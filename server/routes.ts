@@ -91,7 +91,14 @@ import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
-import { unitBuilderData, getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
+import {
+  unitBuilderData,
+  getUnitBuilderByPropertyId,
+  LISTING_DISCLOSURE,
+  REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
+  SINGLE_LISTING_SAMPLE_DISCLOSURE,
+  type PropertyUnitBuilder,
+} from "../client/src/data/unit-builder-data";
 import {
   aliasPrefixForGuest,
   createSimpleLoginAlias,
@@ -105,6 +112,49 @@ import {
   SIMPLELOGIN_MAILBOX_EMAIL,
 } from "./simplelogin";
 import { parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
+
+const GUESTY_SUMMARY_SEPARATOR = "\n\n---\n\n";
+const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
+
+function isComboUnitDisclosure(text: string): boolean {
+  return /combines\s+two\s+units\s+within\s+the\s+same\s+community/i.test(text);
+}
+
+function isRepresentativeAccommodationDisclosure(text: string): boolean {
+  const lower = String(text ?? "").toLowerCase();
+  return lower.includes("photos are representative")
+    || lower.includes("sample unit")
+    || lower.includes("representative accommodations")
+    || lower.includes("unit assignment note")
+    || lower.includes("specific unit assigned")
+    || lower.includes("specific accommodation");
+}
+
+function stripBuilderDisclosureParagraphs(text: string): string {
+  return String(text ?? "")
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .filter((paragraph) => !isComboUnitDisclosure(paragraph))
+    .filter((paragraph) => !isRepresentativeAccommodationDisclosure(paragraph))
+    .join("\n\n")
+    .trim();
+}
+
+function buildGuestySummaryWithAssignmentNote(property: PropertyUnitBuilder): string {
+  const units = Array.isArray(property.units) ? property.units : [];
+  const isSingle = units.length === 1;
+  const body = stripBuilderDisclosureParagraphs(property.combinedDescription);
+  const bottomDisclosure = isSingle
+    ? SINGLE_LISTING_SAMPLE_DISCLOSURE
+    : REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE;
+
+  return [
+    !isSingle ? COMBO_TOP_DISCLOSURE : "",
+    body,
+    bottomDisclosure,
+  ].filter(Boolean).join(GUESTY_SUMMARY_SEPARATOR);
+}
 
 function normalizeHttpsUrl(value: unknown): string | null {
   const raw = String(value ?? "").trim();
@@ -12249,6 +12299,91 @@ export async function registerRoutes(
     } catch (err: any) {
       console.error(`[push-descriptions] error:`, err.message);
       return res.status(500).json({ success: false, error: err.message, sent: payload });
+    }
+  });
+
+  // POST /api/admin/reflow-description-disclaimers
+  //
+  // One-off/admin repair for listings that were pushed before disclosure
+  // placement was centralized. Defaults to dry-run; pass { execute: true }
+  // to update mapped static builder listings in Guesty. Only the summary is
+  // changed, and we merge the existing publicDescription object before PUT so
+  // Space / Neighborhood / Transit / House Rules stay intact.
+  app.post("/api/admin/reflow-description-disclaimers", async (req: Request, res: Response) => {
+    const execute = req.body?.execute === true;
+    const requestedIds = Array.isArray(req.body?.propertyIds)
+      ? new Set(req.body.propertyIds.map((id: unknown) => Number(id)).filter((id: number) => Number.isInteger(id)))
+      : null;
+
+    try {
+      const map = await storage.getGuestyPropertyMap();
+      const targets = map
+        .map((row) => ({ row, property: getUnitBuilderByPropertyId(row.propertyId) }))
+        .filter((entry): entry is { row: typeof map[number]; property: PropertyUnitBuilder } => !!entry.property)
+        .filter((entry) => !requestedIds || requestedIds.has(entry.row.propertyId))
+        .sort((a, b) => a.row.propertyId - b.row.propertyId);
+
+      const results: Array<Record<string, unknown>> = [];
+      for (const { row, property } of targets) {
+        const summary = buildGuestySummaryWithAssignmentNote(property);
+        const sections = summary.split(GUESTY_SUMMARY_SEPARATOR);
+        const isSingle = property.units.length === 1;
+        const summaryPreview = {
+          top: sections[0]?.slice(0, 140) ?? "",
+          bottom: sections.at(-1)?.slice(0, 160) ?? "",
+          hasComboTop: isSingle ? false : summary.startsWith(COMBO_TOP_DISCLOSURE),
+          hasRepresentativeNote: summary.includes("Unit assignment note: This listing uses representative accommodations"),
+          hasOldSampleLanguage: /sample photos|sample unit|photos are representative/i.test(summary),
+        };
+
+        if (!execute) {
+          results.push({
+            propertyId: row.propertyId,
+            guestyListingId: row.guestyListingId,
+            title: property.bookingTitle,
+            units: property.units.length,
+            dryRun: true,
+            ...summaryPreview,
+          });
+          continue;
+        }
+
+        const fetched = await guestyRequest("GET", `/listings/${row.guestyListingId}?fields=publicDescription%20nickname%20title`) as Record<string, unknown>;
+        const currentPublicDescription = fetched.publicDescription && typeof fetched.publicDescription === "object"
+          ? fetched.publicDescription as Record<string, unknown>
+          : {};
+        const payload = {
+          publicDescription: {
+            ...currentPublicDescription,
+            summary,
+          },
+        };
+        await guestyRequest("PUT", `/listings/${row.guestyListingId}`, payload);
+        const verify = await guestyRequest("GET", `/listings/${row.guestyListingId}?fields=publicDescription%20nickname%20title`) as Record<string, unknown>;
+        const verifiedSummary = (verify.publicDescription as Record<string, unknown> | undefined)?.summary;
+
+        results.push({
+          propertyId: row.propertyId,
+          guestyListingId: row.guestyListingId,
+          title: property.bookingTitle,
+          units: property.units.length,
+          executed: true,
+          saved: verifiedSummary === summary,
+          guestyNickname: verify.nickname ?? fetched.nickname ?? null,
+          guestyTitle: verify.title ?? fetched.title ?? null,
+          ...summaryPreview,
+        });
+      }
+
+      res.json({
+        execute,
+        requestedPropertyIds: requestedIds ? Array.from(requestedIds).sort((a, b) => a - b) : null,
+        count: results.length,
+        results,
+      });
+    } catch (err: any) {
+      console.error("[reflow-description-disclaimers] error:", err?.message ?? err);
+      res.status(500).json({ error: "Failed to reflow description disclaimers", message: err?.message ?? String(err) });
     }
   });
 
