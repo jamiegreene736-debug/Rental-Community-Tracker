@@ -384,8 +384,18 @@ class GuestyService {
     return this.request("PUT", `/listings/${id}`, { isListed: true });
   }
 
+  async listOnChannelsAndVerify(id: string): Promise<GuestyChannelStatus> {
+    await this.listOnChannels(id);
+    return this.getChannelStatus(id);
+  }
+
   async unlistFromChannels(id: string) {
     return this.request("PUT", `/listings/${id}`, { isListed: false });
+  }
+
+  async unlistFromChannelsAndVerify(id: string): Promise<GuestyChannelStatus> {
+    await this.unlistFromChannels(id);
+    return this.getChannelStatus(id);
   }
 
   async getChannelStatus(id: string): Promise<GuestyChannelStatus> {

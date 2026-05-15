@@ -737,6 +737,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const autoMapAttemptRef = useRef<string | null>(null);
   const [channelStatus, setChannelStatus] = useState<GuestyChannelStatus | null>(null);
   const [loadingChannels, setLoadingChannels] = useState(false);
+  const [listingStateBusy, setListingStateBusy] = useState<"list" | "unlist" | null>(null);
   // Per-listing "Push Compliance" button state so multiple in-flight
   // compliance submits don't step on each other if the user switches
   // listings mid-request.
@@ -1965,6 +1966,79 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [selectedId]);
   useEffect(() => { refreshChannelStatus(); }, [refreshChannelStatus]);
 
+  const describeChannelVerification = useCallback((status: GuestyChannelStatus) => {
+    const names: Record<"airbnb" | "vrbo" | "bookingCom", string> = {
+      airbnb: "Airbnb",
+      vrbo: "VRBO",
+      bookingCom: "Booking.com",
+    };
+    const live = (["airbnb", "vrbo", "bookingCom"] as const)
+      .filter((key) => status[key]?.live)
+      .map((key) => names[key]);
+    const connectedBlocked = (["airbnb", "vrbo", "bookingCom"] as const)
+      .filter((key) => status[key]?.connected && !status[key]?.live)
+      .map((key) => `${names[key]} (${status[key]?.status || "connected, not live"})`);
+    const missing = (["airbnb", "vrbo", "bookingCom"] as const)
+      .filter((key) => !status[key]?.connected)
+      .map((key) => names[key]);
+
+    if (!status.isListed) return "Guesty still reports this listing as not listed/bookable.";
+    const parts = [`Guesty reports the listing is bookable${live.length ? `; live on ${live.join(", ")}` : ""}.`];
+    if (connectedBlocked.length) parts.push(`Connected but not live yet: ${connectedBlocked.join(", ")}.`);
+    if (missing.length) parts.push(`No connected channel account found for: ${missing.join(", ")}.`);
+    return parts.join(" ");
+  }, []);
+
+  const handleListOnChannels = useCallback(async () => {
+    if (!selectedId || listingStateBusy || building || conn !== "connected") return;
+    setListingStateBusy("list");
+    try {
+      const status = await guestyService.listOnChannelsAndVerify(selectedId);
+      setChannelStatus(status);
+      toast({
+        title: status.isListed ? "Listing marked bookable" : "Guesty did not confirm bookable",
+        description: describeChannelVerification(status),
+        variant: status.isListed ? undefined : "destructive",
+        duration: 8000,
+      });
+    } catch (e) {
+      toast({
+        title: "Could not mark listing bookable",
+        description: (e as Error).message,
+        variant: "destructive",
+        duration: 8000,
+      });
+      refreshChannelStatus();
+    } finally {
+      setListingStateBusy(null);
+    }
+  }, [selectedId, listingStateBusy, building, conn, toast, describeChannelVerification, refreshChannelStatus]);
+
+  const handleUnlistFromChannels = useCallback(async () => {
+    if (!selectedId || listingStateBusy || building || conn !== "connected") return;
+    setListingStateBusy("unlist");
+    try {
+      const status = await guestyService.unlistFromChannelsAndVerify(selectedId);
+      setChannelStatus(status);
+      toast({
+        title: status.isListed ? "Guesty still reports listed" : "Listing unlisted",
+        description: status.isListed ? "Guesty accepted the request but still reports isListed=true. Check Guesty for a channel-specific blocker." : "Guesty reports this listing is no longer globally bookable/listed.",
+        variant: status.isListed ? "destructive" : undefined,
+        duration: 8000,
+      });
+    } catch (e) {
+      toast({
+        title: "Could not unlist listing",
+        description: (e as Error).message,
+        variant: "destructive",
+        duration: 8000,
+      });
+      refreshChannelStatus();
+    } finally {
+      setListingStateBusy(null);
+    }
+  }, [selectedId, listingStateBusy, building, conn, toast, refreshChannelStatus]);
+
   // ── Build new listing ──────────────────────────────────────────────────────
   const handleBuild = useCallback(async () => {
     if (!effectivePropertyData) {
@@ -3108,42 +3182,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
           {selectedId && (
             channelStatus?.isListed === false ? (
-              // Draft state — show an affordance to flip isListed:true so the
-              // operator doesn't have to go into Guesty admin's List-on-channels
-              // page to activate a draft built here or elsewhere.
               <button
                 className="glb-btn glb-btn-secondary"
-                onClick={async () => {
-                  try {
-                    await guestyService.listOnChannels(selectedId);
-                    toast({ title: "Listed on channels", description: "Guesty will start distributing this listing to connected channels." });
-                    refreshChannelStatus?.();
-                  } catch (e: any) {
-                    toast({ title: "Couldn't list on channels", description: e?.message ?? "Unknown error", variant: "destructive" });
-                  }
-                }}
-                disabled={building}
+                onClick={handleListOnChannels}
+                disabled={!!listingStateBusy || building || conn !== "connected"}
                 data-testid="btn-list-on-channels"
-                title="Flip this listing from draft to listed so channels distribute it"
+                title="Set Guesty isListed=true, then verify live channel status"
               >
-                ↑ List on Channels
+                {listingStateBusy === "list" ? "Verifying…" : "↑ List / Mark Bookable"}
               </button>
             ) : (
               <button
                 className="glb-btn glb-btn-danger"
-                onClick={async () => {
-                  try {
-                    await guestyService.unlistFromChannels(selectedId);
-                    toast({ title: "Unlisted", description: "Listing is no longer distributed to channels." });
-                    refreshChannelStatus?.();
-                  } catch (e: any) {
-                    toast({ title: "Couldn't unlist", description: e?.message ?? "Unknown error", variant: "destructive" });
-                  }
-                }}
-                disabled={building}
+                onClick={handleUnlistFromChannels}
+                disabled={!!listingStateBusy || building || conn !== "connected"}
                 data-testid="btn-unlist"
+                title="Set Guesty isListed=false, then verify listing status"
               >
-                Unlist
+                {listingStateBusy === "unlist" ? "Verifying…" : "Unlist"}
               </button>
             )
           )}
@@ -3232,6 +3288,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           >
           <>
             <div className="glb-section-label">Channel Status</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", margin: "-4px 0 12px" }}>
+              <span className={`glb-badge ${channelStatus?.isListed ? "live" : "not-live"}`}>
+                {!loadingChannels && <span className="glb-badge-dot" />}
+                {loadingChannels ? "Checking Guesty…" : channelStatus?.isListed ? "Guesty Bookable" : "Guesty Not Bookable"}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                This is Guesty's global <code>isListed</code> status. Channel cards below show whether each OTA is connected and live.
+              </span>
+            </div>
             <div className="glb-channels">
               {(["airbnb", "vrbo", "bookingCom"] as const).map((ch) => {
                 const LABELS = { airbnb: "Airbnb", vrbo: "VRBO", bookingCom: "Booking.com" };
