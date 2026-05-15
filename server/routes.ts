@@ -9187,7 +9187,11 @@ export async function registerRoutes(
       report: diagnosticsReport,
     };
     const scanComplete = diagnosticsSeverity === "ok" && sourceTimeouts.length === 0 && sourceErrors.length === 0;
-    const autoFillSafe = scanComplete && cheapest.length > 0;
+    // Auto-fill consumes only the verified cheapest pool, so warning-level
+    // diagnostics such as broad upstream rows being filtered should not block
+    // a real date-specific pick. Keep hard failures/timeouts out of auto-fill,
+    // but allow verified rows through when the warnings are just audit context.
+    const autoFillSafe = cheapest.length > 0 && sourceTimeouts.length === 0 && sourceErrors.length === 0;
 
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `

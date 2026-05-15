@@ -2496,15 +2496,6 @@ export default function Bookings() {
           counts: searchSummary,
           candidates: auditCandidatesFor(data),
         });
-        const safeForAutoFill = data.autoFillSafe ?? data.diagnostics?.severity === "ok";
-        // If the scan finished but diagnostics say it is not safe for
-        // automatic attachment, keep the audit rows and return no pickable
-        // candidates. Throwing here made a completed no-pick scan look like
-        // "nothing happened" because onSuccess never got a chance to render
-        // the reviewed results.
-        if (!safeForAutoFill) {
-          return { data, searchSummary, candidates: [] };
-        }
         const unitCandidates: LiveCandidate[] = (data.cheapestUnits ?? [])
           .map((unit): LiveCandidate | null => {
             const listing = [...(unit.listings ?? [])]
@@ -2553,6 +2544,15 @@ export default function Bookings() {
                 : actualBedrooms >= searchedBedrooms;
             }),
         );
+        const safeForAutoFill = data.autoFillSafe ?? data.diagnostics?.severity === "ok";
+        // Warning-level diagnostics should remain visible in the audit panel,
+        // but they must not zero out a verified cheapest pool. Kaha Lani scans
+        // can legitimately warn that many broad upstream rows were filtered
+        // while still returning date-specific direct/OTA prices for the target
+        // resort. Only block auto-fill when there is no verified pickable row.
+        if (!safeForAutoFill && candidates.length === 0) {
+          return { data, searchSummary, candidates: [] };
+        }
         return { data, searchSummary, candidates };
       };
 
