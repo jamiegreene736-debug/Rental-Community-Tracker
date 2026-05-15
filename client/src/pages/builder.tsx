@@ -24,6 +24,51 @@ type BuilderUnitSwap = {
   photoFolder?: string;
 };
 
+const SUMMARY_SEPARATOR = "\n\n---\n\n";
+const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
+const COMBO_REPRESENTATIVE_PHOTO_DISCLOSURE =
+  "Please note: photos are representative of the resort/community and unit standard. Exact assigned units, decor, furnishings, views, and layouts may vary, but the stay will match the advertised bedroom count and overall property standard.";
+
+function isComboUnitDisclosure(text: string): boolean {
+  return /combines\s+two\s+units\s+within\s+the\s+same\s+community/i.test(text);
+}
+
+function isRepresentativePhotoDisclosure(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes("photos are representative")
+    || lower.includes("sample unit")
+    || lower.includes("specific unit assigned")
+    || lower.includes("specific accommodation");
+}
+
+function stripDisclosureParagraphs(text: string): string {
+  return String(text ?? "")
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .filter((paragraph) => !isComboUnitDisclosure(paragraph))
+    .filter((paragraph) => !isRepresentativePhotoDisclosure(paragraph))
+    .join("\n\n")
+    .trim();
+}
+
+function buildGuestySummary(property: PropertyUnitBuilder, units: PropertyUnitBuilder["units"]): string {
+  const body = stripDisclosureParagraphs(property.combinedDescription);
+  const isSingle = units.length === 1;
+  const savedDisclaimer = String(property.sampleDisclaimer ?? "").trim();
+  const bottomDisclosure = isSingle
+    ? SINGLE_LISTING_SAMPLE_DISCLOSURE
+    : isComboUnitDisclosure(savedDisclaimer)
+      ? COMBO_REPRESENTATIVE_PHOTO_DISCLOSURE
+      : (savedDisclaimer || COMBO_REPRESENTATIVE_PHOTO_DISCLOSURE);
+
+  return [
+    !isSingle ? COMBO_TOP_DISCLOSURE : "",
+    body,
+    bottomDisclosure,
+  ].filter(Boolean).join(SUMMARY_SEPARATOR);
+}
+
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
 function parseAddress(addr: string) {
   const parts = addr.split(",").map((s) => s.trim());
@@ -372,7 +417,7 @@ export default function Builder() {
       touristTaxAccount: property.touristTaxAccount,
       descriptions: {
         title: property.bookingTitle,
-        summary: `${units.length === 1 ? `${SINGLE_LISTING_SAMPLE_DISCLOSURE}\n\n---` : LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,
+        summary: buildGuestySummary(property, units),
         space: [
           units
             .map((u, i) => `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR): ${u.longDescription}`)
