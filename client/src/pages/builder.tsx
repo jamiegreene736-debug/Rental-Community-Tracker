@@ -51,9 +51,11 @@ function stripDisclosureParagraphs(text: string): string {
     .split(/\n{2,}/)
     .map((paragraph) => paragraph.trim())
     .filter(Boolean)
+    .filter((paragraph) => !/^-{3,}$/.test(paragraph))
     .filter((paragraph) => !isComboUnitDisclosure(paragraph))
     .filter((paragraph) => !isRepresentativePhotoDisclosure(paragraph))
     .join("\n\n")
+    .replace(/^(?:\s*-{3,}\s*)+/, "")
     .trim();
 }
 

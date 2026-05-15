@@ -135,9 +135,11 @@ function stripBuilderDisclosureParagraphs(text: string): string {
     .split(/\n{2,}/)
     .map((paragraph) => paragraph.trim())
     .filter(Boolean)
+    .filter((paragraph) => !/^-{3,}$/.test(paragraph))
     .filter((paragraph) => !isComboUnitDisclosure(paragraph))
     .filter((paragraph) => !isRepresentativeAccommodationDisclosure(paragraph))
     .join("\n\n")
+    .replace(/^(?:\s*-{3,}\s*)+/, "")
     .trim();
 }
 
