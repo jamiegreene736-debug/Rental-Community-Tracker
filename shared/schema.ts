@@ -53,6 +53,42 @@ export const insertBuyInSchema = createInsertSchema(buyIns).omit({
 export type InsertBuyIn = z.infer<typeof insertBuyInSchema>;
 export type BuyIn = typeof buyIns.$inferSelect;
 
+export const reservationCancellationAudits = pgTable("reservation_cancellation_audits", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  guestyListingId: text("guesty_listing_id").notNull(),
+  guestyReservationId: text("guesty_reservation_id").notNull(),
+  guestName: text("guest_name"),
+  status: text("status"),
+  channel: text("channel"),
+  confirmationCode: text("confirmation_code"),
+  checkIn: date("check_in"),
+  checkOut: date("check_out"),
+  cancelledAt: timestamp("cancelled_at"),
+  totalAmount: numeric("total_amount", { precision: 10, scale: 2 }),
+  totalPaid: numeric("total_paid", { precision: 10, scale: 2 }),
+  totalRefunded: numeric("total_refunded", { precision: 10, scale: 2 }),
+  balanceDue: numeric("balance_due", { precision: 10, scale: 2 }),
+  currency: text("currency").default("USD"),
+  paymentsJson: text("payments_json"),
+  refundsJson: text("refunds_json"),
+  refundDecision: text("refund_decision").notNull().default("unknown"),
+  operatorStatus: text("operator_status").notNull().default("needs_review"),
+  operatorNotes: text("operator_notes"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertReservationCancellationAuditSchema = createInsertSchema(reservationCancellationAudits).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReservationCancellationAudit = z.infer<typeof insertReservationCancellationAuditSchema>;
+export type ReservationCancellationAudit = typeof reservationCancellationAudits.$inferSelect;
+
 export const manualReservations = pgTable("manual_reservations", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull(),

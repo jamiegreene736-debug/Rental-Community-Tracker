@@ -1,6 +1,7 @@
 import {
   type User, type InsertUser,
   type BuyIn, type InsertBuyIn,
+  type ReservationCancellationAudit, type InsertReservationCancellationAudit,
   type ManualReservation, type InsertManualReservation,
   type LodgifyBooking, type InsertLodgifyBooking,
   type ScannerRun, type InsertScannerRun,
@@ -23,7 +24,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
   type PropertyMarketRate, type InsertPropertyMarketRate,
 } from "@shared/schema";
 import { db } from "./db";
@@ -123,6 +124,10 @@ export interface IStorage {
   getBuyInsByReservation(reservationId: string): Promise<BuyIn[]>;
   attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined>;
   detachBuyIn(buyInId: number): Promise<BuyIn | undefined>;
+
+  upsertReservationCancellationAudit(audit: InsertReservationCancellationAudit): Promise<ReservationCancellationAudit>;
+  getReservationCancellationAudits(propertyId: number): Promise<ReservationCancellationAudit[]>;
+  updateReservationCancellationAudit(id: number, data: Partial<Pick<InsertReservationCancellationAudit, "operatorStatus" | "operatorNotes">>): Promise<ReservationCancellationAudit | undefined>;
 
   createManualReservation(reservation: InsertManualReservation): Promise<ManualReservation>;
   getManualReservations(filters?: { propertyId?: number; includePast?: boolean }): Promise<ManualReservation[]>;
@@ -328,6 +333,59 @@ export class DatabaseStorage implements IStorage {
       .update(buyIns)
       .set({ guestyReservationId: null, attachedAt: null })
       .where(eq(buyIns.id, buyInId))
+      .returning();
+    return row;
+  }
+
+  async upsertReservationCancellationAudit(audit: InsertReservationCancellationAudit): Promise<ReservationCancellationAudit> {
+    const [existing] = await db
+      .select()
+      .from(reservationCancellationAudits)
+      .where(eq(reservationCancellationAudits.guestyReservationId, audit.guestyReservationId))
+      .limit(1);
+
+    if (existing) {
+      const [row] = await db
+        .update(reservationCancellationAudits)
+        .set({
+          ...audit,
+          operatorStatus: existing.operatorStatus,
+          operatorNotes: existing.operatorNotes,
+          updatedAt: new Date(),
+        })
+        .where(eq(reservationCancellationAudits.id, existing.id))
+        .returning();
+      return row;
+    }
+
+    const [row] = await db.insert(reservationCancellationAudits).values(audit).returning();
+    return row;
+  }
+
+  async getReservationCancellationAudits(propertyId: number): Promise<ReservationCancellationAudit[]> {
+    try {
+      return await db
+        .select()
+        .from(reservationCancellationAudits)
+        .where(eq(reservationCancellationAudits.propertyId, propertyId))
+        .orderBy(desc(reservationCancellationAudits.cancelledAt), desc(reservationCancellationAudits.createdAt));
+    } catch (error: any) {
+      if (error?.code === "42P01" || /reservation_cancellation_audits.*does not exist/i.test(String(error?.message ?? ""))) {
+        console.warn("reservation_cancellation_audits table is missing; returning no cancellation audits until db:push runs");
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async updateReservationCancellationAudit(
+    id: number,
+    data: Partial<Pick<InsertReservationCancellationAudit, "operatorStatus" | "operatorNotes">>,
+  ): Promise<ReservationCancellationAudit | undefined> {
+    const [row] = await db
+      .update(reservationCancellationAudits)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(reservationCancellationAudits.id, id))
       .returning();
     return row;
   }

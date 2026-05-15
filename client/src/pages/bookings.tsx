@@ -29,7 +29,7 @@ import {
   MapPin, Footprints, MessageSquare,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { BuyIn, GuestyPropertyMap } from "@shared/schema";
+import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
 import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
 import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
@@ -450,11 +450,12 @@ async function apiGetJson<T>(url: string, signal?: AbortSignal): Promise<T> {
 // Accepts both pure date strings ("2026-10-17") and full ISO timestamps
 // ("2026-10-18T01:00:00.000Z"). Guesty returns the former as
 // `checkInDateLocalized` and the latter as `checkIn`.
-function fmtDate(s: string | undefined | null): string {
+function fmtDate(s: string | Date | undefined | null): string {
   if (!s) return "—";
+  const raw = s instanceof Date ? s.toISOString() : s;
   // Pure YYYY-MM-DD — force mid-day UTC so timezone doesn't bump us to the
   // previous calendar day in western time zones.
-  const isoDate = /^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T12:00:00` : s;
+  const isoDate = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T12:00:00` : raw;
   const d = new Date(isoDate);
   if (isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
@@ -1478,6 +1479,30 @@ function asMoneyNumber(v: unknown): number {
   return typeof v === "number" ? v : typeof v === "string" ? Number(v) || 0 : 0;
 }
 
+function refundDecisionLabel(decision: string): string {
+  switch (decision) {
+    case "no_payment": return "No payment taken";
+    case "fully_refunded": return "Fully refunded";
+    case "partial_refund": return "Partial refund";
+    case "refund_review": return "Refund review needed";
+    default: return "Unknown payment state";
+  }
+}
+
+function refundDecisionClass(decision: string): string {
+  switch (decision) {
+    case "no_payment":
+    case "fully_refunded":
+      return "bg-green-600 text-white";
+    case "partial_refund":
+      return "bg-amber-500 text-white";
+    case "refund_review":
+      return "bg-red-600 text-white";
+    default:
+      return "";
+  }
+}
+
 function addDays(date: Date, days: number): Date {
   const d = new Date(date);
   d.setDate(d.getDate() + days);
@@ -1861,6 +1886,7 @@ export default function Bookings() {
     | { reservation: GuestyReservation; slot: SlotInfo }
     | null
   >(null);
+  const [cancellationRange, setCancellationRange] = useState<"all" | "365" | "90">("all");
   const [verifyTarget, setVerifyTarget] = useState<
     | { buyIn: BuyIn; reservation: GuestyReservation }
     | null
@@ -2040,6 +2066,49 @@ export default function Bookings() {
 
   const rawReservations = isGlobalView ? globalReservations : (bookingsData?.reservations ?? []);
   const unitSlots = isGlobalView ? [] : (bookingsData?.unitSlots ?? []);
+
+  const {
+    data: cancellationsData,
+    isLoading: cancellationsLoading,
+    isError: cancellationsError,
+    error: cancellationsErr,
+  } = useQuery<{ propertyId: number; audits: ReservationCancellationAudit[] }>({
+    queryKey: ["/api/operations/cancellations", selectedPropertyId],
+    queryFn: () => {
+      if (!selectedPropertyId) return Promise.resolve({ propertyId: 0, audits: [] });
+      return apiRequest("GET", `/api/operations/cancellations?propertyId=${selectedPropertyId}`).then((r) => r.json());
+    },
+    enabled: !!selectedPropertyId && !isGlobalView,
+    refetchInterval: 120_000,
+  });
+
+  const cancellationScanMutation = useMutation({
+    mutationFn: () => {
+      if (!selectedPropertyId) throw new Error("No property selected");
+      return apiRequest("POST", "/api/operations/cancellations/scan", {
+        propertyId: selectedPropertyId,
+        range: cancellationRange,
+      }).then((r) => r.json());
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/cancellations", selectedPropertyId] });
+      toast({
+        title: "Cancelled bookings scanned",
+        description: `${data?.saved ?? 0} cancellation audit row${data?.saved === 1 ? "" : "s"} refreshed from Guesty.`,
+      });
+    },
+    onError: (e: any) => toast({ title: "Cancellation scan failed", description: e.message, variant: "destructive" }),
+  });
+
+  const cancellationUpdateMutation = useMutation({
+    mutationFn: ({ id, operatorStatus, operatorNotes }: { id: number; operatorStatus?: string; operatorNotes?: string }) =>
+      apiRequest("PATCH", `/api/operations/cancellations/${id}`, { operatorStatus, operatorNotes }).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/cancellations", selectedPropertyId] });
+    },
+    onError: (e: any) => toast({ title: "Cancellation update failed", description: e.message, variant: "destructive" }),
+  });
+
   const estimateRemainingBuyInCost = (reservation: GuestyReservation, propertyId: number | null | undefined): number => {
     if (!propertyId) return 0;
     const config = PROPERTY_UNIT_CONFIGS[propertyId];
@@ -3164,6 +3233,32 @@ export default function Bookings() {
     return { expected, net, openBalance, dated };
   }, [depositRows]);
 
+  const cancellationRows = useMemo(() => {
+    const rows = [...(cancellationsData?.audits ?? [])];
+    const priority = (row: ReservationCancellationAudit) => {
+      if (row.operatorStatus === "needs_review") return 0;
+      if (row.refundDecision === "refund_review" || row.refundDecision === "partial_refund") return 1;
+      return 2;
+    };
+    return rows.sort((a, b) => {
+      const p = priority(a) - priority(b);
+      if (p !== 0) return p;
+      return new Date(b.cancelledAt ?? b.updatedAt ?? b.createdAt ?? 0).getTime()
+        - new Date(a.cancelledAt ?? a.updatedAt ?? a.createdAt ?? 0).getTime();
+    });
+  }, [cancellationsData]);
+
+  const cancellationStats = useMemo(() => {
+    const rows = cancellationRows;
+    const paymentTaken = rows.filter((r) => asMoneyNumber(r.totalPaid) > 0).length;
+    const reviewNeeded = rows.filter((r) => r.operatorStatus === "needs_review").length;
+    const resolved = rows.filter((r) => r.operatorStatus && r.operatorStatus !== "needs_review").length;
+    const exposure = rows
+      .filter((r) => r.operatorStatus === "needs_review")
+      .reduce((sum, r) => sum + Math.max(0, asMoneyNumber(r.totalPaid) - asMoneyNumber(r.totalRefunded)), 0);
+    return { total: rows.length, paymentTaken, reviewNeeded, resolved, exposure };
+  }, [cancellationRows]);
+
   const totalBedrooms = unitSlots.reduce((s, u) => s + u.bedrooms, 0);
   const propertyLabel = selectedPropertyId
     ? `Property ${selectedPropertyId}${unitSlots.length > 1 ? ` · ${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})` : ""}`
@@ -3783,6 +3878,9 @@ export default function Bookings() {
               <TabsTrigger value="deposits" data-testid="tab-operations-deposits">
                 <WalletCards className="h-3.5 w-3.5 mr-1.5" /> Expected Deposits
               </TabsTrigger>
+              <TabsTrigger value="cancelled" data-testid="tab-operations-cancelled">
+                <AlertCircle className="h-3.5 w-3.5 mr-1.5" /> Cancelled
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="bookings" className="space-y-4">
@@ -4340,6 +4438,187 @@ export default function Bookings() {
                                     {row.paymentSource.label}
                                   </p>
                                 </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="cancelled" className="space-y-4">
+              <Card>
+                <CardContent className="py-4">
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="w-48">
+                      <Label className="text-xs mb-1.5 block">Guesty scan range</Label>
+                      <Select value={cancellationRange} onValueChange={(v) => setCancellationRange(v as "all" | "365" | "90")}>
+                        <SelectTrigger data-testid="select-cancellation-range">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All history</SelectItem>
+                          <SelectItem value="365">Last 365 days</SelectItem>
+                          <SelectItem value="90">Last 90 days</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Button
+                      onClick={() => cancellationScanMutation.mutate()}
+                      disabled={cancellationScanMutation.isPending || !selectedPropertyId}
+                      data-testid="button-scan-cancellations"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${cancellationScanMutation.isPending ? "animate-spin" : ""}`} />
+                      Scan cancelled bookings
+                    </Button>
+                    <p className="text-xs text-muted-foreground max-w-2xl">
+                      Pulls cancelled Guesty reservations for this property and flags rows where money was collected but not fully refunded.
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <Card>
+                  <CardContent className="py-4">
+                    <p className="text-xs text-muted-foreground">Cancelled bookings</p>
+                    <p className="text-2xl font-semibold mt-1">{cancellationStats.total}</p>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="py-4">
+                    <p className="text-xs text-muted-foreground">Payment taken</p>
+                    <p className="text-2xl font-semibold mt-1">{cancellationStats.paymentTaken}</p>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="py-4">
+                    <p className="text-xs text-muted-foreground">Refund review needed</p>
+                    <p className={`text-2xl font-semibold mt-1 ${cancellationStats.reviewNeeded > 0 ? "text-red-600" : "text-green-600"}`}>
+                      {cancellationStats.reviewNeeded}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{fmtMoney(cancellationStats.exposure)} possible exposure</p>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="py-4">
+                    <p className="text-xs text-muted-foreground">Resolved</p>
+                    <p className="text-2xl font-semibold mt-1">{cancellationStats.resolved}</p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4" /> Cancellation Refund Check
+                    {(cancellationsLoading || cancellationScanMutation.isPending) && (
+                      <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground ml-1" />
+                    )}
+                  </CardTitle>
+                  <CardDescription>
+                    Review Guesty cancellations where a guest may have paid. Mark each row once refund responsibility is handled.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {cancellationsError && (
+                    <div className="border border-destructive rounded px-3 py-2 mb-3 text-sm text-destructive">
+                      {(cancellationsErr as Error)?.message}
+                    </div>
+                  )}
+                  {!cancellationsLoading && cancellationRows.length === 0 && (
+                    <p className="text-sm text-muted-foreground py-6 text-center">
+                      No cancelled bookings saved yet. Run a scan for this property.
+                    </p>
+                  )}
+                  {cancellationRows.length > 0 && (
+                    <div className="overflow-x-auto">
+                      <div className="min-w-[1120px]">
+                        <div className="grid grid-cols-[1.25fr_1.15fr_.95fr_.8fr_.8fr_.9fr_1fr_1.2fr] gap-3 px-3 py-2 border-b text-[10px] uppercase tracking-wider text-muted-foreground">
+                          <div>Guest</div>
+                          <div>Stay / Cancelled</div>
+                          <div className="text-right">Paid</div>
+                          <div className="text-right">Refunded</div>
+                          <div className="text-right">Net held</div>
+                          <div>Decision</div>
+                          <div>Operator status</div>
+                          <div>Notes</div>
+                        </div>
+                        <div className="divide-y">
+                          {cancellationRows.map((row) => {
+                            const paid = asMoneyNumber(row.totalPaid);
+                            const refunded = asMoneyNumber(row.totalRefunded);
+                            const netHeld = Math.max(0, paid - refunded);
+                            return (
+                              <div
+                                key={row.id}
+                                className="grid grid-cols-[1.25fr_1.15fr_.95fr_.8fr_.8fr_.9fr_1fr_1.2fr] gap-3 px-3 py-3 items-start text-sm"
+                                data-testid={`cancellation-row-${row.id}`}
+                              >
+                                <div className="min-w-0">
+                                  <p className="font-medium truncate">{row.guestName || "Guest"}</p>
+                                  <p className="text-[10px] text-muted-foreground font-mono truncate">{row.confirmationCode || row.guestyReservationId}</p>
+                                  <a
+                                    href={`https://app.guesty.com/reservations/${row.guestyReservationId}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-[10px] text-primary hover:underline inline-flex items-center gap-0.5 mt-1"
+                                  >
+                                    Open in Guesty <ExternalLink className="h-2.5 w-2.5" />
+                                  </a>
+                                </div>
+                                <div>
+                                  <p>{fmtDate(row.checkIn)} → {fmtDate(row.checkOut)}</p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    cancelled {fmtDate(row.cancelledAt)} · <span className="capitalize">{row.channel || "direct"}</span>
+                                  </p>
+                                </div>
+                                <div className="text-right font-medium">{fmtMoney(paid)}</div>
+                                <div className="text-right">{fmtMoney(refunded)}</div>
+                                <div className={`text-right font-medium ${netHeld > 0 ? "text-red-600" : "text-green-600"}`}>
+                                  {fmtMoney(netHeld)}
+                                </div>
+                                <div>
+                                  <Badge
+                                    variant={row.refundDecision === "unknown" ? "outline" : "default"}
+                                    className={`text-[10px] ${refundDecisionClass(row.refundDecision)}`}
+                                  >
+                                    {refundDecisionLabel(row.refundDecision)}
+                                  </Badge>
+                                </div>
+                                <div>
+                                  <Select
+                                    value={row.operatorStatus || "needs_review"}
+                                    onValueChange={(operatorStatus) => cancellationUpdateMutation.mutate({ id: row.id, operatorStatus })}
+                                  >
+                                    <SelectTrigger className="h-8 text-xs" data-testid={`select-cancellation-status-${row.id}`}>
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="needs_review">Needs review</SelectItem>
+                                      <SelectItem value="refunded">Refunded</SelectItem>
+                                      <SelectItem value="no_refund_due">No refund due</SelectItem>
+                                      <SelectItem value="disputed">Disputed</SelectItem>
+                                      <SelectItem value="ignored">Ignore</SelectItem>
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <Textarea
+                                  defaultValue={row.operatorNotes ?? ""}
+                                  rows={2}
+                                  className="text-xs min-h-[52px]"
+                                  placeholder="Add refund note..."
+                                  onBlur={(e) => {
+                                    const operatorNotes = e.currentTarget.value;
+                                    if (operatorNotes !== (row.operatorNotes ?? "")) {
+                                      cancellationUpdateMutation.mutate({ id: row.id, operatorNotes });
+                                    }
+                                  }}
+                                  data-testid={`textarea-cancellation-notes-${row.id}`}
+                                />
                               </div>
                             );
                           })}

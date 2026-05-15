@@ -10131,6 +10131,232 @@ export async function registerRoutes(
   // A multi-unit Guesty listing (e.g. 6-BR = 3-BR Unit 721 + 3-BR Unit 812) requires
   // ONE buy-in per physical unit per reservation. All endpoints below are slot-aware.
 
+  type CancellationDecision = "no_payment" | "fully_refunded" | "partial_refund" | "refund_review" | "unknown";
+
+  const unwrapCancellationGuestyList = (data: any): any[] => {
+    if (Array.isArray(data?.results)) return data.results;
+    if (Array.isArray(data?.data)) return data.data;
+    if (Array.isArray(data?.data?.results)) return data.data.results;
+    if (Array.isArray(data?.items)) return data.items;
+    return [];
+  };
+
+  const moneyNumber = (value: unknown): number => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value.replace(/[$,]/g, ""));
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return 0;
+  };
+
+  const dateOnlyOrNull = (value: unknown): string | null => {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T12:00:00Z` : raw);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toISOString().slice(0, 10);
+  };
+
+  const timestampOrNull = (value: unknown): Date | null => {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const isPaidPayment = (payment: any): boolean => {
+    const status = String(payment?.status ?? payment?.paymentStatus ?? "").toLowerCase();
+    return !status || /(paid|success|succeed|captured|charged|completed|settled|processed)/.test(status);
+  };
+
+  const paymentAmount = (payment: any): number => {
+    return moneyNumber(payment?.amount ?? payment?.paidAmount ?? payment?.collectedAmount ?? payment?.total ?? payment?.value);
+  };
+
+  const cancellationDecision = (totalPaid: number, totalRefunded: number, sawMoneyFields: boolean): CancellationDecision => {
+    if (!sawMoneyFields) return "unknown";
+    if (totalPaid <= 0) return "no_payment";
+    if (totalRefunded >= totalPaid - 0.01) return "fully_refunded";
+    if (totalRefunded > 0) return "partial_refund";
+    return "refund_review";
+  };
+
+  const operatorStatusForDecision = (decision: CancellationDecision): "needs_review" | "refunded" | "no_refund_due" => {
+    if (decision === "fully_refunded") return "refunded";
+    if (decision === "no_payment") return "no_refund_due";
+    return "needs_review";
+  };
+
+  const buildCancellationAudit = (propertyId: number, guestyListingId: string, reservation: any) => {
+    const money = reservation?.money ?? {};
+    const payments = [
+      ...(Array.isArray(reservation?.payments) ? reservation.payments : []),
+      ...(Array.isArray(money?.payments) ? money.payments : []),
+      ...(Array.isArray(money?.paymentSchedule) ? money.paymentSchedule : []),
+    ];
+    const refunds = [
+      ...(Array.isArray(reservation?.refunds) ? reservation.refunds : []),
+      ...(Array.isArray(money?.refunds) ? money.refunds : []),
+      ...(Array.isArray(money?.payments)
+        ? money.payments.filter((p: any) => moneyNumber(p?.amount) < 0 || /refund/i.test(String(p?.type ?? p?.status ?? "")))
+        : []),
+    ];
+    const paymentSum = payments.filter(isPaidPayment).reduce((sum, p) => sum + Math.max(0, paymentAmount(p)), 0);
+    const refundSum = refunds.reduce((sum, r) => sum + Math.abs(paymentAmount(r)), 0);
+    const totalPaid = moneyNumber(money?.totalPaid ?? reservation?.totalPaid) || paymentSum;
+    const totalRefunded = moneyNumber(money?.totalRefunded ?? reservation?.totalRefunded) || refundSum;
+    const totalAmount = moneyNumber(
+      money?.hostPayout ?? money?.fareAccommodation ?? money?.netIncome ?? reservation?.totalAmount ?? reservation?.money?.total,
+    );
+    const balanceDue = moneyNumber(money?.balanceDue ?? reservation?.balanceDue);
+    const sawMoneyFields =
+      totalPaid > 0 ||
+      totalRefunded > 0 ||
+      balanceDue > 0 ||
+      payments.length > 0 ||
+      refunds.length > 0 ||
+      money?.totalPaid !== undefined ||
+      money?.totalRefunded !== undefined;
+    const decision = cancellationDecision(totalPaid, totalRefunded, sawMoneyFields);
+    const cancelledAt = timestampOrNull(
+      reservation?.cancelledAt ??
+      reservation?.canceledAt ??
+      reservation?.cancellationDate ??
+      reservation?.updatedAt ??
+      reservation?.createdAt,
+    );
+
+    return {
+      propertyId,
+      guestyListingId,
+      guestyReservationId: String(reservation?._id ?? reservation?.id),
+      guestName: reservation?.guest?.fullName ?? ([reservation?.guest?.firstName, reservation?.guest?.lastName].filter(Boolean).join(" ") || null),
+      status: reservation?.status ?? null,
+      channel: reservation?.integration?.platform ?? reservation?.source ?? null,
+      confirmationCode: reservation?.confirmationCode ?? null,
+      checkIn: dateOnlyOrNull(reservation?.checkInDateLocalized ?? reservation?.checkIn),
+      checkOut: dateOnlyOrNull(reservation?.checkOutDateLocalized ?? reservation?.checkOut),
+      cancelledAt,
+      totalAmount: totalAmount.toFixed(2),
+      totalPaid: totalPaid.toFixed(2),
+      totalRefunded: totalRefunded.toFixed(2),
+      balanceDue: balanceDue.toFixed(2),
+      currency: money?.currency ?? reservation?.currency ?? "USD",
+      paymentsJson: JSON.stringify(payments.slice(0, 50)),
+      refundsJson: JSON.stringify(refunds.slice(0, 50)),
+      refundDecision: decision,
+      operatorStatus: operatorStatusForDecision(decision),
+      operatorNotes: null,
+      lastSyncedAt: new Date(),
+    };
+  };
+
+  app.get("/api/operations/cancellations", async (req, res) => {
+    try {
+      const propertyId = parseInt((req.query.propertyId as string) ?? "", 10);
+      if (!propertyId) return res.status(400).json({ error: "propertyId query param required" });
+      const audits = await storage.getReservationCancellationAudits(propertyId);
+      res.json({ propertyId, audits });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to load cancellation audits", message: err.message });
+    }
+  });
+
+  app.post("/api/operations/cancellations/scan", async (req, res) => {
+    try {
+      const propertyId = parseInt(String(req.body?.propertyId ?? ""), 10);
+      const range = String(req.body?.range ?? "all");
+      if (!propertyId) return res.status(400).json({ error: "propertyId required" });
+      const guestyListingId = await storage.getGuestyListingId(propertyId);
+      if (!guestyListingId) return res.status(404).json({ error: `No Guesty listing mapped for property ${propertyId}` });
+
+      const fields = encodeURIComponent([
+        "_id",
+        "status",
+        "createdAt",
+        "updatedAt",
+        "cancelledAt",
+        "canceledAt",
+        "cancellationDate",
+        "checkIn",
+        "checkOut",
+        "checkInDateLocalized",
+        "checkOutDateLocalized",
+        "nightsCount",
+        "guest",
+        "money",
+        "payments",
+        "refunds",
+        "source",
+        "integration",
+        "confirmationCode",
+      ].join(" "));
+      const limit = 100;
+      const maxRows = 2000;
+      const seen = new Map<string, any>();
+
+      for (let skip = 0; skip < maxRows; skip += limit) {
+        const filterArr: Array<Record<string, unknown>> = [
+          { field: "listingId", operator: "$eq", value: guestyListingId },
+          { field: "status", operator: "$in", value: ["canceled", "cancelled"] },
+        ];
+        const filtersParam = encodeURIComponent(JSON.stringify(filterArr));
+        const url = `/reservations?filters=${filtersParam}&limit=${limit}&skip=${skip}&sort=-updatedAt&fields=${fields}`;
+        const data = await guestyRequest("GET", url) as any;
+        const rows = unwrapCancellationGuestyList(data);
+        for (const row of rows) {
+          const id = String(row?._id ?? row?.id ?? "");
+          if (id) seen.set(id, row);
+        }
+        if (rows.length < limit) break;
+      }
+
+      const cutoff = range === "90"
+        ? Date.now() - 90 * 86400000
+        : range === "365"
+          ? Date.now() - 365 * 86400000
+          : null;
+      const rows = Array.from(seen.values()).filter((row) => {
+        if (!cutoff) return true;
+        const d = timestampOrNull(row?.cancelledAt ?? row?.canceledAt ?? row?.cancellationDate ?? row?.updatedAt ?? row?.createdAt);
+        return d ? d.getTime() >= cutoff : true;
+      });
+
+      const audits = await Promise.all(rows.map((row) => storage.upsertReservationCancellationAudit(
+        buildCancellationAudit(propertyId, guestyListingId, row),
+      )));
+
+      const saved = await storage.getReservationCancellationAudits(propertyId);
+      res.json({
+        propertyId,
+        guestyListingId,
+        scanned: rows.length,
+        saved: audits.length,
+        audits: saved,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to scan cancelled reservations", message: err.message });
+    }
+  });
+
+  app.patch("/api/operations/cancellations/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const operatorStatus = typeof req.body?.operatorStatus === "string" ? req.body.operatorStatus : undefined;
+      const operatorNotes = typeof req.body?.operatorNotes === "string" ? req.body.operatorNotes : undefined;
+      const allowed = new Set(["needs_review", "refunded", "no_refund_due", "disputed", "ignored"]);
+      if (operatorStatus && !allowed.has(operatorStatus)) {
+        return res.status(400).json({ error: "Invalid operatorStatus" });
+      }
+      const audit = await storage.updateReservationCancellationAudit(id, { operatorStatus, operatorNotes });
+      if (!audit) return res.status(404).json({ error: "Cancellation audit not found" });
+      res.json(audit);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to update cancellation audit", message: err.message });
+    }
+  });
+
   // List reservations for a Guesty listing, annotated with per-unit-slot fill status.
   app.get("/api/bookings/listing/:listingId", async (req, res) => {
     try {
