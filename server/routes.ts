@@ -23094,15 +23094,8 @@ Return ONLY compact JSON with this exact shape:
           : (season === "HIGH" ? 1.30 : 1.80);
         return Math.round(lowResult.basis * multiplier);
       };
-      const highFloor = fallbackSeasonBasis("HIGH");
-      const highBasis = highFloor == null
-        ? highResult.basis
-        : Math.max(highResult.basis ?? highFloor, highFloor);
-      const holidayFloorBase = fallbackSeasonBasis("HOLIDAY");
-      const holidayFloor = Math.max(holidayFloorBase ?? 0, highBasis ?? 0) || null;
-      const holidayBasis = holidayFloor == null
-        ? holidayResult.basis
-        : Math.max(holidayResult.basis ?? holidayFloor, holidayFloor);
+      const highBasis = highResult.basis ?? fallbackSeasonBasis("HIGH");
+      const holidayBasis = holidayResult.basis ?? fallbackSeasonBasis("HOLIDAY");
 
       if (lowResult.basis == null || lowResult.basis <= 0) {
         await storage.deletePropertyMarketRate(-id, br);
@@ -23754,15 +23747,8 @@ Return ONLY compact JSON with this exact shape:
             });
             continue;
           }
-          const highFloor = fallbackSeasonBasis(lowBasis, "HIGH");
-          const highBasis = highFloor == null
-            ? highRaw
-            : Math.max(highRaw ?? highFloor, highFloor);
-          const holidayFloorBase = fallbackSeasonBasis(lowBasis, "HOLIDAY");
-          const holidayFloor = Math.max(holidayFloorBase ?? 0, highBasis ?? 0) || null;
-          const holidayBasis = holidayFloor == null
-            ? holidayRaw
-            : Math.max(holidayRaw ?? holidayFloor, holidayFloor);
+          const highBasis = highRaw ?? fallbackSeasonBasis(lowBasis, "HIGH");
+          const holidayBasis = holidayRaw ?? fallbackSeasonBasis(lowBasis, "HOLIDAY");
           const clampedMonthlyRates: Record<string, MonthlyRatePayload> = {};
           for (const [yearMonth, payload] of Object.entries(monthlyRates)) {
             const seasonBasis = payload.season === "HIGH"
@@ -24097,15 +24083,8 @@ Return ONLY compact JSON with this exact shape:
           : (season === "HIGH" ? 1.30 : 1.80);
         return Math.round(lowResult.basis * multiplier);
       };
-      const highFloor = fallbackSeasonBasis("HIGH");
-      const highBasis = highFloor == null
-        ? highResult.basis
-        : Math.max(highResult.basis ?? highFloor, highFloor);
-      const holidayFloorBase = fallbackSeasonBasis("HOLIDAY");
-      const holidayFloor = Math.max(holidayFloorBase ?? 0, highBasis ?? 0) || null;
-      const holidayBasis = holidayFloor == null
-        ? holidayResult.basis
-        : Math.max(holidayResult.basis ?? holidayFloor, holidayFloor);
+      const highBasis = highResult.basis ?? fallbackSeasonBasis("HIGH");
+      const holidayBasis = holidayResult.basis ?? fallbackSeasonBasis("HOLIDAY");
 
       const hasOnlyAirbnbChannel =
         !!lowResult.channels.airbnb &&
