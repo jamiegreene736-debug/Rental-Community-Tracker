@@ -17,7 +17,7 @@ export type LicenseRequirement = {
 };
 
 export type LicenseComplianceProfile = {
-  jurisdiction: "hawaii" | "fort_myers_beach_fl" | "florida" | "unknown";
+  jurisdiction: "hawaii" | "fort_myers_beach_fl" | "lee_county_fl" | "florida" | "unknown";
   title: string;
   summary: string;
   requirements: LicenseRequirement[];
@@ -59,6 +59,10 @@ export function usableLicenseValue(value: unknown): string | null {
   return raw && !isPlaceholderLicenseValue(raw) ? raw : null;
 }
 
+export function isFloridaLicenseJurisdiction(jurisdiction: LicenseComplianceProfile["jurisdiction"]): boolean {
+  return jurisdiction === "fort_myers_beach_fl" || jurisdiction === "lee_county_fl" || jurisdiction === "florida";
+}
+
 export function resolveLicenseComplianceProfile(input: {
   city?: string | null;
   state?: string | null;
@@ -71,6 +75,7 @@ export function resolveLicenseComplianceProfile(input: {
   const isHawaii = state === "hi" || state === "hawaii" || /\bhawaii\b|\bkoloa\b|\bpoipu\b|\bprinceville\b|\bkapaa\b|\bkauai\b/.test(haystack);
   const isFlorida = state === "fl" || state === "florida" || /\bflorida\b/.test(haystack);
   const isFortMyersBeach = isFlorida && /\bfort myers beach\b|\bestero blvd\b|\b33931\b/.test(haystack);
+  const isLeeCounty = isFlorida && /\blee county\b|\bbonita springs\b|\bbonita national\b|\bcape coral\b|\bsanibel\b|\bfort myers\b|\bestero\b|\b34135\b|\b34134\b|\b33904\b|\b33908\b|\b33912\b|\b33913\b|\b33916\b|\b33919\b|\b33928\b|\b33957\b/.test(haystack);
 
   if (isFortMyersBeach) {
     return {
@@ -160,6 +165,57 @@ export function resolveLicenseComplianceProfile(input: {
       sources: [
         { label: "Kauai real property search", url: "https://kauairpt.ehawaii.gov" },
         { label: "Hawaii Tax Online", url: "https://hitax.hawaii.gov" },
+      ],
+    };
+  }
+
+  if (isLeeCounty) {
+    return {
+      jurisdiction: "lee_county_fl",
+      title: "Lee County / Bonita Springs, Florida license requirements",
+      summary: "Pull the Florida DBPR vacation-rental license from state lodging records and track Lee County tourist tax plus any local business tax receipt used for compliance.",
+      requirements: [
+        {
+          key: "dbprLicense",
+          label: "Florida DBPR Vacation Rental License",
+          shortLabel: "Florida DBPR License",
+          required: true,
+          requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
+          sample: "CND4600000 or DWE4600000",
+          helpText: "State vacation-rental license. Condo licenses commonly start with CND; dwelling licenses commonly start with DWE.",
+        },
+        {
+          key: "getLicense",
+          label: "Florida Sales Tax Certificate",
+          shortLabel: "Florida Sales Tax Cert",
+          required: false,
+          requiredForOtas: [],
+          sample: "Florida sales tax certificate number",
+          helpText: "Track the Florida sales tax certificate if the operator, owner, or manager collects taxable rentals outside OTA-collected tax.",
+        },
+        {
+          key: "touristTaxAccount",
+          label: "Lee County Tourist Development Tax Account",
+          shortLabel: "Lee County TDT",
+          required: false,
+          requiredForOtas: [],
+          sample: "Lee County TDT account number",
+          helpText: "Lee County tourist development tax account/reference for direct bookings or off-platform collection tracking.",
+        },
+        {
+          key: "strPermit",
+          label: "Lee County / Bonita Springs Business Tax Receipt",
+          shortLabel: "LBTR",
+          required: false,
+          requiredForOtas: [],
+          sample: "Lee County or Bonita Springs BTR number",
+          helpText: "Local business tax receipt or related local registration number when one applies to the listing/operator.",
+        },
+      ],
+      sources: [
+        { label: "Florida DBPR lodging public records", url: "https://www2.myfloridalicense.com/hotels-restaurants/lodging-public-records/" },
+        { label: "Florida DBPR license search", url: "https://www.myfloridalicense.com/wl11.asp" },
+        { label: "Lee County Tourist Development Tax", url: "https://www.leeclerk.org/i-want-to/pay/tourist-tax" },
       ],
     };
   }

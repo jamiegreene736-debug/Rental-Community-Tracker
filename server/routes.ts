@@ -27,7 +27,7 @@ import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
-import { resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
+import { isFloridaLicenseJurisdiction, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
 // below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
@@ -3986,6 +3986,88 @@ export async function registerRoutes(
     return parseDbprLicenseRecords(await resp.text(), searchTerm);
   };
 
+  const DBPR_LODGING_EXTRACT_URL = "https://www2.myfloridalicense.com/sto/file_download/extracts/hrlodge7.csv";
+  let dbprLodgingExtractCache: { loadedAt: number; records: DbprLicenseRecord[] } | null = null;
+
+  const parseCsvRows = (text: string): string[][] => {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let cell = "";
+    let quoted = false;
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i];
+      const next = text[i + 1];
+      if (ch === "\"") {
+        if (quoted && next === "\"") {
+          cell += "\"";
+          i += 1;
+        } else {
+          quoted = !quoted;
+        }
+      } else if (ch === "," && !quoted) {
+        row.push(cell);
+        cell = "";
+      } else if ((ch === "\n" || ch === "\r") && !quoted) {
+        if (ch === "\r" && next === "\n") i += 1;
+        row.push(cell);
+        if (row.some((value) => value.trim())) rows.push(row);
+        row = [];
+        cell = "";
+      } else {
+        cell += ch;
+      }
+    }
+    row.push(cell);
+    if (row.some((value) => value.trim())) rows.push(row);
+    return rows;
+  };
+
+  const fetchDbprLodgingExtract = async (): Promise<DbprLicenseRecord[]> => {
+    const oneHour = 60 * 60 * 1000;
+    if (dbprLodgingExtractCache && Date.now() - dbprLodgingExtractCache.loadedAt < oneHour) {
+      return dbprLodgingExtractCache.records;
+    }
+
+    const resp = await fetch(DBPR_LODGING_EXTRACT_URL, {
+      headers: { "User-Agent": "NexStay/1.0" },
+    });
+    if (!resp.ok) throw new Error(`Florida DBPR lodging extract failed (${resp.status})`);
+    const text = await resp.text();
+    const records = parseCsvRows(text)
+      .map((row): DbprLicenseRecord | null => {
+        const licenseNumber = String(row[27] ?? "").trim().toUpperCase();
+        const locationLine1 = String(row[17] ?? "").trim();
+        const locationLine2 = String(row[18] ?? "").trim();
+        const city = String(row[20] ?? "").trim();
+        const state = String(row[21] ?? "").trim();
+        const zip = String(row[22] ?? "").trim();
+        if (!/^(?:CND|DWE)\d{5,}$/i.test(licenseNumber) || !locationLine1) return null;
+        const rankCode = String(row[3] ?? "").trim().toUpperCase();
+        const rank = rankCode === "CNDO"
+          ? `CONDO ${String(row[4] ?? "").trim()}`
+          : rankCode === "DWEL"
+            ? `DWELLING ${String(row[4] ?? "").trim()}`
+            : `${rankCode} ${String(row[4] ?? "").trim()}`.trim();
+        const locationAddress = [locationLine1, locationLine2, city, state, zip].filter(Boolean).join(" ");
+        const mailingAddress = [row[6], row[7], row[8], row[9], row[10], row[11]].map((value) => String(value ?? "").trim()).filter(Boolean).join(" ") || null;
+        return {
+          id: licenseNumber,
+          name: String(row[15] || row[2] || "").trim(),
+          licenseNumber,
+          rank,
+          status: row[0] === "200" ? "Current Active" : String(row[0] ?? "").trim(),
+          expires: String(row[30] ?? "").trim(),
+          locationAddress,
+          mainAddress: mailingAddress,
+          mailingAddress,
+          searchTerm: "DBPR lodging public records extract",
+        };
+      })
+      .filter((record): record is DbprLicenseRecord => Boolean(record));
+    dbprLodgingExtractCache = { loadedAt: Date.now(), records };
+    return records;
+  };
+
   const scoreDbprLicense = (record: DbprLicenseRecord, address: string, listingName?: string | null): number => {
     const searched = normalizeAddressText(address);
     const streetTerm = streetSearchTermFromAddress(address);
@@ -4017,6 +4099,27 @@ export async function registerRoutes(
   };
 
   const lookupFloridaDbprLicense = async (address: string, listingName?: string | null): Promise<{ value: string | null; source: string; sourceUrl: string; match?: DbprLicenseRecord; candidates: DbprLicenseRecord[]; note: string } | null> => {
+    try {
+      const extractRecords = await fetchDbprLodgingExtract();
+      const rankedExtract = extractRecords
+        .map((record) => ({ record, score: scoreDbprLicense(record, address, listingName) }))
+        .filter(({ score }) => score >= 120)
+        .sort((a, b) => b.score - a.score);
+      const extractBest = rankedExtract[0]?.record;
+      if (extractBest) {
+        return {
+          value: extractBest.licenseNumber,
+          source: "Florida DBPR lodging public records",
+          sourceUrl: "https://www2.myfloridalicense.com/hotels-restaurants/lodging-public-records/",
+          match: extractBest,
+          candidates: rankedExtract.slice(0, 8).map(({ record }) => record),
+          note: `Matched Florida DBPR ${extractBest.licenseNumber} in the official lodging extract for ${extractBest.locationAddress}.`,
+        };
+      }
+    } catch (e: any) {
+      console.warn(`[dbpr-lookup] lodging extract failed: ${e?.message ?? e}`);
+    }
+
     const terms = dbprNameSearchTerms(address, listingName);
     if (!terms.length) return null;
     const byLicense = new Map<string, DbprLicenseRecord>();
@@ -11586,7 +11689,7 @@ export async function registerRoutes(
       state: body.state,
       address: body.address,
     });
-    const isFloridaProfile = profile.jurisdiction === "fort_myers_beach_fl" || profile.jurisdiction === "florida";
+    const isFloridaProfile = isFloridaLicenseJurisdiction(profile.jurisdiction);
     const taxMapKeyValue = usableLicenseValue(body.taxMapKey);
     const tatLicenseValue = usableLicenseValue(body.tatLicense);
     const getLicenseValue = usableLicenseValue(body.getLicense);
@@ -11664,7 +11767,7 @@ export async function registerRoutes(
         city: String(addressForProfile.city ?? ""),
         state: String(addressForProfile.state ?? ""),
       });
-      const isFloridaProfile = profile.jurisdiction === "fort_myers_beach_fl" || profile.jurisdiction === "florida";
+      const isFloridaProfile = isFloridaLicenseJurisdiction(profile.jurisdiction);
       const effectiveGetLicense = usableLicenseValue(getLicense);
       const effectiveStrPermit = usableLicenseValue(strPermit);
       const effectiveDbprLicense = usableLicenseValue(dbprLicense) || (isFloridaProfile ? usableLicenseValue(taxMapKey) : undefined);

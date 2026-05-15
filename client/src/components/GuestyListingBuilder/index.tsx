@@ -12,7 +12,7 @@ import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
-import { isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
+import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -922,7 +922,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   const complianceValueFor = useCallback((key: LicenseFieldKey): string | undefined => {
     if (!effectivePropertyData) return undefined;
-    if (complianceProfile.jurisdiction === "fort_myers_beach_fl" || complianceProfile.jurisdiction === "florida") {
+    if (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction)) {
       if (key === "dbprLicense") return effectivePropertyData.dbprLicense || effectivePropertyData.taxMapKey;
       if (key === "touristTaxAccount") return effectivePropertyData.touristTaxAccount || effectivePropertyData.tatLicense;
     }
@@ -936,6 +936,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const canCopyComplianceValue = useCallback((value?: string | null): boolean => {
     return Boolean(value && !isPlaceholderLicenseValue(value));
   }, []);
+
+  const complianceSummaryValues = useMemo(() => {
+    const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
+    return {
+      title1: complianceValueFor(isFloridaProfile ? "dbprLicense" : "taxMapKey"),
+      title2: complianceValueFor("getLicense"),
+      title3: complianceValueFor(isFloridaProfile ? "touristTaxAccount" : "tatLicense"),
+      title4: complianceValueFor("strPermit"),
+    };
+  }, [complianceProfile.jurisdiction, complianceValueFor]);
 
   const persistDraftComplianceValues = useCallback(async (
     values: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>,
@@ -980,7 +990,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!effectivePropertyData?.address) return;
     setLicenseLookupBusy(true);
     try {
-      const isFloridaProfile = complianceProfile.jurisdiction === "fort_myers_beach_fl" || complianceProfile.jurisdiction === "florida";
+      const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
       const r = await fetch("/api/builder/resolve-license-requirements", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3951,14 +3961,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             }}
                             data-testid="btn-pull-license-requirements"
                           >
-                            {licenseLookupBusy ? "Checking..." : "Check requirements / pull STR"}
+                            {licenseLookupBusy ? "Checking..." : "Check requirements / pull public licenses"}
                           </button>
                           <button
                             disabled={!selectedId}
                             onClick={async () => {
                               if (!selectedId) return;
                               try {
-                                const isFloridaProfile = complianceProfile.jurisdiction === "fort_myers_beach_fl" || complianceProfile.jurisdiction === "florida";
+                                const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
                                 const res = await fetch("/api/builder/push-compliance", {
                                   method: "POST",
                                   headers: { "Content-Type": "application/json" },
@@ -4018,11 +4028,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tmk-value">
-                              <span>{complianceDisplayValue(effectivePropertyData.taxMapKey)}</span>
-                              {canCopyComplianceValue(effectivePropertyData.taxMapKey) && (
+                              <span>{complianceDisplayValue(complianceSummaryValues.title1)}</span>
+                              {canCopyComplianceValue(complianceSummaryValues.title1) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
-                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.taxMapKey!); toast({ title: "Copied TMK" }); }}
+                                  onClick={() => { navigator.clipboard.writeText(complianceSummaryValues.title1!); toast({ title: `Copied ${complianceLabels.title1}` }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
@@ -4075,11 +4085,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-get-value">
-                              <span>{complianceDisplayValue(effectivePropertyData.getLicense)}</span>
-                              {canCopyComplianceValue(effectivePropertyData.getLicense) && (
+                              <span>{complianceDisplayValue(complianceSummaryValues.title2)}</span>
+                              {canCopyComplianceValue(complianceSummaryValues.title2) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
-                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.getLicense!); toast({ title: "Copied GET License" }); }}
+                                  onClick={() => { navigator.clipboard.writeText(complianceSummaryValues.title2!); toast({ title: `Copied ${complianceLabels.title2}` }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
@@ -4091,11 +4101,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tat-value">
-                              <span>{complianceDisplayValue(effectivePropertyData.tatLicense)}</span>
-                              {canCopyComplianceValue(effectivePropertyData.tatLicense) && (
+                              <span>{complianceDisplayValue(complianceSummaryValues.title3)}</span>
+                              {canCopyComplianceValue(complianceSummaryValues.title3) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
-                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.tatLicense!); toast({ title: "Copied TAT License" }); }}
+                                  onClick={() => { navigator.clipboard.writeText(complianceSummaryValues.title3!); toast({ title: `Copied ${complianceLabels.title3}` }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
@@ -4107,11 +4117,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-str-permit-value">
-                              <span>{complianceDisplayValue(effectivePropertyData.strPermit)}</span>
-                              {canCopyComplianceValue(effectivePropertyData.strPermit) && (
+                              <span>{complianceDisplayValue(complianceSummaryValues.title4)}</span>
+                              {canCopyComplianceValue(complianceSummaryValues.title4) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
-                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.strPermit!); toast({ title: "Copied STR Permit" }); }}
+                                  onClick={() => { navigator.clipboard.writeText(complianceSummaryValues.title4!); toast({ title: `Copied ${complianceLabels.title4}` }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
@@ -4124,7 +4134,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const value = complianceValueFor(req.key);
                               const isPlaceholder = isPlaceholderLicenseValue(value);
                               const inputValue = value && !isPlaceholder ? value : "";
-                              const canPublicPull = complianceProfile.jurisdiction === "fort_myers_beach_fl" && (req.key === "strPermit" || req.key === "dbprLicense");
+                              const canPublicPull = (complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit")
+                                || (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction) && req.key === "dbprLicense");
                               return (
                                 <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
                                   <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -4142,7 +4153,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isPlaceholder && (
                                     <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
-                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? ` or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR search" : "Fort Myers STR portal"}` : ""} before pushing compliance.
+                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? ` or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : "Fort Myers STR portal"}` : ""} before pushing compliance.
                                     </div>
                                   )}
                                   <input
