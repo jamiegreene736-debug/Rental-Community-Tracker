@@ -759,14 +759,15 @@ export default function AddCommunity() {
     //
     // We only short-circuit to the empty state when neither path
     // can run (no URL AND insufficient community info to search).
-    const buildBody = (u: UnitResult, skipUrls: string[] = []) =>
+    const buildBody = (u: UnitResult, skipUrls: string[] = [], bedroomOverride?: number | "any") =>
       u.url
         ? { url: u.url }
         : {
             communityName: selectedCommunity?.name,
+            streetAddress: editedStreetAddress.trim() || suggestedStreetAddress || undefined,
             city: selectedCommunity?.city,
             state: selectedCommunity?.state,
-            bedrooms: u.bedrooms ?? undefined,
+            bedrooms: bedroomOverride ?? u.bedrooms ?? undefined,
             skipUrls,
           };
     const canFetch = (u: UnitResult) => !!(u.url || (selectedCommunity?.name && u.bedrooms));
@@ -794,13 +795,46 @@ export default function AddCommunity() {
         const overlap = b.filter((p) => keys.has(p.url.replace(/[?#].*$/, "").toLowerCase())).length;
         return overlap / Math.min(a.length, b.length) >= 0.8;
       };
+      const hasEnoughPhotos = (photos: PhotoItem[]) => photos.length >= 3;
+      const fetchUnitPhotosWithRetries = async (
+        unit: UnitResult,
+        blockedUrls: string[] = [],
+        avoidPhotos: PhotoItem[] = [],
+      ): Promise<{ photos: PhotoItem[]; sourceUrl: string | null; relaxed: boolean }> => {
+        const seenUrls = new Set(blockedUrls.filter(Boolean));
+        const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
+          { relaxed: false },
+          { relaxed: false },
+          { bedroomOverride: "any", relaxed: true },
+        ];
+        let best: { photos: PhotoItem[]; sourceUrl: string | null; relaxed: boolean } = {
+          photos: [],
+          sourceUrl: null,
+          relaxed: false,
+        };
+        for (const attempt of attempts) {
+          const r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(unit, Array.from(seenUrls), attempt.bedroomOverride));
+          const d = await r.json();
+          const sourceUrl = typeof d.sourceUrl === "string" ? d.sourceUrl : unit.url || null;
+          const photos = ((d.photos || []) as PhotoItem[]).slice(0, 25);
+          const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKey(u) === listingKey(sourceUrl));
+          const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSame(avoidPhotos, photos);
+          if (photos.length > best.photos.length && !duplicateSource && !duplicatePhotos) {
+            best = { photos, sourceUrl, relaxed: attempt.relaxed };
+          }
+          if (sourceUrl) seenUrls.add(sourceUrl);
+          if (hasEnoughPhotos(photos) && !duplicateSource && !duplicatePhotos) {
+            return { photos, sourceUrl, relaxed: attempt.relaxed };
+          }
+        }
+        return best;
+      };
       let firstSourceUrl: string | null = null;
       let firstPhotos: PhotoItem[] = [];
       if (canFetch(selectedUnit1)) {
-        const r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit1));
-        const d = await r.json();
-        firstSourceUrl = typeof d.sourceUrl === "string" ? d.sourceUrl : selectedUnit1.url || null;
-        firstPhotos = ((d.photos || []) as PhotoItem[]).slice(0, 25);
+        const first = await fetchUnitPhotosWithRetries(selectedUnit1);
+        firstSourceUrl = first.sourceUrl;
+        firstPhotos = first.photos;
         setUnit1PhotoSourceUrl(firstSourceUrl);
         setUnit1Photos(firstPhotos);
       }
@@ -810,28 +844,29 @@ export default function AddCommunity() {
         // top Zillow/Realtor listing twice. Skip Unit A's source when finding
         // Unit B so the two draft folders do not persist identical photos.
         const skipUrls = firstSourceUrl && !selectedUnit2.url ? [firstSourceUrl] : [];
-        let r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2, skipUrls));
-        let d = await r.json();
-        if (!selectedUnit2.url && firstSourceUrl && listingKey(d.sourceUrl) === listingKey(firstSourceUrl)) {
-          r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2, [firstSourceUrl, d.sourceUrl]));
-          d = await r.json();
-        }
-        let secondPhotos = ((d.photos || []) as PhotoItem[]).slice(0, 25);
-        if (!selectedUnit2.url && firstSourceUrl && photoSetLooksSame(firstPhotos, secondPhotos)) {
-          const retrySkips = [firstSourceUrl, d.sourceUrl].filter((u): u is string => typeof u === "string" && !!u);
-          r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(selectedUnit2, retrySkips));
-          d = await r.json();
-          secondPhotos = ((d.photos || []) as PhotoItem[]).slice(0, 25);
-        }
+        const second = await fetchUnitPhotosWithRetries(selectedUnit2, skipUrls, firstPhotos);
+        let secondPhotos = second.photos;
         if (!selectedUnit2.url && firstPhotos.length > 0 && photoSetLooksSame(firstPhotos, secondPhotos)) {
           toast({
             title: "Unit B photos need another source",
-            description: "The search returned the same photo set as Unit A, so I did not attach duplicate Unit B photos. Use Find Photos / Find different photos from pre-flight to pick another source.",
+            description: "The search returned the same photo set as Unit A after multiple retries, so I did not attach duplicate Unit B photos. Try a different pairing or rerun after opening the source links.",
             variant: "destructive",
           });
           secondPhotos = [];
         }
-        setUnit2PhotoSourceUrl(typeof d.sourceUrl === "string" ? d.sourceUrl : selectedUnit2.url || null);
+        if (!hasEnoughPhotos(secondPhotos)) {
+          toast({
+            title: "Unit photos incomplete",
+            description: "I could not find at least 3 independent photos for both units. The search now retries broader sources automatically, but this community may need a manually selected source.",
+            variant: "destructive",
+          });
+        } else if (second.relaxed) {
+          toast({
+            title: "Unit B photos found with broader search",
+            description: "Exact bedroom-count photo discovery was thin, so I used a broader same-community listing source for Unit B.",
+          });
+        }
+        setUnit2PhotoSourceUrl(second.sourceUrl);
         setUnit2Photos(secondPhotos);
       }
     } catch (e: any) {
@@ -839,7 +874,7 @@ export default function AddCommunity() {
     } finally {
       setPhotosLoading(false);
     }
-  }, [selectedUnit1, selectedUnit2, selectedCommunity, toast]);
+  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, toast]);
 
   // Run platform check on a photo URL
   const checkPhoto = useCallback(async (imageUrl: string) => {

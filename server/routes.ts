@@ -21148,7 +21148,7 @@ Return ONLY compact JSON with this exact shape:
       streetAddress?: string;
       city?: string;
       state?: string;
-      bedrooms?: number;
+      bedrooms?: number | "any";
       // URLs the caller already has (e.g. from a previous click) so
       // a "Find another" button can skip listings already surfaced.
       skipUrls?: string[];
@@ -21189,10 +21189,17 @@ Return ONLY compact JSON with this exact shape:
         }
       };
       const skipSet = new Set((skipUrls ?? []).map((u) => listingKey(u)));
-      type DiscoverySource = "zillow" | "realtor";
+      const requestedBedrooms = bedrooms === "any"
+        ? null
+        : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
+          ? Math.round(Number(bedrooms))
+          : null;
+      type DiscoverySource = "zillow" | "realtor" | "redfin" | "homes";
       const candidateUrls: Array<{ url: string; source: DiscoverySource }> = [];
       const seen = new Set<string>();
       const harvestRootCounts = new Map<string, number>();
+      const suppliedStreetRoot = streetRootFromListingAddress(streetAddress ?? null);
+      if (suppliedStreetRoot) harvestRootCounts.set(suppliedStreetRoot, 2);
       const rememberRoot = (link: string, title = "", snippet = "") => {
         const root = streetRootFromListingAddress(
           parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
@@ -21222,22 +21229,32 @@ Return ONLY compact JSON with this exact shape:
 
       const zillowQueries: string[] = [];
       const realtorQueries: string[] = [];
+      const redfinQueries: string[] = [];
+      const homesQueries: string[] = [];
       if (streetAddress) {
         zillowQueries.push(`site:zillow.com "${streetAddress}"`);
         realtorQueries.push(`site:realtor.com "${streetAddress}"`);
+        redfinQueries.push(`site:redfin.com "${streetAddress}"`);
+        homesQueries.push(`site:homes.com "${streetAddress}"`);
       }
-      const brHint = bedrooms ? `${bedrooms} bedroom` : "";
+      const brHint = requestedBedrooms ? `${requestedBedrooms} bedroom` : "";
       if (brHint) {
         zillowQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim());
         realtorQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:realtor.com`.replace(/\s+/g, " ").trim());
+        redfinQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:redfin.com`.replace(/\s+/g, " ").trim());
+        homesQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:homes.com`.replace(/\s+/g, " ").trim());
       }
       zillowQueries.push(`site:zillow.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
       realtorQueries.push(`site:realtor.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+      redfinQueries.push(`site:redfin.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+      homesQueries.push(`site:homes.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
       // Last-ditch: bare quoted community name, no city/state. Catches
       // distinctive names ("Pili Mai", "Caribe Cove Resort") that
       // Google indexes well even without geographic disambiguation.
       zillowQueries.push(`site:zillow.com "${communityName}"`);
       realtorQueries.push(`site:realtor.com "${communityName}"`);
+      redfinQueries.push(`site:redfin.com "${communityName}"`);
+      homesQueries.push(`site:homes.com "${communityName}"`);
 
       const runDiscoveryQueries = async (queries: string[], pattern: RegExp, source: DiscoverySource) => {
         await Promise.all(queries.map(async (q) => {
@@ -21265,6 +21282,8 @@ Return ONLY compact JSON with this exact shape:
       await Promise.all([
         runDiscoveryQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
         runDiscoveryQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
+        runDiscoveryQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
+        runDiscoveryQueries(homesQueries, /homes\.com\/property\//i, "homes"),
       ]);
 
       if (city && state) {
@@ -21286,11 +21305,12 @@ Return ONLY compact JSON with this exact shape:
         }
       }
 
-      // Prefer Realtor first because older/off-market Realtor pages
-      // often expose facts/photos more reliably than Zillow in
-      // Florida condo buildings. Zillow remains the fallback.
+      // Prefer Realtor/Redfin/Homes before Zillow because older/off-market
+      // detail pages often expose facts/photos more reliably than Zillow in
+      // resort condo buildings. Zillow remains a fallback and still benefits
+      // from sidecar/ScrapingBee recovery when needed.
       candidateUrls.sort((a, b) => {
-        const priority: Record<DiscoverySource, number> = { realtor: 0, zillow: 1 };
+        const priority: Record<DiscoverySource, number> = { realtor: 0, redfin: 1, homes: 2, zillow: 3 };
         return priority[a.source] - priority[b.source];
       });
 
@@ -21304,8 +21324,8 @@ Return ONLY compact JSON with this exact shape:
             continue;
           }
           const scrapedBR = facts.bedrooms ?? null;
-          if (bedrooms && scrapedBR !== null && scrapedBR !== bedrooms) {
-            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${bedrooms}BR`);
+          if (requestedBedrooms && scrapedBR !== null && scrapedBR !== requestedBedrooms) {
+            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
             continue;
           }
           res.json({
@@ -21327,7 +21347,7 @@ Return ONLY compact JSON with this exact shape:
           photos: [],
           sourceUrl: null,
           foundVia: "search",
-          note: `No Zillow/Realtor listing found for "${communityName}"${bedrooms ? ` (${bedrooms}BR)` : ""}.`,
+          note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""}.`,
         });
       }
     }
