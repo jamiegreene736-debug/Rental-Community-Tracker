@@ -1487,6 +1487,17 @@ export default function AddCommunity() {
                 const typeCheck = checkCommunityType(c.unitTypes, c.researchSummary);
                 const resortUnitMix = formatResortUnitMix(c);
                 const minimumStay = formatMinimumStay(c);
+                const selectCommunity = () => {
+                  if (!typeCheck.eligible) {
+                    toast({
+                      title: "Not a supported community type",
+                      description: typeCheck.reason ?? "Only condo or townhome communities can be added.",
+                      variant: "destructive",
+                    });
+                    return;
+                  }
+                  handleSelectCommunity(c);
+                };
                 return (
                 <Card
                   key={i}
@@ -1495,16 +1506,14 @@ export default function AddCommunity() {
                       ? "p-4 cursor-pointer hover:border-primary transition-colors"
                       : "p-4 opacity-60 cursor-not-allowed bg-muted/30 border-dashed"
                   }
-                  onClick={() => {
-                    if (!typeCheck.eligible) {
-                      toast({
-                        title: "Not a supported community type",
-                        description: typeCheck.reason ?? "Only condo or townhome communities can be added.",
-                        variant: "destructive",
-                      });
-                      return;
+                  role="button"
+                  tabIndex={typeCheck.eligible ? 0 : -1}
+                  onClick={selectCommunity}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      selectCommunity();
                     }
-                    handleSelectCommunity(c);
                   }}
                   data-testid={`card-community-${i}`}
                 >
@@ -1643,8 +1652,16 @@ export default function AddCommunity() {
                           <Button variant="ghost" size="sm"><ExternalLink className="h-4 w-4" /></Button>
                         </a>
                       )}
-                      <Button size="sm" data-testid={`button-select-community-${i}`}>
-                        Select <ArrowRight className="h-4 w-4 ml-1" />
+                      <Button
+                        size="sm"
+                        disabled={!typeCheck.eligible}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectCommunity();
+                        }}
+                        data-testid={`button-select-community-${i}`}
+                      >
+                        {typeCheck.eligible ? "Select" : "Not supported"} <ArrowRight className="h-4 w-4 ml-1" />
                       </Button>
                     </div>
                   </div>
