@@ -1154,7 +1154,21 @@ export const TOP_MARKET_SEEDS: TopMarketSeed[] = [
   // Texas coast
   { city: "South Padre Island",  state: "Texas",          tag: "Gulf Coast", estimatedComboLow: 300, estimatedComboHigh: 650 },
   { city: "Galveston",           state: "Texas",          tag: "Gulf Coast", estimatedComboLow: 325, estimatedComboHigh: 700 },
-  // Hawaii (your home market, for completeness)
-  { city: "Kihei",               state: "Hawaii",         tag: "Hawaii",     estimatedComboLow: 850, estimatedComboHigh: 1700 },
-  { city: "Kailua-Kona",         state: "Hawaii",         tag: "Hawaii",     estimatedComboLow: 750, estimatedComboHigh: 1500 },
+  // Hawaii - operator home market. These are intentionally city/area
+  // seeds, not individual resort names; the research pipeline then
+  // discovers the actual condo/townhome communities inside each market.
+  { city: "Koloa",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 850, estimatedComboHigh: 1900 },
+  { city: "Poipu",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 900, estimatedComboHigh: 2000 },
+  { city: "Princeville",         state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 850, estimatedComboHigh: 1800 },
+  { city: "Kapaa",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 700, estimatedComboHigh: 1500 },
+  { city: "Lihue",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400 },
+  { city: "Kihei",               state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 850, estimatedComboHigh: 1700 },
+  { city: "Wailea",              state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2300 },
+  { city: "Lahaina",             state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 900, estimatedComboHigh: 2100 },
+  { city: "Kaanapali",           state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2400 },
+  { city: "Kailua-Kona",         state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 750, estimatedComboHigh: 1500 },
+  { city: "Waikoloa",            state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 800, estimatedComboHigh: 1700 },
+  { city: "Kohala Coast",        state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 950, estimatedComboHigh: 2200 },
+  { city: "Kapolei",             state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 850, estimatedComboHigh: 1800 },
+  { city: "Honolulu",            state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 700, estimatedComboHigh: 1600 },
 ];
