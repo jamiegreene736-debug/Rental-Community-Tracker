@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -51,7 +51,11 @@ import {
   TrendingUp,
   MessageSquare,
   Home as HomeIcon,
+  Loader2,
   RefreshCw,
+  Square,
+  CheckSquare,
+  StopCircle,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -110,6 +114,36 @@ type Property = {
   multiUnit: boolean;
   unitDetails: string;
   url: string;
+};
+
+type BulkPricingItemStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+type BulkPricingJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+type BulkPricingJob = {
+  id: string;
+  status: BulkPricingJobStatus;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  cancelRequested: boolean;
+  currentIndex: number;
+  total: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  items: Array<{
+    propertyId: number;
+    label: string;
+    status: BulkPricingItemStatus;
+    startedAt: string | null;
+    finishedAt: string | null;
+    progress: {
+      phase?: string;
+      percent?: number;
+      label?: string;
+      error?: string;
+    } | null;
+    error: string | null;
+  }>;
 };
 
 const properties: Property[] = [
@@ -412,6 +446,11 @@ export default function Home() {
   // When the operator clicks an unmapped (gray) G-dot we open the
   // connect-to-existing dialog seeded with this row's id + name.
   const [connectTarget, setConnectTarget] = useState<{ id: number; name: string } | null>(null);
+  const [selectedPricingIds, setSelectedPricingIds] = useState<Set<number>>(() => new Set());
+  const [bulkPricingOpen, setBulkPricingOpen] = useState(false);
+  const [bulkPricingJob, setBulkPricingJob] = useState<BulkPricingJob | null>(null);
+  const [bulkPricingStarting, setBulkPricingStarting] = useState(false);
+  const [bulkPricingCancelling, setBulkPricingCancelling] = useState(false);
 
   // Pull community drafts up here (early in the render) because
   // `allProperties` below depends on them and `qualityScores` /
@@ -942,6 +981,113 @@ export default function Home() {
 
   const queryClient = useQueryClient();
 
+  const isBulkPricingSelectable = (property: Property) =>
+    property.bedrooms > 0 && property.draftStatus !== "researching" && property.draftStatus !== "draft_ready";
+
+  const visibleBulkPricingIds = filtered
+    .filter(isBulkPricingSelectable)
+    .map((property) => property.id);
+  const selectedBulkPricingProperties = allProperties
+    .filter((property) => selectedPricingIds.has(property.id) && isBulkPricingSelectable(property));
+  const selectedBulkPricingCount = selectedBulkPricingProperties.length;
+  const allVisibleBulkPricingSelected =
+    visibleBulkPricingIds.length > 0 && visibleBulkPricingIds.every((id) => selectedPricingIds.has(id));
+  const bulkPricingTerminal =
+    bulkPricingJob?.status === "completed" || bulkPricingJob?.status === "failed" || bulkPricingJob?.status === "cancelled";
+
+  useEffect(() => {
+    const validIds = new Set(allProperties.filter(isBulkPricingSelectable).map((property) => property.id));
+    setSelectedPricingIds((prev) => {
+      const next = new Set(Array.from(prev).filter((id) => validIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [allProperties]);
+
+  useEffect(() => {
+    if (!bulkPricingJob?.id || bulkPricingTerminal) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/pricing/bulk-refresh/${bulkPricingJob.id}`, { credentials: "include" });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!cancelled) {
+          setBulkPricingJob(data.job);
+          if (["completed", "failed", "cancelled"].includes(data.job?.status)) {
+            queryClient.invalidateQueries({ queryKey: ["/api/property/market-rates"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+          }
+        }
+      } catch {
+        // Polling should never crash the dashboard. The next tick can recover.
+      }
+    };
+    const timer = window.setInterval(poll, 2_500);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bulkPricingJob?.id, bulkPricingTerminal, queryClient]);
+
+  const toggleBulkPricingRow = (propertyId: number) => {
+    setSelectedPricingIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(propertyId)) next.delete(propertyId);
+      else next.add(propertyId);
+      return next;
+    });
+  };
+
+  const toggleVisibleBulkPricingRows = () => {
+    setSelectedPricingIds((prev) => {
+      const next = new Set(prev);
+      if (allVisibleBulkPricingSelected) {
+        for (const id of visibleBulkPricingIds) next.delete(id);
+      } else {
+        for (const id of visibleBulkPricingIds) next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const startBulkPricingRefresh = async () => {
+    if (selectedBulkPricingProperties.length === 0) return;
+    setBulkPricingStarting(true);
+    try {
+      const labels = Object.fromEntries(selectedBulkPricingProperties.map((property) => [String(property.id), property.name]));
+      const response = await apiRequest("POST", "/api/pricing/bulk-refresh", {
+        propertyIds: selectedBulkPricingProperties.map((property) => property.id),
+        labels,
+      });
+      const data = await response.json();
+      setBulkPricingJob(data.job);
+      toast({
+        title: "Bulk pricing queued",
+        description: `${selectedBulkPricingProperties.length} propert${selectedBulkPricingProperties.length === 1 ? "y" : "ies"} will run one at a time.`,
+      });
+    } catch (e: any) {
+      toast({ title: "Bulk pricing failed to start", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkPricingStarting(false);
+    }
+  };
+
+  const cancelBulkPricingRefresh = async () => {
+    if (!bulkPricingJob?.id) return;
+    setBulkPricingCancelling(true);
+    try {
+      const response = await apiRequest("POST", `/api/pricing/bulk-refresh/${bulkPricingJob.id}/cancel`);
+      const data = await response.json();
+      setBulkPricingJob(data.job);
+      toast({ title: "Bulk pricing cancellation sent", description: "Queued items were cancelled and the active sidecar job was stopped." });
+    } catch (e: any) {
+      toast({ title: "Cancel failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkPricingCancelling(false);
+    }
+  };
+
   const deleteDraftMutation = useMutation({
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/community/${id}`);
@@ -1259,6 +1405,142 @@ export default function Home() {
               Showing {filtered.length} of {dashboardRowCount} properties
             </p>
             <div className="flex items-center gap-2">
+              <Dialog open={bulkPricingOpen} onOpenChange={setBulkPricingOpen}>
+                <DialogTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 gap-1.5"
+                    disabled={selectedBulkPricingCount === 0}
+                    data-testid="button-bulk-market-pricing"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Update market pricing
+                    {selectedBulkPricingCount > 0 && (
+                      <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-[10px]">
+                        {selectedBulkPricingCount}
+                      </Badge>
+                    )}
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-3xl">
+                  <DialogHeader>
+                    <DialogTitle>Bulk market pricing queue</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-4">
+                    <div className="rounded-md border bg-muted/20 p-3 text-sm">
+                      <p className="font-medium">Runs one selected property at a time.</p>
+                      <p className="mt-1 text-muted-foreground">
+                        This uses the same market-rate refresh as each Pricing tab, but serializes the work so Chrome sidecar scans do not collide.
+                      </p>
+                    </div>
+                    {!bulkPricingJob ? (
+                      <div className="space-y-3">
+                        <div className="max-h-64 overflow-y-auto rounded-md border">
+                          {selectedBulkPricingProperties.map((property) => (
+                            <div key={property.id} className="flex items-center justify-between gap-3 border-b px-3 py-2 last:border-b-0">
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-medium">{property.name}</p>
+                                <p className="truncate text-xs text-muted-foreground">{property.community} · {property.bedrooms}BR</p>
+                              </div>
+                              <Badge variant="outline" className="shrink-0">Queued</Badge>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <Button
+                            type="button"
+                            onClick={startBulkPricingRefresh}
+                            disabled={bulkPricingStarting || selectedBulkPricingCount === 0}
+                            data-testid="button-start-bulk-market-pricing"
+                          >
+                            {bulkPricingStarting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                            Start queue
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Status</p>
+                            <p className="text-sm font-semibold capitalize">{bulkPricingJob.status}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Completed</p>
+                            <p className="text-sm font-semibold">{bulkPricingJob.completed} / {bulkPricingJob.total}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Failed</p>
+                            <p className="text-sm font-semibold">{bulkPricingJob.failed}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Cancelled</p>
+                            <p className="text-sm font-semibold">{bulkPricingJob.cancelled}</p>
+                          </div>
+                        </div>
+                        <div className="max-h-80 overflow-y-auto rounded-md border">
+                          {bulkPricingJob.items.map((item, index) => {
+                            const statusTone =
+                              item.status === "completed" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : item.status === "failed" ? "bg-red-50 text-red-700 border-red-200"
+                              : item.status === "cancelled" ? "bg-slate-50 text-slate-600 border-slate-200"
+                              : item.status === "running" ? "bg-blue-50 text-blue-700 border-blue-200"
+                              : "bg-amber-50 text-amber-700 border-amber-200";
+                            const percent = typeof item.progress?.percent === "number" ? Math.max(0, Math.min(100, item.progress.percent)) : 0;
+                            return (
+                              <div key={`${item.propertyId}-${index}`} className="border-b px-3 py-3 last:border-b-0">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-medium">{item.label}</p>
+                                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                      {item.progress?.label || item.error || "Waiting for its turn"}
+                                    </p>
+                                  </div>
+                                  <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>
+                                    {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                                    {item.status}
+                                  </Badge>
+                                </div>
+                                {(item.status === "running" || percent > 0) && (
+                                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+                                    <div className="h-full rounded-full bg-[hsl(var(--brand-blue))]" style={{ width: `${percent}%` }} />
+                                  </div>
+                                )}
+                                {item.error && <p className="mt-1 text-xs text-red-700">{item.error}</p>}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => {
+                              setBulkPricingJob(null);
+                              setSelectedPricingIds(new Set());
+                            }}
+                            disabled={!bulkPricingTerminal}
+                          >
+                            Clear completed queue
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="destructive"
+                            onClick={cancelBulkPricingRefresh}
+                            disabled={bulkPricingTerminal || bulkPricingCancelling}
+                            data-testid="button-cancel-bulk-market-pricing"
+                          >
+                            {bulkPricingCancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+                            Cancel remaining
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
               <Badge variant="outline" className="text-xs">
                 <BedDouble className="h-3 w-3 mr-1" />
                 Avg {avgBedrooms} BR
@@ -1269,6 +1551,21 @@ export default function Home() {
           <Table id="list-properties" style={{ minWidth: 0 }}>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-[34px] text-center px-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    disabled={visibleBulkPricingIds.length === 0}
+                    onClick={toggleVisibleBulkPricingRows}
+                    title={allVisibleBulkPricingSelected ? "Clear visible pricing selections" : "Select visible properties for bulk market pricing"}
+                    aria-label={allVisibleBulkPricingSelected ? "Clear visible pricing selections" : "Select visible properties for bulk market pricing"}
+                    data-testid="button-select-visible-pricing"
+                  >
+                    {allVisibleBulkPricingSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+                  </Button>
+                </TableHead>
                 <TableHead className="w-[70px] sticky left-0 bg-background z-10">Actions</TableHead>
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
@@ -1421,6 +1718,21 @@ export default function Home() {
                   id={`item-property-${property.id}`}
                   className={isResearchDraft ? "bg-amber-50/40 dark:bg-amber-900/10" : ""}
                 >
+                  <TableCell className="text-center px-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={!isBulkPricingSelectable(property)}
+                      onClick={() => toggleBulkPricingRow(property.id)}
+                      title={isBulkPricingSelectable(property) ? "Select for bulk market pricing" : "Publish this draft before bulk pricing"}
+                      aria-label={`Select ${property.name} for bulk market pricing`}
+                      data-testid={`button-select-pricing-${property.id}`}
+                    >
+                      {selectedPricingIds.has(property.id) ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+                    </Button>
+                  </TableCell>
                   <TableCell
                     className="sticky left-0 z-10 px-2"
                     style={{ background: isResearchDraft ? "rgba(254, 243, 199, 0.4)" : undefined }}
@@ -1780,7 +2092,7 @@ export default function Home() {
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={13} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={14} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>

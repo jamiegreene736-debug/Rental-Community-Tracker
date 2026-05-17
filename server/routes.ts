@@ -227,6 +227,165 @@ type PricingRefreshLock = {
 const PRICING_REFRESH_LOCK_TTL_MS = 4 * 60 * 60 * 1000;
 const pricingRefreshLocks = new Map<number, PricingRefreshLock>();
 
+type BulkPricingItemStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+type BulkPricingJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+type BulkPricingItem = {
+  propertyId: number;
+  label: string;
+  status: BulkPricingItemStatus;
+  startedAt: number | null;
+  finishedAt: number | null;
+  progress: Record<string, unknown> | null;
+  error: string | null;
+};
+
+type BulkPricingJob = {
+  id: string;
+  status: BulkPricingJobStatus;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  cancelRequested: boolean;
+  currentIndex: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  items: BulkPricingItem[];
+  dryRun?: boolean;
+};
+
+const BULK_PRICING_JOB_TTL_MS = 6 * 60 * 60 * 1000;
+const BULK_PRICING_ITEM_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const bulkPricingJobs = new Map<string, BulkPricingJob>();
+
+function cleanupBulkPricingJobs(): void {
+  const now = Date.now();
+  for (const [jobId, job] of Array.from(bulkPricingJobs.entries())) {
+    if (job.finishedAt && now - job.finishedAt > BULK_PRICING_JOB_TTL_MS) {
+      bulkPricingJobs.delete(jobId);
+    }
+  }
+}
+
+function summarizeBulkPricingJob(job: BulkPricingJob) {
+  return {
+    id: job.id,
+    status: job.status,
+    createdAt: new Date(job.createdAt).toISOString(),
+    startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
+    finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+    cancelRequested: job.cancelRequested,
+    currentIndex: job.currentIndex,
+    total: job.items.length,
+    completed: job.completed,
+    failed: job.failed,
+    cancelled: job.cancelled,
+    items: job.items.map((item) => ({
+      ...item,
+      startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
+      finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
+    })),
+  };
+}
+
+function bulkPricingBaseUrl(): string {
+  return `http://127.0.0.1:${process.env.PORT || "5000"}`;
+}
+
+async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
+  item.status = "running";
+  item.startedAt = Date.now();
+  item.progress = { phase: "starting", percent: 1, label: "Queued by bulk market-pricing update" };
+
+  if (job.dryRun) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    item.progress = { phase: "done", percent: 100, label: "Dry-run completed" };
+    return;
+  }
+
+  const base = bulkPricingBaseUrl();
+  const startUrl = item.propertyId < 0
+    ? `${base}/api/community/${Math.abs(item.propertyId)}/refresh-pricing?background=1`
+    : `${base}/api/property/${item.propertyId}/refresh-market-rates?background=1&mode=banded`;
+  const startResponse = await fetch(startUrl, { method: "POST" });
+  const startBody = (await startResponse.json().catch(() => ({}))) as any;
+  if (!startResponse.ok) {
+    throw new Error(startBody?.error || startBody?.message || `HTTP ${startResponse.status}`);
+  }
+  item.progress = startBody?.progress ?? item.progress;
+
+  const deadline = Date.now() + BULK_PRICING_ITEM_TIMEOUT_MS;
+  let missingProgressCount = 0;
+  while (Date.now() < deadline) {
+    if (job.cancelRequested) {
+      const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
+      cancelActiveAndPendingRequests(`bulk pricing job ${job.id} cancelled`);
+      throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const progressResponse = await fetch(`${base}/api/property/${item.propertyId}/refresh-progress`);
+    if (progressResponse.status === 404) {
+      missingProgressCount += 1;
+      if (missingProgressCount >= 5) {
+        throw new Error("Lost refresh progress before the scan reported completion");
+      }
+      continue;
+    }
+    missingProgressCount = 0;
+    const progress = (await progressResponse.json().catch(() => null)) as any;
+    if (progress) item.progress = progress;
+    if (progress?.phase === "done") return;
+    if (progress?.phase === "error") {
+      throw new Error(progress?.error || progress?.label || "Market-rate refresh failed");
+    }
+  }
+  throw new Error("Market-rate refresh timed out");
+}
+
+async function runBulkPricingJob(jobId: string): Promise<void> {
+  const job = bulkPricingJobs.get(jobId);
+  if (!job) return;
+  job.status = "running";
+  job.startedAt = Date.now();
+  for (let i = 0; i < job.items.length; i += 1) {
+    job.currentIndex = i;
+    const item = job.items[i];
+    if (item.status === "cancelled") continue;
+    if (job.cancelRequested) {
+      item.status = "cancelled";
+      item.finishedAt = Date.now();
+      job.cancelled += 1;
+      continue;
+    }
+    try {
+      await runBulkPricingItem(job, item);
+      item.status = "completed";
+      job.completed += 1;
+    } catch (e: any) {
+      if (e?.cancelled || job.cancelRequested) {
+        item.status = "cancelled";
+        item.error = "Cancelled by operator";
+        job.cancelled += 1;
+      } else {
+        item.status = "failed";
+        item.error = e?.message ?? String(e);
+        job.failed += 1;
+      }
+    } finally {
+      item.finishedAt = Date.now();
+    }
+  }
+  job.finishedAt = Date.now();
+  if (job.cancelRequested) job.status = "cancelled";
+  else if (job.failed > 0 && job.completed === 0) job.status = "failed";
+  else job.status = "completed";
+  console.log(
+    `[bulk-pricing] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed, ${job.cancelled} cancelled`,
+  );
+}
+
 function cleanupPricingRefreshLocks(): void {
   const now = Date.now();
   for (const [propertyKey, lock] of Array.from(pricingRefreshLocks.entries())) {
@@ -24567,6 +24726,108 @@ Return ONLY compact JSON with this exact shape:
     }
     res.setHeader("Cache-Control", "no-store");
     return res.json(state);
+  });
+
+  // POST /api/pricing/bulk-refresh
+  //
+  // Operator-facing queue for refreshing selected dashboard rows. The queue is
+  // intentionally sequential: each item starts the existing background
+  // property/draft refresh endpoint, polls its real progress, then advances to
+  // the next item. That keeps Chrome sidecar work from stampeding and gives the
+  // UI a stable per-row status modal.
+  app.post("/api/pricing/bulk-refresh", async (req, res) => {
+    cleanupBulkPricingJobs();
+    if (!process.env.SEARCHAPI_API_KEY && req.body?.dryRun !== true) {
+      return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    }
+    const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
+    const labels = req.body?.labels && typeof req.body.labels === "object" ? req.body.labels as Record<string, string> : {};
+    const dryRun = req.body?.dryRun === true;
+    const seen = new Set<number>();
+    const propertyIds = rawIds
+      .map((id: unknown) => Number(id))
+      .filter((id: number) => Number.isInteger(id) && id !== 0)
+      .filter((id: number) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+      .slice(0, 50);
+    if (propertyIds.length === 0) {
+      return res.status(400).json({ error: "Select at least one property" });
+    }
+
+    const items: BulkPricingItem[] = [];
+    for (const propertyId of propertyIds) {
+      if (propertyId < 0) {
+        const draft = await storage.getCommunityDraft(Math.abs(propertyId));
+        if (!draft) return res.status(400).json({ error: `Draft ${Math.abs(propertyId)} was not found` });
+      }
+      items.push({
+        propertyId,
+        label: labels[String(propertyId)] || (propertyId < 0 ? `Draft ${Math.abs(propertyId)}` : `Property ${propertyId}`),
+        status: "queued",
+        startedAt: null,
+        finishedAt: null,
+        progress: null,
+        error: null,
+      });
+    }
+
+    const job: BulkPricingJob = {
+      id: randomBytes(10).toString("hex"),
+      status: "queued",
+      createdAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+      cancelRequested: false,
+      currentIndex: -1,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      items,
+      dryRun,
+    };
+    bulkPricingJobs.set(job.id, job);
+    console.log(`[bulk-pricing] queued job ${job.id} with ${items.length} item(s)${dryRun ? " (dry-run)" : ""}`);
+    void runBulkPricingJob(job.id).catch((e) => {
+      const active = bulkPricingJobs.get(job.id);
+      if (!active) return;
+      active.status = "failed";
+      active.finishedAt = Date.now();
+      console.error(`[bulk-pricing] job ${job.id} crashed:`, e);
+    });
+    res.status(202).json({ ok: true, job: summarizeBulkPricingJob(job) });
+  });
+
+  app.get("/api/pricing/bulk-refresh/:jobId", async (req, res) => {
+    cleanupBulkPricingJobs();
+    const job = bulkPricingJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Bulk pricing job not found" });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, job: summarizeBulkPricingJob(job) });
+  });
+
+  app.post("/api/pricing/bulk-refresh/:jobId/cancel", async (req, res) => {
+    const job = bulkPricingJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Bulk pricing job not found" });
+    job.cancelRequested = true;
+    for (const item of job.items) {
+      if (item.status === "queued") {
+        item.status = "cancelled";
+        item.finishedAt = Date.now();
+        job.cancelled += 1;
+      }
+    }
+    try {
+      const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
+      cancelActiveAndPendingRequests(`bulk pricing job ${job.id} cancelled`);
+    } catch {}
+    if (job.status === "queued") {
+      job.status = "cancelled";
+      job.finishedAt = Date.now();
+    }
+    res.json({ ok: true, job: summarizeBulkPricingJob(job) });
   });
 
   // POST /api/admin/refresh-all-market-rates
