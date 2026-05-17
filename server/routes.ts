@@ -25210,6 +25210,147 @@ Return ONLY compact JSON with this exact shape:
   //   {type:"market-done", city, state, count, communities:[...]}
   //   {type:"market-error", city, state, error}
   //   {type:"all-done", totalCommunities, topCommunity?}
+  type TopMarketJobMarket = {
+    city: string;
+    state: string;
+    tag?: string;
+    estimatedComboLow?: number;
+    estimatedComboHigh?: number;
+    status: "pending" | "running" | "done" | "error" | "cancelled";
+    count?: number;
+    communities?: any[];
+    error?: string;
+  };
+  type TopMarketJob = {
+    id: string;
+    status: "queued" | "running" | "done" | "error" | "cancelled";
+    markets: TopMarketJobMarket[];
+    totalCommunities: number;
+    topCommunity: any | null;
+    error?: string;
+    createdAt: number;
+    updatedAt: number;
+    cancelRequested?: boolean;
+  };
+  const topMarketJobs = new Map<string, TopMarketJob>();
+  const TOP_MARKET_JOB_TTL_MS = 1000 * 60 * 60 * 6;
+  const pruneTopMarketJobs = () => {
+    const cutoff = Date.now() - TOP_MARKET_JOB_TTL_MS;
+    for (const [id, job] of topMarketJobs.entries()) {
+      if (job.updatedAt < cutoff) topMarketJobs.delete(id);
+    }
+  };
+  const serializeTopMarketJob = (job: TopMarketJob) => ({
+    id: job.id,
+    status: job.status,
+    markets: job.markets,
+    totalCommunities: job.totalCommunities,
+    topCommunity: job.topCommunity,
+    error: job.error,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  });
+  const runTopMarketJob = async (job: TopMarketJob) => {
+    job.status = "running";
+    job.updatedAt = Date.now();
+    console.log(`[scan-top-markets-job] ${job.id} starting sweep of ${job.markets.length} cities`);
+    let topCommunity: { score: number; data: any } | null = null;
+    try {
+      for (let i = 0; i < job.markets.length; i++) {
+        const market = job.markets[i];
+        if (job.cancelRequested) {
+          market.status = "cancelled";
+          job.status = "cancelled";
+          job.updatedAt = Date.now();
+          console.log(`[scan-top-markets-job] ${job.id} cancelled`);
+          return;
+        }
+        market.status = "running";
+        job.updatedAt = Date.now();
+        try {
+          const communities = await researchCommunitiesForCity(market.city, market.state);
+          market.status = "done";
+          market.count = communities.length;
+          market.communities = communities;
+          job.totalCommunities += communities.length;
+          for (const c of communities) {
+            const score = c.confidenceScore + (c.combinabilityScore ?? 50);
+            if (!topCommunity || score > topCommunity.score) {
+              topCommunity = { score, data: { ...c, tag: market.tag } };
+            }
+          }
+          job.topCommunity = topCommunity?.data ?? null;
+          console.log(`[scan-top-markets-job] ${job.id} ${market.city}, ${market.state}: ${communities.length} qualifying`);
+        } catch (e: any) {
+          market.status = "error";
+          market.error = e?.message || "Market scan failed";
+          console.error(`[scan-top-markets-job] ${job.id} ${market.city}, ${market.state} error:`, market.error);
+        } finally {
+          job.updatedAt = Date.now();
+        }
+      }
+      job.status = job.markets.every((m) => m.status === "error") ? "error" : "done";
+      if (job.status === "error") job.error = "All selected markets failed";
+      job.updatedAt = Date.now();
+      console.log(`[scan-top-markets-job] ${job.id} done: ${job.totalCommunities} communities across ${job.markets.length} markets`);
+    } catch (e: any) {
+      job.status = "error";
+      job.error = e?.message || "Top-market job failed";
+      job.updatedAt = Date.now();
+      console.error(`[scan-top-markets-job] ${job.id} fatal error:`, job.error);
+    }
+  };
+
+  app.post("/api/community/scan-top-markets-job", async (req, res) => {
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    pruneTopMarketJobs();
+    const body = (req.body ?? {}) as {
+      markets?: Array<{ city: string; state: string; tag?: string; estimatedComboLow?: number; estimatedComboHigh?: number }>;
+      maxMarkets?: number;
+    };
+    const requested = body.markets && body.markets.length > 0 ? body.markets : TOP_MARKET_SEEDS;
+    const limit = Math.min(requested.length, Math.max(1, body.maxMarkets ?? 12));
+    const markets = requested.slice(0, limit).map((m) => ({
+      city: m.city,
+      state: m.state,
+      tag: m.tag,
+      estimatedComboLow: m.estimatedComboLow,
+      estimatedComboHigh: m.estimatedComboHigh,
+      status: "pending" as const,
+    }));
+    const id = `tmj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const now = Date.now();
+    const job: TopMarketJob = {
+      id,
+      status: "queued",
+      markets,
+      totalCommunities: 0,
+      topCommunity: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    topMarketJobs.set(id, job);
+    void runTopMarketJob(job);
+    res.status(202).json({ job: serializeTopMarketJob(job) });
+  });
+
+  app.get("/api/community/scan-top-markets-job/:jobId", (req, res) => {
+    pruneTopMarketJobs();
+    const job = topMarketJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Top-market scan job not found" });
+    res.json({ job: serializeTopMarketJob(job) });
+  });
+
+  app.post("/api/community/scan-top-markets-job/:jobId/cancel", (req, res) => {
+    const job = topMarketJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Top-market scan job not found" });
+    job.cancelRequested = true;
+    if (job.status === "queued") job.status = "cancelled";
+    job.updatedAt = Date.now();
+    res.json({ job: serializeTopMarketJob(job) });
+  });
+
   app.post("/api/community/scan-top-markets", async (req: Request, res: Response) => {
     const searchApiKey = process.env.SEARCHAPI_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });

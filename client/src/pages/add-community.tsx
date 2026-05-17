@@ -55,6 +55,7 @@ const US_STATES = [
 ];
 
 const STEPS = ["Location", "Research", "Select Units", "Photos", "Listing Draft"];
+const ADD_COMBO_DRAFT_KEY = "nexstay_add_combo_listing_draft_v1";
 
 type CommunityResult = {
   name: string;
@@ -233,7 +234,7 @@ export default function AddCommunity() {
     tag?: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
-    status: "pending" | "running" | "done" | "error";
+    status: "pending" | "running" | "done" | "error" | "cancelled";
     count?: number;
     communities?: CommunityResult[];
     error?: string;
@@ -242,7 +243,10 @@ export default function AddCommunity() {
   const [sweepMarkets, setSweepMarkets] = useState<MarketResult[]>([]);
   const [sweepRunning, setSweepRunning] = useState(false);
   const [sweepDone, setSweepDone] = useState(false);
-  const sweepAbortRef = useRef<AbortController | null>(null);
+  const [sweepJobId, setSweepJobId] = useState<string | null>(null);
+  const [draftRestored, setDraftRestored] = useState(false);
+  const draftHydratedRef = useRef(false);
+  const [draftAutosaveReady, setDraftAutosaveReady] = useState(false);
   // Two-phase flow for the sweep modal. "setup" shows a checkbox grid the
   // user picks markets from; "running" shows streaming per-market progress.
   // Avoids the old behavior of firing a ~30-minute sweep across all 20
@@ -258,6 +262,25 @@ export default function AddCommunity() {
     if (low && high) return `$${low.toLocaleString()}-${high.toLocaleString()}/night`;
     return `$${(low ?? high)!.toLocaleString()}/night`;
   };
+  type TopMarketJobPayload = {
+    id: string;
+    status: "queued" | "running" | "done" | "error" | "cancelled";
+    markets: MarketResult[];
+    totalCommunities?: number;
+    topCommunity?: CommunityResult | null;
+    error?: string;
+  };
+  const applySweepJob = useCallback((job: TopMarketJobPayload) => {
+    setSweepJobId(job.id);
+    setSweepMarkets(job.markets || []);
+    setSweepPhase("running");
+    const terminal = job.status === "done" || job.status === "error" || job.status === "cancelled";
+    setSweepRunning(!terminal);
+    setSweepDone(terminal);
+    if (job.status === "error" && job.error) {
+      toast({ title: "Sweep error", description: job.error, variant: "destructive" });
+    }
+  }, [toast]);
 
   // Step 3
   const [unitSearchResults, setUnitSearchResults] = useState<{ units: UnitResult[]; grouped: Record<string, UnitResult[]> } | null>(null);
@@ -372,6 +395,153 @@ export default function AddCommunity() {
     }
   }, [editedStreetAddress, suggestedStreetAddress]);
 
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(ADD_COMBO_DRAFT_KEY);
+      if (!raw) {
+        draftHydratedRef.current = true;
+        return;
+      }
+      const draft = JSON.parse(raw);
+      if (typeof draft.step === "number") setStep(Math.min(Math.max(draft.step, 1), STEPS.length));
+      if (typeof draft.selectedState === "string") setSelectedState(draft.selectedState);
+      if (typeof draft.cityInput === "string") setCityInput(draft.cityInput);
+      if (Array.isArray(draft.communities)) setCommunities(draft.communities);
+      if (draft.selectedCommunity) setSelectedCommunity(draft.selectedCommunity);
+      if (Array.isArray(draft.sweepMarkets)) setSweepMarkets(draft.sweepMarkets);
+      if (typeof draft.sweepJobId === "string") setSweepJobId(draft.sweepJobId);
+      if (typeof draft.sweepPhase === "string") setSweepPhase(draft.sweepPhase === "running" ? "running" : "setup");
+      if (typeof draft.sweepDone === "boolean") setSweepDone(draft.sweepDone);
+      if (Array.isArray(draft.seedMarkets)) setSeedMarkets(draft.seedMarkets);
+      if (Array.isArray(draft.selectedMarkets)) setSelectedMarkets(new Set(draft.selectedMarkets));
+      if (draft.unitSearchResults) setUnitSearchResults(draft.unitSearchResults);
+      if (draft.communityProfile) setCommunityProfile(draft.communityProfile);
+      if (Array.isArray(draft.suggestedPairings)) setSuggestedPairings(draft.suggestedPairings);
+      if (draft.selectedPairing) setSelectedPairing(draft.selectedPairing);
+      if (draft.selectedUnit1) setSelectedUnit1(draft.selectedUnit1);
+      if (draft.selectedUnit2) setSelectedUnit2(draft.selectedUnit2);
+      if (Array.isArray(draft.unit1Photos)) setUnit1Photos(draft.unit1Photos);
+      if (Array.isArray(draft.unit2Photos)) setUnit2Photos(draft.unit2Photos);
+      if (typeof draft.unit1PhotoSourceUrl === "string") setUnit1PhotoSourceUrl(draft.unit1PhotoSourceUrl);
+      if (typeof draft.unit2PhotoSourceUrl === "string") setUnit2PhotoSourceUrl(draft.unit2PhotoSourceUrl);
+      if (draft.photoChecks && typeof draft.photoChecks === "object") setPhotoChecks(draft.photoChecks);
+      if (draft.listing) setListing(draft.listing);
+      if (typeof draft.editedTitle === "string") setEditedTitle(draft.editedTitle);
+      if (typeof draft.editedBookingTitle === "string") setEditedBookingTitle(draft.editedBookingTitle);
+      if (typeof draft.editedPropertyType === "string") setEditedPropertyType(draft.editedPropertyType);
+      if (typeof draft.editedPricingArea === "string") setEditedPricingArea(draft.editedPricingArea);
+      if (typeof draft.editedStreetAddress === "string") setEditedStreetAddress(draft.editedStreetAddress);
+      if (typeof draft.editedDescription === "string") setEditedDescription(draft.editedDescription);
+      if (typeof draft.editedNeighborhood === "string") setEditedNeighborhood(draft.editedNeighborhood);
+      if (typeof draft.editedTransit === "string") setEditedTransit(draft.editedTransit);
+      if (draft.editedUnitA) setEditedUnitA(draft.editedUnitA);
+      if (draft.editedUnitB) setEditedUnitB(draft.editedUnitB);
+      if (typeof draft.strPermit === "string") setStrPermit(draft.strPermit);
+      if (typeof draft.dbprLicense === "string") setDbprLicense(draft.dbprLicense);
+      if (typeof draft.touristTaxAccount === "string") setTouristTaxAccount(draft.touristTaxAccount);
+      setDraftRestored(true);
+    } catch (e) {
+      console.warn("[add-community] failed to restore combo draft", e);
+      window.localStorage.removeItem(ADD_COMBO_DRAFT_KEY);
+    } finally {
+      draftHydratedRef.current = true;
+      window.setTimeout(() => setDraftAutosaveReady(true), 0);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!draftHydratedRef.current || !draftAutosaveReady) return;
+    const payload = {
+      step,
+      selectedState,
+      cityInput,
+      communities,
+      selectedCommunity,
+      sweepMarkets,
+      sweepJobId,
+      sweepPhase,
+      sweepDone,
+      seedMarkets,
+      selectedMarkets: Array.from(selectedMarkets),
+      unitSearchResults,
+      communityProfile,
+      suggestedPairings,
+      selectedPairing,
+      selectedUnit1,
+      selectedUnit2,
+      unit1Photos,
+      unit2Photos,
+      unit1PhotoSourceUrl,
+      unit2PhotoSourceUrl,
+      photoChecks,
+      listing,
+      editedTitle,
+      editedBookingTitle,
+      editedPropertyType,
+      editedPricingArea,
+      editedStreetAddress,
+      editedDescription,
+      editedNeighborhood,
+      editedTransit,
+      editedUnitA,
+      editedUnitB,
+      strPermit,
+      dbprLicense,
+      touristTaxAccount,
+      savedAt: new Date().toISOString(),
+    };
+    try {
+      window.localStorage.setItem(ADD_COMBO_DRAFT_KEY, JSON.stringify(payload));
+    } catch (e) {
+      console.warn("[add-community] failed to autosave combo draft", e);
+    }
+  }, [
+    draftAutosaveReady,
+    step, selectedState, cityInput, communities, selectedCommunity, sweepMarkets, sweepJobId,
+    sweepPhase, sweepDone, seedMarkets, selectedMarkets, unitSearchResults, communityProfile,
+    suggestedPairings, selectedPairing, selectedUnit1, selectedUnit2, unit1Photos, unit2Photos,
+    unit1PhotoSourceUrl, unit2PhotoSourceUrl, photoChecks, listing, editedTitle,
+    editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress,
+    editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB,
+    strPermit, dbprLicense, touristTaxAccount,
+  ]);
+
+  useEffect(() => {
+    if (!sweepJobId) return;
+    let cancelled = false;
+    const fetchJob = async () => {
+      try {
+        const resp = await fetch(`/api/community/scan-top-markets-job/${encodeURIComponent(sweepJobId)}`);
+        if (!resp.ok) {
+          if (resp.status === 404) {
+            setSweepRunning(false);
+            setSweepDone(true);
+          }
+          return;
+        }
+        const data = await resp.json();
+        if (!cancelled && data.job) applySweepJob(data.job);
+      } catch (e: any) {
+        if (!cancelled) console.warn("[add-community] sweep job poll failed", e?.message || e);
+      }
+    };
+    fetchJob();
+    if (sweepDone && !sweepRunning) {
+      return () => { cancelled = true; };
+    }
+    const interval = window.setInterval(fetchJob, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [sweepJobId, sweepDone, sweepRunning, applySweepJob]);
+
+  const clearSavedComboDraft = useCallback(() => {
+    window.localStorage.removeItem(ADD_COMBO_DRAFT_KEY);
+    setDraftRestored(false);
+    toast({ title: "Saved combo draft cleared", description: "This does not delete anything already saved to the dashboard." });
+  }, [toast]);
+
   // ── Step 2: Research ────────────────────────────────────────
   const handleResearch = useCallback(async () => {
     if (!selectedState || !cityInput.trim()) {
@@ -400,6 +570,10 @@ export default function AddCommunity() {
   // markets (if we haven't already) so the checkbox grid can render.
   const openSweepSetup = useCallback(async () => {
     setSweepOpen(true);
+    if (sweepJobId && sweepRunning) {
+      setSweepPhase("running");
+      return;
+    }
     setSweepPhase("setup");
     setSweepDone(false);
     setSweepMarkets([]);
@@ -420,7 +594,7 @@ export default function AddCommunity() {
         toast({ title: "Couldn't load market list", description: e.message, variant: "destructive" });
       }
     }
-  }, [seedMarkets, toast]);
+  }, [seedMarkets, sweepJobId, sweepRunning, toast]);
 
   const toggleMarket = (m: { city: string; state: string }) => {
     setSelectedMarkets((prev) => {
@@ -436,8 +610,9 @@ export default function AddCommunity() {
   };
   const clearAllMarkets = () => setSelectedMarkets(new Set());
 
-  // ── Top-markets sweep: stream per-market progress for the selected
-  // markets. Kicked off by the Run button inside the modal's setup phase.
+  // ── Top-markets sweep: start a server-owned job and poll it. Keeping
+  // the long-running work on the server means the scan keeps going if the
+  // operator closes or leaves this tab, then resumes when they return.
   const runTopMarketsSweep = useCallback(async () => {
     if (!seedMarkets) return;
     const picked = seedMarkets.filter((m) => selectedMarkets.has(keyFor(m)));
@@ -456,91 +631,44 @@ export default function AddCommunity() {
       estimatedComboHigh: m.estimatedComboHigh,
       status: "pending",
     })));
-
-    const controller = new AbortController();
-    sweepAbortRef.current = controller;
+    setSweepJobId(null);
 
     try {
-      const resp = await fetch("/api/community/scan-top-markets", {
+      const resp = await fetch("/api/community/scan-top-markets-job", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ markets: picked, maxMarkets: picked.length }),
-        signal: controller.signal,
       });
-      if (!resp.ok || !resp.body) {
-        toast({ title: "Sweep failed", description: `HTTP ${resp.status}`, variant: "destructive" });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        toast({ title: "Sweep failed", description: text || `HTTP ${resp.status}`, variant: "destructive" });
         setSweepRunning(false);
         return;
       }
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let evt: any;
-          try { evt = JSON.parse(line); } catch { continue; }
-
-          if (evt.type === "start") {
-            setSweepMarkets((evt.markets as any[]).map((m) => ({
-              city: m.city,
-              state: m.state,
-              tag: m.tag,
-              estimatedComboLow: m.estimatedComboLow,
-              estimatedComboHigh: m.estimatedComboHigh,
-              status: "pending",
-            })));
-          } else if (evt.type === "market-start") {
-            setSweepMarkets((prev) => prev.map((m) =>
-              m.city === evt.city && m.state === evt.state ? { ...m, status: "running" } : m
-            ));
-          } else if (evt.type === "market-done") {
-            setSweepMarkets((prev) => prev.map((m) =>
-              m.city === evt.city && m.state === evt.state
-                ? {
-                    ...m,
-                    status: "done",
-                    count: evt.count,
-                    communities: evt.communities,
-                    estimatedComboLow: evt.estimatedComboLow ?? m.estimatedComboLow,
-                    estimatedComboHigh: evt.estimatedComboHigh ?? m.estimatedComboHigh,
-                  }
-                : m
-            ));
-          } else if (evt.type === "market-error") {
-            setSweepMarkets((prev) => prev.map((m) =>
-              m.city === evt.city && m.state === evt.state
-                ? {
-                    ...m,
-                    status: "error",
-                    error: evt.error,
-                    estimatedComboLow: evt.estimatedComboLow ?? m.estimatedComboLow,
-                    estimatedComboHigh: evt.estimatedComboHigh ?? m.estimatedComboHigh,
-                  }
-                : m
-            ));
-          } else if (evt.type === "all-done") {
-            setSweepDone(true);
-          }
-        }
-      }
+      const data = await resp.json();
+      if (data.job) applySweepJob(data.job);
     } catch (e: any) {
-      if (e.name !== "AbortError") {
-        toast({ title: "Sweep error", description: e.message, variant: "destructive" });
-      }
-    } finally {
+      toast({ title: "Sweep error", description: e.message, variant: "destructive" });
       setSweepRunning(false);
-      sweepAbortRef.current = null;
     }
-  }, [seedMarkets, selectedMarkets, toast]);
+  }, [seedMarkets, selectedMarkets, toast, applySweepJob]);
 
-  const stopSweep = () => sweepAbortRef.current?.abort();
+  const stopSweep = useCallback(async () => {
+    if (!sweepJobId) {
+      setSweepRunning(false);
+      setSweepDone(true);
+      return;
+    }
+    try {
+      const resp = await fetch(`/api/community/scan-top-markets-job/${encodeURIComponent(sweepJobId)}/cancel`, {
+        method: "POST",
+      });
+      const data = await resp.json().catch(() => null);
+      if (data?.job) applySweepJob(data.job);
+    } catch (e: any) {
+      toast({ title: "Couldn't stop sweep", description: e.message, variant: "destructive" });
+    }
+  }, [sweepJobId, applySweepJob, toast]);
 
   // When a sweep result is chosen, load it into Step 2 as if the user had
   // searched that city directly, then jump them there.
@@ -903,6 +1031,7 @@ export default function AddCommunity() {
           .catch((e: any) => console.warn(`[add-community] refresh-pricing failed: ${e?.message}`));
       }
       await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+      window.localStorage.removeItem(ADD_COMBO_DRAFT_KEY);
       toast({ title: "Community saved to dashboard!" });
       navigate("/");
     } catch (e: any) {
@@ -952,6 +1081,19 @@ export default function AddCommunity() {
           })}
         </div>
         <p className="text-sm text-muted-foreground mb-6" id="step-progress-label">Step {step} of {STEPS.length}: {STEPS[step - 1]}</p>
+        {draftRestored && (
+          <Card className="mb-6 border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span>
+                Saved combo-listing progress restored. You can leave this tab and come back without losing the current step.
+                {sweepRunning ? " The top-market scan is still running in the background." : ""}
+              </span>
+              <Button variant="outline" size="sm" onClick={clearSavedComboDraft}>
+                Clear saved draft
+              </Button>
+            </div>
+          </Card>
+        )}
 
         {/* ── STEP 1: Location ─────────────────────────────── */}
         {step === 1 && (
@@ -1230,6 +1372,7 @@ export default function AddCommunity() {
                               </Badge>
                             )}
                             {m.status === "error" && <Badge variant="destructive">Error</Badge>}
+                            {m.status === "cancelled" && <Badge variant="outline">Cancelled</Badge>}
                           </div>
                           {best && (
                             <div className="text-xs text-muted-foreground mt-1 truncate">
