@@ -7,6 +7,9 @@ import {
   bulkComboListingJobs as bulkComboListingJobRows,
   buyInEmails,
   buyInVendorContacts,
+  comboPhotoFetchJobItems as comboPhotoFetchJobItemRows,
+  comboPhotoFetchJobs as comboPhotoFetchJobRows,
+  communityPricingRefreshJobs as communityPricingRefreshJobRows,
   guestyPropertyMap,
   insertBuyInSchema,
   insertCommunityDraftSchema,
@@ -16,7 +19,7 @@ import {
   rentalAgreements,
 } from "@shared/schema";
 import { db } from "./db";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import path from "path";
 import fs from "fs";
@@ -21128,6 +21131,10 @@ Return ONLY compact JSON with this exact shape:
     return res.json({ ok: true });
   });
 
+  const QUEUE_WORKER_ID = `${process.pid}-${randomBytes(4).toString("hex")}`;
+  const QUEUE_LEASE_MS = 10 * 60 * 1000;
+  const queueLockExpiry = () => new Date(Date.now() + QUEUE_LEASE_MS);
+
   type ComboPhotoFetchStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
   type ComboPhotoFetchUnit = {
     url?: string;
@@ -21174,14 +21181,134 @@ Return ONLY compact JSON with this exact shape:
     items: ComboPhotoFetchItem[];
   };
 
-  const comboPhotoFetchJobs = new Map<string, ComboPhotoFetchJob>();
-  const COMBO_PHOTO_FETCH_JOB_TTL_MS = 12 * 60 * 60 * 1000;
+  const activeComboPhotoFetchJobIds = new Set<string>();
   const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 4 * 60 * 1000;
-
-  const pruneComboPhotoFetchJobs = () => {
-    const cutoff = Date.now() - COMBO_PHOTO_FETCH_JOB_TTL_MS;
-    for (const [id, job] of comboPhotoFetchJobs.entries()) {
-      if ((job.finishedAt ?? job.updatedAt) < cutoff) comboPhotoFetchJobs.delete(id);
+  const toQueueMs = (value: Date | string | number | null | undefined): number | null => {
+    if (!value) return null;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  };
+  const queueDate = (ms: number | null | undefined): Date | null => (ms ? new Date(ms) : null);
+  const validComboPhotoFetchStatus = (value: unknown): ComboPhotoFetchStatus => {
+    return value === "queued" || value === "running" || value === "completed" || value === "failed" || value === "cancelled"
+      ? value
+      : "queued";
+  };
+  const normalizeComboPhotoFetchPhotos = (value: unknown): Array<{ url: string; label?: string }> => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((photo: any) => ({ url: String(photo?.url || "").trim(), label: photo?.label ? String(photo.label) : undefined }))
+      .filter((photo) => photo.url);
+  };
+  const refreshComboPhotoFetchCounts = (job: ComboPhotoFetchJob) => {
+    job.completed = job.items.filter((item) => item.status === "completed").length;
+    job.failed = job.items.filter((item) => item.status === "failed").length;
+    job.cancelled = job.items.filter((item) => item.status === "cancelled").length;
+  };
+  const persistComboPhotoFetchSnapshot = async (job: ComboPhotoFetchJob) => {
+    refreshComboPhotoFetchCounts(job);
+    const now = new Date(job.updatedAt || Date.now());
+    await db
+      .update(comboPhotoFetchJobRows)
+      .set({
+        status: job.status,
+        cancelRequested: job.cancelRequested,
+        currentIndex: job.currentIndex,
+        completed: job.completed,
+        failed: job.failed,
+        cancelled: job.cancelled,
+        lockedBy: activeComboPhotoFetchJobIds.has(job.id) ? QUEUE_WORKER_ID : null,
+        lockExpiresAt: activeComboPhotoFetchJobIds.has(job.id) ? queueLockExpiry() : null,
+        startedAt: queueDate(job.startedAt),
+        finishedAt: queueDate(job.finishedAt),
+        updatedAt: now,
+      })
+      .where(eq(comboPhotoFetchJobRows.id, job.id));
+    for (const [sortOrder, item] of job.items.entries()) {
+      await db
+        .update(comboPhotoFetchJobItemRows)
+        .set({
+          label: item.label,
+          status: item.status,
+          phase: item.phase,
+          message: item.message,
+          unit1Photos: item.unit1Photos,
+          unit2Photos: item.unit2Photos,
+          unit1SourceUrl: item.unit1SourceUrl,
+          unit2SourceUrl: item.unit2SourceUrl,
+          error: item.error,
+          attemptCount: item.attemptCount,
+          heartbeatAt: queueDate(item.heartbeatAt),
+          sortOrder,
+          startedAt: queueDate(item.startedAt),
+          finishedAt: queueDate(item.finishedAt),
+          updatedAt: now,
+        })
+        .where(and(eq(comboPhotoFetchJobItemRows.jobId, job.id), eq(comboPhotoFetchJobItemRows.itemKey, item.id)));
+    }
+  };
+  const loadComboPhotoFetchJob = async (jobId: string): Promise<ComboPhotoFetchJob | null> => {
+    const [jobRow] = await db.select().from(comboPhotoFetchJobRows).where(eq(comboPhotoFetchJobRows.id, jobId)).limit(1);
+    if (!jobRow) return null;
+    const itemRows = await db
+      .select()
+      .from(comboPhotoFetchJobItemRows)
+      .where(eq(comboPhotoFetchJobItemRows.jobId, jobId))
+      .orderBy(asc(comboPhotoFetchJobItemRows.sortOrder), asc(comboPhotoFetchJobItemRows.id));
+    const items: ComboPhotoFetchItem[] = itemRows.map((row) => {
+      const payload = (row.payload && typeof row.payload === "object" ? row.payload : {}) as ComboPhotoFetchItemInput;
+      return {
+        ...payload,
+        id: row.itemKey,
+        label: row.label,
+        status: validComboPhotoFetchStatus(row.status),
+        phase: row.phase || "queued",
+        message: row.message || "Queued",
+        startedAt: toQueueMs(row.startedAt),
+        finishedAt: toQueueMs(row.finishedAt),
+        unit1Photos: normalizeComboPhotoFetchPhotos(row.unit1Photos),
+        unit2Photos: normalizeComboPhotoFetchPhotos(row.unit2Photos),
+        unit1SourceUrl: row.unit1SourceUrl ?? null,
+        unit2SourceUrl: row.unit2SourceUrl ?? null,
+        error: row.error ?? null,
+        attemptCount: row.attemptCount ?? 0,
+        heartbeatAt: toQueueMs(row.heartbeatAt),
+      };
+    });
+    const createdAt = toQueueMs(jobRow.createdAt) ?? Date.now();
+    const updatedAt = toQueueMs(jobRow.updatedAt) ?? createdAt;
+    return {
+      id: jobRow.id,
+      status: validComboPhotoFetchStatus(jobRow.status),
+      createdAt,
+      updatedAt,
+      startedAt: toQueueMs(jobRow.startedAt),
+      finishedAt: toQueueMs(jobRow.finishedAt),
+      cancelRequested: Boolean(jobRow.cancelRequested),
+      currentIndex: jobRow.currentIndex ?? 0,
+      completed: jobRow.completed ?? 0,
+      failed: jobRow.failed ?? 0,
+      cancelled: jobRow.cancelled ?? 0,
+      items,
+    };
+  };
+  const claimComboPhotoFetchJobLease = async (jobId: string): Promise<boolean> => {
+    const now = new Date();
+    const [claimed] = await db
+      .update(comboPhotoFetchJobRows)
+      .set({ lockedBy: QUEUE_WORKER_ID, lockExpiresAt: queueLockExpiry(), updatedAt: now })
+      .where(and(
+        eq(comboPhotoFetchJobRows.id, jobId),
+        or(isNull(comboPhotoFetchJobRows.lockExpiresAt), lt(comboPhotoFetchJobRows.lockExpiresAt, now), eq(comboPhotoFetchJobRows.lockedBy, QUEUE_WORKER_ID)),
+      ))
+      .returning({ id: comboPhotoFetchJobRows.id });
+    return !!claimed;
+  };
+  const maybeResumeComboPhotoFetchJob = (job: ComboPhotoFetchJob | null) => {
+    if (!job) return;
+    if ((job.status === "queued" || job.status === "running") && !activeComboPhotoFetchJobIds.has(job.id)) {
+      void runComboPhotoFetchJob(job.id);
     }
   };
   const serializeComboPhotoFetchJob = (job: ComboPhotoFetchJob) => ({
@@ -21194,6 +21321,7 @@ Return ONLY compact JSON with this exact shape:
       ...item,
       startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
       finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
+      heartbeatAt: item.heartbeatAt ? new Date(item.heartbeatAt).toISOString() : null,
     })),
   });
   const comboPhotoBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
@@ -21338,50 +21466,74 @@ Return ONLY compact JSON with this exact shape:
     item.message = total > 0 ? `${total} photos fetched` : "No photos were found";
   };
   const runComboPhotoFetchJob = async (jobId: string) => {
-    const job = comboPhotoFetchJobs.get(jobId);
-    if (!job) return;
-    job.status = "running";
-    job.startedAt = Date.now();
-    job.updatedAt = Date.now();
-    for (let i = 0; i < job.items.length; i += 1) {
-      job.currentIndex = i;
-      const item = job.items[i];
-      if (job.cancelRequested) {
-        item.status = "cancelled";
-        item.finishedAt = Date.now();
-        job.cancelled += 1;
-        continue;
-      }
-      try {
-        await runComboPhotoFetchItem(job, item);
-        item.status = "completed";
-        job.completed += 1;
-      } catch (e: any) {
-        if (e?.cancelled || job.cancelRequested) {
+    if (activeComboPhotoFetchJobIds.has(jobId)) return;
+    const leaseClaimed = await claimComboPhotoFetchJobLease(jobId);
+    if (!leaseClaimed) return;
+    activeComboPhotoFetchJobIds.add(jobId);
+    try {
+      const job = await loadComboPhotoFetchJob(jobId);
+      if (!job) return;
+      job.status = "running";
+      job.startedAt = job.startedAt ?? Date.now();
+      job.updatedAt = Date.now();
+      await persistComboPhotoFetchSnapshot(job);
+      for (let i = 0; i < job.items.length; i += 1) {
+        job.currentIndex = i;
+        const item = job.items[i];
+        if (item.status === "completed" || item.status === "cancelled") continue;
+        const latestJob = await loadComboPhotoFetchJob(jobId);
+        if (latestJob?.cancelRequested) job.cancelRequested = true;
+        if (job.cancelRequested) {
           item.status = "cancelled";
-          item.error = "Cancelled by operator";
-          job.cancelled += 1;
-        } else {
-          item.status = "failed";
-          item.error = e?.message ?? String(e);
-          item.message = item.error || "Photo fetch failed";
-          job.failed += 1;
+          item.phase = "cancelled";
+          item.message = "Cancelled by operator";
+          item.finishedAt = Date.now();
+          job.updatedAt = Date.now();
+          await persistComboPhotoFetchSnapshot(job);
+          continue;
         }
-      } finally {
-        item.finishedAt = Date.now();
-        job.updatedAt = Date.now();
+        try {
+          item.attemptCount += 1;
+          item.heartbeatAt = Date.now();
+          await runComboPhotoFetchItem(job, item);
+          item.status = "completed";
+        } catch (e: any) {
+          if (e?.cancelled || job.cancelRequested) {
+            item.status = "cancelled";
+            item.phase = "cancelled";
+            item.error = "Cancelled by operator";
+            item.message = "Cancelled by operator";
+          } else {
+            item.status = "failed";
+            item.phase = "failed";
+            item.error = e?.message ?? String(e);
+            item.message = item.error || "Photo fetch failed";
+          }
+        } finally {
+          item.finishedAt = Date.now();
+          item.heartbeatAt = Date.now();
+          job.updatedAt = Date.now();
+          await persistComboPhotoFetchSnapshot(job);
+        }
       }
+      job.finishedAt = Date.now();
+      job.updatedAt = Date.now();
+      refreshComboPhotoFetchCounts(job);
+      if (job.cancelRequested) job.status = "cancelled";
+      else if (job.failed > 0 && job.completed === 0) job.status = "failed";
+      else job.status = "completed";
+      await persistComboPhotoFetchSnapshot(job);
+      console.log(`[combo-photo-fetch] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
+    } finally {
+      activeComboPhotoFetchJobIds.delete(jobId);
+      await db
+        .update(comboPhotoFetchJobRows)
+        .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
+        .where(and(eq(comboPhotoFetchJobRows.id, jobId), eq(comboPhotoFetchJobRows.lockedBy, QUEUE_WORKER_ID)));
     }
-    job.finishedAt = Date.now();
-    job.updatedAt = Date.now();
-    if (job.cancelRequested) job.status = "cancelled";
-    else if (job.failed > 0 && job.completed === 0) job.status = "failed";
-    else job.status = "completed";
-    console.log(`[combo-photo-fetch] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
   };
 
   app.post("/api/community/photo-fetch-jobs", async (req, res) => {
-    pruneComboPhotoFetchJobs();
     const body = (req.body ?? {}) as { items?: ComboPhotoFetchItemInput[]; item?: ComboPhotoFetchItemInput };
     const requestedItems = Array.isArray(body.items) && body.items.length > 0
       ? body.items
@@ -21410,6 +21562,8 @@ Return ONLY compact JSON with this exact shape:
       unit1SourceUrl: null,
       unit2SourceUrl: null,
       error: null,
+      attemptCount: 0,
+      heartbeatAt: null,
     }));
     const job: ComboPhotoFetchJob = {
       id,
@@ -21425,20 +21579,64 @@ Return ONLY compact JSON with this exact shape:
       cancelled: 0,
       items,
     };
-    comboPhotoFetchJobs.set(id, job);
+    await db.insert(comboPhotoFetchJobRows).values({
+      id: job.id,
+      status: job.status,
+      cancelRequested: job.cancelRequested,
+      currentIndex: job.currentIndex,
+      completed: job.completed,
+      failed: job.failed,
+      cancelled: job.cancelled,
+      lockedBy: null,
+      lockExpiresAt: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    await db.insert(comboPhotoFetchJobItemRows).values(items.map((item, index) => ({
+      jobId: id,
+      itemKey: item.id,
+      label: item.label,
+      status: item.status,
+      phase: item.phase,
+      message: item.message,
+      payload: {
+        id: item.id,
+        label: item.label,
+        communityName: item.communityName,
+        streetAddress: item.streetAddress,
+        city: item.city,
+        state: item.state,
+        unit1: item.unit1,
+        unit2: item.unit2,
+      },
+      unit1Photos: [],
+      unit2Photos: [],
+      unit1SourceUrl: null,
+      unit2SourceUrl: null,
+      error: null,
+      attemptCount: item.attemptCount,
+      heartbeatAt: null,
+      sortOrder: index,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    })));
     void runComboPhotoFetchJob(id);
     res.status(202).json({ job: serializeComboPhotoFetchJob(job) });
   });
 
-  app.get("/api/community/photo-fetch-jobs/:jobId", (req, res) => {
-    pruneComboPhotoFetchJobs();
-    const job = comboPhotoFetchJobs.get(req.params.jobId);
+  app.get("/api/community/photo-fetch-jobs/:jobId", async (req, res) => {
+    const job = await loadComboPhotoFetchJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Photo fetch job not found" });
+    maybeResumeComboPhotoFetchJob(job);
     res.json({ job: serializeComboPhotoFetchJob(job) });
   });
 
-  app.post("/api/community/photo-fetch-jobs/:jobId/cancel", (req, res) => {
-    const job = comboPhotoFetchJobs.get(req.params.jobId);
+  app.post("/api/community/photo-fetch-jobs/:jobId/cancel", async (req, res) => {
+    const job = await loadComboPhotoFetchJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Photo fetch job not found" });
     job.cancelRequested = true;
     for (const item of job.items) {
@@ -21450,7 +21648,236 @@ Return ONLY compact JSON with this exact shape:
     }
     if (job.status === "queued") job.status = "cancelled";
     job.updatedAt = Date.now();
+    await persistComboPhotoFetchSnapshot(job);
     res.json({ job: serializeComboPhotoFetchJob(job) });
+  });
+
+  const resumeComboPhotoFetchJobs = async () => {
+    try {
+      const rows = await db
+        .select({ id: comboPhotoFetchJobRows.id })
+        .from(comboPhotoFetchJobRows)
+        .where(inArray(comboPhotoFetchJobRows.status, ["queued", "running"]))
+        .orderBy(asc(comboPhotoFetchJobRows.createdAt))
+        .limit(5);
+      for (const row of rows) {
+        if (!activeComboPhotoFetchJobIds.has(row.id)) void runComboPhotoFetchJob(row.id);
+      }
+      if (rows.length > 0) console.log(`[combo-photo-fetch] resumed ${rows.length} queued/running DB job(s)`);
+    } catch (e: any) {
+      console.warn("[combo-photo-fetch] DB resume failed", e?.message ?? e);
+    }
+  };
+  setTimeout(() => void resumeComboPhotoFetchJobs(), 2_500).unref?.();
+
+  type CommunityPricingRefreshStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+  type CommunityPricingRefreshJob = {
+    id: string;
+    draftId: number;
+    status: CommunityPricingRefreshStatus;
+    phase: string;
+    message: string;
+    error: string | null;
+    attemptCount: number;
+    createdAt: number;
+    updatedAt: number;
+    startedAt: number | null;
+    finishedAt: number | null;
+  };
+  const activeCommunityPricingRefreshJobIds = new Set<string>();
+  const validCommunityPricingRefreshStatus = (value: unknown): CommunityPricingRefreshStatus => {
+    return value === "queued" || value === "running" || value === "completed" || value === "failed" || value === "cancelled"
+      ? value
+      : "queued";
+  };
+  const loadCommunityPricingRefreshJob = async (jobId: string): Promise<CommunityPricingRefreshJob | null> => {
+    const [row] = await db.select().from(communityPricingRefreshJobRows).where(eq(communityPricingRefreshJobRows.id, jobId)).limit(1);
+    if (!row) return null;
+    const createdAt = toQueueMs(row.createdAt) ?? Date.now();
+    const updatedAt = toQueueMs(row.updatedAt) ?? createdAt;
+    return {
+      id: row.id,
+      draftId: row.draftId,
+      status: validCommunityPricingRefreshStatus(row.status),
+      phase: row.phase || "queued",
+      message: row.message || "Queued market pricing refresh",
+      error: row.error ?? null,
+      attemptCount: row.attemptCount ?? 0,
+      createdAt,
+      updatedAt,
+      startedAt: toQueueMs(row.startedAt),
+      finishedAt: toQueueMs(row.finishedAt),
+    };
+  };
+  const serializeCommunityPricingRefreshJob = (job: CommunityPricingRefreshJob) => ({
+    ...job,
+    createdAt: new Date(job.createdAt).toISOString(),
+    updatedAt: new Date(job.updatedAt).toISOString(),
+    startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
+    finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+  });
+  const persistCommunityPricingRefreshJob = async (job: CommunityPricingRefreshJob) => {
+    const now = new Date(job.updatedAt || Date.now());
+    await db
+      .update(communityPricingRefreshJobRows)
+      .set({
+        status: job.status,
+        phase: job.phase,
+        message: job.message,
+        error: job.error,
+        attemptCount: job.attemptCount,
+        lockedBy: activeCommunityPricingRefreshJobIds.has(job.id) ? QUEUE_WORKER_ID : null,
+        lockExpiresAt: activeCommunityPricingRefreshJobIds.has(job.id) ? queueLockExpiry() : null,
+        startedAt: queueDate(job.startedAt),
+        finishedAt: queueDate(job.finishedAt),
+        updatedAt: now,
+      })
+      .where(eq(communityPricingRefreshJobRows.id, job.id));
+  };
+  const claimCommunityPricingRefreshJobLease = async (jobId: string): Promise<boolean> => {
+    const now = new Date();
+    const [claimed] = await db
+      .update(communityPricingRefreshJobRows)
+      .set({ lockedBy: QUEUE_WORKER_ID, lockExpiresAt: queueLockExpiry(), updatedAt: now })
+      .where(and(
+        eq(communityPricingRefreshJobRows.id, jobId),
+        or(isNull(communityPricingRefreshJobRows.lockExpiresAt), lt(communityPricingRefreshJobRows.lockExpiresAt, now), eq(communityPricingRefreshJobRows.lockedBy, QUEUE_WORKER_ID)),
+      ))
+      .returning({ id: communityPricingRefreshJobRows.id });
+    return !!claimed;
+  };
+  const runCommunityPricingRefreshJob = async (jobId: string) => {
+    if (activeCommunityPricingRefreshJobIds.has(jobId)) return;
+    const leaseClaimed = await claimCommunityPricingRefreshJobLease(jobId);
+    if (!leaseClaimed) return;
+    activeCommunityPricingRefreshJobIds.add(jobId);
+    try {
+      const job = await loadCommunityPricingRefreshJob(jobId);
+      if (!job) return;
+      job.status = "running";
+      job.phase = "refresh";
+      job.message = "Refreshing market pricing";
+      job.startedAt = job.startedAt ?? Date.now();
+      job.updatedAt = Date.now();
+      job.attemptCount += 1;
+      await persistCommunityPricingRefreshJob(job);
+      const heartbeat = setInterval(() => {
+        void db
+          .update(communityPricingRefreshJobRows)
+          .set({ lockedBy: QUEUE_WORKER_ID, lockExpiresAt: queueLockExpiry(), updatedAt: new Date() })
+          .where(and(eq(communityPricingRefreshJobRows.id, job.id), eq(communityPricingRefreshJobRows.lockedBy, QUEUE_WORKER_ID)))
+          .catch((e: any) => console.warn(`[pricing-refresh-jobs] heartbeat failed for ${job.id}:`, e?.message ?? e));
+      }, 30_000);
+      let resp: Response;
+      let text = "";
+      try {
+        resp = await fetch(`${comboPhotoBaseUrl()}/api/community/${job.draftId}/refresh-pricing?run=1&refreshToken=${encodeURIComponent(job.id)}`, { method: "POST" });
+        text = await resp.text().catch(() => "");
+      } finally {
+        clearInterval(heartbeat);
+      }
+      if (!resp.ok) throw new Error(`Pricing refresh HTTP ${resp.status}: ${text.slice(0, 300)}`);
+      job.status = "completed";
+      job.phase = "done";
+      job.message = "Market pricing refreshed";
+      job.error = null;
+      job.finishedAt = Date.now();
+      job.updatedAt = Date.now();
+      await persistCommunityPricingRefreshJob(job);
+    } catch (e: any) {
+      const job = await loadCommunityPricingRefreshJob(jobId);
+      if (job) {
+        job.error = e?.message ?? String(e);
+        if (job.attemptCount < 2) {
+          job.status = "queued";
+          job.phase = "retrying";
+          job.message = "Pricing refresh failed; retrying once";
+          job.updatedAt = Date.now();
+          await persistCommunityPricingRefreshJob(job);
+          setTimeout(() => void runCommunityPricingRefreshJob(job.id), 45_000).unref?.();
+        } else {
+          job.status = "failed";
+          job.phase = "failed";
+          job.message = job.error || "Pricing refresh failed";
+          job.finishedAt = Date.now();
+          job.updatedAt = Date.now();
+          await persistCommunityPricingRefreshJob(job);
+        }
+      }
+    } finally {
+      activeCommunityPricingRefreshJobIds.delete(jobId);
+      await db
+        .update(communityPricingRefreshJobRows)
+        .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
+        .where(and(eq(communityPricingRefreshJobRows.id, jobId), eq(communityPricingRefreshJobRows.lockedBy, QUEUE_WORKER_ID)));
+    }
+  };
+  const enqueueCommunityPricingRefreshJob = async (draftId: number): Promise<CommunityPricingRefreshJob> => {
+    const now = Date.now();
+    const id = `prj_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const job: CommunityPricingRefreshJob = {
+      id,
+      draftId,
+      status: "queued",
+      phase: "queued",
+      message: "Queued market pricing refresh",
+      error: null,
+      attemptCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+    };
+    await db.insert(communityPricingRefreshJobRows).values({
+      id,
+      draftId,
+      status: job.status,
+      phase: job.phase,
+      message: job.message,
+      error: null,
+      attemptCount: 0,
+      lockedBy: null,
+      lockExpiresAt: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    void runCommunityPricingRefreshJob(id);
+    return job;
+  };
+  const resumeCommunityPricingRefreshJobs = async () => {
+    try {
+      const rows = await db
+        .select({ id: communityPricingRefreshJobRows.id })
+        .from(communityPricingRefreshJobRows)
+        .where(inArray(communityPricingRefreshJobRows.status, ["queued", "running"]))
+        .orderBy(asc(communityPricingRefreshJobRows.createdAt))
+        .limit(3);
+      for (const row of rows) {
+        if (!activeCommunityPricingRefreshJobIds.has(row.id)) void runCommunityPricingRefreshJob(row.id);
+      }
+      if (rows.length > 0) console.log(`[pricing-refresh-jobs] resumed ${rows.length} queued/running DB job(s)`);
+    } catch (e: any) {
+      console.warn("[pricing-refresh-jobs] DB resume failed", e?.message ?? e);
+    }
+  };
+  setTimeout(() => void resumeCommunityPricingRefreshJobs(), 4_000).unref?.();
+
+  app.post("/api/community/pricing-refresh-jobs", async (req, res) => {
+    const draftId = Number(req.body?.draftId);
+    if (!Number.isFinite(draftId) || draftId <= 0) return res.status(400).json({ error: "draftId required" });
+    const job = await enqueueCommunityPricingRefreshJob(draftId);
+    res.status(202).json({ job: serializeCommunityPricingRefreshJob(job) });
+  });
+
+  app.get("/api/community/pricing-refresh-jobs/:jobId", async (req, res) => {
+    const job = await loadCommunityPricingRefreshJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Pricing refresh job not found" });
+    if ((job.status === "queued" || job.status === "running") && !activeCommunityPricingRefreshJobIds.has(job.id)) {
+      void runCommunityPricingRefreshJob(job.id);
+    }
+    res.json({ job: serializeCommunityPricingRefreshJob(job) });
   });
 
   type BulkComboListingStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -21553,6 +21980,8 @@ Return ONLY compact JSON with this exact shape:
         completed: job.completed,
         failed: job.failed,
         cancelled: job.cancelled,
+        lockedBy: activeBulkComboListingJobIds.has(job.id) ? QUEUE_WORKER_ID : null,
+        lockExpiresAt: activeBulkComboListingJobIds.has(job.id) ? queueLockExpiry() : null,
         startedAt: bulkComboDate(job.startedAt),
         finishedAt: bulkComboDate(job.finishedAt),
         updatedAt: now,
@@ -21633,6 +22062,18 @@ Return ONLY compact JSON with this exact shape:
     if ((job.status === "queued" || job.status === "running") && !activeBulkComboListingJobIds.has(job.id)) {
       void runBulkComboListingJob(job.id);
     }
+  };
+  const claimBulkComboListingJobLease = async (jobId: string): Promise<boolean> => {
+    const now = new Date();
+    const [claimed] = await db
+      .update(bulkComboListingJobRows)
+      .set({ lockedBy: QUEUE_WORKER_ID, lockExpiresAt: queueLockExpiry(), updatedAt: now })
+      .where(and(
+        eq(bulkComboListingJobRows.id, jobId),
+        or(isNull(bulkComboListingJobRows.lockExpiresAt), lt(bulkComboListingJobRows.lockExpiresAt, now), eq(bulkComboListingJobRows.lockedBy, QUEUE_WORKER_ID)),
+      ))
+      .returning({ id: bulkComboListingJobRows.id });
+    return !!claimed;
   };
   const touchBulkComboListingHeartbeat = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
     const now = Date.now();
@@ -21739,6 +22180,8 @@ Return ONLY compact JSON with this exact shape:
       unit1SourceUrl: null,
       unit2SourceUrl: null,
       error: null,
+      attemptCount: 0,
+      heartbeatAt: null,
     };
 
     item.status = "running";
@@ -21835,7 +22278,9 @@ Return ONLY compact JSON with this exact shape:
         }
       });
       fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
-      fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/refresh-pricing`, { method: "POST" }).catch(() => null);
+      await enqueueCommunityPricingRefreshJob(draftId).catch((e: any) => {
+        item.message = `Draft saved; pricing queue warning: ${e?.message ?? e}`;
+      });
     }
     item.phase = "done";
     item.message = item.draftId ? `Draft #${item.draftId} saved to dashboard` : "Draft saved to dashboard";
@@ -21844,6 +22289,8 @@ Return ONLY compact JSON with this exact shape:
   };
   const runBulkComboListingJob = async (jobId: string) => {
     if (activeBulkComboListingJobIds.has(jobId)) return;
+    const leaseClaimed = await claimBulkComboListingJobLease(jobId);
+    if (!leaseClaimed) return;
     activeBulkComboListingJobIds.add(jobId);
     try {
       const job = await loadBulkComboListingJob(jobId);
@@ -21948,6 +22395,10 @@ Return ONLY compact JSON with this exact shape:
       console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
     } finally {
       activeBulkComboListingJobIds.delete(jobId);
+      await db
+        .update(bulkComboListingJobRows)
+        .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
+        .where(and(eq(bulkComboListingJobRows.id, jobId), eq(bulkComboListingJobRows.lockedBy, QUEUE_WORKER_ID)));
     }
   };
 
@@ -22000,6 +22451,8 @@ Return ONLY compact JSON with this exact shape:
       completed: job.completed,
       failed: job.failed,
       cancelled: job.cancelled,
+      lockedBy: null,
+      lockExpiresAt: null,
       startedAt: null,
       finishedAt: null,
       createdAt: new Date(now),

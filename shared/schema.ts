@@ -412,6 +412,45 @@ export const insertCommunityDraftSchema = createInsertSchema(communityDrafts).om
 export type InsertCommunityDraft = z.infer<typeof insertCommunityDraftSchema>;
 export type CommunityDraft = typeof communityDrafts.$inferSelect;
 
+export const comboPhotoFetchJobs = pgTable("combo_photo_fetch_jobs", {
+  id: text("id").primaryKey(),
+  status: text("status").notNull().default("queued"),
+  cancelRequested: boolean("cancel_requested").notNull().default(false),
+  currentIndex: integer("current_index").notNull().default(0),
+  completed: integer("completed").notNull().default(0),
+  failed: integer("failed").notNull().default(0),
+  cancelled: integer("cancelled").notNull().default(0),
+  lockedBy: text("locked_by"),
+  lockExpiresAt: timestamp("lock_expires_at"),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const comboPhotoFetchJobItems = pgTable("combo_photo_fetch_job_items", {
+  id: serial("id").primaryKey(),
+  jobId: text("job_id").notNull(),
+  itemKey: text("item_key").notNull(),
+  label: text("label").notNull(),
+  status: text("status").notNull().default("queued"),
+  phase: text("phase").notNull().default("queued"),
+  message: text("message").notNull().default("Queued"),
+  payload: jsonb("payload"),
+  unit1Photos: jsonb("unit1_photos"),
+  unit2Photos: jsonb("unit2_photos"),
+  unit1SourceUrl: text("unit1_source_url"),
+  unit2SourceUrl: text("unit2_source_url"),
+  error: text("error"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  heartbeatAt: timestamp("heartbeat_at"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const bulkComboListingJobs = pgTable("bulk_combo_listing_jobs", {
   id: text("id").primaryKey(),
   status: text("status").notNull().default("queued"),
@@ -420,6 +459,8 @@ export const bulkComboListingJobs = pgTable("bulk_combo_listing_jobs", {
   completed: integer("completed").notNull().default(0),
   failed: integer("failed").notNull().default(0),
   cancelled: integer("cancelled").notNull().default(0),
+  lockedBy: text("locked_by"),
+  lockExpiresAt: timestamp("lock_expires_at"),
   startedAt: timestamp("started_at"),
   finishedAt: timestamp("finished_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -452,6 +493,26 @@ export const bulkComboListingJobItems = pgTable("bulk_combo_listing_job_items", 
 
 export type BulkComboListingJobRow = typeof bulkComboListingJobs.$inferSelect;
 export type BulkComboListingJobItemRow = typeof bulkComboListingJobItems.$inferSelect;
+
+export const communityPricingRefreshJobs = pgTable("community_pricing_refresh_jobs", {
+  id: text("id").primaryKey(),
+  draftId: integer("draft_id").notNull(),
+  status: text("status").notNull().default("queued"),
+  phase: text("phase").notNull().default("queued"),
+  message: text("message").notNull().default("Queued market pricing refresh"),
+  error: text("error"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  lockedBy: text("locked_by"),
+  lockExpiresAt: timestamp("lock_expires_at"),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type ComboPhotoFetchJobRow = typeof comboPhotoFetchJobs.$inferSelect;
+export type ComboPhotoFetchJobItemRow = typeof comboPhotoFetchJobItems.$inferSelect;
+export type CommunityPricingRefreshJobRow = typeof communityPricingRefreshJobs.$inferSelect;
 
 export const unitSwaps = pgTable("unit_swaps", {
   id: serial("id").primaryKey(),
