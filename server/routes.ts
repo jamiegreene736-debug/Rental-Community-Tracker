@@ -21134,6 +21134,39 @@ Return ONLY compact JSON with this exact shape:
   const QUEUE_WORKER_ID = `${process.pid}-${randomBytes(4).toString("hex")}`;
   const QUEUE_LEASE_MS = 10 * 60 * 1000;
   const queueLockExpiry = () => new Date(Date.now() + QUEUE_LEASE_MS);
+  const queueConcurrency = (name: string, fallback: number, max: number) => {
+    const parsed = Number(process.env[name]);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return Math.min(max, Math.max(1, Math.floor(parsed)));
+  };
+  const createQueueLimiter = (limit: number) => {
+    let active = 0;
+    const waiters: Array<() => void> = [];
+    const acquire = async () => {
+      if (active < limit) {
+        active += 1;
+        return;
+      }
+      await new Promise<void>((resolve) => waiters.push(resolve));
+      active += 1;
+    };
+    const release = () => {
+      active = Math.max(0, active - 1);
+      const next = waiters.shift();
+      if (next) next();
+    };
+    return async <T>(_label: string, work: () => Promise<T>): Promise<T> => {
+      await acquire();
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    };
+  };
+  const photoFetchLimiter = createQueueLimiter(queueConcurrency("COMBO_PHOTO_FETCH_CONCURRENCY", 2, 4));
+  const bulkComboListingLimiter = createQueueLimiter(queueConcurrency("BULK_COMBO_LISTING_CONCURRENCY", 1, 3));
+  const communityPricingRefreshLimiter = createQueueLimiter(queueConcurrency("COMMUNITY_PRICING_REFRESH_CONCURRENCY", 1, 3));
 
   type ComboPhotoFetchStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
   type ComboPhotoFetchUnit = {
@@ -21418,12 +21451,21 @@ Return ONLY compact JSON with this exact shape:
     }
     return best;
   };
-  const runComboPhotoFetchItem = async (job: ComboPhotoFetchJob, item: ComboPhotoFetchItem) => {
+  const runComboPhotoFetchItem = async (
+    job: ComboPhotoFetchJob,
+    item: ComboPhotoFetchItem,
+    onProgress?: (item: ComboPhotoFetchItem) => Promise<void> | void,
+  ) => {
+    const persistProgress = async () => {
+      item.heartbeatAt = Date.now();
+      job.updatedAt = Date.now();
+      await onProgress?.(item);
+    };
     item.status = "running";
     item.phase = "unit1";
     item.message = "Fetching Unit A photos";
     item.startedAt = Date.now();
-    job.updatedAt = Date.now();
+    await persistProgress();
 
     if (!canComboPhotoFetchUnit(item, item.unit1) && !canComboPhotoFetchUnit(item, item.unit2)) {
       throw new Error("No direct listing URL or community/bedroom search data was available");
@@ -21438,12 +21480,12 @@ Return ONLY compact JSON with this exact shape:
       item.unit1Photos = firstPhotos;
       item.unit1SourceUrl = firstSourceUrl;
       item.message = `Unit A photos fetched (${firstPhotos.length})`;
-      job.updatedAt = Date.now();
+      await persistProgress();
     }
 
     item.phase = "unit2";
     item.message = "Fetching Unit B photos";
-    job.updatedAt = Date.now();
+    await persistProgress();
     if (canComboPhotoFetchUnit(item, item.unit2)) {
       const skipUrls = firstSourceUrl && !item.unit2?.url ? [firstSourceUrl] : [];
       const second = await fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos);
@@ -21455,7 +21497,7 @@ Return ONLY compact JSON with this exact shape:
       item.unit2SourceUrl = second.sourceUrl;
       item.message = `Unit B photos fetched (${secondPhotos.length})`;
       if (second.relaxed) item.message = `${item.message}; broader same-community search was used`;
-      job.updatedAt = Date.now();
+      await persistProgress();
     }
 
     item.phase = "done";
@@ -21464,73 +21506,78 @@ Return ONLY compact JSON with this exact shape:
       item.error = "Photo discovery completed, but one or both units had fewer than 3 independent photos.";
     }
     item.message = total > 0 ? `${total} photos fetched` : "No photos were found";
+    await persistProgress();
   };
   const runComboPhotoFetchJob = async (jobId: string) => {
     if (activeComboPhotoFetchJobIds.has(jobId)) return;
-    const leaseClaimed = await claimComboPhotoFetchJobLease(jobId);
-    if (!leaseClaimed) return;
-    activeComboPhotoFetchJobIds.add(jobId);
-    try {
-      const job = await loadComboPhotoFetchJob(jobId);
-      if (!job) return;
-      job.status = "running";
-      job.startedAt = job.startedAt ?? Date.now();
-      job.updatedAt = Date.now();
-      await persistComboPhotoFetchSnapshot(job);
-      for (let i = 0; i < job.items.length; i += 1) {
-        job.currentIndex = i;
-        const item = job.items[i];
-        if (item.status === "completed" || item.status === "cancelled") continue;
-        const latestJob = await loadComboPhotoFetchJob(jobId);
-        if (latestJob?.cancelRequested) job.cancelRequested = true;
-        if (job.cancelRequested) {
-          item.status = "cancelled";
-          item.phase = "cancelled";
-          item.message = "Cancelled by operator";
-          item.finishedAt = Date.now();
-          job.updatedAt = Date.now();
-          await persistComboPhotoFetchSnapshot(job);
-          continue;
-        }
-        try {
-          item.attemptCount += 1;
-          item.heartbeatAt = Date.now();
-          await runComboPhotoFetchItem(job, item);
-          item.status = "completed";
-        } catch (e: any) {
-          if (e?.cancelled || job.cancelRequested) {
+    return photoFetchLimiter(`combo-photo-fetch:${jobId}`, async () => {
+      if (activeComboPhotoFetchJobIds.has(jobId)) return;
+      const leaseClaimed = await claimComboPhotoFetchJobLease(jobId);
+      if (!leaseClaimed) return;
+      activeComboPhotoFetchJobIds.add(jobId);
+      try {
+        const job = await loadComboPhotoFetchJob(jobId);
+        if (!job) return;
+        if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") return;
+        job.status = "running";
+        job.startedAt = job.startedAt ?? Date.now();
+        job.updatedAt = Date.now();
+        await persistComboPhotoFetchSnapshot(job);
+        for (let i = 0; i < job.items.length; i += 1) {
+          job.currentIndex = i;
+          const item = job.items[i];
+          if (item.status === "completed" || item.status === "cancelled") continue;
+          const latestJob = await loadComboPhotoFetchJob(jobId);
+          if (latestJob?.cancelRequested) job.cancelRequested = true;
+          if (job.cancelRequested) {
             item.status = "cancelled";
             item.phase = "cancelled";
-            item.error = "Cancelled by operator";
             item.message = "Cancelled by operator";
-          } else {
-            item.status = "failed";
-            item.phase = "failed";
-            item.error = e?.message ?? String(e);
-            item.message = item.error || "Photo fetch failed";
+            item.finishedAt = Date.now();
+            job.updatedAt = Date.now();
+            await persistComboPhotoFetchSnapshot(job);
+            continue;
           }
-        } finally {
-          item.finishedAt = Date.now();
-          item.heartbeatAt = Date.now();
-          job.updatedAt = Date.now();
-          await persistComboPhotoFetchSnapshot(job);
+          try {
+            item.attemptCount += 1;
+            item.heartbeatAt = Date.now();
+            await runComboPhotoFetchItem(job, item, async () => persistComboPhotoFetchSnapshot(job));
+            item.status = "completed";
+          } catch (e: any) {
+            if (e?.cancelled || job.cancelRequested) {
+              item.status = "cancelled";
+              item.phase = "cancelled";
+              item.error = "Cancelled by operator";
+              item.message = "Cancelled by operator";
+            } else {
+              item.status = "failed";
+              item.phase = "failed";
+              item.error = e?.message ?? String(e);
+              item.message = item.error || "Photo fetch failed";
+            }
+          } finally {
+            item.finishedAt = Date.now();
+            item.heartbeatAt = Date.now();
+            job.updatedAt = Date.now();
+            await persistComboPhotoFetchSnapshot(job);
+          }
         }
+        job.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+        refreshComboPhotoFetchCounts(job);
+        if (job.cancelRequested) job.status = "cancelled";
+        else if (job.failed > 0 && job.completed === 0) job.status = "failed";
+        else job.status = "completed";
+        await persistComboPhotoFetchSnapshot(job);
+        console.log(`[combo-photo-fetch] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
+      } finally {
+        activeComboPhotoFetchJobIds.delete(jobId);
+        await db
+          .update(comboPhotoFetchJobRows)
+          .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
+          .where(and(eq(comboPhotoFetchJobRows.id, jobId), eq(comboPhotoFetchJobRows.lockedBy, QUEUE_WORKER_ID)));
       }
-      job.finishedAt = Date.now();
-      job.updatedAt = Date.now();
-      refreshComboPhotoFetchCounts(job);
-      if (job.cancelRequested) job.status = "cancelled";
-      else if (job.failed > 0 && job.completed === 0) job.status = "failed";
-      else job.status = "completed";
-      await persistComboPhotoFetchSnapshot(job);
-      console.log(`[combo-photo-fetch] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
-    } finally {
-      activeComboPhotoFetchJobIds.delete(jobId);
-      await db
-        .update(comboPhotoFetchJobRows)
-        .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
-        .where(and(eq(comboPhotoFetchJobRows.id, jobId), eq(comboPhotoFetchJobRows.lockedBy, QUEUE_WORKER_ID)));
-    }
+    });
   };
 
   app.post("/api/community/photo-fetch-jobs", async (req, res) => {
@@ -21748,69 +21795,73 @@ Return ONLY compact JSON with this exact shape:
   };
   const runCommunityPricingRefreshJob = async (jobId: string) => {
     if (activeCommunityPricingRefreshJobIds.has(jobId)) return;
-    const leaseClaimed = await claimCommunityPricingRefreshJobLease(jobId);
-    if (!leaseClaimed) return;
-    activeCommunityPricingRefreshJobIds.add(jobId);
-    try {
-      const job = await loadCommunityPricingRefreshJob(jobId);
-      if (!job) return;
-      job.status = "running";
-      job.phase = "refresh";
-      job.message = "Refreshing market pricing";
-      job.startedAt = job.startedAt ?? Date.now();
-      job.updatedAt = Date.now();
-      job.attemptCount += 1;
-      await persistCommunityPricingRefreshJob(job);
-      const heartbeat = setInterval(() => {
-        void db
-          .update(communityPricingRefreshJobRows)
-          .set({ lockedBy: QUEUE_WORKER_ID, lockExpiresAt: queueLockExpiry(), updatedAt: new Date() })
-          .where(and(eq(communityPricingRefreshJobRows.id, job.id), eq(communityPricingRefreshJobRows.lockedBy, QUEUE_WORKER_ID)))
-          .catch((e: any) => console.warn(`[pricing-refresh-jobs] heartbeat failed for ${job.id}:`, e?.message ?? e));
-      }, 30_000);
-      let resp: Response;
-      let text = "";
+    return communityPricingRefreshLimiter(`pricing-refresh:${jobId}`, async () => {
+      if (activeCommunityPricingRefreshJobIds.has(jobId)) return;
+      const leaseClaimed = await claimCommunityPricingRefreshJobLease(jobId);
+      if (!leaseClaimed) return;
+      activeCommunityPricingRefreshJobIds.add(jobId);
       try {
-        resp = await fetch(`${comboPhotoBaseUrl()}/api/community/${job.draftId}/refresh-pricing?run=1&refreshToken=${encodeURIComponent(job.id)}`, { method: "POST" });
-        text = await resp.text().catch(() => "");
-      } finally {
-        clearInterval(heartbeat);
-      }
-      if (!resp.ok) throw new Error(`Pricing refresh HTTP ${resp.status}: ${text.slice(0, 300)}`);
-      job.status = "completed";
-      job.phase = "done";
-      job.message = "Market pricing refreshed";
-      job.error = null;
-      job.finishedAt = Date.now();
-      job.updatedAt = Date.now();
-      await persistCommunityPricingRefreshJob(job);
-    } catch (e: any) {
-      const job = await loadCommunityPricingRefreshJob(jobId);
-      if (job) {
-        job.error = e?.message ?? String(e);
-        if (job.attemptCount < 2) {
-          job.status = "queued";
-          job.phase = "retrying";
-          job.message = "Pricing refresh failed; retrying once";
-          job.updatedAt = Date.now();
-          await persistCommunityPricingRefreshJob(job);
-          setTimeout(() => void runCommunityPricingRefreshJob(job.id), 45_000).unref?.();
-        } else {
-          job.status = "failed";
-          job.phase = "failed";
-          job.message = job.error || "Pricing refresh failed";
-          job.finishedAt = Date.now();
-          job.updatedAt = Date.now();
-          await persistCommunityPricingRefreshJob(job);
+        const job = await loadCommunityPricingRefreshJob(jobId);
+        if (!job) return;
+        if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") return;
+        job.status = "running";
+        job.phase = "refresh";
+        job.message = "Refreshing market pricing";
+        job.startedAt = job.startedAt ?? Date.now();
+        job.updatedAt = Date.now();
+        job.attemptCount += 1;
+        await persistCommunityPricingRefreshJob(job);
+        const heartbeat = setInterval(() => {
+          void db
+            .update(communityPricingRefreshJobRows)
+            .set({ lockedBy: QUEUE_WORKER_ID, lockExpiresAt: queueLockExpiry(), updatedAt: new Date() })
+            .where(and(eq(communityPricingRefreshJobRows.id, job.id), eq(communityPricingRefreshJobRows.lockedBy, QUEUE_WORKER_ID)))
+            .catch((e: any) => console.warn(`[pricing-refresh-jobs] heartbeat failed for ${job.id}:`, e?.message ?? e));
+        }, 30_000);
+        let resp: Response;
+        let text = "";
+        try {
+          resp = await fetch(`${comboPhotoBaseUrl()}/api/community/${job.draftId}/refresh-pricing?run=1&refreshToken=${encodeURIComponent(job.id)}`, { method: "POST" });
+          text = await resp.text().catch(() => "");
+        } finally {
+          clearInterval(heartbeat);
         }
+        if (!resp.ok) throw new Error(`Pricing refresh HTTP ${resp.status}: ${text.slice(0, 300)}`);
+        job.status = "completed";
+        job.phase = "done";
+        job.message = "Market pricing refreshed";
+        job.error = null;
+        job.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+        await persistCommunityPricingRefreshJob(job);
+      } catch (e: any) {
+        const job = await loadCommunityPricingRefreshJob(jobId);
+        if (job) {
+          job.error = e?.message ?? String(e);
+          if (job.attemptCount < 2) {
+            job.status = "queued";
+            job.phase = "retrying";
+            job.message = "Pricing refresh failed; retrying once";
+            job.updatedAt = Date.now();
+            await persistCommunityPricingRefreshJob(job);
+            setTimeout(() => void runCommunityPricingRefreshJob(job.id), 45_000).unref?.();
+          } else {
+            job.status = "failed";
+            job.phase = "failed";
+            job.message = job.error || "Pricing refresh failed";
+            job.finishedAt = Date.now();
+            job.updatedAt = Date.now();
+            await persistCommunityPricingRefreshJob(job);
+          }
+        }
+      } finally {
+        activeCommunityPricingRefreshJobIds.delete(jobId);
+        await db
+          .update(communityPricingRefreshJobRows)
+          .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
+          .where(and(eq(communityPricingRefreshJobRows.id, jobId), eq(communityPricingRefreshJobRows.lockedBy, QUEUE_WORKER_ID)));
       }
-    } finally {
-      activeCommunityPricingRefreshJobIds.delete(jobId);
-      await db
-        .update(communityPricingRefreshJobRows)
-        .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
-        .where(and(eq(communityPricingRefreshJobRows.id, jobId), eq(communityPricingRefreshJobRows.lockedBy, QUEUE_WORKER_ID)));
-    }
+    });
   };
   const enqueueCommunityPricingRefreshJob = async (draftId: number): Promise<CommunityPricingRefreshJob> => {
     const now = Date.now();
@@ -21913,6 +21964,8 @@ Return ONLY compact JSON with this exact shape:
     unit1SourceUrl: string | null;
     unit2SourceUrl: string | null;
     error: string | null;
+    attemptCount: number;
+    heartbeatAt: number | null;
   };
   type BulkComboListingJob = {
     id: string;
@@ -22141,6 +22194,59 @@ Return ONLY compact JSON with this exact shape:
       heartbeatAt: item.heartbeatAt ? new Date(item.heartbeatAt).toISOString() : null,
     })),
   });
+  const normalizeQueueText = (value: unknown) =>
+    String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const draftBedroomsMatchBulkComboItem = (draft: any, item: BulkComboListingItem) => {
+    const unit1Beds = Number(item.pairing?.unit1Beds || 0);
+    const unit2Beds = Number(item.pairing?.unit2Beds || 0);
+    const draft1Beds = Number(draft?.unit1Bedrooms || 0);
+    const draft2Beds = Number(draft?.unit2Bedrooms || 0);
+    return (draft1Beds === unit1Beds && draft2Beds === unit2Beds) || (draft1Beds === unit2Beds && draft2Beds === unit1Beds);
+  };
+  const draftSourcesMatchBulkComboItem = (draft: any, item: BulkComboListingItem) => {
+    const item1 = listingKeyForComboPhotoJob(item.unit1SourceUrl);
+    const item2 = listingKeyForComboPhotoJob(item.unit2SourceUrl);
+    if (!item1 || !item2) return false;
+    const draft1 = listingKeyForComboPhotoJob(draft?.unit1Url);
+    const draft2 = listingKeyForComboPhotoJob(draft?.unit2Url);
+    return (draft1 === item1 && draft2 === item2) || (draft1 === item2 && draft2 === item1);
+  };
+  const findExistingBulkComboDraftId = async (
+    item: BulkComboListingItem,
+    generated: any,
+    streetAddress: string | null | undefined,
+  ): Promise<number | null> => {
+    const community = item.community || {};
+    const expectedBedrooms = Number(item.pairing?.totalBeds || (item.pairing?.unit1Beds || 0) + (item.pairing?.unit2Beds || 0));
+    const expectedName = normalizeQueueText(community.name);
+    const expectedCity = normalizeQueueText(community.city);
+    const expectedState = normalizeQueueText(community.state);
+    const expectedTitle = normalizeQueueText(generated?.title);
+    const expectedAddress = normalizeQueueText(streetAddress);
+    const drafts = await storage.getCommunityDrafts();
+
+    for (const draft of drafts as any[]) {
+      if (draft.singleListing) continue;
+      if (normalizeQueueText(draft.name) !== expectedName) continue;
+      if (expectedCity && normalizeQueueText(draft.city) !== expectedCity) continue;
+      if (expectedState && normalizeQueueText(draft.state) !== expectedState) continue;
+      if (expectedBedrooms > 0 && Number(draft.combinedBedrooms || 0) !== expectedBedrooms) continue;
+      if (!draftBedroomsMatchBulkComboItem(draft, item)) continue;
+
+      if (draftSourcesMatchBulkComboItem(draft, item)) return Number(draft.id);
+
+      const titleMatches = expectedTitle && normalizeQueueText(draft.listingTitle) === expectedTitle;
+      const addressMatches = !expectedAddress || normalizeQueueText(draft.streetAddress) === expectedAddress;
+      if (titleMatches && addressMatches) return Number(draft.id);
+    }
+    return null;
+  };
   const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
     if (item.draftId) {
       item.status = "completed";
@@ -22192,7 +22298,16 @@ Return ONLY compact JSON with this exact shape:
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
     await runBulkComboListingStep(job, item, "photos", "Fetching unit photos", async () => {
-      await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem);
+      await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
+        item.unit1Photos = updatedPhotoItem.unit1Photos;
+        item.unit2Photos = updatedPhotoItem.unit2Photos;
+        item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
+        item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
+        item.message = updatedPhotoItem.message || item.message;
+        item.heartbeatAt = Date.now();
+        job.updatedAt = Date.now();
+        await persistBulkComboListingSnapshot(job);
+      });
     });
     item.unit1Photos = photoItem.unit1Photos;
     item.unit2Photos = photoItem.unit2Photos;
@@ -22218,51 +22333,59 @@ Return ONLY compact JSON with this exact shape:
       state: community.state,
       unitAddresses: [],
     });
-    const saveData = await runBulkComboListingStep(job, item, "save", "Saving dashboard draft", () => fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/save`, {
-      name: community.name,
-      city: community.city,
-      state: community.state,
-      estimatedLowRate: community.estimatedLowRate ?? null,
-      estimatedHighRate: community.estimatedHighRate ?? null,
-      unitTypes: community.unitTypes ?? "condominium",
-      confidenceScore: community.confidenceScore ?? 70,
-      researchSummary: community.researchSummary ?? "",
-      sourceUrl: community.sourceUrl ?? null,
-      minimumStayNights: community.minimumStayNights ?? null,
-      minimumStayEvidence: community.minimumStayEvidence ?? null,
-      minimumStaySourceUrl: community.minimumStaySourceUrl ?? null,
-      unit1Url: item.unit1SourceUrl,
-      unit1Bedrooms: pairing.unit1Beds,
-      unit1Bathrooms: generated.unitA?.bathrooms ?? null,
-      unit1Sqft: generated.unitA?.sqft ?? null,
-      unit1MaxGuests: generated.unitA?.maxGuests ?? null,
-      unit1Bedding: generated.unitA?.bedding ?? null,
-      unit1ShortDescription: generated.unitA?.shortDescription ?? null,
-      unit1LongDescription: generated.unitA?.longDescription ?? null,
-      unit2Url: item.unit2SourceUrl,
-      unit2Bedrooms: pairing.unit2Beds,
-      unit2Bathrooms: generated.unitB?.bathrooms ?? null,
-      unit2Sqft: generated.unitB?.sqft ?? null,
-      unit2MaxGuests: generated.unitB?.maxGuests ?? null,
-      unit2Bedding: generated.unitB?.bedding ?? null,
-      unit2ShortDescription: generated.unitB?.shortDescription ?? null,
-      unit2LongDescription: generated.unitB?.longDescription ?? null,
-      combinedBedrooms: pairing.totalBeds || pairing.unit1Beds + pairing.unit2Beds,
-      suggestedRate: pairing.estimatedSellRate,
-      listingTitle: generated.title ?? null,
-      bookingTitle: generated.bookingTitle ?? generated.title ?? null,
-      propertyType: generated.propertyType ?? "Condominium",
-      pricingArea: item.pricingArea || suggestPricingArea(community.city, community.state, community.name),
-      streetAddress,
-      listingDescription: generated.description ?? null,
-      neighborhood: generated.neighborhood ?? null,
-      transit: generated.transit ?? null,
-      strPermit: item.strPermit || generated.strPermitSample || null,
-      dbprLicense: item.dbprLicense || null,
-      touristTaxAccount: item.touristTaxAccount || null,
-      status: "draft_ready",
-    }));
-    const draftId = Number(saveData?.id);
+    let draftId = await findExistingBulkComboDraftId(item, generated, streetAddress);
+    if (draftId) {
+      item.draftId = draftId;
+      item.message = `Using existing draft #${draftId}; skipping duplicate dashboard save`;
+      job.updatedAt = Date.now();
+      await persistBulkComboListingSnapshot(job);
+    } else {
+      const saveData = await runBulkComboListingStep(job, item, "save", "Saving dashboard draft", () => fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/save`, {
+        name: community.name,
+        city: community.city,
+        state: community.state,
+        estimatedLowRate: community.estimatedLowRate ?? null,
+        estimatedHighRate: community.estimatedHighRate ?? null,
+        unitTypes: community.unitTypes ?? "condominium",
+        confidenceScore: community.confidenceScore ?? 70,
+        researchSummary: community.researchSummary ?? "",
+        sourceUrl: community.sourceUrl ?? null,
+        minimumStayNights: community.minimumStayNights ?? null,
+        minimumStayEvidence: community.minimumStayEvidence ?? null,
+        minimumStaySourceUrl: community.minimumStaySourceUrl ?? null,
+        unit1Url: item.unit1SourceUrl,
+        unit1Bedrooms: pairing.unit1Beds,
+        unit1Bathrooms: generated.unitA?.bathrooms ?? null,
+        unit1Sqft: generated.unitA?.sqft ?? null,
+        unit1MaxGuests: generated.unitA?.maxGuests ?? null,
+        unit1Bedding: generated.unitA?.bedding ?? null,
+        unit1ShortDescription: generated.unitA?.shortDescription ?? null,
+        unit1LongDescription: generated.unitA?.longDescription ?? null,
+        unit2Url: item.unit2SourceUrl,
+        unit2Bedrooms: pairing.unit2Beds,
+        unit2Bathrooms: generated.unitB?.bathrooms ?? null,
+        unit2Sqft: generated.unitB?.sqft ?? null,
+        unit2MaxGuests: generated.unitB?.maxGuests ?? null,
+        unit2Bedding: generated.unitB?.bedding ?? null,
+        unit2ShortDescription: generated.unitB?.shortDescription ?? null,
+        unit2LongDescription: generated.unitB?.longDescription ?? null,
+        combinedBedrooms: pairing.totalBeds || pairing.unit1Beds + pairing.unit2Beds,
+        suggestedRate: pairing.estimatedSellRate,
+        listingTitle: generated.title ?? null,
+        bookingTitle: generated.bookingTitle ?? generated.title ?? null,
+        propertyType: generated.propertyType ?? "Condominium",
+        pricingArea: item.pricingArea || suggestPricingArea(community.city, community.state, community.name),
+        streetAddress,
+        listingDescription: generated.description ?? null,
+        neighborhood: generated.neighborhood ?? null,
+        transit: generated.transit ?? null,
+        strPermit: item.strPermit || generated.strPermitSample || null,
+        dbprLicense: item.dbprLicense || null,
+        touristTaxAccount: item.touristTaxAccount || null,
+        status: "draft_ready",
+      }));
+      draftId = Number(saveData?.id);
+    }
     if (Number.isFinite(draftId) && draftId > 0) {
       item.draftId = draftId;
       await runBulkComboListingStep(job, item, "persist", "Persisting photos and starting pricing", async () => {
@@ -22289,117 +22412,121 @@ Return ONLY compact JSON with this exact shape:
   };
   const runBulkComboListingJob = async (jobId: string) => {
     if (activeBulkComboListingJobIds.has(jobId)) return;
-    const leaseClaimed = await claimBulkComboListingJobLease(jobId);
-    if (!leaseClaimed) return;
-    activeBulkComboListingJobIds.add(jobId);
-    try {
-      const job = await loadBulkComboListingJob(jobId);
-      if (!job) return;
-      job.status = "running";
-      job.startedAt = job.startedAt ?? Date.now();
-      job.updatedAt = Date.now();
-      await persistBulkComboListingSnapshot(job);
-      for (let i = 0; i < job.items.length; i += 1) {
-        job.currentIndex = i;
-        const item = job.items[i];
-        if (item.status === "completed" || item.status === "cancelled") continue;
-        if (item.status === "running" && isBulkComboListingStale(item)) {
-          item.status = "queued";
-          item.phase = "retrying";
-          item.message = "Previous worker heartbeat went stale; retrying this listing";
-          item.error = null;
-          item.finishedAt = null;
-          job.updatedAt = Date.now();
-          await persistBulkComboListingSnapshot(job);
-        }
-        const latestJob = await loadBulkComboListingJob(jobId);
-        if (latestJob?.cancelRequested) job.cancelRequested = true;
-        if (job.cancelRequested) {
-          item.status = "cancelled";
-          item.phase = "cancelled";
-          item.message = "Cancelled by operator";
-          item.finishedAt = Date.now();
-          job.updatedAt = Date.now();
-          await persistBulkComboListingSnapshot(job);
-          continue;
-        }
-        if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
-          item.status = "failed";
-          item.phase = "failed";
-          item.message = item.error || `Max attempts reached (${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
-          item.finishedAt = Date.now();
-          job.updatedAt = Date.now();
-          await persistBulkComboListingSnapshot(job);
-          continue;
-        }
-        while (item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS) {
-          item.attemptCount += 1;
-          item.error = null;
-          item.finishedAt = null;
-          item.heartbeatAt = Date.now();
-          if (item.attemptCount > 1) {
-            item.phase = "retrying";
-            item.message = `Retrying listing creation (attempt ${item.attemptCount}/${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
-            job.updatedAt = Date.now();
-            await persistBulkComboListingSnapshot(job);
-          }
-          try {
-            await runBulkComboListingItem(job, item);
-            item.status = "completed";
-            break;
-          } catch (e: any) {
-            if (e?.cancelled || job.cancelRequested) {
-              item.status = "cancelled";
-              item.phase = "cancelled";
-              item.error = "Cancelled by operator";
-              item.message = "Cancelled by operator";
-              break;
-            }
-            item.error = e?.message ?? String(e);
-            const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId;
-            if (!canRetry) {
-              item.status = "failed";
-              item.phase = "failed";
-              item.message = item.error || "Bulk combo listing failed";
-              break;
-            }
-            const backoffMs = BULK_COMBO_LISTING_RETRY_BACKOFF_MS[Math.min(item.attemptCount - 1, BULK_COMBO_LISTING_RETRY_BACKOFF_MS.length - 1)] ?? 60_000;
-            item.status = "queued";
-            item.phase = "retrying";
-            item.message = `${isBulkComboListingTimeout(e) ? "Timed out" : "Temporary failure"}; retrying in ${Math.round(backoffMs / 1000)}s`;
-            job.updatedAt = Date.now();
-            await persistBulkComboListingSnapshot(job);
-            await sleepBulkComboListing(backoffMs);
-            const afterBackoffJob = await loadBulkComboListingJob(jobId);
-            if (afterBackoffJob?.cancelRequested) {
-              job.cancelRequested = true;
-              item.status = "cancelled";
-              item.phase = "cancelled";
-              item.error = "Cancelled by operator";
-              item.message = "Cancelled by operator";
-              break;
-            }
-          }
-        }
-        item.finishedAt = Date.now();
+    return bulkComboListingLimiter(`bulk-combo-listing:${jobId}`, async () => {
+      if (activeBulkComboListingJobIds.has(jobId)) return;
+      const leaseClaimed = await claimBulkComboListingJobLease(jobId);
+      if (!leaseClaimed) return;
+      activeBulkComboListingJobIds.add(jobId);
+      try {
+        const job = await loadBulkComboListingJob(jobId);
+        if (!job) return;
+        if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") return;
+        job.status = "running";
+        job.startedAt = job.startedAt ?? Date.now();
         job.updatedAt = Date.now();
         await persistBulkComboListingSnapshot(job);
+        for (let i = 0; i < job.items.length; i += 1) {
+          job.currentIndex = i;
+          const item = job.items[i];
+          if (item.status === "completed" || item.status === "cancelled") continue;
+          if (item.status === "running" && isBulkComboListingStale(item)) {
+            item.status = "queued";
+            item.phase = "retrying";
+            item.message = "Previous worker heartbeat went stale; retrying this listing";
+            item.error = null;
+            item.finishedAt = null;
+            job.updatedAt = Date.now();
+            await persistBulkComboListingSnapshot(job);
+          }
+          const latestJob = await loadBulkComboListingJob(jobId);
+          if (latestJob?.cancelRequested) job.cancelRequested = true;
+          if (job.cancelRequested) {
+            item.status = "cancelled";
+            item.phase = "cancelled";
+            item.message = "Cancelled by operator";
+            item.finishedAt = Date.now();
+            job.updatedAt = Date.now();
+            await persistBulkComboListingSnapshot(job);
+            continue;
+          }
+          if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
+            item.status = "failed";
+            item.phase = "failed";
+            item.message = item.error || `Max attempts reached (${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
+            item.finishedAt = Date.now();
+            job.updatedAt = Date.now();
+            await persistBulkComboListingSnapshot(job);
+            continue;
+          }
+          while (item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS) {
+            item.attemptCount += 1;
+            item.error = null;
+            item.finishedAt = null;
+            item.heartbeatAt = Date.now();
+            if (item.attemptCount > 1) {
+              item.phase = "retrying";
+              item.message = `Retrying listing creation (attempt ${item.attemptCount}/${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
+              job.updatedAt = Date.now();
+              await persistBulkComboListingSnapshot(job);
+            }
+            try {
+              await runBulkComboListingItem(job, item);
+              item.status = "completed";
+              break;
+            } catch (e: any) {
+              if (e?.cancelled || job.cancelRequested) {
+                item.status = "cancelled";
+                item.phase = "cancelled";
+                item.error = "Cancelled by operator";
+                item.message = "Cancelled by operator";
+                break;
+              }
+              item.error = e?.message ?? String(e);
+              const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId;
+              if (!canRetry) {
+                item.status = "failed";
+                item.phase = "failed";
+                item.message = item.error || "Bulk combo listing failed";
+                break;
+              }
+              const backoffMs = BULK_COMBO_LISTING_RETRY_BACKOFF_MS[Math.min(item.attemptCount - 1, BULK_COMBO_LISTING_RETRY_BACKOFF_MS.length - 1)] ?? 60_000;
+              item.status = "queued";
+              item.phase = "retrying";
+              item.message = `${isBulkComboListingTimeout(e) ? "Timed out" : "Temporary failure"}; retrying in ${Math.round(backoffMs / 1000)}s`;
+              job.updatedAt = Date.now();
+              await persistBulkComboListingSnapshot(job);
+              await sleepBulkComboListing(backoffMs);
+              const afterBackoffJob = await loadBulkComboListingJob(jobId);
+              if (afterBackoffJob?.cancelRequested) {
+                job.cancelRequested = true;
+                item.status = "cancelled";
+                item.phase = "cancelled";
+                item.error = "Cancelled by operator";
+                item.message = "Cancelled by operator";
+                break;
+              }
+            }
+          }
+          item.finishedAt = Date.now();
+          job.updatedAt = Date.now();
+          await persistBulkComboListingSnapshot(job);
+        }
+        job.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+        refreshBulkComboListingCounts(job);
+        if (job.cancelRequested) job.status = "cancelled";
+        else if (job.failed > 0 && job.completed === 0) job.status = "failed";
+        else job.status = "completed";
+        await persistBulkComboListingSnapshot(job);
+        console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
+      } finally {
+        activeBulkComboListingJobIds.delete(jobId);
+        await db
+          .update(bulkComboListingJobRows)
+          .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
+          .where(and(eq(bulkComboListingJobRows.id, jobId), eq(bulkComboListingJobRows.lockedBy, QUEUE_WORKER_ID)));
       }
-      job.finishedAt = Date.now();
-      job.updatedAt = Date.now();
-      refreshBulkComboListingCounts(job);
-      if (job.cancelRequested) job.status = "cancelled";
-      else if (job.failed > 0 && job.completed === 0) job.status = "failed";
-      else job.status = "completed";
-      await persistBulkComboListingSnapshot(job);
-      console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
-    } finally {
-      activeBulkComboListingJobIds.delete(jobId);
-      await db
-        .update(bulkComboListingJobRows)
-        .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
-        .where(and(eq(bulkComboListingJobRows.id, jobId), eq(bulkComboListingJobRows.lockedBy, QUEUE_WORKER_ID)));
-    }
+    });
   };
 
   app.post("/api/community/bulk-combo-listing-jobs", async (req, res) => {
