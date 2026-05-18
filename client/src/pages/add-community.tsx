@@ -297,6 +297,27 @@ export default function AddCommunity() {
   };
   const [photoFetchJobId, setPhotoFetchJobId] = useState<string | null>(null);
   const [photoFetchJob, setPhotoFetchJob] = useState<ComboPhotoFetchJobPayload | null>(null);
+  type BulkComboListingJobPayload = {
+    id: string;
+    status: "queued" | "running" | "completed" | "failed" | "cancelled";
+    completed: number;
+    failed: number;
+    cancelled: number;
+    items: Array<{
+      id: string;
+      label: string;
+      status: "queued" | "running" | "completed" | "failed" | "cancelled";
+      phase: string;
+      message: string;
+      draftId: number | null;
+      error: string | null;
+    }>;
+  };
+  const [bulkPairingIndexes, setBulkPairingIndexes] = useState<Set<number>>(new Set());
+  const [bulkComboOpen, setBulkComboOpen] = useState(false);
+  const [bulkComboStarting, setBulkComboStarting] = useState(false);
+  const [bulkComboJobId, setBulkComboJobId] = useState<string | null>(null);
+  const [bulkComboJob, setBulkComboJob] = useState<BulkComboListingJobPayload | null>(null);
   const applySweepJob = useCallback((job: TopMarketJobPayload) => {
     setSweepJobId(job.id);
     setSweepMarkets(job.markets || []);
@@ -441,6 +462,10 @@ export default function AddCommunity() {
       if (typeof draft.sweepPhase === "string") setSweepPhase(draft.sweepPhase === "running" ? "running" : "setup");
       if (typeof draft.sweepDone === "boolean") setSweepDone(draft.sweepDone);
       if (typeof draft.photoFetchJobId === "string") setPhotoFetchJobId(draft.photoFetchJobId);
+      if (typeof draft.bulkComboJobId === "string") {
+        setBulkComboJobId(draft.bulkComboJobId);
+        setBulkComboOpen(true);
+      }
       if (Array.isArray(draft.seedMarkets)) setSeedMarkets(draft.seedMarkets);
       if (Array.isArray(draft.selectedMarkets)) setSelectedMarkets(new Set(draft.selectedMarkets));
       if (draft.unitSearchResults) setUnitSearchResults(draft.unitSearchResults);
@@ -491,6 +516,7 @@ export default function AddCommunity() {
       sweepPhase,
       sweepDone,
       photoFetchJobId,
+      bulkComboJobId,
       seedMarkets,
       selectedMarkets: Array.from(selectedMarkets),
       unitSearchResults,
@@ -528,7 +554,7 @@ export default function AddCommunity() {
   }, [
     draftAutosaveReady,
     step, selectedState, cityInput, communities, selectedCommunity, sweepMarkets, sweepJobId,
-    sweepPhase, sweepDone, photoFetchJobId, seedMarkets, selectedMarkets, unitSearchResults, communityProfile,
+    sweepPhase, sweepDone, photoFetchJobId, bulkComboJobId, seedMarkets, selectedMarkets, unitSearchResults, communityProfile,
     suggestedPairings, selectedPairing, selectedUnit1, selectedUnit2, unit1Photos, unit2Photos,
     unit1PhotoSourceUrl, unit2PhotoSourceUrl, photoChecks, listing, editedTitle,
     editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress,
@@ -623,6 +649,41 @@ export default function AddCommunity() {
       window.clearInterval(interval);
     };
   }, [photoFetchJobId, photoFetchJob?.status, applyPhotoFetchJob]);
+
+  useEffect(() => {
+    if (!bulkComboJobId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(`/api/community/bulk-combo-listing-jobs/${encodeURIComponent(bulkComboJobId)}`, {
+          credentials: "include",
+        });
+        if (!resp.ok) {
+          if (resp.status === 404 && !cancelled) {
+            setBulkComboJobId(null);
+            setBulkComboJob(null);
+          }
+          return;
+        }
+        const data = await resp.json();
+        if (!cancelled && data.job) {
+          setBulkComboJob(data.job);
+          const terminal = ["completed", "failed", "cancelled"].includes(data.job.status);
+          if (terminal) queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+        }
+      } catch (e: any) {
+        if (!cancelled) console.warn("[add-community] bulk combo job poll failed", e?.message || e);
+      }
+    };
+    poll();
+    const terminal = bulkComboJob?.status === "completed" || bulkComboJob?.status === "failed" || bulkComboJob?.status === "cancelled";
+    if (terminal) return () => { cancelled = true; };
+    const interval = window.setInterval(poll, 2_500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [bulkComboJobId, bulkComboJob?.status, queryClient]);
 
   const clearSavedComboDraft = useCallback(() => {
     window.localStorage.removeItem(ADD_COMBO_DRAFT_KEY);
@@ -821,6 +882,73 @@ export default function AddCommunity() {
       source: "Algorithm",
     });
   }, []);
+
+  const toggleBulkPairing = useCallback((index: number) => {
+    setBulkPairingIndexes((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }, []);
+
+  const startBulkComboListings = useCallback(async () => {
+    if (!selectedCommunity || bulkPairingIndexes.size === 0) return;
+    const picked = Array.from(bulkPairingIndexes)
+      .sort((a, b) => a - b)
+      .map((index) => suggestedPairings[index])
+      .filter(Boolean);
+    if (picked.length === 0) return;
+    setBulkComboStarting(true);
+    setBulkComboOpen(true);
+    try {
+      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", {
+        items: picked.map((pairing, index) => ({
+          id: `pairing_${index + 1}_${pairing.unit1Beds}_${pairing.unit2Beds}`,
+          community: selectedCommunity,
+          pairing,
+          streetAddress: editedStreetAddress.trim() || suggestedStreetAddress || undefined,
+          pricingArea: editedPricingArea || suggestPricingArea(selectedCommunity.city, selectedCommunity.state),
+          strPermit: strPermit.trim() || null,
+          dbprLicense: dbprLicense.trim() || null,
+          touristTaxAccount: touristTaxAccount.trim() || null,
+        })),
+      });
+      const data = await resp.json();
+      if (data.job) {
+        setBulkComboJob(data.job);
+        setBulkComboJobId(data.job.id);
+        toast({ title: "Bulk listing queue started", description: `${picked.length} combo draft${picked.length === 1 ? "" : "s"} queued.` });
+      }
+    } catch (e: any) {
+      toast({ title: "Bulk queue failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkComboStarting(false);
+    }
+  }, [
+    selectedCommunity,
+    bulkPairingIndexes,
+    suggestedPairings,
+    editedStreetAddress,
+    suggestedStreetAddress,
+    editedPricingArea,
+    strPermit,
+    dbprLicense,
+    touristTaxAccount,
+    toast,
+  ]);
+
+  const cancelBulkComboListings = useCallback(async () => {
+    if (!bulkComboJobId) return;
+    try {
+      const resp = await apiRequest("POST", `/api/community/bulk-combo-listing-jobs/${bulkComboJobId}/cancel`);
+      const data = await resp.json();
+      if (data.job) setBulkComboJob(data.job);
+      toast({ title: "Bulk listing queue cancellation sent" });
+    } catch (e: any) {
+      toast({ title: "Cancel failed", description: e.message, variant: "destructive" });
+    }
+  }, [bulkComboJobId, toast]);
 
   // ── Step 4: Fetch photos ────────────────────────────────────
   const postJsonWithTimeout = useCallback(async (url: string, body: unknown, timeoutMs = PHOTO_FETCH_REQUEST_TIMEOUT_MS) => {
@@ -1694,6 +1822,129 @@ export default function AddCommunity() {
           </div>
         )}
 
+        {bulkComboOpen && (
+          <div
+            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+            onClick={() => {
+              const terminal = !bulkComboJob || ["completed", "failed", "cancelled"].includes(bulkComboJob.status);
+              if (terminal) setBulkComboOpen(false);
+            }}
+          >
+            <div
+              className="bg-background rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <Plus className="h-5 w-5 text-primary" />
+                    Bulk combo listing queue
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    Creates dashboard drafts one at a time: unit photos, listing copy, draft save, photo persistence, and pricing refresh.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  {bulkComboJob && !["completed", "failed", "cancelled"].includes(bulkComboJob.status) && (
+                    <Button variant="destructive" size="sm" onClick={cancelBulkComboListings}>Cancel</Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setBulkComboOpen(false)}
+                    disabled={!!bulkComboJob && !["completed", "failed", "cancelled"].includes(bulkComboJob.status)}
+                  >
+                    Close
+                  </Button>
+                </div>
+              </div>
+
+              {!bulkComboJob ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">
+                  {bulkComboStarting ? (
+                    <>
+                      <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                      Starting queue…
+                    </>
+                  ) : (
+                    "No bulk queue is active."
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <div className="rounded-md border p-2">
+                      <p className="text-xs text-muted-foreground">Status</p>
+                      <p className="text-sm font-semibold capitalize">{bulkComboJob.status}</p>
+                    </div>
+                    <div className="rounded-md border p-2">
+                      <p className="text-xs text-muted-foreground">Completed</p>
+                      <p className="text-sm font-semibold">{bulkComboJob.completed} / {bulkComboJob.items.length}</p>
+                    </div>
+                    <div className="rounded-md border p-2">
+                      <p className="text-xs text-muted-foreground">Failed</p>
+                      <p className="text-sm font-semibold">{bulkComboJob.failed}</p>
+                    </div>
+                    <div className="rounded-md border p-2">
+                      <p className="text-xs text-muted-foreground">Cancelled</p>
+                      <p className="text-sm font-semibold">{bulkComboJob.cancelled}</p>
+                    </div>
+                  </div>
+
+                  <div className="max-h-96 overflow-y-auto rounded-md border">
+                    {bulkComboJob.items.map((item) => {
+                      const tone =
+                        item.status === "completed" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                        : item.status === "failed" ? "bg-red-50 text-red-700 border-red-200"
+                        : item.status === "cancelled" ? "bg-slate-50 text-slate-600 border-slate-200"
+                        : item.status === "running" ? "bg-blue-50 text-blue-700 border-blue-200"
+                        : "bg-amber-50 text-amber-700 border-amber-200";
+                      return (
+                        <div key={item.id} className="border-b px-3 py-3 last:border-b-0">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-medium">{item.label}</p>
+                              <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                {item.message || item.error || "Waiting for its turn"}
+                              </p>
+                              {item.draftId && (
+                                <p className="mt-0.5 text-xs text-emerald-700">Saved as dashboard draft #{item.draftId}</p>
+                              )}
+                            </div>
+                            <Badge variant="outline" className={`shrink-0 capitalize ${tone}`}>
+                              {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                              {item.status}
+                            </Badge>
+                          </div>
+                          {item.error && <p className="mt-1 text-xs text-red-700">{item.error}</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {["completed", "failed", "cancelled"].includes(bulkComboJob.status) && (
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setBulkComboJob(null);
+                          setBulkComboJobId(null);
+                          setBulkPairingIndexes(new Set());
+                        }}
+                      >
+                        Clear queue
+                      </Button>
+                      <Link href="/">
+                        <Button>Go to Dashboard</Button>
+                      </Link>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* ── STEP 2: Research results ──────────────────────── */}
         {step === 2 && (
           <div id="step-2-content">
@@ -1977,10 +2228,45 @@ export default function AddCommunity() {
                   <h3 className="font-semibold text-sm">Algorithm-Suggested Combinations</h3>
                   <Badge variant="outline" className="text-xs ml-auto">Select one to continue</Badge>
                 </div>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 p-3 text-sm">
+                  <span className="text-muted-foreground">
+                    Select multiple combinations to schedule dashboard drafts in the background.
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setBulkPairingIndexes(new Set(suggestedPairings.map((_, index) => index)))}
+                    >
+                      Select all
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setBulkPairingIndexes(new Set())}
+                      disabled={bulkPairingIndexes.size === 0}
+                    >
+                      Clear
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={startBulkComboListings}
+                      disabled={bulkComboStarting || bulkPairingIndexes.size === 0}
+                      data-testid="button-start-bulk-combo-listings"
+                    >
+                      {bulkComboStarting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
+                      Schedule {bulkPairingIndexes.size || ""} draft{bulkPairingIndexes.size === 1 ? "" : "s"}
+                    </Button>
+                  </div>
+                </div>
 
                 <div className="space-y-3 mb-6">
                   {suggestedPairings.map((p, i) => {
                     const isSelected = selectedPairing?.unit1Beds === p.unit1Beds && selectedPairing?.unit2Beds === p.unit2Beds;
+                    const isBulkSelected = bulkPairingIndexes.has(i);
                     const buyCost = p.estimatedUnit1Rate + p.estimatedUnit2Rate;
                     const profit = p.estimatedSellRate - buyCost;
                     return (
@@ -1994,8 +2280,21 @@ export default function AddCommunity() {
                         }`}
                         data-testid={`card-pairing-${i}`}
                       >
+                        <label
+                          className="absolute top-3 left-3 z-10 flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-xs shadow-sm"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isBulkSelected}
+                            onChange={() => toggleBulkPairing(i)}
+                            className="accent-primary"
+                            data-testid={`checkbox-bulk-pairing-${i}`}
+                          />
+                          Queue
+                        </label>
                         {p.isTopPick && (
-                          <div className="absolute -top-2.5 left-4">
+                          <div className="absolute -top-2.5 left-24">
                             <Badge className="text-xs bg-amber-500 hover:bg-amber-500 text-white border-0 gap-1">
                               <Star className="h-3 w-3" /> Algorithm Top Pick
                             </Badge>
@@ -2007,7 +2306,7 @@ export default function AddCommunity() {
                           </div>
                         )}
 
-                        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                        <div className="flex flex-wrap items-center gap-x-6 gap-y-3 pt-8 sm:pt-5">
                           {/* Unit combo */}
                           <div className="flex items-center gap-2">
                             <div className="flex items-center gap-1.5">

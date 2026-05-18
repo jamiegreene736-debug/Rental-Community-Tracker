@@ -69,7 +69,7 @@ import {
 } from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
-import { communityAddressRuleForName, validateCommunityStreetAddress } from "@shared/community-addresses";
+import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
@@ -21447,6 +21447,317 @@ Return ONLY compact JSON with this exact shape:
     if (job.status === "queued") job.status = "cancelled";
     job.updatedAt = Date.now();
     res.json({ job: serializeComboPhotoFetchJob(job) });
+  });
+
+  type BulkComboListingStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+  type BulkComboListingInput = {
+    id?: string;
+    community: any;
+    pairing: {
+      unit1Beds: number;
+      unit2Beds: number;
+      totalBeds: number;
+      estimatedUnit1Rate: number;
+      estimatedUnit2Rate: number;
+      estimatedSellRate: number;
+      estimatedSellRateHigh?: number;
+    };
+    streetAddress?: string;
+    pricingArea?: string | null;
+    strPermit?: string | null;
+    dbprLicense?: string | null;
+    touristTaxAccount?: string | null;
+  };
+  type BulkComboListingItem = BulkComboListingInput & {
+    id: string;
+    label: string;
+    status: BulkComboListingStatus;
+    phase: string;
+    message: string;
+    startedAt: number | null;
+    finishedAt: number | null;
+    draftId: number | null;
+    unit1Photos: Array<{ url: string; label?: string }>;
+    unit2Photos: Array<{ url: string; label?: string }>;
+    unit1SourceUrl: string | null;
+    unit2SourceUrl: string | null;
+    error: string | null;
+  };
+  type BulkComboListingJob = {
+    id: string;
+    status: BulkComboListingStatus;
+    createdAt: number;
+    updatedAt: number;
+    startedAt: number | null;
+    finishedAt: number | null;
+    cancelRequested: boolean;
+    currentIndex: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    items: BulkComboListingItem[];
+  };
+  const bulkComboListingJobs = new Map<string, BulkComboListingJob>();
+  const BULK_COMBO_LISTING_JOB_TTL_MS = 12 * 60 * 60 * 1000;
+  const pruneBulkComboListingJobs = () => {
+    const cutoff = Date.now() - BULK_COMBO_LISTING_JOB_TTL_MS;
+    for (const [id, job] of bulkComboListingJobs.entries()) {
+      if ((job.finishedAt ?? job.updatedAt) < cutoff) bulkComboListingJobs.delete(id);
+    }
+  };
+  const serializeBulkComboListingJob = (job: BulkComboListingJob) => ({
+    ...job,
+    createdAt: new Date(job.createdAt).toISOString(),
+    updatedAt: new Date(job.updatedAt).toISOString(),
+    startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
+    finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+    items: job.items.map((item) => ({
+      ...item,
+      startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
+      finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
+    })),
+  });
+  const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
+    const community = item.community || {};
+    const pairing = item.pairing;
+    const unit1: ComboPhotoFetchUnit = {
+      title: `Unit A — ${pairing.unit1Beds}BR`,
+      bedrooms: pairing.unit1Beds,
+    };
+    const unit2: ComboPhotoFetchUnit = {
+      title: `Unit B — ${pairing.unit2Beds}BR`,
+      bedrooms: pairing.unit2Beds,
+    };
+    const photoItem: ComboPhotoFetchItem = {
+      id: item.id,
+      label: item.label,
+      communityName: community.name,
+      streetAddress: item.streetAddress,
+      city: community.city,
+      state: community.state,
+      unit1,
+      unit2,
+      status: "queued",
+      phase: "queued",
+      message: "Queued",
+      startedAt: null,
+      finishedAt: null,
+      unit1Photos: [],
+      unit2Photos: [],
+      unit1SourceUrl: null,
+      unit2SourceUrl: null,
+      error: null,
+    };
+
+    item.status = "running";
+    item.phase = "photos";
+    item.message = "Fetching unit photos";
+    item.startedAt = Date.now();
+    job.updatedAt = Date.now();
+    await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem);
+    item.unit1Photos = photoItem.unit1Photos;
+    item.unit2Photos = photoItem.unit2Photos;
+    item.unit1SourceUrl = photoItem.unit1SourceUrl;
+    item.unit2SourceUrl = photoItem.unit2SourceUrl;
+
+    if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+    item.phase = "copy";
+    item.message = "Generating listing draft";
+    job.updatedAt = Date.now();
+    const generated = await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/generate-listing`, {
+      communityName: community.name,
+      city: community.city,
+      state: community.state,
+      unit1: { bedrooms: pairing.unit1Beds, url: "", address: undefined },
+      unit2: { bedrooms: pairing.unit2Beds, url: "", address: undefined },
+      suggestedRate: pairing.estimatedSellRate,
+    });
+
+    if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+    item.phase = "save";
+    item.message = "Saving dashboard draft";
+    job.updatedAt = Date.now();
+    const streetAddress = item.streetAddress || inferCommunityStreetAddress({
+      communityName: community.name,
+      city: community.city,
+      state: community.state,
+      unitAddresses: [],
+    });
+    const saveData = await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/save`, {
+      name: community.name,
+      city: community.city,
+      state: community.state,
+      estimatedLowRate: community.estimatedLowRate ?? null,
+      estimatedHighRate: community.estimatedHighRate ?? null,
+      unitTypes: community.unitTypes ?? "condominium",
+      confidenceScore: community.confidenceScore ?? 70,
+      researchSummary: community.researchSummary ?? "",
+      sourceUrl: community.sourceUrl ?? null,
+      minimumStayNights: community.minimumStayNights ?? null,
+      minimumStayEvidence: community.minimumStayEvidence ?? null,
+      minimumStaySourceUrl: community.minimumStaySourceUrl ?? null,
+      unit1Url: item.unit1SourceUrl,
+      unit1Bedrooms: pairing.unit1Beds,
+      unit1Bathrooms: generated.unitA?.bathrooms ?? null,
+      unit1Sqft: generated.unitA?.sqft ?? null,
+      unit1MaxGuests: generated.unitA?.maxGuests ?? null,
+      unit1Bedding: generated.unitA?.bedding ?? null,
+      unit1ShortDescription: generated.unitA?.shortDescription ?? null,
+      unit1LongDescription: generated.unitA?.longDescription ?? null,
+      unit2Url: item.unit2SourceUrl,
+      unit2Bedrooms: pairing.unit2Beds,
+      unit2Bathrooms: generated.unitB?.bathrooms ?? null,
+      unit2Sqft: generated.unitB?.sqft ?? null,
+      unit2MaxGuests: generated.unitB?.maxGuests ?? null,
+      unit2Bedding: generated.unitB?.bedding ?? null,
+      unit2ShortDescription: generated.unitB?.shortDescription ?? null,
+      unit2LongDescription: generated.unitB?.longDescription ?? null,
+      combinedBedrooms: pairing.totalBeds || pairing.unit1Beds + pairing.unit2Beds,
+      suggestedRate: pairing.estimatedSellRate,
+      listingTitle: generated.title ?? null,
+      bookingTitle: generated.bookingTitle ?? generated.title ?? null,
+      propertyType: generated.propertyType ?? "Condominium",
+      pricingArea: item.pricingArea || suggestPricingArea(community.city, community.state, community.name),
+      streetAddress,
+      listingDescription: generated.description ?? null,
+      neighborhood: generated.neighborhood ?? null,
+      transit: generated.transit ?? null,
+      strPermit: item.strPermit || generated.strPermitSample || null,
+      dbprLicense: item.dbprLicense || null,
+      touristTaxAccount: item.touristTaxAccount || null,
+      status: "draft_ready",
+    });
+    const draftId = Number(saveData?.id);
+    if (Number.isFinite(draftId) && draftId > 0) {
+      item.draftId = draftId;
+      item.phase = "persist";
+      item.message = "Persisting photos and starting pricing";
+      job.updatedAt = Date.now();
+      if (item.unit1Photos.length > 0 || item.unit2Photos.length > 0) {
+        await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
+          unit1Photos: item.unit1Photos.map((p) => p.url),
+          unit2Photos: item.unit2Photos.map((p) => p.url),
+          unit1SourceUrl: item.unit1SourceUrl,
+          unit2SourceUrl: item.unit2SourceUrl,
+        }).catch((e: any) => {
+          item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`;
+        });
+      }
+      fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
+      fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/refresh-pricing`, { method: "POST" }).catch(() => null);
+    }
+    item.phase = "done";
+    item.message = item.draftId ? `Draft #${item.draftId} saved to dashboard` : "Draft saved to dashboard";
+  };
+  const runBulkComboListingJob = async (jobId: string) => {
+    const job = bulkComboListingJobs.get(jobId);
+    if (!job) return;
+    job.status = "running";
+    job.startedAt = Date.now();
+    job.updatedAt = Date.now();
+    for (let i = 0; i < job.items.length; i += 1) {
+      job.currentIndex = i;
+      const item = job.items[i];
+      if (job.cancelRequested) {
+        item.status = "cancelled";
+        item.finishedAt = Date.now();
+        job.cancelled += 1;
+        continue;
+      }
+      try {
+        await runBulkComboListingItem(job, item);
+        item.status = "completed";
+        job.completed += 1;
+      } catch (e: any) {
+        if (e?.cancelled || job.cancelRequested) {
+          item.status = "cancelled";
+          item.error = "Cancelled by operator";
+          job.cancelled += 1;
+        } else {
+          item.status = "failed";
+          item.error = e?.message ?? String(e);
+          item.message = item.error || "Bulk combo listing failed";
+          job.failed += 1;
+        }
+      } finally {
+        item.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+      }
+    }
+    job.finishedAt = Date.now();
+    job.updatedAt = Date.now();
+    if (job.cancelRequested) job.status = "cancelled";
+    else if (job.failed > 0 && job.completed === 0) job.status = "failed";
+    else job.status = "completed";
+    console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
+  };
+
+  app.post("/api/community/bulk-combo-listing-jobs", async (req, res) => {
+    pruneBulkComboListingJobs();
+    const inputs = Array.isArray(req.body?.items) ? req.body.items as BulkComboListingInput[] : [];
+    if (inputs.length === 0) return res.status(400).json({ error: "items required" });
+    const now = Date.now();
+    const id = `bcj_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const items: BulkComboListingItem[] = inputs.slice(0, 12).map((input, index) => {
+      const communityName = input.community?.name || "Community";
+      const label = `${communityName} ${input.pairing?.unit1Beds ?? "?"}BR + ${input.pairing?.unit2Beds ?? "?"}BR`;
+      return {
+        ...input,
+        id: input.id || `item_${index + 1}`,
+        label,
+        status: "queued",
+        phase: "queued",
+        message: "Queued",
+        startedAt: null,
+        finishedAt: null,
+        draftId: null,
+        unit1Photos: [],
+        unit2Photos: [],
+        unit1SourceUrl: null,
+        unit2SourceUrl: null,
+        error: null,
+      };
+    });
+    const job: BulkComboListingJob = {
+      id,
+      status: "queued",
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+      cancelRequested: false,
+      currentIndex: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      items,
+    };
+    bulkComboListingJobs.set(id, job);
+    void runBulkComboListingJob(id);
+    res.status(202).json({ job: serializeBulkComboListingJob(job) });
+  });
+
+  app.get("/api/community/bulk-combo-listing-jobs/:jobId", (req, res) => {
+    pruneBulkComboListingJobs();
+    const job = bulkComboListingJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Bulk combo listing job not found" });
+    res.json({ job: serializeBulkComboListingJob(job) });
+  });
+
+  app.post("/api/community/bulk-combo-listing-jobs/:jobId/cancel", (req, res) => {
+    const job = bulkComboListingJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Bulk combo listing job not found" });
+    job.cancelRequested = true;
+    for (const item of job.items) {
+      if (item.status === "queued") {
+        item.status = "cancelled";
+        item.finishedAt = Date.now();
+        job.cancelled += 1;
+      }
+    }
+    if (job.status === "queued") job.status = "cancelled";
+    job.updatedAt = Date.now();
+    res.json({ job: serializeBulkComboListingJob(job) });
   });
 
   // ============================================================
