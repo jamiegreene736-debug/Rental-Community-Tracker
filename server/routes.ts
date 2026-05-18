@@ -51,6 +51,7 @@ import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
+import { acquireSidecarLane, getSidecarLaneStatus, isSidecarLaneOwner } from "./sidecar-lane";
 import { findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
@@ -537,78 +538,109 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
     await topQueueEvent("bulk-pricing", job.id, "running", "Bulk market pricing queue started", {
       meta: { total: job.items.length, dryRun: Boolean(job.dryRun) },
     });
-
-    for (let i = 0; i < job.items.length; i += 1) {
-      job = await loadBulkPricingJob(job.id) ?? job;
-      job.currentIndex = i;
-      const item = job.items[i];
-      if (!item || item.status === "completed" || item.status === "cancelled") continue;
-      if (job.cancelRequested) {
-        item.status = "cancelled";
-        item.error = "Cancelled by operator";
-        item.finishedAt = Date.now();
-        item.heartbeatAt = Date.now();
+    const lane = await acquireSidecarLane({
+      ownerType: "bulk-pricing",
+      ownerId: job.id,
+      label: `Bulk market pricing ${job.id}`,
+      shouldCancel: async () => {
+        const latest = await loadBulkPricingJob(job.id).catch(() => null);
+        return Boolean(latest?.cancelRequested);
+      },
+      onWait: async (owner) => {
+        job = await loadBulkPricingJob(job.id) ?? job;
+        job.status = "running";
+        job.currentIndex = -1;
         await persistBulkPricingJob(job);
-        continue;
-      }
+        await topQueueEvent("bulk-pricing", job.id, "waiting-sidecar-lane", `Waiting for Chrome sidecar lane held by ${owner.label}`, {
+          level: "warn",
+          meta: { owner },
+        });
+      },
+    });
+    const laneHeartbeat = setInterval(() => lane.heartbeat(), 30_000);
 
-      let shouldRetry = false;
-      do {
-        shouldRetry = false;
-        try {
-          await runBulkPricingItem(job, item);
-          item.status = "completed";
-          item.progress = item.progress ?? { phase: "done", percent: 100, label: "Market-rate refresh completed" };
+    try {
+      await topQueueEvent("bulk-pricing", job.id, "sidecar-lane-acquired", "Chrome sidecar lane acquired for bulk market pricing", {
+        meta: { acquiredAt: lane.acquiredAt },
+      });
+      for (let i = 0; i < job.items.length; i += 1) {
+        job = await loadBulkPricingJob(job.id) ?? job;
+        job.currentIndex = i;
+        const item = job.items[i];
+        if (!item || item.status === "completed" || item.status === "cancelled") continue;
+        if (job.cancelRequested) {
+          item.status = "cancelled";
+          item.error = "Cancelled by operator";
           item.finishedAt = Date.now();
           item.heartbeatAt = Date.now();
-          item.error = null;
           await persistBulkPricingJob(job);
-          await topQueueEvent("bulk-pricing", job.id, "item-completed", `Completed market pricing refresh for ${item.label}`, {
-            itemKey: item.id,
-            meta: { propertyId: item.propertyId, attempt: item.attemptCount },
-          });
-        } catch (e: any) {
-          if (e?.cancelled || job.cancelRequested) {
-            item.status = "cancelled";
-            item.error = "Cancelled by operator";
+          continue;
+        }
+
+        let shouldRetry = false;
+        do {
+          shouldRetry = false;
+          try {
+            await runBulkPricingItem(job, item);
+            item.status = "completed";
+            item.progress = item.progress ?? { phase: "done", percent: 100, label: "Market-rate refresh completed" };
             item.finishedAt = Date.now();
             item.heartbeatAt = Date.now();
+            item.error = null;
             await persistBulkPricingJob(job);
-            await topQueueEvent("bulk-pricing", job.id, "item-cancelled", `Cancelled market pricing refresh for ${item.label}`, {
+            await topQueueEvent("bulk-pricing", job.id, "item-completed", `Completed market pricing refresh for ${item.label}`, {
               itemKey: item.id,
-              level: "warn",
-              meta: { propertyId: item.propertyId },
+              meta: { propertyId: item.propertyId, attempt: item.attemptCount },
             });
-            break;
-          }
+          } catch (e: any) {
+            if (e?.cancelled || job.cancelRequested) {
+              item.status = "cancelled";
+              item.error = "Cancelled by operator";
+              item.finishedAt = Date.now();
+              item.heartbeatAt = Date.now();
+              await persistBulkPricingJob(job);
+              await topQueueEvent("bulk-pricing", job.id, "item-cancelled", `Cancelled market pricing refresh for ${item.label}`, {
+                itemKey: item.id,
+                level: "warn",
+                meta: { propertyId: item.propertyId },
+              });
+              break;
+            }
 
-          const message = labelBulkPricingError(e);
-          item.error = message;
-          item.heartbeatAt = Date.now();
-          if (item.attemptCount < BULK_PRICING_ITEM_MAX_ATTEMPTS) {
-            item.status = "queued";
-            item.progress = { phase: "retrying", percent: 0, label: `Retrying after error: ${message}` };
-            item.finishedAt = null;
-            shouldRetry = true;
-            await persistBulkPricingJob(job);
-            await topQueueEvent("bulk-pricing", job.id, "item-retry", `Retrying ${item.label} after transient failure`, {
-              itemKey: item.id,
-              level: "warn",
-              meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
-            });
-            await new Promise((resolve) => setTimeout(resolve, BULK_PRICING_RETRY_BACKOFF_MS));
-          } else {
-            item.status = "failed";
-            item.finishedAt = Date.now();
-            await persistBulkPricingJob(job);
-            await topQueueEvent("bulk-pricing", job.id, "item-failed", `Failed market pricing refresh for ${item.label}`, {
-              itemKey: item.id,
-              level: "error",
-              meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
-            });
+            const message = labelBulkPricingError(e);
+            item.error = message;
+            item.heartbeatAt = Date.now();
+            if (item.attemptCount < BULK_PRICING_ITEM_MAX_ATTEMPTS) {
+              item.status = "queued";
+              item.progress = { phase: "retrying", percent: 0, label: `Retrying after error: ${message}` };
+              item.finishedAt = null;
+              shouldRetry = true;
+              await persistBulkPricingJob(job);
+              await topQueueEvent("bulk-pricing", job.id, "item-retry", `Retrying ${item.label} after transient failure`, {
+                itemKey: item.id,
+                level: "warn",
+                meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
+              });
+              await new Promise((resolve) => setTimeout(resolve, BULK_PRICING_RETRY_BACKOFF_MS));
+            } else {
+              item.status = "failed";
+              item.finishedAt = Date.now();
+              await persistBulkPricingJob(job);
+              await topQueueEvent("bulk-pricing", job.id, "item-failed", `Failed market pricing refresh for ${item.label}`, {
+                itemKey: item.id,
+                level: "error",
+                meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
+              });
+            }
           }
-        }
-      } while (shouldRetry && !job.cancelRequested);
+        } while (shouldRetry && !job.cancelRequested);
+      }
+    } finally {
+      clearInterval(laneHeartbeat);
+      lane.release();
+      await topQueueEvent("bulk-pricing", job.id, "sidecar-lane-released", "Chrome sidecar lane released for bulk market pricing", {
+        meta: { jobId: job.id },
+      });
     }
 
     job.finishedAt = Date.now();
@@ -624,6 +656,26 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
     console.log(
       `[bulk-pricing] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed, ${job.cancelled} cancelled`,
     );
+  } catch (e: any) {
+    const failedJob = await loadBulkPricingJob(jobId).catch(() => job);
+    if (failedJob) {
+      const cancelled = e?.cancelled || failedJob.cancelRequested;
+      failedJob.status = cancelled ? "cancelled" : "failed";
+      failedJob.finishedAt = Date.now();
+      failedJob.items.forEach((item) => {
+        if (item.status !== "queued" && item.status !== "running") return;
+        item.status = cancelled ? "cancelled" : "failed";
+        item.error = cancelled ? "Cancelled by operator" : labelBulkPricingError(e);
+        item.finishedAt = Date.now();
+        item.heartbeatAt = Date.now();
+      });
+      refreshBulkPricingCounts(failedJob);
+      await persistBulkPricingJob(failedJob).catch(() => {});
+      await topQueueEvent("bulk-pricing", failedJob.id, cancelled ? "cancelled" : "failed", cancelled ? "Bulk market pricing queue cancelled" : "Bulk market pricing queue failed", {
+        level: cancelled ? "warn" : "error",
+        meta: { error: e?.message ?? String(e) },
+      });
+    }
   } finally {
     activeBulkPricingJobIds.delete(jobId);
     const finalJob = await loadBulkPricingJob(jobId).catch(() => null);
@@ -22875,91 +22927,121 @@ Return ONLY compact JSON with this exact shape:
         job.startedAt = job.startedAt ?? Date.now();
         job.updatedAt = Date.now();
         await persistBulkComboListingSnapshot(job);
-        for (let i = 0; i < job.items.length; i += 1) {
-          job.currentIndex = i;
-          const item = job.items[i];
-          if (item.status === "completed" || item.status === "cancelled") continue;
-          if (item.status === "running" && isBulkComboListingStale(item)) {
-            item.status = "queued";
-            item.phase = "retrying";
-            item.message = "Previous worker heartbeat went stale; retrying this listing";
-            item.error = null;
-            item.finishedAt = null;
+        const lane = await acquireSidecarLane({
+          ownerType: "bulk-combo-listing",
+          ownerId: job.id,
+          label: `Bulk combo listing ${job.id}`,
+          shouldCancel: async () => {
+            const latest = await loadBulkComboListingJob(job.id).catch(() => null);
+            return Boolean(latest?.cancelRequested);
+          },
+          onWait: async (owner) => {
+            const latest = await loadBulkComboListingJob(job.id);
+            if (latest?.cancelRequested) job.cancelRequested = true;
+            job.currentIndex = -1;
             job.updatedAt = Date.now();
             await persistBulkComboListingSnapshot(job);
-          }
-          const latestJob = await loadBulkComboListingJob(jobId);
-          if (latestJob?.cancelRequested) job.cancelRequested = true;
-          if (job.cancelRequested) {
-            item.status = "cancelled";
-            item.phase = "cancelled";
-            item.message = "Cancelled by operator";
-            item.finishedAt = Date.now();
-            job.updatedAt = Date.now();
-            await persistBulkComboListingSnapshot(job);
-            continue;
-          }
-          if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
-            item.status = "failed";
-            item.phase = "failed";
-            item.message = item.error || `Max attempts reached (${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
-            item.finishedAt = Date.now();
-            job.updatedAt = Date.now();
-            await persistBulkComboListingSnapshot(job);
-            continue;
-          }
-          while (item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS) {
-            item.attemptCount += 1;
-            item.error = null;
-            item.finishedAt = null;
-            item.heartbeatAt = Date.now();
-            if (item.attemptCount > 1) {
-              item.phase = "retrying";
-              item.message = `Retrying listing creation (attempt ${item.attemptCount}/${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
-              job.updatedAt = Date.now();
-              await persistBulkComboListingSnapshot(job);
-            }
-            try {
-              await runBulkComboListingItem(job, item);
-              item.status = "completed";
-              break;
-            } catch (e: any) {
-              if (e?.cancelled || job.cancelRequested) {
-                item.status = "cancelled";
-                item.phase = "cancelled";
-                item.error = "Cancelled by operator";
-                item.message = "Cancelled by operator";
-                break;
-              }
-              item.error = queueErrorLabel(e, "Bulk combo listing failed");
-              const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId;
-              if (!canRetry) {
-                item.status = "failed";
-                item.phase = "failed";
-                item.message = item.error || "Bulk combo listing failed";
-                break;
-              }
-              const backoffMs = BULK_COMBO_LISTING_RETRY_BACKOFF_MS[Math.min(item.attemptCount - 1, BULK_COMBO_LISTING_RETRY_BACKOFF_MS.length - 1)] ?? 60_000;
+            await queueEvent("bulk-combo-listing", job.id, "waiting-sidecar-lane", `Waiting for Chrome sidecar lane held by ${owner.label}`, {
+              level: "warn",
+              meta: { owner },
+            });
+          },
+        });
+        const laneHeartbeat = setInterval(() => lane.heartbeat(), 30_000);
+        try {
+          await queueEvent("bulk-combo-listing", job.id, "sidecar-lane-acquired", "Chrome sidecar lane acquired for bulk combo listing queue", {
+            meta: { acquiredAt: lane.acquiredAt },
+          });
+          for (let i = 0; i < job.items.length; i += 1) {
+            job.currentIndex = i;
+            const item = job.items[i];
+            if (item.status === "completed" || item.status === "cancelled") continue;
+            if (item.status === "running" && isBulkComboListingStale(item)) {
               item.status = "queued";
               item.phase = "retrying";
-              item.message = `${isBulkComboListingTimeout(e) ? "Timed out" : "Temporary failure"}; retrying in ${Math.round(backoffMs / 1000)}s`;
+              item.message = "Previous worker heartbeat went stale; retrying this listing";
+              item.error = null;
+              item.finishedAt = null;
               job.updatedAt = Date.now();
               await persistBulkComboListingSnapshot(job);
-              await sleepBulkComboListing(backoffMs);
-              const afterBackoffJob = await loadBulkComboListingJob(jobId);
-              if (afterBackoffJob?.cancelRequested) {
-                job.cancelRequested = true;
-                item.status = "cancelled";
-                item.phase = "cancelled";
-                item.error = "Cancelled by operator";
-                item.message = "Cancelled by operator";
+            }
+            const latestJob = await loadBulkComboListingJob(jobId);
+            if (latestJob?.cancelRequested) job.cancelRequested = true;
+            if (job.cancelRequested) {
+              item.status = "cancelled";
+              item.phase = "cancelled";
+              item.message = "Cancelled by operator";
+              item.finishedAt = Date.now();
+              job.updatedAt = Date.now();
+              await persistBulkComboListingSnapshot(job);
+              continue;
+            }
+            if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
+              item.status = "failed";
+              item.phase = "failed";
+              item.message = item.error || `Max attempts reached (${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
+              item.finishedAt = Date.now();
+              job.updatedAt = Date.now();
+              await persistBulkComboListingSnapshot(job);
+              continue;
+            }
+            while (item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS) {
+              item.attemptCount += 1;
+              item.error = null;
+              item.finishedAt = null;
+              item.heartbeatAt = Date.now();
+              if (item.attemptCount > 1) {
+                item.phase = "retrying";
+                item.message = `Retrying listing creation (attempt ${item.attemptCount}/${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
+                job.updatedAt = Date.now();
+                await persistBulkComboListingSnapshot(job);
+              }
+              try {
+                await runBulkComboListingItem(job, item);
+                item.status = "completed";
                 break;
+              } catch (e: any) {
+                if (e?.cancelled || job.cancelRequested) {
+                  item.status = "cancelled";
+                  item.phase = "cancelled";
+                  item.error = "Cancelled by operator";
+                  item.message = "Cancelled by operator";
+                  break;
+                }
+                item.error = queueErrorLabel(e, "Bulk combo listing failed");
+                const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId;
+                if (!canRetry) {
+                  item.status = "failed";
+                  item.phase = "failed";
+                  item.message = item.error || "Bulk combo listing failed";
+                  break;
+                }
+                const backoffMs = BULK_COMBO_LISTING_RETRY_BACKOFF_MS[Math.min(item.attemptCount - 1, BULK_COMBO_LISTING_RETRY_BACKOFF_MS.length - 1)] ?? 60_000;
+                item.status = "queued";
+                item.phase = "retrying";
+                item.message = `${isBulkComboListingTimeout(e) ? "Timed out" : "Temporary failure"}; retrying in ${Math.round(backoffMs / 1000)}s`;
+                job.updatedAt = Date.now();
+                await persistBulkComboListingSnapshot(job);
+                await sleepBulkComboListing(backoffMs);
+                const afterBackoffJob = await loadBulkComboListingJob(jobId);
+                if (afterBackoffJob?.cancelRequested) {
+                  job.cancelRequested = true;
+                  item.status = "cancelled";
+                  item.phase = "cancelled";
+                  item.error = "Cancelled by operator";
+                  item.message = "Cancelled by operator";
+                  break;
+                }
               }
             }
+            item.finishedAt = Date.now();
+            job.updatedAt = Date.now();
+            await persistBulkComboListingSnapshot(job);
           }
-          item.finishedAt = Date.now();
-          job.updatedAt = Date.now();
-          await persistBulkComboListingSnapshot(job);
+        } finally {
+          clearInterval(laneHeartbeat);
+          lane.release();
+          await queueEvent("bulk-combo-listing", job.id, "sidecar-lane-released", "Chrome sidecar lane released for bulk combo listing queue");
         }
         job.finishedAt = Date.now();
         job.updatedAt = Date.now();
@@ -22973,6 +23055,29 @@ Return ONLY compact JSON with this exact shape:
           meta: { completed: job.completed, failed: job.failed, cancelled: job.cancelled },
         });
         console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
+      } catch (e: any) {
+        const failedJob = await loadBulkComboListingJob(jobId);
+        if (failedJob) {
+          const cancelled = e?.cancelled || failedJob.cancelRequested;
+          failedJob.status = cancelled ? "cancelled" : "failed";
+          failedJob.finishedAt = Date.now();
+          failedJob.updatedAt = Date.now();
+          failedJob.items.forEach((item) => {
+            if (item.status !== "queued" && item.status !== "running") return;
+            item.status = cancelled ? "cancelled" : "failed";
+            item.phase = failedJob.status;
+            item.message = cancelled ? "Cancelled by operator" : queueErrorLabel(e, "Bulk combo listing failed");
+            item.error = item.message;
+            item.finishedAt = Date.now();
+            item.heartbeatAt = Date.now();
+          });
+          refreshBulkComboListingCounts(failedJob);
+          await persistBulkComboListingSnapshot(failedJob).catch(() => {});
+          await queueEvent("bulk-combo-listing", failedJob.id, failedJob.status, cancelled ? "Bulk combo listing queue cancelled" : "Bulk combo listing queue failed", {
+            level: cancelled ? "warn" : "error",
+            meta: { error: e?.message ?? String(e) },
+          });
+        }
       } finally {
         activeBulkComboListingJobIds.delete(jobId);
         await db
@@ -23168,7 +23273,13 @@ Return ONLY compact JSON with this exact shape:
       bulkPricingRefreshes: bulkPricingRows,
       events: eventRows,
       sidecar,
+      sidecarLane: getSidecarLaneStatus(),
     });
+  });
+
+  app.get("/api/sidecar-lane/status", async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json(getSidecarLaneStatus());
   });
 
   const resumeBulkComboListingJobs = async () => {
@@ -27068,8 +27179,10 @@ Return ONLY compact JSON with this exact shape:
       }
     }
     try {
-      const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
-      cancelActiveAndPendingRequests(`bulk pricing job ${job.id} cancelled`);
+      if (isSidecarLaneOwner("bulk-pricing", job.id)) {
+        const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
+        cancelActiveAndPendingRequests(`bulk pricing job ${job.id} cancelled`);
+      }
     } catch {}
     if (job.status === "queued") {
       job.status = "cancelled";
