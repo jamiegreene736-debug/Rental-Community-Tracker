@@ -275,6 +275,28 @@ export default function AddCommunity() {
     topCommunity?: CommunityResult | null;
     error?: string;
   };
+  type ComboPhotoFetchJobPayload = {
+    id: string;
+    status: "queued" | "running" | "completed" | "failed" | "cancelled";
+    total?: number;
+    completed?: number;
+    failed?: number;
+    cancelled?: number;
+    items: Array<{
+      id: string;
+      label: string;
+      status: "queued" | "running" | "completed" | "failed" | "cancelled";
+      phase: string;
+      message: string;
+      unit1Photos: PhotoItem[];
+      unit2Photos: PhotoItem[];
+      unit1SourceUrl: string | null;
+      unit2SourceUrl: string | null;
+      error: string | null;
+    }>;
+  };
+  const [photoFetchJobId, setPhotoFetchJobId] = useState<string | null>(null);
+  const [photoFetchJob, setPhotoFetchJob] = useState<ComboPhotoFetchJobPayload | null>(null);
   const applySweepJob = useCallback((job: TopMarketJobPayload) => {
     setSweepJobId(job.id);
     setSweepMarkets(job.markets || []);
@@ -418,6 +440,7 @@ export default function AddCommunity() {
       if (typeof draft.sweepJobId === "string") setSweepJobId(draft.sweepJobId);
       if (typeof draft.sweepPhase === "string") setSweepPhase(draft.sweepPhase === "running" ? "running" : "setup");
       if (typeof draft.sweepDone === "boolean") setSweepDone(draft.sweepDone);
+      if (typeof draft.photoFetchJobId === "string") setPhotoFetchJobId(draft.photoFetchJobId);
       if (Array.isArray(draft.seedMarkets)) setSeedMarkets(draft.seedMarkets);
       if (Array.isArray(draft.selectedMarkets)) setSelectedMarkets(new Set(draft.selectedMarkets));
       if (draft.unitSearchResults) setUnitSearchResults(draft.unitSearchResults);
@@ -467,6 +490,7 @@ export default function AddCommunity() {
       sweepJobId,
       sweepPhase,
       sweepDone,
+      photoFetchJobId,
       seedMarkets,
       selectedMarkets: Array.from(selectedMarkets),
       unitSearchResults,
@@ -504,7 +528,7 @@ export default function AddCommunity() {
   }, [
     draftAutosaveReady,
     step, selectedState, cityInput, communities, selectedCommunity, sweepMarkets, sweepJobId,
-    sweepPhase, sweepDone, seedMarkets, selectedMarkets, unitSearchResults, communityProfile,
+    sweepPhase, sweepDone, photoFetchJobId, seedMarkets, selectedMarkets, unitSearchResults, communityProfile,
     suggestedPairings, selectedPairing, selectedUnit1, selectedUnit2, unit1Photos, unit2Photos,
     unit1PhotoSourceUrl, unit2PhotoSourceUrl, photoChecks, listing, editedTitle,
     editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress,
@@ -541,6 +565,64 @@ export default function AddCommunity() {
       window.clearInterval(interval);
     };
   }, [sweepJobId, sweepDone, sweepRunning, applySweepJob]);
+
+  const applyPhotoFetchJob = useCallback((job: ComboPhotoFetchJobPayload) => {
+    setPhotoFetchJob(job);
+    setPhotoFetchJobId(job.id);
+    const item = job.items?.[0];
+    if (item) {
+      if (Array.isArray(item.unit1Photos) && item.unit1Photos.length > 0) setUnit1Photos(item.unit1Photos);
+      if (Array.isArray(item.unit2Photos) && item.unit2Photos.length > 0) setUnit2Photos(item.unit2Photos);
+      if (typeof item.unit1SourceUrl === "string") setUnit1PhotoSourceUrl(item.unit1SourceUrl);
+      if (typeof item.unit2SourceUrl === "string") setUnit2PhotoSourceUrl(item.unit2SourceUrl);
+    }
+    const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+    setPhotosLoading(!terminal);
+    if (terminal) {
+      setPhotoFetchStartedAt(null);
+      if (item?.error) {
+        toast({
+          title: job.status === "failed" ? "Photo fetch failed" : "Photo fetch completed with notes",
+          description: item.error,
+          variant: job.status === "failed" ? "destructive" : undefined,
+        });
+      }
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (!photoFetchJobId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(`/api/community/photo-fetch-jobs/${encodeURIComponent(photoFetchJobId)}`, {
+          credentials: "include",
+        });
+        if (!resp.ok) {
+          if (resp.status === 404 && !cancelled) {
+            setPhotosLoading(false);
+            setPhotoFetchJobId(null);
+            setPhotoFetchJob(null);
+          }
+          return;
+        }
+        const data = await resp.json();
+        if (!cancelled && data.job) applyPhotoFetchJob(data.job);
+      } catch (e: any) {
+        if (!cancelled) console.warn("[add-community] photo fetch job poll failed", e?.message || e);
+      }
+    };
+    poll();
+    const terminal = photoFetchJob?.status === "completed" || photoFetchJob?.status === "failed" || photoFetchJob?.status === "cancelled";
+    if (terminal) {
+      return () => { cancelled = true; };
+    }
+    const interval = window.setInterval(poll, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [photoFetchJobId, photoFetchJob?.status, applyPhotoFetchJob]);
 
   const clearSavedComboDraft = useCallback(() => {
     window.localStorage.removeItem(ADD_COMBO_DRAFT_KEY);
@@ -767,11 +849,68 @@ export default function AddCommunity() {
     }
   }, []);
 
+  const startServerPhotoFetchJob = useCallback(async (): Promise<boolean> => {
+    if (!selectedCommunity || !selectedUnit1 || !selectedUnit2) return false;
+    setStep(4);
+    setPhotosLoading(true);
+    setPhotoFetchStartedAt(null);
+    setPhotoFetchJob(null);
+    setUnit1Photos([]);
+    setUnit2Photos([]);
+    setUnit1PhotoSourceUrl(null);
+    setUnit2PhotoSourceUrl(null);
+    setPhotoChecks({});
+
+    try {
+      const resp = await apiRequest("POST", "/api/community/photo-fetch-jobs", {
+        item: {
+          id: "current-combo",
+          label: `${selectedCommunity.name} photo fetch`,
+          communityName: selectedCommunity.name,
+          streetAddress: editedStreetAddress.trim() || suggestedStreetAddress || undefined,
+          city: selectedCommunity.city,
+          state: selectedCommunity.state,
+          unit1: {
+            url: selectedUnit1.url,
+            title: selectedUnit1.title,
+            bedrooms: selectedUnit1.bedrooms,
+            address: (selectedUnit1 as any).address,
+          },
+          unit2: {
+            url: selectedUnit2.url,
+            title: selectedUnit2.title,
+            bedrooms: selectedUnit2.bedrooms,
+            address: (selectedUnit2 as any).address,
+          },
+        },
+      });
+      const data = await resp.json();
+      if (data.job) {
+        applyPhotoFetchJob(data.job);
+        return true;
+      }
+      return false;
+    } catch (e: any) {
+      console.warn("[add-community] server photo fetch job failed; falling back to direct fetch", e?.message || e);
+      setPhotoFetchJobId(null);
+      setPhotoFetchJob(null);
+      return false;
+    }
+  }, [
+    selectedCommunity,
+    selectedUnit1,
+    selectedUnit2,
+    editedStreetAddress,
+    suggestedStreetAddress,
+    applyPhotoFetchJob,
+  ]);
+
   const handleConfirmUnits = useCallback(async () => {
     if (!selectedUnit1 || !selectedUnit2) {
       toast({ title: "Please select two units to combine", variant: "destructive" });
       return;
     }
+    if (await startServerPhotoFetchJob()) return;
     const runId = photoFetchRunRef.current + 1;
     photoFetchRunRef.current = runId;
     const startedAt = Date.now();
@@ -920,13 +1059,14 @@ export default function AddCommunity() {
         setPhotoFetchStartedAt(null);
       }
     }
-  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, toast, postJsonWithTimeout]);
+  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, toast, postJsonWithTimeout, startServerPhotoFetchJob]);
 
   useEffect(() => {
     if (!draftHydratedRef.current || !draftAutosaveReady) return;
     if (step !== 4 || photosLoading) return;
     if (!selectedUnit1 || !selectedUnit2) return;
     if (unit1Photos.length + unit2Photos.length > 0) return;
+    if (photoFetchJobId) return;
     if (photoAutoResumeRef.current) return;
     photoAutoResumeRef.current = true;
     window.setTimeout(() => {
@@ -938,6 +1078,7 @@ export default function AddCommunity() {
     photosLoading,
     selectedUnit1,
     selectedUnit2,
+    photoFetchJobId,
     unit1Photos.length,
     unit2Photos.length,
     handleConfirmUnits,
@@ -1959,9 +2100,16 @@ export default function AddCommunity() {
             </div>
 
             {photosLoading && (
-              <div className="flex items-center gap-3 py-12 justify-center text-muted-foreground">
-                <Loader2 className="h-5 w-5 animate-spin" />
-                Fetching photos from Zillow listing pages…
+              <div className="flex flex-col items-center gap-3 py-12 justify-center text-muted-foreground">
+                <div className="flex items-center gap-3">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  <span>{photoFetchJob?.items?.[0]?.message || "Fetching photos from Zillow listing pages…"}</span>
+                </div>
+                {photoFetchJobId && (
+                  <p className="text-xs">
+                    Server job running. You can leave this tab and come back; this page will reconnect to the job.
+                  </p>
+                )}
               </div>
             )}
 

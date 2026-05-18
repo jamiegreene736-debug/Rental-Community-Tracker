@@ -21126,6 +21126,329 @@ Return ONLY compact JSON with this exact shape:
     return res.json({ ok: true });
   });
 
+  type ComboPhotoFetchStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+  type ComboPhotoFetchUnit = {
+    url?: string;
+    title?: string;
+    bedrooms?: number;
+    address?: string;
+  };
+  type ComboPhotoFetchItemInput = {
+    id?: string;
+    label?: string;
+    communityName?: string;
+    streetAddress?: string;
+    city?: string;
+    state?: string;
+    unit1?: ComboPhotoFetchUnit;
+    unit2?: ComboPhotoFetchUnit;
+  };
+  type ComboPhotoFetchItem = Required<Pick<ComboPhotoFetchItemInput, "id" | "label">> & Omit<ComboPhotoFetchItemInput, "id" | "label"> & {
+    status: ComboPhotoFetchStatus;
+    phase: string;
+    message: string;
+    startedAt: number | null;
+    finishedAt: number | null;
+    unit1Photos: Array<{ url: string; label?: string }>;
+    unit2Photos: Array<{ url: string; label?: string }>;
+    unit1SourceUrl: string | null;
+    unit2SourceUrl: string | null;
+    error: string | null;
+  };
+  type ComboPhotoFetchJob = {
+    id: string;
+    status: ComboPhotoFetchStatus;
+    createdAt: number;
+    updatedAt: number;
+    startedAt: number | null;
+    finishedAt: number | null;
+    cancelRequested: boolean;
+    currentIndex: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    items: ComboPhotoFetchItem[];
+  };
+
+  const comboPhotoFetchJobs = new Map<string, ComboPhotoFetchJob>();
+  const COMBO_PHOTO_FETCH_JOB_TTL_MS = 12 * 60 * 60 * 1000;
+  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 4 * 60 * 1000;
+
+  const pruneComboPhotoFetchJobs = () => {
+    const cutoff = Date.now() - COMBO_PHOTO_FETCH_JOB_TTL_MS;
+    for (const [id, job] of comboPhotoFetchJobs.entries()) {
+      if ((job.finishedAt ?? job.updatedAt) < cutoff) comboPhotoFetchJobs.delete(id);
+    }
+  };
+  const serializeComboPhotoFetchJob = (job: ComboPhotoFetchJob) => ({
+    ...job,
+    createdAt: new Date(job.createdAt).toISOString(),
+    updatedAt: new Date(job.updatedAt).toISOString(),
+    startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
+    finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+    items: job.items.map((item) => ({
+      ...item,
+      startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
+      finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
+    })),
+  });
+  const comboPhotoBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
+  const listingKeyForComboPhotoJob = (raw: string | null | undefined): string => {
+    if (!raw) return "";
+    try {
+      const u = new URL(raw);
+      return `${u.hostname.replace(/^www\./i, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase()}`;
+    } catch {
+      return String(raw).trim().toLowerCase().replace(/[?#].*$/, "").replace(/\/+$/, "");
+    }
+  };
+  const photoSetLooksSameForComboPhotoJob = (
+    a: Array<{ url: string }>,
+    b: Array<{ url: string }>,
+  ): boolean => {
+    if (a.length === 0 || b.length === 0) return false;
+    const keys = new Set(a.map((p) => p.url.replace(/[?#].*$/, "").toLowerCase()));
+    const overlap = b.filter((p) => keys.has(p.url.replace(/[?#].*$/, "").toLowerCase())).length;
+    return overlap / Math.min(a.length, b.length) >= 0.8;
+  };
+  const fetchComboPhotoJson = async (url: string, body: unknown) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || data?.message || `HTTP ${resp.status}`);
+      return data as any;
+    } catch (e: any) {
+      if (e?.name === "AbortError") throw new Error("Photo fetch timed out");
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const buildComboPhotoFetchBody = (
+    item: ComboPhotoFetchItem,
+    unit: ComboPhotoFetchUnit | undefined,
+    skipUrls: string[] = [],
+    bedroomOverride?: number | "any",
+  ) => unit?.url
+    ? { url: unit.url }
+    : {
+        communityName: item.communityName,
+        streetAddress: unit?.address || item.streetAddress || undefined,
+        city: item.city,
+        state: item.state,
+        bedrooms: bedroomOverride ?? unit?.bedrooms ?? undefined,
+        skipUrls,
+      };
+  const canComboPhotoFetchUnit = (item: ComboPhotoFetchItem, unit: ComboPhotoFetchUnit | undefined) =>
+    !!(unit?.url || (item.communityName && unit?.bedrooms));
+  const fetchComboPhotosForUnit = async (
+    job: ComboPhotoFetchJob,
+    item: ComboPhotoFetchItem,
+    unit: ComboPhotoFetchUnit | undefined,
+    blockedUrls: string[] = [],
+    avoidPhotos: Array<{ url: string; label?: string }> = [],
+  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean }> => {
+    const seenUrls = new Set(blockedUrls.filter(Boolean));
+    const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
+      { relaxed: false },
+      { relaxed: false },
+      { bedroomOverride: "any", relaxed: true },
+    ];
+    let best: { photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean } = {
+      photos: [],
+      sourceUrl: null,
+      relaxed: false,
+    };
+    for (const attempt of attempts) {
+      if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+      const data = await fetchComboPhotoJson(
+        `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
+        buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
+      );
+      const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
+      const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
+      const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKeyForComboPhotoJob(u) === listingKeyForComboPhotoJob(sourceUrl));
+      const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(avoidPhotos, photos);
+      if (photos.length > best.photos.length && !duplicateSource && !duplicatePhotos) {
+        best = { photos, sourceUrl, relaxed: attempt.relaxed };
+      }
+      if (sourceUrl) seenUrls.add(sourceUrl);
+      if (photos.length >= 3 && !duplicateSource && !duplicatePhotos) {
+        return { photos, sourceUrl, relaxed: attempt.relaxed };
+      }
+    }
+    return best;
+  };
+  const runComboPhotoFetchItem = async (job: ComboPhotoFetchJob, item: ComboPhotoFetchItem) => {
+    item.status = "running";
+    item.phase = "unit1";
+    item.message = "Fetching Unit A photos";
+    item.startedAt = Date.now();
+    job.updatedAt = Date.now();
+
+    if (!canComboPhotoFetchUnit(item, item.unit1) && !canComboPhotoFetchUnit(item, item.unit2)) {
+      throw new Error("No direct listing URL or community/bedroom search data was available");
+    }
+
+    let firstPhotos: Array<{ url: string; label?: string }> = [];
+    let firstSourceUrl: string | null = null;
+    if (canComboPhotoFetchUnit(item, item.unit1)) {
+      const first = await fetchComboPhotosForUnit(job, item, item.unit1);
+      firstPhotos = first.photos;
+      firstSourceUrl = first.sourceUrl;
+      item.unit1Photos = firstPhotos;
+      item.unit1SourceUrl = firstSourceUrl;
+      item.message = `Unit A photos fetched (${firstPhotos.length})`;
+      job.updatedAt = Date.now();
+    }
+
+    item.phase = "unit2";
+    item.message = "Fetching Unit B photos";
+    job.updatedAt = Date.now();
+    if (canComboPhotoFetchUnit(item, item.unit2)) {
+      const skipUrls = firstSourceUrl && !item.unit2?.url ? [firstSourceUrl] : [];
+      const second = await fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos);
+      let secondPhotos = second.photos;
+      if (!item.unit2?.url && firstPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(firstPhotos, secondPhotos)) {
+        secondPhotos = [];
+      }
+      item.unit2Photos = secondPhotos;
+      item.unit2SourceUrl = second.sourceUrl;
+      item.message = `Unit B photos fetched (${secondPhotos.length})`;
+      if (second.relaxed) item.message = `${item.message}; broader same-community search was used`;
+      job.updatedAt = Date.now();
+    }
+
+    item.phase = "done";
+    const total = item.unit1Photos.length + item.unit2Photos.length;
+    if (item.unit1Photos.length < 3 || item.unit2Photos.length < 3) {
+      item.error = "Photo discovery completed, but one or both units had fewer than 3 independent photos.";
+    }
+    item.message = total > 0 ? `${total} photos fetched` : "No photos were found";
+  };
+  const runComboPhotoFetchJob = async (jobId: string) => {
+    const job = comboPhotoFetchJobs.get(jobId);
+    if (!job) return;
+    job.status = "running";
+    job.startedAt = Date.now();
+    job.updatedAt = Date.now();
+    for (let i = 0; i < job.items.length; i += 1) {
+      job.currentIndex = i;
+      const item = job.items[i];
+      if (job.cancelRequested) {
+        item.status = "cancelled";
+        item.finishedAt = Date.now();
+        job.cancelled += 1;
+        continue;
+      }
+      try {
+        await runComboPhotoFetchItem(job, item);
+        item.status = "completed";
+        job.completed += 1;
+      } catch (e: any) {
+        if (e?.cancelled || job.cancelRequested) {
+          item.status = "cancelled";
+          item.error = "Cancelled by operator";
+          job.cancelled += 1;
+        } else {
+          item.status = "failed";
+          item.error = e?.message ?? String(e);
+          item.message = item.error || "Photo fetch failed";
+          job.failed += 1;
+        }
+      } finally {
+        item.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+      }
+    }
+    job.finishedAt = Date.now();
+    job.updatedAt = Date.now();
+    if (job.cancelRequested) job.status = "cancelled";
+    else if (job.failed > 0 && job.completed === 0) job.status = "failed";
+    else job.status = "completed";
+    console.log(`[combo-photo-fetch] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
+  };
+
+  app.post("/api/community/photo-fetch-jobs", async (req, res) => {
+    pruneComboPhotoFetchJobs();
+    const body = (req.body ?? {}) as { items?: ComboPhotoFetchItemInput[]; item?: ComboPhotoFetchItemInput };
+    const requestedItems = Array.isArray(body.items) && body.items.length > 0
+      ? body.items
+      : body.item
+        ? [body.item]
+        : [];
+    if (requestedItems.length === 0) return res.status(400).json({ error: "items required" });
+    const now = Date.now();
+    const id = `cpj_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const items: ComboPhotoFetchItem[] = requestedItems.slice(0, 25).map((input, index) => ({
+      id: input.id || `item_${index + 1}`,
+      label: input.label || input.communityName || `Photo job ${index + 1}`,
+      communityName: input.communityName,
+      streetAddress: input.streetAddress,
+      city: input.city,
+      state: input.state,
+      unit1: input.unit1,
+      unit2: input.unit2,
+      status: "queued",
+      phase: "queued",
+      message: "Queued",
+      startedAt: null,
+      finishedAt: null,
+      unit1Photos: [],
+      unit2Photos: [],
+      unit1SourceUrl: null,
+      unit2SourceUrl: null,
+      error: null,
+    }));
+    const job: ComboPhotoFetchJob = {
+      id,
+      status: "queued",
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+      cancelRequested: false,
+      currentIndex: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      items,
+    };
+    comboPhotoFetchJobs.set(id, job);
+    void runComboPhotoFetchJob(id);
+    res.status(202).json({ job: serializeComboPhotoFetchJob(job) });
+  });
+
+  app.get("/api/community/photo-fetch-jobs/:jobId", (req, res) => {
+    pruneComboPhotoFetchJobs();
+    const job = comboPhotoFetchJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Photo fetch job not found" });
+    res.json({ job: serializeComboPhotoFetchJob(job) });
+  });
+
+  app.post("/api/community/photo-fetch-jobs/:jobId/cancel", (req, res) => {
+    const job = comboPhotoFetchJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Photo fetch job not found" });
+    job.cancelRequested = true;
+    for (const item of job.items) {
+      if (item.status === "queued") {
+        item.status = "cancelled";
+        item.finishedAt = Date.now();
+        job.cancelled += 1;
+      }
+    }
+    if (job.status === "queued") job.status = "cancelled";
+    job.updatedAt = Date.now();
+    res.json({ job: serializeComboPhotoFetchJob(job) });
+  });
+
   // ============================================================
   // Step 4: Fetch unit photos
   //
