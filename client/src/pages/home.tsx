@@ -580,6 +580,37 @@ export default function Home() {
       const n = Number(String(s ?? "").replace(/[^\d.]/g, ""));
       return Number.isFinite(n) ? n : 0;
     };
+    const positiveInt = (value: unknown): number | null => {
+      const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const inferBedrooms = (d: CommunityDraft, unitKey: "unit1" | "unit2") => {
+      const stored = unitKey === "unit1" ? d.unit1Bedrooms : d.unit2Bedrooms;
+      const combined = (d as any).singleListing === true ? d.combinedBedrooms : null;
+      const structured = positiveInt(stored) ?? positiveInt(combined);
+      if (structured) return structured;
+
+      const text = [
+        unitKey === "unit1" ? (d as any).unit1Description : (d as any).unit2Description,
+        unitKey === "unit1" ? d.unit1Bedding : d.unit2Bedding,
+        d.listingTitle,
+        d.bookingTitle,
+        d.name,
+        d.unitTypes,
+        d.listingDescription,
+      ].filter(Boolean).join(" ");
+      const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+      return positiveInt(match?.[1]) ?? 0;
+    };
+    const inferSleeps = (d: CommunityDraft, bedrooms: number) => {
+      const stored = positiveInt(d.unit1MaxGuests);
+      if (stored) return stored;
+      const text = [d.listingTitle, d.bookingTitle, d.listingDescription, d.unit1Bedding]
+        .filter(Boolean)
+        .join(" ");
+      const match = text.match(/\b(?:sleeps?|sleeping\s+up\s+to|for)\s*(\d{1,2})\b/i);
+      return positiveInt(match?.[1]) ?? (bedrooms > 0 ? bedrooms * 2 : 0);
+    };
     return communityDraftsDataForRows.map((d) => {
       // CODEX NOTE (2026-05-04, claude/single-listing): branch on
       // `singleListing` so standalone drafts render with `multiUnit:
@@ -588,11 +619,11 @@ export default function Home() {
       // before the column existed are treated as combos (existing
       // behavior).
       const isSingle = (d as any).singleListing === true;
-      const u1Br = d.unit1Bedrooms ?? 0;
-      const u2Br = d.unit2Bedrooms ?? 0;
-      const totalBr = isSingle ? u1Br : (d.combinedBedrooms ?? (u1Br + u2Br));
+      const u1Br = inferBedrooms(d, "unit1");
+      const u2Br = isSingle ? 0 : inferBedrooms(d, "unit2");
+      const totalBr = isSingle ? u1Br : (positiveInt(d.combinedBedrooms) ?? (u1Br + u2Br));
       const totalGuests = isSingle
-        ? (d.unit1MaxGuests ?? u1Br * 2)
+        ? inferSleeps(d, u1Br)
         : (((d.unit1MaxGuests ?? 0) + (d.unit2MaxGuests ?? 0)) || totalBr * 2);
       const totalBath = isSingle
         ? parseBath(d.unit1Bathrooms ?? null)
