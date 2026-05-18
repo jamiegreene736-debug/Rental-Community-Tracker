@@ -300,9 +300,13 @@ export default function AddCommunity() {
   type BulkComboListingJobPayload = {
     id: string;
     status: "queued" | "running" | "completed" | "failed" | "cancelled";
+    currentIndex?: number;
     completed: number;
     failed: number;
     cancelled: number;
+    lockedBy?: string | null;
+    lockExpiresAt?: string | null;
+    updatedAt?: string | null;
     items: Array<{
       id: string;
       label: string;
@@ -311,6 +315,10 @@ export default function AddCommunity() {
       message: string;
       draftId: number | null;
       error: string | null;
+      attemptCount?: number;
+      heartbeatAt?: string | null;
+      startedAt?: string | null;
+      finishedAt?: string | null;
     }>;
   };
   const [bulkPairingIndexes, setBulkPairingIndexes] = useState<Set<number>>(new Set());
@@ -947,6 +955,21 @@ export default function AddCommunity() {
       toast({ title: "Bulk listing queue cancellation sent" });
     } catch (e: any) {
       toast({ title: "Cancel failed", description: e.message, variant: "destructive" });
+    }
+  }, [bulkComboJobId, toast]);
+
+  const retryFailedBulkComboListings = useCallback(async () => {
+    if (!bulkComboJobId) return;
+    try {
+      const resp = await apiRequest("POST", `/api/community/bulk-combo-listing-jobs/${bulkComboJobId}/retry-failed`);
+      const data = await resp.json();
+      if (data.job) {
+        setBulkComboJob(data.job);
+        setBulkComboOpen(true);
+      }
+      toast({ title: "Failed items re-queued", description: `${data.retried || 0} failed item${data.retried === 1 ? "" : "s"} queued for retry.` });
+    } catch (e: any) {
+      toast({ title: "Retry failed", description: e.message, variant: "destructive" });
     }
   }, [bulkComboJobId, toast]);
 
@@ -1845,6 +1868,11 @@ export default function AddCommunity() {
                   </p>
                 </div>
                 <div className="flex gap-2">
+                  {bulkComboJob?.failed ? (
+                    <Button variant="outline" size="sm" onClick={retryFailedBulkComboListings}>
+                      Retry failed only
+                    </Button>
+                  ) : null}
                   {bulkComboJob && !["completed", "failed", "cancelled"].includes(bulkComboJob.status) && (
                     <Button variant="destructive" size="sm" onClick={cancelBulkComboListings}>Cancel</Button>
                   )}
@@ -1890,6 +1918,20 @@ export default function AddCommunity() {
                       <p className="text-sm font-semibold">{bulkComboJob.cancelled}</p>
                     </div>
                   </div>
+                  <div className="grid grid-cols-1 gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+                    <div className="rounded-md border bg-muted/30 p-2">
+                      <span className="font-medium text-foreground">Current item:</span>{" "}
+                      {typeof bulkComboJob.currentIndex === "number" ? `${bulkComboJob.currentIndex + 1} of ${bulkComboJob.items.length}` : "Waiting"}
+                    </div>
+                    <div className="rounded-md border bg-muted/30 p-2">
+                      <span className="font-medium text-foreground">Last heartbeat:</span>{" "}
+                      {bulkComboJob.updatedAt ? new Date(bulkComboJob.updatedAt).toLocaleTimeString() : "None yet"}
+                    </div>
+                    <div className="rounded-md border bg-muted/30 p-2">
+                      <span className="font-medium text-foreground">Worker lease:</span>{" "}
+                      {bulkComboJob.lockExpiresAt ? `until ${new Date(bulkComboJob.lockExpiresAt).toLocaleTimeString()}` : "Not locked"}
+                    </div>
+                  </div>
 
                   <div className="max-h-96 overflow-y-auto rounded-md border">
                     {bulkComboJob.items.map((item) => {
@@ -1906,6 +1948,10 @@ export default function AddCommunity() {
                               <p className="truncate text-sm font-medium">{item.label}</p>
                               <p className="mt-0.5 truncate text-xs text-muted-foreground">
                                 {item.message || item.error || "Waiting for its turn"}
+                              </p>
+                              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                Phase: {item.phase || "queued"} · attempts {item.attemptCount ?? 0}
+                                {item.heartbeatAt ? ` · heartbeat ${new Date(item.heartbeatAt).toLocaleTimeString()}` : ""}
                               </p>
                               {item.draftId && (
                                 <p className="mt-0.5 text-xs text-emerald-700">Saved as dashboard draft #{item.draftId}</p>

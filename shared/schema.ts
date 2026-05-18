@@ -401,6 +401,10 @@ export const communityDrafts = pgTable("community_drafts", {
   strPermit: text("str_permit"),
   dbprLicense: text("dbpr_license"),
   touristTaxAccount: text("tourist_tax_account"),
+  // Server-owned queue idempotency. Bulk listing jobs send a stable key so a
+  // retry can return the original dashboard draft instead of creating a
+  // duplicate row after a timeout or deploy interruption.
+  queueIdempotencyKey: text("queue_idempotency_key"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

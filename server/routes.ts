@@ -21167,6 +21167,63 @@ Return ONLY compact JSON with this exact shape:
   const photoFetchLimiter = createQueueLimiter(queueConcurrency("COMBO_PHOTO_FETCH_CONCURRENCY", 2, 4));
   const bulkComboListingLimiter = createQueueLimiter(queueConcurrency("BULK_COMBO_LISTING_CONCURRENCY", 1, 3));
   const communityPricingRefreshLimiter = createQueueLimiter(queueConcurrency("COMMUNITY_PRICING_REFRESH_CONCURRENCY", 1, 3));
+  const activeQueueAbortControllers = new Map<string, Set<AbortController>>();
+  const abortQueuedWork = (key: string, reason: string) => {
+    const controllers = activeQueueAbortControllers.get(key);
+    if (!controllers?.size) return 0;
+    for (const controller of controllers) {
+      try {
+        controller.abort(reason);
+      } catch {
+        controller.abort();
+      }
+    }
+    return controllers.size;
+  };
+  const registerQueueAbortController = (key: string | undefined, controller: AbortController) => {
+    if (!key) return () => {};
+    let controllers = activeQueueAbortControllers.get(key);
+    if (!controllers) {
+      controllers = new Set();
+      activeQueueAbortControllers.set(key, controllers);
+    }
+    controllers.add(controller);
+    return () => {
+      controllers?.delete(controller);
+      if (controllers && controllers.size === 0) activeQueueAbortControllers.delete(key);
+    };
+  };
+  const queueCircuitBreakers = new Map<string, { failures: number; firstFailureAt: number; cooldownUntil: number }>();
+  const QUEUE_CIRCUIT_FAILURE_WINDOW_MS = 3 * 60 * 1000;
+  const QUEUE_CIRCUIT_COOLDOWN_MS = 2 * 60 * 1000;
+  const queueCircuitKeyForUrl = (url: string) => {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.hostname}${parsed.pathname}`;
+    } catch {
+      return url;
+    }
+  };
+  const assertQueueCircuitOpen = (key: string) => {
+    const state = queueCircuitBreakers.get(key);
+    if (!state) return;
+    if (state.cooldownUntil > Date.now()) {
+      throw new Error(`Temporary vendor cooldown for ${key}; retry after ${new Date(state.cooldownUntil).toLocaleTimeString()}`);
+    }
+    if (state.cooldownUntil) queueCircuitBreakers.delete(key);
+  };
+  const recordQueueCircuitSuccess = (key: string) => {
+    queueCircuitBreakers.delete(key);
+  };
+  const recordQueueCircuitFailure = (key: string) => {
+    const now = Date.now();
+    const prior = queueCircuitBreakers.get(key);
+    const fresh = prior && now - prior.firstFailureAt <= QUEUE_CIRCUIT_FAILURE_WINDOW_MS
+      ? { ...prior, failures: prior.failures + 1 }
+      : { failures: 1, firstFailureAt: now, cooldownUntil: 0 };
+    if (fresh.failures >= 3) fresh.cooldownUntil = now + QUEUE_CIRCUIT_COOLDOWN_MS;
+    queueCircuitBreakers.set(key, fresh);
+  };
 
   type ComboPhotoFetchStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
   type ComboPhotoFetchUnit = {
@@ -21207,6 +21264,8 @@ Return ONLY compact JSON with this exact shape:
     startedAt: number | null;
     finishedAt: number | null;
     cancelRequested: boolean;
+    lockedBy: string | null;
+    lockExpiresAt: number | null;
     currentIndex: number;
     completed: number;
     failed: number;
@@ -21319,6 +21378,8 @@ Return ONLY compact JSON with this exact shape:
       startedAt: toQueueMs(jobRow.startedAt),
       finishedAt: toQueueMs(jobRow.finishedAt),
       cancelRequested: Boolean(jobRow.cancelRequested),
+      lockedBy: jobRow.lockedBy ?? null,
+      lockExpiresAt: toQueueMs(jobRow.lockExpiresAt),
       currentIndex: jobRow.currentIndex ?? 0,
       completed: jobRow.completed ?? 0,
       failed: jobRow.failed ?? 0,
@@ -21350,6 +21411,8 @@ Return ONLY compact JSON with this exact shape:
     updatedAt: new Date(job.updatedAt).toISOString(),
     startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
     finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+    lockedBy: job.lockedBy,
+    lockExpiresAt: job.lockExpiresAt ? new Date(job.lockExpiresAt).toISOString() : null,
     items: job.items.map((item) => ({
       ...item,
       startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
@@ -21376,8 +21439,20 @@ Return ONLY compact JSON with this exact shape:
     const overlap = b.filter((p) => keys.has(p.url.replace(/[?#].*$/, "").toLowerCase())).length;
     return overlap / Math.min(a.length, b.length) >= 0.8;
   };
-  const fetchComboPhotoJson = async (url: string, body: unknown) => {
+  const fetchComboPhotoJson = async (url: string, body: unknown, options: { abortKey?: string; signal?: AbortSignal } = {}) => {
+    const circuitKey = queueCircuitKeyForUrl(url);
+    assertQueueCircuitOpen(circuitKey);
     const controller = new AbortController();
+    const unregister = registerQueueAbortController(options.abortKey, controller);
+    const abortFromParent = () => {
+      try {
+        controller.abort(options.signal?.reason || "Parent request aborted");
+      } catch {
+        controller.abort();
+      }
+    };
+    if (options.signal?.aborted) abortFromParent();
+    else options.signal?.addEventListener("abort", abortFromParent, { once: true });
     const timer = setTimeout(() => controller.abort(), COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS);
     try {
       const resp = await fetch(url, {
@@ -21388,12 +21463,16 @@ Return ONLY compact JSON with this exact shape:
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data?.error || data?.message || `HTTP ${resp.status}`);
+      recordQueueCircuitSuccess(circuitKey);
       return data as any;
     } catch (e: any) {
+      if (e?.name !== "AbortError") recordQueueCircuitFailure(circuitKey);
       if (e?.name === "AbortError") throw new Error("Photo fetch timed out");
       throw e;
     } finally {
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abortFromParent);
+      unregister();
     }
   };
   const buildComboPhotoFetchBody = (
@@ -21419,6 +21498,8 @@ Return ONLY compact JSON with this exact shape:
     unit: ComboPhotoFetchUnit | undefined,
     blockedUrls: string[] = [],
     avoidPhotos: Array<{ url: string; label?: string }> = [],
+    abortKey?: string,
+    signal?: AbortSignal,
   ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean }> => {
     const seenUrls = new Set(blockedUrls.filter(Boolean));
     const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
@@ -21436,6 +21517,7 @@ Return ONLY compact JSON with this exact shape:
       const data = await fetchComboPhotoJson(
         `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
         buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
+        { abortKey, signal },
       );
       const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
       const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
@@ -21455,6 +21537,8 @@ Return ONLY compact JSON with this exact shape:
     job: ComboPhotoFetchJob,
     item: ComboPhotoFetchItem,
     onProgress?: (item: ComboPhotoFetchItem) => Promise<void> | void,
+    abortKey?: string,
+    signal?: AbortSignal,
   ) => {
     const persistProgress = async () => {
       item.heartbeatAt = Date.now();
@@ -21474,7 +21558,7 @@ Return ONLY compact JSON with this exact shape:
     let firstPhotos: Array<{ url: string; label?: string }> = [];
     let firstSourceUrl: string | null = null;
     if (canComboPhotoFetchUnit(item, item.unit1)) {
-      const first = await fetchComboPhotosForUnit(job, item, item.unit1);
+      const first = await fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal);
       firstPhotos = first.photos;
       firstSourceUrl = first.sourceUrl;
       item.unit1Photos = firstPhotos;
@@ -21488,7 +21572,7 @@ Return ONLY compact JSON with this exact shape:
     await persistProgress();
     if (canComboPhotoFetchUnit(item, item.unit2)) {
       const skipUrls = firstSourceUrl && !item.unit2?.url ? [firstSourceUrl] : [];
-      const second = await fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos);
+      const second = await fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos, abortKey, signal);
       let secondPhotos = second.photos;
       if (!item.unit2?.url && firstPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(firstPhotos, secondPhotos)) {
         secondPhotos = [];
@@ -21515,6 +21599,7 @@ Return ONLY compact JSON with this exact shape:
       const leaseClaimed = await claimComboPhotoFetchJobLease(jobId);
       if (!leaseClaimed) return;
       activeComboPhotoFetchJobIds.add(jobId);
+      const abortKey = `combo-photo-fetch:${jobId}`;
       try {
         const job = await loadComboPhotoFetchJob(jobId);
         if (!job) return;
@@ -21541,7 +21626,7 @@ Return ONLY compact JSON with this exact shape:
           try {
             item.attemptCount += 1;
             item.heartbeatAt = Date.now();
-            await runComboPhotoFetchItem(job, item, async () => persistComboPhotoFetchSnapshot(job));
+            await runComboPhotoFetchItem(job, item, async () => persistComboPhotoFetchSnapshot(job), abortKey);
             item.status = "completed";
           } catch (e: any) {
             if (e?.cancelled || job.cancelRequested) {
@@ -21620,6 +21705,8 @@ Return ONLY compact JSON with this exact shape:
       startedAt: null,
       finishedAt: null,
       cancelRequested: false,
+      lockedBy: null,
+      lockExpiresAt: null,
       currentIndex: 0,
       completed: 0,
       failed: 0,
@@ -21686,6 +21773,7 @@ Return ONLY compact JSON with this exact shape:
     const job = await loadComboPhotoFetchJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Photo fetch job not found" });
     job.cancelRequested = true;
+    abortQueuedWork(`combo-photo-fetch:${job.id}`, "Photo fetch queue cancelled by operator");
     for (const item of job.items) {
       if (item.status === "queued") {
         item.status = "cancelled";
@@ -21726,6 +21814,8 @@ Return ONLY compact JSON with this exact shape:
     message: string;
     error: string | null;
     attemptCount: number;
+    lockedBy: string | null;
+    lockExpiresAt: number | null;
     createdAt: number;
     updatedAt: number;
     startedAt: number | null;
@@ -21750,6 +21840,8 @@ Return ONLY compact JSON with this exact shape:
       message: row.message || "Queued market pricing refresh",
       error: row.error ?? null,
       attemptCount: row.attemptCount ?? 0,
+      lockedBy: row.lockedBy ?? null,
+      lockExpiresAt: toQueueMs(row.lockExpiresAt),
       createdAt,
       updatedAt,
       startedAt: toQueueMs(row.startedAt),
@@ -21762,6 +21854,8 @@ Return ONLY compact JSON with this exact shape:
     updatedAt: new Date(job.updatedAt).toISOString(),
     startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
     finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+    lockedBy: job.lockedBy,
+    lockExpiresAt: job.lockExpiresAt ? new Date(job.lockExpiresAt).toISOString() : null,
   });
   const persistCommunityPricingRefreshJob = async (job: CommunityPricingRefreshJob) => {
     const now = new Date(job.updatedAt || Date.now());
@@ -21800,6 +21894,7 @@ Return ONLY compact JSON with this exact shape:
       const leaseClaimed = await claimCommunityPricingRefreshJobLease(jobId);
       if (!leaseClaimed) return;
       activeCommunityPricingRefreshJobIds.add(jobId);
+      const abortKey = `pricing-refresh:${jobId}`;
       try {
         const job = await loadCommunityPricingRefreshJob(jobId);
         if (!job) return;
@@ -21821,7 +21916,16 @@ Return ONLY compact JSON with this exact shape:
         let resp: Response;
         let text = "";
         try {
-          resp = await fetch(`${comboPhotoBaseUrl()}/api/community/${job.draftId}/refresh-pricing?run=1&refreshToken=${encodeURIComponent(job.id)}`, { method: "POST" });
+          const controller = new AbortController();
+          const unregister = registerQueueAbortController(abortKey, controller);
+          try {
+            resp = await fetch(`${comboPhotoBaseUrl()}/api/community/${job.draftId}/refresh-pricing?run=1&refreshToken=${encodeURIComponent(job.id)}`, {
+              method: "POST",
+              signal: controller.signal,
+            });
+          } finally {
+            unregister();
+          }
           text = await resp.text().catch(() => "");
         } finally {
           clearInterval(heartbeat);
@@ -21874,6 +21978,8 @@ Return ONLY compact JSON with this exact shape:
       message: "Queued market pricing refresh",
       error: null,
       attemptCount: 0,
+      lockedBy: null,
+      lockExpiresAt: null,
       createdAt: now,
       updatedAt: now,
       startedAt: null,
@@ -21975,6 +22081,8 @@ Return ONLY compact JSON with this exact shape:
     startedAt: number | null;
     finishedAt: number | null;
     cancelRequested: boolean;
+    lockedBy: string | null;
+    lockExpiresAt: number | null;
     currentIndex: number;
     completed: number;
     failed: number;
@@ -22103,6 +22211,8 @@ Return ONLY compact JSON with this exact shape:
       startedAt: toBulkComboMs(jobRow.startedAt),
       finishedAt: toBulkComboMs(jobRow.finishedAt),
       cancelRequested: Boolean(jobRow.cancelRequested),
+      lockedBy: jobRow.lockedBy ?? null,
+      lockExpiresAt: toBulkComboMs(jobRow.lockExpiresAt),
       currentIndex: jobRow.currentIndex ?? 0,
       completed: jobRow.completed ?? 0,
       failed: jobRow.failed ?? 0,
@@ -22187,6 +22297,8 @@ Return ONLY compact JSON with this exact shape:
     updatedAt: new Date(job.updatedAt).toISOString(),
     startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
     finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+    lockedBy: job.lockedBy,
+    lockExpiresAt: job.lockExpiresAt ? new Date(job.lockExpiresAt).toISOString() : null,
     items: job.items.map((item) => ({
       ...item,
       startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
@@ -22247,6 +22359,21 @@ Return ONLY compact JSON with this exact shape:
     }
     return null;
   };
+  const bulkComboIdempotencyKey = (jobId: string, item: BulkComboListingItem) => {
+    const community = item.community || {};
+    const pairing = item.pairing || {};
+    return [
+      "bulk-combo",
+      jobId,
+      item.id,
+      normalizeQueueText(community.name),
+      normalizeQueueText(community.city),
+      normalizeQueueText(community.state),
+      pairing.unit1Beds ?? "",
+      pairing.unit2Beds ?? "",
+      pairing.totalBeds ?? "",
+    ].join(":");
+  };
   const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
     if (item.draftId) {
       item.status = "completed";
@@ -22297,6 +22424,7 @@ Return ONLY compact JSON with this exact shape:
     item.heartbeatAt = Date.now();
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
+    const abortKey = `bulk-combo-listing:${job.id}`;
     await runBulkComboListingStep(job, item, "photos", "Fetching unit photos", async () => {
       await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
         item.unit1Photos = updatedPhotoItem.unit1Photos;
@@ -22307,7 +22435,7 @@ Return ONLY compact JSON with this exact shape:
         item.heartbeatAt = Date.now();
         job.updatedAt = Date.now();
         await persistBulkComboListingSnapshot(job);
-      });
+      }, abortKey);
     });
     item.unit1Photos = photoItem.unit1Photos;
     item.unit2Photos = photoItem.unit2Photos;
@@ -22324,7 +22452,7 @@ Return ONLY compact JSON with this exact shape:
       unit1: { bedrooms: pairing.unit1Beds, url: "", address: undefined },
       unit2: { bedrooms: pairing.unit2Beds, url: "", address: undefined },
       suggestedRate: pairing.estimatedSellRate,
-    }));
+    }, { abortKey }));
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     const streetAddress = item.streetAddress || inferCommunityStreetAddress({
@@ -22334,6 +22462,7 @@ Return ONLY compact JSON with this exact shape:
       unitAddresses: [],
     });
     let draftId = await findExistingBulkComboDraftId(item, generated, streetAddress);
+    const idempotencyKey = bulkComboIdempotencyKey(job.id, item);
     if (draftId) {
       item.draftId = draftId;
       item.message = `Using existing draft #${draftId}; skipping duplicate dashboard save`;
@@ -22382,8 +22511,9 @@ Return ONLY compact JSON with this exact shape:
         strPermit: item.strPermit || generated.strPermitSample || null,
         dbprLicense: item.dbprLicense || null,
         touristTaxAccount: item.touristTaxAccount || null,
+        queueIdempotencyKey: idempotencyKey,
         status: "draft_ready",
-      }));
+      }, { abortKey }));
       draftId = Number(saveData?.id);
     }
     if (Number.isFinite(draftId) && draftId > 0) {
@@ -22395,7 +22525,7 @@ Return ONLY compact JSON with this exact shape:
             unit2Photos: item.unit2Photos.map((p) => p.url),
             unit1SourceUrl: item.unit1SourceUrl,
             unit2SourceUrl: item.unit2SourceUrl,
-          }).catch((e: any) => {
+          }, { abortKey }).catch((e: any) => {
             item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`;
           });
         }
@@ -22564,6 +22694,8 @@ Return ONLY compact JSON with this exact shape:
       startedAt: null,
       finishedAt: null,
       cancelRequested: false,
+      lockedBy: null,
+      lockExpiresAt: null,
       currentIndex: 0,
       completed: 0,
       failed: 0,
@@ -22631,6 +22763,7 @@ Return ONLY compact JSON with this exact shape:
     const job = await loadBulkComboListingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk combo listing job not found" });
     job.cancelRequested = true;
+    abortQueuedWork(`bulk-combo-listing:${job.id}`, "Bulk combo listing queue cancelled by operator");
     for (const item of job.items) {
       if (item.status === "queued") {
         item.status = "cancelled";
@@ -22642,6 +22775,32 @@ Return ONLY compact JSON with this exact shape:
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
     res.json({ job: serializeBulkComboListingJob(job) });
+  });
+
+  app.post("/api/community/bulk-combo-listing-jobs/:jobId/retry-failed", async (req, res) => {
+    const job = await loadBulkComboListingJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Bulk combo listing job not found" });
+    let reset = 0;
+    for (const item of job.items) {
+      if (item.status !== "failed") continue;
+      item.status = "queued";
+      item.phase = "queued";
+      item.message = "Queued for retry";
+      item.error = null;
+      item.finishedAt = null;
+      item.heartbeatAt = null;
+      item.attemptCount = 0;
+      reset += 1;
+    }
+    if (reset > 0) {
+      job.status = "queued";
+      job.cancelRequested = false;
+      job.finishedAt = null;
+      job.updatedAt = Date.now();
+      await persistBulkComboListingSnapshot(job);
+      void runBulkComboListingJob(job.id);
+    }
+    res.json({ job: serializeBulkComboListingJob(job), retried: reset });
   });
 
   const resumeBulkComboListingJobs = async () => {
@@ -22661,6 +22820,62 @@ Return ONLY compact JSON with this exact shape:
     }
   };
   setTimeout(() => void resumeBulkComboListingJobs(), 2_500).unref?.();
+
+  const cleanupStaleServerQueues = async () => {
+    const staleBefore = new Date(Date.now() - 45 * 60 * 1000);
+    const now = new Date();
+    try {
+      await db
+        .update(comboPhotoFetchJobRows)
+        .set({
+          status: "failed",
+          lockedBy: null,
+          lockExpiresAt: null,
+          finishedAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(comboPhotoFetchJobRows.status, "running"),
+          lt(comboPhotoFetchJobRows.updatedAt, staleBefore),
+          or(isNull(comboPhotoFetchJobRows.lockExpiresAt), lt(comboPhotoFetchJobRows.lockExpiresAt, now)),
+        ));
+      await db
+        .update(bulkComboListingJobRows)
+        .set({
+          status: "failed",
+          lockedBy: null,
+          lockExpiresAt: null,
+          finishedAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(bulkComboListingJobRows.status, "running"),
+          lt(bulkComboListingJobRows.updatedAt, staleBefore),
+          or(isNull(bulkComboListingJobRows.lockExpiresAt), lt(bulkComboListingJobRows.lockExpiresAt, now)),
+        ));
+      await db
+        .update(communityPricingRefreshJobRows)
+        .set({
+          status: "failed",
+          phase: "failed",
+          message: "Queue job went stale and was cleaned up",
+          error: "No heartbeat for more than 45 minutes",
+          lockedBy: null,
+          lockExpiresAt: null,
+          finishedAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(communityPricingRefreshJobRows.status, "running"),
+          lt(communityPricingRefreshJobRows.updatedAt, staleBefore),
+          or(isNull(communityPricingRefreshJobRows.lockExpiresAt), lt(communityPricingRefreshJobRows.lockExpiresAt, now)),
+        ));
+    } catch (e: any) {
+      console.warn("[server-queues] stale cleanup failed", e?.message ?? e);
+    }
+  };
+  setTimeout(() => void cleanupStaleServerQueues(), 6_000).unref?.();
+  setInterval(() => void cleanupStaleServerQueues(), 10 * 60 * 1000).unref?.();
 
   // ============================================================
   // Step 4: Fetch unit photos
@@ -24790,6 +25005,14 @@ Return ONLY compact JSON with this exact shape:
         reason: addressCheck.error,
         expectedStreet: addressCheck.expectedStreet,
       });
+    }
+    if (result.data.queueIdempotencyKey) {
+      const existingDraft = (await storage.getCommunityDrafts()).find(
+        (draft: any) => draft.queueIdempotencyKey === result.data.queueIdempotencyKey,
+      );
+      if (existingDraft) {
+        return res.json(existingDraft);
+      }
     }
 
     const draft = await storage.createCommunityDraft({
