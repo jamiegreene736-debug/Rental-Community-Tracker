@@ -21156,6 +21156,8 @@ Return ONLY compact JSON with this exact shape:
     unit1SourceUrl: string | null;
     unit2SourceUrl: string | null;
     error: string | null;
+    attemptCount: number;
+    heartbeatAt: number | null;
   };
   type ComboPhotoFetchJob = {
     id: string;
@@ -21500,6 +21502,15 @@ Return ONLY compact JSON with this exact shape:
     items: BulkComboListingItem[];
   };
   const activeBulkComboListingJobIds = new Set<string>();
+  const BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS = 3;
+  const BULK_COMBO_LISTING_STALE_MS = 5 * 60 * 1000;
+  const BULK_COMBO_LISTING_RETRY_BACKOFF_MS = [15_000, 45_000];
+  const BULK_COMBO_LISTING_STEP_TIMEOUTS_MS: Record<string, number> = {
+    photos: 4 * 60 * 1000,
+    copy: 90_000,
+    save: 60_000,
+    persist: 90_000,
+  };
   const toBulkComboMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
     if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -21522,6 +21533,13 @@ Return ONLY compact JSON with this exact shape:
     job.completed = job.items.filter((item) => item.status === "completed").length;
     job.failed = job.items.filter((item) => item.status === "failed").length;
     job.cancelled = job.items.filter((item) => item.status === "cancelled").length;
+  };
+  const sleepBulkComboListing = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const isBulkComboListingTimeout = (error: unknown) => !!(error as any)?.bulkComboTimeout;
+  const isBulkComboListingStale = (item: BulkComboListingItem) => {
+    if (item.status !== "running") return false;
+    const heartbeatAt = item.heartbeatAt ?? item.startedAt;
+    return !!heartbeatAt && Date.now() - heartbeatAt > BULK_COMBO_LISTING_STALE_MS;
   };
   const persistBulkComboListingSnapshot = async (job: BulkComboListingJob) => {
     refreshBulkComboListingCounts(job);
@@ -21554,6 +21572,8 @@ Return ONLY compact JSON with this exact shape:
           unit1SourceUrl: item.unit1SourceUrl,
           unit2SourceUrl: item.unit2SourceUrl,
           error: item.error,
+          attemptCount: item.attemptCount,
+          heartbeatAt: bulkComboDate(item.heartbeatAt),
           sortOrder,
           startedAt: bulkComboDate(item.startedAt),
           finishedAt: bulkComboDate(item.finishedAt),
@@ -21587,6 +21607,8 @@ Return ONLY compact JSON with this exact shape:
         unit1SourceUrl: row.unit1SourceUrl ?? null,
         unit2SourceUrl: row.unit2SourceUrl ?? null,
         error: row.error ?? null,
+        attemptCount: row.attemptCount ?? 0,
+        heartbeatAt: toBulkComboMs(row.heartbeatAt),
       };
     });
     const createdAt = toBulkComboMs(jobRow.createdAt) ?? Date.now();
@@ -21612,6 +21634,59 @@ Return ONLY compact JSON with this exact shape:
       void runBulkComboListingJob(job.id);
     }
   };
+  const touchBulkComboListingHeartbeat = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
+    const now = Date.now();
+    item.heartbeatAt = now;
+    job.updatedAt = now;
+    await db
+      .update(bulkComboListingJobRows)
+      .set({ updatedAt: new Date(now) })
+      .where(eq(bulkComboListingJobRows.id, job.id));
+    await db
+      .update(bulkComboListingJobItemRows)
+      .set({ heartbeatAt: new Date(now), updatedAt: new Date(now) })
+      .where(and(eq(bulkComboListingJobItemRows.jobId, job.id), eq(bulkComboListingJobItemRows.itemKey, item.id)));
+  };
+  const runBulkComboListingStep = async <T>(
+    job: BulkComboListingJob,
+    item: BulkComboListingItem,
+    phase: keyof typeof BULK_COMBO_LISTING_STEP_TIMEOUTS_MS,
+    message: string,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    item.phase = phase;
+    item.message = message;
+    item.status = "running";
+    item.heartbeatAt = Date.now();
+    job.updatedAt = Date.now();
+    await persistBulkComboListingSnapshot(job);
+    const timeoutMs = BULK_COMBO_LISTING_STEP_TIMEOUTS_MS[phase];
+    const heartbeat = setInterval(() => {
+      void touchBulkComboListingHeartbeat(job, item).catch((e: any) => {
+        console.warn(`[bulk-combo-listings] heartbeat failed for ${job.id}/${item.id}:`, e?.message ?? e);
+      });
+    }, 15_000);
+    let timeout: NodeJS.Timeout | null = null;
+    try {
+      return await Promise.race([
+        work(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            timeout = null;
+            const err = new Error(`${message} timed out after ${Math.round(timeoutMs / 1000)}s`);
+            (err as any).bulkComboTimeout = true;
+            reject(err);
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      clearInterval(heartbeat);
+      item.heartbeatAt = Date.now();
+      job.updatedAt = Date.now();
+      await persistBulkComboListingSnapshot(job);
+    }
+  };
   const serializeBulkComboListingJob = (job: BulkComboListingJob) => ({
     ...job,
     createdAt: new Date(job.createdAt).toISOString(),
@@ -21622,6 +21697,7 @@ Return ONLY compact JSON with this exact shape:
       ...item,
       startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
       finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
+      heartbeatAt: item.heartbeatAt ? new Date(item.heartbeatAt).toISOString() : null,
     })),
   });
   const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
@@ -21669,9 +21745,12 @@ Return ONLY compact JSON with this exact shape:
     item.phase = "photos";
     item.message = "Fetching unit photos";
     item.startedAt = Date.now();
+    item.heartbeatAt = Date.now();
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
-    await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem);
+    await runBulkComboListingStep(job, item, "photos", "Fetching unit photos", async () => {
+      await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem);
+    });
     item.unit1Photos = photoItem.unit1Photos;
     item.unit2Photos = photoItem.unit2Photos;
     item.unit1SourceUrl = photoItem.unit1SourceUrl;
@@ -21680,31 +21759,23 @@ Return ONLY compact JSON with this exact shape:
     await persistBulkComboListingSnapshot(job);
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
-    item.phase = "copy";
-    item.message = "Generating listing draft";
-    job.updatedAt = Date.now();
-    await persistBulkComboListingSnapshot(job);
-    const generated = await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/generate-listing`, {
+    const generated = await runBulkComboListingStep(job, item, "copy", "Generating listing draft", () => fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/generate-listing`, {
       communityName: community.name,
       city: community.city,
       state: community.state,
       unit1: { bedrooms: pairing.unit1Beds, url: "", address: undefined },
       unit2: { bedrooms: pairing.unit2Beds, url: "", address: undefined },
       suggestedRate: pairing.estimatedSellRate,
-    });
+    }));
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
-    item.phase = "save";
-    item.message = "Saving dashboard draft";
-    job.updatedAt = Date.now();
-    await persistBulkComboListingSnapshot(job);
     const streetAddress = item.streetAddress || inferCommunityStreetAddress({
       communityName: community.name,
       city: community.city,
       state: community.state,
       unitAddresses: [],
     });
-    const saveData = await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/save`, {
+    const saveData = await runBulkComboListingStep(job, item, "save", "Saving dashboard draft", () => fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/save`, {
       name: community.name,
       city: community.city,
       state: community.state,
@@ -21747,24 +21818,22 @@ Return ONLY compact JSON with this exact shape:
       dbprLicense: item.dbprLicense || null,
       touristTaxAccount: item.touristTaxAccount || null,
       status: "draft_ready",
-    });
+    }));
     const draftId = Number(saveData?.id);
     if (Number.isFinite(draftId) && draftId > 0) {
       item.draftId = draftId;
-      item.phase = "persist";
-      item.message = "Persisting photos and starting pricing";
-      job.updatedAt = Date.now();
-      await persistBulkComboListingSnapshot(job);
-      if (item.unit1Photos.length > 0 || item.unit2Photos.length > 0) {
-        await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
-          unit1Photos: item.unit1Photos.map((p) => p.url),
-          unit2Photos: item.unit2Photos.map((p) => p.url),
-          unit1SourceUrl: item.unit1SourceUrl,
-          unit2SourceUrl: item.unit2SourceUrl,
-        }).catch((e: any) => {
-          item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`;
-        });
-      }
+      await runBulkComboListingStep(job, item, "persist", "Persisting photos and starting pricing", async () => {
+        if (item.unit1Photos.length > 0 || item.unit2Photos.length > 0) {
+          await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
+            unit1Photos: item.unit1Photos.map((p) => p.url),
+            unit2Photos: item.unit2Photos.map((p) => p.url),
+            unit1SourceUrl: item.unit1SourceUrl,
+            unit2SourceUrl: item.unit2SourceUrl,
+          }).catch((e: any) => {
+            item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`;
+          });
+        }
+      });
       fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
       fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/refresh-pricing`, { method: "POST" }).catch(() => null);
     }
@@ -21787,6 +21856,15 @@ Return ONLY compact JSON with this exact shape:
         job.currentIndex = i;
         const item = job.items[i];
         if (item.status === "completed" || item.status === "cancelled") continue;
+        if (item.status === "running" && isBulkComboListingStale(item)) {
+          item.status = "queued";
+          item.phase = "retrying";
+          item.message = "Previous worker heartbeat went stale; retrying this listing";
+          item.error = null;
+          item.finishedAt = null;
+          job.updatedAt = Date.now();
+          await persistBulkComboListingSnapshot(job);
+        }
         const latestJob = await loadBulkComboListingJob(jobId);
         if (latestJob?.cancelRequested) job.cancelRequested = true;
         if (job.cancelRequested) {
@@ -21798,26 +21876,67 @@ Return ONLY compact JSON with this exact shape:
           await persistBulkComboListingSnapshot(job);
           continue;
         }
-        try {
-          await runBulkComboListingItem(job, item);
-          item.status = "completed";
-        } catch (e: any) {
-          if (e?.cancelled || job.cancelRequested) {
-            item.status = "cancelled";
-            item.phase = "cancelled";
-            item.error = "Cancelled by operator";
-            item.message = "Cancelled by operator";
-          } else {
-            item.status = "failed";
-            item.phase = "failed";
-            item.error = e?.message ?? String(e);
-            item.message = item.error || "Bulk combo listing failed";
-          }
-        } finally {
+        if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
+          item.status = "failed";
+          item.phase = "failed";
+          item.message = item.error || `Max attempts reached (${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
           item.finishedAt = Date.now();
           job.updatedAt = Date.now();
           await persistBulkComboListingSnapshot(job);
+          continue;
         }
+        while (item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS) {
+          item.attemptCount += 1;
+          item.error = null;
+          item.finishedAt = null;
+          item.heartbeatAt = Date.now();
+          if (item.attemptCount > 1) {
+            item.phase = "retrying";
+            item.message = `Retrying listing creation (attempt ${item.attemptCount}/${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS})`;
+            job.updatedAt = Date.now();
+            await persistBulkComboListingSnapshot(job);
+          }
+          try {
+            await runBulkComboListingItem(job, item);
+            item.status = "completed";
+            break;
+          } catch (e: any) {
+            if (e?.cancelled || job.cancelRequested) {
+              item.status = "cancelled";
+              item.phase = "cancelled";
+              item.error = "Cancelled by operator";
+              item.message = "Cancelled by operator";
+              break;
+            }
+            item.error = e?.message ?? String(e);
+            const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId;
+            if (!canRetry) {
+              item.status = "failed";
+              item.phase = "failed";
+              item.message = item.error || "Bulk combo listing failed";
+              break;
+            }
+            const backoffMs = BULK_COMBO_LISTING_RETRY_BACKOFF_MS[Math.min(item.attemptCount - 1, BULK_COMBO_LISTING_RETRY_BACKOFF_MS.length - 1)] ?? 60_000;
+            item.status = "queued";
+            item.phase = "retrying";
+            item.message = `${isBulkComboListingTimeout(e) ? "Timed out" : "Temporary failure"}; retrying in ${Math.round(backoffMs / 1000)}s`;
+            job.updatedAt = Date.now();
+            await persistBulkComboListingSnapshot(job);
+            await sleepBulkComboListing(backoffMs);
+            const afterBackoffJob = await loadBulkComboListingJob(jobId);
+            if (afterBackoffJob?.cancelRequested) {
+              job.cancelRequested = true;
+              item.status = "cancelled";
+              item.phase = "cancelled";
+              item.error = "Cancelled by operator";
+              item.message = "Cancelled by operator";
+              break;
+            }
+          }
+        }
+        item.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+        await persistBulkComboListingSnapshot(job);
       }
       job.finishedAt = Date.now();
       job.updatedAt = Date.now();
@@ -21855,6 +21974,8 @@ Return ONLY compact JSON with this exact shape:
         unit1SourceUrl: null,
         unit2SourceUrl: null,
         error: null,
+        attemptCount: 0,
+        heartbeatAt: null,
       };
     });
     const job: BulkComboListingJob = {
@@ -21907,6 +22028,8 @@ Return ONLY compact JSON with this exact shape:
       unit1SourceUrl: null,
       unit2SourceUrl: null,
       error: null,
+      attemptCount: item.attemptCount,
+      heartbeatAt: null,
       sortOrder: index,
       startedAt: null,
       finishedAt: null,
