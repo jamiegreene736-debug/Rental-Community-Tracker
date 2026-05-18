@@ -1,4 +1,4 @@
-type SidecarLaneOwnerType = "bulk-combo-listing" | "bulk-pricing";
+type SidecarLaneOwnerType = "bulk-combo-listing" | "bulk-pricing" | "pricing-refresh";
 
 type SidecarLaneOwner = {
   ownerType: SidecarLaneOwnerType;

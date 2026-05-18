@@ -22255,6 +22255,30 @@ Return ONLY compact JSON with this exact shape:
         job.updatedAt = Date.now();
         job.attemptCount += 1;
         await persistCommunityPricingRefreshJob(job);
+        const lane = await acquireSidecarLane({
+          ownerType: "pricing-refresh",
+          ownerId: job.id,
+          label: `Draft pricing refresh ${job.draftId}`,
+          shouldCancel: async () => {
+            const latest = await loadCommunityPricingRefreshJob(job.id).catch(() => null);
+            return latest?.status === "cancelled";
+          },
+          onWait: async (owner) => {
+            const latest = await loadCommunityPricingRefreshJob(job.id);
+            if (latest) {
+              latest.status = "running";
+              latest.phase = "waiting-sidecar-lane";
+              latest.message = `Waiting for Chrome sidecar lane held by ${owner.label}`;
+              latest.updatedAt = Date.now();
+              await persistCommunityPricingRefreshJob(latest);
+            }
+            await queueEvent("pricing-refresh", job.id, "waiting-sidecar-lane", `Waiting for Chrome sidecar lane held by ${owner.label}`, {
+              level: "warn",
+              meta: { draftId: job.draftId, owner },
+            });
+          },
+        });
+        const laneHeartbeat = setInterval(() => lane.heartbeat(), 30_000);
         const heartbeat = setInterval(() => {
           void db
             .update(communityPricingRefreshJobRows)
@@ -22265,6 +22289,13 @@ Return ONLY compact JSON with this exact shape:
         let resp: Response;
         let text = "";
         try {
+          await queueEvent("pricing-refresh", job.id, "sidecar-lane-acquired", "Chrome sidecar lane acquired for pricing refresh", {
+            meta: { draftId: job.draftId, acquiredAt: lane.acquiredAt },
+          });
+          job.phase = "refresh";
+          job.message = "Refreshing market pricing";
+          job.updatedAt = Date.now();
+          await persistCommunityPricingRefreshJob(job);
           const controller = new AbortController();
           const unregister = registerQueueAbortController(abortKey, controller);
           try {
@@ -22278,6 +22309,11 @@ Return ONLY compact JSON with this exact shape:
           text = await resp.text().catch(() => "");
         } finally {
           clearInterval(heartbeat);
+          clearInterval(laneHeartbeat);
+          lane.release();
+          await queueEvent("pricing-refresh", job.id, "sidecar-lane-released", "Chrome sidecar lane released for pricing refresh", {
+            meta: { draftId: job.draftId },
+          });
         }
         if (!resp.ok) throw new Error(`Pricing refresh HTTP ${resp.status}: ${text.slice(0, 300)}`);
         job.status = "completed";
