@@ -56,6 +56,8 @@ const US_STATES = [
 
 const STEPS = ["Location", "Research", "Select Units", "Photos", "Listing Draft"];
 const ADD_COMBO_DRAFT_KEY = "nexstay_add_combo_listing_draft_v1";
+const PHOTO_FETCH_REQUEST_TIMEOUT_MS = 180_000;
+const PHOTO_FETCH_STALE_MS = 6 * 60_000;
 
 type CommunityResult = {
   name: string;
@@ -247,6 +249,9 @@ export default function AddCommunity() {
   const [draftRestored, setDraftRestored] = useState(false);
   const draftHydratedRef = useRef(false);
   const [draftAutosaveReady, setDraftAutosaveReady] = useState(false);
+  const photoFetchRunRef = useRef(0);
+  const photoAutoResumeRef = useRef(false);
+  const photoStaleRestartRef = useRef(false);
   // Two-phase flow for the sweep modal. "setup" shows a checkbox grid the
   // user picks markets from; "running" shows streaming per-market progress.
   // Avoids the old behavior of firing a ~30-minute sweep across all 20
@@ -297,6 +302,7 @@ export default function AddCommunity() {
   const [unit1PhotoSourceUrl, setUnit1PhotoSourceUrl] = useState<string | null>(null);
   const [unit2PhotoSourceUrl, setUnit2PhotoSourceUrl] = useState<string | null>(null);
   const [photosLoading, setPhotosLoading] = useState(false);
+  const [photoFetchStartedAt, setPhotoFetchStartedAt] = useState<number | null>(null);
   const [photoChecks, setPhotoChecks] = useState<Record<string, PhotoCheckResult | "checking">>({});
 
   // Step 5 — extended draft shape that mirrors the existing
@@ -735,13 +741,43 @@ export default function AddCommunity() {
   }, []);
 
   // ── Step 4: Fetch photos ────────────────────────────────────
+  const postJsonWithTimeout = useCallback(async (url: string, body: unknown, timeoutMs = PHOTO_FETCH_REQUEST_TIMEOUT_MS) => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        credentials: "include",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => response.statusText);
+        throw new Error(`${response.status}: ${text || response.statusText}`);
+      }
+      return response.json();
+    } catch (e: any) {
+      if (e?.name === "AbortError") {
+        throw new Error("Photo fetch timed out. Try again or pick a different unit source.");
+      }
+      throw e;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }, []);
+
   const handleConfirmUnits = useCallback(async () => {
     if (!selectedUnit1 || !selectedUnit2) {
       toast({ title: "Please select two units to combine", variant: "destructive" });
       return;
     }
+    const runId = photoFetchRunRef.current + 1;
+    photoFetchRunRef.current = runId;
+    const startedAt = Date.now();
     setStep(4);
     setPhotosLoading(true);
+    setPhotoFetchStartedAt(startedAt);
     setUnit1Photos([]);
     setUnit2Photos([]);
     setUnit1PhotoSourceUrl(null);
@@ -813,8 +849,13 @@ export default function AddCommunity() {
           relaxed: false,
         };
         for (const attempt of attempts) {
-          const r = await apiRequest("POST", "/api/community/fetch-unit-photos", buildBody(unit, Array.from(seenUrls), attempt.bedroomOverride));
-          const d = await r.json();
+          if (photoFetchRunRef.current !== runId) {
+            throw new Error("Photo fetch was restarted.");
+          }
+          const d = await postJsonWithTimeout(
+            "/api/community/fetch-unit-photos",
+            buildBody(unit, Array.from(seenUrls), attempt.bedroomOverride),
+          );
           const sourceUrl = typeof d.sourceUrl === "string" ? d.sourceUrl : unit.url || null;
           const photos = ((d.photos || []) as PhotoItem[]).slice(0, 25);
           const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKey(u) === listingKey(sourceUrl));
@@ -870,11 +911,67 @@ export default function AddCommunity() {
         setUnit2Photos(secondPhotos);
       }
     } catch (e: any) {
-      toast({ title: "Photo fetch failed", description: e.message, variant: "destructive" });
+      if (photoFetchRunRef.current === runId) {
+        toast({ title: "Photo fetch failed", description: e.message, variant: "destructive" });
+      }
     } finally {
-      setPhotosLoading(false);
+      if (photoFetchRunRef.current === runId) {
+        setPhotosLoading(false);
+        setPhotoFetchStartedAt(null);
+      }
     }
-  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, toast]);
+  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, toast, postJsonWithTimeout]);
+
+  useEffect(() => {
+    if (!draftHydratedRef.current || !draftAutosaveReady) return;
+    if (step !== 4 || photosLoading) return;
+    if (!selectedUnit1 || !selectedUnit2) return;
+    if (unit1Photos.length + unit2Photos.length > 0) return;
+    if (photoAutoResumeRef.current) return;
+    photoAutoResumeRef.current = true;
+    window.setTimeout(() => {
+      void handleConfirmUnits();
+    }, 0);
+  }, [
+    draftAutosaveReady,
+    step,
+    photosLoading,
+    selectedUnit1,
+    selectedUnit2,
+    unit1Photos.length,
+    unit2Photos.length,
+    handleConfirmUnits,
+  ]);
+
+  useEffect(() => {
+    if (!photosLoading || !photoFetchStartedAt) return;
+
+    const maybeRestartStaleFetch = () => {
+      if (!photosLoading || !photoFetchStartedAt || photoStaleRestartRef.current) return;
+      if (Date.now() - photoFetchStartedAt < PHOTO_FETCH_STALE_MS) return;
+      photoStaleRestartRef.current = true;
+      photoFetchRunRef.current += 1;
+      setPhotosLoading(false);
+      setPhotoFetchStartedAt(null);
+      toast({
+        title: "Photo fetch restarted",
+        description: "The previous photo request stopped responding after the tab was inactive, so I restarted Step 4.",
+      });
+      window.setTimeout(() => {
+        photoStaleRestartRef.current = false;
+        void handleConfirmUnits();
+      }, 250);
+    };
+
+    const interval = window.setInterval(maybeRestartStaleFetch, 15_000);
+    window.addEventListener("focus", maybeRestartStaleFetch);
+    document.addEventListener("visibilitychange", maybeRestartStaleFetch);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", maybeRestartStaleFetch);
+      document.removeEventListener("visibilitychange", maybeRestartStaleFetch);
+    };
+  }, [photosLoading, photoFetchStartedAt, handleConfirmUnits, toast]);
 
   // Run platform check on a photo URL
   const checkPhoto = useCallback(async (imageUrl: string) => {
@@ -1945,6 +2042,16 @@ export default function AddCommunity() {
                     <Camera className="h-10 w-10 mx-auto mb-3 opacity-30" />
                     <p>Photos could not be fetched from Zillow automatically.</p>
                     <p className="text-sm mt-1">You can proceed to generate the listing draft anyway.</p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="mt-4"
+                      onClick={handleConfirmUnits}
+                      data-testid="button-retry-photos"
+                    >
+                      Retry Photo Fetch
+                    </Button>
                   </div>
                 )}
 
