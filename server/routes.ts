@@ -5,6 +5,8 @@ import { storage } from "./storage";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
   bulkComboListingJobs as bulkComboListingJobRows,
+  bulkPricingRefreshJobItems as bulkPricingRefreshJobItemRows,
+  bulkPricingRefreshJobs as bulkPricingRefreshJobRows,
   buyInEmails,
   buyInVendorContacts,
   comboPhotoFetchJobItems as comboPhotoFetchJobItemRows,
@@ -237,6 +239,7 @@ type BulkPricingItemStatus = "queued" | "running" | "completed" | "failed" | "ca
 type BulkPricingJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 type BulkPricingItem = {
+  id: string;
   propertyId: number;
   label: string;
   status: BulkPricingItemStatus;
@@ -244,6 +247,8 @@ type BulkPricingItem = {
   finishedAt: number | null;
   progress: Record<string, unknown> | null;
   error: string | null;
+  attemptCount: number;
+  heartbeatAt: number | null;
 };
 
 type BulkPricingJob = {
@@ -253,6 +258,8 @@ type BulkPricingJob = {
   startedAt: number | null;
   finishedAt: number | null;
   cancelRequested: boolean;
+  lockedBy: string | null;
+  lockExpiresAt: number | null;
   currentIndex: number;
   completed: number;
   failed: number;
@@ -263,7 +270,50 @@ type BulkPricingJob = {
 
 const BULK_PRICING_JOB_TTL_MS = 6 * 60 * 60 * 1000;
 const BULK_PRICING_ITEM_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const BULK_PRICING_ITEM_MAX_ATTEMPTS = 2;
+const BULK_PRICING_RETRY_BACKOFF_MS = 30_000;
 const bulkPricingJobs = new Map<string, BulkPricingJob>();
+const activeBulkPricingJobIds = new Set<string>();
+const BULK_PRICING_WORKER_ID = `${process.pid}-${randomBytes(4).toString("hex")}`;
+const BULK_PRICING_LEASE_MS = 10 * 60 * 1000;
+const bulkPricingLockExpiry = () => new Date(Date.now() + BULK_PRICING_LEASE_MS);
+const bulkPricingDate = (ms: number | null | undefined): Date | null => (ms ? new Date(ms) : null);
+const toBulkPricingMs = (value: Date | string | number | null | undefined): number | null => {
+  if (!value) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+};
+const topQueueEvent = async (
+  jobType: string,
+  jobId: string,
+  phase: string,
+  message: string,
+  options: { itemKey?: string | null; level?: "info" | "warn" | "error"; meta?: Record<string, unknown> | null } = {},
+) => {
+  try {
+    await db.insert(queueJobEventRows).values({
+      jobType,
+      jobId,
+      itemKey: options.itemKey ?? null,
+      phase,
+      level: options.level ?? "info",
+      message,
+      meta: options.meta ?? null,
+      createdAt: new Date(),
+    });
+  } catch (e: any) {
+    console.warn("[bulk-pricing] event write failed", e?.message ?? e);
+  }
+};
+const labelBulkPricingError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/refresh-progress|progress/i.test(message)) return `Progress tracking failed: ${message}`;
+  if (/refresh-market-rates|refresh-pricing|pricing/i.test(message)) return `Market pricing refresh failed: ${message}`;
+  if (/sidecar|Chrome|queue/i.test(message)) return `Chrome sidecar queue failed: ${message}`;
+  if (/HTTP|fetch/i.test(message)) return `Refresh request failed: ${message}`;
+  return message || "Bulk pricing refresh failed";
+};
 
 function cleanupBulkPricingJobs(): void {
   const now = Date.now();
@@ -274,6 +324,104 @@ function cleanupBulkPricingJobs(): void {
   }
 }
 
+function refreshBulkPricingCounts(job: BulkPricingJob): void {
+  job.completed = job.items.filter((item) => item.status === "completed").length;
+  job.failed = job.items.filter((item) => item.status === "failed").length;
+  job.cancelled = job.items.filter((item) => item.status === "cancelled").length;
+}
+
+async function persistBulkPricingJob(job: BulkPricingJob): Promise<void> {
+  refreshBulkPricingCounts(job);
+  const now = new Date();
+  const hasActiveLease = activeBulkPricingJobIds.has(job.id);
+  await db
+    .update(bulkPricingRefreshJobRows)
+    .set({
+      status: job.status,
+      cancelRequested: job.cancelRequested,
+      currentIndex: job.currentIndex,
+      completed: job.completed,
+      failed: job.failed,
+      cancelled: job.cancelled,
+      lockedBy: hasActiveLease ? BULK_PRICING_WORKER_ID : job.lockedBy,
+      lockExpiresAt: hasActiveLease ? bulkPricingLockExpiry() : bulkPricingDate(job.lockExpiresAt),
+      startedAt: bulkPricingDate(job.startedAt),
+      finishedAt: bulkPricingDate(job.finishedAt),
+      updatedAt: now,
+    })
+    .where(eq(bulkPricingRefreshJobRows.id, job.id));
+  for (const [sortOrder, item] of job.items.entries()) {
+    await db
+      .update(bulkPricingRefreshJobItemRows)
+      .set({
+        label: item.label,
+        status: item.status,
+        progress: item.progress,
+        error: item.error,
+        attemptCount: item.attemptCount,
+        heartbeatAt: bulkPricingDate(item.heartbeatAt),
+        sortOrder,
+        startedAt: bulkPricingDate(item.startedAt),
+        finishedAt: bulkPricingDate(item.finishedAt),
+        updatedAt: now,
+      })
+      .where(and(eq(bulkPricingRefreshJobItemRows.jobId, job.id), eq(bulkPricingRefreshJobItemRows.itemKey, item.id)));
+  }
+  bulkPricingJobs.set(job.id, job);
+}
+
+async function loadBulkPricingJob(jobId: string): Promise<BulkPricingJob | null> {
+  const [jobRow] = await db.select().from(bulkPricingRefreshJobRows).where(eq(bulkPricingRefreshJobRows.id, jobId)).limit(1);
+  if (!jobRow) return bulkPricingJobs.get(jobId) ?? null;
+  const itemRows = await db
+    .select()
+    .from(bulkPricingRefreshJobItemRows)
+    .where(eq(bulkPricingRefreshJobItemRows.jobId, jobId))
+    .orderBy(asc(bulkPricingRefreshJobItemRows.sortOrder), asc(bulkPricingRefreshJobItemRows.id));
+  const job: BulkPricingJob = {
+    id: jobRow.id,
+    status: (jobRow.status as BulkPricingJobStatus) || "queued",
+    createdAt: toBulkPricingMs(jobRow.createdAt) ?? Date.now(),
+    startedAt: toBulkPricingMs(jobRow.startedAt),
+    finishedAt: toBulkPricingMs(jobRow.finishedAt),
+    cancelRequested: Boolean(jobRow.cancelRequested),
+    lockedBy: jobRow.lockedBy ?? null,
+    lockExpiresAt: toBulkPricingMs(jobRow.lockExpiresAt),
+    currentIndex: jobRow.currentIndex ?? -1,
+    completed: jobRow.completed ?? 0,
+    failed: jobRow.failed ?? 0,
+    cancelled: jobRow.cancelled ?? 0,
+    dryRun: Boolean(jobRow.dryRun),
+    items: itemRows.map((row) => ({
+      id: row.itemKey,
+      propertyId: row.propertyId,
+      label: row.label,
+      status: (row.status as BulkPricingItemStatus) || "queued",
+      startedAt: toBulkPricingMs(row.startedAt),
+      finishedAt: toBulkPricingMs(row.finishedAt),
+      progress: row.progress && typeof row.progress === "object" ? row.progress as Record<string, unknown> : null,
+      error: row.error ?? null,
+      attemptCount: row.attemptCount ?? 0,
+      heartbeatAt: toBulkPricingMs(row.heartbeatAt),
+    })),
+  };
+  bulkPricingJobs.set(job.id, job);
+  return job;
+}
+
+async function claimBulkPricingJobLease(jobId: string): Promise<boolean> {
+  const now = new Date();
+  const [claimed] = await db
+    .update(bulkPricingRefreshJobRows)
+    .set({ lockedBy: BULK_PRICING_WORKER_ID, lockExpiresAt: bulkPricingLockExpiry(), updatedAt: now })
+    .where(and(
+      eq(bulkPricingRefreshJobRows.id, jobId),
+      or(isNull(bulkPricingRefreshJobRows.lockExpiresAt), lt(bulkPricingRefreshJobRows.lockExpiresAt, now), eq(bulkPricingRefreshJobRows.lockedBy, BULK_PRICING_WORKER_ID)),
+    ))
+    .returning({ id: bulkPricingRefreshJobRows.id });
+  return !!claimed;
+}
+
 function summarizeBulkPricingJob(job: BulkPricingJob) {
   return {
     id: job.id,
@@ -282,6 +430,8 @@ function summarizeBulkPricingJob(job: BulkPricingJob) {
     startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
     finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
     cancelRequested: job.cancelRequested,
+    lockedBy: job.lockedBy,
+    lockExpiresAt: job.lockExpiresAt ? new Date(job.lockExpiresAt).toISOString() : null,
     currentIndex: job.currentIndex,
     total: job.items.length,
     completed: job.completed,
@@ -291,6 +441,7 @@ function summarizeBulkPricingJob(job: BulkPricingJob) {
       ...item,
       startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
       finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
+      heartbeatAt: item.heartbeatAt ? new Date(item.heartbeatAt).toISOString() : null,
     })),
   };
 }
@@ -301,12 +452,23 @@ function bulkPricingBaseUrl(): string {
 
 async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
   item.status = "running";
-  item.startedAt = Date.now();
+  item.startedAt = item.startedAt ?? Date.now();
+  item.finishedAt = null;
+  item.error = null;
+  item.attemptCount += 1;
+  item.heartbeatAt = Date.now();
   item.progress = { phase: "starting", percent: 1, label: "Queued by bulk market-pricing update" };
+  await persistBulkPricingJob(job);
+  await topQueueEvent("bulk-pricing", job.id, "item-started", `Started market pricing refresh for ${item.label}`, {
+    itemKey: item.id,
+    meta: { propertyId: item.propertyId, attempt: item.attemptCount },
+  });
 
   if (job.dryRun) {
     await new Promise((resolve) => setTimeout(resolve, 100));
     item.progress = { phase: "done", percent: 100, label: "Dry-run completed" };
+    item.heartbeatAt = Date.now();
+    await persistBulkPricingJob(job);
     return;
   }
 
@@ -320,10 +482,14 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     throw new Error(startBody?.error || startBody?.message || `HTTP ${startResponse.status}`);
   }
   item.progress = startBody?.progress ?? item.progress;
+  item.heartbeatAt = Date.now();
+  await persistBulkPricingJob(job);
 
   const deadline = Date.now() + BULK_PRICING_ITEM_TIMEOUT_MS;
   let missingProgressCount = 0;
   while (Date.now() < deadline) {
+    item.heartbeatAt = Date.now();
+    await persistBulkPricingJob(job);
     if (job.cancelRequested) {
       const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
       cancelActiveAndPendingRequests(`bulk pricing job ${job.id} cancelled`);
@@ -341,7 +507,11 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     }
     missingProgressCount = 0;
     const progress = (await progressResponse.json().catch(() => null)) as any;
-    if (progress) item.progress = progress;
+    if (progress) {
+      item.progress = progress;
+      item.heartbeatAt = Date.now();
+      await persistBulkPricingJob(job);
+    }
     if (progress?.phase === "done") return;
     if (progress?.phase === "error") {
       throw new Error(progress?.error || progress?.label || "Market-rate refresh failed");
@@ -351,45 +521,124 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
 }
 
 async function runBulkPricingJob(jobId: string): Promise<void> {
-  const job = bulkPricingJobs.get(jobId);
-  if (!job) return;
-  job.status = "running";
-  job.startedAt = Date.now();
-  for (let i = 0; i < job.items.length; i += 1) {
-    job.currentIndex = i;
-    const item = job.items[i];
-    if (item.status === "cancelled") continue;
-    if (job.cancelRequested) {
-      item.status = "cancelled";
-      item.finishedAt = Date.now();
-      job.cancelled += 1;
-      continue;
-    }
-    try {
-      await runBulkPricingItem(job, item);
-      item.status = "completed";
-      job.completed += 1;
-    } catch (e: any) {
-      if (e?.cancelled || job.cancelRequested) {
+  if (activeBulkPricingJobIds.has(jobId)) return;
+  const claimed = await claimBulkPricingJobLease(jobId).catch(() => false);
+  if (!claimed) return;
+  activeBulkPricingJobIds.add(jobId);
+  let job = await loadBulkPricingJob(jobId);
+  try {
+    if (!job) return;
+    if (["completed", "failed", "cancelled"].includes(job.status)) return;
+    job.status = "running";
+    job.lockedBy = BULK_PRICING_WORKER_ID;
+    job.lockExpiresAt = Date.now() + BULK_PRICING_LEASE_MS;
+    job.startedAt = job.startedAt ?? Date.now();
+    await persistBulkPricingJob(job);
+    await topQueueEvent("bulk-pricing", job.id, "running", "Bulk market pricing queue started", {
+      meta: { total: job.items.length, dryRun: Boolean(job.dryRun) },
+    });
+
+    for (let i = 0; i < job.items.length; i += 1) {
+      job = await loadBulkPricingJob(job.id) ?? job;
+      job.currentIndex = i;
+      const item = job.items[i];
+      if (!item || item.status === "completed" || item.status === "cancelled") continue;
+      if (job.cancelRequested) {
         item.status = "cancelled";
         item.error = "Cancelled by operator";
-        job.cancelled += 1;
-      } else {
-        item.status = "failed";
-        item.error = e?.message ?? String(e);
-        job.failed += 1;
+        item.finishedAt = Date.now();
+        item.heartbeatAt = Date.now();
+        await persistBulkPricingJob(job);
+        continue;
       }
-    } finally {
-      item.finishedAt = Date.now();
+
+      let shouldRetry = false;
+      do {
+        shouldRetry = false;
+        try {
+          await runBulkPricingItem(job, item);
+          item.status = "completed";
+          item.progress = item.progress ?? { phase: "done", percent: 100, label: "Market-rate refresh completed" };
+          item.finishedAt = Date.now();
+          item.heartbeatAt = Date.now();
+          item.error = null;
+          await persistBulkPricingJob(job);
+          await topQueueEvent("bulk-pricing", job.id, "item-completed", `Completed market pricing refresh for ${item.label}`, {
+            itemKey: item.id,
+            meta: { propertyId: item.propertyId, attempt: item.attemptCount },
+          });
+        } catch (e: any) {
+          if (e?.cancelled || job.cancelRequested) {
+            item.status = "cancelled";
+            item.error = "Cancelled by operator";
+            item.finishedAt = Date.now();
+            item.heartbeatAt = Date.now();
+            await persistBulkPricingJob(job);
+            await topQueueEvent("bulk-pricing", job.id, "item-cancelled", `Cancelled market pricing refresh for ${item.label}`, {
+              itemKey: item.id,
+              level: "warn",
+              meta: { propertyId: item.propertyId },
+            });
+            break;
+          }
+
+          const message = labelBulkPricingError(e);
+          item.error = message;
+          item.heartbeatAt = Date.now();
+          if (item.attemptCount < BULK_PRICING_ITEM_MAX_ATTEMPTS) {
+            item.status = "queued";
+            item.progress = { phase: "retrying", percent: 0, label: `Retrying after error: ${message}` };
+            item.finishedAt = null;
+            shouldRetry = true;
+            await persistBulkPricingJob(job);
+            await topQueueEvent("bulk-pricing", job.id, "item-retry", `Retrying ${item.label} after transient failure`, {
+              itemKey: item.id,
+              level: "warn",
+              meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
+            });
+            await new Promise((resolve) => setTimeout(resolve, BULK_PRICING_RETRY_BACKOFF_MS));
+          } else {
+            item.status = "failed";
+            item.finishedAt = Date.now();
+            await persistBulkPricingJob(job);
+            await topQueueEvent("bulk-pricing", job.id, "item-failed", `Failed market pricing refresh for ${item.label}`, {
+              itemKey: item.id,
+              level: "error",
+              meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
+            });
+          }
+        }
+      } while (shouldRetry && !job.cancelRequested);
+    }
+
+    job.finishedAt = Date.now();
+    refreshBulkPricingCounts(job);
+    if (job.cancelRequested) job.status = "cancelled";
+    else if (job.failed > 0 && job.completed === 0) job.status = "failed";
+    else job.status = "completed";
+    await persistBulkPricingJob(job);
+    await topQueueEvent("bulk-pricing", job.id, "finished", `Bulk market pricing queue ${job.status}`, {
+      level: job.status === "failed" ? "error" : job.status === "cancelled" ? "warn" : "info",
+      meta: { completed: job.completed, failed: job.failed, cancelled: job.cancelled, total: job.items.length },
+    });
+    console.log(
+      `[bulk-pricing] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed, ${job.cancelled} cancelled`,
+    );
+  } finally {
+    activeBulkPricingJobIds.delete(jobId);
+    const finalJob = await loadBulkPricingJob(jobId).catch(() => null);
+    if (finalJob) {
+      finalJob.lockedBy = null;
+      finalJob.lockExpiresAt = null;
+      await persistBulkPricingJob(finalJob).catch(() => {});
+      if (finalJob.status === "running" && !finalJob.cancelRequested) {
+        await db.update(bulkPricingRefreshJobRows)
+          .set({ lockedBy: null, lockExpiresAt: null, updatedAt: new Date() })
+          .where(eq(bulkPricingRefreshJobRows.id, jobId))
+          .catch(() => {});
+      }
     }
   }
-  job.finishedAt = Date.now();
-  if (job.cancelRequested) job.status = "cancelled";
-  else if (job.failed > 0 && job.completed === 0) job.status = "failed";
-  else job.status = "completed";
-  console.log(
-    `[bulk-pricing] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed, ${job.cancelled} cancelled`,
-  );
 }
 
 function cleanupPricingRefreshLocks(): void {
@@ -22898,10 +23147,11 @@ Return ONLY compact JSON with this exact shape:
   });
 
   app.get("/api/community/queue-history", async (_req, res) => {
-    const [bulkRows, photoRows, pricingRows, eventRows] = await Promise.all([
+    const [bulkRows, photoRows, pricingRows, bulkPricingRows, eventRows] = await Promise.all([
       db.select().from(bulkComboListingJobRows).orderBy(desc(bulkComboListingJobRows.createdAt)).limit(10),
       db.select().from(comboPhotoFetchJobRows).orderBy(desc(comboPhotoFetchJobRows.createdAt)).limit(10),
       db.select().from(communityPricingRefreshJobRows).orderBy(desc(communityPricingRefreshJobRows.createdAt)).limit(10),
+      db.select().from(bulkPricingRefreshJobRows).orderBy(desc(bulkPricingRefreshJobRows.createdAt)).limit(10),
       db.select().from(queueJobEventRows).orderBy(desc(queueJobEventRows.createdAt)).limit(50),
     ]);
     let sidecar: any = null;
@@ -22915,6 +23165,7 @@ Return ONLY compact JSON with this exact shape:
       bulkComboListings: bulkRows,
       photoFetches: photoRows,
       pricingRefreshes: pricingRows,
+      bulkPricingRefreshes: bulkPricingRows,
       events: eventRows,
       sidecar,
     });
@@ -22937,6 +23188,24 @@ Return ONLY compact JSON with this exact shape:
     }
   };
   setTimeout(() => void resumeBulkComboListingJobs(), 2_500).unref?.();
+
+  const resumeBulkPricingJobs = async () => {
+    try {
+      const rows = await db
+        .select({ id: bulkPricingRefreshJobRows.id })
+        .from(bulkPricingRefreshJobRows)
+        .where(inArray(bulkPricingRefreshJobRows.status, ["queued", "running"]))
+        .orderBy(asc(bulkPricingRefreshJobRows.createdAt))
+        .limit(3);
+      for (const row of rows) {
+        if (!activeBulkPricingJobIds.has(row.id)) void runBulkPricingJob(row.id);
+      }
+      if (rows.length > 0) console.log(`[bulk-pricing] resumed ${rows.length} queued/running DB job(s)`);
+    } catch (e: any) {
+      console.warn("[bulk-pricing] DB resume failed", e?.message ?? e);
+    }
+  };
+  setTimeout(() => void resumeBulkPricingJobs(), 3_500).unref?.();
 
   const cleanupStaleServerQueues = async () => {
     const staleBefore = new Date(Date.now() - 45 * 60 * 1000);
@@ -22986,6 +23255,20 @@ Return ONLY compact JSON with this exact shape:
           eq(communityPricingRefreshJobRows.status, "running"),
           lt(communityPricingRefreshJobRows.updatedAt, staleBefore),
           or(isNull(communityPricingRefreshJobRows.lockExpiresAt), lt(communityPricingRefreshJobRows.lockExpiresAt, now)),
+        ));
+      await db
+        .update(bulkPricingRefreshJobRows)
+        .set({
+          status: "failed",
+          lockedBy: null,
+          lockExpiresAt: null,
+          finishedAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(bulkPricingRefreshJobRows.status, "running"),
+          lt(bulkPricingRefreshJobRows.updatedAt, staleBefore),
+          or(isNull(bulkPricingRefreshJobRows.lockExpiresAt), lt(bulkPricingRefreshJobRows.lockExpiresAt, now)),
         ));
     } catch (e: any) {
       console.warn("[server-queues] stale cleanup failed", e?.message ?? e);
@@ -26659,7 +26942,9 @@ Return ONLY compact JSON with this exact shape:
         const draft = await storage.getCommunityDraft(Math.abs(propertyId));
         if (!draft) return res.status(400).json({ error: `Draft ${Math.abs(propertyId)} was not found` });
       }
+      const sortOrder = items.length;
       items.push({
+        id: `item_${sortOrder + 1}_${propertyId}`,
         propertyId,
         label: labels[String(propertyId)] || (propertyId < 0 ? `Draft ${Math.abs(propertyId)}` : `Property ${propertyId}`),
         status: "queued",
@@ -26667,6 +26952,8 @@ Return ONLY compact JSON with this exact shape:
         finishedAt: null,
         progress: null,
         error: null,
+        attemptCount: 0,
+        heartbeatAt: null,
       });
     }
 
@@ -26677,6 +26964,8 @@ Return ONLY compact JSON with this exact shape:
       startedAt: null,
       finishedAt: null,
       cancelRequested: false,
+      lockedBy: null,
+      lockExpiresAt: null,
       currentIndex: -1,
       completed: 0,
       failed: 0,
@@ -26684,6 +26973,37 @@ Return ONLY compact JSON with this exact shape:
       items,
       dryRun,
     };
+    await db.insert(bulkPricingRefreshJobRows).values({
+      id: job.id,
+      status: job.status,
+      cancelRequested: job.cancelRequested,
+      currentIndex: job.currentIndex,
+      completed: job.completed,
+      failed: job.failed,
+      cancelled: job.cancelled,
+      dryRun,
+      createdAt: new Date(job.createdAt),
+      updatedAt: new Date(job.createdAt),
+    });
+    await db.insert(bulkPricingRefreshJobItemRows).values(items.map((item, sortOrder) => ({
+      jobId: job.id,
+      itemKey: item.id,
+      propertyId: item.propertyId,
+      label: item.label,
+      status: item.status,
+      progress: item.progress,
+      error: item.error,
+      attemptCount: item.attemptCount,
+      heartbeatAt: null,
+      sortOrder,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date(job.createdAt),
+      updatedAt: new Date(job.createdAt),
+    })));
+    await topQueueEvent("bulk-pricing", job.id, "queued", `Queued ${items.length} market pricing refresh item(s)`, {
+      meta: { total: items.length, dryRun },
+    });
     bulkPricingJobs.set(job.id, job);
     console.log(`[bulk-pricing] queued job ${job.id} with ${items.length} item(s)${dryRun ? " (dry-run)" : ""}`);
     void runBulkPricingJob(job.id).catch((e) => {
@@ -26691,28 +27011,60 @@ Return ONLY compact JSON with this exact shape:
       if (!active) return;
       active.status = "failed";
       active.finishedAt = Date.now();
+      void persistBulkPricingJob(active);
+      void topQueueEvent("bulk-pricing", job.id, "crashed", "Bulk market pricing worker crashed", { level: "error", meta: { error: e?.message ?? String(e) } });
       console.error(`[bulk-pricing] job ${job.id} crashed:`, e);
     });
     res.status(202).json({ ok: true, job: summarizeBulkPricingJob(job) });
   });
 
+  app.get("/api/pricing/bulk-refresh", async (_req, res) => {
+    cleanupBulkPricingJobs();
+    const rows = await db
+      .select({ id: bulkPricingRefreshJobRows.id })
+      .from(bulkPricingRefreshJobRows)
+      .orderBy(desc(bulkPricingRefreshJobRows.createdAt))
+      .limit(12);
+    const jobs = (await Promise.all(rows.map((row) => loadBulkPricingJob(row.id)))).filter(Boolean) as BulkPricingJob[];
+    for (const job of jobs) {
+      if ((job.status === "queued" || job.status === "running") && !activeBulkPricingJobIds.has(job.id)) {
+        void runBulkPricingJob(job.id).catch((e) => {
+          console.error(`[bulk-pricing] resume failed for ${job.id}:`, e);
+        });
+      }
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, jobs: jobs.map(summarizeBulkPricingJob) });
+  });
+
   app.get("/api/pricing/bulk-refresh/:jobId", async (req, res) => {
     cleanupBulkPricingJobs();
-    const job = bulkPricingJobs.get(req.params.jobId);
+    const job = await loadBulkPricingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk pricing job not found" });
+    if ((job.status === "queued" || job.status === "running") && !activeBulkPricingJobIds.has(job.id)) {
+      void runBulkPricingJob(job.id).catch((e) => {
+        console.error(`[bulk-pricing] resume failed for ${job.id}:`, e);
+      });
+    }
+    const events = await db
+      .select()
+      .from(queueJobEventRows)
+      .where(and(eq(queueJobEventRows.jobType, "bulk-pricing"), eq(queueJobEventRows.jobId, job.id)))
+      .orderBy(desc(queueJobEventRows.createdAt))
+      .limit(50);
     res.setHeader("Cache-Control", "no-store");
-    res.json({ ok: true, job: summarizeBulkPricingJob(job) });
+    res.json({ ok: true, job: summarizeBulkPricingJob(job), events });
   });
 
   app.post("/api/pricing/bulk-refresh/:jobId/cancel", async (req, res) => {
-    const job = bulkPricingJobs.get(req.params.jobId);
+    const job = await loadBulkPricingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk pricing job not found" });
     job.cancelRequested = true;
     for (const item of job.items) {
       if (item.status === "queued") {
         item.status = "cancelled";
         item.finishedAt = Date.now();
-        job.cancelled += 1;
+        item.heartbeatAt = Date.now();
       }
     }
     try {
@@ -26723,6 +27075,45 @@ Return ONLY compact JSON with this exact shape:
       job.status = "cancelled";
       job.finishedAt = Date.now();
     }
+    refreshBulkPricingCounts(job);
+    await persistBulkPricingJob(job);
+    await topQueueEvent("bulk-pricing", job.id, "cancel-requested", "Bulk market pricing cancellation requested", { level: "warn" });
+    res.json({ ok: true, job: summarizeBulkPricingJob(job) });
+  });
+
+  app.post("/api/pricing/bulk-refresh/:jobId/retry-failed", async (req, res) => {
+    const job = await loadBulkPricingJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Bulk pricing job not found" });
+    if (job.status === "running" || activeBulkPricingJobIds.has(job.id)) {
+      return res.status(409).json({ error: "Bulk pricing job is already running" });
+    }
+    let retryCount = 0;
+    for (const item of job.items) {
+      if (item.status !== "failed") continue;
+      item.status = "queued";
+      item.error = null;
+      item.progress = { phase: "queued", percent: 0, label: "Queued for retry" };
+      item.startedAt = null;
+      item.finishedAt = null;
+      item.heartbeatAt = null;
+      item.attemptCount = 0;
+      retryCount += 1;
+    }
+    if (retryCount === 0) {
+      return res.status(400).json({ error: "No failed items to retry" });
+    }
+    job.status = "queued";
+    job.cancelRequested = false;
+    job.finishedAt = null;
+    job.currentIndex = -1;
+    refreshBulkPricingCounts(job);
+    await persistBulkPricingJob(job);
+    await topQueueEvent("bulk-pricing", job.id, "retry-failed", `Queued ${retryCount} failed market pricing item(s) for retry`, {
+      meta: { retryCount },
+    });
+    void runBulkPricingJob(job.id).catch((e) => {
+      console.error(`[bulk-pricing] retry failed for ${job.id}:`, e);
+    });
     res.json({ ok: true, job: summarizeBulkPricingJob(job) });
   });
 

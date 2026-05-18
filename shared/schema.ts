@@ -526,6 +526,41 @@ export const queueJobEvents = pgTable("queue_job_events", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const bulkPricingRefreshJobs = pgTable("bulk_pricing_refresh_jobs", {
+  id: text("id").primaryKey(),
+  status: text("status").notNull().default("queued"),
+  cancelRequested: boolean("cancel_requested").notNull().default(false),
+  currentIndex: integer("current_index").notNull().default(-1),
+  completed: integer("completed").notNull().default(0),
+  failed: integer("failed").notNull().default(0),
+  cancelled: integer("cancelled").notNull().default(0),
+  dryRun: boolean("dry_run").notNull().default(false),
+  lockedBy: text("locked_by"),
+  lockExpiresAt: timestamp("lock_expires_at"),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const bulkPricingRefreshJobItems = pgTable("bulk_pricing_refresh_job_items", {
+  id: serial("id").primaryKey(),
+  jobId: text("job_id").notNull(),
+  itemKey: text("item_key").notNull(),
+  propertyId: integer("property_id").notNull(),
+  label: text("label").notNull(),
+  status: text("status").notNull().default("queued"),
+  progress: jsonb("progress"),
+  error: text("error"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  heartbeatAt: timestamp("heartbeat_at"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export type ComboPhotoFetchJobRow = typeof comboPhotoFetchJobs.$inferSelect;
 export type ComboPhotoFetchJobItemRow = typeof comboPhotoFetchJobItems.$inferSelect;
 export type CommunityPricingRefreshJobRow = typeof communityPricingRefreshJobs.$inferSelect;

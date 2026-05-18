@@ -125,17 +125,22 @@ type BulkPricingJob = {
   startedAt: string | null;
   finishedAt: string | null;
   cancelRequested: boolean;
+  lockedBy?: string | null;
+  lockExpiresAt?: string | null;
   currentIndex: number;
   total: number;
   completed: number;
   failed: number;
   cancelled: number;
   items: Array<{
+    id?: string;
     propertyId: number;
     label: string;
     status: BulkPricingItemStatus;
     startedAt: string | null;
     finishedAt: string | null;
+    attemptCount?: number;
+    heartbeatAt?: string | null;
     progress: {
       phase?: string;
       percent?: number;
@@ -144,6 +149,18 @@ type BulkPricingJob = {
     } | null;
     error: string | null;
   }>;
+};
+
+type QueueJobEventPayload = {
+  id?: number;
+  jobType?: string;
+  jobId?: string;
+  itemKey?: string | null;
+  phase: string;
+  level: "info" | "warn" | "error";
+  message: string;
+  meta?: Record<string, unknown> | null;
+  createdAt: string;
 };
 
 const properties: Property[] = [
@@ -449,8 +466,11 @@ export default function Home() {
   const [selectedPricingIds, setSelectedPricingIds] = useState<Set<number>>(() => new Set());
   const [bulkPricingOpen, setBulkPricingOpen] = useState(false);
   const [bulkPricingJob, setBulkPricingJob] = useState<BulkPricingJob | null>(null);
+  const [bulkPricingHistory, setBulkPricingHistory] = useState<BulkPricingJob[]>([]);
+  const [bulkPricingEvents, setBulkPricingEvents] = useState<QueueJobEventPayload[]>([]);
   const [bulkPricingStarting, setBulkPricingStarting] = useState(false);
   const [bulkPricingCancelling, setBulkPricingCancelling] = useState(false);
+  const [bulkPricingRetrying, setBulkPricingRetrying] = useState(false);
 
   // Pull community drafts up here (early in the render) because
   // `allProperties` below depends on them and `qualityScores` /
@@ -1025,6 +1045,23 @@ export default function Home() {
     visibleBulkPricingIds.length > 0 && visibleBulkPricingIds.every((id) => selectedPricingIds.has(id));
   const bulkPricingTerminal =
     bulkPricingJob?.status === "completed" || bulkPricingJob?.status === "failed" || bulkPricingJob?.status === "cancelled";
+  const activeBulkPricingHistory = bulkPricingHistory.find((job) => job.status === "queued" || job.status === "running");
+  const runningBulkPricingItem = bulkPricingJob?.items.find((item) => item.status === "running") ?? null;
+  const bulkPricingLastHeartbeat = bulkPricingJob?.items
+    .map((item) => item.heartbeatAt ? Date.parse(item.heartbeatAt) : 0)
+    .filter((ms) => Number.isFinite(ms) && ms > 0)
+    .sort((a, b) => b - a)[0] ?? null;
+  const bulkPricingLooksStale = !!(
+    bulkPricingJob?.status === "running" &&
+    bulkPricingLastHeartbeat &&
+    Date.now() - bulkPricingLastHeartbeat > 5 * 60 * 1000
+  );
+  const formatBulkPricingTime = (value?: string | null) => {
+    if (!value) return "—";
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) return "—";
+    return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  };
 
   useEffect(() => {
     const validIds = new Set(allProperties.filter(isBulkPricingSelectable).map((property) => property.id));
@@ -1044,6 +1081,7 @@ export default function Home() {
         const data = await response.json();
         if (!cancelled) {
           setBulkPricingJob(data.job);
+          setBulkPricingEvents(Array.isArray(data.events) ? data.events : []);
           if (["completed", "failed", "cancelled"].includes(data.job?.status)) {
             queryClient.invalidateQueries({ queryKey: ["/api/property/market-rates"] });
             queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
@@ -1060,6 +1098,32 @@ export default function Home() {
       window.clearInterval(timer);
     };
   }, [bulkPricingJob?.id, bulkPricingTerminal, queryClient]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHistory = async () => {
+      try {
+        const response = await fetch("/api/pricing/bulk-refresh", { credentials: "include" });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (cancelled) return;
+        const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+        setBulkPricingHistory(jobs);
+        const active = jobs.find((job: BulkPricingJob) => job.status === "queued" || job.status === "running");
+        if (active && !bulkPricingJob?.id) {
+          setBulkPricingJob(active);
+        }
+      } catch {
+        // Dashboard history is best-effort; the active job poll handles recovery.
+      }
+    };
+    void loadHistory();
+    const timer = window.setInterval(loadHistory, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bulkPricingJob?.id]);
 
   const toggleBulkPricingRow = (propertyId: number) => {
     setSelectedPricingIds((prev) => {
@@ -1093,6 +1157,7 @@ export default function Home() {
       });
       const data = await response.json();
       setBulkPricingJob(data.job);
+      setBulkPricingEvents([]);
       toast({
         title: "Bulk pricing queued",
         description: `${selectedBulkPricingProperties.length} propert${selectedBulkPricingProperties.length === 1 ? "y" : "ies"} will run one at a time.`,
@@ -1116,6 +1181,21 @@ export default function Home() {
       toast({ title: "Cancel failed", description: e.message, variant: "destructive" });
     } finally {
       setBulkPricingCancelling(false);
+    }
+  };
+
+  const retryFailedBulkPricingRefresh = async () => {
+    if (!bulkPricingJob?.id || bulkPricingJob.failed === 0) return;
+    setBulkPricingRetrying(true);
+    try {
+      const response = await apiRequest("POST", `/api/pricing/bulk-refresh/${bulkPricingJob.id}/retry-failed`);
+      const data = await response.json();
+      setBulkPricingJob(data.job);
+      toast({ title: "Failed pricing rows re-queued", description: "The queue will retry only the failed properties." });
+    } catch (e: any) {
+      toast({ title: "Retry failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkPricingRetrying(false);
     }
   };
 
@@ -1463,11 +1543,24 @@ export default function Home() {
                     <div className="rounded-md border bg-muted/20 p-3 text-sm">
                       <p className="font-medium">Runs one selected property at a time.</p>
                       <p className="mt-1 text-muted-foreground">
-                        This uses the same market-rate refresh as each Pricing tab, but serializes the work so Chrome sidecar scans do not collide.
+                        This uses the same market-rate refresh as each Pricing tab, but serializes the work so Chrome sidecar scans do not collide. The queue is saved on the server, so closing this tab will not stop it.
                       </p>
                     </div>
                     {!bulkPricingJob ? (
                       <div className="space-y-3">
+                        {activeBulkPricingHistory && (
+                          <div className="flex items-center justify-between gap-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                            <div>
+                              <p className="font-medium">A market-pricing queue is already running.</p>
+                              <p className="text-blue-800">
+                                {activeBulkPricingHistory.completed} / {activeBulkPricingHistory.total} complete · started {formatBulkPricingTime(activeBulkPricingHistory.startedAt || activeBulkPricingHistory.createdAt)}
+                              </p>
+                            </div>
+                            <Button type="button" size="sm" variant="outline" onClick={() => setBulkPricingJob(activeBulkPricingHistory)}>
+                              View queue
+                            </Button>
+                          </div>
+                        )}
                         <div className="max-h-64 overflow-y-auto rounded-md border">
                           {selectedBulkPricingProperties.map((property) => (
                             <div key={property.id} className="flex items-center justify-between gap-3 border-b px-3 py-2 last:border-b-0">
@@ -1493,6 +1586,11 @@ export default function Home() {
                       </div>
                     ) : (
                       <div className="space-y-3">
+                        {bulkPricingLooksStale && (
+                          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                            This queue has not reported a heartbeat in over five minutes. It is saved on the server and will be re-claimed automatically if the worker died.
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                           <div className="rounded-md border p-2">
                             <p className="text-xs text-muted-foreground">Status</p>
@@ -1509,6 +1607,22 @@ export default function Home() {
                           <div className="rounded-md border p-2">
                             <p className="text-xs text-muted-foreground">Cancelled</p>
                             <p className="text-sm font-semibold">{bulkPricingJob.cancelled}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Current</p>
+                            <p className="truncate text-sm font-semibold">{runningBulkPricingItem?.label || "—"}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Last heartbeat</p>
+                            <p className="text-sm font-semibold">{bulkPricingLastHeartbeat ? new Date(bulkPricingLastHeartbeat).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—"}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Lease expires</p>
+                            <p className="text-sm font-semibold">{formatBulkPricingTime(bulkPricingJob.lockExpiresAt)}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Worker</p>
+                            <p className="truncate text-sm font-semibold">{bulkPricingJob.lockedBy || "—"}</p>
                           </div>
                         </div>
                         <div className="max-h-80 overflow-y-auto rounded-md border">
@@ -1528,6 +1642,9 @@ export default function Home() {
                                     <p className="mt-0.5 truncate text-xs text-muted-foreground">
                                       {item.progress?.label || item.error || "Waiting for its turn"}
                                     </p>
+                                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                      Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
+                                    </p>
                                   </div>
                                   <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>
                                     {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
@@ -1544,6 +1661,26 @@ export default function Home() {
                             );
                           })}
                         </div>
+                        {bulkPricingEvents.length > 0 && (
+                          <div className="rounded-md border">
+                            <div className="border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                              Queue event history
+                            </div>
+                            <div className="max-h-40 overflow-y-auto">
+                              {bulkPricingEvents.slice(0, 12).map((event, index) => (
+                                <div key={`${event.createdAt}-${index}`} className="flex items-start justify-between gap-3 border-b px-3 py-2 text-xs last:border-b-0">
+                                  <div className="min-w-0">
+                                    <p className={event.level === "error" ? "font-medium text-red-700" : event.level === "warn" ? "font-medium text-amber-700" : "font-medium"}>
+                                      {event.message}
+                                    </p>
+                                    <p className="text-muted-foreground">{event.phase}</p>
+                                  </div>
+                                  <span className="shrink-0 text-muted-foreground">{formatBulkPricingTime(event.createdAt)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                         <div className="flex items-center justify-between gap-2">
                           <Button
                             type="button"
@@ -1556,16 +1693,30 @@ export default function Home() {
                           >
                             Clear completed queue
                           </Button>
-                          <Button
-                            type="button"
-                            variant="destructive"
-                            onClick={cancelBulkPricingRefresh}
-                            disabled={bulkPricingTerminal || bulkPricingCancelling}
-                            data-testid="button-cancel-bulk-market-pricing"
-                          >
-                            {bulkPricingCancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
-                            Cancel remaining
-                          </Button>
+                          <div className="flex items-center gap-2">
+                            {bulkPricingJob.failed > 0 && bulkPricingTerminal && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                onClick={retryFailedBulkPricingRefresh}
+                                disabled={bulkPricingRetrying}
+                                data-testid="button-retry-failed-bulk-market-pricing"
+                              >
+                                {bulkPricingRetrying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                                Retry failed
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              variant="destructive"
+                              onClick={cancelBulkPricingRefresh}
+                              disabled={bulkPricingTerminal || bulkPricingCancelling}
+                              data-testid="button-cancel-bulk-market-pricing"
+                            >
+                              {bulkPricingCancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+                              Cancel remaining
+                            </Button>
+                          </div>
                         </div>
                       </div>
                     )}
