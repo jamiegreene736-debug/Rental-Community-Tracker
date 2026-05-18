@@ -514,6 +514,18 @@ export const communityPricingRefreshJobs = pgTable("community_pricing_refresh_jo
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const queueJobEvents = pgTable("queue_job_events", {
+  id: serial("id").primaryKey(),
+  jobType: text("job_type").notNull(),
+  jobId: text("job_id").notNull(),
+  itemKey: text("item_key"),
+  phase: text("phase").notNull(),
+  level: text("level").notNull().default("info"),
+  message: text("message").notNull(),
+  meta: jsonb("meta"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export type ComboPhotoFetchJobRow = typeof comboPhotoFetchJobs.$inferSelect;
 export type ComboPhotoFetchJobItemRow = typeof comboPhotoFetchJobItems.$inferSelect;
 export type CommunityPricingRefreshJobRow = typeof communityPricingRefreshJobs.$inferSelect;

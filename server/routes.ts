@@ -17,6 +17,7 @@ import {
   insertUnitSwapSchema,
   reservationAliases,
   rentalAgreements,
+  queueJobEvents as queueJobEventRows,
 } from "@shared/schema";
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
@@ -21224,6 +21225,38 @@ Return ONLY compact JSON with this exact shape:
     if (fresh.failures >= 3) fresh.cooldownUntil = now + QUEUE_CIRCUIT_COOLDOWN_MS;
     queueCircuitBreakers.set(key, fresh);
   };
+  const queueEvent = async (
+    jobType: string,
+    jobId: string,
+    phase: string,
+    message: string,
+    options: { itemKey?: string | null; level?: "info" | "warn" | "error"; meta?: Record<string, unknown> | null } = {},
+  ) => {
+    try {
+      await db.insert(queueJobEventRows).values({
+        jobType,
+        jobId,
+        itemKey: options.itemKey ?? null,
+        phase,
+        level: options.level ?? "info",
+        message,
+        meta: options.meta ?? null,
+        createdAt: new Date(),
+      });
+    } catch (e: any) {
+      console.warn("[server-queues] event write failed", e?.message ?? e);
+    }
+  };
+  const queueErrorLabel = (error: unknown, fallback = "Queue step failed") => {
+    const message = error instanceof Error ? error.message : String(error || "");
+    if (/fetch-unit-photos|zillow|photo/i.test(message)) return `Photo/Zillow step failed: ${message}`;
+    if (/generate-listing|copy|claude|anthropic/i.test(message)) return `Listing copy step failed: ${message}`;
+    if (/community\/save|dashboard draft|Invalid community address/i.test(message)) return `Dashboard save step failed: ${message}`;
+    if (/persist-photos|photo persistence/i.test(message)) return `Photo persistence step failed: ${message}`;
+    if (/refresh-pricing|pricing/i.test(message)) return `Pricing refresh step failed: ${message}`;
+    if (/Guesty/i.test(message)) return `Guesty step failed: ${message}`;
+    return message || fallback;
+  };
 
   type ComboPhotoFetchStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
   type ComboPhotoFetchUnit = {
@@ -21604,6 +21637,7 @@ Return ONLY compact JSON with this exact shape:
         const job = await loadComboPhotoFetchJob(jobId);
         if (!job) return;
         if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") return;
+        await queueEvent("combo-photo-fetch", job.id, "running", "Photo fetch job started", { meta: { totalItems: job.items.length } });
         job.status = "running";
         job.startedAt = job.startedAt ?? Date.now();
         job.updatedAt = Date.now();
@@ -21628,6 +21662,10 @@ Return ONLY compact JSON with this exact shape:
             item.heartbeatAt = Date.now();
             await runComboPhotoFetchItem(job, item, async () => persistComboPhotoFetchSnapshot(job), abortKey);
             item.status = "completed";
+            await queueEvent("combo-photo-fetch", job.id, item.phase, "Photo fetch item completed", {
+              itemKey: item.id,
+              meta: { unit1Photos: item.unit1Photos.length, unit2Photos: item.unit2Photos.length },
+            });
           } catch (e: any) {
             if (e?.cancelled || job.cancelRequested) {
               item.status = "cancelled";
@@ -21637,9 +21675,14 @@ Return ONLY compact JSON with this exact shape:
             } else {
               item.status = "failed";
               item.phase = "failed";
-              item.error = e?.message ?? String(e);
+              item.error = queueErrorLabel(e, "Photo fetch failed");
               item.message = item.error || "Photo fetch failed";
             }
+            await queueEvent("combo-photo-fetch", job.id, item.phase, item.message, {
+              itemKey: item.id,
+              level: item.status === "failed" ? "error" : "warn",
+              meta: { error: e?.message ?? String(e) },
+            });
           } finally {
             item.finishedAt = Date.now();
             item.heartbeatAt = Date.now();
@@ -21654,6 +21697,10 @@ Return ONLY compact JSON with this exact shape:
         else if (job.failed > 0 && job.completed === 0) job.status = "failed";
         else job.status = "completed";
         await persistComboPhotoFetchSnapshot(job);
+        await queueEvent("combo-photo-fetch", job.id, job.status, `Photo fetch job ${job.status}`, {
+          level: job.status === "failed" ? "error" : "info",
+          meta: { completed: job.completed, failed: job.failed, cancelled: job.cancelled },
+        });
         console.log(`[combo-photo-fetch] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
       } finally {
         activeComboPhotoFetchJobIds.delete(jobId);
@@ -21899,6 +21946,7 @@ Return ONLY compact JSON with this exact shape:
         const job = await loadCommunityPricingRefreshJob(jobId);
         if (!job) return;
         if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") return;
+        await queueEvent("pricing-refresh", job.id, "refresh", "Pricing refresh started", { meta: { draftId: job.draftId } });
         job.status = "running";
         job.phase = "refresh";
         job.message = "Refreshing market pricing";
@@ -21938,10 +21986,15 @@ Return ONLY compact JSON with this exact shape:
         job.finishedAt = Date.now();
         job.updatedAt = Date.now();
         await persistCommunityPricingRefreshJob(job);
+        await queueEvent("pricing-refresh", job.id, "done", "Pricing refresh completed", { meta: { draftId: job.draftId } });
       } catch (e: any) {
         const job = await loadCommunityPricingRefreshJob(jobId);
         if (job) {
-          job.error = e?.message ?? String(e);
+          job.error = queueErrorLabel(e, "Pricing refresh failed");
+          await queueEvent("pricing-refresh", job.id, "failed", job.error, {
+            level: "error",
+            meta: { draftId: job.draftId, error: e?.message ?? String(e) },
+          });
           if (job.attemptCount < 2) {
             job.status = "queued";
             job.phase = "retrying";
@@ -22271,8 +22324,13 @@ Return ONLY compact JSON with this exact shape:
       });
     }, 15_000);
     let timeout: NodeJS.Timeout | null = null;
+    const started = Date.now();
+    await queueEvent("bulk-combo-listing", job.id, phase, message, {
+      itemKey: item.id,
+      meta: { attemptCount: item.attemptCount, timeoutMs },
+    });
     try {
-      return await Promise.race([
+      const result = await Promise.race([
         work(),
         new Promise<never>((_, reject) => {
           timeout = setTimeout(() => {
@@ -22283,6 +22341,18 @@ Return ONLY compact JSON with this exact shape:
           }, timeoutMs);
         }),
       ]);
+      await queueEvent("bulk-combo-listing", job.id, phase, `${message} completed`, {
+        itemKey: item.id,
+        meta: { elapsedMs: Date.now() - started },
+      });
+      return result;
+    } catch (e: any) {
+      await queueEvent("bulk-combo-listing", job.id, phase, queueErrorLabel(e, `${message} failed`), {
+        itemKey: item.id,
+        level: "error",
+        meta: { elapsedMs: Date.now() - started, error: e?.message ?? String(e) },
+      });
+      throw e;
     } finally {
       if (timeout) clearTimeout(timeout);
       clearInterval(heartbeat);
@@ -22551,6 +22621,7 @@ Return ONLY compact JSON with this exact shape:
         const job = await loadBulkComboListingJob(jobId);
         if (!job) return;
         if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") return;
+        await queueEvent("bulk-combo-listing", job.id, "running", "Bulk combo listing job started", { meta: { totalItems: job.items.length } });
         job.status = "running";
         job.startedAt = job.startedAt ?? Date.now();
         job.updatedAt = Date.now();
@@ -22611,7 +22682,7 @@ Return ONLY compact JSON with this exact shape:
                 item.message = "Cancelled by operator";
                 break;
               }
-              item.error = e?.message ?? String(e);
+              item.error = queueErrorLabel(e, "Bulk combo listing failed");
               const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId;
               if (!canRetry) {
                 item.status = "failed";
@@ -22648,6 +22719,10 @@ Return ONLY compact JSON with this exact shape:
         else if (job.failed > 0 && job.completed === 0) job.status = "failed";
         else job.status = "completed";
         await persistBulkComboListingSnapshot(job);
+        await queueEvent("bulk-combo-listing", job.id, job.status, `Bulk combo listing job ${job.status}`, {
+          level: job.status === "failed" ? "error" : "info",
+          meta: { completed: job.completed, failed: job.failed, cancelled: job.cancelled },
+        });
         console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
       } finally {
         activeBulkComboListingJobIds.delete(jobId);
@@ -22756,7 +22831,13 @@ Return ONLY compact JSON with this exact shape:
     const job = await loadBulkComboListingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk combo listing job not found" });
     maybeResumeBulkComboListingJob(job);
-    res.json({ job: serializeBulkComboListingJob(job) });
+    const events = await db
+      .select()
+      .from(queueJobEventRows)
+      .where(and(eq(queueJobEventRows.jobType, "bulk-combo-listing"), eq(queueJobEventRows.jobId, job.id)))
+      .orderBy(desc(queueJobEventRows.createdAt))
+      .limit(40);
+    res.json({ job: serializeBulkComboListingJob(job), events });
   });
 
   app.post("/api/community/bulk-combo-listing-jobs/:jobId/cancel", async (req, res) => {
@@ -22801,6 +22882,42 @@ Return ONLY compact JSON with this exact shape:
       void runBulkComboListingJob(job.id);
     }
     res.json({ job: serializeBulkComboListingJob(job), retried: reset });
+  });
+
+  app.get("/api/community/bulk-combo-listing-jobs", async (_req, res) => {
+    const rows = await db
+      .select({ id: bulkComboListingJobRows.id })
+      .from(bulkComboListingJobRows)
+      .orderBy(desc(bulkComboListingJobRows.createdAt))
+      .limit(12);
+    const jobs = (await Promise.all(rows.map((row) => loadBulkComboListingJob(row.id)))).filter(Boolean) as BulkComboListingJob[];
+    res.json({
+      jobs: jobs.map(serializeBulkComboListingJob),
+      active: jobs.filter((job) => job.status === "queued" || job.status === "running"),
+    });
+  });
+
+  app.get("/api/community/queue-history", async (_req, res) => {
+    const [bulkRows, photoRows, pricingRows, eventRows] = await Promise.all([
+      db.select().from(bulkComboListingJobRows).orderBy(desc(bulkComboListingJobRows.createdAt)).limit(10),
+      db.select().from(comboPhotoFetchJobRows).orderBy(desc(comboPhotoFetchJobRows.createdAt)).limit(10),
+      db.select().from(communityPricingRefreshJobRows).orderBy(desc(communityPricingRefreshJobRows.createdAt)).limit(10),
+      db.select().from(queueJobEventRows).orderBy(desc(queueJobEventRows.createdAt)).limit(50),
+    ]);
+    let sidecar: any = null;
+    try {
+      const sidecarQueue = await import("./vrbo-sidecar-queue");
+      sidecar = sidecarQueue.getStatus();
+    } catch {
+      sidecar = null;
+    }
+    res.json({
+      bulkComboListings: bulkRows,
+      photoFetches: photoRows,
+      pricingRefreshes: pricingRows,
+      events: eventRows,
+      sidecar,
+    });
   });
 
   const resumeBulkComboListingJobs = async () => {

@@ -321,11 +321,23 @@ export default function AddCommunity() {
       finishedAt?: string | null;
     }>;
   };
+  type QueueJobEventPayload = {
+    id: number;
+    jobType: string;
+    jobId: string;
+    itemKey: string | null;
+    phase: string;
+    level: "info" | "warn" | "error" | string;
+    message: string;
+    createdAt: string;
+  };
   const [bulkPairingIndexes, setBulkPairingIndexes] = useState<Set<number>>(new Set());
   const [bulkComboOpen, setBulkComboOpen] = useState(false);
   const [bulkComboStarting, setBulkComboStarting] = useState(false);
   const [bulkComboJobId, setBulkComboJobId] = useState<string | null>(null);
   const [bulkComboJob, setBulkComboJob] = useState<BulkComboListingJobPayload | null>(null);
+  const [bulkComboEvents, setBulkComboEvents] = useState<QueueJobEventPayload[]>([]);
+  const [bulkComboHistory, setBulkComboHistory] = useState<BulkComboListingJobPayload[]>([]);
   const applySweepJob = useCallback((job: TopMarketJobPayload) => {
     setSweepJobId(job.id);
     setSweepMarkets(job.markets || []);
@@ -676,6 +688,7 @@ export default function AddCommunity() {
         const data = await resp.json();
         if (!cancelled && data.job) {
           setBulkComboJob(data.job);
+          if (Array.isArray(data.events)) setBulkComboEvents(data.events);
           const terminal = ["completed", "failed", "cancelled"].includes(data.job.status);
           if (terminal) queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
         }
@@ -692,6 +705,32 @@ export default function AddCommunity() {
       window.clearInterval(interval);
     };
   }, [bulkComboJobId, bulkComboJob?.status, queryClient]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHistory = async () => {
+      try {
+        const resp = await fetch("/api/community/bulk-combo-listing-jobs", { credentials: "include" });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (cancelled) return;
+        setBulkComboHistory(Array.isArray(data.jobs) ? data.jobs : []);
+        const active = Array.isArray(data.active) ? data.active[0] : null;
+        if (active && !bulkComboJobId) {
+          setBulkComboJob(active);
+          setBulkComboJobId(active.id);
+        }
+      } catch (e: any) {
+        if (!cancelled) console.warn("[add-community] bulk queue history poll failed", e?.message || e);
+      }
+    };
+    loadHistory();
+    const interval = window.setInterval(loadHistory, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [bulkComboJobId]);
 
   const clearSavedComboDraft = useCallback(() => {
     window.localStorage.removeItem(ADD_COMBO_DRAFT_KEY);
@@ -926,6 +965,7 @@ export default function AddCommunity() {
       if (data.job) {
         setBulkComboJob(data.job);
         setBulkComboJobId(data.job.id);
+        setBulkComboEvents([]);
         toast({ title: "Bulk listing queue started", description: `${picked.length} combo draft${picked.length === 1 ? "" : "s"} queued.` });
       }
     } catch (e: any) {
@@ -1900,6 +1940,11 @@ export default function AddCommunity() {
                 </div>
               ) : (
                 <div className="space-y-4">
+                  {bulkComboJob.items.some((item) => item.status === "running" && item.heartbeatAt && Date.now() - new Date(item.heartbeatAt).getTime() > 5 * 60_000) && (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      One running item has not heartbeated in more than 5 minutes. The server will clean it up if the lease expires; use Retry failed only after it turns failed.
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     <div className="rounded-md border p-2">
                       <p className="text-xs text-muted-foreground">Status</p>
@@ -1966,6 +2011,29 @@ export default function AddCommunity() {
                         </div>
                       );
                     })}
+                  </div>
+
+                  <div className="rounded-md border">
+                    <div className="border-b px-3 py-2">
+                      <p className="text-sm font-semibold">Queue event history</p>
+                    </div>
+                    <div className="max-h-48 overflow-y-auto">
+                      {bulkComboEvents.length === 0 ? (
+                        <p className="px-3 py-3 text-xs text-muted-foreground">No structured events recorded yet.</p>
+                      ) : bulkComboEvents.slice(0, 20).map((event) => (
+                        <div key={event.id} className="border-b px-3 py-2 last:border-b-0">
+                          <div className="flex items-start justify-between gap-2">
+                            <p className={`text-xs ${event.level === "error" ? "text-red-700" : event.level === "warn" ? "text-amber-700" : "text-muted-foreground"}`}>
+                              <span className="font-medium text-foreground">{event.phase}</span>
+                              {event.itemKey ? ` · ${event.itemKey}` : ""} — {event.message}
+                            </p>
+                            <span className="shrink-0 text-[11px] text-muted-foreground">
+                              {new Date(event.createdAt).toLocaleTimeString()}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
                   {["completed", "failed", "cancelled"].includes(bulkComboJob.status) && (
@@ -2269,6 +2337,28 @@ export default function AddCommunity() {
 
             {!unitSearchLoading && suggestedPairings.length > 0 && (
               <>
+                {bulkComboHistory.some((job) => job.status === "queued" || job.status === "running") && (
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                    <span>
+                      {bulkComboHistory.filter((job) => job.status === "queued" || job.status === "running").length} background combo queue is active.
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const active = bulkComboHistory.find((job) => job.status === "queued" || job.status === "running");
+                        if (active) {
+                          setBulkComboJob(active);
+                          setBulkComboJobId(active.id);
+                        }
+                        setBulkComboOpen(true);
+                      }}
+                    >
+                      Resume queue
+                    </Button>
+                  </div>
+                )}
                 <div className="flex items-center gap-2 mb-3">
                   <TrendingUp className="h-4 w-4 text-primary" />
                   <h3 className="font-semibold text-sm">Algorithm-Suggested Combinations</h3>
