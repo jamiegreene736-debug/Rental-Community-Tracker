@@ -3,6 +3,8 @@ import { createServer, type Server } from "http";
 import { randomBytes } from "crypto";
 import { storage } from "./storage";
 import {
+  bulkComboListingJobItems as bulkComboListingJobItemRows,
+  bulkComboListingJobs as bulkComboListingJobRows,
   buyInEmails,
   buyInVendorContacts,
   guestyPropertyMap,
@@ -14,7 +16,7 @@ import {
   rentalAgreements,
 } from "@shared/schema";
 import { db } from "./db";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import path from "path";
 import fs from "fs";
@@ -21497,12 +21499,117 @@ Return ONLY compact JSON with this exact shape:
     cancelled: number;
     items: BulkComboListingItem[];
   };
-  const bulkComboListingJobs = new Map<string, BulkComboListingJob>();
-  const BULK_COMBO_LISTING_JOB_TTL_MS = 12 * 60 * 60 * 1000;
-  const pruneBulkComboListingJobs = () => {
-    const cutoff = Date.now() - BULK_COMBO_LISTING_JOB_TTL_MS;
-    for (const [id, job] of bulkComboListingJobs.entries()) {
-      if ((job.finishedAt ?? job.updatedAt) < cutoff) bulkComboListingJobs.delete(id);
+  const activeBulkComboListingJobIds = new Set<string>();
+  const toBulkComboMs = (value: Date | string | number | null | undefined): number | null => {
+    if (!value) return null;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  };
+  const bulkComboDate = (ms: number | null | undefined): Date | null => (ms ? new Date(ms) : null);
+  const validBulkComboStatus = (value: unknown): BulkComboListingStatus => {
+    return value === "queued" || value === "running" || value === "completed" || value === "failed" || value === "cancelled"
+      ? value
+      : "queued";
+  };
+  const normalizeBulkComboPhotos = (value: unknown): Array<{ url: string; label?: string }> => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((photo: any) => ({ url: String(photo?.url || "").trim(), label: photo?.label ? String(photo.label) : undefined }))
+      .filter((photo) => photo.url);
+  };
+  const refreshBulkComboListingCounts = (job: BulkComboListingJob) => {
+    job.completed = job.items.filter((item) => item.status === "completed").length;
+    job.failed = job.items.filter((item) => item.status === "failed").length;
+    job.cancelled = job.items.filter((item) => item.status === "cancelled").length;
+  };
+  const persistBulkComboListingSnapshot = async (job: BulkComboListingJob) => {
+    refreshBulkComboListingCounts(job);
+    const now = new Date(job.updatedAt || Date.now());
+    await db
+      .update(bulkComboListingJobRows)
+      .set({
+        status: job.status,
+        cancelRequested: job.cancelRequested,
+        currentIndex: job.currentIndex,
+        completed: job.completed,
+        failed: job.failed,
+        cancelled: job.cancelled,
+        startedAt: bulkComboDate(job.startedAt),
+        finishedAt: bulkComboDate(job.finishedAt),
+        updatedAt: now,
+      })
+      .where(eq(bulkComboListingJobRows.id, job.id));
+    for (const [sortOrder, item] of job.items.entries()) {
+      await db
+        .update(bulkComboListingJobItemRows)
+        .set({
+          label: item.label,
+          status: item.status,
+          phase: item.phase,
+          message: item.message,
+          draftId: item.draftId,
+          unit1Photos: item.unit1Photos,
+          unit2Photos: item.unit2Photos,
+          unit1SourceUrl: item.unit1SourceUrl,
+          unit2SourceUrl: item.unit2SourceUrl,
+          error: item.error,
+          sortOrder,
+          startedAt: bulkComboDate(item.startedAt),
+          finishedAt: bulkComboDate(item.finishedAt),
+          updatedAt: now,
+        })
+        .where(and(eq(bulkComboListingJobItemRows.jobId, job.id), eq(bulkComboListingJobItemRows.itemKey, item.id)));
+    }
+  };
+  const loadBulkComboListingJob = async (jobId: string): Promise<BulkComboListingJob | null> => {
+    const [jobRow] = await db.select().from(bulkComboListingJobRows).where(eq(bulkComboListingJobRows.id, jobId)).limit(1);
+    if (!jobRow) return null;
+    const itemRows = await db
+      .select()
+      .from(bulkComboListingJobItemRows)
+      .where(eq(bulkComboListingJobItemRows.jobId, jobId))
+      .orderBy(asc(bulkComboListingJobItemRows.sortOrder), asc(bulkComboListingJobItemRows.id));
+    const items: BulkComboListingItem[] = itemRows.map((row) => {
+      const payload = (row.payload && typeof row.payload === "object" ? row.payload : {}) as BulkComboListingInput;
+      return {
+        ...payload,
+        id: row.itemKey,
+        label: row.label,
+        status: validBulkComboStatus(row.status),
+        phase: row.phase || "queued",
+        message: row.message || "Queued",
+        startedAt: toBulkComboMs(row.startedAt),
+        finishedAt: toBulkComboMs(row.finishedAt),
+        draftId: row.draftId ?? null,
+        unit1Photos: normalizeBulkComboPhotos(row.unit1Photos),
+        unit2Photos: normalizeBulkComboPhotos(row.unit2Photos),
+        unit1SourceUrl: row.unit1SourceUrl ?? null,
+        unit2SourceUrl: row.unit2SourceUrl ?? null,
+        error: row.error ?? null,
+      };
+    });
+    const createdAt = toBulkComboMs(jobRow.createdAt) ?? Date.now();
+    const updatedAt = toBulkComboMs(jobRow.updatedAt) ?? createdAt;
+    return {
+      id: jobRow.id,
+      status: validBulkComboStatus(jobRow.status),
+      createdAt,
+      updatedAt,
+      startedAt: toBulkComboMs(jobRow.startedAt),
+      finishedAt: toBulkComboMs(jobRow.finishedAt),
+      cancelRequested: Boolean(jobRow.cancelRequested),
+      currentIndex: jobRow.currentIndex ?? 0,
+      completed: jobRow.completed ?? 0,
+      failed: jobRow.failed ?? 0,
+      cancelled: jobRow.cancelled ?? 0,
+      items,
+    };
+  };
+  const maybeResumeBulkComboListingJob = (job: BulkComboListingJob | null) => {
+    if (!job) return;
+    if ((job.status === "queued" || job.status === "running") && !activeBulkComboListingJobIds.has(job.id)) {
+      void runBulkComboListingJob(job.id);
     }
   };
   const serializeBulkComboListingJob = (job: BulkComboListingJob) => ({
@@ -21518,6 +21625,15 @@ Return ONLY compact JSON with this exact shape:
     })),
   });
   const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
+    if (item.draftId) {
+      item.status = "completed";
+      item.phase = "done";
+      item.message = `Draft #${item.draftId} already saved to dashboard`;
+      item.finishedAt = item.finishedAt ?? Date.now();
+      job.updatedAt = Date.now();
+      await persistBulkComboListingSnapshot(job);
+      return;
+    }
     const community = item.community || {};
     const pairing = item.pairing;
     const unit1: ComboPhotoFetchUnit = {
@@ -21554,16 +21670,20 @@ Return ONLY compact JSON with this exact shape:
     item.message = "Fetching unit photos";
     item.startedAt = Date.now();
     job.updatedAt = Date.now();
+    await persistBulkComboListingSnapshot(job);
     await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem);
     item.unit1Photos = photoItem.unit1Photos;
     item.unit2Photos = photoItem.unit2Photos;
     item.unit1SourceUrl = photoItem.unit1SourceUrl;
     item.unit2SourceUrl = photoItem.unit2SourceUrl;
+    job.updatedAt = Date.now();
+    await persistBulkComboListingSnapshot(job);
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     item.phase = "copy";
     item.message = "Generating listing draft";
     job.updatedAt = Date.now();
+    await persistBulkComboListingSnapshot(job);
     const generated = await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/generate-listing`, {
       communityName: community.name,
       city: community.city,
@@ -21577,6 +21697,7 @@ Return ONLY compact JSON with this exact shape:
     item.phase = "save";
     item.message = "Saving dashboard draft";
     job.updatedAt = Date.now();
+    await persistBulkComboListingSnapshot(job);
     const streetAddress = item.streetAddress || inferCommunityStreetAddress({
       communityName: community.name,
       city: community.city,
@@ -21633,6 +21754,7 @@ Return ONLY compact JSON with this exact shape:
       item.phase = "persist";
       item.message = "Persisting photos and starting pricing";
       job.updatedAt = Date.now();
+      await persistBulkComboListingSnapshot(job);
       if (item.unit1Photos.length > 0 || item.unit2Photos.length > 0) {
         await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
           unit1Photos: item.unit1Photos.map((p) => p.url),
@@ -21648,52 +21770,69 @@ Return ONLY compact JSON with this exact shape:
     }
     item.phase = "done";
     item.message = item.draftId ? `Draft #${item.draftId} saved to dashboard` : "Draft saved to dashboard";
+    job.updatedAt = Date.now();
+    await persistBulkComboListingSnapshot(job);
   };
   const runBulkComboListingJob = async (jobId: string) => {
-    const job = bulkComboListingJobs.get(jobId);
-    if (!job) return;
-    job.status = "running";
-    job.startedAt = Date.now();
-    job.updatedAt = Date.now();
-    for (let i = 0; i < job.items.length; i += 1) {
-      job.currentIndex = i;
-      const item = job.items[i];
-      if (job.cancelRequested) {
-        item.status = "cancelled";
-        item.finishedAt = Date.now();
-        job.cancelled += 1;
-        continue;
-      }
-      try {
-        await runBulkComboListingItem(job, item);
-        item.status = "completed";
-        job.completed += 1;
-      } catch (e: any) {
-        if (e?.cancelled || job.cancelRequested) {
+    if (activeBulkComboListingJobIds.has(jobId)) return;
+    activeBulkComboListingJobIds.add(jobId);
+    try {
+      const job = await loadBulkComboListingJob(jobId);
+      if (!job) return;
+      job.status = "running";
+      job.startedAt = job.startedAt ?? Date.now();
+      job.updatedAt = Date.now();
+      await persistBulkComboListingSnapshot(job);
+      for (let i = 0; i < job.items.length; i += 1) {
+        job.currentIndex = i;
+        const item = job.items[i];
+        if (item.status === "completed" || item.status === "cancelled") continue;
+        const latestJob = await loadBulkComboListingJob(jobId);
+        if (latestJob?.cancelRequested) job.cancelRequested = true;
+        if (job.cancelRequested) {
           item.status = "cancelled";
-          item.error = "Cancelled by operator";
-          job.cancelled += 1;
-        } else {
-          item.status = "failed";
-          item.error = e?.message ?? String(e);
-          item.message = item.error || "Bulk combo listing failed";
-          job.failed += 1;
+          item.phase = "cancelled";
+          item.message = "Cancelled by operator";
+          item.finishedAt = Date.now();
+          job.updatedAt = Date.now();
+          await persistBulkComboListingSnapshot(job);
+          continue;
         }
-      } finally {
-        item.finishedAt = Date.now();
-        job.updatedAt = Date.now();
+        try {
+          await runBulkComboListingItem(job, item);
+          item.status = "completed";
+        } catch (e: any) {
+          if (e?.cancelled || job.cancelRequested) {
+            item.status = "cancelled";
+            item.phase = "cancelled";
+            item.error = "Cancelled by operator";
+            item.message = "Cancelled by operator";
+          } else {
+            item.status = "failed";
+            item.phase = "failed";
+            item.error = e?.message ?? String(e);
+            item.message = item.error || "Bulk combo listing failed";
+          }
+        } finally {
+          item.finishedAt = Date.now();
+          job.updatedAt = Date.now();
+          await persistBulkComboListingSnapshot(job);
+        }
       }
+      job.finishedAt = Date.now();
+      job.updatedAt = Date.now();
+      refreshBulkComboListingCounts(job);
+      if (job.cancelRequested) job.status = "cancelled";
+      else if (job.failed > 0 && job.completed === 0) job.status = "failed";
+      else job.status = "completed";
+      await persistBulkComboListingSnapshot(job);
+      console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
+    } finally {
+      activeBulkComboListingJobIds.delete(jobId);
     }
-    job.finishedAt = Date.now();
-    job.updatedAt = Date.now();
-    if (job.cancelRequested) job.status = "cancelled";
-    else if (job.failed > 0 && job.completed === 0) job.status = "failed";
-    else job.status = "completed";
-    console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
   };
 
   app.post("/api/community/bulk-combo-listing-jobs", async (req, res) => {
-    pruneBulkComboListingJobs();
     const inputs = Array.isArray(req.body?.items) ? req.body.items as BulkComboListingInput[] : [];
     if (inputs.length === 0) return res.status(400).json({ error: "items required" });
     const now = Date.now();
@@ -21732,20 +21871,61 @@ Return ONLY compact JSON with this exact shape:
       cancelled: 0,
       items,
     };
-    bulkComboListingJobs.set(id, job);
+    await db.insert(bulkComboListingJobRows).values({
+      id: job.id,
+      status: job.status,
+      cancelRequested: job.cancelRequested,
+      currentIndex: job.currentIndex,
+      completed: job.completed,
+      failed: job.failed,
+      cancelled: job.cancelled,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    await db.insert(bulkComboListingJobItemRows).values(items.map((item, index) => ({
+      jobId: id,
+      itemKey: item.id,
+      label: item.label,
+      status: item.status,
+      phase: item.phase,
+      message: item.message,
+      payload: {
+        id: item.id,
+        community: item.community,
+        pairing: item.pairing,
+        streetAddress: item.streetAddress,
+        pricingArea: item.pricingArea,
+        strPermit: item.strPermit,
+        dbprLicense: item.dbprLicense,
+        touristTaxAccount: item.touristTaxAccount,
+      },
+      draftId: null,
+      unit1Photos: [],
+      unit2Photos: [],
+      unit1SourceUrl: null,
+      unit2SourceUrl: null,
+      error: null,
+      sortOrder: index,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    })));
     void runBulkComboListingJob(id);
     res.status(202).json({ job: serializeBulkComboListingJob(job) });
   });
 
-  app.get("/api/community/bulk-combo-listing-jobs/:jobId", (req, res) => {
-    pruneBulkComboListingJobs();
-    const job = bulkComboListingJobs.get(req.params.jobId);
+  app.get("/api/community/bulk-combo-listing-jobs/:jobId", async (req, res) => {
+    const job = await loadBulkComboListingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk combo listing job not found" });
+    maybeResumeBulkComboListingJob(job);
     res.json({ job: serializeBulkComboListingJob(job) });
   });
 
-  app.post("/api/community/bulk-combo-listing-jobs/:jobId/cancel", (req, res) => {
-    const job = bulkComboListingJobs.get(req.params.jobId);
+  app.post("/api/community/bulk-combo-listing-jobs/:jobId/cancel", async (req, res) => {
+    const job = await loadBulkComboListingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk combo listing job not found" });
     job.cancelRequested = true;
     for (const item of job.items) {
@@ -21757,8 +21937,27 @@ Return ONLY compact JSON with this exact shape:
     }
     if (job.status === "queued") job.status = "cancelled";
     job.updatedAt = Date.now();
+    await persistBulkComboListingSnapshot(job);
     res.json({ job: serializeBulkComboListingJob(job) });
   });
+
+  const resumeBulkComboListingJobs = async () => {
+    try {
+      const rows = await db
+        .select({ id: bulkComboListingJobRows.id })
+        .from(bulkComboListingJobRows)
+        .where(inArray(bulkComboListingJobRows.status, ["queued", "running"]))
+        .orderBy(asc(bulkComboListingJobRows.createdAt))
+        .limit(5);
+      for (const row of rows) {
+        if (!activeBulkComboListingJobIds.has(row.id)) void runBulkComboListingJob(row.id);
+      }
+      if (rows.length > 0) console.log(`[bulk-combo-listings] resumed ${rows.length} queued/running DB job(s)`);
+    } catch (e: any) {
+      console.warn("[bulk-combo-listings] DB resume failed", e?.message ?? e);
+    }
+  };
+  setTimeout(() => void resumeBulkComboListingJobs(), 2_500).unref?.();
 
   // ============================================================
   // Step 4: Fetch unit photos
