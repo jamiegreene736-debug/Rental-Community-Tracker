@@ -491,6 +491,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
 
   const deadline = Date.now() + BULK_PRICING_ITEM_TIMEOUT_MS;
   let missingProgressCount = 0;
+  let sidecarOfflineSince: number | null = null;
   while (Date.now() < deadline) {
     const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
     if (latestJob?.cancelRequested) job.cancelRequested = true;
@@ -517,6 +518,14 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       item.progress = progress;
       item.heartbeatAt = Date.now();
       await persistBulkPricingJob(job);
+      if (progress.daemonOnline === false) {
+        sidecarOfflineSince = sidecarOfflineSince ?? Date.now();
+        if (Date.now() - sidecarOfflineSince > 45_000) {
+          throw new Error("Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac, then retry this market-pricing queue.");
+        }
+      } else if (progress.daemonOnline === true) {
+        sidecarOfflineSince = null;
+      }
     }
     if (progress?.phase === "done") return;
     if (progress?.phase === "error") {
@@ -543,6 +552,18 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
     await topQueueEvent("bulk-pricing", job.id, "running", "Bulk market pricing queue started", {
       meta: { total: job.items.length, dryRun: Boolean(job.dryRun) },
     });
+    if (!job.dryRun) {
+      const { getHeartbeat } = await import("./vrbo-sidecar-queue");
+      const heartbeat = getHeartbeat();
+      if (heartbeat.paused) {
+        throw new Error(heartbeat.pausedReason
+          ? `Chrome sidecar queue is stopped: ${heartbeat.pausedReason}`
+          : "Chrome sidecar queue is stopped. Start the sidecar queue before running bulk market pricing.");
+      }
+      if (!heartbeat.isOnline) {
+        throw new Error("Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac, then retry this market-pricing queue.");
+      }
+    }
     const lane = await acquireSidecarLane({
       ownerType: "bulk-pricing",
       ownerId: job.id,
