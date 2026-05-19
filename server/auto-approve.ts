@@ -69,7 +69,7 @@ async function preApproveAirbnbInquiry(reservationId: string): Promise<"preappro
 
 async function approveAirbnbRequest(reservationId: string): Promise<"approved" | "already"> {
   try {
-    await guestyRequest("POST", `/reservations/${reservationId}/approve`, {});
+    await guestyRequest("POST", `/reservations-v3/${reservationId}/approve`, {});
     return "approved";
   } catch (err: any) {
     const message = err?.message ?? String(err);
