@@ -169,7 +169,35 @@ sleep 5
 launchctl kickstart -k "gui/$UID/com.vrbosidecar.worker"
 ```
 
-## launchd plist (one-time setup)
+## launchd setup (one-time setup)
+
+Preferred setup from the repo root:
+
+```sh
+./scripts/install-vrbo-sidecar-launchagent.sh
+```
+
+That script copies the current sidecar files into
+`~/.vrbo-sidecar-daemon`, writes the LaunchAgent plist, stops any
+manual sidecar supervisor already running from Terminal, and kickstarts
+`com.vrbosidecar.worker`. The LaunchAgent uses `KeepAlive`, so macOS
+starts it at login and restarts it if the sidecar exits. The daemon is
+installed outside `~/Downloads` because macOS can block LaunchAgents
+from executing files there with `Operation not permitted`.
+
+For the dedicated sidecar monitor setup, the installer defaults to:
+
+```sh
+SIDECAR_CHROME_VISIBLE=1
+SIDECAR_CHROME_VISIBLE_GRID_ORIGIN=1600,60
+SIDECAR_CHROME_VISIBLE_GRID_COLUMNS=2
+SIDECAR_ALLOW_FOCUS=0
+```
+
+Override any of those before running the installer if the monitor
+layout changes.
+
+Manual plist reference:
 
 `~/Library/LaunchAgents/com.vrbosidecar.worker.plist`:
 
