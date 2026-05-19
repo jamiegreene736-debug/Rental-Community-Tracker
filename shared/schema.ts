@@ -885,6 +885,12 @@ export const scannerSchedule = pgTable("scanner_schedule", {
   lastRunAt: timestamp("last_run_at"),
   lastRunStatus: text("last_run_status"),       // "ok" | "error" | null
   lastRunSummary: text("last_run_summary"),     // short message for the UI
+  // Separate from scan completion: this records when the pricing plan was
+  // actually written to Guesty's calendar, so a fresh market scan and a
+  // fresh Guesty push can be audited independently.
+  lastGuestyRatePushAt: timestamp("last_guesty_rate_push_at"),
+  lastGuestyRatePushStatus: text("last_guesty_rate_push_status"),
+  lastGuestyRatePushSummary: text("last_guesty_rate_push_summary"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

@@ -1002,6 +1002,35 @@ export class DatabaseStorage implements IStorage {
       .where(eq(scannerSchedule.propertyId, propertyId));
   }
 
+  async markScannerGuestyRatePush(
+    propertyId: number,
+    status: "ok" | "error",
+    summary: string,
+  ): Promise<void> {
+    const now = new Date();
+    const existing = await this.getScannerSchedule(propertyId);
+    if (existing) {
+      await db.update(scannerSchedule)
+        .set({
+          lastGuestyRatePushAt: now,
+          lastGuestyRatePushStatus: status,
+          lastGuestyRatePushSummary: summary,
+          updatedAt: now,
+        })
+        .where(eq(scannerSchedule.id, existing.id));
+      return;
+    }
+    await db.insert(scannerSchedule)
+      .values({
+        propertyId,
+        enabled: false,
+        lastGuestyRatePushAt: now,
+        lastGuestyRatePushStatus: status,
+        lastGuestyRatePushSummary: summary,
+      })
+      .returning();
+  }
+
   // Append one row per scanner run (scheduled tick or manual "Run now").
   // `scannerSchedule.lastRunSummary` holds only the latest; this table
   // keeps the trail the UI renders as "Last N runs".

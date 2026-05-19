@@ -233,6 +233,13 @@ function fmt(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function fmtDateTime(value?: string | number | null) {
+  if (value == null) return "never";
+  const date = typeof value === "number" ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown time";
+  return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
 function statusIcon(status: string) {
   if (status === "success") return "✓";
   if (status === "error") return "✗";
@@ -260,6 +267,7 @@ function guestyListingId(listing: GuestyListing | null | undefined): string {
 // the server tries multiple field shapes and reports which one stuck.
 function ChannelMarkupCard({
   listingId,
+  propertyId,
   markupPct,
   setMarkupPct,
   seasonalMonths,
@@ -268,8 +276,13 @@ function ChannelMarkupCard({
   targetMarginPct,
   setTargetMarginPct,
   allowCustomMargin,
+  lastGuestyRatePushAt,
+  lastGuestyRatePushStatus,
+  lastGuestyRatePushSummary,
+  onGuestyRatePushRecorded,
 }: {
   listingId: string | null;
+  propertyId?: number;
   // Decimal form: { airbnb: 0.155, vrbo: 0, ... }. Inputs below translate to/from %.
   markupPct: Record<ChannelKey, number>;
   setMarkupPct: (m: Record<ChannelKey, number>) => void;
@@ -283,6 +296,10 @@ function ChannelMarkupCard({
   targetMarginPct: number;
   setTargetMarginPct: (value: number) => void;
   allowCustomMargin: boolean;
+  lastGuestyRatePushAt?: string | null;
+  lastGuestyRatePushStatus?: string | null;
+  lastGuestyRatePushSummary?: string | null;
+  onGuestyRatePushRecorded?: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -379,6 +396,7 @@ function ChannelMarkupCard({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           listingId,
+          propertyId,
           monthlyRates: plan.map(({ yearMonth, price }) => ({ yearMonth, price })),
         }),
       });
@@ -395,6 +413,7 @@ function ChannelMarkupCard({
       // re-fetch because Guesty's calendar GET was returning stale rates
       // right after the PUT (eventual consistency on their side).
       applyPushedRates?.(plan);
+      await onGuestyRatePushRecorded?.();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -519,6 +538,12 @@ function ChannelMarkupCard({
         {seasonalPriceRange && (
           <span style={{ fontSize: 11, color: "#6b7280" }}>
             Seasonal base rates will range <b>${seasonalPriceRange.min.toLocaleString()}</b>–<b>${seasonalPriceRange.max.toLocaleString()}</b> per night.
+          </span>
+        )}
+        {lastGuestyRatePushAt && (
+          <span style={{ fontSize: 11, color: lastGuestyRatePushStatus === "error" ? "#991b1b" : "#166534" }}>
+            Last Guesty rate push: <b>{fmtDateTime(lastGuestyRatePushAt)}</b>
+            {lastGuestyRatePushSummary ? ` · ${lastGuestyRatePushSummary}` : ""}
           </span>
         )}
       </div>
@@ -2379,6 +2404,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     label: string;
     error?: string;
   };
+  type ScannerScheduleSnapshot = {
+    targetMargin?: string | number | null;
+    lastGuestyRatePushAt?: string | null;
+    lastGuestyRatePushStatus?: string | null;
+    lastGuestyRatePushSummary?: string | null;
+  };
   const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
   const refreshNoticeDismissKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.server-dismissed-at`;
   const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Start a fresh season-band refresh after the sidecar goes quiet.";
@@ -3058,26 +3089,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   });
   const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
   const pricingMarginTarget = isSingleListing ? targetMarginPct / 100 : MIN_PROFIT_MARGIN;
+  const [scannerSchedule, setScannerSchedule] = useState<ScannerScheduleSnapshot | null>(null);
 
   useEffect(() => {
     if (!isSingleListing) setTargetMarginPct(MIN_PROFIT_MARGIN * 100);
   }, [isSingleListing]);
 
-  useEffect(() => {
-    if (!propertyId || !isSingleListing) return;
-    let cancelled = false;
-    fetch(`/api/availability/schedule/${propertyId}`)
+  const refreshScannerSchedule = useCallback(async () => {
+    if (!propertyId) {
+      setScannerSchedule(null);
+      return;
+    }
+    await fetch(`/api/availability/schedule/${propertyId}`)
       .then((r) => r.json())
       .then((data: any) => {
-        if (cancelled) return;
+        const nextSchedule = (data?.schedule ?? null) as ScannerScheduleSnapshot | null;
+        setScannerSchedule(nextSchedule);
         const margin = Number.parseFloat(String(data?.schedule?.targetMargin ?? ""));
-        if (Number.isFinite(margin)) {
+        if (isSingleListing && Number.isFinite(margin)) {
           setTargetMarginPct(Math.max(-99, Math.min(100, margin * 100)));
         }
       })
       .catch(() => {});
-    return () => { cancelled = true; };
   }, [propertyId, isSingleListing]);
+
+  useEffect(() => {
+    void refreshScannerSchedule();
+  }, [refreshScannerSchedule]);
 
   useEffect(() => {
     if (!propertyId || !isSingleListing) return;
@@ -4956,6 +4994,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       ? "Season-band market-rate basis has been saved. This notice stays here until you dismiss it."
                                       : (effectiveRefreshNotice.error || effectiveRefreshNotice.label || "The season-band market-rate refresh did not complete.")}
                                   </div>
+                                  {scannerSchedule?.lastGuestyRatePushAt && (
+                                    <div style={{ marginTop: 4, opacity: 0.88 }}>
+                                      Last Guesty rate push: <b>{fmtDateTime(scannerSchedule.lastGuestyRatePushAt)}</b>
+                                      {scannerSchedule.lastGuestyRatePushStatus === "error" ? " (needs review)" : ""}
+                                      {scannerSchedule.lastGuestyRatePushSummary ? ` · ${scannerSchedule.lastGuestyRatePushSummary}` : ""}
+                                    </div>
+                                  )}
                                 </div>
                                 <button
                                   type="button"
@@ -5421,6 +5466,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 {activeTab === "pricing" && (
                   <ChannelMarkupCard
                     listingId={selectedId}
+                    propertyId={propertyId}
                     markupPct={markupPct}
                     setMarkupPct={setMarkupPct}
                     seasonalMonths={seasonalMonths}
@@ -5429,6 +5475,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     targetMarginPct={targetMarginPct}
                     setTargetMarginPct={setTargetMarginPct}
                     allowCustomMargin={isSingleListing}
+                    lastGuestyRatePushAt={scannerSchedule?.lastGuestyRatePushAt ?? null}
+                    lastGuestyRatePushStatus={scannerSchedule?.lastGuestyRatePushStatus ?? null}
+                    lastGuestyRatePushSummary={scannerSchedule?.lastGuestyRatePushSummary ?? null}
+                    onGuestyRatePushRecorded={refreshScannerSchedule}
                   />
                 )}
 

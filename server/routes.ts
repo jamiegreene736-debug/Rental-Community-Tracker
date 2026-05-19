@@ -611,6 +611,7 @@ async function pushBulkGuestyPricingAfterRefresh(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       listingId: plan.listingId,
+      propertyId,
       monthlyRates: plan.monthlyRates.map(({ yearMonth, price }) => ({ yearMonth, price })),
     }),
   });
@@ -13535,8 +13536,9 @@ export async function registerRoutes(
   // To hit a steady margin target across months, the base rate itself has
   // to scale with season — that's what this endpoint writes.
   app.post("/api/builder/push-seasonal-rates", async (req: Request, res: Response) => {
-    const { listingId, monthlyRates } = req.body as {
+    const { listingId, monthlyRates, propertyId } = req.body as {
       listingId?: string;
+      propertyId?: number;
       // Each entry: { yearMonth: "2026-08", price: 1970 } — price becomes the
       // per-night base for every day in that month.
       monthlyRates?: Array<{ yearMonth: string; price: number }>;
@@ -13579,6 +13581,16 @@ export async function registerRoutes(
       }
     }
     if (current) ranges.push(current);
+
+    const schedulePropertyId = Number.isFinite(Number(propertyId)) ? Number(propertyId) : null;
+    const recordGuestyRatePush = async (status: "ok" | "error", summary: string) => {
+      if (!schedulePropertyId) return;
+      try {
+        await storage.markScannerGuestyRatePush(schedulePropertyId, status, summary.slice(0, 240));
+      } catch (err: any) {
+        console.warn(`[push-seasonal-rates] could not record Guesty push timestamp for property ${schedulePropertyId}: ${err?.message ?? err}`);
+      }
+    };
 
     console.log(`[push-seasonal-rates] listing ${listingId} · ${ranges.length} ranges · ${days.length} days`);
 
@@ -13624,7 +13636,15 @@ export async function registerRoutes(
         if (priceByDate.get(dateStr) === Math.round(rate)) matched++;
       }
       const fullyVerified = matched >= days.length;
+      const success = failedRanges.length === 0 && fullyVerified;
+      const summary = success
+        ? `Pushed ${days.length} calendar days in ${pushedRanges}/${ranges.length} ranges; verified ${matched}/${days.length} days.`
+        : `Attempted ${days.length} calendar days; pushed ${pushedRanges}/${ranges.length} ranges; verified ${matched}/${days.length} days.`;
+      await recordGuestyRatePush(success ? "ok" : "error", summary);
       return res.json({
+        lastGuestyRatePushAt: schedulePropertyId ? new Date().toISOString() : undefined,
+        lastGuestyRatePushStatus: success ? "ok" : "error",
+        lastGuestyRatePushSummary: summary,
         success: failedRanges.length === 0 && fullyVerified,
         pushedDays: days.length,
         pushedRanges,
@@ -13639,8 +13659,14 @@ export async function registerRoutes(
     } catch (err: any) {
       console.error(`[push-seasonal-rates] verify error:`, err.message);
       // Push happened (or partially happened); only verification failed.
+      const success = failedRanges.length === 0;
+      const summary = `Pushed ${pushedRanges}/${ranges.length} ranges; Guesty read-back verification failed: ${err.message}`;
+      await recordGuestyRatePush(success ? "ok" : "error", summary);
       return res.json({
-        success: failedRanges.length === 0,
+        lastGuestyRatePushAt: schedulePropertyId ? new Date().toISOString() : undefined,
+        lastGuestyRatePushStatus: success ? "ok" : "error",
+        lastGuestyRatePushSummary: summary,
+        success,
         pushedDays: days.length,
         pushedRanges,
         totalRanges: ranges.length,
