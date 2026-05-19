@@ -4095,7 +4095,7 @@ export default function InboxPage() {
                       <p className="text-xs text-muted-foreground">
                         {autoApproveStatus?.enabled
                           ? `Active · Checks every 15 min${autoApproveStatus?.lastRunAt ? ` · Last run: ${new Date(autoApproveStatus.lastRunAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}`
-                          : "Paused — new Airbnb requests will not be auto-confirmed"}
+                          : "Paused — new Airbnb requests will not be auto-approved"}
                       </p>
                       {autoApproveStatus?.lastRunResult?.message && (
                         <p className="text-xs text-muted-foreground mt-0.5 italic">{autoApproveStatus.lastRunResult.message}</p>
