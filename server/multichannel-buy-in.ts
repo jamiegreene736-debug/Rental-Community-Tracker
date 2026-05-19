@@ -307,32 +307,20 @@ type PmRateSample = {
   priceBasis?: PriceBasis;
 };
 
-async function fetchPmMarketRatesForBedroom(args: {
+async function buildPmSearchSites(args: {
   community: string;
   city: string;
   state: string;
   searchName?: string;
   bedrooms: number;
   checkIn: string;
-  checkOut: string;
-  region: RegionKey;
-  sidecarQueueBudgetMs?: number;
-  pmPerSiteLimit?: number;
-  pmMaxSites?: number;
-  pmWalletBudgetMs?: number;
   sidecarStopGeneration?: number;
   signal?: AbortSignal;
-}): Promise<{
-  br: number;
-  medianNightly: number | null;
-  sampleCount: number;
-  workerOnline: boolean;
-  reason?: string;
-}> {
+}): Promise<{ sites: SidecarPmSearchSite[]; knownCount: number; discoveredCount: number }> {
   const br = args.bedrooms;
   const assertSidecarRunCurrent = () => {
     if (args.signal?.aborted) {
-      const err = new Error(args.signal.reason instanceof Error ? args.signal.reason.message : "monthly PM scan cancelled");
+      const err = new Error(args.signal.reason instanceof Error ? args.signal.reason.message : "PM site discovery cancelled");
       err.name = "AbortError";
       throw err;
     }
@@ -341,19 +329,10 @@ async function fetchPmMarketRatesForBedroom(args: {
     }
   };
   const target = args.searchName ?? args.community;
-  const nights = nightsBetween(args.checkIn, args.checkOut);
-  const samples: PmRateSample[] = [];
-  const pushSample = (sample: PmRateSample) => {
-    if (sample.bedrooms !== br || !(sample.nightlyPrice > 0)) return;
-    samples.push(sample);
-  };
-
   const isHawaii = /hawaii|kauai|maui|oahu|honolulu|big\s*island|hawai|poipu|princeville|hanalei|wailua|kapaa|koloa|lihue|anini|pili\s*mai|wailea|kaanapali|kihei|lahaina|kaneohe/i
     .test(`${args.community} ${args.searchName ?? ""} ${args.city} ${args.state}`);
   const isPoipu = /poipu|pili\s*mai/i.test(`${args.community} ${args.searchName ?? ""} ${args.city}`);
 
-  let workerOnline = false;
-  let sidecarReason = "";
   let discoveredSiteCount = 0;
   const apiKey = process.env.SEARCHAPI_API_KEY;
   const knownSites: SidecarPmSearchSite[] = [];
@@ -401,6 +380,53 @@ async function fetchPmMarketRatesForBedroom(args: {
       return false;
     }
   });
+  return { sites, knownCount: knownSites.length, discoveredCount: discoveredSiteCount };
+}
+
+async function fetchPmMarketRatesForBedroom(args: {
+  community: string;
+  city: string;
+  state: string;
+  searchName?: string;
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  region: RegionKey;
+  sidecarQueueBudgetMs?: number;
+  pmPerSiteLimit?: number;
+  pmMaxSites?: number;
+  pmWalletBudgetMs?: number;
+  sidecarStopGeneration?: number;
+  signal?: AbortSignal;
+}): Promise<{
+  br: number;
+  medianNightly: number | null;
+  sampleCount: number;
+  workerOnline: boolean;
+  reason?: string;
+}> {
+  const br = args.bedrooms;
+  const assertSidecarRunCurrent = () => {
+    if (args.signal?.aborted) {
+      const err = new Error(args.signal.reason instanceof Error ? args.signal.reason.message : "monthly PM scan cancelled");
+      err.name = "AbortError";
+      throw err;
+    }
+    if (hasSidecarStopGenerationChanged(args.sidecarStopGeneration)) {
+      throw sidecarRunCancelledError();
+    }
+  };
+  const target = args.searchName ?? args.community;
+  const nights = nightsBetween(args.checkIn, args.checkOut);
+  const samples: PmRateSample[] = [];
+  const pushSample = (sample: PmRateSample) => {
+    if (sample.bedrooms !== br || !(sample.nightlyPrice > 0)) return;
+    samples.push(sample);
+  };
+
+  let workerOnline = false;
+  let sidecarReason = "";
+  const { sites, knownCount, discoveredCount } = await buildPmSearchSites(args);
 
   if (sites.length > 0) {
     try {
@@ -458,7 +484,7 @@ async function fetchPmMarketRatesForBedroom(args: {
   const medianNightly = medianOfSorted(normalizedRates);
   const reasonBits: string[] = [];
   if (samples.length > 0) reasonBits.push(`${samples.length} verified PM sample(s)`);
-  reasonBits.push(`${sites.length} PM site(s): ${knownSites.length} known + ${discoveredSiteCount} SearchAPI-discovered`);
+  reasonBits.push(`${sites.length} PM site(s): ${knownCount} known + ${discoveredCount} SearchAPI-discovered`);
   if (sidecarReason) reasonBits.push(sidecarReason);
 
   return {
@@ -468,6 +494,126 @@ async function fetchPmMarketRatesForBedroom(args: {
     workerOnline,
     reason: reasonBits.join(" | "),
   };
+}
+
+async function fetchPmMarketRatesForBedroomSet(args: {
+  community: string;
+  city: string;
+  state: string;
+  searchName?: string;
+  bedroomCounts: number[];
+  checkIn: string;
+  checkOut: string;
+  region: RegionKey;
+  sidecarQueueBudgetMs?: number;
+  pmPerSiteLimit?: number;
+  pmMaxSites?: number;
+  pmWalletBudgetMs?: number;
+  sidecarStopGeneration?: number;
+  signal?: AbortSignal;
+}): Promise<{
+  br: number;
+  medianNightly: number | null;
+  sampleCount: number;
+  workerOnline: boolean;
+  reason?: string;
+}[]> {
+  const targetBrs = Array.from(new Set(args.bedroomCounts))
+    .filter((br) => Number.isFinite(br) && br > 0)
+    .sort((a, b) => a - b);
+  const searchBedrooms = targetBrs[0];
+  if (!searchBedrooms || targetBrs.length <= 1) {
+    const br = searchBedrooms ?? args.bedroomCounts[0];
+    return [await fetchPmMarketRatesForBedroom({ ...args, bedrooms: br })];
+  }
+
+  const target = args.searchName ?? args.community;
+  const nights = nightsBetween(args.checkIn, args.checkOut);
+  const samplesByBr = new Map<number, PmRateSample[]>();
+  for (const br of targetBrs) samplesByBr.set(br, []);
+  let workerOnline = false;
+  let sidecarReason = "";
+  const { sites, knownCount, discoveredCount } = await buildPmSearchSites({
+    ...args,
+    bedrooms: searchBedrooms,
+  });
+
+  if (sites.length > 0) {
+    try {
+      if (args.signal?.aborted) {
+        const err = new Error(args.signal.reason instanceof Error ? args.signal.reason.message : "shared PM scan cancelled");
+        err.name = "AbortError";
+        throw err;
+      }
+      if (hasSidecarStopGenerationChanged(args.sidecarStopGeneration)) throw sidecarRunCancelledError();
+      const { searchPmSitesViaSidecar } = await import("./vrbo-sidecar-queue");
+      const r = await searchPmSitesViaSidecar({
+        sites,
+        searchTerm: target,
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        bedrooms: searchBedrooms,
+        perSiteLimit: Math.max(args.pmPerSiteLimit ?? 8, 8),
+        maxSites: Math.min(args.pmMaxSites ?? 30, sites.length),
+        walletBudgetMs: args.pmWalletBudgetMs ?? 240_000,
+        queueBudgetMs: args.sidecarQueueBudgetMs ?? 285_000,
+        signal: args.signal,
+        stopGeneration: args.sidecarStopGeneration,
+      });
+      workerOnline = r.workerOnline;
+      sidecarReason = r.reason;
+      for (const c of r.candidates) {
+        const candidateBr = typeof c.bedrooms === "number" && Number.isFinite(c.bedrooms) ? c.bedrooms : null;
+        const matchingBrs = candidateBr === null ? [searchBedrooms] : targetBrs.filter((br) => br === candidateBr);
+        if (matchingBrs.length === 0) continue;
+        const total = c.totalPrice > 0
+          ? Math.round(c.totalPrice)
+          : c.nightlyPrice > 0
+            ? Math.round(c.nightlyPrice * nights)
+            : 0;
+        if (!(total > 0)) continue;
+        for (const br of matchingBrs) {
+          samplesByBr.get(br)?.push({
+            source: c.sourceLabel || normalizeHost(c.url) || "PM sidecar",
+            url: c.url,
+            title: c.title || c.url,
+            bedrooms: br,
+            nightlyPrice: Math.round(total / nights),
+            totalPrice: total,
+            includesTaxes: c.priceIncludesTaxes ?? defaultPriceIncludesTaxes("pm", c.priceBasis),
+            includesFees: c.priceIncludesFees ?? defaultPriceIncludesFees("pm", c.priceBasis),
+            priceBasis: c.priceBasis,
+          });
+        }
+      }
+    } catch (e: any) {
+      rethrowIfSidecarRunCancelled(e);
+      sidecarReason = e?.message ?? String(e);
+    }
+  }
+
+  return targetBrs.map((br) => {
+    const samples = samplesByBr.get(br) ?? [];
+    const normalizedRates = samples
+      .map((s) => normalizeQuotedNightly(s.nightlyPrice, "pm", args.region, br, nights, {
+        priceIncludesTaxes: s.includesTaxes,
+        priceIncludesFees: s.includesFees,
+        priceBasis: s.priceBasis,
+      }))
+      .filter((n) => Number.isFinite(n) && n > 0)
+      .sort((a, b) => a - b);
+    const reasonBits: string[] = [];
+    if (samples.length > 0) reasonBits.push(`${samples.length} verified PM sample(s)`);
+    reasonBits.push(`shared PM scan for ${targetBrs.join("/")}BR: ${sites.length} PM site(s): ${knownCount} known + ${discoveredCount} SearchAPI-discovered`);
+    if (sidecarReason) reasonBits.push(sidecarReason);
+    return {
+      br,
+      medianNightly: medianOfSorted(normalizedRates),
+      sampleCount: normalizedRates.length,
+      workerOnline,
+      reason: reasonBits.join(" | "),
+    };
+  });
 }
 
 export type MultiChannelBuyInResult = {
@@ -586,6 +732,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // long background scans do not spend several minutes per bedroom on
   // slow PM sites while buy-in/detail workflows can still run the
   // deeper search.
+  reuseSharedPmSearch?: boolean;
   pmPerSiteLimit?: number;
   pmMaxSites?: number;
   pmWalletBudgetMs?: number;
@@ -675,10 +822,12 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const otaSearchBedroomCounts = reuseSharedOtaSearch
     ? [sharedOtaBedroomCount]
     : args.bedroomCounts;
+  const reuseSharedPmSearch = args.reuseSharedPmSearch !== false && sortedBedroomCounts.length > 1;
+  const pmSearchCount = reuseSharedPmSearch ? 1 : args.bedroomCounts.length;
   const progressTotal = args.skipSidecar
     ? 0
     : (args.skipOta ? 0 : otaSearchBedroomCounts.length * 3) +
-      (args.skipPm ? 0 : args.bedroomCounts.length);
+      (args.skipPm ? 0 : pmSearchCount);
   let progressCompleted = 0;
   const emitProgress = (
     label: string,
@@ -740,7 +889,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     sampleCount: number;
     workerOnline: boolean;
     reason?: string;
-  }>[] = [];
+  }[]>[] = [];
   // When caller asks us to skip sidecar, we still build the channel
   // map but browser-backed entries stay null. Normal pricing refreshes
   // do not skip sidecar: LOW/HIGH/HOLIDAY all use Airbnb + VRBO +
@@ -957,11 +1106,36 @@ export async function fetchMultiChannelBuyInByBR(args: {
       })(),
     );
   }
-  if (!args.skipSidecar && !args.skipPm) for (const br of args.bedroomCounts) {
-    pmOps.push((async () => {
-      const progressLabel = `PM/direct sites ${br}BR`;
+  if (!args.skipSidecar && !args.skipPm) {
+    if (reuseSharedPmSearch) {
+      pmOps.push((async () => {
+        const progressLabel = `PM/direct sites ${sortedBedroomCounts.join("/")}BR`;
+        try {
+          return await fetchPmMarketRatesForBedroomSet({
+            community: args.community,
+            city: args.city,
+            state: args.state,
+            searchName: args.searchName,
+            bedroomCounts: sortedBedroomCounts,
+            checkIn,
+            checkOut,
+            region: inferRegion(args.city, args.state),
+            sidecarQueueBudgetMs,
+            pmPerSiteLimit: args.pmPerSiteLimit,
+            pmMaxSites: args.pmMaxSites,
+            pmWalletBudgetMs: args.pmWalletBudgetMs,
+            sidecarStopGeneration,
+            signal: args.signal,
+          });
+        } finally {
+          markProgressDone(progressLabel, "pm", sharedOtaBedroomCount);
+        }
+      })());
+    } else for (const br of args.bedroomCounts) {
+      pmOps.push((async () => {
+        const progressLabel = `PM/direct sites ${br}BR`;
       try {
-        return await fetchPmMarketRatesForBedroom({
+        return [await fetchPmMarketRatesForBedroom({
           community: args.community,
           city: args.city,
           state: args.state,
@@ -976,16 +1150,17 @@ export async function fetchMultiChannelBuyInByBR(args: {
           pmWalletBudgetMs: args.pmWalletBudgetMs,
           sidecarStopGeneration,
           signal: args.signal,
-        });
+        })];
       } finally {
         markProgressDone(progressLabel, "pm", br);
       }
-    })());
+      })());
+    }
   }
   const [airbnbFallbackResult, sidecarResults, pmResults] = await Promise.all([
     airbnbFallbackPromise,
     Promise.all(sidecarOps).then((groups) => groups.flat()),
-    Promise.all(pmOps),
+    Promise.all(pmOps).then((groups) => groups.flat()),
   ]);
 
   const daemonOnline =
