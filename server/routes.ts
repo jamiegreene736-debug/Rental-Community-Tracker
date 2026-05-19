@@ -335,11 +335,14 @@ async function persistBulkPricingJob(job: BulkPricingJob): Promise<void> {
   refreshBulkPricingCounts(job);
   const now = new Date();
   const hasActiveLease = activeBulkPricingJobIds.has(job.id);
+  const cancelRequestedValue = job.cancelRequested
+    ? true
+    : sql`${bulkPricingRefreshJobRows.cancelRequested}`;
   await db
     .update(bulkPricingRefreshJobRows)
     .set({
       status: job.status,
-      cancelRequested: job.cancelRequested,
+      cancelRequested: cancelRequestedValue,
       currentIndex: job.currentIndex,
       completed: job.completed,
       failed: job.failed,
@@ -489,11 +492,13 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   const deadline = Date.now() + BULK_PRICING_ITEM_TIMEOUT_MS;
   let missingProgressCount = 0;
   while (Date.now() < deadline) {
+    const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
+    if (latestJob?.cancelRequested) job.cancelRequested = true;
     item.heartbeatAt = Date.now();
     await persistBulkPricingJob(job);
     if (job.cancelRequested) {
-      const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
-      cancelActiveAndPendingRequests(`bulk pricing job ${job.id} cancelled`);
+      const { cancelSidecarRunAndRequests } = await import("./vrbo-sidecar-queue");
+      cancelSidecarRunAndRequests(`bulk pricing job ${job.id} cancelled`);
       throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     }
 
@@ -569,6 +574,8 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
         const item = job.items[i];
         if (!item || item.status === "completed" || item.status === "cancelled") continue;
         if (job.cancelRequested) {
+          const { cancelSidecarRunAndRequests } = await import("./vrbo-sidecar-queue");
+          cancelSidecarRunAndRequests(`bulk pricing job ${job.id} cancelled`);
           item.status = "cancelled";
           item.error = "Cancelled by operator";
           item.finishedAt = Date.now();
@@ -26482,7 +26489,7 @@ Return ONLY compact JSON with this exact shape:
         setRefreshProgress({
           ...current,
           lastTickAt: Date.now(),
-          daemonOnline: hb.everSeen ? hb.isOnline : current.daemonOnline,
+          daemonOnline: hb.isOnline,
           daemonLastPollAgeMs: hb.ageMs ?? current.daemonLastPollAgeMs,
         });
       }, 15_000);
@@ -27069,6 +27076,24 @@ Return ONLY compact JSON with this exact shape:
     const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
     const labels = req.body?.labels && typeof req.body.labels === "object" ? req.body.labels as Record<string, string> : {};
     const dryRun = req.body?.dryRun === true;
+    if (!dryRun) {
+      const { getHeartbeat } = await import("./vrbo-sidecar-queue");
+      const heartbeat = getHeartbeat();
+      if (heartbeat.paused) {
+        return res.status(409).json({
+          error: heartbeat.pausedReason
+            ? `Chrome sidecar queue is stopped: ${heartbeat.pausedReason}`
+            : "Chrome sidecar queue is stopped. Start the sidecar queue before running bulk market pricing.",
+          sidecar: heartbeat,
+        });
+      }
+      if (!heartbeat.isOnline) {
+        return res.status(409).json({
+          error: "Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac first, then run bulk market pricing again.",
+          sidecar: heartbeat,
+        });
+      }
+    }
     const seen = new Set<number>();
     const propertyIds = rawIds
       .map((id: unknown) => Number(id))
@@ -27216,8 +27241,8 @@ Return ONLY compact JSON with this exact shape:
     }
     try {
       if (isSidecarLaneOwner("bulk-pricing", job.id)) {
-        const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
-        cancelActiveAndPendingRequests(`bulk pricing job ${job.id} cancelled`);
+        const { cancelSidecarRunAndRequests } = await import("./vrbo-sidecar-queue");
+        cancelSidecarRunAndRequests(`bulk pricing job ${job.id} cancelled`);
       }
     } catch {}
     if (job.status === "queued") {

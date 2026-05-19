@@ -146,6 +146,8 @@ type BulkPricingJob = {
       percent?: number;
       label?: string;
       error?: string;
+      daemonOnline?: boolean;
+      daemonLastPollAgeMs?: number | null;
     } | null;
     error: string | null;
   }>;
@@ -1062,6 +1064,11 @@ export default function Home() {
     if (!Number.isFinite(ms)) return "—";
     return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   };
+  const formatBulkPricingAge = (ageMs?: number | null) => {
+    if (typeof ageMs !== "number" || !Number.isFinite(ageMs) || ageMs < 0) return "never";
+    if (ageMs < 60_000) return `${Math.max(1, Math.round(ageMs / 1000))}s ago`;
+    return `${Math.round(ageMs / 60_000)}m ago`;
+  };
 
   useEffect(() => {
     const validIds = new Set(allProperties.filter(isBulkPricingSelectable).map((property) => property.id));
@@ -1591,6 +1598,11 @@ export default function Home() {
                             This queue has not reported a heartbeat in over five minutes. It is saved on the server and will be re-claimed automatically if the worker died.
                           </div>
                         )}
+                        {runningBulkPricingItem?.progress?.daemonOnline === false && (
+                          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                            Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac, then retry the queue. Last worker poll: {formatBulkPricingAge(runningBulkPricingItem.progress.daemonLastPollAgeMs)}.
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                           <div className="rounded-md border p-2">
                             <p className="text-xs text-muted-foreground">Status</p>
@@ -1644,6 +1656,8 @@ export default function Home() {
                                     </p>
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
+                                      {item.progress?.daemonOnline === false && ` · sidecar offline (${formatBulkPricingAge(item.progress.daemonLastPollAgeMs)})`}
+                                      {item.progress?.daemonOnline === true && " · sidecar live"}
                                     </p>
                                   </div>
                                   <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>

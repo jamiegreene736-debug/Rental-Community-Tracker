@@ -683,6 +683,22 @@ export function cancelActiveAndPendingRequests(reason = "cancelled by operator")
   return { cancelled, pending, inProgress };
 }
 
+export function cancelSidecarRunAndRequests(reason = "cancelled by operator"): {
+  cancelled: number;
+  pending: number;
+  inProgress: number;
+  stopGeneration: number;
+} {
+  // Request-level cancellation stops what is already queued. The stop
+  // generation also tells long-running producers that captured the old
+  // generation to stop enqueueing follow-up browser work.
+  queueStopGeneration++;
+  return {
+    ...cancelActiveAndPendingRequests(reason),
+    stopGeneration: queueStopGeneration,
+  };
+}
+
 export function isCancellationRequested(id: string): boolean {
   const r = queue.get(id);
   return Boolean(r?.cancelled);
