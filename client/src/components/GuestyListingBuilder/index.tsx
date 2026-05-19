@@ -2380,9 +2380,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     error?: string;
   };
   const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
+  const refreshNoticeDismissKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.server-dismissed-at`;
   const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Start a fresh season-band refresh after the sidecar goes quiet.";
   const [refreshProgress, setRefreshProgress] = useState<MarketRefreshProgress | null>(null);
   const [refreshNotice, setRefreshNotice] = useState<MarketRefreshNotice | null>(null);
+  const [dismissedServerRefreshAt, setDismissedServerRefreshAt] = useState<number>(0);
   const handledTerminalProgressRef = useRef<string | null>(null);
   const marketRatesRefreshingRef = useRef(false);
   const refreshProgressRef = useRef<MarketRefreshProgress | null>(null);
@@ -2464,9 +2466,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     lostProgressRecordedRef.current = false;
     if (!propertyId || typeof window === "undefined") {
       setRefreshNotice(null);
+      setDismissedServerRefreshAt(0);
       return;
     }
     try {
+      const dismissedRaw = window.localStorage.getItem(refreshNoticeDismissKeyFor(propertyId));
+      const dismissedAt = dismissedRaw ? Number.parseInt(dismissedRaw, 10) : 0;
+      setDismissedServerRefreshAt(Number.isFinite(dismissedAt) && dismissedAt > 0 ? dismissedAt : 0);
       const raw = window.localStorage.getItem(refreshNoticeKeyFor(propertyId));
       if (!raw) {
         setRefreshNotice(null);
@@ -2511,6 +2517,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     try {
       if (propertyId && typeof window !== "undefined") {
         window.localStorage.removeItem(refreshNoticeKeyFor(propertyId));
+        const dismissedAt = Date.now();
+        window.localStorage.setItem(refreshNoticeDismissKeyFor(propertyId), String(dismissedAt));
+        setDismissedServerRefreshAt(dismissedAt);
       }
     } catch {}
   }, [propertyId]);
@@ -2991,6 +3000,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, marketRatesVersion]);
 
+  const latestServerMarketRateNotice = useMemo<MarketRefreshNotice | null>(() => {
+    if (!propertyId) return null;
+    let latest = 0;
+    for (const entry of liveBuyInSummary) {
+      const ms = entry.live?.refreshedAt ? Date.parse(entry.live.refreshedAt) : NaN;
+      if (Number.isFinite(ms) && ms > latest) latest = ms;
+    }
+    if (latest <= 0) return null;
+    return {
+      propertyId,
+      status: "done",
+      finishedAt: latest,
+      label: "Season-band market-rate basis saved from the server queue",
+    };
+  }, [propertyId, liveBuyInSummary]);
+
+  const effectiveRefreshNotice = useMemo<MarketRefreshNotice | null>(() => {
+    const serverNotice = latestServerMarketRateNotice &&
+      latestServerMarketRateNotice.finishedAt > dismissedServerRefreshAt
+      ? latestServerMarketRateNotice
+      : null;
+    if (!serverNotice) return refreshNotice;
+    if (!refreshNotice) return serverNotice;
+    return serverNotice.finishedAt > refreshNotice.finishedAt
+      ? serverNotice
+      : refreshNotice;
+  }, [dismissedServerRefreshAt, latestServerMarketRateNotice, refreshNotice]);
+
   // ── Guesty-confirmed monthly rates + channel-aware profit floor ──
   // Fetches what Guesty is ACTUALLY charging per month so we can compare
   // against our pricing sheet at a glance. Also surfaces the minimum rate
@@ -3025,6 +3062,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     if (!isSingleListing) setTargetMarginPct(MIN_PROFIT_MARGIN * 100);
   }, [isSingleListing]);
+
+  useEffect(() => {
+    if (!propertyId || !isSingleListing) return;
+    let cancelled = false;
+    fetch(`/api/availability/schedule/${propertyId}`)
+      .then((r) => r.json())
+      .then((data: any) => {
+        if (cancelled) return;
+        const margin = Number.parseFloat(String(data?.schedule?.targetMargin ?? ""));
+        if (Number.isFinite(margin)) {
+          setTargetMarginPct(Math.max(-99, Math.min(100, margin * 100)));
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [propertyId, isSingleListing]);
+
+  useEffect(() => {
+    if (!propertyId || !isSingleListing) return;
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/availability/schedule/${propertyId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetMargin: targetMarginPct / 100 }),
+      }).catch(() => {});
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [propertyId, isSingleListing, targetMarginPct]);
 
   // Hydrate markupPct from Guesty so saved values survive navigation.
   useEffect(() => {
@@ -4865,15 +4930,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 </div>
                               );
                             })()}
-                            {!marketRatesRefreshing && refreshNotice && (
+                            {!marketRatesRefreshing && effectiveRefreshNotice && (
                               <div
                                 style={{
                                   marginBottom: 8,
                                   padding: "8px 10px",
-                                  border: `1px solid ${refreshNotice.status === "done" ? "#bbf7d0" : "#fecaca"}`,
-                                  background: refreshNotice.status === "done" ? "#f0fdf4" : "#fef2f2",
+                                  border: `1px solid ${effectiveRefreshNotice.status === "done" ? "#bbf7d0" : "#fecaca"}`,
+                                  background: effectiveRefreshNotice.status === "done" ? "#f0fdf4" : "#fef2f2",
                                   borderRadius: 4,
-                                  color: refreshNotice.status === "done" ? "#14532d" : "#7f1d1d",
+                                  color: effectiveRefreshNotice.status === "done" ? "#14532d" : "#7f1d1d",
                                   fontSize: 11,
                                   display: "flex",
                                   alignItems: "center",
@@ -4884,12 +4949,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               >
                                 <div>
                                   <div style={{ fontWeight: 600 }}>
-                                    {refreshNotice.status === "done" ? "Finished last scan" : "Last scan failed"}: {formatRefreshNoticeTime(refreshNotice.finishedAt)}
+                                    {effectiveRefreshNotice.status === "done" ? "Finished last scan" : "Last scan failed"}: {formatRefreshNoticeTime(effectiveRefreshNotice.finishedAt)}
                                   </div>
                                   <div style={{ marginTop: 2, opacity: 0.82 }}>
-                                    {refreshNotice.status === "done"
+                                    {effectiveRefreshNotice.status === "done"
                                       ? "Season-band market-rate basis has been saved. This notice stays here until you dismiss it."
-                                      : (refreshNotice.error || refreshNotice.label || "The season-band market-rate refresh did not complete.")}
+                                      : (effectiveRefreshNotice.error || effectiveRefreshNotice.label || "The season-band market-rate refresh did not complete.")}
                                   </div>
                                 </div>
                                 <button
@@ -4899,9 +4964,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     fontSize: 10,
                                     padding: "3px 8px",
                                     borderRadius: 4,
-                                    border: `1px solid ${refreshNotice.status === "done" ? "#86efac" : "#fca5a5"}`,
+                                    border: `1px solid ${effectiveRefreshNotice.status === "done" ? "#86efac" : "#fca5a5"}`,
                                     background: "#ffffff",
-                                    color: refreshNotice.status === "done" ? "#14532d" : "#7f1d1d",
+                                    color: effectiveRefreshNotice.status === "done" ? "#14532d" : "#7f1d1d",
                                     cursor: "pointer",
                                   }}
                                 >

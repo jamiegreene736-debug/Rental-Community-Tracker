@@ -65,10 +65,16 @@ import {
 } from "./community-research";
 import {
   BUY_IN_RATES,
+  CHANNEL_HOST_FEE,
+  computeChannelMarkups,
   getCommunityRegion,
   getBuyInRate,
   getSeasonForMonth,
+  normalizeSeasonalBasis,
   suggestPricingArea,
+  SEASON_MULTIPLIERS,
+  type ChannelKey,
+  type SeasonType,
 } from "@shared/pricing-rates";
 import { draftPhotoFolderRef, isScannableFolder, replacementPhotoFolderRef, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import {
@@ -454,6 +460,191 @@ function bulkPricingBaseUrl(): string {
   return `http://127.0.0.1:${process.env.PORT || "5000"}`;
 }
 
+const cleanBaseRateFromBuyInServer = (
+  buyIn: number,
+  targetMargin: number,
+): number => {
+  const feeDirect = CHANNEL_HOST_FEE.direct ?? 0.03;
+  return Math.ceil(((1 + targetMargin) * buyIn) / (1 - feeDirect));
+};
+
+const parsePositivePricingRate = (value: unknown): number | null => {
+  const n = typeof value === "number"
+    ? value
+    : typeof value === "string"
+      ? Number.parseFloat(value)
+      : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+const parseTargetMargin = (value: unknown): number | null => {
+  const n = typeof value === "number"
+    ? value
+    : typeof value === "string"
+      ? Number.parseFloat(value)
+      : NaN;
+  if (!Number.isFinite(n)) return null;
+  return Math.max(-0.99, Math.min(1, n));
+};
+
+const build24MonthPricingWindow = (): Array<{ yearMonth: string; season: SeasonType }> => {
+  const now = new Date();
+  const months: Array<{ yearMonth: string; season: SeasonType }> = [];
+  for (let i = 0; i < 24; i += 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    const yearMonth = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    // Region is applied later per property; this placeholder is overwritten
+    // by callers and keeps the tuple shape simple.
+    months.push({ yearMonth, season: "LOW" });
+  }
+  return months;
+};
+
+function marketRateBasisForMonth(args: {
+  community: string;
+  bedrooms: number;
+  propertyId: number;
+  yearMonth: string;
+  season: SeasonType;
+  row?: Awaited<ReturnType<typeof storage.getPropertyMarketRates>>[number] | null;
+}): number {
+  const { community, bedrooms, propertyId, yearMonth, season, row } = args;
+  const monthly = row?.monthlyRates && typeof row.monthlyRates === "object"
+    ? parsePositivePricingRate((row.monthlyRates as Record<string, any>)[yearMonth]?.medianNightly)
+    : null;
+  if (monthly != null) return monthly;
+
+  const low = parsePositivePricingRate(row?.medianNightly);
+  if (low != null) {
+    const normalized = normalizeSeasonalBasis(
+      community,
+      low,
+      parsePositivePricingRate(row?.medianNightlyHigh),
+      parsePositivePricingRate(row?.medianNightlyHoliday),
+    );
+    if (season === "HIGH" && normalized.high != null) return normalized.high;
+    if (season === "HOLIDAY" && normalized.holiday != null) return normalized.holiday;
+    if (season === "LOW") return normalized.low;
+    const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+    return Math.round(low * SEASON_MULTIPLIERS[region][season]);
+  }
+
+  return getBuyInRate(community, bedrooms, propertyId > 0 ? undefined : propertyId, season, yearMonth);
+}
+
+async function buildBulkGuestySeasonalPlan(
+  propertyId: number,
+  targetMargin: number,
+): Promise<{ listingId: string; monthlyRates: Array<{ yearMonth: string; price: number; buyIn: number }>; units: Array<{ bedrooms: number }>; targetMargin: number } | null> {
+  const listingId = await storage.getGuestyListingId(propertyId);
+  if (!listingId) return null;
+
+  let community: string;
+  let units: Array<{ bedrooms: number }>;
+  if (propertyId > 0) {
+    const config = PROPERTY_UNIT_CONFIGS[propertyId];
+    if (!config) return null;
+    community = config.community;
+    units = config.units.map((unit) => ({ bedrooms: unit.bedrooms }));
+  } else {
+    const draft = await storage.getCommunityDraft(Math.abs(propertyId));
+    if (!draft) return null;
+    const isSingle = (draft as any).singleListing === true;
+    const unit1Bedrooms = inferCommunityDraftBedroomCount(draft, "unit1") ?? (Number(draft.combinedBedrooms ?? 0) || 2);
+    const unit2Bedrooms = inferCommunityDraftBedroomCount(draft, "unit2") ?? 2;
+    units = isSingle
+      ? [{ bedrooms: unit1Bedrooms }]
+      : [{ bedrooms: unit1Bedrooms }, { bedrooms: unit2Bedrooms }];
+    community = draft.pricingArea && BUY_IN_RATES[draft.pricingArea]
+      ? draft.pricingArea
+      : draft.name || (/\bfl(orida)?\b/i.test(draft.state || "") ? "Florida Generic" : "Poipu Kai");
+  }
+
+  const rows = await storage.getPropertyMarketRates(propertyId);
+  const rowByBR = new Map<number, (typeof rows)[number]>();
+  for (const row of rows) rowByBR.set(row.bedrooms, row);
+  const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+  const monthlyRates = build24MonthPricingWindow().map(({ yearMonth }) => {
+    const season = getSeasonForMonth(yearMonth, region);
+    const buyIn = units.reduce((sum, unit) => sum + marketRateBasisForMonth({
+      community,
+      bedrooms: unit.bedrooms,
+      propertyId,
+      yearMonth,
+      season,
+      row: rowByBR.get(unit.bedrooms),
+    }), 0);
+    return {
+      yearMonth,
+      buyIn,
+      price: cleanBaseRateFromBuyInServer(buyIn, targetMargin),
+    };
+  }).filter((row) => row.buyIn > 0 && row.price > 0);
+
+  return { listingId, monthlyRates, units, targetMargin };
+}
+
+async function pushBulkGuestyPricingAfterRefresh(
+  propertyId: number,
+): Promise<{
+  skipped: boolean;
+  reason?: string;
+  listingId?: string;
+  targetMargin?: number;
+  seasonal?: any;
+  markups?: any;
+}> {
+  const schedule = await storage.getScannerSchedule(propertyId).catch(() => null);
+  const configuredMargin = parseTargetMargin(schedule?.targetMargin);
+  const targetMargin = configuredMargin != null ? configuredMargin : 0.20;
+  const plan = await buildBulkGuestySeasonalPlan(propertyId, targetMargin);
+  if (!plan) {
+    return { skipped: true, reason: "No mapped Guesty listing or pricing configuration found for this property." };
+  }
+  if (plan.monthlyRates.length === 0) {
+    return { skipped: true, listingId: plan.listingId, reason: "No valid monthly pricing plan was generated." };
+  }
+
+  const base = bulkPricingBaseUrl();
+  const seasonalResponse = await fetch(`${base}/api/builder/push-seasonal-rates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      listingId: plan.listingId,
+      monthlyRates: plan.monthlyRates.map(({ yearMonth, price }) => ({ yearMonth, price })),
+    }),
+  });
+  const seasonal = await seasonalResponse.json().catch(() => ({}));
+  if (!seasonalResponse.ok || seasonal?.success === false) {
+    throw new Error(seasonal?.error || `Guesty seasonal-rate push failed with HTTP ${seasonalResponse.status}`);
+  }
+
+  const markups = computeChannelMarkups();
+  const markupPayload = Object.fromEntries(
+    (Object.entries(markups) as Array<[ChannelKey, number]>).filter(([, value]) => value > 0),
+  );
+  let markupResult: any = null;
+  if (Object.keys(markupPayload).length > 0) {
+    const markupResponse = await fetch(`${base}/api/builder/push-channel-markups`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ listingId: plan.listingId, markups: markupPayload }),
+    });
+    markupResult = await markupResponse.json().catch(() => ({}));
+    if (!markupResponse.ok) {
+      throw new Error(markupResult?.error || `Guesty channel-markup push failed with HTTP ${markupResponse.status}`);
+    }
+  }
+
+  return {
+    skipped: false,
+    listingId: plan.listingId,
+    targetMargin,
+    seasonal,
+    markups: markupResult,
+  };
+}
+
 async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
   item.status = "running";
   item.startedAt = item.startedAt ?? Date.now();
@@ -527,7 +718,51 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
         sidecarOfflineSince = null;
       }
     }
-    if (progress?.phase === "done") return;
+    if (progress?.phase === "done") {
+      item.progress = { ...progress, label: "Market-rate refresh completed; pushing clean-margin pricing to Guesty" };
+      item.heartbeatAt = Date.now();
+      await persistBulkPricingJob(job);
+      await topQueueEvent("bulk-pricing", job.id, "item-pushing-guesty", `Pushing clean-margin Guesty pricing for ${item.label}`, {
+        itemKey: item.id,
+        meta: { propertyId: item.propertyId },
+      });
+      const guestyPush = await pushBulkGuestyPricingAfterRefresh(item.propertyId);
+      if (guestyPush.skipped) {
+        item.progress = {
+          ...progress,
+          phase: "done",
+          percent: 100,
+          label: `Market rates saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`,
+          guestyPush,
+        };
+        await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-skipped", `Guesty pricing push skipped for ${item.label}: ${guestyPush.reason ?? "not mapped"}`, {
+          itemKey: item.id,
+          level: "warn",
+          meta: { propertyId: item.propertyId, guestyPush },
+        });
+      } else {
+        item.progress = {
+          ...progress,
+          phase: "done",
+          percent: 100,
+          label: `Market rates saved and Guesty pricing pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
+          guestyPush,
+        };
+        await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed clean-margin Guesty pricing for ${item.label}`, {
+          itemKey: item.id,
+          meta: {
+            propertyId: item.propertyId,
+            listingId: guestyPush.listingId,
+            targetMargin: guestyPush.targetMargin,
+            pushedDays: guestyPush.seasonal?.pushedDays,
+            pushedRanges: guestyPush.seasonal?.pushedRanges,
+          },
+        });
+      }
+      item.heartbeatAt = Date.now();
+      await persistBulkPricingJob(job);
+      return;
+    }
     if (progress?.phase === "error") {
       throw new Error(progress?.error || progress?.label || "Market-rate refresh failed");
     }
