@@ -614,17 +614,7 @@ function authHeaders() {
   return ADMIN_SECRET ? { "X-Admin-Secret": ADMIN_SECRET } : {};
 }
 
-function loadCookies() {
-  if (!fs.existsSync(COOKIES_FILE)) {
-    throw new Error(
-      `cookies.json not found at ${COOKIES_FILE}. Export Cookie-Editor JSON from your real browser on vrbo.com (and ideally booking.com too) and save it here.`,
-    );
-  }
-  const raw = fs.readFileSync(COOKIES_FILE, "utf8").trim();
-  const arr = JSON.parse(raw);
-  if (!Array.isArray(arr) || arr.length === 0) {
-    throw new Error("cookies.json is empty or not a JSON array.");
-  }
+function normaliseCookieRecords(arr) {
   const sameSiteMap = { strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None" };
   return arr
     .filter((c) => c?.name && c?.value && c?.domain)
@@ -643,6 +633,19 @@ function loadCookies() {
       secure: c.secure ?? true,
       sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax",
     }));
+}
+
+function loadCookies() {
+  if (!fs.existsSync(COOKIES_FILE)) {
+    log(`cookies.json not found at ${COOKIES_FILE}; using Chrome profile/server-pushed cookies only`);
+    return [];
+  }
+  const raw = fs.readFileSync(COOKIES_FILE, "utf8").trim();
+  const arr = JSON.parse(raw);
+  if (!Array.isArray(arr) || arr.length === 0) {
+    throw new Error("cookies.json is empty or not a JSON array.");
+  }
+  return normaliseCookieRecords(arr);
 }
 
 async function addCookiesBestEffort(cookies, label) {
@@ -774,9 +777,10 @@ async function ensureBrowser() {
   browser = await chromium.connectOverCDP(allocation.cdpUrl);
   context = browser.contexts()[0] ?? (await browser.newContext());
   await installContextGuards();
+  await syncRemoteCookies();
   const cookies = loadCookies();
-  const seeded = await addCookiesBestEffort(cookies, "startup cookie seed");
-  log(seeded ? `seeded ${cookies.length} cookies into Chrome context` : `using existing Chrome profile cookies (${cookies.length} cookies available on disk)`);
+  const seeded = cookies.length ? await addCookiesBestEffort(cookies, "startup cookie seed") : false;
+  log(seeded ? `seeded ${cookies.length} cookies into Chrome context` : `using existing Chrome profile/server cookies (${cookies.length} cookies available on disk)`);
 
   // PR #302 (revised): always create a NEW page rather than reusing
   // pages[0]. The daemon's Chrome accumulates tabs from prior sessions
@@ -953,25 +957,7 @@ async function syncRemoteCookies() {
     // cookies. The next real request will acquire the sidecar and then
     // apply the latest server-pushed cookie set before navigation.
     if (!context) return false;
-    // Normalise to Playwright shape (same as loadCookies()).
-    const sameSiteMap = { strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None" };
-    const normalised = cookies
-      .filter((c) => c?.name && c?.value && c?.domain)
-      .map((c) => ({
-        name: c.name,
-        value: c.value,
-        domain: c.domain.startsWith(".") ? c.domain : `.${c.domain}`,
-        path: c.path ?? "/",
-        expires:
-          typeof c.expirationDate === "number"
-            ? Math.floor(c.expirationDate)
-            : typeof c.expires === "number"
-            ? Math.floor(c.expires)
-            : -1,
-        httpOnly: c.httpOnly ?? false,
-        secure: c.secure ?? true,
-        sameSite: sameSiteMap[(c.sameSite ?? "lax").toLowerCase()] ?? "Lax",
-      }));
+    const normalised = normaliseCookieRecords(cookies);
     const applied = await addCookiesBestEffort(normalised, "cookie sync");
     if (!applied) {
       if (fp) lastAppliedCookieFingerprint = fp;

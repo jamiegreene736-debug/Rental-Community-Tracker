@@ -4,7 +4,7 @@ set -euo pipefail
 # Install the local Chrome sidecar as a macOS LaunchAgent.
 #
 # This copies the repo's canonical sidecar files into
-# ~/Downloads/vrbo-sidecar, writes ~/Library/LaunchAgents/com.vrbosidecar.worker.plist,
+# ~/.vrbo-sidecar-daemon, writes ~/Library/LaunchAgents/com.vrbosidecar.worker.plist,
 # and kickstarts it. launchd then starts it at login and restarts it if it exits.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +43,12 @@ if [[ -d "${REPO_ROOT}/node_modules" ]]; then
   ln -sfn "${REPO_ROOT}/node_modules" "${INSTALL_DIR}/node_modules"
 else
   echo "Warning: ${REPO_ROOT}/node_modules does not exist; run npm install in the repo if the sidecar cannot resolve dependencies." >&2
+fi
+LEGACY_COOKIES_FILE="${HOME}/Downloads/vrbo-sidecar/cookies.json"
+if [[ ! -f "${INSTALL_DIR}/cookies.json" && -f "${LEGACY_COOKIES_FILE}" ]]; then
+  cp "${LEGACY_COOKIES_FILE}" "${INSTALL_DIR}/cookies.json"
+  chmod 600 "${INSTALL_DIR}/cookies.json"
+  echo "Migrated sidecar cookies from ${LEGACY_COOKIES_FILE}"
 fi
 
 SERVER_URL="${SIDECAR_SERVER:-https://rental-community-tracker-production.up.railway.app}"
@@ -125,6 +131,11 @@ while IFS= read -r pid; do
   [[ -z "${pid}" || "${pid}" == "$$" ]] && continue
   kill "${pid}" >/dev/null 2>&1 || true
 done < <(pgrep -f "(daemon/vrbo-sidecar|Downloads/vrbo-sidecar|\\.vrbo-sidecar-daemon)/worker\\.mjs" || true)
+echo "Stopping dedicated sidecar Chrome windows, if any..."
+while IFS= read -r pid; do
+  [[ -z "${pid}" || "${pid}" == "$$" ]] && continue
+  kill "${pid}" >/dev/null 2>&1 || true
+done < <(pgrep -f "VrboSidecar-Chrome" || true)
 sleep 1
 
 : >"${INSTALL_DIR}/sidecar-launchd.log"
