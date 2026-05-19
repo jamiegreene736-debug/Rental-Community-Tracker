@@ -22,7 +22,16 @@ function maybeRedirectToLogin(): boolean {
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    const text = sanitizeForChatText((await res.text()) || res.statusText, { maxLength: 4_000 });
+    const raw = (await res.text()) || res.statusText;
+    let message = raw;
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed?.error === "string" && parsed.error.trim()) message = parsed.error;
+      else if (typeof parsed?.message === "string" && parsed.message.trim()) message = parsed.message;
+    } catch {
+      // Plain-text errors are fine; sanitize below.
+    }
+    const text = sanitizeForChatText(message, { maxLength: 600 });
     throw new Error(`${res.status}: ${text}`);
   }
 }
