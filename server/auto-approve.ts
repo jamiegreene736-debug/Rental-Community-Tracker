@@ -45,6 +45,14 @@ function isAlreadyPreApproved(reservation: any): boolean {
     || String(reservation?.preApprovalStatus ?? "").toLowerCase() === "preapproved";
 }
 
+function pendingAirbnbStatus(reservation: any): boolean {
+  const status = String(reservation?.status ?? "").toLowerCase();
+  return status === "inquiry"
+    || status === "reserved"
+    || status === "awaitingpayment"
+    || status === "pending";
+}
+
 async function preApproveAirbnbInquiry(reservationId: string): Promise<"preapproved" | "already"> {
   try {
     await guestyRequest("POST", `/reservations-v3/${reservationId}/pre-approve`, {});
@@ -90,9 +98,10 @@ export async function runAutoApprove(): Promise<{ approved: number; errors: numb
     ) as any;
 
     const reservations: any[] = data?.results ?? [];
-    const airbnbPending = reservations.filter(isAirbnbReservation);
+    const airbnbRecords = reservations.filter(isAirbnbReservation);
+    const airbnbPending = airbnbRecords.filter(pendingAirbnbStatus);
 
-    console.log(`[auto-approve] Found ${airbnbPending.length} pending Airbnb record(s)`);
+    console.log(`[auto-approve] Found ${airbnbPending.length} pending Airbnb record(s) (${airbnbRecords.length} Airbnb record(s) returned by Guesty)`);
 
     for (const res of airbnbPending) {
       const status = String(res?.status ?? "").toLowerCase();
