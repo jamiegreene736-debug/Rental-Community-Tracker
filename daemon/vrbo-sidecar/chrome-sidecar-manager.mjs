@@ -47,6 +47,14 @@ function parsePosition(value, fallback = { left: 120, top: 80 }) {
   };
 }
 
+function parseSize(value, fallback = DEFAULT_VIEWPORT) {
+  const [widthRaw, heightRaw] = String(value ?? "").split(",").map((part) => Number(part.trim()));
+  return {
+    width: Number.isFinite(widthRaw) && widthRaw > 0 ? Math.round(widthRaw) : fallback.width,
+    height: Number.isFinite(heightRaw) && heightRaw > 0 ? Math.round(heightRaw) : fallback.height,
+  };
+}
+
 function formatPosition(pos) {
   return `${Math.round(pos.left)},${Math.round(pos.top)}`;
 }
@@ -414,6 +422,10 @@ export class ChromeSidecarManager {
     this.macosBackgroundLaunch = boolFromEnv("SIDECAR_MACOS_BACKGROUND_LAUNCH", true);
     this.hiddenWindowPosition = process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? "-32000,-32000";
     this.visibleWindowPosition = process.env.SIDECAR_CHROME_VISIBLE_POSITION ?? "120,80";
+    this.visibleWindowSize = parseSize(
+      process.env.SIDECAR_CHROME_VISIBLE_SIZE,
+      { width: this.viewport.width, height: this.viewport.height + 80 },
+    );
     this.visibleWindowPositions = parsePositionList(process.env.SIDECAR_CHROME_VISIBLE_POSITIONS ?? "");
     this.visibleGridOrigin = parsePosition(
       process.env.SIDECAR_CHROME_VISIBLE_GRID_ORIGIN ?? this.visibleWindowPosition,
@@ -739,11 +751,14 @@ export class ChromeSidecarManager {
     }
     fs.mkdirSync(instance.chromeDataDir, { recursive: true });
     const visiblePosition = this.visiblePositionForInstance(instance);
+    const windowSize = this.localVisible
+      ? this.visibleWindowSize
+      : { width: this.viewport.width, height: this.viewport.height + 80 };
     const chromeArgs = [
       `--remote-debugging-port=${instance.cdpPort}`,
       "--remote-debugging-address=127.0.0.1",
       `--user-data-dir=${instance.chromeDataDir}`,
-      `--window-size=${this.viewport.width},${this.viewport.height + 80}`,
+      `--window-size=${windowSize.width},${windowSize.height}`,
       `--window-position=${this.localVisible ? visiblePosition : this.hiddenWindowPosition}`,
       "--force-device-scale-factor=1",
       ...(this.localVisible ? [] : ["--start-minimized", "--no-startup-window"]),
@@ -780,8 +795,8 @@ export class ChromeSidecarManager {
     if (explicit) return formatPosition(explicit);
     const col = instance.index % this.visibleGridColumns;
     const row = Math.floor(instance.index / this.visibleGridColumns);
-    const left = this.visibleGridOrigin.left + col * (this.viewport.width + this.visibleGridGapX);
-    const top = this.visibleGridOrigin.top + row * (this.viewport.height + 80 + this.visibleGridGapY);
+    const left = this.visibleGridOrigin.left + col * (this.visibleWindowSize.width + this.visibleGridGapX);
+    const top = this.visibleGridOrigin.top + row * (this.visibleWindowSize.height + this.visibleGridGapY);
     return formatPosition({ left, top });
   }
 

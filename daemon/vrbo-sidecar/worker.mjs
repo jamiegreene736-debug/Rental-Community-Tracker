@@ -40,6 +40,13 @@ const SIDECAR_CAPTCHA_ALLOW_FOCUS = process.env.SIDECAR_CAPTCHA_ALLOW_FOCUS !== 
 const SIDECAR_MACOS_BACKGROUND_LAUNCH = process.env.SIDECAR_MACOS_BACKGROUND_LAUNCH !== "0";
 const HIDDEN_WINDOW_POSITION = "-32000,-32000";
 const VISIBLE_WINDOW_POSITION = process.env.SIDECAR_CHROME_VISIBLE_POSITION ?? "120,80";
+const VISIBLE_WINDOW_SIZE = (() => {
+  const [widthRaw, heightRaw] = String(process.env.SIDECAR_CHROME_VISIBLE_SIZE ?? "").split(",").map((part) => Number(part.trim()));
+  return {
+    width: Number.isFinite(widthRaw) && widthRaw > 0 ? Math.round(widthRaw) : VIEWPORT.width,
+    height: Number.isFinite(heightRaw) && heightRaw > 0 ? Math.round(heightRaw) : VIEWPORT.height + 80,
+  };
+})();
 
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
@@ -683,8 +690,8 @@ async function ensureChromeRunning() {
   const chromeArgs = [
     `--remote-debugging-port=${CDP_PORT}`,
     `--user-data-dir=${CHROME_DATA_DIR}`,
-    `--window-size=${VIEWPORT.width},${VIEWPORT.height + 80}`,
-    `--window-position=${SIDE_CAR_CHROME_VISIBLE ? "120,80" : HIDDEN_WINDOW_POSITION}`,
+    `--window-size=${SIDE_CAR_CHROME_VISIBLE ? VISIBLE_WINDOW_SIZE.width : VIEWPORT.width},${SIDE_CAR_CHROME_VISIBLE ? VISIBLE_WINDOW_SIZE.height : VIEWPORT.height + 80}`,
+    `--window-position=${SIDE_CAR_CHROME_VISIBLE ? VISIBLE_WINDOW_POSITION : HIDDEN_WINDOW_POSITION}`,
     "--force-device-scale-factor=1",
     ...(SIDE_CAR_CHROME_VISIBLE ? [] : ["--start-minimized", "--no-startup-window"]),
     "--disable-notifications",
