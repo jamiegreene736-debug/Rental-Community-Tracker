@@ -7727,8 +7727,15 @@ export async function registerRoutes(
     const targetIsKahaLani = /\bkaha\s+lani\b/.test(normalizedResortName);
     const mentionsRegencyPoipuKai = (haystack: string): boolean => {
       const n = norm(haystack);
-      return /\bregency\b/.test(n) && /\b(poipu\s+kai|poipu|koloa|kauai)\b/.test(n);
+      return /\bregency\b/.test(n) && (
+        /\b(poipu\s+kai|poipu|koloa|kauai)\b/.test(n)
+        || /\bregency\s+(?:at\s+poipu\s+kai\s*)?#?\d{2,4}\b/.test(n)
+      );
     };
+    const candidatePrimaryHaystack = (c: Candidate): string =>
+      `${c.title} ${c.sourceLabel ?? ""} ${c.url}`;
+    const candidateHasStrongRegencyPoipuKaiProof = (c: Candidate): boolean =>
+      targetIsRegencyPoipuKai && mentionsRegencyPoipuKai(candidatePrimaryHaystack(c));
     const mentionsKnownNonRegencyPoipuKaiComplex = (haystack: string): boolean => {
       if (!targetIsRegencyPoipuKai) return false;
       const n = norm(haystack);
@@ -8031,7 +8038,7 @@ export async function registerRoutes(
     };
 
     const candidateHaystack = (c: Candidate): string =>
-      `${c.title} ${c.snippet ?? ""} ${c.url}`;
+      `${c.title} ${c.sourceLabel ?? ""} ${c.snippet ?? ""} ${c.url}`;
     const candidateNightlySignal = (c: Candidate): number => {
       if (Number.isFinite(c.nightlyPrice) && c.nightlyPrice > 0) return c.nightlyPrice;
       if (Number.isFinite(c.totalPrice) && c.totalPrice > 0) return Math.round(c.totalPrice / Math.max(1, nights));
@@ -8070,6 +8077,7 @@ export async function registerRoutes(
       bedroomFromText(`${c.title ?? ""} ${c.snippet ?? ""} ${c.url ?? ""}`);
     const candidateIsPoipuKaiCondoLike = (c: Candidate): boolean => {
       if (targetIsRegencyPoipuKai) {
+        if (candidateHasStrongRegencyPoipuKaiProof(c)) return true;
         const hay = candidateHaystack(c);
         if (mentionsKnownNonRegencyPoipuKaiComplex(hay)) return false;
         return mentionsRegencyPoipuKai(hay);
@@ -8103,7 +8111,8 @@ export async function registerRoutes(
       opts: { requireBedroomProof?: boolean } = {},
     ): boolean => {
       const hay = candidateHaystack(c);
-      if (mentionsKnownNonRegencyPoipuKaiComplex(hay)) return false;
+      const strongRegencyProof = candidateHasStrongRegencyPoipuKaiProof(c);
+      if (mentionsKnownNonRegencyPoipuKaiComplex(hay) && !strongRegencyProof) return false;
       if (mentionsKnownNonPoipuKaiComplex(hay)) return false;
       if (mentionsKnownNonKahaLaniComplex(hay)) return false;
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
@@ -8132,7 +8141,7 @@ export async function registerRoutes(
         && priceIsPlausibleForTarget(c)
         && normalizedResortName !== "poipu kai";
       const targetSignal = targetIsRegencyPoipuKai
-        ? (visibleResortProof || photoMatchProof || candidateIsPoipuKaiCondoLike(c))
+        ? (visibleResortProof || photoMatchProof || candidateIsPoipuKaiCondoLike(c) || strongRegencyProof)
         : visibleResortProof
           || photoMatchProof
           || searchProofCanCarryTarget
@@ -8145,12 +8154,59 @@ export async function registerRoutes(
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
       if (pricePlausibilityReason(c)) return false;
       if (targetIsRegencyPoipuKai) {
-        if (!visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c)) return false;
+        if (!visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c) && !strongRegencyProof) return false;
       } else if (!searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) {
         return false;
       }
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       return true;
+    };
+    const candidateTargetRejectReason = (c: Candidate): string => {
+      const hay = candidateHaystack(c);
+      const strongRegencyProof = candidateHasStrongRegencyPoipuKaiProof(c);
+      if (mentionsKnownNonRegencyPoipuKaiComplex(hay) && !strongRegencyProof) return "known non-Regency Poipu Kai complex";
+      if (mentionsKnownNonPoipuKaiComplex(hay)) return "known non-Poipu Kai complex";
+      if (mentionsKnownNonKahaLaniComplex(hay)) return "known non-Kaha Lani complex";
+      const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
+        .map((m) => parseInt(m[1], 10))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      if (stayNightCounts.some((n) => n !== nights)) return "wrong stay-night count in visible text";
+      const visibleResortProof = mentionsResort(hay)
+        || (normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
+      const photoMatchProof = targetIsRegencyPoipuKai
+        ? (c.photoMatches ?? []).some((m) => mentionsRegencyPoipuKai(`${m.title} ${m.url} ${m.domain}`))
+        : normalizedResortName === "poipu kai"
+          && (c.photoMatches ?? []).some((m) => mentionsPoipuKai(`${m.title} ${m.url} ${m.domain}`));
+      const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
+      const searchProofCanCarryTarget = websiteSearchProof
+        && hasLocalityForPriceFallback(hay)
+        && normalizedResortName !== "poipu kai";
+      const pricePlausibleSearchProof = websiteSearchProof
+        && hasLocalityForPriceFallback(hay)
+        && priceIsPlausibleForTarget(c)
+        && normalizedResortName !== "poipu kai";
+      const targetSignal = targetIsRegencyPoipuKai
+        ? (visibleResortProof || photoMatchProof || candidateIsPoipuKaiCondoLike(c) || strongRegencyProof)
+        : visibleResortProof
+          || photoMatchProof
+          || searchProofCanCarryTarget
+          || pricePlausibleSearchProof
+          || (c.source === "airbnb" && c.inTargetBounds === true)
+          || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
+      if (!targetSignal) return "no visible target resort proof";
+      const inferredBedrooms = candidateBedroomSignal(c);
+      if (inferredBedrooms !== null && inferredBedrooms < bedrooms) return `bedroom mismatch ${inferredBedrooms}BR < ${bedrooms}BR`;
+      const priceReason = pricePlausibilityReason(c);
+      if (priceReason) return priceReason;
+      if (targetIsRegencyPoipuKai && !visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c) && !strongRegencyProof) {
+        return "no Regency-specific proof";
+      }
+      if (!targetIsRegencyPoipuKai && !searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) {
+        return "not condo-like for target";
+      }
+      if (c.source === "pm" && !isDetailUrl("pm", c.url)) return "PM URL is not a detail page";
+      if (c.source === "pm" && isLandingUrl("pm", c.url)) return "PM URL looks like a landing/search page";
+      return "unknown target-filter rejection";
     };
 
     // Append the reservation's check-in/out to the URL so the landing page
@@ -9720,12 +9776,26 @@ export async function registerRoutes(
     const targetFilterDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
     const targetFilterPriceDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
     const filterTargetCandidates = (items: Candidate[], key: keyof typeof targetFilterDropped): Candidate[] => {
+      const dropExamples: string[] = [];
       const kept = items.filter((item) => {
         const fits = candidateFitsTarget(item);
-        if (!fits && pricePlausibilityReason(item)) targetFilterPriceDropped[key]++;
+        if (!fits) {
+          if (pricePlausibilityReason(item)) targetFilterPriceDropped[key]++;
+          if (dropExamples.length < 6 && (item.totalPrice > 0 || item.nightlyPrice > 0)) {
+            const urlHost = (() => {
+              try { return new URL(item.url).hostname.replace(/^www\./, ""); } catch { return item.sourceLabel || item.source; }
+            })();
+            dropExamples.push(`${candidateTargetRejectReason(item)} :: ${urlHost} :: ${(item.title || item.sourceLabel || item.url).replace(/\s+/g, " ").slice(0, 90)} :: $${Math.round(item.totalPrice || item.nightlyPrice * Math.max(1, nights))}`);
+          }
+        }
         return fits;
       });
       targetFilterDropped[key] += items.length - kept.length;
+      if (dropExamples.length > 0) {
+        console.log(
+          `[find-buy-in] target-filter dropped priced ${key} examples (${items.length - kept.length}/${items.length}): ${dropExamples.join(" | ")}`,
+        );
+      }
       return kept;
     };
     const airbnbTarget = filterTargetCandidates(airbnbWithMatches, "airbnb");
