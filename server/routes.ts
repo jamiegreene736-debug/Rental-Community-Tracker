@@ -7665,24 +7665,66 @@ export async function registerRoutes(
     }
     // Normalize a string for inclusion checks — lowercase + collapse punctuation
     const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const GENERIC_RESORT_TOKENS = new Set([
+      "and",
+      "the",
+      "at",
+      "for",
+      "with",
+      "beach",
+      "beachfront",
+      "bedroom",
+      "bedrooms",
+      "condo",
+      "condos",
+      "home",
+      "ocean",
+      "oceanfront",
+      "resort",
+      "sleeps",
+      "view",
+      "views",
+      "villa",
+      "villas",
+    ]);
+    const meaningfulResortTokens = (value: string | null | undefined): string[] =>
+      value
+        ? norm(value)
+            .split(" ")
+            .filter((t) => t.length >= 3 && !GENERIC_RESORT_TOKENS.has(t))
+        : [];
     const communitySearchName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName;
     const listingResolvedResortName = resortName;
+    const configuredTargetTokens = meaningfulResortTokens(communitySearchName);
+    const listingLeadTokens = meaningfulResortTokens(resortName);
+    const listingLeadMentionsConfiguredTarget =
+      !!communitySearchName &&
+      configuredTargetTokens.length > 0 &&
+      configuredTargetTokens.some((t) => listingLeadTokens.includes(t));
+    const listingLeadLooksLikeMarketingCopy =
+      !!resortName &&
+      /\b(gorgeous|beautiful|wonderful|sunny|fabulous|spacious|incredible|amazing|ocean|beachfront|beach|sleeps?|bedrooms?|condos?|homes?|villas?|rental)\b/i.test(resortName);
     if (!resortName) {
       resortName = communitySearchName ?? null;
     } else if (
       communitySearchName &&
-      norm(resortName) === norm(community) &&
+      (norm(resortName) === norm(community) || (listingLeadLooksLikeMarketingCopy && !listingLeadMentionsConfiguredTarget)) &&
       norm(communitySearchName) !== norm(community)
     ) {
       // Some Guesty titles are intentionally broad ("Poipu Kai - 6BR ..."),
       // while the configured buy-in target is a specific sub-resort. Use the
       // configured target so the sidecar searches Regency instead of accepting
-      // any Poipu Kai-area complex such as Aston, Kahala, or Villas.
+      // any Poipu Kai-area complex such as Aston, Kahala, or Villas. Also do
+      // this when the Guesty title lead is marketing copy ("Gorgeous 5 br...")
+      // instead of a real resort name; otherwise every valid target card is
+      // filtered out before curation for not mentioning that marketing phrase.
+      console.log(`[find-buy-in] using configured resort target "${communitySearchName}" instead of listing title lead "${resortName}"`);
       resortName = communitySearchName;
     }
-    const resortTokens = resortName ? norm(resortName).split(" ").filter(t => t.length >= 3) : [];
+    const resortTokens = meaningfulResortTokens(resortName);
     const normalizedResortName = resortName ? norm(resortName) : "";
     const targetIsRegencyPoipuKai = normalizedResortName === "regency at poipu kai";
+    const targetIsKahaLani = /\bkaha\s+lani\b/.test(normalizedResortName);
     const mentionsRegencyPoipuKai = (haystack: string): boolean => {
       const n = norm(haystack);
       return /\bregency\b/.test(n) && /\b(poipu\s+kai|poipu|koloa|kauai)\b/.test(n);
@@ -7710,7 +7752,7 @@ export async function registerRoutes(
       return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu)\b/.test(n);
     };
     const mentionsKnownNonKahaLaniComplex = (haystack: string): boolean => {
-      if (normalizedResortName !== "kaha lani") return false;
+      if (!targetIsKahaLani) return false;
       const n = norm(haystack);
       return /\b(lae nani|pono kai|kauai kailani|kailani|plantation hale|waipouli|islander on the beach|kapaa sands|kapa a sands|wailua bay view|kauai beach villas?)\b/.test(n);
     };
@@ -7992,7 +8034,7 @@ export async function registerRoutes(
     const hasLocalityForPriceFallback = (haystack: string): boolean => {
       if (targetIsRegencyPoipuKai) return mentionsRegencyPoipuKai(haystack);
       if (normalizedResortName === "poipu kai") return /\b(poipu|koloa)\b/.test(norm(haystack));
-      if (normalizedResortName === "kaha lani") {
+      if (targetIsKahaLani) {
         const n = norm(haystack);
         return /\b(kaha lani|wailua|lihue|kapaa|kapa a|lydgate|nehe)\b/.test(n);
       }
