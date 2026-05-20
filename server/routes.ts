@@ -1445,6 +1445,14 @@ function extractUnitTokenFromText(value: string): string | null {
   return compact?.[1]?.toUpperCase() ?? null;
 }
 
+function extractAddressUnitToken(address: string | null | undefined): string | null {
+  const text = String(address ?? "");
+  const explicit =
+    text.match(/\b(?:unit|suite|apt|apartment|condo|villa|#)\s*([A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?)/i) ||
+    text.match(/\b(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)\s+([A-Za-z]?\d{1,5}[A-Za-z]?)\b/i);
+  return explicit?.[1]?.toUpperCase() ?? null;
+}
+
 function addressIncludesUnitToken(address: string | null | undefined): boolean {
   const text = String(address ?? "");
   return /\b(?:unit|suite|apt|apartment|condo|villa|#)\s*[A-Za-z]?\d+[A-Za-z]?(?:[-/][A-Za-z0-9]+)?\b/i.test(text)
@@ -5671,8 +5679,9 @@ export async function registerRoutes(
           const scraped = guess.source === "saved"
             ? null
             : await scrapeAddressFromListingUrl(buyIn.airbnbListingUrl).catch(() => null);
+          const scrapedUnitToken = extractAddressUnitToken(scraped);
           const finalGuess: ListingAddressGuess = scraped
-            ? { ...guess, address: scraped, source: "scraped" }
+            ? { ...guess, address: scraped, source: "scraped", unitToken: scrapedUnitToken ?? guess.unitToken }
             : guess;
           return {
             buyInId: buyIn.id,
@@ -5688,7 +5697,10 @@ export async function registerRoutes(
       );
 
       let walk = await walkBetween(units[0].address, units[1].address, resortName).catch(() => fallbackWalkForResort(resortName));
-      const exactAddressCount = units.filter((u) => u.addressSource === "saved" || u.addressSource === "scraped").length;
+      const exactAddressCount = units.filter((u) => {
+        if (u.addressSource !== "saved" && u.addressSource !== "scraped") return false;
+        return Boolean(extractAddressUnitToken(u.address));
+      }).length;
       if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
         // Resort-title searches can geocode both units to the same resort
         // centroid. In that case the resort footprint default is more honest

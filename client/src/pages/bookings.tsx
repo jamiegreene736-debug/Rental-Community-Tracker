@@ -553,6 +553,21 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
     return "resort footprint estimate";
   };
 
+  const displayUnitLabel = (unit: Extract<UnitProximityResponse, { status: "ready" }>["units"][number]) => {
+    const token = String(unit.unitToken ?? "").trim();
+    const slotLabel = String(unit.unitLabel ?? "").trim();
+    if (token && slotLabel && !slotLabel.toLowerCase().includes(token.toLowerCase())) {
+      return `Buy-in #${token} for ${slotLabel}`;
+    }
+    return slotLabel || (token ? `Buy-in #${token}` : "Buy-in unit");
+  };
+
+  const addressAlreadyShowsToken = (unit: Extract<UnitProximityResponse, { status: "ready" }>["units"][number]) => {
+    const token = String(unit.unitToken ?? "").trim();
+    if (!token) return false;
+    return new RegExp(`(?:#|unit\\s+|apt\\s+)${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(unit.address);
+  };
+
   return (
     <div className="rounded border border-sky-200 bg-sky-50/65 px-3 py-2 text-xs text-sky-950 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-100">
       <div className="flex flex-wrap items-center gap-2">
@@ -588,9 +603,9 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
           {query.data.units.map((unit) => (
             <span key={unit.buyInId} className="inline-flex items-center gap-1 min-w-0" title={unit.address}>
               <MapPin className="h-3 w-3 shrink-0" />
-              <span className="font-medium">{unit.unitLabel}</span>
+              <span className="font-medium">{displayUnitLabel(unit)}</span>
               <span className="truncate max-w-[320px]">
-                {unit.unitToken ? `#${unit.unitToken} · ` : ""}{unit.address}
+                {unit.unitToken && !addressAlreadyShowsToken(unit) ? `#${unit.unitToken} · ` : ""}{unit.address}
               </span>
             </span>
           ))}
