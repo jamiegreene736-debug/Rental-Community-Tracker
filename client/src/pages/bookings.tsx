@@ -164,6 +164,7 @@ type AutoFillComboOption = {
   totalCost: number | null;
   selected: boolean;
   unavailableReason?: string;
+  note?: string;
   picks: Array<{
     bedrooms: number;
     sourceLabel: string;
@@ -1266,6 +1267,9 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                     ? option.unavailableReason ?? "Not enough verified options"
                     : displayedPicks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
                 </p>
+                {option.note && (
+                  <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{option.note}</p>
+                )}
               </div>
               <div className="text-right font-semibold tabular-nums">
                 {displayedTotal == null ? "—" : fmtMoney(displayedTotal)}
@@ -2753,10 +2757,35 @@ export default function Bookings() {
         }
       };
 
+      const reservationNights = Math.max(
+        1,
+        Math.round((new Date(`${co}T12:00:00`).getTime() - new Date(`${ci}T12:00:00`).getTime()) / 86400000),
+      );
+      const attachedCandidateForSlot = (slot: typeof reservation.slots[number]): LiveCandidate | null => {
+        if (!slot.buyIn) return null;
+        const totalPrice = parseFloat(String(slot.buyIn.costPaid ?? 0));
+        if (!Number.isFinite(totalPrice) || totalPrice <= 0) return null;
+        return {
+          source: "pm",
+          sourceLabel: "Attached buy-in",
+          title: titleFromBuyInNotes(slot.buyIn.notes) || slot.unitLabel,
+          url: slot.buyIn.airbnbListingUrl || `attached-buy-in:${slot.buyIn.id}`,
+          nightlyPrice: totalPrice / reservationNights,
+          totalPrice,
+          bedrooms: slot.bedrooms,
+          identityKeys: listingIdentityKeys({
+            url: slot.buyIn.airbnbListingUrl || `attached-buy-in:${slot.buyIn.id}`,
+            title: titleFromBuyInNotes(slot.buyIn.notes) || slot.unitLabel,
+          }),
+          verified: "yes",
+          verifiedReason: "Already attached to this reservation",
+          groundFloorStatus: (slot.buyIn.groundFloorStatus as GroundFloorStatus | undefined) ?? "unknown",
+          groundFloorEvidence: slot.buyIn.groundFloorEvidence ?? null,
+        };
+      };
+
       type TwoUnitBedroomCombo = { bedrooms: number[] };
-      const twoUnitBedroomCombos = (): TwoUnitBedroomCombo[] => {
-        if (emptySlots.length !== 2) return [];
-        const totalNeeded = emptySlots.reduce((sum, s) => sum + s.bedrooms, 0);
+      const twoUnitBedroomCombos = (totalNeeded: number, preferredBedrooms: number[]): TwoUnitBedroomCombo[] => {
         if (totalNeeded <= 0) return [];
         const combos: TwoUnitBedroomCombo[] = [];
         const seen = new Set<string>();
@@ -2768,7 +2797,7 @@ export default function Bookings() {
           seen.add(key);
           combos.push({ bedrooms: combo });
         };
-        addCombo(emptySlots.map((s) => s.bedrooms));
+        addCombo(preferredBedrooms);
         const minLegBedrooms = totalNeeded >= 4 ? 2 : 1;
         for (let high = totalNeeded - minLegBedrooms; high >= Math.ceil(totalNeeded / 2); high--) {
           const low = totalNeeded - high;
@@ -2785,6 +2814,7 @@ export default function Bookings() {
         summaries: AutoFillSearchSummary[];
         totalCost: number | null;
         unavailableReason?: string;
+        note?: string;
       };
       const comboOptionFrom = (evaluated: EvaluatedCombo, selected = false): AutoFillComboOption => ({
         label: evaluated.combo.bedrooms.map((b) => `${b}BR`).join(" + "),
@@ -2792,6 +2822,7 @@ export default function Bookings() {
         totalCost: evaluated.totalCost,
         selected,
         unavailableReason: evaluated.unavailableReason,
+        note: evaluated.note,
         picks: evaluated.picks.map((pick, index) => ({
           bedrooms: evaluated.combo.bedrooms[index],
           sourceLabel: pick.sourceLabel,
@@ -2832,7 +2863,9 @@ export default function Bookings() {
         best: EvaluatedCombo | null;
         options: AutoFillComboOption[];
       }> => {
-        const combos = twoUnitBedroomCombos();
+        if (emptySlots.length !== 2) return { best: null, options: [] };
+        const totalNeeded = emptySlots.reduce((sum, s) => sum + s.bedrooms, 0);
+        const combos = twoUnitBedroomCombos(totalNeeded, emptySlots.map((s) => s.bedrooms));
         if (combos.length === 0) return { best: null, options: [] };
         const poolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
         const poolFor = (bedroomCount: number) => {
@@ -2846,7 +2879,6 @@ export default function Bookings() {
 
         const evaluatedCombos: EvaluatedCombo[] = [];
         let best: EvaluatedCombo | null = null;
-        const exactSlotComboKey = emptySlots.map((slot) => slot.bedrooms).join("+");
         for (const combo of combos) {
           const used = new Set(pickedIdentities);
           const picks: LiveCandidate[] = [];
@@ -2893,24 +2925,109 @@ export default function Bookings() {
           if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
             best = evaluated;
           }
-          // The first combo mirrors the actual physical slots on the
-          // reservation. If that exact plan is already verified and distinct,
-          // attach it immediately instead of blocking on alternate splits
-          // like 4BR+2BR. Those alternates are useful fallback paths, but on
-          // slow PM sites they can push the whole auto-fill past the edge
-          // timeout even after the correct 3BR+3BR candidates are ready.
-          if (totalCost !== null && combo.bedrooms.join("+") === exactSlotComboKey) {
-            best = evaluated;
-            return {
-              best,
-              options: [comboOptionFrom(evaluated, true)],
-            };
-          }
         }
         return {
           best,
           options: evaluatedCombos.map((option) => comboOptionFrom(option, option === best)),
         };
+      };
+      const evaluateAttachedComparisonCombos = async (
+        newlyFilled: AutoFillResult[],
+      ): Promise<AutoFillComboOption[]> => {
+        if (reservation.slots.length !== 2 || emptySlots.length !== 1) return [];
+        const attachedByUnit = new Map<string, LiveCandidate>();
+        for (const slot of reservation.slots) {
+          const attached = attachedCandidateForSlot(slot);
+          if (attached) attachedByUnit.set(slot.unitId, attached);
+        }
+        for (const result of newlyFilled) {
+          if (!result.picked) continue;
+          attachedByUnit.set(result.slot.unitId, {
+            ...result.picked,
+            bedrooms: candidateBedrooms(result.picked, result.slot.bedrooms),
+          });
+        }
+        if (attachedByUnit.size !== 2) return [];
+
+        const totalNeeded = reservation.slots.reduce((sum, slot) => sum + slot.bedrooms, 0);
+        const currentBedroomPlan = reservation.slots.map((slot) => slot.bedrooms);
+        const currentKey = currentBedroomPlan.join("+");
+        const combos = twoUnitBedroomCombos(totalNeeded, currentBedroomPlan);
+        const attachedCandidates = reservation.slots
+          .map((slot) => ({ slot, candidate: attachedByUnit.get(slot.unitId) ?? null }))
+          .filter((item): item is { slot: typeof reservation.slots[number]; candidate: LiveCandidate } => !!item.candidate);
+        const poolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
+        const poolFor = (bedroomCount: number) => {
+          const key = `${bedroomCount}|pm`;
+          const existing = poolCache.get(key);
+          if (existing) return existing;
+          const promise = getCandidatePool(bedroomCount, true, true);
+          poolCache.set(key, promise);
+          return promise;
+        };
+        const evaluatedCombos: EvaluatedCombo[] = [];
+        let best: EvaluatedCombo | null = null;
+        for (const combo of combos) {
+          const used = new Set<string>();
+          const pools: Array<{ bedrooms: number; candidates: LiveCandidate[] }> = [];
+          const summaries: AutoFillSearchSummary[] = [];
+          const picks: LiveCandidate[] = [];
+          const usedAttachedSlots = new Set<string>();
+          let unavailableReason = "";
+          for (const bedroomCount of combo.bedrooms) {
+            const attached = attachedCandidates.find((item) =>
+              item.slot.bedrooms === bedroomCount
+              && !usedAttachedSlots.has(item.slot.unitId)
+              && !hasUsedListingIdentity(used, item.candidate)
+            );
+            if (attached) {
+              usedAttachedSlots.add(attached.slot.unitId);
+              addUsedListingIdentity(used, attached.candidate);
+              picks.push(attached.candidate);
+              pools.push({ bedrooms: bedroomCount, candidates: [attached.candidate] });
+              summaries.push({
+                bedrooms: bedroomCount,
+                scanned: 1,
+                priced: 1,
+                sourceCounts: { airbnb: 0, vrbo: 0, booking: 0, pm: 1 },
+                kept: 1,
+                targetFiltered: 0,
+                groundFloorOnly: false,
+              });
+              continue;
+            }
+            const pool = await poolFor(bedroomCount);
+            pools.push({ bedrooms: bedroomCount, candidates: pool.candidates });
+            summaries.push(pool.searchSummary);
+            const pick = pool.candidates.find((candidate) => !hasUsedListingIdentity(used, candidate)) ?? null;
+            if (!pick) {
+              unavailableReason ||= `No unused verified ${bedroomCount}BR option`;
+              continue;
+            }
+            addUsedListingIdentity(used, pick);
+            picks.push(pick);
+          }
+          const totalCost = picks.length === combo.bedrooms.length
+            ? picks.reduce((sum, pick) => sum + pick.totalPrice, 0)
+            : null;
+          const replacesCurrent = combo.bedrooms.join("+") !== currentKey;
+          const evaluated: EvaluatedCombo = {
+            combo,
+            picks,
+            pools,
+            summaries,
+            totalCost,
+            unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct verified options" : undefined,
+            note: replacesCurrent
+              ? "Comparison only; would require replacing the already attached buy-in."
+              : "Current attached plan after auto-fill.",
+          };
+          evaluatedCombos.push(evaluated);
+          if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
+            best = evaluated;
+          }
+        }
+        return evaluatedCombos.map((option) => comboOptionFrom(option, option === best));
       };
 
       const results: AutoFillResult[] = [];
@@ -2979,10 +3096,11 @@ export default function Bookings() {
             };
         results.push(slotResult);
       }
+      const attachedComparisonOptions = await evaluateAttachedComparisonCombos(results);
       return {
         reservation,
         results,
-        comboOptions: comboEvaluation.options,
+        comboOptions: attachedComparisonOptions.length > 0 ? attachedComparisonOptions : comboEvaluation.options,
         searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
       };
     },
