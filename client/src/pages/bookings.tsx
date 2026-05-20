@@ -1436,12 +1436,10 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
                   <p className="text-[11px] text-muted-foreground">
                     {audit.counts.scanned} scanned · {audit.counts.priced} priced · {audit.counts.kept} curated · Airbnb {audit.counts.sourceCounts.airbnb}, VRBO {audit.counts.sourceCounts.vrbo}, Booking {audit.counts.sourceCounts.booking}, PM {audit.counts.sourceCounts.pm}
                     {audit.counts.groundFloorOnly ? " · ground-floor required" : ""}
+                    {audit.counts.targetFiltered > 0
+                      ? ` · ${audit.counts.targetFiltered} broad upstream result${audit.counts.targetFiltered === 1 ? "" : "s"} ignored`
+                      : ""}
                   </p>
-                  {audit.counts.targetFiltered > 0 && (
-                    <p className="text-[11px] text-amber-700">
-                      {audit.counts.targetFiltered} upstream option{audit.counts.targetFiltered === 1 ? "" : "s"} filtered out before curation because they did not match the target resort/bedroom rules.
-                    </p>
-                  )}
                 </div>
                 <span className="text-[10px] text-muted-foreground">
                   {new Date(audit.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}
