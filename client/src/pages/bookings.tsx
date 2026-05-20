@@ -2288,6 +2288,20 @@ export default function Bookings() {
   // into a single button per booking.
   const [autoFillStartedByReservation, setAutoFillStartedByReservation] = useState<Record<string, number>>({});
   const autoFillRunRef = useRef<Set<string>>(new Set());
+  const clearAutoFillDiagnostics = (reservationId: string) => {
+    setLastAutoFillCombos((prev) => {
+      if (!(reservationId in prev)) return prev;
+      const next = { ...prev };
+      delete next[reservationId];
+      return next;
+    });
+    setLastAutoFillAudits((prev) => {
+      if (!(reservationId in prev)) return prev;
+      const next = { ...prev };
+      delete next[reservationId];
+      return next;
+    });
+  };
   const stopTrackingAutoFill = (reservationId?: string) => {
     if (!reservationId) {
       autoFillRunRef.current.clear();
@@ -2303,6 +2317,9 @@ export default function Bookings() {
     });
   };
   const autoFillMutation = useMutation({
+    onMutate: ({ reservation }) => {
+      clearAutoFillDiagnostics(reservation._id);
+    },
     mutationFn: async ({ reservation }: { reservation: GuestyReservation }) => {
       if (!selectedPropertyId) throw new Error("No property selected");
       const emptySlots = reservation.slots.filter((s) => !s.buyIn);
@@ -2977,9 +2994,23 @@ export default function Bookings() {
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
       if (comboOptions.length > 0) {
         setLastAutoFillCombos((prev) => ({ ...prev, [reservation._id]: comboOptions }));
+      } else {
+        setLastAutoFillCombos((prev) => {
+          if (!(reservation._id in prev)) return prev;
+          const next = { ...prev };
+          delete next[reservation._id];
+          return next;
+        });
       }
       if (searchAudits.length > 0) {
         setLastAutoFillAudits((prev) => ({ ...prev, [reservation._id]: searchAudits }));
+      } else {
+        setLastAutoFillAudits((prev) => {
+          if (!(reservation._id in prev)) return prev;
+          const next = { ...prev };
+          delete next[reservation._id];
+          return next;
+        });
       }
       const filled = results.filter((r) => r.picked);
       const totalCost = filled.reduce((s, r) => s + (r.picked?.totalPrice ?? 0), 0);
