@@ -340,6 +340,10 @@ export async function findAvailableVrpUnits(opts: {
     console.warn(`[vrp-discovery:${site.label}] sitemap returned 0 units`);
     return [];
   }
+  const resortUrlMatches = resortTokens.length > 0
+    ? urls.filter((url) => matchesResort(url))
+    : urls;
+  const urlsToFetch = resortUrlMatches.length > 0 ? resortUrlMatches : urls;
 
   // PR #337: bumped concurrency 8 → 24. Parrish Kauai's sitemap walks
   // ~370 unit pages on cold cache; at concurrency 8 that ran ~105s,
@@ -347,14 +351,14 @@ export async function findAvailableVrpUnits(opts: {
   // 0 candidates to the operator even when units WERE available. With
   // concurrency 24 the cold-cache walk drops to ~30-40s; subsequent
   // calls hit the 7d meta cache and complete in <1s.
-  const metas = await withConcurrency(urls, 24, (url) => fetchUnitMeta(site, url));
+  const metas = await withConcurrency(urlsToFetch, 24, (url) => fetchUnitMeta(site, url));
   const matchingBedrooms = metas.filter(
     (m): m is VrpUnitMeta => m !== null && m.bedrooms === bedrooms,
   );
   const matchingResort = matchingBedrooms.filter((m) => matchesResort(m.resortHaystack));
 
   console.log(
-    `[vrp-discovery:${site.label}] sitemap=${urls.length} metaResolved=${metas.filter(Boolean).length} ` +
+    `[vrp-discovery:${site.label}] sitemap=${urls.length} prefiltered=${urlsToFetch.length} metaResolved=${metas.filter(Boolean).length} ` +
     `matchingBedrooms=${matchingBedrooms.length} matchingResort=${matchingResort.length} ` +
     `(target=${bedrooms}BR @ "${resortName}")`,
   );
@@ -390,7 +394,7 @@ export async function findAvailableVrpUnits(opts: {
       if (rates === null || rates === undefined) return null;
 
       const bookedSet = new Set(booked.bookedDates ?? []);
-      for (const md of stayNightsMD) {
+      for (const md of Array.from(stayNightsMD)) {
         if (bookedSet.has(md)) return null;
       }
       const noCheckinSet = new Set(booked.noCheckin ?? []);
