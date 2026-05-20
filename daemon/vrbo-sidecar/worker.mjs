@@ -4554,10 +4554,16 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         try { u = new URL(raw, baseUrl); } catch { return false; }
         const path = u.pathname.toLowerCase();
         const pathAndQuery = `${path}?${u.searchParams.toString()}`.toLowerCase();
+        const segments = path.split("/").filter(Boolean);
+        const last = segments[segments.length - 1] || "";
         const searchOrListPage =
           /\/site\/propertylist\b/i.test(path) ||
           /\bpropertylist\b/i.test(path) ||
-          /(?:^|\/)(?:search|search-results|availability|property-list|properties|rentals?|vacation-rentals?|browse-all)(?:\/|$)/i.test(path) ||
+          /(?:^|\/)(?:search|search-results|availability|property-list|browse-all)(?:\/|$)/i.test(path) ||
+          // Real PM unit details often live below collection folders such as
+          // /vacation-rentals/<unit-slug>. Treat only the bare collection URL
+          // as a listing/search page.
+          (segments.length <= 1 && /^(?:properties|rentals?|vacation-rentals?)$/.test(last)) ||
           /\b(?:propertylist|searchresults|search-results|availability|property-list)\b/i.test(pathAndQuery);
         if (searchOrListPage) return false;
         if (path === "/" || /\/(?:search|availability|rentals?|vacation-rentals?|properties|collections?|areas?|locations?)\/?$/.test(path)) return false;

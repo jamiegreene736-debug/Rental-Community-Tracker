@@ -7937,9 +7937,15 @@ export async function registerRoutes(
         const u = new URL(rawUrl);
         const path = u.pathname.toLowerCase();
         const pathAndQuery = `${path}?${u.searchParams.toString()}`.toLowerCase();
+        const segments = path.split("/").filter(Boolean);
+        const last = segments[segments.length - 1] ?? "";
         return /\/site\/propertylist\b/i.test(path)
           || /\bpropertylist\b/i.test(path)
-          || /(?:^|\/)(?:search|search-results|availability|property-list|properties|rentals?|vacation-rentals?|browse-all)(?:\/|$)/i.test(path)
+          || /(?:^|\/)(?:search|search-results|availability|property-list|browse-all)(?:\/|$)/i.test(path)
+          // PM unit pages commonly sit under /vacation-rentals/<unit>,
+          // /rentals/<unit>, or /properties/<unit>. Reject only the bare
+          // collection/listing path, not the nested unit detail page.
+          || (segments.length <= 1 && /^(?:properties|rentals?|vacation-rentals?)$/.test(last))
           || /\b(?:propertylist|searchresults|search-results|availability|property-list)\b/i.test(pathAndQuery);
       } catch {
         return false;
