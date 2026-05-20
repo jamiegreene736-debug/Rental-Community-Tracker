@@ -2779,6 +2779,7 @@ export default function Bookings() {
 
         const evaluatedCombos: EvaluatedCombo[] = [];
         let best: EvaluatedCombo | null = null;
+        const exactSlotComboKey = emptySlots.map((slot) => slot.bedrooms).join("+");
         for (const combo of combos) {
           const used = new Set(pickedIdentities);
           const picks: LiveCandidate[] = [];
@@ -2824,6 +2825,19 @@ export default function Bookings() {
           evaluatedCombos.push(evaluated);
           if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
             best = evaluated;
+          }
+          // The first combo mirrors the actual physical slots on the
+          // reservation. If that exact plan is already verified and distinct,
+          // attach it immediately instead of blocking on alternate splits
+          // like 4BR+2BR. Those alternates are useful fallback paths, but on
+          // slow PM sites they can push the whole auto-fill past the edge
+          // timeout even after the correct 3BR+3BR candidates are ready.
+          if (totalCost !== null && combo.bedrooms.join("+") === exactSlotComboKey) {
+            best = evaluated;
+            return {
+              best,
+              options: [comboOptionFrom(evaluated, true)],
+            };
           }
         }
         return {
