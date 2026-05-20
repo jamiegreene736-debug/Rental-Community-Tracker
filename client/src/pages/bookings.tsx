@@ -170,6 +170,11 @@ type AutoFillComboOption = {
     title: string;
     totalPrice: number;
     url: string;
+    image?: string;
+    airbnbAnchorUrl?: string | null;
+    alternateUrls?: Array<string | null | undefined>;
+    photoMatches?: Array<{ url?: string | null }>;
+    identityKeys?: Array<string | null | undefined>;
     groundFloorStatus?: GroundFloorStatus;
     groundFloorEvidence?: string | null;
   }>;
@@ -184,6 +189,10 @@ type AutoFillComboOption = {
       bedrooms?: number;
       url: string;
       image?: string;
+      airbnbAnchorUrl?: string | null;
+      alternateUrls?: Array<string | null | undefined>;
+      photoMatches?: Array<{ url?: string | null }>;
+      identityKeys?: Array<string | null | undefined>;
       verified?: "yes" | "no" | "unclear" | "skipped";
       verifiedReason?: string;
       groundFloorStatus?: GroundFloorStatus;
@@ -634,6 +643,7 @@ function titleFromBuyInNotes(notes: string | null | undefined): string {
 
 function listingIdentityKeys(item: {
   url?: string | null;
+  sourceLabel?: string | null;
   title?: string | null;
   image?: string | null;
   airbnbAnchorUrl?: string | null;
@@ -662,6 +672,12 @@ function listingIdentityKeys(item: {
   const titleKey = normalizedIdentityText(item.title);
   if (titleKey.length >= 12 && !isGenericRentalTitle(titleKey)) {
     keys.add(`title:${titleKey}`);
+  }
+
+  const labelKey = normalizedIdentityText(item.sourceLabel);
+  const labelLooksUnitSpecific = /\b(?:unit|apt|suite|condo|villa|regency|#)?\s*\d{2,4}\b/.test(labelKey);
+  if (labelKey.length >= 12 && labelLooksUnitSpecific && !isGenericRentalTitle(labelKey)) {
+    keys.add(`label:${labelKey}`);
   }
 
   for (const match of item.photoMatches ?? []) {
@@ -1157,16 +1173,26 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     candidate.verified === "yes"
     && plausibleForDirectCombo(candidate)
     && (candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url)));
+  const distinctCheapestDirectPicks = (option: AutoFillComboOption) => {
+    const used = new Set<string>();
+    const picks: Array<NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]> = [];
+    for (const pool of option.pools ?? []) {
+      const pick = pool.candidates
+        .filter((candidate) => candidate.totalPrice > 0 && candidateQualifies(candidate))
+        .sort((a, b) => a.totalPrice - b.totalPrice)
+        .find((candidate) => !hasUsedListingIdentity(used, candidate));
+      if (!pick) return null;
+      addUsedListingIdentity(used, pick);
+      picks.push(pick);
+    }
+    return picks.length > 0 ? picks : null;
+  };
   const optimizedCombos = options
     .map((option) => {
-      const picks = (option.pools ?? []).map((pool) =>
-        pool.candidates
-          .filter((candidate) => candidate.totalPrice > 0 && candidateQualifies(candidate))
-          .sort((a, b) => a.totalPrice - b.totalPrice)[0] ?? null,
-      );
-      if (picks.length === 0 || picks.some((pick) => !pick)) return null;
-      const totalCost = picks.reduce((sum, pick) => sum + (pick?.totalPrice ?? 0), 0);
-      return { option, picks: picks.filter((pick): pick is NonNullable<typeof pick> => !!pick), totalCost };
+      const picks = distinctCheapestDirectPicks(option);
+      if (!picks) return null;
+      const totalCost = picks.reduce((sum, pick) => sum + pick.totalPrice, 0);
+      return { option, picks, totalCost };
     })
     .filter((combo): combo is NonNullable<typeof combo> => combo !== null);
   const optimizedComboByLabel = new Map(optimizedCombos.map((combo) => [combo.option.label, combo] as const));
@@ -1255,7 +1281,8 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                     ) : pool.candidates.map((candidate, index) => {
                       const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
                       const isDirectPick = !!directRow;
-                      const isOptimizedPick = !!optimizedCombo?.picks.some((pick) => listingUrlKey(pick.url) === listingUrlKey(candidate.url));
+                      const candidateKeys = new Set(listingIdentityKeys(candidate));
+                      const isOptimizedPick = !!optimizedCombo?.picks.some((pick) => hasUsedListingIdentity(candidateKeys, pick));
                       return (
                       <a
                         key={`${candidate.url}-${index}`}
@@ -2525,6 +2552,7 @@ export default function Bookings() {
             const alternateUrls = (unit.listings ?? []).map((l) => l.url).filter(Boolean);
             const identityKeys = listingIdentityKeys({
               url: listing.url,
+              sourceLabel: listing.channelLabel,
               title: unit.unitTitle,
               image: unit.image,
               alternateUrls,
@@ -2755,6 +2783,11 @@ export default function Bookings() {
           title: pick.title,
           totalPrice: pick.totalPrice,
           url: pick.url,
+          image: pick.image,
+          airbnbAnchorUrl: pick.airbnbAnchorUrl,
+          alternateUrls: pick.alternateUrls,
+          photoMatches: pick.photoMatches,
+          identityKeys: pick.identityKeys,
           groundFloorStatus: pick.groundFloorStatus,
           groundFloorEvidence: pick.groundFloorEvidence,
         })),
@@ -2769,6 +2802,10 @@ export default function Bookings() {
             bedrooms: candidate.bedrooms,
             url: candidate.url,
             image: candidate.image,
+            airbnbAnchorUrl: candidate.airbnbAnchorUrl,
+            alternateUrls: candidate.alternateUrls,
+            photoMatches: candidate.photoMatches,
+            identityKeys: candidate.identityKeys,
             verified: candidate.verified,
             verifiedReason: candidate.verifiedReason,
             groundFloorStatus: candidate.groundFloorStatus,
