@@ -9228,7 +9228,13 @@ export async function registerRoutes(
               nightlyPrice: Math.round(nightly),
               totalPrice: Math.round(total),
               bedrooms: candidateBedrooms,
-              bedroomSource: sidecarBedroomSource === "search-filter" ? "search-filter" : sidecarBedroomSource === "search-card" ? "search-card" : undefined,
+              bedroomSource: sidecarBedroomSource === "search-filter"
+                ? "search-filter"
+                : sidecarBedroomSource === "search-card"
+                  ? "search-card"
+                  : sidecarBedroomSource === "detail-page"
+                    ? "detail-page"
+                    : undefined,
               image: c.image,
               snippet: c.snippet,
               verified: "yes",

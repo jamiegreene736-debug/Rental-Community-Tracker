@@ -4576,6 +4576,28 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
         const img = card.querySelector("img");
         return img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
       }
+      const pageText = clean(document.body?.innerText || "");
+      const pageTitle = clean(document.title);
+      if (looksDetail(location.href, `${pageTitle} ${pageText}`)) {
+        const detailBedrooms = extractBedrooms(`${pageTitle} ${pageText}`);
+        if (detailBedrooms !== null && detailBedrooms < bedrooms) return [];
+        const price = parsePrice(pageText);
+        if (!price) return [];
+        const canonical = document.querySelector("link[rel='canonical']")?.href || location.href;
+        return [{
+          url: canonical,
+          title: pageTitle || clean(document.querySelector("h1, h2")?.textContent) || "Property manager listing",
+          totalPrice: price.totalPrice,
+          nightlyPrice: price.nightlyPrice,
+          priceIncludesTaxes: price.priceIncludesTaxes,
+          priceIncludesFees: price.priceIncludesFees,
+          priceBasis: price.priceBasis,
+          bedrooms: detailBedrooms ?? bedrooms,
+          bedroomSource: detailBedrooms === null ? "search-filter" : "detail-page",
+          image: imageFrom(document),
+          snippet: pageText.slice(0, 220),
+        }];
+      }
       if (!looksLikeRentalSearchPage()) return [];
       const anchors = Array.from(document.querySelectorAll("a[href]"));
       const out = [];
