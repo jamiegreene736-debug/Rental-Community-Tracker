@@ -783,7 +783,7 @@ export class ChromeSidecarManager {
     this.log(
       `spawning ${instance.label} ${
         launchHiddenOnMac ? (macAppPath ? "macOS background hidden/offscreen " : "direct hidden/offscreen ") : ""
-      }(port ${instance.cdpPort}, user-data-dir ${instance.chromeDataDir})…`,
+      }(port ${instance.cdpPort}, user-data-dir ${instance.chromeDataDir}, window ${visiblePosition} ${windowSize.width}x${windowSize.height})…`,
     );
     const proc = spawn(command, args, { detached: true, stdio: "ignore" });
     proc.unref?.();
