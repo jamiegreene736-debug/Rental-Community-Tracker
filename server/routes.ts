@@ -9182,24 +9182,44 @@ export async function registerRoutes(
         pmWebsiteSidecarOnline = r.workerOnline;
         pmWebsiteSidecarMs = r.durationMs;
         pmWebsiteSidecarReason = r.reason;
-        return r.candidates
+        let pmSidecarBedroomGuardDropped = 0;
+        const pmSidecarBedroomGuardExamples: string[] = [];
+        const mappedCandidates = r.candidates
           .filter((c) => {
             const explicit = rawCandidateExplicitBedroomSignal(c);
-            const sourceBedroom = String((c as any).bedroomSource) === "search-card" && typeof c.bedrooms === "number"
+            const sidecarBedroomSource = String((c as any).bedroomSource ?? "");
+            const sourceBedroom = typeof c.bedrooms === "number"
               ? c.bedrooms
               : null;
-            const inferred = explicit ?? sourceBedroom;
-            return inferred !== null && inferred >= bedrooms && (c.totalPrice > 0 || c.nightlyPrice > 0);
+            // The local PM sidecar already rejects cards with an explicit
+            // lower bedroom count before returning them. Some PM widgets
+            // expose the bedroom proof only as structured sidecar metadata,
+            // not in the visible title/snippet/url that the server re-parses
+            // here. Trust the sidecar's bedroom number for both search-card
+            // and search-filter results so exact Regency unit pages do not
+            // disappear before the target filter can see their source label.
+            const inferred = explicit ?? sourceBedroom ?? (sidecarBedroomSource === "search-filter" ? bedrooms : null);
+            const priced = c.totalPrice > 0 || c.nightlyPrice > 0;
+            const keep = inferred !== null && inferred >= bedrooms && priced;
+            if (!keep) {
+              pmSidecarBedroomGuardDropped++;
+              if (pmSidecarBedroomGuardExamples.length < 8) {
+                pmSidecarBedroomGuardExamples.push(
+                  `${sidecarBedroomSource || "no-bedroom-source"} inferred=${inferred ?? "none"} priced=${priced ? "yes" : "no"} :: ${(c.sourceLabel || c.title || c.url || "").replace(/\s+/g, " ").slice(0, 90)} :: ${(c.title || "").replace(/\s+/g, " ").slice(0, 60)}`,
+                );
+              }
+            }
+            return keep;
           })
           .map((c): Candidate => {
             const total = c.totalPrice > 0 ? c.totalPrice : c.nightlyPrice * nights;
             const nightly = c.nightlyPrice > 0 ? c.nightlyPrice : Math.round(total / Math.max(1, nights));
             const explicit = rawCandidateExplicitBedroomSignal(c);
             const sidecarBedroomSource = String((c as any).bedroomSource ?? "");
-            const sourceBedroom = sidecarBedroomSource === "search-card" && typeof c.bedrooms === "number"
+            const sourceBedroom = typeof c.bedrooms === "number"
               ? c.bedrooms
               : undefined;
-            const candidateBedrooms = explicit ?? sourceBedroom;
+            const candidateBedrooms = explicit ?? sourceBedroom ?? (sidecarBedroomSource === "search-filter" ? bedrooms : undefined);
             return {
               source: "pm",
               sourceLabel: c.sourceLabel || "Property manager",
@@ -9216,6 +9236,12 @@ export async function registerRoutes(
               verifiedReason: "Property-manager sidecar searched the PM rental search page with the resort, dates, and bedroom filter, then scraped this priced search-result card",
             };
           });
+        if (pmSidecarBedroomGuardDropped > 0) {
+          console.log(
+            `[find-buy-in] pm website sidecar bedroom guard dropped ${pmSidecarBedroomGuardDropped}/${r.candidates.length}: ${pmSidecarBedroomGuardExamples.join(" | ")}`,
+          );
+        }
+        return mappedCandidates;
       } catch (e: any) {
         console.error(`[find-buy-in] pm website sidecar error:`, e?.message ?? e);
         noteSourceError("PM website sidecar search", e);
