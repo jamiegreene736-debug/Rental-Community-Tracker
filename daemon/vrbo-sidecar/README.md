@@ -159,6 +159,13 @@ Railway submits it as a
 Chrome window using the returned coordinate. If the challenge does not
 clear, that specific Chrome window is surfaced with the manual banner.
 
+The local LaunchAgent also needs `ADMIN_SECRET` so Railway's auth
+middleware allows the daemon to call `/api/admin/solve-coordinates-captcha`.
+Run `./scripts/install-vrbo-sidecar-launchagent.sh` from a Railway-linked
+checkout; the installer will load `ADMIN_SECRET` from Railway variables
+when it is not already exported locally. A healthy startup log should show
+`admin-secret=set`, not `admin-secret=none`.
+
 If the daemon's Chrome session is stuck (rare — manifests as
 "Browser context management is not supported" on connect), kill
 the Chrome process and restart:

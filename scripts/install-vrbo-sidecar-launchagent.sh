@@ -63,6 +63,28 @@ SIDECAR_CAPTCHA_SURFACE_WINDOW="${SIDECAR_CAPTCHA_SURFACE_WINDOW:-1}"
 SIDECAR_CAPTCHA_ALLOW_FOCUS="${SIDECAR_CAPTCHA_ALLOW_FOCUS:-1}"
 SIDECAR_MACOS_BACKGROUND_LAUNCH="${SIDECAR_MACOS_BACKGROUND_LAUNCH:-1}"
 SERVER_CHROME_FALLBACK_ENABLED="${SERVER_CHROME_FALLBACK_ENABLED:-0}"
+ADMIN_SECRET_VALUE="${SIDECAR_ADMIN_SECRET:-${ADMIN_SECRET:-}}"
+if [[ -z "${ADMIN_SECRET_VALUE}" ]] && command -v railway >/dev/null 2>&1; then
+  # The 2Captcha key intentionally stays on Railway. The local sidecar still
+  # needs ADMIN_SECRET so Railway's auth middleware lets it call the solver
+  # endpoint. Pull it from the linked Railway service when available, but never
+  # print the value.
+  ADMIN_SECRET_VALUE="$(
+    railway variable list --kv 2>/dev/null \
+      | awk -F= '$1 == "ADMIN_SECRET" { sub(/^[^=]*=/, ""); print; exit }' \
+      || true
+  )"
+  if [[ -n "${ADMIN_SECRET_VALUE}" ]]; then
+    echo "Loaded ADMIN_SECRET from Railway variables for local sidecar auth."
+  fi
+fi
+quote_for_shell() {
+  printf "%q" "$1"
+}
+ADMIN_SECRET_EXPORT="$(quote_for_shell "${ADMIN_SECRET_VALUE}")"
+SIDECAR_VRBO_2CAPTCHA="${SIDECAR_VRBO_2CAPTCHA:-1}"
+SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS="${SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS:-120}"
+SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS="${SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS:-1}"
 
 RUNNER_PATH="${INSTALL_DIR}/run-vrbo-sidecar.sh"
 cat >"${RUNNER_PATH}" <<RUNNER
@@ -70,6 +92,7 @@ cat >"${RUNNER_PATH}" <<RUNNER
 set -euo pipefail
 cd "${INSTALL_DIR}"
 export SIDECAR_SERVER="${SERVER_URL}"
+export ADMIN_SECRET=${ADMIN_SECRET_EXPORT}
 export MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES}"
 export SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE}"
 export SIDECAR_CHROME_VISIBLE_GRID_ORIGIN="${SIDECAR_CHROME_VISIBLE_GRID_ORIGIN}"
@@ -81,6 +104,9 @@ export SIDECAR_CAPTCHA_SURFACE_WINDOW="${SIDECAR_CAPTCHA_SURFACE_WINDOW}"
 export SIDECAR_CAPTCHA_ALLOW_FOCUS="${SIDECAR_CAPTCHA_ALLOW_FOCUS}"
 export SIDECAR_MACOS_BACKGROUND_LAUNCH="${SIDECAR_MACOS_BACKGROUND_LAUNCH}"
 export SERVER_CHROME_FALLBACK_ENABLED="${SERVER_CHROME_FALLBACK_ENABLED}"
+export SIDECAR_VRBO_2CAPTCHA="${SIDECAR_VRBO_2CAPTCHA}"
+export SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS="${SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS}"
+export SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS="${SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS}"
 echo "[\$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [vrbo-sidecar-launchagent] starting supervisor via ${NODE_BIN}"
 exec "${NODE_BIN}" "${INSTALL_DIR}/supervisor.mjs"
 RUNNER
