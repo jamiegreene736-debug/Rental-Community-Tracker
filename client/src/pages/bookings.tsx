@@ -2459,7 +2459,7 @@ export default function Bookings() {
 
       const bedroomFromCandidateText = (c: LiveCandidate): number | null => {
         const text = `${c.title} ${c.snippet ?? ""} ${c.url}`.toLowerCase();
-        const direct = text.match(/(\d+)\s*(?:br|bd|bdr|bedrooms?)\b/);
+        const direct = text.match(/(?:^|[\W_])(\d+)\s*(?:br|bd|bdr|bedrooms?)(?=$|[\W_])/);
         if (direct) return parseInt(direct[1], 10);
         const slash = text.match(/\b([1-9])\s*\/\s*(?:[1-9](?:\.5)?)\b/);
         if (slash) return parseInt(slash[1], 10);

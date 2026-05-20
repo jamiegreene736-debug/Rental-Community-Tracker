@@ -7800,7 +7800,7 @@ export async function registerRoutes(
     const bedroomFromText = (text: string): number | null => {
       const t = text.toLowerCase();
       if (/\bstudio\b|\befficiency\b/.test(t)) return 0;
-      const m = t.match(/(\d+)\s*(?:br|bd|bdr|bedrooms?)\b/);
+      const m = t.match(/(?:^|[\W_])(\d+)\s*(?:br|bd|bdr|bedrooms?)(?=$|[\W_])/);
       if (m) return parseInt(m[1], 10);
       const slash = t.match(/\b([1-9])\s*\/\s*(?:[1-9](?:\.5)?)\b/);
       if (slash) return parseInt(slash[1], 10);
