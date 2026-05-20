@@ -4465,6 +4465,7 @@ export async function registerRoutes(
 
   app.get("/api/guesty-property-map", async (_req, res) => {
     try {
+      res.set("Cache-Control", "no-store");
       let map = await storage.getGuestyPropertyMap();
       const mappedPropertyIds = new Set(map.map((row) => row.propertyId));
 
