@@ -1166,7 +1166,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
   const plausibleForDirectCombo = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) => {
     const nightly = candidate.nightlyPrice > 0
       ? candidate.nightlyPrice
-      : Math.round(candidate.totalPrice / Math.max(1, nights));
+      : candidate.totalPrice;
     return nightly >= minimumDirectNightly(candidate.bedrooms);
   };
   const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) =>
