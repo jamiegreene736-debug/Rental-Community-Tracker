@@ -2879,6 +2879,7 @@ export default function Bookings() {
 
         const evaluatedCombos: EvaluatedCombo[] = [];
         let best: EvaluatedCombo | null = null;
+        const exactSlotComboKey = emptySlots.map((slot) => slot.bedrooms).join("+");
         for (const combo of combos) {
           const used = new Set(pickedIdentities);
           const picks: LiveCandidate[] = [];
@@ -2924,6 +2925,16 @@ export default function Bookings() {
           evaluatedCombos.push(evaluated);
           if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
             best = evaluated;
+          }
+          if (totalCost !== null && combo.bedrooms.join("+") === exactSlotComboKey) {
+            const immediateExact: EvaluatedCombo = {
+              ...evaluated,
+              note: "Exact physical-slot plan attached immediately; alternate splits can be checked after a slot is detached.",
+            };
+            return {
+              best: immediateExact,
+              options: [comboOptionFrom(immediateExact, true)],
+            };
           }
         }
         return {
