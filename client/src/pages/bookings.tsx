@@ -699,6 +699,95 @@ function addUsedListingIdentity(used: Set<string>, item: Parameters<typeof listi
   for (const key of listingIdentityKeys(item)) used.add(key);
 }
 
+type TwoUnitBedroomCombo = { bedrooms: number[] };
+
+type AutoFillGroundCandidatePool = {
+  bedrooms: number;
+  candidates: LiveCandidate[];
+};
+
+function twoUnitBedroomCombos(totalNeeded: number, preferredBedrooms: number[]): TwoUnitBedroomCombo[] {
+  if (totalNeeded <= 0) return [];
+  const combos: TwoUnitBedroomCombo[] = [];
+  const seen = new Set<string>();
+  const addCombo = (combo: number[]) => {
+    if (combo.length !== 2 || combo.some((n) => !Number.isFinite(n) || n <= 0)) return;
+    if (combo[0] + combo[1] !== totalNeeded) return;
+    const key = [...combo].sort((a, b) => b - a).join("+");
+    if (seen.has(key)) return;
+    seen.add(key);
+    combos.push({ bedrooms: combo });
+  };
+  addCombo(preferredBedrooms);
+  const minLegBedrooms = totalNeeded >= 4 ? 2 : 1;
+  for (let high = totalNeeded - minLegBedrooms; high >= Math.ceil(totalNeeded / 2); high--) {
+    const low = totalNeeded - high;
+    if (low < minLegBedrooms) continue;
+    addCombo([high, low]);
+  }
+  return combos;
+}
+
+function isGroundFloorPick(candidate: LiveCandidate | null | undefined): boolean {
+  return candidate?.groundFloorStatus === "confirmed";
+}
+
+function pickCheapestSetWithGroundFloor(
+  pools: AutoFillGroundCandidatePool[],
+  requiredCount: number,
+  usedSeed: Set<string>,
+  requiredIndexes?: Set<number>,
+): { picks: Array<LiveCandidate | null>; reason?: string } {
+  const used = new Set(usedSeed);
+  const picks = pools.map((pool) => {
+    const pick = pool.candidates.find((c) => !hasUsedListingIdentity(used, c)) ?? null;
+    if (pick) addUsedListingIdentity(used, pick);
+    return pick;
+  });
+  const requirementMet = () => {
+    if (requiredIndexes?.size) {
+      return Array.from(requiredIndexes).every((index) => isGroundFloorPick(picks[index]));
+    }
+    return picks.filter(isGroundFloorPick).length >= requiredCount;
+  };
+  if (requiredCount <= 0 || requirementMet()) {
+    return { picks };
+  }
+
+  for (let guard = 0; guard < pools.length && !requirementMet(); guard++) {
+    let bestSwap: { index: number; candidate: LiveCandidate; delta: number } | null = null;
+    for (let i = 0; i < pools.length; i++) {
+      if (requiredIndexes?.size && !requiredIndexes.has(i)) continue;
+      if (isGroundFloorPick(picks[i])) continue;
+      const otherUsed = new Set(usedSeed);
+      picks.forEach((existing, index) => {
+        if (existing && index !== i) addUsedListingIdentity(otherUsed, existing);
+      });
+      const candidate = pools[i].candidates.find((c) => c.groundFloorStatus === "confirmed" && !hasUsedListingIdentity(otherUsed, c));
+      if (!candidate) continue;
+      const currentTotal = picks[i]?.totalPrice ?? 0;
+      const delta = candidate.totalPrice - currentTotal;
+      if (!bestSwap || delta < bestSwap.delta) bestSwap = { index: i, candidate, delta };
+    }
+    if (!bestSwap) break;
+    picks[bestSwap.index] = bestSwap.candidate;
+  }
+
+  const found = requiredIndexes?.size
+    ? Array.from(requiredIndexes).filter((index) => isGroundFloorPick(picks[index])).length
+    : picks.filter(isGroundFloorPick).length;
+  if (!requirementMet()) {
+    const targetLabel = requiredIndexes?.size
+      ? ` for the required ${Array.from(requiredIndexes).map((index) => `${pools[index]?.bedrooms ?? "?"}BR`).join(" + ")} slot${requiredIndexes.size === 1 ? "" : "s"}`
+      : "";
+    return {
+      picks,
+      reason: `Only ${found} confirmed ground-floor option${found === 1 ? "" : "s"} found${targetLabel}; ${requiredCount} required by guest messages`,
+    };
+  }
+  return { picks };
+}
+
 // Mirror of server/pm-scrapers.ts MANUAL_ONLY list. PMs that don't
 // expose rates programmatically — auto-fill / Verify-rate calls return
 // instantly with manualOnly:true and the slot row should show the
@@ -1165,17 +1254,19 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
   const directMatchByUrl = new Map(directMatches.map((row) => [listingUrlKey(row.candidate.url), row] as const));
   const bestDirectCandidate = directMatches[0] ?? null;
-  const minimumDirectNightly = (bedrooms?: number) => Math.max(90, (bedrooms ?? 1) * 70);
+  const minimumDirectNightly = (bedrooms?: number) => Math.max(70, (bedrooms ?? 1) * 55);
   const plausibleForDirectCombo = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) => {
     const nightly = candidate.nightlyPrice > 0
       ? candidate.nightlyPrice
       : candidate.totalPrice;
     return nightly >= minimumDirectNightly(candidate.bedrooms);
   };
-  const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) =>
-    candidate.verified === "yes"
-    && plausibleForDirectCombo(candidate)
-    && (candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url)));
+  const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) => {
+    const verifiedDirectOrPm = candidate.source === "pm" && candidate.verified === "yes";
+    return candidate.verified === "yes"
+      && (verifiedDirectOrPm || plausibleForDirectCombo(candidate))
+      && (candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url)));
+  };
   const distinctCheapestDirectPicks = (option: AutoFillComboOption) => {
     const used = new Set<string>();
     const picks: Array<NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]> = [];
@@ -2554,42 +2645,49 @@ export default function Bookings() {
           const aPrice = a.totalPrice > 0 ? a.totalPrice : Number.POSITIVE_INFINITY;
           const bPrice = b.totalPrice > 0 ? b.totalPrice : Number.POSITIVE_INFINITY;
           return aPrice - bPrice;
-        });
+      });
       const hydrateCandidateIdentity = (candidate: LiveCandidate): LiveCandidate => ({
         ...candidate,
         identityKeys: candidate.identityKeys ?? listingIdentityKeys(candidate),
       });
+      const selectedUnitConfig = selectedPropertyId
+        ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]
+        : undefined;
       const directBookingScanCache = new Map<string, Promise<LiveCandidate[]>>();
       let autoDirectBookingScansStarted = 0;
-      const autoDirectBookingScanLimit = 6;
+      const autoDirectBookingScanLimit = selectedUnitConfig?.enableGoogleLensDiscovery ? 12 : 6;
       const directMatchToAutoFillCandidate = (
         airbnbCandidate: LiveCandidate,
         match: ReverseImageListingMatch,
-      ): LiveCandidate => ({
-        source: "pm",
-        sourceLabel: `Direct PM (${match.domain})`,
-        title: match.title || airbnbCandidate.title,
-        url: match.url,
-        nightlyPrice: airbnbCandidate.nightlyPrice,
-        totalPrice: airbnbCandidate.totalPrice,
-        bedrooms: airbnbCandidate.bedrooms,
-        image: airbnbCandidate.image,
-        snippet: "Direct booking site found automatically from this Airbnb listing's photos. Airbnb supplied the date-specific rate proxy; verify the PM page before booking.",
-        alternateUrls: Array.from(new Set([airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])].filter(Boolean) as string[])),
-        photoMatches: [{ url: match.url, title: match.title, domain: match.domain }],
-        identityKeys: listingIdentityKeys({
-          ...airbnbCandidate,
-          alternateUrls: [airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])],
-          photoMatches: [{ url: match.url }],
-        }),
-        airbnbAnchorUrl: airbnbCandidate.url,
-        airbnbAnchorPrice: airbnbCandidate.totalPrice,
-        verified: "yes",
-        verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
-        verifiedReason: "Direct PM listing found automatically by Google Lens from the Airbnb listing photos. Airbnb supplied the date-specific availability/rate proxy; confirm the PM site before purchase.",
-        groundFloorStatus: airbnbCandidate.groundFloorStatus,
-        groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
-      });
+      ): LiveCandidate => {
+        const photoRole = match.matchedPhotoRole ? ` (${photoRoleLabel(match.matchedPhotoRole)} photo)` : "";
+        const photoLabel = match.matchedPhotoLabel ? `: ${match.matchedPhotoLabel}` : "";
+        return {
+          source: "pm",
+          sourceLabel: `Direct PM (${match.domain})`,
+          title: match.title || airbnbCandidate.title,
+          url: match.url,
+          nightlyPrice: airbnbCandidate.nightlyPrice,
+          totalPrice: airbnbCandidate.totalPrice,
+          bedrooms: airbnbCandidate.bedrooms,
+          image: airbnbCandidate.image,
+          snippet: `Direct booking site found automatically from this Airbnb listing's photos${photoRole}${photoLabel}. Airbnb supplied the date-specific rate proxy; verify the PM page before booking.`,
+          alternateUrls: Array.from(new Set([airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])].filter(Boolean) as string[])),
+          photoMatches: [{ url: match.url, title: match.title, domain: match.domain }],
+          identityKeys: listingIdentityKeys({
+            ...airbnbCandidate,
+            alternateUrls: [airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])],
+            photoMatches: [{ url: match.url }],
+          }),
+          airbnbAnchorUrl: airbnbCandidate.url,
+          airbnbAnchorPrice: airbnbCandidate.totalPrice,
+          verified: "yes",
+          verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
+          verifiedReason: `Direct PM listing found automatically by Google Lens from the Airbnb listing photos${photoRole}${photoLabel}. Airbnb supplied the date-specific availability/rate proxy; confirm the PM site before purchase.`,
+          groundFloorStatus: airbnbCandidate.groundFloorStatus,
+          groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
+        };
+      };
       const scanDirectBookingSitesForAirbnb = (candidate: LiveCandidate): Promise<LiveCandidate[]> => {
         const key = listingUrlKey(candidate.url);
         if (!key) return Promise.resolve([]);
@@ -2597,9 +2695,7 @@ export default function Bookings() {
         if (existing) return existing;
         const promise = (async () => {
           try {
-            const community = selectedPropertyId
-              ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
-              : "";
+            const community = selectedUnitConfig?.community ?? "";
             const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
               sourceUrl: candidate.url,
               title: candidate.title,
@@ -2699,15 +2795,20 @@ export default function Bookings() {
           })
           .filter((c): c is LiveCandidate => c !== null);
         const sourceCandidates = unitCandidates.length > 0 ? unitCandidates : (data.cheapest ?? []);
+        const autoDirectCandidates = await autoDirectBookingCandidatesFor(sourceCandidates, searchedBedrooms);
         const candidates = rankCandidates(
-          sourceCandidates
+          [
+            ...autoDirectCandidates,
+            ...sourceCandidates,
+          ]
             .filter((c) => c.totalPrice > 0)
             .filter((c) => {
               const actualBedrooms = candidateBedrooms(c, searchedBedrooms);
               return exactBedroomForCombo
                 ? actualBedrooms === searchedBedrooms
                 : actualBedrooms >= searchedBedrooms;
-            }),
+            })
+            .map(hydrateCandidateIdentity),
         );
         const safeForAutoFill = data.autoFillSafe ?? data.diagnostics?.severity === "ok";
         // Warning-level diagnostics should remain visible in the audit panel,
@@ -2767,65 +2868,6 @@ export default function Bookings() {
             .map(hydrateCandidateIdentity),
         );
         return { data, searchSummary, candidates };
-      };
-
-      const isGroundFloorPick = (candidate: LiveCandidate | null | undefined): boolean =>
-        candidate?.groundFloorStatus === "confirmed";
-
-      const pickCheapestSetWithGroundFloor = (
-        pools: Array<{ slot?: typeof emptySlots[number]; bedrooms: number; candidates: LiveCandidate[]; searchSummary?: AutoFillSearchSummary }>,
-        requiredCount: number,
-        usedSeed: Set<string>,
-        requiredIndexes?: Set<number>,
-      ): { picks: Array<LiveCandidate | null>; reason?: string } => {
-        const used = new Set(usedSeed);
-        const picks = pools.map((pool) => {
-          const pick = pool.candidates.find((c) => !hasUsedListingIdentity(used, c)) ?? null;
-          if (pick) addUsedListingIdentity(used, pick);
-          return pick;
-        });
-        const requirementMet = () => {
-          if (requiredIndexes?.size) {
-            return Array.from(requiredIndexes).every((index) => isGroundFloorPick(picks[index]));
-          }
-          return picks.filter(isGroundFloorPick).length >= requiredCount;
-        };
-        if (requiredCount <= 0 || requirementMet()) {
-          return { picks };
-        }
-
-        for (let guard = 0; guard < pools.length && !requirementMet(); guard++) {
-          let bestSwap: { index: number; candidate: LiveCandidate; delta: number } | null = null;
-          for (let i = 0; i < pools.length; i++) {
-            if (requiredIndexes?.size && !requiredIndexes.has(i)) continue;
-            if (isGroundFloorPick(picks[i])) continue;
-            const otherUsed = new Set(usedSeed);
-            picks.forEach((existing, index) => {
-              if (existing && index !== i) addUsedListingIdentity(otherUsed, existing);
-            });
-            const candidate = pools[i].candidates.find((c) => c.groundFloorStatus === "confirmed" && !hasUsedListingIdentity(otherUsed, c));
-            if (!candidate) continue;
-            const currentTotal = picks[i]?.totalPrice ?? 0;
-            const delta = candidate.totalPrice - currentTotal;
-            if (!bestSwap || delta < bestSwap.delta) bestSwap = { index: i, candidate, delta };
-          }
-          if (!bestSwap) break;
-          picks[bestSwap.index] = bestSwap.candidate;
-        }
-
-        const found = requiredIndexes?.size
-          ? Array.from(requiredIndexes).filter((index) => isGroundFloorPick(picks[index])).length
-          : picks.filter(isGroundFloorPick).length;
-        if (!requirementMet()) {
-          const targetLabel = requiredIndexes?.size
-            ? ` for the required ${Array.from(requiredIndexes).map((index) => `${pools[index]?.bedrooms ?? "?"}BR`).join(" + ")} slot${requiredIndexes.size === 1 ? "" : "s"}`
-            : "";
-          return {
-            picks,
-            reason: `Only ${found} confirmed ground-floor option${found === 1 ? "" : "s"} found${targetLabel}; ${requiredCount} required by guest messages`,
-          };
-        }
-        return { picks };
       };
 
       const createAndAttachPick = async (
@@ -2933,29 +2975,6 @@ export default function Bookings() {
           groundFloorStatus: (slot.buyIn.groundFloorStatus as GroundFloorStatus | undefined) ?? "unknown",
           groundFloorEvidence: slot.buyIn.groundFloorEvidence ?? null,
         };
-      };
-
-      type TwoUnitBedroomCombo = { bedrooms: number[] };
-      const twoUnitBedroomCombos = (totalNeeded: number, preferredBedrooms: number[]): TwoUnitBedroomCombo[] => {
-        if (totalNeeded <= 0) return [];
-        const combos: TwoUnitBedroomCombo[] = [];
-        const seen = new Set<string>();
-        const addCombo = (combo: number[]) => {
-          if (combo.length !== 2 || combo.some((n) => !Number.isFinite(n) || n <= 0)) return;
-          if (combo[0] + combo[1] !== totalNeeded) return;
-          const key = [...combo].sort((a, b) => b - a).join("+");
-          if (seen.has(key)) return;
-          seen.add(key);
-          combos.push({ bedrooms: combo });
-        };
-        addCombo(preferredBedrooms);
-        const minLegBedrooms = totalNeeded >= 4 ? 2 : 1;
-        for (let high = totalNeeded - minLegBedrooms; high >= Math.ceil(totalNeeded / 2); high--) {
-          const low = totalNeeded - high;
-          if (low < minLegBedrooms) continue;
-          addCombo([high, low]);
-        }
-        return combos;
       };
 
       type EvaluatedCombo = {

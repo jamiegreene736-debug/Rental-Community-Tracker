@@ -7004,7 +7004,7 @@ export async function registerRoutes(
   //   3. lensMatches       — Google Lens reverse-image search for
   //                          PM URLs that share photos with the top
   //                          Airbnb candidates
-  const PM_GOOGLE_DISCOVERY_ENABLED = false;
+  const PM_GOOGLE_DISCOVERY_DEFAULT_ENABLED = false;
 
   // PM discovery hit-rate telemetry. Module-scoped (Express app lifetime).
   // Tracks how often each PM-discovery path returns priced+available units
@@ -7571,6 +7571,13 @@ export async function registerRoutes(
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
     const includePm = req.query.includePm !== "0" && req.query.pm !== "0";
+    const propertyUnitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
+    const googleDiscoveryEnabled = includePm && (
+      propertyUnitConfig?.enableGoogleLensDiscovery === true
+      || propertyUnitConfig?.looseResortPhotoProof === true
+      || PM_GOOGLE_DISCOVERY_DEFAULT_ENABLED
+    );
+    const looseResortPhotoProof = propertyUnitConfig?.looseResortPhotoProof === true;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const cacheKey = `${propertyId}|${bedrooms}|${checkIn}|${checkOut}|${includePm ? "pm" : "ota-only"}|${groundFloorOnly ? "ground" : "any-floor"}`;
     const noCache = req.query.nocache === "1";
@@ -7831,6 +7838,21 @@ export async function registerRoutes(
       if (b === null) return true; // unknown — keep for manual review
       return b >= bedrooms;
     };
+    const pmDeepDiveResortOk = (haystack: string): boolean => {
+      if (mentionsKnownNonRegencyPoipuKaiComplex(haystack) || mentionsKnownNonPoipuKaiComplex(haystack) || mentionsKnownNonKahaLaniComplex(haystack)) {
+        return false;
+      }
+      if (mentionsResort(haystack)) return true;
+      if (!looseResortPhotoProof) return false;
+      const n = norm(haystack);
+      if (targetIsRegencyPoipuKai) {
+        return /\b(regency|poipu|koloa|kauai)\b/.test(n);
+      }
+      if (normalizedResortName === "poipu kai") {
+        return /\b(poipu|koloa|kauai)\b/.test(n);
+      }
+      return mentionsResortLoose(haystack);
+    };
     const websiteSearchTerm = community === "Kapaa Beachfront"
       ? communitySearchName || resortName || community
       : resortName || communitySearchName || community;
@@ -8069,10 +8091,33 @@ export async function registerRoutes(
     const priceIsPlausibleForTarget = (c: Candidate): boolean =>
       candidateNightlySignal(c) >= minPlausibleNightly;
     const pricePlausibilityReason = (c: Candidate): string | null => {
+      if (c.source === "pm" && c.verified === "yes") return null;
       const nightly = candidateNightlySignal(c);
       if (!(nightly > 0)) return null;
       if (nightly >= minPlausibleNightly) return null;
       return `$${nightly}/night is below the ${community} ${bedrooms}BR floor of $${minPlausibleNightly}/night`;
+    };
+    const candidateHasResortPhotoProof = (c: Candidate): boolean => {
+      const hay = candidateHaystack(c);
+      if (mentionsKnownNonRegencyPoipuKaiComplex(hay) || mentionsKnownNonPoipuKaiComplex(hay) || mentionsKnownNonKahaLaniComplex(hay)) {
+        return false;
+      }
+      const photoTexts = (c.photoMatches ?? []).map((m) => `${m.title} ${m.url} ${m.domain}`);
+      const hasPhotoMatch = photoTexts.length > 0;
+      const lensAnchoredPm =
+        c.source === "pm"
+        && !!c.airbnbAnchorUrl
+        && /google lens|photo|direct pm/i.test(`${c.verifiedReason ?? ""} ${c.snippet ?? ""} ${c.sourceLabel ?? ""}`);
+      if (targetIsRegencyPoipuKai) {
+        if (photoTexts.some(mentionsRegencyPoipuKai)) return true;
+        return looseResortPhotoProof && (hasPhotoMatch || lensAnchoredPm);
+      }
+      if (normalizedResortName === "poipu kai") {
+        if (photoTexts.some(mentionsPoipuKai)) return true;
+        return looseResortPhotoProof && (hasPhotoMatch || lensAnchoredPm);
+      }
+      if (photoTexts.some(mentionsResortLoose)) return true;
+      return looseResortPhotoProof && lensAnchoredPm && mentionsResortLoose(hay);
     };
     const candidateBedroomSignal = (c: Candidate): number | null => {
       const explicit = bedroomFromText(candidateHaystack(c));
@@ -8135,10 +8180,7 @@ export async function registerRoutes(
       if (stayNightCounts.some((n) => n !== nights)) return false;
       const visibleResortProof = mentionsResort(hay)
         || (normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
-      const photoMatchProof = targetIsRegencyPoipuKai
-        ? (c.photoMatches ?? []).some((m) => mentionsRegencyPoipuKai(`${m.title} ${m.url} ${m.domain}`))
-        : normalizedResortName === "poipu kai"
-          && (c.photoMatches ?? []).some((m) => mentionsPoipuKai(`${m.title} ${m.url} ${m.domain}`));
+      const photoMatchProof = candidateHasResortPhotoProof(c);
       // Search result cards frequently hide the exact resort name even
       // when the website search itself was driven with the resort, dates,
       // and bedroom filter. Still require a visible target signal before
@@ -8186,10 +8228,7 @@ export async function registerRoutes(
       if (stayNightCounts.some((n) => n !== nights)) return "wrong stay-night count in visible text";
       const visibleResortProof = mentionsResort(hay)
         || (normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
-      const photoMatchProof = targetIsRegencyPoipuKai
-        ? (c.photoMatches ?? []).some((m) => mentionsRegencyPoipuKai(`${m.title} ${m.url} ${m.domain}`))
-        : normalizedResortName === "poipu kai"
-          && (c.photoMatches ?? []).some((m) => mentionsPoipuKai(`${m.title} ${m.url} ${m.domain}`));
+      const photoMatchProof = candidateHasResortPhotoProof(c);
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
       const searchProofCanCarryTarget = websiteSearchProof
         && hasLocalityForPriceFallback(hay)
@@ -8568,7 +8607,7 @@ export async function registerRoutes(
     const pmPromise: Promise<Candidate[]> = (async () => {
       // PR #314: short-circuit when PM Google-discovery is disabled.
       // Operator directive after Google 403s on PM-domain queries.
-      if (!includePm || !PM_GOOGLE_DISCOVERY_ENABLED) {
+      if (!googleDiscoveryEnabled) {
         return [];
       }
       try {
@@ -8714,10 +8753,10 @@ export async function registerRoutes(
             };
             const candidates: Candidate[] = hits
               .filter((h: any) => {
-                const hay = `${h?.title ?? ""} ${h?.snippet ?? ""}`;
+                const hay = `${h?.title ?? ""} ${h?.snippet ?? ""} ${h?.link ?? ""}`;
                 // PM deep-dive still needs to land inside the target resort
                 // with the right bedroom count — same rules as the OTAs.
-                return mentionsResort(hay) && bedroomOk(hay);
+                return pmDeepDiveResortOk(hay) && bedroomOk(hay);
               })
               // Reject bare-homepage URLs AND resort-landing/category pages
               // — the whole point of the deep-dive is to land on a specific
@@ -9013,7 +9052,7 @@ export async function registerRoutes(
     // long-tail PM pages that the per-domain Stage 2 search may miss.
     // Sidecar/Chrome is deliberately NOT used for Google search.
     const pmSearchApiFinderPromise: Promise<Candidate[]> = (async () => {
-      if (!includePm || !PM_GOOGLE_DISCOVERY_ENABLED) return [];
+      if (!googleDiscoveryEnabled) return [];
       try {
         const target = resortName ?? community;
         const locality = searchLocation.replace(/,/g, " ");
@@ -9395,7 +9434,7 @@ export async function registerRoutes(
       // and was 403'd alongside engine=google. Operator directive:
       // skip PM photo-matching while disabled — find-buy-in falls
       // back to direct Airbnb/Booking/Vrbo + known-URL VRP_SITES.
-      if (!PM_GOOGLE_DISCOVERY_ENABLED) return [];
+      if (!googleDiscoveryEnabled) return [];
       try {
         const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey });
         const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`);
@@ -9537,7 +9576,12 @@ export async function registerRoutes(
         // anchor's price + dates, creating bogus "available" rows that
         // dead-end when the operator clicks through.
         const hay = `${m.url} ${m.title} ${m.domain}`;
-        if (!mentionsResortLoose(hay)) {
+        const photoProofCanCarryTarget =
+          looseResortPhotoProof
+          && !mentionsKnownNonRegencyPoipuKaiComplex(hay)
+          && !mentionsKnownNonPoipuKaiComplex(hay)
+          && !mentionsKnownNonKahaLaniComplex(hay);
+        if (!mentionsResortLoose(hay) && !photoProofCanCarryTarget) {
           photoMatchWrongResortDropped++;
           continue;
         }
@@ -9865,8 +9909,9 @@ export async function registerRoutes(
     const comparisonResortFits = (c: Candidate): boolean => {
       const hay = candidateHaystack(c);
       if (mentionsKnownNonPoipuKaiComplex(hay) || mentionsKnownNonKahaLaniComplex(hay)) return false;
+      if (candidateHasResortPhotoProof(c)) return true;
       if (targetIsRegencyPoipuKai || normalizedResortName === "poipu kai") {
-        return candidateIsPoipuKaiCondoLike(c) || mentionsPoipuKai(hay);
+        return candidateFitsTarget(c) || candidateIsPoipuKaiCondoLike(c) || mentionsPoipuKai(hay);
       }
       return candidateFitsTarget(c);
     };
@@ -10697,7 +10742,7 @@ export async function registerRoutes(
     try {
       const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
       const sourceKey = normalizeListingSurfaceKey(sourceUrl);
-      const cacheKey = `buy-in-sites:${sourceKey}`;
+      const cacheKey = `buy-in-sites:v2:${sourceKey}`;
       evictExpiredBuyInListingSites();
       const cached = buyInListingSitesCache.get(cacheKey);
       if (useCache && cached && cached.expiresAt > Date.now()) {
@@ -10745,8 +10790,12 @@ export async function registerRoutes(
       const port = process.env.PORT || "5000";
       const lookupEndpoint = `http://127.0.0.1:${port}/api/operations/reverse-image-listings`;
 
+      const maxPhotosToSearch = 3;
+      let photosSearched = 0;
       for (const photo of candidatePhotos) {
+        if (photosSearched >= maxPhotosToSearch) break;
         photo.searched = true;
+        photosSearched++;
         const photoMatches: BuyInListingSiteMatch[] = [];
         try {
           const response = await fetch(lookupEndpoint, {
@@ -10793,7 +10842,6 @@ export async function registerRoutes(
             : `Reverse search failed: ${e?.message ?? String(e)}`;
           photo.searched = false;
         }
-        if (photoMatches.length > 0) break;
       }
 
       matches.sort((a, b) => {
