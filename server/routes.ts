@@ -9185,9 +9185,9 @@ export async function registerRoutes(
 	          checkOut,
 	          bedrooms,
           perSiteLimit: 5,
-          maxSites: Math.min(18, pmSitesForSearch.length),
-          walletBudgetMs: 180_000,
-          queueBudgetMs: 285_000,
+          maxSites: Math.min(8, pmSitesForSearch.length),
+          walletBudgetMs: 90_000,
+          queueBudgetMs: 135_000,
           signal: pmWebsiteSidecarAbort.signal,
           stopGeneration: sidecarStopGeneration,
         });
