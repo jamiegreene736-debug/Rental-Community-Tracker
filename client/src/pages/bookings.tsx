@@ -4399,6 +4399,25 @@ export default function Bookings() {
                             )}
                           </div>
                         )}
+                        {(searchAudits.length > 0 || comboOptions.length > 0) && (
+                          <div className="flex justify-end">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                clearAutoFillDiagnostics(r._id);
+                                toast({ title: "Search results cleared" });
+                              }}
+                              data-testid={`button-clear-auto-fill-diagnostics-${r._id}`}
+                            >
+                              <XCircle className="mr-1 h-3.5 w-3.5" />
+                              Clear search results
+                            </Button>
+                          </div>
+                        )}
                         {searchAudits.length > 0 && <AutoFillSearchAuditPanel audits={searchAudits} />}
                         {comboOptions.length > 0 && <ComboComparisonPanel options={comboOptions} />}
                         {r.slots.map((slot) => {
