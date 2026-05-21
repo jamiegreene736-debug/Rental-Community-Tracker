@@ -105,6 +105,14 @@ function withSoftTimeout(promise, timeoutMs, fallback = undefined) {
   ]);
 }
 
+async function boundedPageDelay(targetPage, timeoutMs) {
+  await withSoftTimeout(
+    targetPage?.waitForTimeout?.(timeoutMs),
+    Math.max(1_000, timeoutMs + 1_000),
+    null,
+  );
+}
+
 class SidecarHardTimeoutError extends Error {
   constructor(message) {
     super(message);
@@ -1361,16 +1369,39 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
 }
 
 // ─────────────────────── Airbnb search ──────────────────────────────
-async function primeOtaHomepageSearch(homeUrl, searchTerm, label) {
+async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "homepage") {
   if (!searchTerm) return false;
+  const isVrbo = /vrbo/i.test(label) || /vrbo\.com/i.test(homeUrl);
+  const maybeClearVrboChallenge = async (stage) => {
+    if (!isVrbo) return false;
+    const state = await withSoftTimeout(
+      page
+        .evaluate(() => ({
+          url: location.href,
+          title: document.title,
+          bodyExcerpt: (document.body?.innerText ?? "").slice(0, 3000),
+          bodyHtmlSnippet: (document.body?.innerHTML ?? "").slice(0, 5000),
+        }))
+        .catch(() => null),
+      2_000,
+      null,
+    );
+    if (stateLooksLikeVrboHumanChallenge(state) || (await pageLooksLikeVrboHumanChallenge(page))) {
+      log(`${label} ${requestId}: VRBO challenge detected during homepage prime (${stage})`);
+      return waitForVrboManualVerification(page, label, requestId, state);
+    }
+    return false;
+  };
   try {
     await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-    await page.waitForTimeout(1_200);
+    await boundedPageDelay(page, 1_200);
+    await maybeClearVrboChallenge("after-homepage-load");
     await dismissObstructions(page, `${label}_home`);
     const filled = await fillVisibleSearchField(page, searchTerm, `${label}_home`).catch(() => null);
     if (filled) {
-      await clickVisibleSearchSubmit(page, `${label}_home`).catch(() => null);
-      await page.waitForTimeout(1_200);
+      await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`), PAGE_SETTLE_MS + 2_000, null);
+      await boundedPageDelay(page, 1_200);
+      await maybeClearVrboChallenge("after-homepage-submit");
       log(`${label}: primed public homepage search with "${searchTerm}"`);
       return true;
     }
@@ -2224,7 +2255,7 @@ async function processVrboSearch(id, params) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
-  await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search");
+  await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search", id);
   // PR #301: drop minBedrooms URL filter — Vrbo's server-side filter
   // is unreliable (returns 5 properties for a regionId+minBedrooms=3
   // search where only 0 are actually 3BR). Pull ALL listings for the
