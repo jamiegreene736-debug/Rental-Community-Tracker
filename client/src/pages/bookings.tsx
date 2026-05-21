@@ -2958,7 +2958,7 @@ export default function Bookings() {
             bedrooms: candidateBedrooms(result.picked, result.slot.bedrooms),
           });
         }
-        if (attachedByUnit.size !== 2) return [];
+        if (attachedByUnit.size === 0) return [];
 
         const totalNeeded = reservation.slots.reduce((sum, slot) => sum + slot.bedrooms, 0);
         const currentBedroomPlan = reservation.slots.map((slot) => slot.bedrooms);
@@ -3022,6 +3022,7 @@ export default function Bookings() {
             ? picks.reduce((sum, pick) => sum + pick.totalPrice, 0)
             : null;
           const replacesCurrent = combo.bedrooms.join("+") !== currentKey;
+          const isCurrentPartial = combo.bedrooms.join("+") === currentKey && attachedByUnit.size < reservation.slots.length;
           const evaluated: EvaluatedCombo = {
             combo,
             picks,
@@ -3029,7 +3030,9 @@ export default function Bookings() {
             summaries,
             totalCost,
             unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct verified options" : undefined,
-            note: replacesCurrent
+            note: isCurrentPartial
+              ? "Current partial plan; still needs a second verified buy-in."
+              : replacesCurrent
               ? "Comparison only; would require replacing the already attached buy-in."
               : "Current attached plan after auto-fill.",
           };
