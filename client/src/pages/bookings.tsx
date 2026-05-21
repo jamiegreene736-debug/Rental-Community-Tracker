@@ -1264,7 +1264,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">
                   {displayedTotal == null
-                    ? option.unavailableReason ?? "Not enough priced direct/Booking/VRBO options"
+                    ? option.unavailableReason ?? "Not enough priced direct/Booking/VRBO options; Airbnb fallback checked"
                     : displayedPicks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
                 </p>
                 {option.note && (
@@ -1281,7 +1281,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                   <p className="mb-1 text-[11px] font-medium text-emerald-900">{pool.bedrooms}BR options considered</p>
                   <div className="max-h-48 overflow-y-auto rounded border bg-white/70">
                     {pool.candidates.length === 0 ? (
-                      <p className="px-2 py-1.5 text-[11px] text-muted-foreground">No priced direct/Booking/VRBO options in this pool.</p>
+                      <p className="px-2 py-1.5 text-[11px] text-muted-foreground">No priced direct/Booking/VRBO options or Airbnb fallback in this pool.</p>
                     ) : pool.candidates.map((candidate, index) => {
                       const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
                       const isDirectPick = !!directRow;
@@ -2546,6 +2546,9 @@ export default function Bookings() {
         });
       const rankComparisonCandidates = (items: LiveCandidate[]): LiveCandidate[] =>
         [...items].sort((a, b) => {
+          const aSourceRank = a.source === "airbnb" ? 1 : 0;
+          const bSourceRank = b.source === "airbnb" ? 1 : 0;
+          if (aSourceRank !== bSourceRank) return aSourceRank - bSourceRank;
           const aPrice = a.totalPrice > 0 ? a.totalPrice : Number.POSITIVE_INFINITY;
           const bPrice = b.totalPrice > 0 ? b.totalPrice : Number.POSITIVE_INFINITY;
           return aPrice - bPrice;
@@ -2642,6 +2645,7 @@ export default function Bookings() {
           ...(data.comparisonSources?.pm ?? []),
           ...(data.comparisonSources?.booking ?? []),
           ...(data.comparisonSources?.vrbo ?? []),
+          ...(data.comparisonSources?.airbnb ?? []),
         ];
         const sourceCandidates = comparisonSources.length > 0
           ? comparisonSources
@@ -2649,6 +2653,7 @@ export default function Bookings() {
               ...(data.sources?.pm ?? []),
               ...(data.sources?.booking ?? []),
               ...(data.sources?.vrbo ?? []),
+              ...(data.sources?.airbnb ?? []),
             ];
         const candidates = rankComparisonCandidates(
           sourceCandidates
@@ -2996,7 +3001,7 @@ export default function Bookings() {
 
         const [autoEvaluation, comparisonEvaluation] = await Promise.all([
           evaluateWithPool(autoPoolFor, "verified"),
-          evaluateWithPool(comparisonPoolFor, "priced direct/Booking/VRBO"),
+          evaluateWithPool(comparisonPoolFor, "priced direct/Booking/VRBO/Airbnb fallback"),
         ]);
         const best = autoEvaluation.best;
         const evaluatedCombos = comparisonEvaluation.evaluatedCombos.length > 0
@@ -3078,7 +3083,7 @@ export default function Bookings() {
             summaries.push(pool.searchSummary);
             const pick = pool.candidates.find((candidate) => !hasUsedListingIdentity(used, candidate)) ?? null;
             if (!pick) {
-              unavailableReason ||= `No unused priced direct/Booking/VRBO ${bedroomCount}BR option`;
+              unavailableReason ||= `No unused priced direct/Booking/VRBO ${bedroomCount}BR option or Airbnb fallback`;
               continue;
             }
             addUsedListingIdentity(used, pick);
@@ -3095,7 +3100,7 @@ export default function Bookings() {
             pools,
             summaries,
             totalCost,
-            unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct priced direct/Booking/VRBO options" : undefined,
+            unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct priced direct/Booking/VRBO options or Airbnb fallback" : undefined,
             note: isCurrentPartial
               ? "Current partial plan; still needs a second verified buy-in."
               : replacesCurrent
@@ -5726,6 +5731,7 @@ type FindBuyInResponse = {
     pm: LiveCandidate[];
   };
   comparisonSources?: {
+    airbnb?: LiveCandidate[];
     vrbo?: LiveCandidate[];
     booking?: LiveCandidate[];
     pm?: LiveCandidate[];

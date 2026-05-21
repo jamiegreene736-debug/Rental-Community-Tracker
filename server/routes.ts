@@ -9870,8 +9870,8 @@ export async function registerRoutes(
       }
       return candidateFitsTarget(c);
     };
-    const comparisonEligible = (c: Candidate): boolean => {
-      if (c.source === "airbnb") return false;
+    const comparisonEligible = (c: Candidate, opts: { allowAirbnb?: boolean } = {}): boolean => {
+      if (c.source === "airbnb" && !opts.allowAirbnb) return false;
       if (!(c.totalPrice > 0 || c.nightlyPrice > 0)) return false;
       if (!comparisonResortFits(c)) return false;
       const bedroomSignal = comparisonBedroomSignal(c);
@@ -9886,16 +9886,17 @@ export async function registerRoutes(
       const bPrice = b.totalPrice > 0 ? b.totalPrice : b.nightlyPrice * nights;
       return aPrice - bPrice;
     };
-    const dedupeComparisonCandidates = (items: Candidate[]): Candidate[] =>
+    const dedupeComparisonCandidates = (items: Candidate[], opts: { allowAirbnb?: boolean } = {}): Candidate[] =>
       Array.from(
         new Map(
           items
-            .filter(comparisonEligible)
+            .filter((item) => comparisonEligible(item, opts))
             .sort(comparisonSort)
             .map((item) => [item.url, item] as const),
         ).values(),
       ).slice(0, 40);
     const comparisonSources = {
+      airbnb: dedupeComparisonCandidates([...airbnbTarget, ...airbnbWithMatches], { allowAirbnb: true }),
       vrbo: dedupeComparisonCandidates([...vrboTarget, ...vrbo]),
       booking: dedupeComparisonCandidates([...bookingTarget, ...booking]),
       pm: dedupeComparisonCandidates([...pmTarget, ...pmAugmented]),
