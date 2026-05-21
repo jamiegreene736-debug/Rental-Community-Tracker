@@ -10550,11 +10550,12 @@ export async function registerRoutes(
       if (poipuKaiTextMatch(`${domain} ${haystack}`)) return true;
       // Google Images/Lens often surfaces the owner site as an exact
       // top visual match without repeating the resort name in the title.
-      // Keep that shortcut only for OTA pages; PM/direct rows still need
-      // visible Poipu Kai / Regency / Manualoha-style proof so a similar
-      // Poipu-area unit cannot qualify as a wrong-complex direct option.
+      // Treat a top visual match as photo proof for PM/direct rows too:
+      // some Regency at Poipu Kai owner/PM pages do not say "Regency" or
+      // "Poipu Kai" in the listing title/description, so text-only resort
+      // proof incorrectly hides the direct booking site the operator needs.
       const isOta = /(^|\.)airbnb\./.test(domain) || /(^|\.)(vrbo|homeaway)\./.test(domain) || /(^|\.)booking\.com$/.test(domain);
-      return source === "known-source" || (isOta && (highConfidenceVisual || ((source === "visual" || source === "page") && position <= 3)));
+      return source === "known-source" || highConfidenceVisual || (isOta && ((source === "visual" || source === "page") && position <= 3));
     };
 
     const normalizeListingUrl = (rawUrl: string): { url: string; domain: string; dedupeKey: string; pathSpecificity: number } | null => {

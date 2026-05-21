@@ -173,6 +173,7 @@ type AutoFillComboOption = {
     url: string;
     image?: string;
     airbnbAnchorUrl?: string | null;
+    airbnbAnchorPrice?: number;
     alternateUrls?: Array<string | null | undefined>;
     photoMatches?: Array<{ url?: string | null }>;
     identityKeys?: Array<string | null | undefined>;
@@ -191,6 +192,7 @@ type AutoFillComboOption = {
       url: string;
       image?: string;
       airbnbAnchorUrl?: string | null;
+      airbnbAnchorPrice?: number;
       alternateUrls?: Array<string | null | undefined>;
       photoMatches?: Array<{ url?: string | null }>;
       identityKeys?: Array<string | null | undefined>;
@@ -2557,6 +2559,94 @@ export default function Bookings() {
         ...candidate,
         identityKeys: candidate.identityKeys ?? listingIdentityKeys(candidate),
       });
+      const directBookingScanCache = new Map<string, Promise<LiveCandidate[]>>();
+      let autoDirectBookingScansStarted = 0;
+      const autoDirectBookingScanLimit = 6;
+      const directMatchToAutoFillCandidate = (
+        airbnbCandidate: LiveCandidate,
+        match: ReverseImageListingMatch,
+      ): LiveCandidate => ({
+        source: "pm",
+        sourceLabel: `Direct PM (${match.domain})`,
+        title: match.title || airbnbCandidate.title,
+        url: match.url,
+        nightlyPrice: airbnbCandidate.nightlyPrice,
+        totalPrice: airbnbCandidate.totalPrice,
+        bedrooms: airbnbCandidate.bedrooms,
+        image: airbnbCandidate.image,
+        snippet: "Direct booking site found automatically from this Airbnb listing's photos. Airbnb supplied the date-specific rate proxy; verify the PM page before booking.",
+        alternateUrls: Array.from(new Set([airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])].filter(Boolean) as string[])),
+        photoMatches: [{ url: match.url, title: match.title, domain: match.domain }],
+        identityKeys: listingIdentityKeys({
+          ...airbnbCandidate,
+          alternateUrls: [airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])],
+          photoMatches: [{ url: match.url }],
+        }),
+        airbnbAnchorUrl: airbnbCandidate.url,
+        airbnbAnchorPrice: airbnbCandidate.totalPrice,
+        verified: "yes",
+        verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
+        verifiedReason: "Direct PM listing found automatically by Google Lens from the Airbnb listing photos. Airbnb supplied the date-specific availability/rate proxy; confirm the PM site before purchase.",
+        groundFloorStatus: airbnbCandidate.groundFloorStatus,
+        groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
+      });
+      const scanDirectBookingSitesForAirbnb = (candidate: LiveCandidate): Promise<LiveCandidate[]> => {
+        const key = listingUrlKey(candidate.url);
+        if (!key) return Promise.resolve([]);
+        const existing = directBookingScanCache.get(key);
+        if (existing) return existing;
+        const promise = (async () => {
+          try {
+            const community = selectedPropertyId
+              ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+              : "";
+            const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
+              sourceUrl: candidate.url,
+              title: candidate.title,
+              resortName: community,
+              community,
+            });
+            const body = await response.json();
+            const matches = Array.isArray(body?.matches)
+              ? (body.matches as ReverseImageListingMatch[]).filter((match) => match.platformKey === "pm")
+              : [];
+            return matches.map((match) => directMatchToAutoFillCandidate(candidate, match));
+          } catch (e) {
+            return [];
+          }
+        })();
+        directBookingScanCache.set(key, promise);
+        return promise;
+      };
+      const autoDirectBookingCandidatesFor = async (
+        items: LiveCandidate[],
+        searchedBedrooms: number,
+      ): Promise<LiveCandidate[]> => {
+        const candidates = items
+          .filter((candidate) => candidate.source === "airbnb" && candidate.totalPrice > 0)
+          .filter((candidate) => candidateBedrooms(candidate, searchedBedrooms) === searchedBedrooms)
+          .sort((a, b) => a.totalPrice - b.totalPrice);
+        const scans: Promise<LiveCandidate[]>[] = [];
+        const seen = new Set<string>();
+        for (const candidate of candidates) {
+          if (autoDirectBookingScansStarted >= autoDirectBookingScanLimit) break;
+          const key = listingUrlKey(candidate.url);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          autoDirectBookingScansStarted++;
+          scans.push(scanDirectBookingSitesForAirbnb(candidate));
+        }
+        if (scans.length === 0) return [];
+        const directCandidates = (await Promise.all(scans)).flat();
+        return Array.from(
+          new Map(
+            directCandidates
+              .map(hydrateCandidateIdentity)
+              .sort((a, b) => a.totalPrice - b.totalPrice)
+              .map((candidate) => [listingUrlKey(candidate.url), candidate] as const),
+          ).values(),
+        );
+      };
       const getCandidatePool = async (
         searchedBedrooms: number,
         exactBedroomForCombo: boolean,
@@ -2655,8 +2745,12 @@ export default function Bookings() {
               ...(data.sources?.vrbo ?? []),
               ...(data.sources?.airbnb ?? []),
             ];
+        const autoDirectCandidates = await autoDirectBookingCandidatesFor(sourceCandidates, searchedBedrooms);
         const candidates = rankComparisonCandidates(
-          sourceCandidates
+          [
+            ...autoDirectCandidates,
+            ...sourceCandidates,
+          ]
             .map((candidate) => ({
               ...candidate,
               totalPrice: candidate.totalPrice > 0
@@ -2888,6 +2982,7 @@ export default function Bookings() {
           url: pick.url,
           image: pick.image,
           airbnbAnchorUrl: pick.airbnbAnchorUrl,
+          airbnbAnchorPrice: pick.airbnbAnchorPrice,
           alternateUrls: pick.alternateUrls,
           photoMatches: pick.photoMatches,
           identityKeys: pick.identityKeys,
@@ -2906,6 +3001,7 @@ export default function Bookings() {
             url: candidate.url,
             image: candidate.image,
             airbnbAnchorUrl: candidate.airbnbAnchorUrl,
+            airbnbAnchorPrice: candidate.airbnbAnchorPrice,
             alternateUrls: candidate.alternateUrls,
             photoMatches: candidate.photoMatches,
             identityKeys: candidate.identityKeys,
@@ -3003,7 +3099,7 @@ export default function Bookings() {
           evaluateWithPool(autoPoolFor, "verified"),
           evaluateWithPool(comparisonPoolFor, "priced direct/Booking/VRBO/Airbnb fallback"),
         ]);
-        const best = autoEvaluation.best;
+        const best = comparisonEvaluation.best ?? autoEvaluation.best;
         const evaluatedCombos = comparisonEvaluation.evaluatedCombos.length > 0
           ? comparisonEvaluation.evaluatedCombos
           : autoEvaluation.evaluatedCombos;
