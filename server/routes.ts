@@ -9873,7 +9873,18 @@ export async function registerRoutes(
     const comparisonEligible = (c: Candidate, opts: { allowAirbnb?: boolean } = {}): boolean => {
       if (c.source === "airbnb" && !opts.allowAirbnb) return false;
       if (!(c.totalPrice > 0 || c.nightlyPrice > 0)) return false;
-      if (!comparisonResortFits(c)) return false;
+      const isAirbnbFallback = c.source === "airbnb" && opts.allowAirbnb;
+      const resortFits = comparisonResortFits(c);
+      if (!resortFits) {
+        // Comparison-only Airbnb fallback is intentionally looser than
+        // auto-fill. Airbnb cards are often rendered as broad Koloa/Poipu
+        // rows and omit the exact resort name even when the sidecar search
+        // was driven with the configured resort, dates, and bedroom filter.
+        // Keep these as a fallback price surface, but never let this loosen
+        // the verified auto-pick pool.
+        const searchedByAirbnbSidecar = /airbnb sidecar searched|sidecar searched airbnb\.com/i.test(c.verifiedReason ?? "");
+        if (!isAirbnbFallback || !searchedByAirbnbSidecar || c.verified !== "yes") return false;
+      }
       const bedroomSignal = comparisonBedroomSignal(c);
       if (bedroomSignal !== null && bedroomSignal !== bedrooms) return false;
       if (bedroomSignal === null && typeof c.bedrooms === "number" && c.bedrooms !== bedrooms) return false;
