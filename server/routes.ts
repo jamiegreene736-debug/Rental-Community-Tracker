@@ -9861,6 +9861,46 @@ export async function registerRoutes(
     };
     [...airbnbTarget, ...vrboTarget, ...bookingTarget, ...pmTarget].forEach(annotateGroundFloor);
 
+    const comparisonBedroomSignal = (c: Candidate): number | null => candidateBedroomSignal(c);
+    const comparisonResortFits = (c: Candidate): boolean => {
+      const hay = candidateHaystack(c);
+      if (mentionsKnownNonPoipuKaiComplex(hay) || mentionsKnownNonKahaLaniComplex(hay)) return false;
+      if (targetIsRegencyPoipuKai || normalizedResortName === "poipu kai") {
+        return candidateIsPoipuKaiCondoLike(c) || mentionsPoipuKai(hay);
+      }
+      return candidateFitsTarget(c);
+    };
+    const comparisonEligible = (c: Candidate): boolean => {
+      if (c.source === "airbnb") return false;
+      if (!(c.totalPrice > 0 || c.nightlyPrice > 0)) return false;
+      if (!comparisonResortFits(c)) return false;
+      const bedroomSignal = comparisonBedroomSignal(c);
+      if (bedroomSignal !== null && bedroomSignal !== bedrooms) return false;
+      if (bedroomSignal === null && typeof c.bedrooms === "number" && c.bedrooms !== bedrooms) return false;
+      if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
+      if (groundFloorOnly && c.groundFloorStatus !== "confirmed") return false;
+      return true;
+    };
+    const comparisonSort = (a: Candidate, b: Candidate) => {
+      const aPrice = a.totalPrice > 0 ? a.totalPrice : a.nightlyPrice * nights;
+      const bPrice = b.totalPrice > 0 ? b.totalPrice : b.nightlyPrice * nights;
+      return aPrice - bPrice;
+    };
+    const dedupeComparisonCandidates = (items: Candidate[]): Candidate[] =>
+      Array.from(
+        new Map(
+          items
+            .filter(comparisonEligible)
+            .sort(comparisonSort)
+            .map((item) => [item.url, item] as const),
+        ).values(),
+      ).slice(0, 40);
+    const comparisonSources = {
+      vrbo: dedupeComparisonCandidates([...vrboTarget, ...vrbo]),
+      booking: dedupeComparisonCandidates([...bookingTarget, ...booking]),
+      pm: dedupeComparisonCandidates([...pmTarget, ...pmAugmented]),
+    };
+
     // Combined priced pool across all bookable sources.
     //
     // Operator directive 2026-04-28: include Airbnb fully in cheapest,
@@ -10331,6 +10371,7 @@ export async function registerRoutes(
         booking: bookingTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         pm: pmTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
+      comparisonSources,
       // PR #337: pmSourceBreakdown — every PM scraper we attempted,
       // with its result count and whether the discovery promise
       // resolved within its wall budget. Surfaced in the UI so the

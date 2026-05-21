@@ -1208,7 +1208,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
         <p className="font-medium text-emerald-900">
           {bestOptimizedCombo
             ? `Direct-optimized combination: ${bestOptimizedCombo.option.label} · ${fmtMoney(bestOptimizedCombo.totalCost)}`
-            : `Cheapest combination${selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}`}
+            : `Cheapest two-unit combination${selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}`}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {directCandidates.length > 0 && (
@@ -1227,7 +1227,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
           {bestOptimizedCombo ? (
             <Badge className="bg-sky-700 text-white text-[10px]">Direct optimized</Badge>
           ) : selected && (
-            <Badge className="bg-emerald-600 text-white text-[10px]">Selected</Badge>
+            <Badge className="bg-emerald-600 text-white text-[10px]">Cheapest combo</Badge>
           )}
         </div>
       </div>
@@ -1260,11 +1260,11 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                   {option.label}
                   {isOptimizedWinner && <span className="ml-1 text-sky-700">best direct optimized</span>}
                   {!isOptimizedWinner && isOptimizedOption && <span className="ml-1 text-sky-700">direct optimized</span>}
-                  {!isOptimizedOption && option.selected && <span className="ml-1 text-emerald-700">selected</span>}
+                  {!isOptimizedOption && option.selected && <span className="ml-1 text-emerald-700">cheapest combo</span>}
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">
                   {displayedTotal == null
-                    ? option.unavailableReason ?? "Not enough verified options"
+                    ? option.unavailableReason ?? "Not enough priced direct/Booking/VRBO options"
                     : displayedPicks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
                 </p>
                 {option.note && (
@@ -1281,7 +1281,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                   <p className="mb-1 text-[11px] font-medium text-emerald-900">{pool.bedrooms}BR options considered</p>
                   <div className="max-h-48 overflow-y-auto rounded border bg-white/70">
                     {pool.candidates.length === 0 ? (
-                      <p className="px-2 py-1.5 text-[11px] text-muted-foreground">No verified options in this pool.</p>
+                      <p className="px-2 py-1.5 text-[11px] text-muted-foreground">No priced direct/Booking/VRBO options in this pool.</p>
                     ) : pool.candidates.map((candidate, index) => {
                       const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
                       const isDirectPick = !!directRow;
@@ -2544,6 +2544,16 @@ export default function Bookings() {
           if (aRank !== bRank) return aRank - bRank;
           return (a.totalPrice || 999999) - (b.totalPrice || 999999);
         });
+      const rankComparisonCandidates = (items: LiveCandidate[]): LiveCandidate[] =>
+        [...items].sort((a, b) => {
+          const aPrice = a.totalPrice > 0 ? a.totalPrice : Number.POSITIVE_INFINITY;
+          const bPrice = b.totalPrice > 0 ? b.totalPrice : Number.POSITIVE_INFINITY;
+          return aPrice - bPrice;
+        });
+      const hydrateCandidateIdentity = (candidate: LiveCandidate): LiveCandidate => ({
+        ...candidate,
+        identityKeys: candidate.identityKeys ?? listingIdentityKeys(candidate),
+      });
       const getCandidatePool = async (
         searchedBedrooms: number,
         exactBedroomForCombo: boolean,
@@ -2615,6 +2625,48 @@ export default function Bookings() {
         if (!safeForAutoFill && candidates.length === 0) {
           return { data, searchSummary, candidates: [] };
         }
+        return { data, searchSummary, candidates };
+      };
+      const getComparisonCandidatePool = async (
+        searchedBedrooms: number,
+      ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
+        const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm: true });
+        const searchSummary = searchSummaryFor(data, searchedBedrooms);
+        searchAudits.set(searchedBedrooms, {
+          bedrooms: searchedBedrooms,
+          generatedAt: data.diagnostics?.generatedAt ?? new Date().toISOString(),
+          counts: searchSummary,
+          candidates: auditCandidatesFor(data),
+        });
+        const comparisonSources = [
+          ...(data.comparisonSources?.pm ?? []),
+          ...(data.comparisonSources?.booking ?? []),
+          ...(data.comparisonSources?.vrbo ?? []),
+        ];
+        const sourceCandidates = comparisonSources.length > 0
+          ? comparisonSources
+          : [
+              ...(data.sources?.pm ?? []),
+              ...(data.sources?.booking ?? []),
+              ...(data.sources?.vrbo ?? []),
+            ];
+        const candidates = rankComparisonCandidates(
+          sourceCandidates
+            .map((candidate) => ({
+              ...candidate,
+              totalPrice: candidate.totalPrice > 0
+                ? candidate.totalPrice
+                : candidate.nightlyPrice > 0
+                  ? candidate.nightlyPrice * (data.nights || 1)
+                  : 0,
+            }))
+            .filter((c) => c.totalPrice > 0)
+            .filter((c) => {
+              const actualBedrooms = candidateBedrooms(c, searchedBedrooms);
+              return actualBedrooms === searchedBedrooms;
+            })
+            .map(hydrateCandidateIdentity),
+        );
         return { data, searchSummary, candidates };
       };
 
@@ -2867,79 +2919,93 @@ export default function Bookings() {
         const totalNeeded = emptySlots.reduce((sum, s) => sum + s.bedrooms, 0);
         const combos = twoUnitBedroomCombos(totalNeeded, emptySlots.map((s) => s.bedrooms));
         if (combos.length === 0) return { best: null, options: [] };
-        const poolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
-        const poolFor = (bedroomCount: number) => {
-          const key = `${bedroomCount}|pm`;
-          const existing = poolCache.get(key);
+        const evaluateWithPool = async (
+          poolFor: (bedroomCount: number) => Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>,
+          missingLabel: string,
+        ): Promise<{ evaluatedCombos: EvaluatedCombo[]; best: EvaluatedCombo | null }> => {
+          const evaluatedCombos: EvaluatedCombo[] = [];
+          let best: EvaluatedCombo | null = null;
+          for (const combo of combos) {
+            const used = new Set(pickedIdentities);
+            const picks: LiveCandidate[] = [];
+            const pools: Array<{ bedrooms: number; candidates: LiveCandidate[] }> = [];
+            const summaries: AutoFillSearchSummary[] = [];
+            let unavailableReason = "";
+            for (const bedroomCount of combo.bedrooms) {
+              const pool = await poolFor(bedroomCount);
+              pools.push({ bedrooms: bedroomCount, candidates: pool.candidates });
+              summaries.push(pool.searchSummary);
+            }
+            const targetIndexes = requiredGroundFloorBedrooms.size > 0
+              ? new Set(combo.bedrooms.map((bedrooms, index) => requiredGroundFloorBedrooms.has(bedrooms) ? index : -1).filter((index) => index >= 0))
+              : undefined;
+            const requiredForCombo = targetIndexes?.size
+              ? Math.min(requiredGroundFloorUnits, targetIndexes.size)
+              : requiredGroundFloorUnits >= combo.bedrooms.length
+                ? combo.bedrooms.length
+                : requiredGroundFloorUnits > 0
+                  ? 1
+                  : 0;
+            const planned = pickCheapestSetWithGroundFloor(pools, requiredForCombo, used, targetIndexes);
+            if (planned.reason) unavailableReason = planned.reason;
+            for (let i = 0; i < planned.picks.length; i++) {
+              const pick = planned.picks[i];
+              if (!pick) {
+                unavailableReason ||= `No unused ${missingLabel} ${combo.bedrooms[i]}BR option`;
+                break;
+              }
+              picks.push(pick);
+            }
+            const totalCost = !planned.reason && picks.length === combo.bedrooms.length
+              ? picks.reduce((sum, p) => sum + p.totalPrice, 0)
+              : null;
+            const evaluated: EvaluatedCombo = {
+              combo,
+              picks,
+              pools,
+              summaries,
+              totalCost,
+              unavailableReason: totalCost === null ? unavailableReason || `Not enough distinct ${missingLabel} options` : undefined,
+            };
+            evaluatedCombos.push(evaluated);
+            if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
+              best = evaluated;
+            }
+          }
+          return { evaluatedCombos, best };
+        };
+
+        const autoPoolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
+        const autoPoolFor = (bedroomCount: number) => {
+          const key = `${bedroomCount}|auto`;
+          const existing = autoPoolCache.get(key);
           if (existing) return existing;
           const promise = getCandidatePool(bedroomCount, true, true);
-          poolCache.set(key, promise);
+          autoPoolCache.set(key, promise);
+          return promise;
+        };
+        const comparisonPoolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
+        const comparisonPoolFor = (bedroomCount: number) => {
+          const key = `${bedroomCount}|comparison`;
+          const existing = comparisonPoolCache.get(key);
+          if (existing) return existing;
+          const promise = getComparisonCandidatePool(bedroomCount);
+          comparisonPoolCache.set(key, promise);
           return promise;
         };
 
-        const evaluatedCombos: EvaluatedCombo[] = [];
-        let best: EvaluatedCombo | null = null;
-        const exactSlotComboKey = emptySlots.map((slot) => slot.bedrooms).join("+");
-        for (const combo of combos) {
-          const used = new Set(pickedIdentities);
-          const picks: LiveCandidate[] = [];
-          const pools: Array<{ bedrooms: number; candidates: LiveCandidate[] }> = [];
-          const summaries: AutoFillSearchSummary[] = [];
-          let unavailableReason = "";
-          for (const bedroomCount of combo.bedrooms) {
-            const pool = await poolFor(bedroomCount);
-            pools.push({ bedrooms: bedroomCount, candidates: pool.candidates });
-            summaries.push(pool.searchSummary);
-          }
-          const targetIndexes = requiredGroundFloorBedrooms.size > 0
-            ? new Set(combo.bedrooms.map((bedrooms, index) => requiredGroundFloorBedrooms.has(bedrooms) ? index : -1).filter((index) => index >= 0))
-            : undefined;
-          const requiredForCombo = targetIndexes?.size
-            ? Math.min(requiredGroundFloorUnits, targetIndexes.size)
-            : requiredGroundFloorUnits >= combo.bedrooms.length
-              ? combo.bedrooms.length
-              : requiredGroundFloorUnits > 0
-                ? 1
-                : 0;
-          const planned = pickCheapestSetWithGroundFloor(pools, requiredForCombo, used, targetIndexes);
-          if (planned.reason) unavailableReason = planned.reason;
-          for (let i = 0; i < planned.picks.length; i++) {
-            const pick = planned.picks[i];
-            if (!pick) {
-              unavailableReason ||= `No unused verified ${combo.bedrooms[i]}BR option`;
-              break;
-            }
-            picks.push(pick);
-          }
-          const totalCost = !planned.reason && picks.length === combo.bedrooms.length
-            ? picks.reduce((sum, p) => sum + p.totalPrice, 0)
-            : null;
-          const evaluated: EvaluatedCombo = {
-            combo,
-            picks,
-            pools,
-            summaries,
-            totalCost,
-            unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct verified options" : undefined,
-          };
-          evaluatedCombos.push(evaluated);
-          if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
-            best = evaluated;
-          }
-          if (totalCost !== null && combo.bedrooms.join("+") === exactSlotComboKey) {
-            const immediateExact: EvaluatedCombo = {
-              ...evaluated,
-              note: "Exact physical-slot plan attached immediately; alternate splits can be checked after a slot is detached.",
-            };
-            return {
-              best: immediateExact,
-              options: [comboOptionFrom(immediateExact, true)],
-            };
-          }
-        }
+        const [autoEvaluation, comparisonEvaluation] = await Promise.all([
+          evaluateWithPool(autoPoolFor, "verified"),
+          evaluateWithPool(comparisonPoolFor, "priced direct/Booking/VRBO"),
+        ]);
+        const best = autoEvaluation.best;
+        const evaluatedCombos = comparisonEvaluation.evaluatedCombos.length > 0
+          ? comparisonEvaluation.evaluatedCombos
+          : autoEvaluation.evaluatedCombos;
+        const selected = comparisonEvaluation.best ?? autoEvaluation.best;
         return {
           best,
-          options: evaluatedCombos.map((option) => comboOptionFrom(option, option === best)),
+          options: evaluatedCombos.map((option) => comboOptionFrom(option, option === selected)),
         };
       };
       const evaluateAttachedComparisonCombos = async (
@@ -2972,7 +3038,7 @@ export default function Bookings() {
           const key = `${bedroomCount}|pm`;
           const existing = poolCache.get(key);
           if (existing) return existing;
-          const promise = getCandidatePool(bedroomCount, true, true);
+          const promise = getComparisonCandidatePool(bedroomCount);
           poolCache.set(key, promise);
           return promise;
         };
@@ -3012,7 +3078,7 @@ export default function Bookings() {
             summaries.push(pool.searchSummary);
             const pick = pool.candidates.find((candidate) => !hasUsedListingIdentity(used, candidate)) ?? null;
             if (!pick) {
-              unavailableReason ||= `No unused verified ${bedroomCount}BR option`;
+              unavailableReason ||= `No unused priced direct/Booking/VRBO ${bedroomCount}BR option`;
               continue;
             }
             addUsedListingIdentity(used, pick);
@@ -3029,7 +3095,7 @@ export default function Bookings() {
             pools,
             summaries,
             totalCost,
-            unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct verified options" : undefined,
+            unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct priced direct/Booking/VRBO options" : undefined,
             note: isCurrentPartial
               ? "Current partial plan; still needs a second verified buy-in."
               : replacesCurrent
@@ -5658,6 +5724,11 @@ type FindBuyInResponse = {
     vrbo: LiveCandidate[];
     booking: LiveCandidate[];
     pm: LiveCandidate[];
+  };
+  comparisonSources?: {
+    vrbo?: LiveCandidate[];
+    booking?: LiveCandidate[];
+    pm?: LiveCandidate[];
   };
   diagnostics?: FindBuyInDiagnostics;
   scanComplete?: boolean;
