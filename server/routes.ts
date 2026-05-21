@@ -7759,7 +7759,7 @@ export async function registerRoutes(
     const mentionsKnownNonRegencyPoipuKaiComplex = (haystack: string): boolean => {
       if (!targetIsRegencyPoipuKai) return false;
       const n = norm(haystack);
-      return /\b(aston|manualoha|kahala|makanui|nihi kai|poipu sands|villas?\s+at\s+poipu\s+kai|poipu\s+kai\s+villas?|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu)\b/.test(n);
+      return /\b(aston|manualoha|kahala|makanui|nihi kai|poipu sands|villas?\s+at\s+poipu\s+kai|poipu\s+kai\s+villas?|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality)\b/.test(n);
     };
     const mentionsPoipuKai = (haystack: string): boolean => {
       const n = norm(haystack);
@@ -9427,7 +9427,7 @@ export async function registerRoutes(
     // Louisiana house for sale, not a Hawaii vacation rental. This
     // filter cleans them up at the lens-helper layer so they never
     // reach the candidate pool.
-    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
+    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|easemytrip\.com|hotelplanner\.com|reservations\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
     async function lensMatches(imgUrl: string): Promise<Array<{ url: string; title: string; domain: string }>> {
       // PR #314: short-circuit when PM Google-discovery is disabled.
       // Google Lens (engine=google_lens) is a Google search surface
@@ -10554,6 +10554,7 @@ export async function registerRoutes(
       if (/(^|\.)hotels\.com$/.test(d)) return { platformKey: "other", platform: "Hotels.com" };
       if (/(^|\.)tripadvisor\./.test(d)) return { platformKey: "other", platform: "Tripadvisor" };
       if (/(^|\.)agoda\./.test(d)) return { platformKey: "other", platform: "Agoda" };
+      if (/(^|\.)(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations)\./.test(d)) return { platformKey: "other", platform: "Travel / meta-search" };
       if (/(^|\.)vacasa\./.test(d)) return { platformKey: "pm", platform: "Vacasa" };
       return { platformKey: "pm", platform: "Direct / PM" };
     };
@@ -10564,20 +10565,29 @@ export async function registerRoutes(
         || /(?:^|\.)(?:muscache|bstatic|cloudfront|akamaized|fastly|shopifycdn|cdninstagram|twimg)\./.test(d)
         || /(?:^|\.)(?:amazon|walmart|potterybarn|wayfair|target|ebay|etsy|craigslist|ikea|homedepot|lowes|costco|samsclub|kohls|macys|overstock|bedbathandbeyond)\./.test(d)
         || /(?:^|\.)(?:almosafer|charleston\.craigslist)\./.test(d)
+        || /(?:^|\.)(?:careers|jobs|recruiting|apply)\./.test(d)
         || /(?:^|\.)(?:zillow|realtor|redfin|coldwellbanker|century21|compass|sothebysrealty|sothebys|hawaiilife|homes|trulia|movoto|mls|realtytrac|loopnet|apartments|hotpads|ramaui|emauirealestate)\./.test(d);
     };
 
     const normalizeText = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     const contextText = normalizeText(`${resortName} ${community} ${sourceTitle}`);
     const isPoipuKaiContext = /\bpoipu kai\b/.test(contextText);
+    const isRegencyPoipuKaiContext = /\bregency\b/.test(contextText) && /\bpoipu kai\b/.test(contextText);
+    const regencyPoipuKaiTextMatch = (haystack: string): boolean => {
+      const n = normalizeText(haystack);
+      return /\bregency\b/.test(n) && /\b(poipu kai|poipu|koloa|kauai)\b/.test(n);
+    };
     const poipuKaiTextMatch = (haystack: string): boolean => {
       const n = normalizeText(haystack);
+      if (isRegencyPoipuKaiContext) return regencyPoipuKaiTextMatch(n);
       return /\bpoipu kai\b/.test(n)
         || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n));
     };
     const wrongPoipuKaiLocation = (haystack: string): boolean => {
       if (!isPoipuKaiContext) return false;
       const n = normalizeText(haystack);
+      if (/\b(banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers springboardhospitality|job|jobs|career|careers)\b/.test(n)) return true;
+      if (isRegencyPoipuKaiContext && /\b(nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston)\b/.test(n)) return true;
       return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|kihei|wailea|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
     };
     const rentalSurface = (domain: string, haystack: string): boolean => {
@@ -10589,10 +10599,11 @@ export async function registerRoutes(
     };
     const contextAllows = (domain: string, haystack: string, source: string, position: number): boolean => {
       const highConfidenceVisual = source === "visual" && position <= 3;
-      if (wrongPoipuKaiLocation(`${domain} ${haystack}`) && !highConfidenceVisual) return false;
+      if (wrongPoipuKaiLocation(`${domain} ${haystack}`)) return false;
       if (!rentalSurface(domain, haystack) && !highConfidenceVisual) return false;
       if (!isPoipuKaiContext) return true;
       if (poipuKaiTextMatch(`${domain} ${haystack}`)) return true;
+      if (isRegencyPoipuKaiContext) return source === "known-source";
       // Google Images/Lens often surfaces the owner site as an exact
       // top visual match without repeating the resort name in the title.
       // Treat a top visual match as photo proof for PM/direct rows too:
@@ -10616,6 +10627,7 @@ export async function registerRoutes(
         if (/\.(?:jpe?g|png|webp|gif|svg)(?:$|[?#])/i.test(u.pathname)) return null;
         const domain = u.hostname.replace(/^www\./, "").toLowerCase();
         if (!domain || noiseDomain(domain)) return null;
+        if (/(?:^|\/)(?:career|careers|job|jobs|employer-profile|apply)(?:\/|$)/i.test(u.pathname)) return null;
         const pathKey = u.pathname.replace(/\/+$/, "").toLowerCase() || "/";
         const pathSpecificity = pathKey === "/"
           ? 0
@@ -10742,7 +10754,7 @@ export async function registerRoutes(
     try {
       const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
       const sourceKey = normalizeListingSurfaceKey(sourceUrl);
-      const cacheKey = `buy-in-sites:v2:${sourceKey}`;
+      const cacheKey = `buy-in-sites:v3:${sourceKey}`;
       evictExpiredBuyInListingSites();
       const cached = buyInListingSitesCache.get(cacheKey);
       if (useCache && cached && cached.expiresAt > Date.now()) {
@@ -10789,6 +10801,29 @@ export async function registerRoutes(
       let rawCount = 0;
       const port = process.env.PORT || "5000";
       const lookupEndpoint = `http://127.0.0.1:${port}/api/operations/reverse-image-listings`;
+      const normalizeDirectTargetText = (value: string): string =>
+        value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const directTargetText = normalizeDirectTargetText(`${resortName} ${community} ${sourceTitle}`);
+      const directTargetIsRegencyPoipuKai = /\bregency\b/.test(directTargetText) && /\bpoipu kai\b/.test(directTargetText);
+      const directTargetIsPoipuKai = /\bpoipu kai\b/.test(directTargetText);
+      const directMatchFitsTarget = (match: ReverseImageListingMatch): boolean => {
+        const n = normalizeDirectTargetText(`${match.domain} ${match.title} ${match.url}`);
+        if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality)\b/.test(n)) {
+          return false;
+        }
+        if (directTargetIsRegencyPoipuKai) {
+          if (/\b(nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston|pili mai|kiahuna|makahuena|waikomo)\b/.test(n)) {
+            return false;
+          }
+          return /\bregency\b/.test(n) && /\b(poipu kai|poipu|koloa|kauai)\b/.test(n);
+        }
+        if (directTargetIsPoipuKai) {
+          if (/\b(pili mai|kiahuna|makahuena|waikomo|banyan harbor|lihue|kalapaki)\b/.test(n)) return false;
+          return /\bpoipu kai\b/.test(n)
+            || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n));
+        }
+        return true;
+      };
 
       const maxPhotosToSearch = 3;
       let photosSearched = 0;
@@ -10821,6 +10856,7 @@ export async function registerRoutes(
           for (const match of Array.isArray(body?.matches) ? body.matches as ReverseImageListingMatch[] : []) {
             if (match.source === "known-source") continue;
             if (match.platformKey !== "pm") continue;
+            if (!directMatchFitsTarget(match)) continue;
             if (normalizeListingSurfaceKey(match.url) === sourceKey) continue;
             if (domainFromUrl(match.url) === sourceDomain) continue;
             const key = `${match.platformKey}|${match.domain}|${normalizeListingSurfaceKey(match.url)}`;

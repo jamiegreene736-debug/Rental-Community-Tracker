@@ -788,6 +788,13 @@ function pickCheapestSetWithGroundFloor(
   return { picks };
 }
 
+function directBookingTargetResortName(community: string): string {
+  if (community === "Poipu Kai") return "Regency at Poipu Kai";
+  if (community === "Kapaa Beachfront") return "Kaha Lani Resort";
+  if (community === "Pili Mai") return "Pili Mai at Poipu";
+  return community;
+}
+
 // Mirror of server/pm-scrapers.ts MANUAL_ONLY list. PMs that don't
 // expose rates programmatically — auto-fill / Verify-rate calls return
 // instantly with manualOnly:true and the slot row should show the
@@ -2696,10 +2703,11 @@ export default function Bookings() {
         const promise = (async () => {
           try {
             const community = selectedUnitConfig?.community ?? "";
+            const resortName = directBookingTargetResortName(community);
             const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
               sourceUrl: candidate.url,
               title: candidate.title,
-              resortName: community,
+              resortName,
               community,
             });
             const body = await response.json();
