@@ -795,6 +795,38 @@ function directBookingTargetResortName(community: string): string {
   return community;
 }
 
+function normalizeDirectTargetText(value: string | null | undefined): string {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function directCandidateFitsTarget(
+  targetResortName: string,
+  community: string,
+  item: { domain?: string | null; title?: string | null; url?: string | null; sourceLabel?: string | null },
+): boolean {
+  const targetText = normalizeDirectTargetText(`${targetResortName} ${community}`);
+  const hay = normalizeDirectTargetText(`${item.domain ?? ""} ${item.sourceLabel ?? ""} ${item.title ?? ""} ${item.url ?? ""}`);
+  if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality|myrtle beach|port st lucie)\b/.test(hay)) {
+    return false;
+  }
+  const targetIsRegencyPoipuKai = /\bregency\b/.test(targetText) && /\bpoipu kai\b/.test(targetText);
+  if (targetIsRegencyPoipuKai) {
+    if (/\b(nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston|pili mai|kiahuna|makahuena|waikomo)\b/.test(hay)) {
+      return false;
+    }
+    return (/\bregency\b/.test(hay) && /\b(poipu kai|poipu|koloa|kauai)\b/.test(hay))
+      || /\b1831\s+poipu\b/.test(hay);
+  }
+  const targetIsPoipuKai = /\bpoipu kai\b/.test(targetText);
+  if (targetIsPoipuKai) {
+    if (/\b(pili mai|kiahuna|makahuena|waikomo|banyan harbor|lihue|kalapaki)\b/.test(hay)) return false;
+    return /\bpoipu kai\b/.test(hay)
+      || (/\b(poipu|koloa|kauai)\b/.test(hay) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(hay))
+      || /\b1831\s+poipu\b/.test(hay);
+  }
+  return true;
+}
+
 // Mirror of server/pm-scrapers.ts MANUAL_ONLY list. PMs that don't
 // expose rates programmatically — auto-fill / Verify-rate calls return
 // instantly with manualOnly:true and the slot row should show the
@@ -1206,7 +1238,15 @@ function groundFloorTargetBedrooms(req?: GroundFloorRequirement | null): number[
   return Array.from(targets).sort((a, b) => b - a);
 }
 
-function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
+function ComboComparisonPanel({
+  options,
+  targetResortName,
+  community,
+}: {
+  options: AutoFillComboOption[];
+  targetResortName: string;
+  community: string;
+}) {
   const [directRows, setDirectRows] = useState<Array<{
     candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number];
     status: "loading" | "done" | "error";
@@ -1216,12 +1256,37 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
   const [directRunning, setDirectRunning] = useState(false);
   const [directDone, setDirectDone] = useState(0);
   if (options.length === 0) return null;
-  const selected = options.find((option) => option.selected);
+  const candidateVisibleForTarget = (candidate: {
+    source?: "airbnb" | "vrbo" | "booking" | "pm";
+    sourceLabel?: string | null;
+    title?: string | null;
+    url?: string | null;
+  }) =>
+    !/^Direct PM\b/i.test(candidate.sourceLabel ?? "")
+    || directCandidateFitsTarget(targetResortName, community, candidate);
+  const visibleOptions = options.map((option) => {
+    const filteredPicks = option.picks.filter(candidateVisibleForTarget);
+    const allPicksVisible = filteredPicks.length === option.picks.length;
+    return {
+      ...option,
+      selected: option.selected && allPicksVisible,
+      totalCost: allPicksVisible ? option.totalCost : null,
+      unavailableReason: allPicksVisible
+        ? option.unavailableReason
+        : "Filtered out direct/PM rows that did not match the target resort",
+      picks: filteredPicks,
+      pools: option.pools?.map((pool) => ({
+        ...pool,
+        candidates: pool.candidates.filter(candidateVisibleForTarget),
+      })),
+    };
+  });
+  const selected = visibleOptions.find((option) => option.selected);
   const directCandidates = Array.from(new Map(
-    options
+    visibleOptions
       .flatMap((option) => option.pools ?? [])
       .flatMap((pool) => pool.candidates)
-      .filter((candidate) => candidate.source === "airbnb" && candidate.totalPrice > 0)
+      .filter((candidate) => candidate.source === "airbnb" && candidate.totalPrice > 0 && candidateVisibleForTarget(candidate))
       .sort((a, b) => a.totalPrice - b.totalPrice)
       .map((candidate) => [listingUrlKey(candidate.url), candidate] as const),
   ).values());
@@ -1236,10 +1301,14 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
           const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
             sourceUrl: candidate.url,
             title: candidate.title,
+            resortName: targetResortName,
+            community,
           });
           const body = await response.json();
           const matches = Array.isArray(body?.matches)
-            ? (body.matches as ReverseImageListingMatch[]).filter((match) => match.platformKey === "pm")
+            ? (body.matches as ReverseImageListingMatch[])
+                .filter((match) => match.platformKey === "pm")
+                .filter((match) => directCandidateFitsTarget(targetResortName, community, match))
             : [];
           setDirectRows((prev) => prev.map((row) => listingUrlKey(row.candidate.url) === listingUrlKey(candidate.url)
             ? { candidate, status: "done", matches, message: body?.message }
@@ -1269,7 +1338,10 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
     return nightly >= minimumDirectNightly(candidate.bedrooms);
   };
   const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) => {
-    const verifiedDirectOrPm = candidate.source === "pm" && candidate.verified === "yes";
+    const verifiedDirectOrPm =
+      candidate.source === "pm"
+      && candidate.verified === "yes"
+      && candidateVisibleForTarget(candidate);
     return candidate.verified === "yes"
       && (verifiedDirectOrPm || plausibleForDirectCombo(candidate))
       && (candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url)));
@@ -1332,7 +1404,7 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
         </div>
       </div>
       <div className="mt-2 space-y-1">
-        {options.map((option) => {
+        {visibleOptions.map((option) => {
           const optimizedCombo = optimizedComboByLabel.get(option.label) ?? null;
           const isOptimizedWinner = optimizedOptionLabel === option.label;
           const isOptimizedOption = !!optimizedCombo;
@@ -1380,9 +1452,9 @@ function ComboComparisonPanel({ options }: { options: AutoFillComboOption[] }) {
                 <div key={`${option.label}-${pool.bedrooms}`}>
                   <p className="mb-1 text-[11px] font-medium text-emerald-900">{pool.bedrooms}BR options considered</p>
                   <div className="max-h-48 overflow-y-auto rounded border bg-white/70">
-                    {pool.candidates.length === 0 ? (
+                    {pool.candidates.filter(candidateVisibleForTarget).length === 0 ? (
                       <p className="px-2 py-1.5 text-[11px] text-muted-foreground">No priced direct/Booking/VRBO options or Airbnb fallback in this pool.</p>
-                    ) : pool.candidates.map((candidate, index) => {
+                    ) : pool.candidates.filter(candidateVisibleForTarget).map((candidate, index) => {
                       const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
                       const isDirectPick = !!directRow;
                       const candidateKeys = new Set(listingIdentityKeys(candidate));
@@ -2712,7 +2784,9 @@ export default function Bookings() {
             });
             const body = await response.json();
             const matches = Array.isArray(body?.matches)
-              ? (body.matches as ReverseImageListingMatch[]).filter((match) => match.platformKey === "pm")
+              ? (body.matches as ReverseImageListingMatch[])
+                  .filter((match) => match.platformKey === "pm")
+                  .filter((match) => directCandidateFitsTarget(resortName, community, match))
               : [];
             return matches.map((match) => directMatchToAutoFillCandidate(candidate, match));
           } catch (e) {
@@ -4495,6 +4569,7 @@ export default function Bookings() {
                                   e.stopPropagation();
                                   if (autoFillRunRef.current.has(r._id)) return;
                                   autoFillRunRef.current.add(r._id);
+                                  clearAutoFillDiagnostics(r._id);
                                   closeSlotSearchesForReservation(r);
                                   setAutoFillStartedByReservation((prev) => ({
                                     ...prev,
@@ -4542,7 +4617,13 @@ export default function Bookings() {
                           </div>
                         )}
                         {searchAudits.length > 0 && <AutoFillSearchAuditPanel audits={searchAudits} />}
-                        {comboOptions.length > 0 && <ComboComparisonPanel options={comboOptions} />}
+                        {comboOptions.length > 0 && (
+                          <ComboComparisonPanel
+                            options={comboOptions}
+                            targetResortName={directBookingTargetResortName(selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? "" : "")}
+                            community={selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? "" : ""}
+                          />
+                        )}
                         {r.slots.map((slot) => {
                           const slotIsExpanded = expandedSlots.has(slotKey(r._id, slot.unitId));
                           const firstBuyInId = r.slots.find((s) => s.buyIn)?.buyIn?.id ?? null;
