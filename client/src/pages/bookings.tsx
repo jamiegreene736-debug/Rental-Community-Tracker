@@ -806,12 +806,12 @@ function directCandidateFitsTarget(
 ): boolean {
   const targetText = normalizeDirectTargetText(`${targetResortName} ${community}`);
   const hay = normalizeDirectTargetText(`${item.domain ?? ""} ${item.sourceLabel ?? ""} ${item.title ?? ""} ${item.url ?? ""}`);
-  if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality|myrtle beach|port st lucie)\b/.test(hay)) {
+  if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(hay)) {
     return false;
   }
   const targetIsRegencyPoipuKai = /\bregency\b/.test(targetText) && /\bpoipu kai\b/.test(targetText);
   if (targetIsRegencyPoipuKai) {
-    if (/\b(nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston|pili mai|kiahuna|makahuena|waikomo)\b/.test(hay)) {
+    if (/\b(nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston|pili mai|kiahuna|makahuena|waikomo|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast)\b/.test(hay)) {
       return false;
     }
     return (/\bregency\b/.test(hay) && /\b(poipu kai|poipu|koloa|kauai)\b/.test(hay))
@@ -825,6 +825,23 @@ function directCandidateFitsTarget(
       || /\b1831\s+poipu\b/.test(hay);
   }
   return true;
+}
+
+function targetLocationRejectReason(
+  targetResortName: string,
+  community: string,
+  item: { domain?: string | null; title?: string | null; url?: string | null; sourceLabel?: string | null; snippet?: string | null },
+): string | null {
+  const targetText = normalizeDirectTargetText(`${targetResortName} ${community}`);
+  const hay = normalizeDirectTargetText(`${item.domain ?? ""} ${item.sourceLabel ?? ""} ${item.title ?? ""} ${item.url ?? ""} ${item.snippet ?? ""}`);
+  const targetIsRegencyPoipuKai = /\bregency\b/.test(targetText) && /\bpoipu kai\b/.test(targetText);
+  if (targetIsRegencyPoipuKai && /\b(banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|pili mai|kiahuna|makahuena|waikomo|nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston)\b/.test(hay)) {
+    return `not in ${targetResortName}`;
+  }
+  if (/\bpoipu kai\b/.test(targetText) && /\b(banyan harbor|lihue|kalapaki|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|pili mai|kiahuna|makahuena|waikomo)\b/.test(hay)) {
+    return `not in ${community}`;
+  }
+  return null;
 }
 
 // Mirror of server/pm-scrapers.ts MANUAL_ONLY list. PMs that don't
@@ -2967,6 +2984,13 @@ export default function Bookings() {
         }
         const actualBedrooms = candidateBedrooms(pick, searchedBedrooms);
         const airbnbPick = pick.source === "airbnb";
+        const community = selectedUnitConfig?.community ?? "";
+        const targetResortName = directBookingTargetResortName(community);
+        const targetRejectReason = targetLocationRejectReason(targetResortName, community, pick);
+        if (targetRejectReason) {
+          skippedReasons.push(`${slot.unitLabel}: skipped ${targetRejectReason}`);
+          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
+        }
         const propertyName =
           (selectedListingId && listingNameById.get(selectedListingId)) ||
           `Property ${selectedPropertyId}`;

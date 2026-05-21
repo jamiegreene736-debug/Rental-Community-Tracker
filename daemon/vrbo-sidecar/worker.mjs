@@ -1890,8 +1890,75 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
     3_000,
     null,
   );
-  if (filled) log(`${label}: entered search term in "${filled}"`);
+  if (filled) {
+    log(`${label}: entered search term in "${filled}"`);
+    await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label).catch(() => null);
+  }
   return filled;
+}
+
+async function chooseVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search") {
+  if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
+  await targetPage.waitForTimeout(900).catch(() => null);
+  const clicked = await withSoftTimeout(
+    targetPage.evaluate(({ searchTerm }) => {
+      const clean = (raw) => String(raw || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const wanted = clean(searchTerm).split(" ").filter((token) => token.length >= 3);
+      if (wanted.length === 0) return null;
+      const searchNorm = clean(searchTerm);
+      const requirePoipuKai = /\bpoipu\s+kai\b/.test(searchNorm);
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 8 && rect.height > 8 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+
+      const candidates = Array.from(document.querySelectorAll([
+        "[role='option']",
+        "[role='listbox'] *",
+        "[aria-selected]",
+        "[data-testid*='option' i]",
+        "[data-testid*='suggest' i]",
+        "li",
+        "button",
+        "a",
+      ].join(",")))
+        .filter((el) => el instanceof HTMLElement && isVisible(el))
+        .map((el) => {
+          const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+          const norm = clean(text);
+          if (!norm || text.length > 220) return null;
+          const matched = wanted.filter((token) => norm.includes(token)).length;
+          const hasPoipuKai = /\bpoipu\b/.test(norm) && /\bkai\b/.test(norm);
+          if (requirePoipuKai && !hasPoipuKai) return null;
+          if (!requirePoipuKai && matched === 0) return null;
+          let score = matched * 20;
+          if (hasPoipuKai) score += 80;
+          if (norm.includes(searchNorm)) score += 40;
+          if (/\b(resort|koloa|hi|hawaii|kauai)\b/.test(norm)) score += 10;
+          return { el, text, score };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
+      const best = candidates[0];
+      if (!best || best.score < 40) return null;
+      try { best.el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
+      best.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      best.el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      best.el.click();
+      return best.text.slice(0, 120);
+    }, { searchTerm }),
+    3_000,
+    null,
+  );
+  if (clicked) log(`${label}: selected destination suggestion "${clicked}"`);
+  return clicked;
 }
 
 async function fillPmRentalLocationField(targetPage, searchTerm, label = "pm_rental_location") {

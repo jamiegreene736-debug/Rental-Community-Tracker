@@ -7659,7 +7659,8 @@ export async function registerRoutes(
     const community = config.community;
     const nights = Math.max(1, Math.round((new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86_400_000));
     const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
-    const vrboDestination = searchLocation;
+    const buyInPlatformSearch = COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS[community] ?? {};
+    const vrboDestination = buyInPlatformSearch.vrbo ?? searchLocation;
     const bounds = COMMUNITY_BOUNDS[community];
 
     // ── Resort-name resolution ───────────────────────────────────────────
@@ -7747,10 +7748,10 @@ export async function registerRoutes(
     const targetIsKahaLani = /\bkaha\s+lani\b/.test(normalizedResortName);
     const mentionsRegencyPoipuKai = (haystack: string): boolean => {
       const n = norm(haystack);
-      return /\bregency\b/.test(n) && (
+      return /\b1831\s+poipu\b/.test(n) || (/\bregency\b/.test(n) && (
         /\b(poipu\s+kai|poipu|koloa|kauai)\b/.test(n)
         || /\bregency\s+(?:at\s+poipu\s+kai\s*)?#?\d{2,4}\b/.test(n)
-      );
+      ));
     };
     const candidatePrimaryHaystack = (c: Candidate): string =>
       `${c.title} ${c.sourceLabel ?? ""} ${c.url}`;
@@ -7759,7 +7760,7 @@ export async function registerRoutes(
     const mentionsKnownNonRegencyPoipuKaiComplex = (haystack: string): boolean => {
       if (!targetIsRegencyPoipuKai) return false;
       const n = norm(haystack);
-      return /\b(aston|manualoha|kahala|makanui|nihi kai|poipu sands|villas?\s+at\s+poipu\s+kai|poipu\s+kai\s+villas?|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality)\b/.test(n);
+      return /\b(aston|manualoha|kahala|makanui|nihi kai|poipu sands|villas?\s+at\s+poipu\s+kai|poipu\s+kai\s+villas?|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(n);
     };
     const mentionsPoipuKai = (haystack: string): boolean => {
       const n = norm(haystack);
@@ -7856,7 +7857,11 @@ export async function registerRoutes(
     const websiteSearchTerm = community === "Kapaa Beachfront"
       ? communitySearchName || resortName || community
       : resortName || communitySearchName || community;
-    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`);
+    const airbnbWebsiteSearchTerm = buyInPlatformSearch.airbnb ?? websiteSearchTerm;
+    const bookingWebsiteSearchTerm = buyInPlatformSearch.booking ?? websiteSearchTerm;
+    const vrboWebsiteSearchTerm = buyInPlatformSearch.vrbo ?? websiteSearchTerm;
+    const pmWebsiteSearchTerm = buyInPlatformSearch.pm ?? websiteSearchTerm;
+    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" booking="${bookingWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`);
 
     const scanStartedAt = Date.now();
     const { getSidecarStopGeneration } = await import("./vrbo-sidecar-queue");
@@ -8110,7 +8115,7 @@ export async function registerRoutes(
         && /google lens|photo|direct pm/i.test(`${c.verifiedReason ?? ""} ${c.snippet ?? ""} ${c.sourceLabel ?? ""}`);
       if (targetIsRegencyPoipuKai) {
         if (photoTexts.some(mentionsRegencyPoipuKai)) return true;
-        return looseResortPhotoProof && (hasPhotoMatch || lensAnchoredPm);
+        return looseResortPhotoProof && lensAnchoredPm && mentionsRegencyPoipuKai(hay);
       }
       if (normalizedResortName === "poipu kai") {
         if (photoTexts.some(mentionsPoipuKai)) return true;
@@ -8394,8 +8399,8 @@ export async function registerRoutes(
       try {
         const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchAirbnbViaSidecar({
-          destination: searchLocation,
-          searchTerm: websiteSearchTerm,
+          destination: airbnbWebsiteSearchTerm,
+          searchTerm: airbnbWebsiteSearchTerm,
           checkIn,
           checkOut,
           bedrooms,
@@ -8466,8 +8471,8 @@ export async function registerRoutes(
       try {
         const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchBookingViaSidecar({
-          destination: searchLocation,
-          searchTerm: websiteSearchTerm,
+          destination: bookingWebsiteSearchTerm,
+          searchTerm: bookingWebsiteSearchTerm,
           checkIn,
           checkOut,
           bedrooms,
@@ -8536,7 +8541,7 @@ export async function registerRoutes(
     let vrboSidecarReason = "";
     const vrboSidecarAbort = makeSidecarAbort("vrbo");
     const vrboPromise: Promise<Candidate[]> = (async () => {
-      const targetSearchTerm = websiteSearchTerm;
+      const targetSearchTerm = vrboWebsiteSearchTerm;
       try {
         const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchVrboViaSidecar({
@@ -9219,7 +9224,7 @@ export async function registerRoutes(
         const { searchPmSitesViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchPmSitesViaSidecar({
           sites: pmSitesForSearch,
-          searchTerm: websiteSearchTerm,
+          searchTerm: pmWebsiteSearchTerm,
           checkIn,
 	          checkOut,
 	          bedrooms,
@@ -9908,7 +9913,7 @@ export async function registerRoutes(
     const comparisonBedroomSignal = (c: Candidate): number | null => candidateBedroomSignal(c);
     const comparisonResortFits = (c: Candidate): boolean => {
       const hay = candidateHaystack(c);
-      if (mentionsKnownNonPoipuKaiComplex(hay) || mentionsKnownNonKahaLaniComplex(hay)) return false;
+      if (mentionsKnownNonRegencyPoipuKaiComplex(hay) || mentionsKnownNonPoipuKaiComplex(hay) || mentionsKnownNonKahaLaniComplex(hay)) return false;
       if (candidateHasResortPhotoProof(c)) return true;
       if (targetIsRegencyPoipuKai || normalizedResortName === "poipu kai") {
         return candidateFitsTarget(c) || candidateIsPoipuKaiCondoLike(c) || mentionsPoipuKai(hay);
@@ -10473,6 +10478,9 @@ export async function registerRoutes(
         },
         searchLocation,
         vrboDestination,
+        airbnbWebsiteSearchTerm,
+        bookingWebsiteSearchTerm,
+        vrboWebsiteSearchTerm,
         resortName,
       },
       diagnostics,
@@ -12046,6 +12054,19 @@ export async function registerRoutes(
     "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
     "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
     "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
+  };
+
+  const COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS: Record<string, { airbnb?: string; booking?: string; vrbo?: string; pm?: string }> = {
+    // OTA autocomplete works better when it receives the resort area name the
+    // platform exposes in its destination picker. PM/direct discovery stays
+    // Regency-specific because the configured buy-in target is the Regency
+    // sub-resort within Poipu Kai.
+    "Poipu Kai": {
+      airbnb: "Poipu Kai Resort, Koloa, HI",
+      booking: "Poipu Kai Resort, Koloa, HI",
+      vrbo: "Poipu Kai",
+      pm: "Regency at Poipu Kai",
+    },
   };
 
   // Decomposed location info per `PROPERTY_UNIT_NEEDS` community key,
