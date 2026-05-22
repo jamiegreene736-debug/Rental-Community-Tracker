@@ -49,6 +49,9 @@ import {
   MapPin,
   Star,
   TrendingUp,
+  Ban,
+  CreditCard,
+  AlertTriangle,
   MessageSquare,
   Home as HomeIcon,
   Loader2,
@@ -63,7 +66,7 @@ import { useToast } from "@/hooks/use-toast";
 import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
 import { apiRequest } from "@/lib/queryClient";
-import type { CommunityDraft, GuestyPropertyMap } from "@shared/schema";
+import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -164,6 +167,90 @@ type QueueJobEventPayload = {
   meta?: Record<string, unknown> | null;
   createdAt: string;
 };
+
+type DashboardCancellationResponse = {
+  audits: ReservationCancellationAudit[];
+  summary: {
+    total: number;
+    paymentTaken: number;
+    reviewNeeded: number;
+    resolved: number;
+    exposure: number;
+    lastSyncedAt: string | null;
+  };
+};
+
+function moneyNumber(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function parseJsonArray(value: unknown): any[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function refundDecisionLabel(decision: string | null | undefined): string {
+  switch (decision) {
+    case "no_payment": return "No payment taken";
+    case "fully_refunded": return "Fully refunded";
+    case "partial_refund": return "Partial refund";
+    case "refund_review": return "Refund review needed";
+    default: return "Unknown payment state";
+  }
+}
+
+function refundDecisionClass(decision: string | null | undefined): string {
+  switch (decision) {
+    case "no_payment":
+    case "fully_refunded":
+      return "bg-green-600 text-white";
+    case "partial_refund":
+      return "bg-amber-500 text-white";
+    case "refund_review":
+      return "bg-red-600 text-white";
+    default:
+      return "";
+  }
+}
+
+function operatorStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "refunded": return "Refunded";
+    case "no_refund_due": return "No refund due";
+    case "disputed": return "Disputed";
+    case "ignored": return "Ignored";
+    default: return "Needs review";
+  }
+}
+
+function paymentLineAmount(item: any): number {
+  return moneyNumber(item?.amount ?? item?.paidAmount ?? item?.collectedAmount ?? item?.expectedAmount ?? item?.scheduledAmount ?? item?.total ?? item?.value);
+}
+
+function paymentLineDate(item: any): string | null {
+  return String(
+    item?.paidAt ??
+    item?.collectedAt ??
+    item?.processedAt ??
+    item?.paymentDate ??
+    item?.dueDate ??
+    item?.date ??
+    item?.createdAt ??
+    "",
+  ) || null;
+}
+
+function paymentLineLabel(item: any): string {
+  return String(item?.description ?? item?.note ?? item?.label ?? item?.type ?? item?.kind ?? item?.status ?? "Payment");
+}
 
 const properties: Property[] = [
   {
@@ -456,6 +543,8 @@ function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "mini
 type SortDir = "asc" | "desc";
 
 export default function Home() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [searchTerm, setSearchTerm] = useState("");
   const [communityFilter, setCommunityFilter] = useState("all");
   const [islandFilter, setIslandFilter] = useState("all");
@@ -473,6 +562,7 @@ export default function Home() {
   const [bulkPricingStarting, setBulkPricingStarting] = useState(false);
   const [bulkPricingCancelling, setBulkPricingCancelling] = useState(false);
   const [bulkPricingRetrying, setBulkPricingRetrying] = useState(false);
+  const [selectedCancellationId, setSelectedCancellationId] = useState<number | null>(null);
 
   // Pull community drafts up here (early in the render) because
   // `allProperties` below depends on them and `qualityScores` /
@@ -840,13 +930,14 @@ export default function Home() {
       currency: "USD",
       maximumFractionDigits: 0,
     }).format(value);
-  const formatShortDate = (value: string | null) => {
+  const formatShortDate = (value: string | Date | null | undefined) => {
     if (!value) return "N/A";
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "N/A";
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   };
-  const formatShortDateTime = (value: string) => {
+  const formatShortDateTime = (value: string | Date | null | undefined) => {
+    if (!value) return "N/A";
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "N/A";
     return date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -900,6 +991,79 @@ export default function Home() {
     queryKey: ["/api/dashboard/revenue-week"],
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
+  });
+
+  const propertyNameById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const property of allProperties) map.set(property.id, property.name);
+    return map;
+  }, [allProperties]);
+
+  const {
+    data: cancellationData,
+    isLoading: cancellationsLoading,
+    isFetching: cancellationsFetching,
+  } = useQuery<DashboardCancellationResponse>({
+    queryKey: ["/api/dashboard/cancellations"],
+    staleTime: 2 * 60 * 1000,
+    refetchInterval: 2 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const cancellationRows = useMemo(() => {
+    const rows = [...(cancellationData?.audits ?? [])];
+    const priority = (row: ReservationCancellationAudit) => {
+      if (row.operatorStatus === "needs_review") return 0;
+      if (row.refundDecision === "refund_review" || row.refundDecision === "partial_refund") return 1;
+      return 2;
+    };
+    return rows.sort((a, b) => {
+      const p = priority(a) - priority(b);
+      if (p !== 0) return p;
+      return new Date(b.cancelledAt ?? b.updatedAt ?? b.createdAt ?? 0).getTime()
+        - new Date(a.cancelledAt ?? a.updatedAt ?? a.createdAt ?? 0).getTime();
+    });
+  }, [cancellationData]);
+
+  const selectedCancellation = useMemo(() => {
+    if (!selectedCancellationId) return null;
+    return cancellationRows.find((row) => row.id === selectedCancellationId) ?? null;
+  }, [cancellationRows, selectedCancellationId]);
+
+  const selectedCancellationPayments = useMemo(
+    () => parseJsonArray(selectedCancellation?.paymentsJson),
+    [selectedCancellation],
+  );
+  const selectedCancellationRefunds = useMemo(
+    () => parseJsonArray(selectedCancellation?.refundsJson),
+    [selectedCancellation],
+  );
+
+  const cancellationSummary = cancellationData?.summary ?? {
+    total: 0,
+    paymentTaken: 0,
+    reviewNeeded: 0,
+    resolved: 0,
+    exposure: 0,
+    lastSyncedAt: null,
+  };
+
+  const cancellationScanMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/dashboard/cancellations/scan", { range: "365" }).then((r) => r.json()),
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/cancellations"] });
+      toast({
+        title: "Cancelled bookings refreshed",
+        description: `${data?.saved ?? 0} audit row${data?.saved === 1 ? "" : "s"} refreshed from Guesty.`,
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Cancellation refresh failed",
+        description: error?.message ?? "Guesty could not be scanned for cancelled bookings.",
+        variant: "destructive",
+      });
+    },
   });
 
   // Reverse-image-search status for the Photo Match column. One row
@@ -1029,10 +1193,6 @@ export default function Home() {
     }
     return out;
   }, [allProperties, communityDraftsDataForRows, photoCheckByFolder]);
-
-  const { toast } = useToast();
-
-  const queryClient = useQueryClient();
 
   const isBulkPricingSelectable = (property: Property) =>
     property.bedrooms > 0 && property.draftStatus !== "researching" && property.draftStatus !== "draft_ready";
@@ -1354,7 +1514,7 @@ export default function Home() {
           </Link>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
           <Card className="p-4">
             <div className="flex items-center gap-2 mb-1">
               <Building2 className="h-4 w-4 text-muted-foreground" />
@@ -1450,6 +1610,250 @@ export default function Home() {
                   </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">No revenue bookings found in this rolling 7-day window.</p>
+                )}
+              </div>
+            </DialogContent>
+          </Dialog>
+          <Dialog>
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="shadcn-card rounded-xl border bg-card border-card-border p-4 text-left text-card-foreground shadow-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                data-testid="button-cancelled-bookings"
+              >
+                <div className="flex items-center gap-2 mb-1">
+                  <Ban className={`h-4 w-4 ${cancellationSummary.reviewNeeded > 0 ? "text-red-600" : "text-muted-foreground"}`} />
+                  <span className="text-xs text-muted-foreground font-medium">Cancelled bookings</span>
+                </div>
+                <p className="text-2xl font-bold" data-testid="text-cancelled-bookings">
+                  {cancellationsLoading ? "..." : cancellationSummary.total}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {cancellationSummary.paymentTaken} with payments
+                  {cancellationSummary.reviewNeeded > 0 ? ` · ${cancellationSummary.reviewNeeded} review` : " · clean"}
+                </p>
+              </button>
+            </DialogTrigger>
+            <DialogContent className="max-w-6xl">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Ban className="h-4 w-4" /> Cancelled bookings
+                </DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                  <div className="rounded border bg-muted/20 px-3 py-2.5">
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Total cancelled</p>
+                    <p className="mt-1 text-2xl font-semibold">{cancellationSummary.total}</p>
+                  </div>
+                  <div className="rounded border bg-muted/20 px-3 py-2.5">
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Payments taken</p>
+                    <p className="mt-1 text-2xl font-semibold">{cancellationSummary.paymentTaken}</p>
+                  </div>
+                  <div className="rounded border bg-muted/20 px-3 py-2.5">
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Needs review</p>
+                    <p className={`mt-1 text-2xl font-semibold ${cancellationSummary.reviewNeeded > 0 ? "text-red-600" : "text-green-700"}`}>
+                      {cancellationSummary.reviewNeeded}
+                    </p>
+                  </div>
+                  <div className="rounded border bg-muted/20 px-3 py-2.5">
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Open exposure</p>
+                    <p className={`mt-1 text-2xl font-semibold ${cancellationSummary.exposure > 0 ? "text-red-600" : ""}`}>
+                      {formatCurrency(cancellationSummary.exposure)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs text-muted-foreground">
+                    {cancellationSummary.lastSyncedAt
+                      ? `Last Guesty sync ${formatShortDateTime(cancellationSummary.lastSyncedAt)}`
+                      : "No cancellation audit sync has run yet."}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => cancellationScanMutation.mutate()}
+                    disabled={cancellationScanMutation.isPending}
+                    data-testid="button-refresh-cancelled-bookings"
+                  >
+                    <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${cancellationScanMutation.isPending ? "animate-spin" : ""}`} />
+                    Refresh from Guesty
+                  </Button>
+                </div>
+
+                {cancellationsLoading || cancellationsFetching ? (
+                  <div className="rounded border py-8 text-center text-sm text-muted-foreground">
+                    <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin opacity-50" />
+                    Loading cancelled booking audits...
+                  </div>
+                ) : cancellationRows.length === 0 ? (
+                  <div className="rounded border py-8 text-center">
+                    <Ban className="mx-auto mb-2 h-6 w-6 opacity-30" />
+                    <p className="font-medium">No cancelled bookings found</p>
+                    <p className="text-sm text-muted-foreground">Refresh from Guesty to populate the audit table for linked listings.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.2fr_.9fr]">
+                    <div className="overflow-x-auto rounded border">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Cancelled booking</TableHead>
+                            <TableHead>Stay</TableHead>
+                            <TableHead>Status</TableHead>
+                            <TableHead className="text-right">Paid</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {cancellationRows.map((row) => {
+                            const paid = moneyNumber(row.totalPaid);
+                            const refunded = moneyNumber(row.totalRefunded);
+                            const isSelected = selectedCancellation?.id === row.id;
+                            return (
+                              <TableRow
+                                key={row.id}
+                                className={`cursor-pointer ${isSelected ? "bg-blue-50/70" : ""}`}
+                                onClick={() => setSelectedCancellationId(row.id)}
+                                data-testid={`row-cancelled-booking-${row.id}`}
+                              >
+                                <TableCell>
+                                  <div className="font-medium">{row.guestName || "Guest"}</div>
+                                  <div className="text-xs text-muted-foreground">
+                                    {propertyNameById.get(row.propertyId) ?? `Property ${row.propertyId}`}
+                                  </div>
+                                  <div className="text-[10px] text-muted-foreground">
+                                    {row.confirmationCode ?? row.guestyReservationId}
+                                  </div>
+                                </TableCell>
+                                <TableCell className="whitespace-nowrap text-sm">
+                                  {formatShortDate(row.checkIn)} - {formatShortDate(row.checkOut)}
+                                  <div className="text-[10px] text-muted-foreground">
+                                    cancelled {formatShortDate(row.cancelledAt)}
+                                  </div>
+                                </TableCell>
+                                <TableCell>
+                                  <Badge className={`text-[10px] ${refundDecisionClass(row.refundDecision)}`} variant="outline">
+                                    {refundDecisionLabel(row.refundDecision)}
+                                  </Badge>
+                                  <div className="mt-1 text-[10px] text-muted-foreground">
+                                    {operatorStatusLabel(row.operatorStatus)}
+                                  </div>
+                                </TableCell>
+                                <TableCell className="text-right">
+                                  <div className={`font-medium ${paid > refunded ? "text-red-600" : ""}`}>
+                                    {formatCurrency(paid)}
+                                  </div>
+                                  {refunded > 0 && (
+                                    <div className="text-[10px] text-green-700">
+                                      {formatCurrency(refunded)} refunded
+                                    </div>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </div>
+
+                    <div className="rounded border bg-muted/10 p-4">
+                      {selectedCancellation ? (
+                        <div className="space-y-4">
+                          <div>
+                            <p className="text-xs uppercase tracking-wider text-muted-foreground">Selected booking</p>
+                            <h3 className="mt-1 font-semibold">{selectedCancellation.guestName || "Guest"}</h3>
+                            <p className="text-sm text-muted-foreground">
+                              {propertyNameById.get(selectedCancellation.propertyId) ?? `Property ${selectedCancellation.propertyId}`}
+                            </p>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3 text-sm">
+                            <div className="rounded border bg-background px-3 py-2">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Paid</p>
+                              <p className="font-semibold">{formatCurrency(moneyNumber(selectedCancellation.totalPaid))}</p>
+                            </div>
+                            <div className="rounded border bg-background px-3 py-2">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Refunded</p>
+                              <p className="font-semibold">{formatCurrency(moneyNumber(selectedCancellation.totalRefunded))}</p>
+                            </div>
+                            <div className="rounded border bg-background px-3 py-2">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Balance due</p>
+                              <p className="font-semibold">{formatCurrency(moneyNumber(selectedCancellation.balanceDue))}</p>
+                            </div>
+                            <div className="rounded border bg-background px-3 py-2">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Channel</p>
+                              <p className="font-semibold capitalize">{selectedCancellation.channel || "Unknown"}</p>
+                            </div>
+                          </div>
+
+                          {moneyNumber(selectedCancellation.totalPaid) > moneyNumber(selectedCancellation.totalRefunded) && (
+                            <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                              <AlertTriangle className="mr-1.5 inline h-4 w-4" />
+                              Payment remains after refund audit: {formatCurrency(moneyNumber(selectedCancellation.totalPaid) - moneyNumber(selectedCancellation.totalRefunded))}
+                            </div>
+                          )}
+
+                          <div>
+                            <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+                              <CreditCard className="h-4 w-4" /> Payments
+                            </div>
+                            {selectedCancellationPayments.length > 0 ? (
+                              <div className="space-y-2">
+                                {selectedCancellationPayments.slice(0, 8).map((payment, index) => (
+                                  <div key={`${paymentLineLabel(payment)}-${index}`} className="rounded border bg-background px-3 py-2 text-sm">
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <p className="font-medium truncate">{paymentLineLabel(payment)}</p>
+                                        <p className="text-xs text-muted-foreground">
+                                          {paymentLineDate(payment) ? formatShortDateTime(paymentLineDate(payment)!) : "No date"} · {String(payment?.status ?? "status unknown")}
+                                        </p>
+                                      </div>
+                                      <p className="font-semibold">{formatCurrency(paymentLineAmount(payment))}</p>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="rounded border bg-background px-3 py-2 text-sm text-muted-foreground">
+                                No payment line items were returned by Guesty for this cancellation.
+                              </p>
+                            )}
+                          </div>
+
+                          {selectedCancellationRefunds.length > 0 && (
+                            <div>
+                              <p className="mb-2 text-sm font-semibold">Refunds</p>
+                              <div className="space-y-2">
+                                {selectedCancellationRefunds.slice(0, 8).map((refund, index) => (
+                                  <div key={`${paymentLineLabel(refund)}-refund-${index}`} className="rounded border bg-background px-3 py-2 text-sm">
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <p className="font-medium truncate">{paymentLineLabel(refund)}</p>
+                                        <p className="text-xs text-muted-foreground">
+                                          {paymentLineDate(refund) ? formatShortDateTime(paymentLineDate(refund)!) : "No date"} · {String(refund?.status ?? "status unknown")}
+                                        </p>
+                                      </div>
+                                      <p className="font-semibold text-green-700">{formatCurrency(Math.abs(paymentLineAmount(refund)))}</p>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex min-h-[280px] flex-col items-center justify-center text-center">
+                          <CreditCard className="mb-2 h-7 w-7 opacity-30" />
+                          <p className="font-medium">Click a cancelled booking</p>
+                          <p className="max-w-xs text-sm text-muted-foreground">
+                            The payment panel will show Guesty's paid, refunded, and remaining balance details for that cancellation.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
             </DialogContent>

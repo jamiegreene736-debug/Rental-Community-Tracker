@@ -127,6 +127,7 @@ export interface IStorage {
 
   upsertReservationCancellationAudit(audit: InsertReservationCancellationAudit): Promise<ReservationCancellationAudit>;
   getReservationCancellationAudits(propertyId: number): Promise<ReservationCancellationAudit[]>;
+  getAllReservationCancellationAudits(): Promise<ReservationCancellationAudit[]>;
   updateReservationCancellationAudit(id: number, data: Partial<Pick<InsertReservationCancellationAudit, "operatorStatus" | "operatorNotes">>): Promise<ReservationCancellationAudit | undefined>;
 
   createManualReservation(reservation: InsertManualReservation): Promise<ManualReservation>;
@@ -368,6 +369,21 @@ export class DatabaseStorage implements IStorage {
         .select()
         .from(reservationCancellationAudits)
         .where(eq(reservationCancellationAudits.propertyId, propertyId))
+        .orderBy(desc(reservationCancellationAudits.cancelledAt), desc(reservationCancellationAudits.createdAt));
+    } catch (error: any) {
+      if (error?.code === "42P01" || /reservation_cancellation_audits.*does not exist/i.test(String(error?.message ?? ""))) {
+        console.warn("reservation_cancellation_audits table is missing; returning no cancellation audits until db:push runs");
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async getAllReservationCancellationAudits(): Promise<ReservationCancellationAudit[]> {
+    try {
+      return await db
+        .select()
+        .from(reservationCancellationAudits)
         .orderBy(desc(reservationCancellationAudits.cancelledAt), desc(reservationCancellationAudits.createdAt));
     } catch (error: any) {
       if (error?.code === "42P01" || /reservation_cancellation_audits.*does not exist/i.test(String(error?.message ?? ""))) {

@@ -11517,6 +11517,160 @@ export async function registerRoutes(
     };
   };
 
+  const scanCancellationAuditsForProperty = async (propertyId: number, range: string) => {
+    const guestyListingId = await storage.getGuestyListingId(propertyId);
+    if (!guestyListingId) {
+      return {
+        propertyId,
+        guestyListingId: null,
+        scanned: 0,
+        saved: 0,
+        skipped: true,
+        error: `No Guesty listing mapped for property ${propertyId}`,
+      };
+    }
+
+    const fields = encodeURIComponent([
+      "_id",
+      "status",
+      "createdAt",
+      "updatedAt",
+      "cancelledAt",
+      "canceledAt",
+      "cancellationDate",
+      "checkIn",
+      "checkOut",
+      "checkInDateLocalized",
+      "checkOutDateLocalized",
+      "nightsCount",
+      "guest",
+      "money",
+      "payments",
+      "refunds",
+      "source",
+      "integration",
+      "confirmationCode",
+    ].join(" "));
+    const limit = 100;
+    const maxRows = 2000;
+    const seen = new Map<string, any>();
+
+    for (let skip = 0; skip < maxRows; skip += limit) {
+      const filterArr: Array<Record<string, unknown>> = [
+        { field: "listingId", operator: "$eq", value: guestyListingId },
+        { field: "status", operator: "$in", value: ["canceled", "cancelled"] },
+      ];
+      const filtersParam = encodeURIComponent(JSON.stringify(filterArr));
+      const url = `/reservations?filters=${filtersParam}&limit=${limit}&skip=${skip}&sort=-updatedAt&fields=${fields}`;
+      const data = await guestyRequest("GET", url) as any;
+      const rows = unwrapCancellationGuestyList(data);
+      for (const row of rows) {
+        const id = String(row?._id ?? row?.id ?? "");
+        if (id) seen.set(id, row);
+      }
+      if (rows.length < limit) break;
+    }
+
+    const cutoff = range === "90"
+      ? Date.now() - 90 * 86400000
+      : range === "365"
+        ? Date.now() - 365 * 86400000
+        : null;
+    const rows = Array.from(seen.values()).filter((row) => {
+      if (!cutoff) return true;
+      const d = timestampOrNull(row?.cancelledAt ?? row?.canceledAt ?? row?.cancellationDate ?? row?.updatedAt ?? row?.createdAt);
+      return d ? d.getTime() >= cutoff : true;
+    });
+
+    const audits = await Promise.all(rows.map((row) => storage.upsertReservationCancellationAudit(
+      buildCancellationAudit(propertyId, guestyListingId, row),
+    )));
+
+    return {
+      propertyId,
+      guestyListingId,
+      scanned: rows.length,
+      saved: audits.length,
+      skipped: false,
+      error: null,
+    };
+  };
+
+  const cancellationDashboardSummary = (audits: Awaited<ReturnType<typeof storage.getAllReservationCancellationAudits>>) => {
+    const money = (value: unknown) => {
+      const n = typeof value === "number" ? value : Number(value ?? 0);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const reviewNeeded = audits.filter((row) => row.operatorStatus === "needs_review").length;
+    const exposure = audits
+      .filter((row) => row.operatorStatus === "needs_review")
+      .reduce((sum, row) => sum + Math.max(0, money(row.totalPaid) - money(row.totalRefunded)), 0);
+    return {
+      total: audits.length,
+      paymentTaken: audits.filter((row) => money(row.totalPaid) > 0).length,
+      reviewNeeded,
+      resolved: audits.filter((row) => row.operatorStatus && row.operatorStatus !== "needs_review").length,
+      exposure,
+      lastSyncedAt: audits.reduce<string | null>((latest, row) => {
+        const value = row.lastSyncedAt ? new Date(row.lastSyncedAt).toISOString() : null;
+        if (!value) return latest;
+        return !latest || value > latest ? value : latest;
+      }, null),
+    };
+  };
+
+  app.get("/api/dashboard/cancellations", async (_req, res) => {
+    try {
+      const audits = await storage.getAllReservationCancellationAudits();
+      res.json({ audits, summary: cancellationDashboardSummary(audits) });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to load dashboard cancellations", message: err.message });
+    }
+  });
+
+  app.post("/api/dashboard/cancellations/scan", async (req, res) => {
+    try {
+      const range = String(req.body?.range ?? "365");
+      const map = await storage.getGuestyPropertyMap();
+      const propertyIds = Array.from(new Set(
+        map
+          .map((row) => row.propertyId)
+          .filter((id): id is number => typeof id === "number" && Number.isFinite(id)),
+      ));
+
+      const results = [];
+      // Keep this sequential: this endpoint is operator-triggered from the
+      // dashboard and Guesty's reservation API is the bottleneck, not local CPU.
+      for (const propertyId of propertyIds) {
+        try {
+          results.push(await scanCancellationAuditsForProperty(propertyId, range));
+        } catch (error: any) {
+          results.push({
+            propertyId,
+            guestyListingId: null,
+            scanned: 0,
+            saved: 0,
+            skipped: false,
+            error: error?.message ?? String(error),
+          });
+        }
+      }
+
+      const audits = await storage.getAllReservationCancellationAudits();
+      res.json({
+        scannedProperties: results.length,
+        saved: results.reduce((sum, row) => sum + row.saved, 0),
+        failed: results.filter((row) => row.error && !row.skipped).length,
+        skipped: results.filter((row) => row.skipped).length,
+        results,
+        audits,
+        summary: cancellationDashboardSummary(audits),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to scan dashboard cancellations", message: err.message });
+    }
+  });
+
   app.get("/api/operations/cancellations", async (req, res) => {
     try {
       const propertyId = parseInt((req.query.propertyId as string) ?? "", 10);
@@ -11533,71 +11687,15 @@ export async function registerRoutes(
       const propertyId = parseInt(String(req.body?.propertyId ?? ""), 10);
       const range = String(req.body?.range ?? "all");
       if (!propertyId) return res.status(400).json({ error: "propertyId required" });
-      const guestyListingId = await storage.getGuestyListingId(propertyId);
-      if (!guestyListingId) return res.status(404).json({ error: `No Guesty listing mapped for property ${propertyId}` });
-
-      const fields = encodeURIComponent([
-        "_id",
-        "status",
-        "createdAt",
-        "updatedAt",
-        "cancelledAt",
-        "canceledAt",
-        "cancellationDate",
-        "checkIn",
-        "checkOut",
-        "checkInDateLocalized",
-        "checkOutDateLocalized",
-        "nightsCount",
-        "guest",
-        "money",
-        "payments",
-        "refunds",
-        "source",
-        "integration",
-        "confirmationCode",
-      ].join(" "));
-      const limit = 100;
-      const maxRows = 2000;
-      const seen = new Map<string, any>();
-
-      for (let skip = 0; skip < maxRows; skip += limit) {
-        const filterArr: Array<Record<string, unknown>> = [
-          { field: "listingId", operator: "$eq", value: guestyListingId },
-          { field: "status", operator: "$in", value: ["canceled", "cancelled"] },
-        ];
-        const filtersParam = encodeURIComponent(JSON.stringify(filterArr));
-        const url = `/reservations?filters=${filtersParam}&limit=${limit}&skip=${skip}&sort=-updatedAt&fields=${fields}`;
-        const data = await guestyRequest("GET", url) as any;
-        const rows = unwrapCancellationGuestyList(data);
-        for (const row of rows) {
-          const id = String(row?._id ?? row?.id ?? "");
-          if (id) seen.set(id, row);
-        }
-        if (rows.length < limit) break;
-      }
-
-      const cutoff = range === "90"
-        ? Date.now() - 90 * 86400000
-        : range === "365"
-          ? Date.now() - 365 * 86400000
-          : null;
-      const rows = Array.from(seen.values()).filter((row) => {
-        if (!cutoff) return true;
-        const d = timestampOrNull(row?.cancelledAt ?? row?.canceledAt ?? row?.cancellationDate ?? row?.updatedAt ?? row?.createdAt);
-        return d ? d.getTime() >= cutoff : true;
-      });
-
-      const audits = await Promise.all(rows.map((row) => storage.upsertReservationCancellationAudit(
-        buildCancellationAudit(propertyId, guestyListingId, row),
-      )));
+      const result = await scanCancellationAuditsForProperty(propertyId, range);
+      if (result.skipped) return res.status(404).json({ error: result.error });
 
       const saved = await storage.getReservationCancellationAudits(propertyId);
       res.json({
         propertyId,
-        guestyListingId,
-        scanned: rows.length,
-        saved: audits.length,
+        guestyListingId: result.guestyListingId,
+        scanned: result.scanned,
+        saved: result.saved,
         audits: saved,
       });
     } catch (err: any) {
