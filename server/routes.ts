@@ -11571,11 +11571,13 @@ export async function registerRoutes(
       if (rows.length < limit) break;
     }
 
-    const cutoff = range === "90"
-      ? Date.now() - 90 * 86400000
-      : range === "365"
-        ? Date.now() - 365 * 86400000
-        : null;
+    const cutoff = range === "30"
+      ? Date.now() - 30 * 86400000
+      : range === "90"
+        ? Date.now() - 90 * 86400000
+        : range === "365"
+          ? Date.now() - 365 * 86400000
+          : null;
     const rows = Array.from(seen.values()).filter((row) => {
       if (!cutoff) return true;
       const d = timestampOrNull(row?.cancelledAt ?? row?.canceledAt ?? row?.cancellationDate ?? row?.updatedAt ?? row?.createdAt);
@@ -11595,6 +11597,16 @@ export async function registerRoutes(
       error: null,
     };
   };
+
+  const dashboardCancellationWindowDays = 30;
+  const withinDashboardCancellationWindow = (row: Awaited<ReturnType<typeof storage.getAllReservationCancellationAudits>>[number]) => {
+    const value = row.cancelledAt ?? row.updatedAt ?? row.createdAt;
+    const date = value ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return true;
+    return date.getTime() >= Date.now() - dashboardCancellationWindowDays * 86400000;
+  };
+  const dashboardCancellationAudits = (audits: Awaited<ReturnType<typeof storage.getAllReservationCancellationAudits>>) =>
+    audits.filter(withinDashboardCancellationWindow);
 
   const cancellationDashboardSummary = (audits: Awaited<ReturnType<typeof storage.getAllReservationCancellationAudits>>) => {
     const money = (value: unknown) => {
@@ -11621,8 +11633,12 @@ export async function registerRoutes(
 
   app.get("/api/dashboard/cancellations", async (_req, res) => {
     try {
-      const audits = await storage.getAllReservationCancellationAudits();
-      res.json({ audits, summary: cancellationDashboardSummary(audits) });
+      const audits = dashboardCancellationAudits(await storage.getAllReservationCancellationAudits());
+      res.json({
+        windowDays: dashboardCancellationWindowDays,
+        audits,
+        summary: cancellationDashboardSummary(audits),
+      });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to load dashboard cancellations", message: err.message });
     }
@@ -11630,7 +11646,7 @@ export async function registerRoutes(
 
   app.post("/api/dashboard/cancellations/scan", async (req, res) => {
     try {
-      const range = String(req.body?.range ?? "365");
+      const range = String(req.body?.range ?? "30");
       const map = await storage.getGuestyPropertyMap();
       const propertyIds = Array.from(new Set(
         map
@@ -11656,8 +11672,9 @@ export async function registerRoutes(
         }
       }
 
-      const audits = await storage.getAllReservationCancellationAudits();
+      const audits = dashboardCancellationAudits(await storage.getAllReservationCancellationAudits());
       res.json({
+        windowDays: dashboardCancellationWindowDays,
         scannedProperties: results.length,
         saved: results.reduce((sum, row) => sum + row.saved, 0),
         failed: results.filter((row) => row.error && !row.skipped).length,

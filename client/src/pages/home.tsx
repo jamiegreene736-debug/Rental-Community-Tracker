@@ -169,6 +169,7 @@ type QueueJobEventPayload = {
 };
 
 type DashboardCancellationResponse = {
+  windowDays: number;
   audits: ReservationCancellationAudit[];
   summary: {
     total: number;
@@ -1047,9 +1048,10 @@ export default function Home() {
     exposure: 0,
     lastSyncedAt: null,
   };
+  const cancellationWindowDays = cancellationData?.windowDays ?? 30;
 
   const cancellationScanMutation = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/dashboard/cancellations/scan", { range: "365" }).then((r) => r.json()),
+    mutationFn: () => apiRequest("POST", "/api/dashboard/cancellations/scan", { range: "30" }).then((r) => r.json()),
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/cancellations"] });
       toast({
@@ -1623,7 +1625,7 @@ export default function Home() {
               >
                 <div className="flex items-center gap-2 mb-1">
                   <Ban className={`h-4 w-4 ${cancellationSummary.reviewNeeded > 0 ? "text-red-600" : "text-muted-foreground"}`} />
-                  <span className="text-xs text-muted-foreground font-medium">Cancelled bookings</span>
+                  <span className="text-xs text-muted-foreground font-medium">Cancelled bookings, past {cancellationWindowDays} days</span>
                 </div>
                 <p className="text-2xl font-bold" data-testid="text-cancelled-bookings">
                   {cancellationsLoading ? "..." : cancellationSummary.total}
@@ -1637,13 +1639,13 @@ export default function Home() {
             <DialogContent className="max-w-6xl">
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2">
-                  <Ban className="h-4 w-4" /> Cancelled bookings
+                  <Ban className="h-4 w-4" /> Cancelled bookings, past {cancellationWindowDays} days
                 </DialogTitle>
               </DialogHeader>
               <div className="space-y-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
                   <div className="rounded border bg-muted/20 px-3 py-2.5">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Total cancelled</p>
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Total cancelled, past {cancellationWindowDays} days</p>
                     <p className="mt-1 text-2xl font-semibold">{cancellationSummary.total}</p>
                   </div>
                   <div className="rounded border bg-muted/20 px-3 py-2.5">
@@ -1668,7 +1670,7 @@ export default function Home() {
                   <p className="text-xs text-muted-foreground">
                     {cancellationSummary.lastSyncedAt
                       ? `Last Guesty sync ${formatShortDateTime(cancellationSummary.lastSyncedAt)}`
-                      : "No cancellation audit sync has run yet."}
+                      : `No cancellation audit sync has run for the past ${cancellationWindowDays} days yet.`}
                   </p>
                   <Button
                     type="button"
@@ -1691,8 +1693,8 @@ export default function Home() {
                 ) : cancellationRows.length === 0 ? (
                   <div className="rounded border py-8 text-center">
                     <Ban className="mx-auto mb-2 h-6 w-6 opacity-30" />
-                    <p className="font-medium">No cancelled bookings found</p>
-                    <p className="text-sm text-muted-foreground">Refresh from Guesty to populate the audit table for linked listings.</p>
+                    <p className="font-medium">No cancelled bookings found in the past {cancellationWindowDays} days</p>
+                    <p className="text-sm text-muted-foreground">Refresh from Guesty to populate the rolling {cancellationWindowDays}-day audit table for linked listings.</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.2fr_.9fr]">
