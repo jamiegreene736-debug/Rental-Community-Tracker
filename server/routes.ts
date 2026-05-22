@@ -5269,9 +5269,10 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/dashboard/revenue-week", async (_req, res) => {
+  const dashboardRevenue30DayHandler = async (_req: any, res: any) => {
     const now = new Date();
-    const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const windowDays = 30;
+    const start = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
     const limit = 100;
     const maxPages = 20;
 
@@ -5314,7 +5315,16 @@ export async function registerRoutes(
       return 0;
     };
 
-    // Count "past 7 days" by the booking/confirmation timestamp when
+    const reservationNights = (reservation: any): number => {
+      const explicit = asNum(reservation?.nightsCount ?? reservation?.nights);
+      if (explicit > 0) return Math.round(explicit);
+      const checkIn = reservation?.checkIn ? new Date(String(reservation.checkIn)) : null;
+      const checkOut = reservation?.checkOut ? new Date(String(reservation.checkOut)) : null;
+      if (!checkIn || !checkOut || Number.isNaN(checkIn.getTime()) || Number.isNaN(checkOut.getTime())) return 0;
+      return Math.max(0, Math.round((checkOut.getTime() - checkIn.getTime()) / 86400000));
+    };
+
+    // Count the rolling dashboard window by the booking/confirmation timestamp when
     // Guesty provides one, falling back to createdAt for older payloads.
     const bookingActivityAt = (reservation: any): Date | null => {
       const raw =
@@ -5333,7 +5343,7 @@ export async function registerRoutes(
     };
 
     try {
-      const fields = encodeURIComponent("_id status createdAt confirmedAt bookedAt reservationDate checkIn checkOut listing listingId money guest source integration confirmationCode");
+      const fields = encodeURIComponent("_id status createdAt confirmedAt bookedAt reservationDate checkIn checkOut nightsCount listing listingId money guest source integration confirmationCode");
       const filters = encodeURIComponent(JSON.stringify([
         { field: "createdAt", operator: "$gte", value: start.toISOString() },
       ]));
@@ -5371,6 +5381,11 @@ export async function registerRoutes(
 
       let revenue = 0;
       let bookingCount = 0;
+      const listingRevenue = new Map<string, {
+        listingName: string;
+        revenue: number;
+        bookingCount: number;
+      }>();
       const bookings: Array<{
         id: string;
         guestName: string;
@@ -5381,6 +5396,7 @@ export async function registerRoutes(
         bookedAt: string;
         checkIn: string | null;
         checkOut: string | null;
+        nights: number;
         amount: number;
       }> = [];
 
@@ -5399,32 +5415,60 @@ export async function registerRoutes(
           guest?.lastName ?? guest?.last_name,
         ].filter(Boolean).join(" ").trim();
         const listing = reservation?.listing ?? {};
+        const listingKey = String(reservation?.listingId ?? listing?._id ?? listing?.id ?? listing?.nickname ?? listing?.title ?? "Listing");
+        const listingName = String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing");
+        const existingListing = listingRevenue.get(listingKey) ?? {
+          listingName,
+          revenue: 0,
+          bookingCount: 0,
+        };
+        existingListing.revenue += amount;
+        existingListing.bookingCount += 1;
+        listingRevenue.set(listingKey, existingListing);
         bookings.push({
           id: String(reservation?._id ?? reservation?.id ?? ""),
           guestName: guestName || String(guest?.fullName ?? guest?.full_name ?? guest?.name ?? "Guest"),
-          listingName: String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing"),
+          listingName,
           confirmationCode: reservation?.confirmationCode ? String(reservation.confirmationCode) : null,
           source: String(reservation?.source ?? reservation?.integration?.platform ?? "Guesty"),
           status: String(reservation?.status ?? ""),
           bookedAt: madeAt.toISOString(),
           checkIn: reservation?.checkIn ? String(reservation.checkIn) : null,
           checkOut: reservation?.checkOut ? String(reservation.checkOut) : null,
+          nights: reservationNights(reservation),
           amount,
         });
       }
 
+      const sortedBookings = bookings.sort((a, b) => b.bookedAt.localeCompare(a.bookedAt));
+      const largestBooking = bookings
+        .slice()
+        .sort((a, b) => (b.nights - a.nights) || (b.amount - a.amount))[0] ?? null;
+      const highestGrossingBooking = bookings
+        .slice()
+        .sort((a, b) => b.amount - a.amount)[0] ?? null;
+      const highestListingEarner = Array.from(listingRevenue.values())
+        .sort((a, b) => b.revenue - a.revenue)[0] ?? null;
+
       res.json({
+        windowDays,
         revenue,
         bookingCount,
-        bookings: bookings.sort((a, b) => b.bookedAt.localeCompare(a.bookedAt)),
+        bookings: sortedBookings,
+        largestBooking,
+        highestGrossingBooking,
+        highestListingEarner,
         startDate: start.toISOString(),
         endDate: now.toISOString(),
-        windowLabel: "Rolling past 7 days",
+        windowLabel: `Rolling past ${windowDays} days`,
       });
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to fetch weekly revenue", message: err.message });
+      res.status(500).json({ error: "Failed to fetch 30-day revenue", message: err.message });
     }
-  });
+  };
+
+  app.get("/api/dashboard/revenue-30-days", dashboardRevenue30DayHandler);
+  app.get("/api/dashboard/revenue-week", dashboardRevenue30DayHandler);
 
   app.post("/api/guesty-token", async (_req, res) => {
     try {

@@ -917,7 +917,6 @@ export default function Home() {
   const propertyCountBreakdown = importedDraftCount
     ? `${corePropertyCount} core + ${importedDraftCount} imported/draft`
     : `${corePropertyCount} core`;
-  const multiUnitCount = dashboardRows.filter((p) => p.multiUnit).length;
   const avgBedrooms = dashboardRowCount
     ? Math.round((dashboardRows.reduce((s, p) => s + p.bedrooms, 0) / dashboardRowCount) * 10) / 10
     : 0;
@@ -969,27 +968,37 @@ export default function Home() {
     refetchOnWindowFocus: false,
   });
 
-  type WeeklyRevenue = {
+  type RevenueBookingSummary = {
+    id: string;
+    guestName: string;
+    listingName: string;
+    confirmationCode: string | null;
+    source: string;
+    status: string;
+    bookedAt: string;
+    checkIn: string | null;
+    checkOut: string | null;
+    nights: number;
+    amount: number;
+  };
+  type DashboardRevenueSummary = {
+    windowDays: number;
     revenue: number;
     bookingCount: number;
-    bookings: Array<{
-      id: string;
-      guestName: string;
+    bookings: RevenueBookingSummary[];
+    largestBooking: RevenueBookingSummary | null;
+    highestGrossingBooking: RevenueBookingSummary | null;
+    highestListingEarner: {
       listingName: string;
-      confirmationCode: string | null;
-      source: string;
-      status: string;
-      bookedAt: string;
-      checkIn: string | null;
-      checkOut: string | null;
-      amount: number;
-    }>;
+      revenue: number;
+      bookingCount: number;
+    } | null;
     startDate: string;
     endDate: string;
     windowLabel?: string;
   };
-  const { data: weeklyRevenue, isLoading: weeklyRevenueLoading } = useQuery<WeeklyRevenue>({
-    queryKey: ["/api/dashboard/revenue-week"],
+  const { data: revenueSummary, isLoading: revenueSummaryLoading } = useQuery<DashboardRevenueSummary>({
+    queryKey: ["/api/dashboard/revenue-30-days"],
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
@@ -1525,19 +1534,49 @@ export default function Home() {
             <p className="text-2xl font-bold" data-testid="text-total-properties">{dashboardRowCount}</p>
             <p className="mt-1 text-xs text-muted-foreground">{propertyCountBreakdown}</p>
           </Card>
-          <Card className="p-4">
-            <div className="flex items-center gap-2 mb-1">
-              <Layers className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">Multi-Unit Combos</span>
-            </div>
-            <p className="text-2xl font-bold" data-testid="text-multi-unit-count">{multiUnitCount}</p>
-          </Card>
-          <Card className="p-4">
+          <Card className="p-4 sm:col-span-2 lg:col-span-2">
             <div className="flex items-center gap-2 mb-1">
               <DollarSign className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">Avg Low Price/Night</span>
+              <span className="text-xs text-muted-foreground font-medium">Avg Low Price/Night + 30-day booking stats</span>
             </div>
             <p className="text-2xl font-bold" data-testid="text-avg-price">${avgLow.toLocaleString()}</p>
+            <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
+              <div className="min-w-0 border-t pt-2">
+                <p className="font-medium text-muted-foreground">Largest booking</p>
+                <p className="truncate font-semibold">
+                  {revenueSummaryLoading
+                    ? "..."
+                    : revenueSummary?.largestBooking
+                      ? `${revenueSummary.largestBooking.guestName} · ${revenueSummary.largestBooking.nights || 0} nights`
+                      : "No bookings"}
+                </p>
+              </div>
+              <div className="min-w-0 border-t pt-2">
+                <p className="font-medium text-muted-foreground">Highest grossing</p>
+                <p className="truncate font-semibold">
+                  {revenueSummaryLoading
+                    ? "..."
+                    : revenueSummary?.highestGrossingBooking
+                      ? `${formatCurrency(revenueSummary.highestGrossingBooking.amount)} · ${revenueSummary.highestGrossingBooking.guestName}`
+                      : "No bookings"}
+                </p>
+              </div>
+              <div className="min-w-0 border-t pt-2">
+                <p className="font-medium text-muted-foreground">Top listing earner</p>
+                <p className="truncate font-semibold">
+                  {revenueSummaryLoading
+                    ? "..."
+                    : revenueSummary?.highestListingEarner
+                      ? revenueSummary.highestListingEarner.listingName
+                      : "No listing revenue"}
+                </p>
+                {revenueSummary?.highestListingEarner && (
+                  <p className="truncate text-[11px] text-muted-foreground">
+                    {formatCurrency(revenueSummary.highestListingEarner.revenue)}
+                  </p>
+                )}
+              </div>
+            </div>
           </Card>
           <Dialog>
             <DialogTrigger asChild>
@@ -1547,34 +1586,34 @@ export default function Home() {
               >
                 <div className="flex items-center gap-2 mb-1">
                   <TrendingUp className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-xs text-muted-foreground font-medium">Revenue, past 7 days</span>
+                  <span className="text-xs text-muted-foreground font-medium">Revenue, past 30 days</span>
                 </div>
                 <p className="text-2xl font-bold" data-testid="text-weekly-revenue">
-                  {weeklyRevenueLoading ? "..." : formatCurrency(weeklyRevenue?.revenue ?? 0)}
+                  {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue ?? 0)}
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Rolling 7-day booking window
-                  {weeklyRevenue ? ` · ${weeklyRevenue.bookingCount} booking${weeklyRevenue.bookingCount === 1 ? "" : "s"}` : ""}
+                  Rolling 30-day booking window
+                  {revenueSummary ? ` · ${revenueSummary.bookingCount} booking${revenueSummary.bookingCount === 1 ? "" : "s"}` : ""}
                 </p>
               </button>
             </DialogTrigger>
             <DialogContent className="max-w-4xl">
               <DialogHeader>
-                <DialogTitle>Revenue bookings, past 7 days</DialogTitle>
+                <DialogTitle>Revenue bookings, past 30 days</DialogTitle>
               </DialogHeader>
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
                   <span className="text-muted-foreground">
-                    {weeklyRevenue?.windowLabel ?? "Rolling past 7 days"}
-                    {weeklyRevenue ? ` · ${formatShortDate(weeklyRevenue.startDate)} to ${formatShortDate(weeklyRevenue.endDate)}` : ""}
+                    {revenueSummary?.windowLabel ?? "Rolling past 30 days"}
+                    {revenueSummary ? ` · ${formatShortDate(revenueSummary.startDate)} to ${formatShortDate(revenueSummary.endDate)}` : ""}
                   </span>
                   <span className="font-semibold">
-                    {formatCurrency(weeklyRevenue?.revenue ?? 0)} from {weeklyRevenue?.bookingCount ?? 0} booking{(weeklyRevenue?.bookingCount ?? 0) === 1 ? "" : "s"}
+                    {formatCurrency(revenueSummary?.revenue ?? 0)} from {revenueSummary?.bookingCount ?? 0} booking{(revenueSummary?.bookingCount ?? 0) === 1 ? "" : "s"}
                   </span>
                 </div>
-                {weeklyRevenueLoading ? (
+                {revenueSummaryLoading ? (
                   <p className="text-sm text-muted-foreground">Loading booking details...</p>
-                ) : weeklyRevenue?.bookings?.length ? (
+                ) : revenueSummary?.bookings?.length ? (
                   <div className="overflow-x-auto rounded-md border">
                     <Table>
                       <TableHeader>
@@ -1589,7 +1628,7 @@ export default function Home() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {weeklyRevenue.bookings.map((booking) => (
+                        {revenueSummary.bookings.map((booking) => (
                           <TableRow key={booking.id || `${booking.guestName}-${booking.bookedAt}`}>
                             <TableCell className="whitespace-nowrap">{formatShortDateTime(booking.bookedAt)}</TableCell>
                             <TableCell>
@@ -1611,7 +1650,7 @@ export default function Home() {
                     </Table>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground">No revenue bookings found in this rolling 7-day window.</p>
+                  <p className="text-sm text-muted-foreground">No revenue bookings found in this rolling 30-day window.</p>
                 )}
               </div>
             </DialogContent>
