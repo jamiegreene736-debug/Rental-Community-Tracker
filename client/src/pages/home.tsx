@@ -989,6 +989,7 @@ export default function Home() {
     largestBooking: RevenueBookingSummary | null;
     highestGrossingBooking: RevenueBookingSummary | null;
     highestListingEarner: {
+      listingId: string;
       listingName: string;
       revenue: number;
       bookingCount: number;
@@ -1008,6 +1009,13 @@ export default function Home() {
     for (const property of allProperties) map.set(property.id, property.name);
     return map;
   }, [allProperties]);
+  const highestListingEarnerName = useMemo(() => {
+    const listingId = revenueSummary?.highestListingEarner?.listingId;
+    if (!listingId) return revenueSummary?.highestListingEarner?.listingName ?? null;
+    const mapping = guestyMapData?.find((row) => row.guestyListingId === listingId);
+    if (!mapping) return revenueSummary?.highestListingEarner?.listingName ?? null;
+    return propertyNameById.get(mapping.propertyId) ?? revenueSummary?.highestListingEarner?.listingName ?? null;
+  }, [guestyMapData, propertyNameById, revenueSummary?.highestListingEarner]);
 
   const {
     data: cancellationData,
@@ -1566,8 +1574,8 @@ export default function Home() {
                 <p className="truncate font-semibold">
                   {revenueSummaryLoading
                     ? "..."
-                    : revenueSummary?.highestListingEarner
-                      ? revenueSummary.highestListingEarner.listingName
+                    : highestListingEarnerName
+                      ? highestListingEarnerName
                       : "No listing revenue"}
                 </p>
                 {revenueSummary?.highestListingEarner && (

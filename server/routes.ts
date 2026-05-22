@@ -5382,6 +5382,7 @@ export async function registerRoutes(
       let revenue = 0;
       let bookingCount = 0;
       const listingRevenue = new Map<string, {
+        listingId: string;
         listingName: string;
         revenue: number;
         bookingCount: number;
@@ -5418,6 +5419,7 @@ export async function registerRoutes(
         const listingKey = String(reservation?.listingId ?? listing?._id ?? listing?.id ?? listing?.nickname ?? listing?.title ?? "Listing");
         const listingName = String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing");
         const existingListing = listingRevenue.get(listingKey) ?? {
+          listingId: listingKey,
           listingName,
           revenue: 0,
           bookingCount: 0,
