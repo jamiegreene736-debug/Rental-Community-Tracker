@@ -11787,18 +11787,12 @@ export async function registerRoutes(
   app.get("/api/bookings/listing/:listingId", async (req, res) => {
     try {
       const listingId = req.params.listingId;
-      const propertyId = parseInt((req.query.propertyId as string) ?? "", 10);
+      const propertyIdRaw = parseInt((req.query.propertyId as string) ?? "", 10);
+      const propertyId = Number.isFinite(propertyIdRaw) && propertyIdRaw > 0 ? propertyIdRaw : null;
       const includePast = req.query.includePast === "true";
       const limit = Math.min(parseInt((req.query.limit as string) ?? "100", 10) || 100, 200);
 
-      if (!propertyId) {
-        return res.status(400).json({ error: "propertyId query param required" });
-      }
-
-      const unitSlots = getPropertyUnits(propertyId);
-      if (unitSlots.length === 0) {
-        return res.status(400).json({ error: `No unit config found for property ${propertyId}` });
-      }
+      const unitSlots = propertyId ? getPropertyUnits(propertyId) : [];
 
       const today = new Date().toISOString().slice(0, 10);
       const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState");
@@ -11843,7 +11837,7 @@ export async function registerRoutes(
       // For each reservation build per-slot attachment info
       const enriched = await Promise.all(
         reservations.map(async (r) => {
-          const attached = r._id ? await storage.getBuyInsByReservation(r._id) : [];
+          const attached = unitSlots.length > 0 && r._id ? await storage.getBuyInsByReservation(r._id) : [];
           const slots = unitSlots.map((slot) => {
             const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
             return { ...slot, buyIn };
@@ -11854,12 +11848,14 @@ export async function registerRoutes(
             slots,
             slotsFilled: filled,
             slotsTotal: slots.length,
-            fullyLinked: filled === slots.length,
+            fullyLinked: slots.length > 0 && filled === slots.length,
           };
         }),
       );
 
-      const manualRows = await storage.getManualReservations({ propertyId, includePast });
+      const manualRows = propertyId && unitSlots.length > 0
+        ? await storage.getManualReservations({ propertyId, includePast })
+        : [];
       const manualEnriched = await Promise.all(
         manualRows.map(async (row) => {
           const reservationId = `manual:${row.id}`;
@@ -11913,7 +11909,7 @@ export async function registerRoutes(
             slots,
             slotsFilled: filled,
             slotsTotal: slots.length,
-            fullyLinked: filled === slots.length,
+            fullyLinked: slots.length > 0 && filled === slots.length,
           };
         }),
       );
@@ -11928,6 +11924,7 @@ export async function registerRoutes(
         total: allReservations.length,
         unitSlots,
         propertyId,
+        buyInConfigured: unitSlots.length > 0,
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch bookings", message: err.message });

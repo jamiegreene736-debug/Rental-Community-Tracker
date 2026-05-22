@@ -2305,13 +2305,15 @@ export default function Bookings() {
   } = useQuery<{ reservations: GuestyReservation[]; total: number; unitSlots: UnitConfig[] }>({
     queryKey: ["/api/bookings/listing", selectedListingId, selectedPropertyId, { includePast }],
     queryFn: () => {
-      if (!selectedListingId || !selectedPropertyId || !selectedHasBuyInConfig) {
+      if (!selectedListingId) {
         return Promise.resolve({ reservations: [], total: 0, unitSlots: [] });
       }
-      const url = `/api/bookings/listing/${encodeURIComponent(selectedListingId)}?propertyId=${selectedPropertyId}&includePast=${includePast}`;
+      const params = new URLSearchParams({ includePast: String(includePast) });
+      if (selectedPropertyId) params.set("propertyId", String(selectedPropertyId));
+      const url = `/api/bookings/listing/${encodeURIComponent(selectedListingId)}?${params.toString()}`;
       return apiRequest("GET", url).then((r) => r.json());
     },
-    enabled: !!selectedListingId && !!selectedPropertyId && selectedHasBuyInConfig,
+    enabled: !!selectedListingId,
     refetchInterval: 120_000,
   });
 
@@ -2374,6 +2376,7 @@ export default function Bookings() {
 
   const rawReservations = isGlobalView ? globalReservations : (bookingsData?.reservations ?? []);
   const unitSlots = isGlobalView ? [] : (bookingsData?.unitSlots ?? []);
+  const hasBuyInSlots = unitSlots.length > 0;
 
   const {
     data: cancellationsData,
@@ -3883,7 +3886,7 @@ export default function Bookings() {
     : "";
   const activeGuestyCount = activeGuestyListings.length || sortedPropertyMap.length;
   const globalLabel = `${activeGuestyCount} active Guesty ${activeGuestyCount === 1 ? "listing" : "listings"} · ${operationalPropertyMap.length} buy-in configured`;
-  const operationsDataEnabled = isGlobalView || selectedHasBuyInConfig;
+  const operationsDataEnabled = isGlobalView || !!selectedListingId;
   const refreshVisibleBookings = () => {
     if (isGlobalView) {
       void Promise.all(globalBookingQueries.map((query) => query.refetch()));
@@ -4028,10 +4031,10 @@ export default function Bookings() {
             <CardContent className="py-5">
               <p className="text-sm font-medium text-amber-950">
                 <AlertCircle className="h-4 w-4 inline mr-1.5" />
-                This Guesty listing is active but is not configured for buy-in tracking yet.
+                Guesty bookings load automatically for this listing.
               </p>
               <p className="text-sm text-amber-900/80 mt-1">
-                It now appears in the Operations dropdown, but reservations, manual reservations, and cheapest-buy-in tools need unit slots in the buy-in property configuration before they can run.
+                Buy-in unit slots are only needed when you want to attach buy-ins, run cheapest-buy-in searches, or add Operations-only manual reservations.
               </p>
             </CardContent>
           </Card>
@@ -4056,7 +4059,9 @@ export default function Bookings() {
                 <p className="text-xs text-muted-foreground">{isGlobalView ? "Bookings across properties" : "Bookings"}</p>
                 <p className="text-2xl font-semibold mt-1">{stats.total}</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  {stats.fully} fully linked · {stats.partial} partial
+                  {isGlobalView || hasBuyInSlots
+                    ? `${stats.fully} fully linked · ${stats.partial} partial`
+                    : "Pulled directly from Guesty"}
                 </p>
               </CardContent>
             </Card>
@@ -4131,7 +4136,9 @@ export default function Bookings() {
                       >
                         {arrivalStats.nextArrival.reservation.fullyLinked
                           ? "Bought in"
-                          : `${arrivalStats.nextArrival.reservation.slotsFilled}/${arrivalStats.nextArrival.reservation.slotsTotal} bought in`}
+                          : arrivalStats.nextArrival.reservation.slotsTotal > 0
+                            ? `${arrivalStats.nextArrival.reservation.slotsFilled}/${arrivalStats.nextArrival.reservation.slotsTotal} bought in`
+                            : "Guesty booking"}
                       </Badge>
                     </>
                   ) : (
@@ -4516,7 +4523,7 @@ export default function Bookings() {
           </Card>
         )}
 
-        {selectedPropertyId && selectedHasBuyInConfig && !bookingsError && (
+        {!isGlobalView && !bookingsError && (
           <Tabs defaultValue="bookings" className="space-y-4">
             <TabsList className="flex h-auto w-full max-w-full justify-start overflow-x-auto p-1 sm:w-auto" data-testid="tabs-operations">
               <TabsTrigger value="bookings" data-testid="tab-operations-bookings">
@@ -4691,6 +4698,10 @@ export default function Bookings() {
                             <Badge className="bg-amber-500 text-white text-[10px]">
                               {r.slotsFilled} / {r.slotsTotal} filled
                             </Badge>
+                          ) : r.slotsTotal === 0 ? (
+                            <Badge variant="outline" className="text-[10px]">
+                              Guesty booking
+                            </Badge>
                           ) : (
                             <Badge variant="outline" className="text-[10px]">
                               0 / {r.slotsTotal} filled
@@ -4703,6 +4714,11 @@ export default function Bookings() {
                     {/* Expanded: per-unit-slot detail */}
                     {isOpen && (
                       <div className="border-t px-4 py-3 bg-muted/20 space-y-2">
+                        {r.slotsTotal === 0 && (
+                          <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                            This reservation came from Guesty. Configure buy-in unit slots only if you need unit-level buy-in tracking for this property.
+                          </div>
+                        )}
                         {selectedPropertyId && !manualReservation && (
                           <GroundFloorRequirementNotice reservation={r} propertyId={selectedPropertyId} />
                         )}
