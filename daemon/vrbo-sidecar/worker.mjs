@@ -1312,6 +1312,39 @@ async function showVrboManualVerificationBanner(targetPage, label) {
   if (!targetPage || targetPage.isClosed?.()) return;
   await targetPage
     .evaluate((safeLabel) => {
+      const styleId = "vrbo-sidecar-manual-verification-style";
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement("style");
+        style.id = styleId;
+        style.textContent = `
+          @keyframes vrboSidecarCaptchaPulse {
+            0%, 100% { opacity: 1; box-shadow: inset 0 0 0 12px #facc15, 0 0 42px rgba(250,204,21,.95); }
+            50% { opacity: .34; box-shadow: inset 0 0 0 12px #fde047, 0 0 16px rgba(250,204,21,.55); }
+          }
+          @keyframes vrboSidecarBannerPulse {
+            0%, 100% { background: #facc15; color: #111827; }
+            50% { background: #fff7ed; color: #7c2d12; }
+          }
+        `;
+        document.documentElement.appendChild(style);
+      }
+
+      const frameId = "vrbo-sidecar-manual-verification-frame";
+      let frame = document.getElementById(frameId);
+      if (!frame) {
+        frame = document.createElement("div");
+        frame.id = frameId;
+        frame.style.cssText = [
+          "position:fixed",
+          "inset:0",
+          "z-index:2147483646",
+          "pointer-events:none",
+          "border-radius:10px",
+          "animation:vrboSidecarCaptchaPulse .82s ease-in-out infinite",
+        ].join(";");
+        document.documentElement.appendChild(frame);
+      }
+
       const id = "vrbo-sidecar-manual-verification-banner";
       let banner = document.getElementById(id);
       if (!banner) {
@@ -1323,19 +1356,23 @@ async function showVrboManualVerificationBanner(targetPage, label) {
           "left:0",
           "right:0",
           "z-index:2147483647",
-          "background:#fff7ed",
-          "color:#7c2d12",
-          "border-bottom:1px solid #fed7aa",
-          "box-shadow:0 8px 30px rgba(15,23,42,.18)",
-          "font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
-          "padding:14px 18px",
-          "text-align:left",
+          "pointer-events:none",
+          "background:#facc15",
+          "color:#111827",
+          "border-bottom:2px solid #92400e",
+          "box-shadow:0 10px 34px rgba(15,23,42,.28)",
+          "font:900 16px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+          "letter-spacing:.02em",
+          "padding:13px 18px",
+          "text-align:center",
+          "text-transform:uppercase",
+          "animation:vrboSidecarBannerPulse .82s ease-in-out infinite",
         ].join(";");
         document.documentElement.appendChild(banner);
       }
       banner.textContent =
-        `VRBO manual verification needed for ${safeLabel}. ` +
-        "Complete the check in this Chrome window. The sidecar will resume automatically after the page clears.";
+        `VRBO CAPTCHA NEEDS MANUAL SOLVE - ${safeLabel} - Complete the check in this Chrome window`;
+      document.title = "VRBO CAPTCHA ACTION NEEDED";
     }, label)
     .catch(() => {});
 }
