@@ -7733,14 +7733,19 @@ export async function registerRoutes(
       norm(communitySearchName) !== norm(community)
     ) {
       // Some Guesty titles are intentionally broad ("Poipu Kai - 6BR ..."),
-      // while the configured buy-in target is a specific sub-resort. Use the
-      // configured target so the sidecar searches Regency instead of accepting
-      // any Poipu Kai-area complex such as Aston, Kahala, or Villas. Also do
-      // this when the Guesty title lead is marketing copy ("Gorgeous 5 br...")
-      // instead of a real resort name; otherwise every valid target card is
+      // while the configured buy-in target may be a more precise resort
+      // search label. Use the configured target when the title lead is just
+      // the community name or marketing copy; otherwise valid target cards are
       // filtered out before curation for not mentioning that marketing phrase.
       console.log(`[find-buy-in] using configured resort target "${communitySearchName}" instead of listing title lead "${resortName}"`);
       resortName = communitySearchName;
+    }
+    if (community === "Poipu Kai") {
+      const poipuKaiTarget = communitySearchName ?? "Poipu Kai";
+      if (resortName && norm(resortName) !== norm(poipuKaiTarget)) {
+        console.log(`[find-buy-in] broadening Poipu Kai target from "${resortName}" to "${poipuKaiTarget}" so sub-communities inside Poipu Kai can qualify`);
+      }
+      resortName = poipuKaiTarget;
     }
     const resortTokens = meaningfulResortTokens(resortName);
     const normalizedResortName = resortName ? norm(resortName) : "";
@@ -7777,7 +7782,7 @@ export async function registerRoutes(
     const mentionsKnownNonPoipuKaiComplex = (haystack: string): boolean => {
       if (normalizedResortName !== "poipu kai") return false;
       const n = norm(haystack);
-      return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu)\b/.test(n);
+      return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers?|jobs?|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
     };
     const mentionsKnownNonKahaLaniComplex = (haystack: string): boolean => {
       if (!targetIsKahaLani) return false;
@@ -7914,12 +7919,9 @@ export async function registerRoutes(
       // candidates (cap configurable via TOP_AIRBNB_FOR_LENS).
       photoMatches?: Array<{ url: string; title: string; domain: string }>;
       // For PM candidates discovered via reverse-image match against
-      // an Airbnb listing: track the anchor for traceability + price
-      // attribution. The PM URL inherits the Airbnb anchor's price
-      // because (a) Airbnb says it's available for these dates and
-      // (b) the same physical unit on the PM site typically prices
-      // similarly. The buy-in note carries a disclosure that the PM
-      // rate may vary slightly (Airbnb adds service fee, PMs don't).
+      // an Airbnb listing: track the anchor for traceability only.
+      // The PM URL must earn its own verified date-specific quote before
+      // it can enter cheapest/auto-fill; never inherit the Airbnb price.
       airbnbAnchorUrl?: string;
       airbnbAnchorPrice?: number;
       // Verification state. The cheapest-N panel is GATED on
@@ -9474,16 +9476,11 @@ export async function registerRoutes(
         return [];
       }
     }
-    // Widen the Airbnb→Lens cap. The Airbnb-anchored PM match is the
-    // CANONICAL priced path (per operator direction): Airbnb gives us
-    // verified-available + priced inventory, Google Lens bridges to
-    // the bookable PM URL for the same physical unit. Operator
-    // explicitly opted for "maximum candidate surface area" over
-    // tighter cost control — cap at 30 surfaces every priced Airbnb
-    // listing in a typical resort window (the engine itself rarely
-    // returns more), so we never miss an anchor that might have a
-    // bookable PM. Cost: ~$0.01/lens call × up to 30 = $0.30/cold-
-    // cache find-buy-in; cached 5min so re-runs free.
+    // Widen the Airbnb→Lens cap. Airbnb gives us verified-available
+    // inventory, and Google Lens can find the PM/direct page for that
+    // same physical unit. The Lens match is discovery only; the PM page
+    // still has to verify bedroom count and a date-specific quote before
+    // it can be auto-filled. Cap at 30 so we do not miss likely PM pages.
     const TOP_AIRBNB_FOR_LENS = 30;
     const topAirbnb = airbnb
       .filter((c) => c.image && c.nightlyPrice > 0)
@@ -9506,16 +9503,19 @@ export async function registerRoutes(
       photoMatches: photoMatchesByUrl.get(c.url) ?? [],
     }));
 
-    // Promote photo-match URLs into the PM source as PRICED candidates.
+    // Promote photo-match URLs into the PM source as verification targets.
     //
-    // Each match becomes a bookable PM Candidate that inherits its
-    // Airbnb anchor's price + bedrooms + image. Reasoning:
+    // Each match becomes an unpriced PM Candidate. Reasoning:
     //   - Photos match → it's the same physical unit
     //   - Airbnb shows the unit as available + priced for these dates
-    //   - PM URL is bookable (no Airbnb TOS sublet issue)
-    //   - PM rate ≈ Airbnb rate (typically slightly less; PMs don't
-    //     add Airbnb's service fee). We surface the Airbnb price as
-    //     the proxy and the buy-in note discloses that PM may differ.
+    //   - PM URL may be bookable, but that must be proven separately.
+    //
+    // Do NOT inherit the Airbnb price/bedrooms onto the PM URL. That
+    // produced fake "Direct PM" rows when Lens found a Suite Paradise
+    // collection page or a neighboring 2BR unit: the UI displayed the
+    // Airbnb anchor's 3BR price as if the PM page had quoted it. The
+    // sidecar detail verifier below is the only step allowed to promote
+    // a photo-match PM URL into a priced/verified candidate.
     //
     // Two filters keep noise out:
     //   a. mentionsResort(url + title) — drops matches at neighboring
@@ -9577,9 +9577,8 @@ export async function registerRoutes(
         // Soft resort-token filter (see `mentionsResortLoose` for the
         // why). Without this, Lens surfaces visually-similar interiors
         // at totally different resorts (Kona / Mauna Lani / Big Island
-        // hits under a "Poipu Kai" anchor) and they all inherit the
-        // anchor's price + dates, creating bogus "available" rows that
-        // dead-end when the operator clicks through.
+        // hits under a "Poipu Kai" anchor) and they otherwise become
+        // bogus direct-booking rows that dead-end when clicked.
         const hay = `${m.url} ${m.title} ${m.domain}`;
         const photoProofCanCarryTarget =
           looseResortPhotoProof
@@ -9603,18 +9602,11 @@ export async function registerRoutes(
           // page lands on the right window when it does support it.
           url: withStayDates("pm", m.url),
           title: m.title || `Match on ${m.domain}`,
-          // Inherit price from the Airbnb anchor. This is what makes
-          // the Airbnb-anchored path a PRIMARY priced channel rather
-          // than an unpriced fallback.
-          nightlyPrice: anchor.nightlyPrice,
-          totalPrice: anchor.totalPrice,
+          nightlyPrice: 0,
+          totalPrice: 0,
           bedrooms: anchorBedrooms,
           image: anchor.image,
-          // Honest snippet: anchor confirmed available + priced; PM
-          // availability for these dates is NOT verified server-side
-          // (would cost $0.10–0.30 per row to drive the PM widget).
-          // Operator should click Open to confirm before recording.
-          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}). Airbnb confirmed available; PM availability not verified — verify before recording. Rate may differ slightly.`,
+          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}). Airbnb confirmed availability, but this PM URL still needs its own date-specific quote before it can be auto-filled.`,
           airbnbAnchorUrl: anchor.url,
           airbnbAnchorPrice: anchor.totalPrice,
         });
@@ -9733,12 +9725,15 @@ export async function registerRoutes(
         .map(([label, bucket]) => `${label} (${bucket.count}; e.g. ${bucket.examples.join(" | ")})`);
       return rows.join("; ");
     };
-    // Current operator rule: pricing comes from search-result pages only.
-    // Airbnb, Vrbo, Booking.com, and PM sites are not clicked through to
-    // listing-detail pages for availability/rate confirmation. Rows that
-    // don't already have a visible search-result price stay visible as
-    // skipped/unverified context, but never join the cheapest pool.
-    const sidecarVerifyPool: Candidate[] = [];
+    // PM/direct candidates need a same-page date-specific quote before
+    // they can be considered bookable. Google/SearchAPI/Lens can discover
+    // URLs, but only the PM page/API verifier can promote them to
+    // verified=yes with a real price for the requested stay.
+    const sidecarVerifyPool: Candidate[] = [
+      ...pm,
+      ...photoMatchPmCandidates,
+      ...pmSearchApiFinderCandidates,
+    ];
     for (const c of sidecarVerifyPool) {
       const key = c.url ? sidecarVerifyKey(c.url) : "";
       if (!c.url || c.verified || sidecarVerifySeen.has(key)) continue;
@@ -9791,15 +9786,21 @@ export async function registerRoutes(
                 continue;
               }
               sidecarBatchVerifiedUrls.add(c.url);
-              if (typeof r.bedrooms === "number" && Number.isFinite(r.bedrooms)) {
-                c.bedrooms = r.bedrooms;
+              const sidecarReportedBedrooms = typeof r.bedrooms === "number" && Number.isFinite(r.bedrooms)
+                ? r.bedrooms
+                : null;
+              if (sidecarReportedBedrooms !== null) {
+                c.bedrooms = sidecarReportedBedrooms;
               }
-              const sidecarBedroomSignal = candidateBedroomSignal(c);
-              if (r.available === "yes" && sidecarBedroomSignal !== null && sidecarBedroomSignal < bedrooms) {
-                c.verified = sidecarBedroomSignal === null ? "unclear" : "no";
-                c.verifiedReason = sidecarBedroomSignal === null
-                  ? `Sidecar found a rate but did not confirm this is a ${bedrooms}BR listing: ${r.reason}`
-                  : `Sidecar detail page identified ${sidecarBedroomSignal}BR, below requested ${bedrooms}BR: ${r.reason}`;
+              const pageBedroomSignal =
+                sidecarReportedBedrooms
+                ?? rawCandidateExplicitBedroomSignal(c)
+                ?? (c.airbnbAnchorUrl ? null : candidateBedroomSignal(c));
+              if (r.available === "yes" && (pageBedroomSignal === null || pageBedroomSignal < bedrooms)) {
+                c.verified = pageBedroomSignal === null ? "unclear" : "no";
+                c.verifiedReason = pageBedroomSignal === null
+                  ? `Sidecar found a rate but did not confirm this is a ${bedrooms}BR listing on the PM page: ${r.reason}`
+                  : `Sidecar detail page identified ${pageBedroomSignal}BR, below requested ${bedrooms}BR: ${r.reason}`;
                 c.verifiedNightlyPrice = null;
                 rememberSidecarVerifyReason(c, c.verifiedReason);
                 continue;
@@ -9923,6 +9924,7 @@ export async function registerRoutes(
     const comparisonEligible = (c: Candidate, opts: { allowAirbnb?: boolean } = {}): boolean => {
       if (c.source === "airbnb" && !opts.allowAirbnb) return false;
       if (!(c.totalPrice > 0 || c.nightlyPrice > 0)) return false;
+      if (c.source !== "airbnb" && c.verified !== "yes") return false;
       const isAirbnbFallback = c.source === "airbnb" && opts.allowAirbnb;
       const resortFits = comparisonResortFits(c);
       if (!resortFits) {
@@ -9987,18 +9989,17 @@ export async function registerRoutes(
     // PM — verified via the sidecar batch-verify pass above.
     const priced: Candidate[] = [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget]
       .filter((c) => c.nightlyPrice > 0)
+      .filter((c) => c.source === "airbnb" || c.verified === "yes")
       .filter((c) => !groundFloorOnly || c.groundFloorStatus === "confirmed")
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
     // ── Pre-verify top-N priced PM candidates ──────────────────────────────
     //
     // The Steve Kuykendall case (Jun 13-20 2026, 3BR Poipu Kai) surfaced
-    // a $10,670 sandydoor.com row marked "Same photos as Airbnb listing
-    // $10,670 (Luxury 4BR Penthouse)" — bedroom mismatch caught now by
-    // Fix #3, but the deeper problem is that PM photo-match candidates
-    // inherit the Airbnb anchor's price WITHOUT confirming the PM URL is
-    // actually bookable for those dates. The operator was about to record
-    // a buy-in for a unit that wasn't even available.
+    // direct/PM rows whose visible pages were either the wrong bedroom
+    // count or a resort collection page. The deeper rule is that PM
+    // discovery is not enough: a detail page/API must prove bedrooms,
+    // availability, and the requested stay price before auto-fill.
     //
     // Pre-verify a budget-capped slice of the cheapest PM candidates BEFORE
     // returning, so the cheapest panel can be hard-gated on verified=yes.
@@ -10024,9 +10025,7 @@ export async function registerRoutes(
     }
 
     // Re-sort priced after verification — verified-yes candidates may
-    // have had their nightlyPrice updated to the real PM rate (which
-    // typically differs from the inherited Airbnb-anchor rate by the
-    // service-fee delta).
+    // have had their nightlyPrice updated from the PM detail/API quote.
     priced.sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
     // ── Cheapest pool ──────────────────────────────────────────────────────
@@ -10580,7 +10579,7 @@ export async function registerRoutes(
     const normalizeText = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     const contextText = normalizeText(`${resortName} ${community} ${sourceTitle}`);
     const isPoipuKaiContext = /\bpoipu kai\b/.test(contextText);
-    const isRegencyPoipuKaiContext = /\bregency\b/.test(contextText) && /\bpoipu kai\b/.test(contextText);
+    const isRegencyPoipuKaiContext = community !== "Poipu Kai" && /\bregency\b/.test(contextText) && /\bpoipu kai\b/.test(contextText);
     const regencyPoipuKaiTextMatch = (haystack: string): boolean => {
       const n = normalizeText(haystack);
       return /\bregency\b/.test(n) && /\b(poipu kai|poipu|koloa|kauai)\b/.test(n);
@@ -10589,12 +10588,14 @@ export async function registerRoutes(
       const n = normalizeText(haystack);
       if (isRegencyPoipuKaiContext) return regencyPoipuKaiTextMatch(n);
       return /\bpoipu kai\b/.test(n)
-        || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n));
+        || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n))
+        || /\bvillas?\s+at\s+poipu\s+kai\b/.test(n)
+        || /\bpoipu\s+kai\s+villas?\b/.test(n);
     };
     const wrongPoipuKaiLocation = (haystack: string): boolean => {
       if (!isPoipuKaiContext) return false;
       const n = normalizeText(haystack);
-      if (/\b(banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers springboardhospitality|job|jobs|career|careers)\b/.test(n)) return true;
+      if (/\b(banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers springboardhospitality|job|jobs|career|careers|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie)\b/.test(n)) return true;
       if (isRegencyPoipuKaiContext && /\b(nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston)\b/.test(n)) return true;
       return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|kihei|wailea|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
     };
@@ -10812,11 +10813,11 @@ export async function registerRoutes(
       const normalizeDirectTargetText = (value: string): string =>
         value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
       const directTargetText = normalizeDirectTargetText(`${resortName} ${community} ${sourceTitle}`);
-      const directTargetIsRegencyPoipuKai = /\bregency\b/.test(directTargetText) && /\bpoipu kai\b/.test(directTargetText);
+      const directTargetIsRegencyPoipuKai = community !== "Poipu Kai" && /\bregency\b/.test(directTargetText) && /\bpoipu kai\b/.test(directTargetText);
       const directTargetIsPoipuKai = /\bpoipu kai\b/.test(directTargetText);
       const directMatchFitsTarget = (match: ReverseImageListingMatch): boolean => {
         const n = normalizeDirectTargetText(`${match.domain} ${match.title} ${match.url}`);
-        if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality)\b/.test(n)) {
+        if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(n)) {
           return false;
         }
         if (directTargetIsRegencyPoipuKai) {
@@ -10826,9 +10827,11 @@ export async function registerRoutes(
           return /\bregency\b/.test(n) && /\b(poipu kai|poipu|koloa|kauai)\b/.test(n);
         }
         if (directTargetIsPoipuKai) {
-          if (/\b(pili mai|kiahuna|makahuena|waikomo|banyan harbor|lihue|kalapaki)\b/.test(n)) return false;
+          if (/\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(n)) return false;
           return /\bpoipu kai\b/.test(n)
-            || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n));
+            || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n))
+            || /\bvillas?\s+at\s+poipu\s+kai\b/.test(n)
+            || /\bpoipu\s+kai\s+villas?\b/.test(n);
         }
         return true;
       };
@@ -12046,7 +12049,7 @@ export async function registerRoutes(
   };
 
   const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
-    "Poipu Kai": "Regency at Poipu Kai, Koloa, Kauai, Hawaii",
+    "Poipu Kai": "Poipu Kai Resort, Koloa, Kauai, Hawaii",
     "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
     "Keauhou": "Keauhou, Kailua-Kona, Big Island, Hawaii",
     "Princeville": "Princeville, Kauai, Hawaii",
@@ -12058,14 +12061,14 @@ export async function registerRoutes(
 
   const COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS: Record<string, { airbnb?: string; booking?: string; vrbo?: string; pm?: string }> = {
     // OTA autocomplete works better when it receives the resort area name the
-    // platform exposes in its destination picker. PM/direct discovery stays
-    // Regency-specific because the configured buy-in target is the Regency
-    // sub-resort within Poipu Kai.
+    // platform exposes in its destination picker. PM/direct discovery should
+    // also search the whole Poipu Kai community, not only Regency, because
+    // valid replacement inventory can sit in named Poipu Kai sub-communities.
     "Poipu Kai": {
       airbnb: "Poipu Kai Resort, Koloa, HI",
       booking: "Poipu Kai Resort, Koloa, HI",
       vrbo: "Poipu Kai",
-      pm: "Regency at Poipu Kai",
+      pm: "Poipu Kai",
     },
   };
 
@@ -12074,10 +12077,10 @@ export async function registerRoutes(
   // (name, city, state, streetAddress) tuple `fetchAmortizedNightlyByBR`
   // expects. The `searchName` field is the name passed to the engine's
   // token-match fallback when geocoding fails — it should be the
-  // operator-recognizable resort name, not the canonical complex name
-  // (so "Regency at Poipu Kai" beats the bare community key
-  // "Poipu Kai" for distinctness against "Poipu Kai Resort", "Poipu Kai
-  // Estates", etc.).
+  // operator-recognizable resort/community name, not marketing copy from a
+  // listing title. Poipu Kai intentionally uses the community-wide target so
+  // Regency, Villas at Poipu Kai, and other in-footprint sub-communities can
+  // qualify after bedroom/date/price verification.
   // Hand-curated bbox centers per `PROPERTY_UNIT_NEEDS` community key,
   // used by `/api/property/:id/refresh-market-rates` as the override
   // that skips Nominatim geocoding (see fetchAmortizedNightlyByBR's
@@ -12097,7 +12100,7 @@ export async function registerRoutes(
   // (also used in the SearchAPI `q=` parameter as additional context)
   // but is no longer the primary input to bbox computation.
   const COMMUNITY_LOCATION_BY_KEY: Record<string, { searchName: string; city: string; state: string; streetAddress?: string; lat: number; lng: number }> = {
-    "Poipu Kai":         { searchName: "Regency at Poipu Kai",        city: "Koloa",       state: "Hawaii", streetAddress: "1831 Poipu Rd",                lat: 21.8794, lng: -159.4609 },
+    "Poipu Kai":         { searchName: "Poipu Kai",                   city: "Koloa",       state: "Hawaii", streetAddress: "1831 Poipu Rd",                lat: 21.8794, lng: -159.4609 },
     "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd",               lat: 21.9678, lng: -159.7464 },
     "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr",             lat: 19.5493, lng: -155.9704 },
     "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd",               lat: 22.2218, lng: -159.4849 },

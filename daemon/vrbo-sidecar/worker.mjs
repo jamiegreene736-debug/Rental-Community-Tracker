@@ -4562,54 +4562,10 @@ async function extractPmSearchSeeds(targetPage, site, searchTerm, bedrooms, limi
             };
           }
         }
-        const nightlyMatch =
-          text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/|per|a\s+)?\s*(?:night|nt|nightly)/i) ||
-          text.match(/(?:from|starting(?:\s+at)?)\s*\$\s*([\d,]+(?:\.\d+)?)/i);
-        if (nightlyMatch) {
-          const nightly = parseAmount(nightlyMatch[1]);
-          if (nightly > 0) {
-            return {
-              nightlyPrice: Math.round(nightly),
-              totalPrice: Math.round(nightly * expectedNights),
-              priceIncludesTaxes: false,
-              priceIncludesFees: false,
-              priceBasis: "nightly_base",
-            };
-          }
-        }
-        const amounts = Array.from(text.matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g))
-          .map((m) => parseAmount(m[1]))
-          .filter((n) => n > 0)
-          .sort((a, b) => a - b);
-        if (amounts.length === 1 && amounts[0] >= Math.max(250, expectedNights * 80)) {
-          return {
-            totalPrice: Math.round(amounts[0]),
-            nightlyPrice: Math.round(amounts[0] / expectedNights),
-            priceIncludesTaxes: false,
-            priceIncludesFees: true,
-            priceBasis: "stay_total",
-          };
-        }
-        const plausibleNightly = amounts.find((n) => n >= 50 && n <= 5000);
-        if (plausibleNightly) {
-          return {
-            nightlyPrice: Math.round(plausibleNightly),
-            totalPrice: Math.round(plausibleNightly * expectedNights),
-            priceIncludesTaxes: false,
-            priceIncludesFees: false,
-            priceBasis: "nightly_base",
-          };
-        }
-        const plausibleTotal = amounts.find((n) => n >= Math.max(250, expectedNights * 80));
-        if (plausibleTotal) {
-          return {
-            totalPrice: Math.round(plausibleTotal),
-            nightlyPrice: Math.round(plausibleTotal / expectedNights),
-            priceIncludesTaxes: false,
-            priceIncludesFees: true,
-            priceBasis: "stay_total",
-          };
-        }
+        // PM search-result grids often show generic "from $X/night" or
+        // marketing prices that are not tied to the requested dates. Do not
+        // fabricate a stay total from those snippets; detail-page/API
+        // verification is the only path allowed to promote a PM row.
         return null;
       }
       function looksLikeRentalSearchPage() {

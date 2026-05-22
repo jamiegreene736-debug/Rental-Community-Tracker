@@ -789,7 +789,7 @@ function pickCheapestSetWithGroundFloor(
 }
 
 function directBookingTargetResortName(community: string): string {
-  if (community === "Poipu Kai") return "Regency at Poipu Kai";
+  if (community === "Poipu Kai") return "Poipu Kai";
   if (community === "Kapaa Beachfront") return "Kaha Lani Resort";
   if (community === "Pili Mai") return "Pili Mai at Poipu";
   return community;
@@ -819,9 +819,11 @@ function directCandidateFitsTarget(
   }
   const targetIsPoipuKai = /\bpoipu kai\b/.test(targetText);
   if (targetIsPoipuKai) {
-    if (/\b(pili mai|kiahuna|makahuena|waikomo|banyan harbor|lihue|kalapaki)\b/.test(hay)) return false;
+    if (/\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|career|careers|job|jobs|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(hay)) return false;
     return /\bpoipu kai\b/.test(hay)
       || (/\b(poipu|koloa|kauai)\b/.test(hay) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(hay))
+      || /\bvillas?\s+at\s+poipu\s+kai\b/.test(hay)
+      || /\bpoipu\s+kai\s+villas?\b/.test(hay)
       || /\b1831\s+poipu\b/.test(hay);
   }
   return true;
@@ -838,7 +840,7 @@ function targetLocationRejectReason(
   if (targetIsRegencyPoipuKai && /\b(banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|pili mai|kiahuna|makahuena|waikomo|nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston)\b/.test(hay)) {
     return `not in ${targetResortName}`;
   }
-  if (/\bpoipu kai\b/.test(targetText) && /\b(banyan harbor|lihue|kalapaki|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|pili mai|kiahuna|makahuena|waikomo)\b/.test(hay)) {
+  if (/\bpoipu kai\b/.test(targetText) && /\b(banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|career|careers|job|jobs|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(hay)) {
     return `not in ${community}`;
   }
   return null;
@@ -2763,11 +2765,11 @@ export default function Bookings() {
           sourceLabel: `Direct PM (${match.domain})`,
           title: match.title || airbnbCandidate.title,
           url: match.url,
-          nightlyPrice: airbnbCandidate.nightlyPrice,
-          totalPrice: airbnbCandidate.totalPrice,
-          bedrooms: airbnbCandidate.bedrooms,
+          nightlyPrice: 0,
+          totalPrice: 0,
+          bedrooms: undefined,
           image: airbnbCandidate.image,
-          snippet: `Direct booking site found automatically from this Airbnb listing's photos${photoRole}${photoLabel}. Airbnb supplied the date-specific rate proxy; verify the PM page before booking.`,
+          snippet: `Direct booking site found automatically from this Airbnb listing's photos${photoRole}${photoLabel}. It is evidence only until the PM page confirms bedroom count and a date-specific quote.`,
           alternateUrls: Array.from(new Set([airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])].filter(Boolean) as string[])),
           photoMatches: [{ url: match.url, title: match.title, domain: match.domain }],
           identityKeys: listingIdentityKeys({
@@ -2777,9 +2779,9 @@ export default function Bookings() {
           }),
           airbnbAnchorUrl: airbnbCandidate.url,
           airbnbAnchorPrice: airbnbCandidate.totalPrice,
-          verified: "yes",
-          verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
-          verifiedReason: `Direct PM listing found automatically by Google Lens from the Airbnb listing photos${photoRole}${photoLabel}. Airbnb supplied the date-specific availability/rate proxy; confirm the PM site before purchase.`,
+          verified: "skipped",
+          verifiedNightlyPrice: null,
+          verifiedReason: `Direct PM listing found automatically by Google Lens from the Airbnb listing photos${photoRole}${photoLabel}, but the PM page has not confirmed bedroom count or a date-specific price.`,
           groundFloorStatus: airbnbCandidate.groundFloorStatus,
           groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
         };
@@ -2859,6 +2861,7 @@ export default function Bookings() {
           .map((unit): LiveCandidate | null => {
             const listing = [...(unit.listings ?? [])]
               .filter((l) => l.totalPrice > 0)
+              .filter((l) => l.channel === "airbnb" || l.verified === "yes")
               .sort((a, b) => {
                 const aRank = a.verified === "yes" ? 0 : 1;
                 const bRank = b.verified === "yes" ? 0 : 1;
@@ -2901,6 +2904,7 @@ export default function Bookings() {
             ...sourceCandidates,
           ]
             .filter((c) => c.totalPrice > 0)
+            .filter((c) => c.source === "airbnb" || c.verified === "yes")
             .filter((c) => {
               const actualBedrooms = candidateBedrooms(c, searchedBedrooms);
               return exactBedroomForCombo
@@ -2960,6 +2964,7 @@ export default function Bookings() {
                   : 0,
             }))
             .filter((c) => c.totalPrice > 0)
+            .filter((c) => c.source === "airbnb" || c.verified === "yes")
             .filter((c) => {
               const actualBedrooms = candidateBedrooms(c, searchedBedrooms);
               return actualBedrooms === searchedBedrooms;
@@ -2984,6 +2989,18 @@ export default function Bookings() {
         }
         const actualBedrooms = candidateBedrooms(pick, searchedBedrooms);
         const airbnbPick = pick.source === "airbnb";
+        if (actualBedrooms < searchedBedrooms) {
+          skippedReasons.push(`${slot.unitLabel}: skipped ${actualBedrooms}BR result for ${searchedBedrooms}BR search`);
+          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
+        }
+        if (pick.source !== "airbnb" && pick.verified !== "yes") {
+          skippedReasons.push(`${slot.unitLabel}: skipped unverified ${pick.sourceLabel} result`);
+          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
+        }
+        if (pick.airbnbAnchorUrl && pick.verified !== "yes") {
+          skippedReasons.push(`${slot.unitLabel}: skipped photo-match result without PM page quote`);
+          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
+        }
         const community = selectedUnitConfig?.community ?? "";
         const targetResortName = directBookingTargetResortName(community);
         const targetRejectReason = targetLocationRejectReason(targetResortName, community, pick);
@@ -3011,7 +3028,7 @@ export default function Bookings() {
           ? ` · ⚠️ Airbnb pick — Airbnb TOS prohibits sublet. Operator should handle channel-specific compliance before booking.`
           : "";
         const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
-          ? ` · 📷 Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Same physical unit, bookable on PM site. PM rate may differ slightly — verify on PM page before confirming with guest.`
+          ? ` · Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). PM page supplied its own verified quote before auto-fill.`
           : "";
         const groundFloorSuffix = pick.groundFloorStatus === "confirmed"
           ? ` · Ground-floor: confirmed${pick.groundFloorEvidence ? ` (${pick.groundFloorEvidence})` : ""}`
@@ -5863,10 +5880,9 @@ type LiveCandidate = {
   // combination candidates.
   identityKeys?: string[];
   // For PM candidates surfaced via reverse-image match against an
-  // Airbnb listing: the anchor's URL + price. Auto-fill annotates the
-  // buy-in note with these so the operator knows the price is a proxy
-  // (Airbnb's, attached because Airbnb verifies availability at the
-  // resort for those exact dates) and the actual PM rate may differ.
+  // Airbnb listing: the anchor's URL + price are traceability only.
+  // Auto-fill requires the PM page to verify its own bedroom count and
+  // date-specific quote before this candidate can be attached.
   airbnbAnchorUrl?: string;
   airbnbAnchorPrice?: number;
   // Server-side verification state (find-buy-in pre-verifies top-N
@@ -6716,18 +6732,18 @@ function LiveSearchSection({
     sourceLabel: `Direct PM (${match.domain})`,
     title: match.title || airbnbCandidate.title,
     url: match.url,
-    nightlyPrice: airbnbCandidate.nightlyPrice,
-    totalPrice: airbnbCandidate.totalPrice,
-    bedrooms: airbnbCandidate.bedrooms,
+    nightlyPrice: 0,
+    totalPrice: 0,
+    bedrooms: undefined,
     image: airbnbCandidate.image,
-    snippet: "Direct booking site found from this Airbnb listing's photos. Airbnb supplied the date-specific rate proxy; verify the PM page before booking.",
+    snippet: "Direct booking site found from this Airbnb listing's photos. It is evidence only until the PM page confirms bedroom count and a date-specific quote.",
     alternateUrls: [airbnbCandidate.url, match.url],
     identityKeys: airbnbCandidate.identityKeys,
     airbnbAnchorUrl: airbnbCandidate.url,
     airbnbAnchorPrice: airbnbCandidate.totalPrice,
-    verified: "yes",
-    verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
-    verifiedReason: "Direct PM listing found by the listing-site scan. Airbnb supplied the date-specific availability/rate proxy, so confirm the PM site before purchase.",
+    verified: "skipped",
+    verifiedNightlyPrice: null,
+    verifiedReason: "Direct PM listing found by the listing-site scan, but the PM page has not confirmed bedroom count or a date-specific price.",
     groundFloorStatus: airbnbCandidate.groundFloorStatus,
     groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
   });
@@ -7187,7 +7203,7 @@ function DirectBookingRecommendations({
                     <p className="text-sm font-medium truncate">{row.candidate.title}</p>
                   </div>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Airbnb rate proxy: <span className="font-semibold text-foreground">{fmtMoney(row.candidate.totalPrice)}</span>
+                    Airbnb anchor price: <span className="font-semibold text-foreground">{fmtMoney(row.candidate.totalPrice)}</span>
                     {row.candidate.nightlyPrice > 0 ? ` · ${fmtMoney(row.candidate.nightlyPrice)}/night` : ""}
                   </p>
                   <div className="mt-1 flex flex-wrap gap-1.5">
@@ -8568,7 +8584,7 @@ function RecordBuyInDialog({
       const defaultNotes = candidate.airbnbAnchorUrl
         ? [
           `Bought via ${candidate.sourceLabel} — ${candidate.title}`,
-          `Direct PM listing found from Airbnb photos. Airbnb rate proxy: ${candidate.airbnbAnchorPrice ? fmtMoney(candidate.airbnbAnchorPrice) : "unknown"}.`,
+          `Direct PM listing found from Airbnb photos. PM bedroom count and price must be confirmed on the direct site before booking.`,
           `Airbnb anchor: ${candidate.airbnbAnchorUrl}`,
         ].join(" · ")
         : `Bought via ${candidate.sourceLabel} — ${candidate.title}`;
