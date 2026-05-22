@@ -59,6 +59,72 @@ function formatPosition(pos) {
   return `${Math.round(pos.left)},${Math.round(pos.top)}`;
 }
 
+async function sendBrowserCdpCommand(cdpUrl, method, params = {}, timeoutMs = 3_000) {
+  const versionResp = await fetch(`${trimTrailingSlash(cdpUrl)}/json/version`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!versionResp.ok) throw new Error(`CDP version failed (${versionResp.status})`);
+  const version = await versionResp.json();
+  const wsUrl = version.webSocketDebuggerUrl;
+  if (!wsUrl) throw new Error("CDP websocket URL missing");
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    const id = Math.floor(Math.random() * 1_000_000);
+    const timer = setTimeout(() => {
+      try { ws.close(); } catch {}
+      reject(new Error(`${method} timed out`));
+    }, timeoutMs);
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+    ws.addEventListener("message", (event) => {
+      let data;
+      try {
+        data = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (data.id !== id) return;
+      clearTimeout(timer);
+      try { ws.close(); } catch {}
+      if (data.error) {
+        reject(new Error(`${method} failed: ${data.error.message ?? JSON.stringify(data.error)}`));
+      } else {
+        resolve(data.result ?? {});
+      }
+    });
+    ws.addEventListener("error", () => {
+      clearTimeout(timer);
+      reject(new Error(`${method} websocket failed`));
+    });
+  });
+}
+
+async function enforceChromeWindowBounds(cdpUrl, position, size) {
+  const targetsResp = await fetch(`${trimTrailingSlash(cdpUrl)}/json/list`, {
+    signal: AbortSignal.timeout(3_000),
+  });
+  if (!targetsResp.ok) throw new Error(`CDP targets failed (${targetsResp.status})`);
+  const targets = await targetsResp.json();
+  const target = Array.isArray(targets)
+    ? targets.find((t) => t.type === "page") ?? targets[0]
+    : null;
+  if (!target?.id) throw new Error("CDP page target missing");
+  const windowInfo = await sendBrowserCdpCommand(cdpUrl, "Browser.getWindowForTarget", { targetId: target.id });
+  if (typeof windowInfo.windowId !== "number") throw new Error("CDP window id missing");
+  await sendBrowserCdpCommand(cdpUrl, "Browser.setWindowBounds", {
+    windowId: windowInfo.windowId,
+    bounds: {
+      left: Math.round(position.left),
+      top: Math.round(position.top),
+      width: Math.round(size.width),
+      height: Math.round(size.height),
+      windowState: "normal",
+    },
+  });
+}
+
 function parsePositionList(value) {
   return String(value ?? "")
     .split(/[;|]/)
@@ -466,9 +532,29 @@ export class ChromeSidecarManager {
     if (this.primary !== "local") return false;
     const first = this.localInstances[0];
     if (!first) return false;
-    if (await this.isCdpReady(first.cdpUrl)) return true;
-    await this.launchLocalChrome(first);
-    return this.waitForCdp(first.cdpUrl, 20_000);
+    if (!(await this.isCdpReady(first.cdpUrl))) {
+      await this.launchLocalChrome(first);
+      const ready = await this.waitForCdp(first.cdpUrl, 20_000);
+      if (!ready) return false;
+    }
+    await this.enforceVisibleBounds(first);
+    return true;
+  }
+
+  async warmAllLocal() {
+    if (this.primary !== "local") return false;
+    let readyCount = 0;
+    for (const instance of this.localInstances) {
+      if (!(await this.isCdpReady(instance.cdpUrl))) {
+        await this.launchLocalChrome(instance);
+        await this.waitForCdp(instance.cdpUrl, 20_000);
+      }
+      if (await this.isCdpReady(instance.cdpUrl)) {
+        await this.enforceVisibleBounds(instance);
+        readyCount += 1;
+      }
+    }
+    return readyCount === this.localInstances.length;
   }
 
   async acquire(request = {}) {
@@ -553,6 +639,10 @@ export class ChromeSidecarManager {
         this.log(`${instance.label} CDP did not become ready`);
         return null;
       }
+    }
+
+    if (await this.isCdpReady(instance.cdpUrl)) {
+      await this.enforceVisibleBounds(instance);
     }
 
     const heartbeat = setInterval(() => {
@@ -789,15 +879,28 @@ export class ChromeSidecarManager {
     proc.unref?.();
   }
 
+  async enforceVisibleBounds(instance) {
+    if (!this.localVisible) return;
+    const position = this.visiblePositionObjectForInstance(instance);
+    await enforceChromeWindowBounds(instance.cdpUrl, position, this.visibleWindowSize)
+      .then(() => this.log(`${instance.label} visible bounds enforced at ${formatPosition(position)} ${this.visibleWindowSize.width}x${this.visibleWindowSize.height}`))
+      .catch((e) => this.log(`${instance.label} visible bounds enforcement skipped: ${e?.message ?? e}`));
+  }
+
   visiblePositionForInstance(instance) {
     if (!this.localVisible) return this.hiddenWindowPosition;
+    return formatPosition(this.visiblePositionObjectForInstance(instance));
+  }
+
+  visiblePositionObjectForInstance(instance) {
+    if (!this.localVisible) return parsePosition(this.hiddenWindowPosition, { left: -32000, top: -32000 });
     const explicit = this.visibleWindowPositions[instance.index];
-    if (explicit) return formatPosition(explicit);
+    if (explicit) return explicit;
     const col = instance.index % this.visibleGridColumns;
     const row = Math.floor(instance.index / this.visibleGridColumns);
     const left = this.visibleGridOrigin.left + col * (this.visibleWindowSize.width + this.visibleGridGapX);
     const top = this.visibleGridOrigin.top + row * (this.visibleWindowSize.height + this.visibleGridGapY);
-    return formatPosition({ left, top });
+    return { left, top };
   }
 
   async isCdpReady(cdpUrl) {

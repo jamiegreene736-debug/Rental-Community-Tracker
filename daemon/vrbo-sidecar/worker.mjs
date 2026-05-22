@@ -5022,7 +5022,11 @@ async function main() {
   log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
   if (WORKER_SLOT === "1") {
     try {
-      await chromeSidecarManager.warmPrimaryLocal();
+      if (process.env.SIDECAR_WARM_ALL_LOCAL_CHROME !== "0") {
+        await chromeSidecarManager.warmAllLocal();
+      } else {
+        await chromeSidecarManager.warmPrimaryLocal();
+      }
     } catch (e) {
       log(`local Chrome warmup skipped: ${e.message}`);
     }
