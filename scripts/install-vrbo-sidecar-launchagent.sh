@@ -80,13 +80,26 @@ if [[ -z "${ADMIN_SECRET_VALUE}" ]] && command -v railway >/dev/null 2>&1; then
     echo "Loaded ADMIN_SECRET from Railway variables for local sidecar auth."
   fi
 fi
+EXISTING_RUNNER_PATH="${INSTALL_DIR}/run-vrbo-sidecar.sh"
+if [[ -z "${ADMIN_SECRET_VALUE}" && -f "${EXISTING_RUNNER_PATH}" ]]; then
+  EXISTING_ADMIN_SECRET_RAW="$(
+    awk -F= '$1 == "export ADMIN_SECRET" { sub(/^[^=]*=/, ""); print; exit }' "${EXISTING_RUNNER_PATH}" \
+      || true
+  )"
+  if [[ -n "${EXISTING_ADMIN_SECRET_RAW}" && "${EXISTING_ADMIN_SECRET_RAW}" != "''" ]]; then
+    ADMIN_SECRET_VALUE="$(/bin/bash -lc "v=${EXISTING_ADMIN_SECRET_RAW}; printf '%s' \"\$v\"" 2>/dev/null || true)"
+    if [[ -n "${ADMIN_SECRET_VALUE}" ]]; then
+      echo "Preserved ADMIN_SECRET from existing sidecar runner."
+    fi
+  fi
+fi
 quote_for_shell() {
   printf "%q" "$1"
 }
 ADMIN_SECRET_EXPORT="$(quote_for_shell "${ADMIN_SECRET_VALUE}")"
 SIDECAR_VRBO_2CAPTCHA="${SIDECAR_VRBO_2CAPTCHA:-1}"
 SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS="${SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS:-120}"
-SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS="${SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS:-1}"
+SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS="${SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS:-2}"
 
 RUNNER_PATH="${INSTALL_DIR}/run-vrbo-sidecar.sh"
 cat >"${RUNNER_PATH}" <<RUNNER

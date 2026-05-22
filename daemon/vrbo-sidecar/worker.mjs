@@ -74,7 +74,7 @@ const VIEWPORT = { width: 1280, height: 820 };
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
 const VRBO_2CAPTCHA_ENABLED = process.env.SIDECAR_VRBO_2CAPTCHA !== "0";
 const VRBO_2CAPTCHA_POLL_SECONDS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS ?? 120);
-const VRBO_2CAPTCHA_MAX_ATTEMPTS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS ?? 1);
+const VRBO_2CAPTCHA_MAX_ATTEMPTS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS ?? 2);
 
 let browser = null;
 let context = null;
@@ -1211,10 +1211,11 @@ async function dragVrboSliderToPoint(targetPage, handle, absoluteTarget) {
   }
   await targetPage.waitForTimeout(250).catch(() => {});
   await targetPage.mouse.up();
+  return { startX, startY, targetX, targetY };
 }
 
-async function tryPressAndHoldChallenge(targetPage, handle, label, id) {
-  if (!handle || !/press and hold|hold/i.test(handle.text ?? "")) return false;
+async function tryPressAndHoldChallenge(targetPage, handle, label, id, challengeText = "") {
+  if (!handle || !/press and hold|hold/i.test(`${handle.text ?? ""}\n${challengeText ?? ""}`)) return false;
   log(`${label} ${id}: attempting press-and-hold CAPTCHA clear`);
   const x = handle.x + handle.width / 2;
   const y = handle.y + handle.height / 2;
@@ -1233,6 +1234,17 @@ async function tryPressAndHoldChallenge(targetPage, handle, label, id) {
   return !(await pageLooksLikeVrboHumanChallenge(targetPage));
 }
 
+async function tryFullTrackSliderDrag(targetPage, handle, clip, label, id, reason) {
+  if (!handle || !clip) return false;
+  const startX = handle.x + handle.width / 2;
+  const targetX = Math.max(startX + 180, clip.x + clip.width - Math.max(28, handle.width / 2));
+  const targetY = handle.y + handle.height / 2;
+  log(`${label} ${id}: trying full VRBO slider sweep to x=${Math.round(targetX)} after ${reason}`);
+  await dragVrboSliderToPoint(targetPage, handle, { x: targetX, y: targetY });
+  await targetPage.waitForTimeout(5000).catch(() => {});
+  return !(await pageLooksLikeVrboHumanChallenge(targetPage));
+}
+
 async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
   if (!VRBO_2CAPTCHA_ENABLED) {
     log(`${label} ${id}: 2Captcha disabled by SIDECAR_VRBO_2CAPTCHA=0; manual fallback may be needed`);
@@ -1246,7 +1258,7 @@ async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
         return false;
       }
       const handle = await findVrboSliderHandle(targetPage, clip);
-      if (await tryPressAndHoldChallenge(targetPage, handle, label, id)) {
+      if (await tryPressAndHoldChallenge(targetPage, handle, label, id, clip.text)) {
         log(`${label} ${id}: press-and-hold challenge cleared`);
         return true;
       }
@@ -1273,6 +1285,7 @@ async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
         id,
       );
       const absoluteTarget = { x: clip.x + point.x, y: clip.y + point.y };
+      const handleCenterX = handle.x + handle.width / 2;
       log(
         `${label} ${id}: dragging VRBO slider from x=${Math.round(handle.x + handle.width / 2)} to x=${Math.round(absoluteTarget.x)} (attempt ${attempt})`,
       );
@@ -1280,6 +1293,11 @@ async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
       await targetPage.waitForTimeout(5000).catch(() => {});
       if (!(await pageLooksLikeVrboHumanChallenge(targetPage))) {
         log(`${label} ${id}: VRBO CAPTCHA cleared by 2Captcha`);
+        return true;
+      }
+      const weakCoordinate = absoluteTarget.x <= handleCenterX + 70;
+      if (await tryFullTrackSliderDrag(targetPage, handle, clip, label, id, weakCoordinate ? "weak 2Captcha coordinate" : "2Captcha coordinate miss")) {
+        log(`${label} ${id}: VRBO CAPTCHA cleared by full slider sweep fallback`);
         return true;
       }
       log(`${label} ${id}: 2Captcha slider attempt ${attempt} did not clear challenge`);

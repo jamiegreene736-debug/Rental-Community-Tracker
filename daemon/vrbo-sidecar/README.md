@@ -151,14 +151,15 @@ Daemon knobs:
 ```sh
 SIDECAR_VRBO_2CAPTCHA=1                 # default; set 0 to disable
 SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS=120  # default solve wait
-SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS=1    # default attempts per wall
+SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS=2    # default attempts per wall
 ```
 
 The daemon captures the challenge box while Chrome remains hidden,
 Railway submits it as a
 2Captcha CoordinatesTask, and the daemon drags the slider in the headed
 Chrome window using the returned coordinate. If the challenge does not
-clear, that specific Chrome window is surfaced with the manual banner.
+clear, the worker also tries a full slider sweep before surfacing that
+specific Chrome window with the manual banner.
 
 The local LaunchAgent also needs `ADMIN_SECRET` so Railway's auth
 middleware allows the daemon to call `/api/admin/solve-coordinates-captcha`.
