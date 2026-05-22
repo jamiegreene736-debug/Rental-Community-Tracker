@@ -41,6 +41,27 @@ interface SlotInfo extends UnitConfig {
   buyIn: BuyIn | null;
 }
 
+type GuestyListingSummary = {
+  _id?: string;
+  id?: string;
+  nickname?: string;
+  title?: string;
+  isListed?: boolean;
+  active?: boolean;
+  isActive?: boolean;
+  status?: string;
+  address?: { full?: string };
+};
+
+type OperationsPropertyOption = {
+  value: string;
+  propertyId: number | null;
+  guestyListingId: string;
+  name: string;
+  mapped: boolean;
+  buyInConfigured: boolean;
+};
+
 interface GuestyReservation {
   _id: string;
   status: string;
@@ -2102,6 +2123,7 @@ function SortHeader({
 export default function Bookings() {
   const { toast } = useToast();
   const [selectedPropertyId, setSelectedPropertyId] = useState<number | null>(null);
+  const [selectedGuestyListingId, setSelectedGuestyListingId] = useState<string | null>(null);
   const [includePast, setIncludePast] = useState(false);
   const [reportMonth, setReportMonth] = useState(() => monthInputValue(new Date()));
   const emptyManualReservationForm = (): ManualReservationFormState => ({
@@ -2182,20 +2204,32 @@ export default function Bookings() {
   // Pull Guesty's listing names so we can show human-readable property names
   // (e.g. "Poipu Kai - 6BR Villas, Pool - Sleeps 16") instead of internal IDs.
   const { data: guestyListings } = useQuery<any>({
-    queryKey: ["/api/guesty-proxy/listings?limit=100&fields=_id%20nickname%20title"],
+    queryKey: ["/api/guesty-proxy/listings?limit=200&fields=_id%20nickname%20title%20isListed%20active%20isActive%20status%20address.full"],
     staleTime: 5 * 60_000,
   });
+  const guestyListingId = (listing: GuestyListingSummary | null | undefined) =>
+    String(listing?._id ?? listing?.id ?? "").trim();
+  const unwrapGuestyListings = (d: any): GuestyListingSummary[] => {
+    if (Array.isArray(d)) return d;
+    if (Array.isArray(d?.results)) return d.results;
+    if (Array.isArray(d?.data)) return d.data;
+    if (Array.isArray(d?.data?.results)) return d.data.results;
+    return [];
+  };
+  const activeGuestyListings = useMemo(() => {
+    return unwrapGuestyListings(guestyListings)
+      .filter((listing) => {
+        const status = String(listing.status ?? "").toLowerCase();
+        const inactive = listing.active === false
+          || listing.isActive === false
+          || /\b(?:inactive|archived|deleted|disabled)\b/.test(status);
+        return guestyListingId(listing) && !inactive;
+      });
+  }, [guestyListings]);
   const listingNameById = useMemo(() => {
     const map = new Map<string, string>();
-    const unwrap = (d: any): any[] => {
-      if (Array.isArray(d)) return d;
-      if (Array.isArray(d?.results)) return d.results;
-      if (Array.isArray(d?.data)) return d.data;
-      if (Array.isArray(d?.data?.results)) return d.data.results;
-      return [];
-    };
-    for (const l of unwrap(guestyListings)) {
-      const id = l?._id;
+    for (const l of unwrapGuestyListings(guestyListings)) {
+      const id = guestyListingId(l);
       const name = l?.nickname ?? l?.title;
       if (id && name) map.set(id, name);
     }
@@ -2218,9 +2252,48 @@ export default function Bookings() {
     });
   }, [sortedPropertyMap]);
 
-  const selectedMapping = operationalPropertyMap.find((m) => m.propertyId === selectedPropertyId);
-  const selectedListingId = selectedMapping?.guestyListingId ?? null;
-  const isGlobalView = selectedPropertyId == null;
+  const propertySelectOptions = useMemo<OperationsPropertyOption[]>(() => {
+    const mappedListingIds = new Set(sortedPropertyMap.map((mapping) => mapping.guestyListingId));
+    const mapped = sortedPropertyMap.map((mapping) => {
+      const unitCount = PROPERTY_UNIT_CONFIGS[mapping.propertyId]?.units?.length ?? 0;
+      return {
+        value: String(mapping.propertyId),
+        propertyId: mapping.propertyId,
+        guestyListingId: mapping.guestyListingId,
+        name: listingNameById.get(mapping.guestyListingId) ?? `Property ${mapping.propertyId}`,
+        mapped: true,
+        buyInConfigured: unitCount > 0,
+      };
+    });
+    const unmapped = activeGuestyListings
+      .filter((listing) => !mappedListingIds.has(guestyListingId(listing)))
+      .map((listing) => {
+        const id = guestyListingId(listing);
+        return {
+          value: `guesty:${id}`,
+          propertyId: null,
+          guestyListingId: id,
+          name: listing.nickname ?? listing.title ?? `Guesty listing ${id.slice(0, 8)}`,
+          mapped: false,
+          buyInConfigured: false,
+        };
+      });
+    return [...mapped, ...unmapped].sort((a, b) => a.name.localeCompare(b.name));
+  }, [activeGuestyListings, listingNameById, sortedPropertyMap]);
+
+  const selectedMapping = selectedPropertyId == null
+    ? undefined
+    : sortedPropertyMap.find((m) => m.propertyId === selectedPropertyId);
+  const selectedListingId = selectedGuestyListingId ?? selectedMapping?.guestyListingId ?? null;
+  const selectedHasBuyInConfig = selectedPropertyId != null
+    && (PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.units?.length ?? 0) > 0;
+  const selectedGuestyOnlyOption = selectedGuestyListingId
+    ? propertySelectOptions.find((option) => option.guestyListingId === selectedGuestyListingId)
+    : undefined;
+  const selectedDisplayName = selectedMapping
+    ? listingNameById.get(selectedMapping.guestyListingId) ?? `Property ${selectedMapping.propertyId}`
+    : selectedGuestyOnlyOption?.name ?? (selectedGuestyListingId ? `Guesty listing ${selectedGuestyListingId.slice(0, 8)}` : "");
+  const isGlobalView = selectedPropertyId == null && selectedGuestyListingId == null;
 
   const {
     data: bookingsData,
@@ -2232,13 +2305,13 @@ export default function Bookings() {
   } = useQuery<{ reservations: GuestyReservation[]; total: number; unitSlots: UnitConfig[] }>({
     queryKey: ["/api/bookings/listing", selectedListingId, selectedPropertyId, { includePast }],
     queryFn: () => {
-      if (!selectedListingId || !selectedPropertyId) {
+      if (!selectedListingId || !selectedPropertyId || !selectedHasBuyInConfig) {
         return Promise.resolve({ reservations: [], total: 0, unitSlots: [] });
       }
       const url = `/api/bookings/listing/${encodeURIComponent(selectedListingId)}?propertyId=${selectedPropertyId}&includePast=${includePast}`;
       return apiRequest("GET", url).then((r) => r.json());
     },
-    enabled: !!selectedListingId && !!selectedPropertyId,
+    enabled: !!selectedListingId && !!selectedPropertyId && selectedHasBuyInConfig,
     refetchInterval: 120_000,
   });
 
@@ -3796,10 +3869,21 @@ export default function Bookings() {
   }, [cancellationRows]);
 
   const totalBedrooms = unitSlots.reduce((s, u) => s + u.bedrooms, 0);
-  const propertyLabel = selectedPropertyId
-    ? `Property ${selectedPropertyId}${unitSlots.length > 1 ? ` · ${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})` : ""}`
+  const selectedPropertyStatusLabel = selectedHasBuyInConfig
+    ? unitSlots.length > 0
+      ? `${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})`
+      : "buy-in configured"
+    : selectedMapping
+      ? "mapped in Guesty · no buy-in unit setup"
+      : selectedGuestyListingId
+        ? "active Guesty listing · not mapped for buy-ins"
+        : "";
+  const propertyLabel = !isGlobalView
+    ? `${selectedDisplayName || "Selected Guesty listing"}${selectedPropertyStatusLabel ? ` · ${selectedPropertyStatusLabel}` : ""}`
     : "";
-  const globalLabel = `${operationalPropertyMap.length} configured buy-in ${operationalPropertyMap.length === 1 ? "property" : "properties"}`;
+  const activeGuestyCount = activeGuestyListings.length || sortedPropertyMap.length;
+  const globalLabel = `${activeGuestyCount} active Guesty ${activeGuestyCount === 1 ? "listing" : "listings"} · ${operationalPropertyMap.length} buy-in configured`;
+  const operationsDataEnabled = isGlobalView || selectedHasBuyInConfig;
   const refreshVisibleBookings = () => {
     if (isGlobalView) {
       void Promise.all(globalBookingQueries.map((query) => query.refetch()));
@@ -3846,9 +3930,18 @@ export default function Bookings() {
               <div className="grow min-w-0 sm:min-w-[260px]">
                 <Label className="text-xs mb-1.5 block">Property</Label>
                 <Select
-                  value={selectedPropertyId?.toString() ?? "all"}
+                  value={selectedGuestyListingId ? `guesty:${selectedGuestyListingId}` : selectedPropertyId?.toString() ?? "all"}
                   onValueChange={(v) => {
-                    setSelectedPropertyId(v === "all" ? null : parseInt(v, 10));
+                    if (v === "all") {
+                      setSelectedPropertyId(null);
+                      setSelectedGuestyListingId(null);
+                    } else if (v.startsWith("guesty:")) {
+                      setSelectedPropertyId(null);
+                      setSelectedGuestyListingId(v.slice("guesty:".length));
+                    } else {
+                      setSelectedPropertyId(parseInt(v, 10));
+                      setSelectedGuestyListingId(null);
+                    }
                     setExpanded({});
                   }}
                 >
@@ -3862,18 +3955,19 @@ export default function Bookings() {
                         · global summary
                       </span>
                     </SelectItem>
-                    {operationalPropertyMap
-                      .map((m) => {
-                        const name = listingNameById.get(m.guestyListingId);
-                        return (
-                          <SelectItem key={m.propertyId} value={m.propertyId.toString()}>
-                            {name ?? `Property ${m.propertyId}`}
-                            <span className="text-muted-foreground text-xs ml-1.5">
-                              · #{m.propertyId}
-                            </span>
-                          </SelectItem>
-                        );
-                      })}
+                    {propertySelectOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.name}
+                        <span className="text-muted-foreground text-xs ml-1.5">
+                          · {option.mapped ? `#${option.propertyId}` : "active Guesty"}
+                        </span>
+                        {!option.buyInConfigured && (
+                          <span className="text-muted-foreground text-xs ml-1.5">
+                            · no buy-in setup
+                          </span>
+                        )}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -3895,12 +3989,13 @@ export default function Bookings() {
                   setManualForm(emptyManualReservationForm());
                   setManualDialogOpen(true);
                 }}
+                disabled={!isGlobalView && !selectedHasBuyInConfig}
                 data-testid="button-add-manual-reservation"
               >
                 <Calendar className="h-3.5 w-3.5 mr-1.5" />
                 Add manual reservation
               </Button>
-              {selectedPropertyId && unitSlots.length > 0 && (
+              {!isGlobalView && propertyLabel && (
                 <div className="text-xs text-muted-foreground bg-muted/40 px-3 py-2 rounded border">
                   <BedDouble className="h-3.5 w-3.5 inline mr-1 opacity-60" />
                   {propertyLabel}
@@ -3920,9 +4015,23 @@ export default function Bookings() {
           <Card>
             <CardContent className="py-12 text-center">
               <Building2 className="h-10 w-10 mx-auto mb-3 opacity-20" />
-              <p className="font-medium mb-1">No linked properties yet</p>
+              <p className="font-medium mb-1">No buy-in configured properties yet</p>
               <p className="text-sm text-muted-foreground">
-                Link properties to Guesty listings before the global Operations summary can load.
+                Active Guesty listings can still appear in the dropdown, but the global Operations summary needs at least one mapped property with buy-in unit slots.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {!isGlobalView && !selectedHasBuyInConfig && (
+          <Card className="border-amber-200 bg-amber-50/50">
+            <CardContent className="py-5">
+              <p className="text-sm font-medium text-amber-950">
+                <AlertCircle className="h-4 w-4 inline mr-1.5" />
+                This Guesty listing is active but is not configured for buy-in tracking yet.
+              </p>
+              <p className="text-sm text-amber-900/80 mt-1">
+                It now appears in the Operations dropdown, but reservations, manual reservations, and cheapest-buy-in tools need unit slots in the buy-in property configuration before they can run.
               </p>
             </CardContent>
           </Card>
@@ -3940,7 +4049,7 @@ export default function Bookings() {
           </Card>
         )}
 
-        {stats && (
+        {operationsDataEnabled && stats && (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <Card>
               <CardContent className="py-4">
@@ -4142,6 +4251,7 @@ export default function Bookings() {
                           className="w-full px-3 py-2 text-left hover:bg-amber-100/50"
                           onClick={() => {
                             if (meta?.propertyId) {
+                              setSelectedGuestyListingId(null);
                               setSelectedPropertyId(meta.propertyId);
                               setExpanded({ [row.reservation._id]: true });
                             }
@@ -4359,6 +4469,7 @@ export default function Bookings() {
                                   variant="ghost"
                                   className="h-7 px-2 text-xs"
                                   onClick={() => {
+                                    setSelectedGuestyListingId(null);
                                     setSelectedPropertyId(row.propertyId);
                                     setExpanded({ [row.reservation._id]: true });
                                   }}
@@ -4405,7 +4516,7 @@ export default function Bookings() {
           </Card>
         )}
 
-        {selectedPropertyId && !bookingsError && (
+        {selectedPropertyId && selectedHasBuyInConfig && !bookingsError && (
           <Tabs defaultValue="bookings" className="space-y-4">
             <TabsList className="flex h-auto w-full max-w-full justify-start overflow-x-auto p-1 sm:w-auto" data-testid="tabs-operations">
               <TabsTrigger value="bookings" data-testid="tab-operations-bookings">
