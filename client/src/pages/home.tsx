@@ -2038,7 +2038,7 @@ export default function Home() {
                     <div className="rounded-md border bg-muted/20 p-3 text-sm">
                       <p className="font-medium">Runs one selected property at a time.</p>
                       <p className="mt-1 text-muted-foreground">
-                        This uses the same market-rate refresh as each Pricing tab, but serializes the work so Chrome sidecar scans do not collide. The queue is saved on the server, so closing this tab will not stop it.
+                        This uses the same OTA-only market-rate refresh as each Pricing tab: 7-night sidecar searches on Airbnb, VRBO, and Booking.com. Direct booking and PM websites are not priced. The queue is saved on the server, so closing this tab will not stop it.
                       </p>
                     </div>
                     {!bulkPricingJob ? (

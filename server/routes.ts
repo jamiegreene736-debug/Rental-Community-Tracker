@@ -676,7 +676,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
 
   const base = bulkPricingBaseUrl();
   const startUrl = item.propertyId < 0
-    ? `${base}/api/community/${Math.abs(item.propertyId)}/refresh-pricing?background=1`
+    ? `${base}/api/community/${Math.abs(item.propertyId)}/refresh-pricing?background=1&mode=banded`
     : `${base}/api/property/${item.propertyId}/refresh-market-rates?background=1&mode=banded`;
   const startResponse = await fetch(startUrl, { method: "POST" });
   const startBody = (await startResponse.json().catch(() => ({}))) as any;
@@ -27033,15 +27033,10 @@ Return ONLY compact JSON with this exact shape:
     if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
     const draft = await storage.getCommunityDraft(id);
     if (!draft) return res.status(404).json({ error: "Not found" });
-    if (!process.env.SEARCHAPI_API_KEY) {
-      return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-    }
-
-    // PR #298: drafts get the same multi-channel + per-season scan
-    // treatment as static properties. Previously this route only
-    // queried a legacy Airbnb fallback for a single LOW window —
-    // drafts missed sidecar VRBO/Booking entirely and only got LOW
-    // basis (no per-season HIGH/HOLIDAY persistence).
+    // PR #298: drafts get the same OTA sidecar + per-season scan
+    // treatment as static properties. Previously this route only queried
+    // a legacy Airbnb fallback for a single LOW window; drafts missed
+    // sidecar VRBO/Booking entirely and only got LOW basis.
     //
     // Critically, drafts pass `draft.name` for BOTH `community`
     // (PM discovery/location context) AND `searchName` (the sidecar
@@ -27064,39 +27059,9 @@ Return ONLY compact JSON with this exact shape:
       .filter((b): b is number => typeof b === "number" && Number.isFinite(b) && b > 0);
     const bedroomCounts = Array.from(new Set(validBedroomCounts)).sort((a, b) => a - b);
     if (bedroomCounts.length === 0) {
-      // Wizard hasn't filled in unit bedrooms yet — fall back to the
-      // legacy single-window engine pull so we still surface estimated
-      // low/high rates for the dashboard. No persistence to
-      // property_market_rates (we don't know which BR row to write).
-      const { ratesByBR, bboxApplied, bboxCenter, drops, firstListingSample } = await fetchAmortizedNightlyByBR(
-        draft.name,
-        draft.city,
-        draft.state,
-        draft.streetAddress ?? undefined,
-      );
-      const allRates: number[] = [];
-      for (const list of Object.values(ratesByBR)) allRates.push(...list);
-      let estimatedLowRate: number | null = null;
-      let estimatedHighRate: number | null = null;
-      if (allRates.length > 0) {
-        const sorted = [...allRates].sort((a, b) => a - b);
-        estimatedLowRate = sorted[0];
-        estimatedHighRate = sorted[sorted.length - 1];
-      }
-      const updated = await storage.updateCommunityDraft(id, { estimatedLowRate, estimatedHighRate });
-      return res.json({
-        ok: true,
-        ratesByBR: Object.fromEntries(
-          Object.entries(ratesByBR).map(([k, v]) => [k, { median: medianRate(v), count: v.length, samples: v }]),
-        ),
-        estimatedLowRate,
-        estimatedHighRate,
-        usedAddressGeoBounds: bboxApplied,
-        bboxCenter,
-        drops,
-        firstListingSample,
-        draft: updated,
-        note: "draft has no units yet — used legacy single-window engine fallback",
+      return res.status(400).json({
+        error: "Bedroom counts are required before market pricing can run",
+        message: "Market pricing now uses Airbnb, VRBO, and Booking.com sidecar searches only. Enter the single-listing bedroom count or both combo unit bedroom counts, then retry the queue.",
       });
     }
 
@@ -27193,6 +27158,7 @@ Return ONLY compact JSON with this exact shape:
         propertyId: -id,               // negative id convention for drafts
         sidecarQueueBudgetMs: 15 * 60_000,
         seasonDeadlineMs: 25 * 60_000,
+        skipPm: true,
         sidecarStopGeneration,
       });
       assertSidecarRunCurrent();
@@ -27228,14 +27194,13 @@ Return ONLY compact JSON with this exact shape:
       sidecarRan: boolean,
     ) => {
       if (!scan) return { basis: null as number | null, channelRates: [] as number[], samples: 0, channels: { airbnb: null, vrbo: null, booking: null, pm: null } };
-      const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
+      const channels = { ...(scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null }), pm: null };
       const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
       if (sidecarRan) {
         if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
         if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
         if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
-        if (typeof channels.pm === "number" && channels.pm > 0) channelRates.push(channels.pm);
       }
       channelRates.sort((a, b) => a - b);
       let basis: number | null = null;
@@ -27250,8 +27215,8 @@ Return ONLY compact JSON with this exact shape:
     const allLowRates: number[] = [];
     for (const br of bedroomCounts) {
       const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
-      // HIGH and HOLIDAY now run the same multichannel path as LOW:
-      // Airbnb, VRBO, Booking.com, and PM website-search rates.
+      // HIGH and HOLIDAY run the same OTA sidecar path as LOW:
+      // Airbnb, VRBO, and Booking.com only.
       const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
       const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
       const fallbackSeasonBasis = (season: "HIGH" | "HOLIDAY"): number | null => {
@@ -27277,13 +27242,11 @@ Return ONLY compact JSON with this exact shape:
       const hasOnlyAirbnbChannel =
         !!lowResult.channels.airbnb &&
         !lowResult.channels.vrbo &&
-        !lowResult.channels.booking &&
-        !lowResult.channels.pm;
+        !lowResult.channels.booking;
       const hasAnyChannel =
         !!lowResult.channels.airbnb ||
         !!lowResult.channels.vrbo ||
-        !!lowResult.channels.booking ||
-        !!lowResult.channels.pm;
+        !!lowResult.channels.booking;
       const basisSource = hasOnlyAirbnbChannel || !hasAnyChannel
         ? "airbnb"
         : "live-multichannel-median";
@@ -27361,9 +27324,6 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/property/:id/refresh-market-rates", async (req, res) => {
     const propertyId = parseInt(req.params.id, 10);
     if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid id" });
-    if (!process.env.SEARCHAPI_API_KEY) {
-      return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-    }
 
     // Negative ids belong to drafts — delegate to the existing draft
     // refresh path so callers don't need to branch by id sign.
@@ -27455,12 +27415,11 @@ Return ONLY compact JSON with this exact shape:
     // Season-band multi-channel scan.
     //
     // Pulls one 7-night OTA sample per contiguous LOW/HIGH date band
-    // across the 24-month horizon, plus explicit holiday windows. PM
-    // website searches are sampled once per LOW/HIGH/HOLIDAY season type
-    // and reused across matching bands. SearchAPI is used only to discover
-    // PM company domains; Chrome sidecar then drives those PM rental-search pages.
-    // Total wall can run several minutes because the daemon serializes
-    // browser work through the operator's Chrome.
+    // across the 24-month horizon, plus explicit holiday windows. Pricing
+    // inputs are strictly Airbnb, VRBO, and Booking.com sidecar searches.
+    // Direct/PM websites are not discovered or scraped for this cost basis.
+    // Total wall can run several minutes because the sidecar runs real
+    // browser work and streams screenshots back to the dashboard.
     //
     // Persistence:
     //   - LOW basis     → medianNightly        (legacy single-value
@@ -27522,18 +27481,15 @@ Return ONLY compact JSON with this exact shape:
       const basisForScan = (
         scan: Awaited<ReturnType<typeof fetchMultiChannelBuyInByBR>> | null,
         br: number,
-        reusablePmRate?: number | null,
       ) => {
         if (!scan) return { basis: null as number | null, channelRates: [] as number[], airbnbSamples: 0, channels: { airbnb: null, vrbo: null, booking: null, pm: null } as ChannelSnapshot };
         const rawChannels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
         const channels: ChannelSnapshot = {
           ...rawChannels,
-          pm: typeof reusablePmRate === "number" && Number.isFinite(reusablePmRate) && reusablePmRate > 0
-            ? Math.round(reusablePmRate)
-            : rawChannels.pm,
+          pm: null,
         };
         const samples = scan.ratesByBR[br] ?? [];
-        const channelRates = [channels.airbnb, channels.vrbo, channels.booking, channels.pm]
+        const channelRates = [channels.airbnb, channels.vrbo, channels.booking]
           .filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0)
           .sort((a, b) => a - b);
         let basis: number | null = null;
@@ -27672,26 +27628,11 @@ Return ONLY compact JSON with this exact shape:
       }
       holidayWindows.sort((a, b) => a.checkIn.localeCompare(b.checkIn));
 
-      const pmSampleWindows: Array<{ label: string; season: SeasonLabel; checkIn: string; checkOut: string }> = [];
-      const addPmSampleWindow = (season: SeasonLabel, source: { checkIn: string; checkOut: string } | undefined) => {
-        if (!source) return;
-        pmSampleWindows.push({
-          label: `${season} reusable PM/direct rates`,
-          season,
-          checkIn: source.checkIn,
-          checkOut: source.checkOut,
-        });
-      };
-      addPmSampleWindow("LOW", bandWindows.find((win) => win.season === "LOW"));
-      addPmSampleWindow("HIGH", bandWindows.find((win) => win.season === "HIGH"));
-      addPmSampleWindow("HOLIDAY", holidayWindows[0]);
-
-      const totalWindows = pmSampleWindows.length + bandWindows.length + holidayWindows.length;
+      const totalWindows = bandWindows.length + holidayWindows.length;
       const monthlyByBR = new Map<number, Record<string, MonthlyRatePayload>>();
       const seasonBuckets = new Map<number, Record<SeasonLabel, number[]>>();
       const sourceFlags = new Map<number, { hasAnyChannel: boolean; hasNonAirbnb: boolean; channelCount: number }>();
       const latestChannels = new Map<number, ChannelSnapshot>();
-      const reusablePmBySeason = new Map<SeasonLabel, Map<number, number | null>>();
       const accumulatedWarnings: Array<{
         season: SeasonLabel;
         channel: "airbnb" | "vrbo" | "booking" | "pm" | "engine";
@@ -27750,8 +27691,6 @@ Return ONLY compact JSON with this exact shape:
         });
       };
       const OTA_BAND_WINDOW_BUDGET_MS = 5 * 60_000;
-      const PM_SAMPLE_WINDOW_BUDGET_MS = 10 * 60_000;
-      const pmSampleSubTotal = Math.max(1, wantBedrooms.length);
       const otaBandSubTotal = Math.max(1, wantBedrooms.length * 3);
       const runBandWindowScan = async (
         label: string,
@@ -27778,9 +27717,6 @@ Return ONLY compact JSON with this exact shape:
             warningSeason: label.includes("holiday") ? "HOLIDAY" : label.includes("HIGH") ? "HIGH" : "LOW",
             reuseSharedOtaSearch: false,
             skipPm: true,
-            pmPerSiteLimit: 3,
-            pmMaxSites: 5,
-            pmWalletBudgetMs: 90_000,
             sidecarStopGeneration,
             signal: controller.signal,
             onProgress: (event) => {
@@ -27799,62 +27735,6 @@ Return ONLY compact JSON with this exact shape:
               });
             },
           });
-        } finally {
-          clearTimeout(timeout);
-        }
-      };
-      const runPmSeasonSample = async (
-        sample: { label: string; season: SeasonLabel; checkIn: string; checkOut: string },
-        currentIndex: number,
-        completedWindows: number,
-      ) => {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => {
-          controller.abort(new Error(`${sample.label} exceeded the ${Math.round(PM_SAMPLE_WINDOW_BUDGET_MS / 60_000)} minute PM/direct budget`));
-        }, PM_SAMPLE_WINDOW_BUDGET_MS);
-        try {
-          const scan = await fetchMultiChannelBuyInByBR({
-            community: loc.searchName,
-            city: loc.city,
-            state: loc.state,
-            streetAddress: loc.streetAddress,
-            bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
-            searchName: loc.searchName,
-            bedroomCounts: wantBedrooms,
-            propertyId,
-            dateOverride: { checkIn: sample.checkIn, checkOut: sample.checkOut },
-            sidecarQueueBudgetMs: 15 * 60_000,
-            warningSeason: sample.season,
-            skipOta: true,
-            skipPm: false,
-            pmPerSiteLimit: 4,
-            pmMaxSites: 8,
-            pmWalletBudgetMs: 150_000,
-            sidecarStopGeneration,
-            signal: controller.signal,
-            onProgress: (event) => {
-              const subLabel = `${event.label} complete (${event.completed}/${event.total} PM checks)`;
-              setBandProgress({
-                completed: completedWindows,
-                current: currentIndex,
-                currentLabel: sample.label,
-                label: `Sampling reusable ${sample.season} PM/direct rates — latest completed: ${subLabel}`,
-                subDone: event.completed,
-                subTotal: event.total,
-                subLabel: event.label,
-                subChannel: event.channel,
-                subBedrooms: event.bedrooms,
-                subStartedAt: event.startedAt,
-              });
-            },
-          });
-          const pmRates = new Map<number, number | null>();
-          for (const br of wantBedrooms) {
-            const pm = scan.channelCheapestByBR[br]?.pm;
-            pmRates.set(br, typeof pm === "number" && Number.isFinite(pm) && pm > 0 ? Math.round(pm) : null);
-          }
-          reusablePmBySeason.set(sample.season, pmRates);
-          return scan;
         } finally {
           clearTimeout(timeout);
         }
@@ -27891,7 +27771,7 @@ Return ONLY compact JSON with this exact shape:
           flags.hasAnyChannel = true;
           flags.channelCount += channelRates.length;
         }
-        if ((channels.vrbo ?? 0) > 0 || (channels.booking ?? 0) > 0 || (channels.pm ?? 0) > 0) {
+        if ((channels.vrbo ?? 0) > 0 || (channels.booking ?? 0) > 0) {
           flags.hasNonAirbnb = true;
         }
         sourceFlags.set(br, flags);
@@ -27969,33 +27849,6 @@ Return ONLY compact JSON with this exact shape:
 
       try {
         let completed = 0;
-        for (const sample of pmSampleWindows) {
-          assertSidecarRunCurrent();
-          const currentStartedAt = Date.now();
-          setBandProgress({
-            completed,
-            current: completed + 1,
-            currentLabel: sample.label,
-            currentStartedAt,
-            label: `Sampling reusable ${sample.season} PM/direct rates (${completed}/${totalWindows} complete)`,
-            subDone: 0,
-            subTotal: pmSampleSubTotal,
-            subLabel: `Starting ${sample.season} PM/direct checks`,
-            subStartedAt: currentStartedAt,
-          });
-          const scan = await runPmSeasonSample(sample, completed + 1, completed);
-          assertSidecarRunCurrent();
-          absorbScan(scan, sample.season);
-          completed++;
-          setBandProgress({
-            completed,
-            label: `Completed ${sample.label} (${completed}/${totalWindows} complete)`,
-            subDone: undefined,
-            subTotal: undefined,
-            subLabel: undefined,
-          });
-        }
-
         for (const win of bandWindows) {
           assertSidecarRunCurrent();
           const currentLabel = win.label;
@@ -28016,7 +27869,7 @@ Return ONLY compact JSON with this exact shape:
           absorbScan(scan, win.season);
           for (const br of wantBedrooms) {
             ensureBR(br);
-            const result = basisForScan(scan, br, reusablePmBySeason.get(win.season)?.get(br) ?? null);
+            const result = basisForScan(scan, br);
             if (result.basis == null || result.basis <= 0) continue;
             for (const yearMonth of win.yearMonths) {
               monthlyByBR.get(br)![yearMonth] = {
@@ -28063,7 +27916,7 @@ Return ONLY compact JSON with this exact shape:
           absorbScan(scan, "HOLIDAY");
           for (const br of wantBedrooms) {
             ensureBR(br);
-            const result = basisForScan(scan, br, reusablePmBySeason.get("HOLIDAY")?.get(br) ?? null);
+            const result = basisForScan(scan, br);
             if (result.basis == null || result.basis <= 0) continue;
             seasonBuckets.get(br)!.HOLIDAY.push(result.basis);
             noteSource(br, result.channels, result.channelRates);
@@ -28175,6 +28028,7 @@ Return ONLY compact JSON with this exact shape:
         sidecarQueueBudgetMs: 15 * 60_000,
         seasonDeadlineMs: 25 * 60_000,
         reuseSharedOtaSearch: false,
+        skipPm: true,
         sidecarStopGeneration,
       });
       assertSidecarRunCurrent();
@@ -28207,24 +28061,22 @@ Return ONLY compact JSON with this exact shape:
         : sorted[mid];
     };
     // Helper: compute the per-season basis for a BR from a season's
-    // scan result. Every season can include Airbnb, VRBO, Booking, and
-    // PM/direct website channel signals. The pricing basis is the median
-    // across whichever of those channels returned a usable all-in nightly
-    // rate for this one 7-night season sample.
+    // scan result. Every season includes Airbnb, VRBO, and Booking.com
+    // sidecar channel signals only. PM/direct websites are not scraped
+    // for market pricing.
     const basisForSeason = (
       scan: typeof seasonScan.perSeason["LOW"],
       br: number,
       sidecarRan: boolean,
     ): { basis: number | null; channelRates: number[]; airbnbSamples: number; channels: { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null } } => {
       if (!scan) return { basis: null, channelRates: [], airbnbSamples: 0, channels: { airbnb: null, vrbo: null, booking: null, pm: null } };
-      const channels = scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null };
+      const channels = { ...(scan.channelCheapestByBR[br] ?? { airbnb: null, vrbo: null, booking: null, pm: null }), pm: null };
       const samples = scan.ratesByBR[br] ?? [];
       const channelRates: number[] = [];
       if (sidecarRan) {
         if (typeof channels.airbnb === "number" && channels.airbnb > 0) channelRates.push(channels.airbnb);
         if (typeof channels.vrbo === "number" && channels.vrbo > 0) channelRates.push(channels.vrbo);
         if (typeof channels.booking === "number" && channels.booking > 0) channelRates.push(channels.booking);
-        if (typeof channels.pm === "number" && channels.pm > 0) channelRates.push(channels.pm);
       }
       channelRates.sort((a, b) => a - b);
       let basis: number | null = null;
@@ -28246,8 +28098,8 @@ Return ONLY compact JSON with this exact shape:
     const persisted: Persisted[] = [];
     for (const br of wantBedrooms) {
       const lowResult = basisForSeason(seasonScan.perSeason.LOW, br, true);
-      // HIGH and HOLIDAY now run the same multichannel path as LOW:
-      // Airbnb, VRBO, Booking.com, and PM website-search rates.
+      // HIGH and HOLIDAY now run the same OTA sidecar path as LOW:
+      // Airbnb, VRBO, and Booking.com.
       const highResult = basisForSeason(seasonScan.perSeason.HIGH, br, true);
       const holidayResult = basisForSeason(seasonScan.perSeason.HOLIDAY, br, true);
       const fallbackSeasonBasis = (season: "HIGH" | "HOLIDAY"): number | null => {
@@ -28263,13 +28115,11 @@ Return ONLY compact JSON with this exact shape:
       const hasOnlyAirbnbChannel =
         !!lowResult.channels.airbnb &&
         !lowResult.channels.vrbo &&
-        !lowResult.channels.booking &&
-        !lowResult.channels.pm;
+        !lowResult.channels.booking;
       const hasAnyChannel =
         !!lowResult.channels.airbnb ||
         !!lowResult.channels.vrbo ||
-        !!lowResult.channels.booking ||
-        !!lowResult.channels.pm;
+        !!lowResult.channels.booking;
       const basisSource: Persisted["basisSource"] =
         lowResult.basis == null
           ? "none"
@@ -28447,9 +28297,6 @@ Return ONLY compact JSON with this exact shape:
   // UI a stable per-row status modal.
   app.post("/api/pricing/bulk-refresh", async (req, res) => {
     cleanupBulkPricingJobs();
-    if (!process.env.SEARCHAPI_API_KEY && req.body?.dryRun !== true) {
-      return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-    }
     const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
     const labels = req.body?.labels && typeof req.body.labels === "object" ? req.body.labels as Record<string, string> : {};
     const dryRun = req.body?.dryRun === true;
@@ -28679,10 +28526,6 @@ Return ONLY compact JSON with this exact shape:
   // Chrome sidecar through many dated windows. Total runtime can be
   // long, which is why the normal operator flow uses background mode.
   app.post("/api/admin/refresh-all-market-rates", async (_req, res) => {
-    if (!process.env.SEARCHAPI_API_KEY) {
-      return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-    }
-
     const port = process.env.PORT || "5000";
     const base = `http://127.0.0.1:${port}`;
 

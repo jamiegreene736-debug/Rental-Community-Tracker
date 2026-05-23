@@ -914,7 +914,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             </span>
           )}
           <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>
-            Counts are dated searches from Airbnb, VRBO, Booking.com, and property-manager sites, with cross-channel duplicate risk discounted.
+            Counts are dated sidecar searches from Airbnb, VRBO, and Booking.com, with cross-channel duplicate risk discounted.
           </div>
         </div>
       )}

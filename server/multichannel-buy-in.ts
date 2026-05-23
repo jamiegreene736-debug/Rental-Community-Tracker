@@ -1433,8 +1433,8 @@ function pickSeasonWindow(
 //   sidecar-low → sidecar-high → sidecar-holiday → persisting →
 //   done | error
 //
-// Each season queues Airbnb / VRBO / Booking.com / PM website work
-// through the daemon's single Chrome. Season-band pricing refreshes also
+// Each season queues Airbnb / VRBO / Booking.com work through the
+// sidecar. Season-band pricing refreshes also
 // include exact window counters so the UI can show completed 7-night
 // samples instead of relying on a rough phase estimate.
 export type RefreshProgressState = {
@@ -1544,6 +1544,7 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   sidecarQueueBudgetMs?: number;
   seasonDeadlineMs?: number;
   reuseSharedOtaSearch?: boolean;
+  skipPm?: boolean;
   sidecarStopGeneration?: number;
 }): Promise<MultiSeasonBuyInResult> {
   const startedAt = Date.now();
@@ -1564,12 +1565,11 @@ export async function fetchMultiChannelBuyInBySeason(args: {
   try {
   setPhase("starting", 0, "Starting multi-season scan");
 
-  // All three seasons get the full multichannel website scan (Airbnb
-  // + VRBO + Booking + PM through sidecar). Run the seasons in a
+  // All three seasons get the full OTA website scan (Airbnb, VRBO,
+  // and Booking.com through sidecar). Run the seasons in a
   // deterministic sequence instead of queueing all three at once:
-  // the local sidecar has a single Chrome worker, so concurrent
-  // season launches can push HOLIDAY behind LOW/HIGH and make the
-  // outer deadline return before holiday gets a fair run.
+  // each season can already fan out across the shared 8-window sidecar
+  // queue, and sequencing keeps the outer progress easy to read.
   const lowWindow = pickSeasonWindow(region, "LOW");
   const highWindow = pickSeasonWindow(region, "HIGH");
   const holidayWindow = pickSeasonWindow(region, "HOLIDAY");
@@ -1579,7 +1579,7 @@ export async function fetchMultiChannelBuyInBySeason(args: {
     HOLIDAY: holidayWindow,
   };
 
-  setPhase("airbnb-low", 3, `Queueing Airbnb/VRBO/Booking/PM sidecar scans (LOW: ${lowWindow?.checkIn ?? "—"})`);
+  setPhase("airbnb-low", 3, `Queueing Airbnb/VRBO/Booking sidecar scans (LOW: ${lowWindow?.checkIn ?? "—"})`);
   let highestPercent = 0;
   const accumulatedWarnings: ScanWarning[] = [];
   const setPhaseAtLeast = (phase: RefreshProgressState["phase"], percent: number, label: string) => {
@@ -1657,6 +1657,7 @@ export async function fetchMultiChannelBuyInBySeason(args: {
         dateOverride: window,
         sidecarQueueBudgetMs: args.sidecarQueueBudgetMs,
         warningSeason: season,
+        skipPm: args.skipPm ?? true,
         sidecarStopGeneration,
       }),
       season,

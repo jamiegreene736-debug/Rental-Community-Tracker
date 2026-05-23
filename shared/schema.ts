@@ -594,7 +594,7 @@ export type UnitSwap = typeof unitSwaps.$inferSelect;
 // Per-(property, bedrooms) live nightly market rate from the buy-in
 // finder. One row per (propertyId, bedrooms) pair — upserted on every
 // refresh — so the Pricing tab can use a fresh "what does it cost to
-// book a comparable unit on Airbnb/Vrbo/PM?" number as the cost basis
+// book a comparable unit on Airbnb/Vrbo/Booking.com?" number as the cost basis
 // instead of the static `BUY_IN_RATES` table alone.
 //
 // `propertyId` covers BOTH the static 11 hardcoded properties (positive
@@ -604,11 +604,8 @@ export type UnitSwap = typeof unitSwaps.$inferSelect;
 // only needs the (id, bedrooms) → median lookup, and the source of the
 // id doesn't matter at read time.
 //
-// `source` is "airbnb" today (we query the SearchAPI Airbnb engine via
-// `fetchAmortizedNightlyByBR`). Vrbo / PM-direct will populate the same
-// column when those source-tagged rate paths land. Treating the field
-// as free-text rather than an enum lets the schema stay forward-
-// compatible without a migration.
+// `source` is free text because the pricing basis can be Airbnb-only
+// or an OTA median across Airbnb, VRBO, and Booking.com sidecar samples.
 export const propertyMarketRates = pgTable("property_market_rates", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull(),
@@ -616,8 +613,8 @@ export const propertyMarketRates = pgTable("property_market_rates", {
   // Median amortized nightly across the engine sample (extracted_total_price
   // ÷ nights), per AGENTS.md Load-Bearing #31 — the priced 7-night-window
   // path. 10–15% accurate vs operator-validated buy-ins for Caribe Cove
-  // / Southern Dunes today; expected to tighten as PM-direct scrapers
-  // start tagging samples by source.
+  // / Southern Dunes today; direct/PM sites are intentionally excluded
+  // from market pricing.
   //
   // `medianNightly` is the LOW-season basis (the legacy single value
   // every existing caller reads). The two seasonal columns below were
