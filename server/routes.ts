@@ -10427,6 +10427,16 @@ export async function registerRoutes(
     type SearchDiagnosticStatus = "ok" | "warning" | "error" | "timeout" | "skipped";
     const pricedCount = (items: Candidate[]) => items.filter((c) => c.nightlyPrice > 0 || c.totalPrice > 0).length;
     const verifiedYesCount = (items: Candidate[]) => items.filter((c) => c.verified === "yes").length;
+    const compactReason = (value: string | undefined | null): string => {
+      const compact = String(value ?? "").replace(/\s+/g, " ").trim();
+      return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
+    };
+    const providerAvailabilitySummary = [
+      `Airbnb raw=${airbnbRawCount}, kept=${airbnbTarget.length}, priced=${pricedCount(airbnbTarget)}, verified=${verifiedYesCount(airbnbTarget)}${airbnbSidecarReason ? ` (${compactReason(airbnbSidecarReason)})` : ""}`,
+      `VRBO raw=${vrboRawCount}, kept=${vrboTarget.length}, priced=${pricedCount(vrboTarget)}, verified=${verifiedYesCount(vrboTarget)}${vrboSidecarReason ? ` (${compactReason(vrboSidecarReason)})` : ""}`,
+      `Booking.com raw=${bookingRawCount + bookingPricedCount + bookingSidecarCount}, kept=${bookingTarget.length}, priced=${pricedCount(bookingTarget)}, verified=${verifiedYesCount(bookingTarget)}`,
+      `Direct/Lens raw=${totalPhotoMatches}, kept=${pmTarget.length}, priced=${pricedCount(pmTarget)}, verified=${verifiedYesCount(pmTarget)}`,
+    ].join("; ");
     const issueList: Array<{ severity: "warning" | "error"; source: string; summary: string; detail?: string }> = [];
     for (const t of sourceTimeouts) {
       issueList.push({
@@ -10484,8 +10494,8 @@ export async function registerRoutes(
         source: "Cheapest pick",
         summary: "No verified bookable candidate was available for auto-pick",
         detail: priced.length > 0
-          ? `${priced.length} priced candidate(s) were scanned, but none passed verified=yes for ${checkIn} to ${checkOut}.`
-          : "No scanned source produced a date-specific price for this stay window.",
+          ? `${priced.length} priced candidate(s) were scanned, but none passed verified=yes for ${checkIn} to ${checkOut}. Provider status: ${providerAvailabilitySummary}.`
+          : `No scanned source produced a date-specific price for this stay window. Provider status: ${providerAvailabilitySummary}.`,
       });
     }
     const totalPricePlausibilityDropped = Object.values(targetFilterPriceDropped).reduce((sum, n) => sum + n, 0);

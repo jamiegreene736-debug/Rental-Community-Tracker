@@ -262,6 +262,7 @@ type AutoFillComboOption = {
   totalCost: number | null;
   selected: boolean;
   unavailableReason?: string;
+  unavailableDetails?: string[];
   note?: string;
   picks: Array<{
     bedrooms: number;
@@ -280,6 +281,8 @@ type AutoFillComboOption = {
   }>;
   pools?: Array<{
     bedrooms: number;
+    unavailableReason?: string;
+    unavailableDetails?: string[];
     candidates: Array<{
       source: "airbnb" | "vrbo" | "booking" | "pm";
       sourceLabel: string;
@@ -321,6 +324,7 @@ type AutoFillSearchAudit = {
   generatedAt: string;
   counts: AutoFillSearchSummary;
   candidates: AutoFillAuditCandidate[];
+  diagnostics?: FindBuyInDiagnostics;
 };
 
 type BulkBuyInQueueStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
@@ -906,6 +910,130 @@ function pickCheapestSetWithGroundFloor(
     };
   }
   return { picks };
+}
+
+type BuyInSearchProviderKey = keyof AutoFillSearchSummary["sourceCounts"];
+type FindBuyInDiagnosticSource = NonNullable<FindBuyInDiagnostics["sources"]>[number];
+
+const BUY_IN_SEARCH_PROVIDER_CONFIG: Array<{
+  key: BuyInSearchProviderKey;
+  label: string;
+  diagnosticName: RegExp;
+}> = [
+  { key: "airbnb", label: "Airbnb", diagnosticName: /^Airbnb$/i },
+  { key: "vrbo", label: "VRBO", diagnosticName: /^Vrbo$/i },
+  { key: "booking", label: "Booking.com", diagnosticName: /^Booking\.com$/i },
+  { key: "pm", label: "Direct/Lens", diagnosticName: /Airbnb Lens direct links|Direct/i },
+];
+
+function metricNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function pluralizeRows(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function compactDiagnosticMessage(value: string | undefined): string {
+  if (!value) return "";
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > 220 ? `${compact.slice(0, 217)}...` : compact;
+}
+
+function findBuyInDiagnosticSource(
+  diagnostics: FindBuyInDiagnostics | undefined,
+  key: BuyInSearchProviderKey,
+): FindBuyInDiagnosticSource | undefined {
+  const config = BUY_IN_SEARCH_PROVIDER_CONFIG.find((provider) => provider.key === key);
+  if (!config) return undefined;
+  return diagnostics?.sources?.find((source) => config.diagnosticName.test(source.source));
+}
+
+function buyInProviderStats(
+  summary: AutoFillSearchSummary,
+  diagnostics: FindBuyInDiagnostics | undefined,
+  key: BuyInSearchProviderKey,
+) {
+  const diagnostic = findBuyInDiagnosticSource(diagnostics, key);
+  const fallbackScanned = summary.sourceCounts[key] ?? 0;
+  const keptFallback = diagnostic ? 0 : fallbackScanned;
+  return {
+    diagnostic,
+    raw: metricNumber(diagnostic?.raw ?? fallbackScanned),
+    kept: metricNumber(diagnostic?.kept ?? keptFallback),
+    priced: metricNumber(diagnostic?.priced ?? 0),
+    verified: metricNumber(diagnostic?.verified ?? 0),
+    status: diagnostic?.status ?? (fallbackScanned > 0 ? "warning" : "skipped"),
+  };
+}
+
+function formatBuyInProviderAvailability(
+  summary: AutoFillSearchSummary,
+  diagnostics: FindBuyInDiagnostics | undefined,
+  bedrooms: number,
+  key: BuyInSearchProviderKey,
+): string {
+  const config = BUY_IN_SEARCH_PROVIDER_CONFIG.find((provider) => provider.key === key)!;
+  const stats = buyInProviderStats(summary, diagnostics, key);
+  const message = compactDiagnosticMessage(stats.diagnostic?.message);
+  const countSuffix = `raw ${stats.raw}, kept ${stats.kept}, priced ${stats.priced}, verified ${stats.verified}`;
+  let lead: string;
+  if (stats.verified > 0) {
+    lead = `${config.label}: ${pluralizeRows(stats.verified, "verified bookable row")} for ${bedrooms}BR.`;
+  } else if (stats.priced > 0) {
+    lead = `${config.label}: ${pluralizeRows(stats.priced, "priced row")} for ${bedrooms}BR, but 0 verified bookable rows.`;
+  } else if (stats.kept > 0) {
+    lead = `${config.label}: ${pluralizeRows(stats.kept, "target-matching row")} for ${bedrooms}BR, but no live price.`;
+  } else if (stats.raw > 0) {
+    lead = `${config.label}: ${pluralizeRows(stats.raw, "raw row")} seen, but 0 survived the resort/bedroom/date filters for ${bedrooms}BR.`;
+  } else {
+    lead = `${config.label}: no ${bedrooms}BR rows were visible to this search.`;
+  }
+  return `${lead} (${stats.status}; ${countSuffix})${message ? ` ${message}` : ""}`;
+}
+
+function buyInSearchAvailabilityDetails(
+  summary: AutoFillSearchSummary,
+  diagnostics: FindBuyInDiagnostics | undefined,
+  bedrooms: number,
+  opts: { onlyUnavailable?: boolean; includeIssues?: boolean } = {},
+): string[] {
+  const providerLines = BUY_IN_SEARCH_PROVIDER_CONFIG
+    .filter((provider) => {
+      if (!opts.onlyUnavailable) return true;
+      return buyInProviderStats(summary, diagnostics, provider.key).verified === 0;
+    })
+    .map((provider) => formatBuyInProviderAvailability(summary, diagnostics, bedrooms, provider.key));
+
+  const issueLines = opts.includeIssues === false
+    ? []
+    : (diagnostics?.issues ?? []).slice(0, 4).map((issue) =>
+      `${issue.source}: ${issue.summary}${issue.detail ? ` (${compactDiagnosticMessage(issue.detail)})` : ""}`,
+    );
+
+  return [...providerLines, ...issueLines].filter(Boolean).slice(0, 8);
+}
+
+function buyInPoolUnavailableReason(
+  summary: AutoFillSearchSummary,
+  diagnostics: FindBuyInDiagnostics | undefined,
+  bedrooms: number,
+): string {
+  const verifiedTotal = BUY_IN_SEARCH_PROVIDER_CONFIG.reduce(
+    (sum, provider) => sum + buyInProviderStats(summary, diagnostics, provider.key).verified,
+    0,
+  );
+  const pricedTotal = BUY_IN_SEARCH_PROVIDER_CONFIG.reduce(
+    (sum, provider) => sum + buyInProviderStats(summary, diagnostics, provider.key).priced,
+    0,
+  );
+  if (verifiedTotal === 0) {
+    return `No verified available ${bedrooms}BR option on Airbnb, VRBO, Booking.com, or direct/Lens`;
+  }
+  if (pricedTotal === 0) {
+    return `No live-priced ${bedrooms}BR option on Airbnb, VRBO, Booking.com, or direct/Lens`;
+  }
+  return `No unused distinct ${bedrooms}BR option remained after duplicate-unit filtering`;
 }
 
 function directBookingTargetResortName(community: string): string {
@@ -1586,13 +1714,34 @@ function ComboComparisonPanel({
                 {displayedTotal == null ? "—" : fmtMoney(displayedTotal)}
               </div>
             </summary>
+            {displayedTotal == null && (option.unavailableDetails?.length ?? 0) > 0 && (
+              <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-950">
+                <p className="font-semibold">No complete combo could be built from the visible provider results.</p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                  {option.unavailableDetails!.slice(0, 6).map((detail, index) => (
+                    <li key={`${option.label}-detail-${index}`}>{detail}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="mt-2 space-y-2 border-t border-emerald-100 pt-2">
               {(option.pools ?? []).map((pool) => (
                 <div key={`${option.label}-${pool.bedrooms}`}>
                   <p className="mb-1 text-[11px] font-medium text-emerald-900">{pool.bedrooms}BR options considered</p>
                   <div className="max-h-48 overflow-y-auto rounded border bg-white/70">
                     {pool.candidates.filter(candidateVisibleForTarget).length === 0 ? (
-                      <p className="px-2 py-1.5 text-[11px] text-muted-foreground">No priced direct/Booking/VRBO options or Airbnb fallback in this pool.</p>
+                      <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                        <p className="font-medium text-amber-900">
+                          {pool.unavailableReason ?? "No verified Airbnb, VRBO, Booking.com, or direct/Lens option in this pool."}
+                        </p>
+                        {(pool.unavailableDetails?.length ?? 0) > 0 && (
+                          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                            {pool.unavailableDetails!.slice(0, 5).map((detail, index) => (
+                              <li key={`${option.label}-${pool.bedrooms}-pool-detail-${index}`}>{detail}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                     ) : pool.candidates.filter(candidateVisibleForTarget).map((candidate, index) => {
                       const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
                       const isDirectPick = !!directRow;
@@ -1743,11 +1892,29 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
             booking: audit.candidates.filter((c) => c.source === "booking"),
             pm: audit.candidates.filter((c) => c.source === "pm"),
           };
+          const availabilityDetails = buyInSearchAvailabilityDetails(
+            audit.counts,
+            audit.diagnostics,
+            audit.bedrooms,
+            { onlyUnavailable: audit.candidates.length === 0, includeIssues: true },
+          );
+          const hasSearchProblem =
+            audit.candidates.length === 0
+            || audit.counts.priced === 0
+            || audit.diagnostics?.severity === "warning"
+            || audit.diagnostics?.severity === "error";
           return (
             <div key={audit.bedrooms} className="rounded border bg-muted/10">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b px-2 py-1.5">
                 <div>
-                  <p className="font-semibold">{audit.bedrooms}BR search</p>
+                  <p className="font-semibold">
+                    {audit.bedrooms}BR search
+                    {audit.diagnostics?.severity && audit.diagnostics.severity !== "ok" && (
+                      <Badge variant="outline" className={`ml-1 text-[9px] ${diagnosticStatusClass(audit.diagnostics.severity)}`}>
+                        {audit.diagnostics.severity}
+                      </Badge>
+                    )}
+                  </p>
                   <p className="text-[11px] text-muted-foreground">
                     {audit.counts.scanned} scanned · {audit.counts.priced} priced · {audit.counts.kept} curated · Airbnb {audit.counts.sourceCounts.airbnb}, VRBO {audit.counts.sourceCounts.vrbo}, Booking {audit.counts.sourceCounts.booking}, PM {audit.counts.sourceCounts.pm}
                     {audit.counts.groundFloorOnly ? " · ground-floor required" : ""}
@@ -1760,9 +1927,27 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
                   {new Date(audit.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}
                 </span>
               </div>
+              {availabilityDetails.length > 0 && (
+                <div className={`border-b px-2 py-1.5 text-[11px] ${
+                  hasSearchProblem ? "border-amber-200 bg-amber-50/80 text-amber-950" : "bg-slate-50 text-slate-700"
+                }`}>
+                  <p className="font-semibold">
+                    {hasSearchProblem
+                      ? "Provider availability diagnostics"
+                      : "Provider availability checked"}
+                  </p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    {availabilityDetails.slice(0, 7).map((detail, index) => (
+                      <li key={`${audit.bedrooms}-availability-${index}`}>{detail}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div className="max-h-72 overflow-y-auto divide-y">
                 {audit.candidates.length === 0 ? (
-                  <p className="px-2 py-2 text-[11px] text-muted-foreground">No curated options were kept for this search.</p>
+                  <p className="px-2 py-2 text-[11px] text-muted-foreground">
+                    No verified available {audit.bedrooms}BR option was kept for this search.
+                  </p>
                 ) : (
                   (["airbnb", "vrbo", "booking", "pm"] as const).map((source) => {
                     const rows = grouped[source];
@@ -3215,6 +3400,7 @@ export default function Bookings() {
           generatedAt: data.diagnostics?.generatedAt ?? new Date().toISOString(),
           counts: searchSummary,
           candidates: auditCandidatesFor(data),
+          diagnostics: data.diagnostics,
         });
         const unitCandidates: LiveCandidate[] = (data.cheapestUnits ?? [])
           .map((unit): LiveCandidate | null => {
@@ -3293,6 +3479,7 @@ export default function Bookings() {
           generatedAt: data.diagnostics?.generatedAt ?? new Date().toISOString(),
           counts: searchSummary,
           candidates: auditCandidatesFor(data),
+          diagnostics: data.diagnostics,
         });
         const comparisonSources = [
           ...(data.comparisonSources?.pm ?? []),
@@ -3459,10 +3646,16 @@ export default function Bookings() {
       type EvaluatedCombo = {
         combo: TwoUnitBedroomCombo;
         picks: LiveCandidate[];
-        pools: Array<{ bedrooms: number; candidates: LiveCandidate[] }>;
+        pools: Array<{
+          bedrooms: number;
+          candidates: LiveCandidate[];
+          unavailableReason?: string;
+          unavailableDetails?: string[];
+        }>;
         summaries: AutoFillSearchSummary[];
         totalCost: number | null;
         unavailableReason?: string;
+        unavailableDetails?: string[];
         note?: string;
       };
       const comboOptionFrom = (evaluated: EvaluatedCombo, selected = false): AutoFillComboOption => ({
@@ -3471,6 +3664,7 @@ export default function Bookings() {
         totalCost: evaluated.totalCost,
         selected,
         unavailableReason: evaluated.unavailableReason,
+        unavailableDetails: evaluated.unavailableDetails,
         note: evaluated.note,
         picks: evaluated.picks.map((pick, index) => ({
           bedrooms: evaluated.combo.bedrooms[index],
@@ -3489,6 +3683,8 @@ export default function Bookings() {
         })),
         pools: evaluated.pools.map((pool) => ({
           bedrooms: pool.bedrooms,
+          unavailableReason: pool.unavailableReason,
+          unavailableDetails: pool.unavailableDetails,
           candidates: pool.candidates.slice(0, 20).map((candidate) => ({
             source: candidate.source,
             sourceLabel: candidate.sourceLabel,
@@ -3527,12 +3723,18 @@ export default function Bookings() {
           for (const combo of combos) {
             const used = new Set(pickedIdentities);
             const picks: LiveCandidate[] = [];
-            const pools: Array<{ bedrooms: number; candidates: LiveCandidate[] }> = [];
+            const pools: EvaluatedCombo["pools"] = [];
             const summaries: AutoFillSearchSummary[] = [];
             let unavailableReason = "";
+            let unavailableDetails: string[] = [];
             for (const bedroomCount of combo.bedrooms) {
               const pool = await poolFor(bedroomCount);
-              pools.push({ bedrooms: bedroomCount, candidates: pool.candidates });
+              pools.push({
+                bedrooms: bedroomCount,
+                candidates: pool.candidates,
+                unavailableReason: buyInPoolUnavailableReason(pool.searchSummary, pool.data.diagnostics, bedroomCount),
+                unavailableDetails: buyInSearchAvailabilityDetails(pool.searchSummary, pool.data.diagnostics, bedroomCount),
+              });
               summaries.push(pool.searchSummary);
             }
             const targetIndexes = requiredGroundFloorBedrooms.size > 0
@@ -3546,11 +3748,22 @@ export default function Bookings() {
                   ? 1
                   : 0;
             const planned = pickCheapestSetWithGroundFloor(pools, requiredForCombo, used, targetIndexes);
-            if (planned.reason) unavailableReason = planned.reason;
+            if (planned.reason) {
+              unavailableReason = planned.reason;
+              unavailableDetails = pools.flatMap((pool) => [
+                `${pool.bedrooms}BR: ${pool.unavailableReason ?? "No provider option available"}`,
+                ...(pool.unavailableDetails ?? []).map((detail) => `${pool.bedrooms}BR ${detail}`),
+              ]);
+            }
             for (let i = 0; i < planned.picks.length; i++) {
               const pick = planned.picks[i];
               if (!pick) {
-                unavailableReason ||= `No unused ${missingLabel} ${combo.bedrooms[i]}BR option`;
+                const pool = pools[i];
+                unavailableReason ||= pool?.unavailableReason ?? `No unused ${missingLabel} ${combo.bedrooms[i]}BR option`;
+                unavailableDetails.push(
+                  `${combo.bedrooms[i]}BR: ${pool?.unavailableReason ?? `No unused ${missingLabel} option`}`,
+                  ...(pool?.unavailableDetails ?? []).map((detail) => `${combo.bedrooms[i]}BR ${detail}`),
+                );
                 break;
               }
               picks.push(pick);
@@ -3565,6 +3778,7 @@ export default function Bookings() {
               summaries,
               totalCost,
               unavailableReason: totalCost === null ? unavailableReason || `Not enough distinct ${missingLabel} options` : undefined,
+              unavailableDetails: totalCost === null ? Array.from(new Set(unavailableDetails)).slice(0, 10) : undefined,
             };
             evaluatedCombos.push(evaluated);
             if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
@@ -3645,11 +3859,12 @@ export default function Bookings() {
         let best: EvaluatedCombo | null = null;
         for (const combo of combos) {
           const used = new Set<string>();
-          const pools: Array<{ bedrooms: number; candidates: LiveCandidate[] }> = [];
+          const pools: EvaluatedCombo["pools"] = [];
           const summaries: AutoFillSearchSummary[] = [];
           const picks: LiveCandidate[] = [];
           const usedAttachedSlots = new Set<string>();
           let unavailableReason = "";
+          let unavailableDetails: string[] = [];
           for (const bedroomCount of combo.bedrooms) {
             const attached = attachedCandidates.find((item) =>
               item.slot.bedrooms === bedroomCount
@@ -3673,11 +3888,21 @@ export default function Bookings() {
               continue;
             }
             const pool = await poolFor(bedroomCount);
-            pools.push({ bedrooms: bedroomCount, candidates: pool.candidates });
+            pools.push({
+              bedrooms: bedroomCount,
+              candidates: pool.candidates,
+              unavailableReason: buyInPoolUnavailableReason(pool.searchSummary, pool.data.diagnostics, bedroomCount),
+              unavailableDetails: buyInSearchAvailabilityDetails(pool.searchSummary, pool.data.diagnostics, bedroomCount),
+            });
             summaries.push(pool.searchSummary);
             const pick = pool.candidates.find((candidate) => !hasUsedListingIdentity(used, candidate)) ?? null;
             if (!pick) {
-              unavailableReason ||= `No unused priced direct/Booking/VRBO ${bedroomCount}BR option or Airbnb fallback`;
+              const lastPool = pools[pools.length - 1];
+              unavailableReason ||= lastPool?.unavailableReason ?? `No unused priced direct/Booking/VRBO ${bedroomCount}BR option or Airbnb fallback`;
+              unavailableDetails.push(
+                `${bedroomCount}BR: ${lastPool?.unavailableReason ?? "No provider option available"}`,
+                ...(lastPool?.unavailableDetails ?? []).map((detail) => `${bedroomCount}BR ${detail}`),
+              );
               continue;
             }
             addUsedListingIdentity(used, pick);
@@ -3695,6 +3920,7 @@ export default function Bookings() {
             summaries,
             totalCost,
             unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct priced direct/Booking/VRBO options or Airbnb fallback" : undefined,
+            unavailableDetails: totalCost === null ? Array.from(new Set(unavailableDetails)).slice(0, 10) : undefined,
             note: isCurrentPartial
               ? "Current partial plan; still needs a second verified buy-in."
               : replacesCurrent
@@ -3840,11 +4066,20 @@ export default function Bookings() {
           { airbnb: 0, vrbo: 0, booking: 0, pm: 0 },
         );
         const sourceSummary = `Airbnb ${sourceCounts.airbnb}, Vrbo ${sourceCounts.vrbo}, Booking.com ${sourceCounts.booking}, PM ${sourceCounts.pm}`;
+        const unavailableDetailSummary = searchAudits
+          .flatMap((audit) =>
+            buyInSearchAvailabilityDetails(audit.counts, audit.diagnostics, audit.bedrooms, {
+              onlyUnavailable: true,
+              includeIssues: false,
+            }).slice(0, 2).map((detail) => `${audit.bedrooms}BR ${detail}`),
+          )
+          .slice(0, 3)
+          .join(" · ");
         toast({
           title: "No verified priced candidates",
           description: scanned > 0
-            ? `Found ${scanned} scanned option${scanned === 1 ? "" : "s"} (${sourceSummary}), but ${priced === 0 ? "none had a live price" : "none were verified bookable"} for these dates. Click a slot's chevron to audit the live results.`
-            : "No source returned a candidate for these dates. Click Find buy-in on a slot to retry the live search.",
+            ? `Found ${scanned} scanned option${scanned === 1 ? "" : "s"} (${sourceSummary}), but ${priced === 0 ? "none had a live price" : "none were verified bookable"} for these dates.${unavailableDetailSummary ? ` ${unavailableDetailSummary}` : ""} Click a slot's chevron to audit the live results.`
+            : `No source returned a candidate for these dates.${unavailableDetailSummary ? ` ${unavailableDetailSummary}` : ""} Click Find buy-in on a slot to retry the live search.`,
         });
       } else if (zeroCostFills.length === filled.length) {
         const hasVrboPick = filled.some((r) => /(?:^|\.)vrbo\.com/.test(r.picked?.url ?? ""));
