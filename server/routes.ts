@@ -7221,34 +7221,14 @@ export async function registerRoutes(
   //     sources: { airbnb: [...], vrbo: [...], booking: [...], pm: [...] },
   //     cheapest: [top 2 cross-source by nightly price]
   //   }
-  // PM discovery: SearchAPI-backed Google paths feature flag (PR #314).
-  //
-  // Operator directive 2026-05-01: Google searches must be server-side
-  // SearchAPI calls only. The sidecar/Chrome daemon is reserved for
-  // visiting already-discovered PM/OTA pages to verify pricing and
-  // availability. Driving google.com through Chrome gets the operator's
-  // local browser flagged and then pollutes the same session we need for
-  // VRBO/Booking/PM page checks.
-  //
-  // When this flag is disabled during a SearchAPI/Google-side outage,
-  // the cheapest pool still draws from non-Google direct sources:
-  //   - Airbnb engine (SearchAPI engine=airbnb — not Google)
-  //   - Booking sidecar + google_hotels engine (different API surface)
-  //   - Vrbo sidecar (operator's home-IP Chrome)
-  //   - Suite-Paradise sitemap walk (no Google)
-  //   - VRP_SITES sitemap walks (no Google) — Parrish, CB Island,
-  //     Piko, EVR Hawaii
-  //
-  // Google-dependent API-only paths currently gated by this flag:
-  //   1. pmPromise         — Stage 1 (find PM domains) + Stage 2
-  //                          (per-PM site:search deep-dive) via
-  //                          SearchAPI engine=google
-  //   2. pmSearchApiFinder — broad SearchAPI engine=google queries for
-  //                          additional PM URLs
-  //   3. lensMatches       — Google Lens reverse-image search for
-  //                          PM URLs that share photos with the top
-  //                          Airbnb candidates
-  const PM_GOOGLE_DISCOVERY_DEFAULT_ENABLED = false;
+  // Buy-in search policy, updated 2026-05-23:
+  //   - search only Airbnb, Vrbo, and Booking.com by resort/community name
+  //     through the Chrome sidecar with stay dates and bedroom count applied;
+  //   - do not use SearchAPI Google SERPs to discover PM websites;
+  //   - do not scrape PM/direct websites for rates;
+  //   - for Airbnb only, Google Lens may find a direct-booking URL from the
+  //     listing photos. That direct URL is link-only and keeps Airbnb's
+  //     date-specific availability and price as the proof.
 
   // PM discovery hit-rate telemetry. Module-scoped (Express app lifetime).
   // Tracks how often each PM-discovery path returns priced+available units
@@ -9640,57 +9620,24 @@ export async function registerRoutes(
       FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS,
       Math.max(25_000, routeRemainingMs() - 10_000),
     );
-    const [airbnb, booking, vrbo, pmGoogle, pmWebsiteSidecarDiscovered, spDiscovered, pkDiscovered, cbDiscovered, pikoDiscovered, evrhiDiscovered, gvDiscovered, slAlekonaDiscovered, slPrincevilleDiscovered] = await Promise.all([
+    const [airbnb, booking, vrbo] = await Promise.all([
       withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-sidecar", airbnbSidecarAbort.abort),
       withTimeout(bookingPromise, sidecarSourceBudgetMs, [] as Candidate[], "booking-sidecar", bookingSidecarAbort.abort),
       withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo", vrboSidecarAbort.abort),
-      withTimeout(pmPromise, 10_000, [] as Candidate[], "pm-google"),
-      withTimeout(pmWebsiteSidecarPromise, sidecarSourceBudgetMs, [] as Candidate[], "pm-website-sidecar", pmWebsiteSidecarAbort.abort),
-      // PR #337/#338: bumped vrp-walk timeouts 30s → 75s → 120s.
-      // Parrish Kauai's cold-cache walk consistently lands in the
-      // 80-95s range even at concurrency=24 (their WP front
-      // controller appears to throttle per-IP — page response time
-      // averages ~270ms rather than the ~80ms a CDN-cached page
-      // would give). 120s covers the 95th-percentile cold call;
-      // warm caches still resolve in <1s, so the higher ceiling
-      // only fires on the first request after a Railway restart.
-      // Other scrapers keep their original 30s budget — they're
-      // either small inventories or already JSON-backed.
-      withTimeout(spDiscoveryPromise, 45_000, [] as Candidate[], "sp-sitemap"),
-      withTimeout(pkDiscoveryPromise, 120_000, [] as Candidate[], "pk-sitemap"),
-      withTimeout(cbDiscoveryPromise, 75_000, [] as Candidate[], "cb-sitemap"),
-      withTimeout(pikoDiscoveryPromise, 45_000, [] as Candidate[], "piko-sitemap"),
-      withTimeout(evrhiDiscoveryPromise, 45_000, [] as Candidate[], "evrhi-sitemap"),
-      withTimeout(gvDiscoveryPromise, 45_000, [] as Candidate[], "gv-sitemap"),
-      withTimeout(slAlekonaDiscoveryPromise, 45_000, [] as Candidate[], "sl-alekona"),
-      withTimeout(slPrincevilleDiscoveryPromise, 45_000, [] as Candidate[], "sl-princeville"),
     ]);
-    // Merge per-PM discoveries (priced) ahead of Google-deep-dive (mostly
-    // unpriced), but dedupe by URL — sitemap walks and Google may both
-    // surface the same unit. Per-PM domains don't overlap, so just union.
-    const seenPmUrls = new Set<string>([
-      ...pmWebsiteSidecarDiscovered.map((c) => c.url),
-      ...spDiscovered.map((c) => c.url),
-      ...pkDiscovered.map((c) => c.url),
-      ...cbDiscovered.map((c) => c.url),
-      ...pikoDiscovered.map((c) => c.url),
-      ...evrhiDiscovered.map((c) => c.url),
-      ...gvDiscovered.map((c) => c.url),
-      ...slAlekonaDiscovered.map((c) => c.url),
-      ...slPrincevilleDiscovered.map((c) => c.url),
-    ]);
-    const pm: Candidate[] = [
-      ...pmWebsiteSidecarDiscovered,
-      ...spDiscovered,
-      ...pkDiscovered,
-      ...cbDiscovered,
-      ...pikoDiscovered,
-      ...evrhiDiscovered,
-      ...gvDiscovered,
-      ...slAlekonaDiscovered,
-      ...slPrincevilleDiscovered,
-      ...pmGoogle.filter((c) => !seenPmUrls.has(c.url)),
-    ];
+    const pmGoogle: Candidate[] = [];
+    const pmWebsiteSidecarDiscovered: Candidate[] = [];
+    const spDiscovered: Candidate[] = [];
+    const pkDiscovered: Candidate[] = [];
+    const cbDiscovered: Candidate[] = [];
+    const pikoDiscovered: Candidate[] = [];
+    const evrhiDiscovered: Candidate[] = [];
+    const gvDiscovered: Candidate[] = [];
+    const slAlekonaDiscovered: Candidate[] = [];
+    const slPrincevilleDiscovered: Candidate[] = [];
+    // PM/direct websites are not searched or scraped for buy-in rates.
+    // Direct links enter below only when Google Lens matches Airbnb photos.
+    const pm: Candidate[] = [];
 
     // ── Path B: reverse-image search the top Airbnb candidates ───────────
     // Airbnb listings can't be sublet (Airbnb's TOS bars commercial
@@ -9808,19 +9755,16 @@ export async function registerRoutes(
       };
     });
 
-    // Promote photo-match URLs into the PM source as verification targets.
+    // Promote photo-match URLs into the PM/direct source as link-only rows.
     //
-    // Each match becomes an unpriced PM Candidate. Reasoning:
+    // Each match becomes a priced PM-shaped Candidate for backward
+    // compatibility with the existing UI model. Reasoning:
     //   - Photos match → it's the same physical unit
     //   - Airbnb shows the unit as available + priced for these dates
-    //   - PM URL may be bookable, but that must be proven separately.
+    //   - The direct URL is useful as a click-through, but is not scraped.
     //
-    // Do NOT inherit the Airbnb price/bedrooms onto the PM URL. That
-    // produced fake "Direct PM" rows when Lens found a Suite Paradise
-    // collection page or a neighboring 2BR unit: the UI displayed the
-    // Airbnb anchor's 3BR price as if the PM page had quoted it. The
-    // sidecar detail verifier below is the only step allowed to promote
-    // a photo-match PM URL into a priced/verified candidate.
+    // The rate is intentionally inherited from Airbnb and clearly labeled
+    // as such. The direct page is never opened for a quote in this flow.
     //
     // Two filters keep noise out:
     //   a. mentionsResort(url + title) — drops matches at neighboring
@@ -9828,8 +9772,7 @@ export async function registerRoutes(
     //   b. Top 2 matches per anchor — Google Lens ranks by visual
     //      similarity; deeper matches are usually wrong-unit.
     //
-    // Dedupe against the existing pm[] array by URL so we don't
-    // double-render a domain that the PM Google search already found.
+    // Dedupe by URL so repeated Lens matches do not double-render.
     const existingPmUrls = new Set(pm.map((c) => c.url));
     const photoMatchPmCandidates: Candidate[] = [];
     let photoMatchWrongResortDropped = 0;
@@ -9925,57 +9868,15 @@ export async function registerRoutes(
         });
       }
     }
-    // ── PM discovery via SearchAPI ──────────────────────────────────
-    // The Stagehand-based PM finder (Browserbase + Anthropic agent that
-    // drove Google search like a human) was retired in PR #275. The
-    // broad PM finder now uses SearchAPI only, then the sidecar verifies
-    // candidate PM URLs directly.
-    const pmFinderBudgetMs = Math.min(30_000, Math.max(0, routeRemainingMs() - 15_000));
-    const pmSearchApiFinderRaw = pmFinderBudgetMs >= 5_000
-      ? await withTimeout(pmSearchApiFinderPromise, pmFinderBudgetMs, [] as Candidate[], "pm-searchapi-finder")
-      : (() => {
-          sourceTimeouts.push({ source: "pm-searchapi-finder", ms: pmFinderBudgetMs });
-          return [] as Candidate[];
-        })();
-    const pmDedupeKey = (rawUrl: string): string => {
-      try {
-        const u = new URL(rawUrl);
-        u.search = "";
-        u.hash = "";
-        return u.toString();
-      } catch {
-        return rawUrl;
-      }
-    };
-    const existingPmUrlSet = new Set(pm.map((c) => pmDedupeKey(c.url)));
-    const pmSearchApiFinderCandidates = pmSearchApiFinderRaw.filter((c) => {
-      const key = pmDedupeKey(c.url);
-      if (existingPmUrlSet.has(key)) return false;
-      existingPmUrlSet.add(key);
-      return true;
-    });
-    if (pmSearchApiFinderRaw.length > 0) {
-      console.log(
-        `[find-buy-in] searchapi-pm-finder added ${pmSearchApiFinderCandidates.length}/${pmSearchApiFinderRaw.length} PM URLs after PM de-dupe`,
-      );
-    }
+    // PM SearchAPI finder intentionally removed from the buy-in path.
+    // SearchAPI is allowed here only for Airbnb Google Lens reverse-image
+    // lookup, never for Google SERP PM discovery.
+    const pmSearchApiFinderCandidates: Candidate[] = [];
 
-    // ── Sidecar batch URL verify (operator's real Chrome) ────────────
-    // Take unverified direct-booking URLs from Booking.com organic rows
-    // plus every PM discovery path (SearchAPI deep-dive, reverse-image PM
-    // matches, SearchAPI PM finder), then force any remaining unpriced
-    // PM rows through the same sidecar verifier. SearchAPI
-    // can only find the page; if the row has no rate, the local Chrome
-    // sidecar is the right next step to try the live booking widget.
-    // Total wall ≈ one slow tab per 5 URLs. Yields:
-    //   - verified=yes with real per-night price → joins priced pool
-    //     correctly ranked by cost.
-    //   - verified=no               → stays unpriced, excluded from
-    //                                  priced pool by the > 0 filter.
-    //   - verified=unclear          → unpriced, excluded from priced
-    //                                  pool but visible in sources.pm.
-    // Tracked in `sidecarBatchVerifiedUrls` so pre-verify accounting
-    // and cheapest gating know which dynamic PM rows were checked.
+    // ── Direct-site verification disabled by design ────────────────
+    // Buy-in now uses the OTA result page as the source of truth. Direct
+    // links found from Airbnb photos are click-through context only and
+    // keep Airbnb's date-specific proof; no PM URL is opened or scraped.
     const sidecarBatchVerifiedUrls = new Set<string>();
     const sidecarVerifyTargets: Candidate[] = [];
     const sidecarVerifySeen = new Set<string>();
@@ -10038,15 +9939,9 @@ export async function registerRoutes(
         .map(([label, bucket]) => `${label} (${bucket.count}; e.g. ${bucket.examples.join(" | ")})`);
       return rows.join("; ");
     };
-    // PM/direct candidates need a same-page date-specific quote before
-    // they can be considered bookable. Google/SearchAPI/Lens can discover
-    // URLs, but only the PM page/API verifier can promote them to
-    // verified=yes with a real price for the requested stay.
-    const sidecarVerifyPool: Candidate[] = [
-      ...pm,
-      ...photoMatchPmCandidates,
-      ...pmSearchApiFinderCandidates,
-    ];
+    // Direct links found from Airbnb photos inherit Airbnb's verified
+    // availability/price. Do not open or scrape the direct site.
+    const sidecarVerifyPool: Candidate[] = [];
     for (const c of sidecarVerifyPool) {
       const key = c.url ? sidecarVerifyKey(c.url) : "";
       if (!c.url || c.verified || sidecarVerifySeen.has(key)) continue;
@@ -10297,38 +10192,17 @@ export async function registerRoutes(
     // site:search VRBO rows are unpriced and stay out via the
     // nightlyPrice > 0 filter).
     //
-    // Booking.com — google_hotels/search sidecar discover URLs; sidecar
-    // detail verification supplies the only trusted room-level price.
-    // PM — verified via the sidecar batch-verify pass above.
+    // Booking.com and Vrbo are sidecar-priced from their own search pages.
+    // Direct-link rows are Lens matches under an Airbnb anchor and keep the
+    // Airbnb date-specific price; the direct site is not scraped.
     const priced: Candidate[] = [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget]
       .filter((c) => c.nightlyPrice > 0)
       .filter((c) => c.source === "airbnb" || c.verified === "yes")
       .filter((c) => !groundFloorOnly || c.groundFloorStatus === "confirmed")
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
-    // ── Pre-verify top-N priced PM candidates ──────────────────────────────
-    //
-    // The Steve Kuykendall case (Jun 13-20 2026, 3BR Poipu Kai) surfaced
-    // direct/PM rows whose visible pages were either the wrong bedroom
-    // count or a resort collection page. The deeper rule is that PM
-    // discovery is not enough: a detail page/API must prove bedrooms,
-    // availability, and the requested stay price before auto-fill.
-    //
-    // Pre-verify a budget-capped slice of the cheapest PM candidates BEFORE
-    // returning, so the cheapest panel can be hard-gated on verified=yes.
-    // Booking.com candidates from the google_hotels engine are already
-    // verified upstream (date-specific rate query), so they skip this step.
-    //
-    // Wall budget: ~90s for top 6 PM URLs (Stagehand sequential ≈ 10s
-    // each + Vrbo parallel scraper ≈ 8s). Past the budget, remaining URLs
-    // are marked "skipped" and excluded from cheapest. The whole find-buy-
-    // in handler aims for ~3-5 min total; this is the last expensive step.
-    // Pre-verify: sidecar batch already covered the top-5 PM URLs above
-    // (parallel tabs on the operator's real Chrome). The Browserbase
-    // pre-verify pass that previously ran here was retired in PR #275 —
-    // same operator home-IP, same DOM heuristics, but free + faster. PM
-    // rows the sidecar didn't cover (sidecar offline OR > 5 PMs) get
-    // marked "skipped" so the UI distinguishes them from confirmed-yes.
+    // No direct-site pre-verification. OTA search pages and Airbnb Lens are
+    // the only buy-in inputs; direct links are shown with Airbnb-backed proof.
     const preVerifyAttempted = sidecarBatchVerifiedUrls.size;
     const preVerifyYes = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "yes").length;
     const preVerifyNo = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "no").length;
@@ -10337,33 +10211,25 @@ export async function registerRoutes(
       if (c.source === "pm" && !c.verified) c.verified = "skipped";
     }
 
-    // Re-sort priced after verification — verified-yes candidates may
-    // have had their nightlyPrice updated from the PM detail/API quote.
+    // Re-sort after Lens rows are merged.
     priced.sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
     // ── Cheapest pool ──────────────────────────────────────────────────────
     //
     // Verified-only. The cheapest panel is the operator's "buy these"
-    // recommendation — it must reflect units we actually confirmed are
-    // bookable for these dates with the price the page is quoting,
-    // not inherited prices on un-verified PM URLs.
+    // recommendation. OTA rows are verified by their own search pages;
+    // direct-link rows are verified by the Airbnb anchor that supplied
+    // the date-specific availability and price.
     //
-    // - "yes"     → in. Real availability + real rate (PM page-quoted or
-    //               google_hotels engine date-specific).
+    // - "yes"     → in. OTA search result or Airbnb-backed direct link.
     // - "no"      → out. Confirmed unavailable.
     // - "unclear" → out of CHEAPEST, but stays in `sources.pm` so the
-    //               operator can review. The Stagehand verify is best-
-    //               effort; "unclear" is honest about the remaining
-    //               uncertainty rather than promoting a bookable claim.
-    // - "skipped" → out of CHEAPEST. Past the verify-budget cap or
-    //               verification path unavailable.
+    //               operator can review.
+    // - "skipped" → out of CHEAPEST.
     // - undefined → out (defensive — should never happen in production).
     const verifiedCheapest = priced.filter((c) => c.verified === "yes");
     // Cap at 20 — multi-slot reservations need enough variety to fill
-    // distinct units per slot. Do not fall back to unpriced PM rows here:
-    // Auto-fill consumes this list directly, so an unpriced fallback
-    // creates a $0 attached buy-in. Unverified PM rows stay visible
-    // below in the scanned-options table with their automatic status.
+    // distinct units per slot. Do not fall back to unpriced rows here.
     const cheapest = verifiedCheapest.slice(0, 20);
     const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
 
@@ -10623,18 +10489,13 @@ export async function registerRoutes(
         message: `${bookingSidecarCount} Booking.com website sidecar search card(s). Sidecar-priced search cards are trusted when Booking.com returned them after date and bedroom filtering.`,
       },
       {
-        source: "PM companies",
-        status: includePm
-          ? sourceStatus(["pm-website-sidecar", "pm-google", "sp-sitemap", "pk-sitemap", "cb-sitemap", "piko-sitemap", "evrhi-sitemap", "gv-sitemap", "sl-alekona", "sl-princeville"], ["PM", "Suite", "Parrish", "Island", "Piko", "EVR", "Gather", "Alekona", "Princeville"], pmWebsiteSidecarCount + pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), "No PM company returned a verified rate")
-          : "skipped",
-        raw: pmWebsiteSidecarCount + pmRawCount + photoMatchPmCandidates.length + spDiscovered.length + pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length + pmSearchApiFinderCandidates.length,
+        source: "Airbnb Lens direct links",
+        status: sourceStatus([], ["Google Lens"], totalPhotoMatches, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), ""),
+        raw: totalPhotoMatches,
         kept: pmTarget.length,
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
-        durationMs: pmWebsiteSidecarMs,
-        message: includePm
-          ? `websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}; sidecarOnline=${pmWebsiteSidecarOnline}; direct PM search-result priced=${pricedCount(pmTarget)}${pmWebsiteSidecarReason ? `; ${pmWebsiteSidecarReason}` : ""}.`
-          : "Skipped for fast OTA-only combo search.",
+        message: `${photoMatchPmCandidates.length} direct link candidate(s) came only from Airbnb photo Lens matches. Direct sites were not scraped; rates remain Airbnb proof.`,
       },
       {
         source: "Sidecar rate verifier",
@@ -10724,7 +10585,7 @@ export async function registerRoutes(
       + `airbnb=${airbnb.length}/${airbnbRawCount} (websiteSidecar=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (website sidecar search cards) `
-      + `pm=${pm.length}/${pmRawCount}+websiteSidecar=${pmWebsiteSidecarDiscovered.length}/${pmWebsiteSidecarCount}/online=${pmWebsiteSidecarOnline}/${pmWebsiteSidecarMs}ms${pmWebsiteSidecarReason ? "; " + pmWebsiteSidecarReason : ""} +${photoMatchPmCandidates.length}+${spDiscovered.length}+${pkDiscovered.length}+${cbDiscovered.length}+${pikoDiscovered.length}+${evrhiDiscovered.length}+${gvDiscovered.length}+${slAlekonaDiscovered.length}+${slPrincevilleDiscovered.length}+${pmSearchApiFinderCandidates.length}+${pmFinderCandidates.length} (website sidecar primary; legacy API/search disabled; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
+      + `directLens=${photoMatchPmCandidates.length}/${totalPhotoMatches} (PM SearchAPI/site scraping disabled; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} priceFloor=${JSON.stringify(targetFilterPriceDropped)} · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
@@ -10746,26 +10607,11 @@ export async function registerRoutes(
         pm: pmTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
       },
       comparisonSources,
-      // PR #337: pmSourceBreakdown — every PM scraper we attempted,
-      // with its result count and whether the discovery promise
-      // resolved within its wall budget. Surfaced in the UI so the
-      // operator can see at a glance which sources contributed and
-      // which came up empty (vs. wondering whether we even searched
-      // them). Order roughly matches build/value priority so the
-      // panel reads top-to-bottom in newest→oldest order.
+      // Backward-compatible source breakdown for the PM/direct section.
+      // PM scrapers are intentionally not attempted; this reports only
+      // Airbnb Google Lens direct-link matches.
       pmSourceBreakdown: [
-        { label: "PM website sidecar search",      count: pmWebsiteSidecarDiscovered.length },
-        { label: "Suite Paradise",                count: spDiscovered.length },
-        { label: "Parrish Kauai",                 count: pkDiscovered.length },
-        { label: "CB Island Vacations",           count: cbDiscovered.length },
-        { label: "Piko Properties",               count: pikoDiscovered.length },
-        { label: "EVR Hawaii",                    count: evrhiDiscovered.length },
-        { label: "Gather Vacations",              count: gvDiscovered.length },
-        { label: "Alekona Kauai",                 count: slAlekonaDiscovered.length },
-        { label: "Princeville Vacation Rentals",  count: slPrincevilleDiscovered.length },
-        { label: "Google site-search (other PMs)",count: pmGoogle.filter((c) => !seenPmUrls.has(c.url)).length },
-        { label: "SearchAPI PM finder",            count: pmSearchApiFinderCandidates.length },
-        { label: "Detail rate checks",             count: sidecarBatchVerifiedUrls.size },
+        { label: "Airbnb Google Lens direct links", count: photoMatchPmCandidates.length },
       ],
       debug: {
         rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },

@@ -244,58 +244,12 @@ async function discoverPmSitesViaSearchApi(opts: {
   checkIn: string;
   apiKey: string;
 }): Promise<SidecarPmSearchSite[]> {
-  const queries = Array.from(new Set([
-    `"${opts.target}" vacation rentals property management book direct ${opts.locality}`,
-    `"${opts.target}" ${opts.bedrooms} bedroom vacation rentals property manager`,
-    `"${opts.target}" "vacation rentals" "search" "availability"`,
-    `"${opts.target}" ${opts.bedrooms}BR condo rental direct booking ${opts.locality}`,
-  ]));
-  const seenHosts = new Set<string>();
-  const sites: SidecarPmSearchSite[] = [];
-  const batches = await Promise.all(queries.map(async (query) => {
-    const params = new URLSearchParams({
-      engine: "google",
-      q: query,
-      num: "10",
-      api_key: opts.apiKey,
-    });
-    try {
-      const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!r.ok) return [];
-      const data = await r.json() as { organic_results?: Array<{ link?: string; title?: string; snippet?: string }> };
-      return Array.isArray(data.organic_results) ? data.organic_results : [];
-    } catch {
-      return [];
-    }
-  }));
-  for (const batch of batches) {
-    for (const hit of batch) {
-      const url = String(hit?.link ?? "");
-      if (!url) continue;
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-      } catch {
-        continue;
-      }
-      const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
-      if (!host || seenHosts.has(host) || PM_DISCOVERY_EXCLUDED_HOSTS.test(host)) continue;
-      const hay = `${String(hit?.title ?? "")} ${String(hit?.snippet ?? "")}`;
-      if (!bedroomTextMatches(hay, opts.bedrooms)) continue;
-      seenHosts.add(host);
-      sites.push({
-        label: String(hit?.title || host).replace(/\s+/g, " ").slice(0, 60),
-        baseUrl: `${parsed.protocol}//${parsed.hostname}`,
-        // The sidecar starts here, then falls back to finding the
-        // site's rental-search page before entering resort/date/BR.
-        searchUrl: url,
-      });
-      if (sites.length >= 10) return sites;
-    }
-  }
-  return sites;
+  void opts;
+  // Retired 2026-05-23: buy-in scans must not use SearchAPI Google SERPs
+  // to discover property-manager websites. Direct booking links are found
+  // only from Airbnb listing images in the Operations flow, and are not
+  // scraped for rates.
+  return [];
 }
 
 type PmRateSample = {
@@ -487,7 +441,7 @@ async function fetchPmMarketRatesForBedroom(args: {
   const medianNightly = medianOfSorted(normalizedRates);
   const reasonBits: string[] = [];
   if (samples.length > 0) reasonBits.push(`${samples.length} verified PM sample(s)`);
-  reasonBits.push(`${sites.length} PM site(s): ${knownCount} known + ${discoveredCount} SearchAPI-discovered`);
+  reasonBits.push(`${sites.length} PM site(s): ${knownCount} known + ${discoveredCount} discovered (PM scanning disabled by default)`);
   if (sidecarReason) reasonBits.push(sidecarReason);
 
   return {
@@ -607,7 +561,7 @@ async function fetchPmMarketRatesForBedroomSet(args: {
       .sort((a, b) => a - b);
     const reasonBits: string[] = [];
     if (samples.length > 0) reasonBits.push(`${samples.length} verified PM sample(s)`);
-    reasonBits.push(`shared PM scan for ${targetBrs.join("/")}BR: ${sites.length} PM site(s): ${knownCount} known + ${discoveredCount} SearchAPI-discovered`);
+    reasonBits.push(`shared PM scan for ${targetBrs.join("/")}BR: ${sites.length} PM site(s): ${knownCount} known + ${discoveredCount} discovered (PM scanning disabled by default)`);
     if (sidecarReason) reasonBits.push(sidecarReason);
     return {
       br,
@@ -695,8 +649,7 @@ export type MultiChannelBuyInResult = {
 };
 
 export async function fetchMultiChannelBuyInByBR(args: {
-  // Identity tuple used for PM discovery/location context and for the
-  // legacy SearchAPI fallback only when `skipSidecar` is explicitly set.
+  // Identity tuple used for OTA resort/location context.
   community: string;
   city: string;
   state: string;
@@ -717,8 +670,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // Airbnb + VRBO + Booking.com local-Chrome searches.
   skipSidecar?: boolean;
   // Pricing refreshes can split the full market-rate check into
-  // reusable stages: PM/direct once per season type and OTA checks per
-  // season date band. Default behavior still runs every channel.
+  // reusable stages. PM/direct scanning is legacy-only and disabled.
   skipOta?: boolean;
   skipPm?: boolean;
   // Manual market-rate refreshes run in the background now, so they can
@@ -728,13 +680,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // Monthly pricing refreshes can reuse one minimum-bedroom OTA search
   // across larger bedroom counts because the sidecar applies "at least N
   // bedrooms" filters for Airbnb/VRBO/Booking and returns parsed BR counts
-  // per card. PM/direct searches stay per-BR because site filters vary.
+  // per card.
   reuseSharedOtaSearch?: boolean;
-  // Pricing refreshes sample PM/direct as a market signal, not as a
-  // full property-manager coverage crawl. Keep these configurable so
-  // long background scans do not spend several minutes per bedroom on
-  // slow PM sites while buy-in/detail workflows can still run the
-  // deeper search.
+  // Legacy PM tuning knobs retained for API compatibility. They are ignored
+  // while PM/direct scanning is disabled.
   reuseSharedPmSearch?: boolean;
   pmPerSiteLimit?: number;
   pmMaxSites?: number;
@@ -1380,10 +1329,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
 // Pricing tab's per-season buy-in basis instead of the legacy
 // "single LOW window × seasonal multipliers" model.
 //
-// LOW/HIGH/HOLIDAY all run the full multichannel path now:
-// sidecar Airbnb + sidecar VRBO + sidecar Booking + PM website-search rates.
-// PM sites include known direct-booking domains plus SearchAPI-discovered
-// PM domains searched through the local Chrome sidecar.
+// LOW/HIGH/HOLIDAY all run the OTA path now:
+// sidecar Airbnb + sidecar VRBO + sidecar Booking.
+// PM/direct websites are not discovered or scraped for buy-in rates.
 //
 // Total wall time depends on sidecar queue depth and bedroom counts;
 // the outer deadline below returns partial seasons after 15 minutes.

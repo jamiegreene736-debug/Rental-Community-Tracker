@@ -1408,7 +1408,7 @@ function ComboComparisonPanel({
       totalCost: allPicksVisible ? option.totalCost : null,
       unavailableReason: allPicksVisible
         ? option.unavailableReason
-        : "Filtered out direct/PM rows that did not match the target resort",
+        : "Filtered out direct-link rows that did not match the target resort",
       picks: filteredPicks,
       pools: option.pools?.map((pool) => ({
         ...pool,
@@ -1632,12 +1632,12 @@ function ComboComparisonPanel({
           </div>
           {directRunning && (
             <div className="mb-2 space-y-1">
-              <p className="text-[11px] text-sky-900/75">Checking Airbnb candidates for direct PM listing pages...</p>
+              <p className="text-[11px] text-sky-900/75">Checking Airbnb candidates for direct booking links...</p>
               <Progress value={directProgress} className="h-1.5" />
             </div>
           )}
           {!directRunning && directMatches.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground">No full combination could be built using VRBO/Booking.com/PM rows plus Airbnb rows with a direct booking site.</p>
+            <p className="text-[11px] text-muted-foreground">No full combination could be built using VRBO/Booking.com rows plus Airbnb rows with a direct booking link.</p>
           ) : (
             <div className="space-y-1">
               {bestOptimizedCombo && (
@@ -3060,14 +3060,14 @@ export default function Bookings() {
         const photoLabel = match.matchedPhotoLabel ? `: ${match.matchedPhotoLabel}` : "";
         return {
           source: "pm",
-          sourceLabel: `Direct PM (${match.domain})`,
+          sourceLabel: `Direct link (${match.domain})`,
           title: match.title || airbnbCandidate.title,
           url: match.url,
-          nightlyPrice: 0,
-          totalPrice: 0,
-          bedrooms: undefined,
+          nightlyPrice: airbnbCandidate.nightlyPrice,
+          totalPrice: airbnbCandidate.totalPrice,
+          bedrooms: candidateBedrooms(airbnbCandidate, 0) || airbnbCandidate.bedrooms,
           image: airbnbCandidate.image,
-          snippet: `Direct booking site found automatically from this Airbnb listing's photos${photoRole}${photoLabel}. It is evidence only until the PM page confirms bedroom count and a date-specific quote.`,
+          snippet: `Direct booking site found automatically from this Airbnb listing's photos${photoRole}${photoLabel}. Airbnb supplied the date-specific availability and rate; the direct site was not scraped.`,
           alternateUrls: Array.from(new Set([airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])].filter(Boolean) as string[])),
           photoMatches: [{ url: match.url, title: match.title, domain: match.domain }],
           identityKeys: listingIdentityKeys({
@@ -3077,9 +3077,14 @@ export default function Bookings() {
           }),
           airbnbAnchorUrl: airbnbCandidate.url,
           airbnbAnchorPrice: airbnbCandidate.totalPrice,
-          verified: "skipped",
-          verifiedNightlyPrice: null,
-          verifiedReason: `Direct PM listing found automatically by Google Lens from the Airbnb listing photos${photoRole}${photoLabel}, but the PM page has not confirmed bedroom count or a date-specific price.`,
+          directBookingUrl: match.url,
+          directBookingHost: match.domain,
+          directBookingConfidence: "medium",
+          directBookingSource: "airbnb_image_reverse_search",
+          directBookingReason: `Google Lens found this direct booking site from the Airbnb listing photos${photoRole}${photoLabel}.`,
+          verified: "yes",
+          verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
+          verifiedReason: `Direct link found automatically by Google Lens from Airbnb photos${photoRole}${photoLabel}. Price and availability are inherited from Airbnb for the requested dates; the direct site was not scraped.`,
           groundFloorStatus: airbnbCandidate.groundFloorStatus,
           groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
         };
@@ -3295,10 +3300,6 @@ export default function Bookings() {
           skippedReasons.push(`${slot.unitLabel}: skipped unverified ${pick.sourceLabel} result`);
           return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
         }
-        if (pick.airbnbAnchorUrl && pick.verified !== "yes") {
-          skippedReasons.push(`${slot.unitLabel}: skipped photo-match result without PM page quote`);
-          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-        }
         const community = selectedSearchCommunity;
         const targetResortName = directBookingTargetResortName(community);
         const targetRejectReason = targetLocationRejectReason(targetResortName, community, pick);
@@ -3327,7 +3328,7 @@ export default function Bookings() {
           ? ` · ⚠️ Airbnb pick — Airbnb TOS prohibits sublet. Operator should handle channel-specific compliance before booking.`
           : "";
         const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
-          ? ` · Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). PM page supplied its own verified quote before auto-fill.`
+          ? ` · Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Direct link only; Airbnb supplied the date-specific price and availability.`
           : "";
         const groundFloorSuffix = pick.groundFloorStatus === "confirmed"
           ? ` · Ground-floor: confirmed${pick.groundFloorEvidence ? ` (${pick.groundFloorEvidence})` : ""}`
@@ -3794,10 +3795,10 @@ export default function Bookings() {
         toast({
           title: hasVrboPick
             ? `Attached ${filled.length} Vrbo link${filled.length > 1 ? "s" : ""} for review`
-            : `Attached ${filled.length} PM link${filled.length > 1 ? "s" : ""} for review`,
+            : `Attached ${filled.length} direct link${filled.length > 1 ? "s" : ""} for review`,
           description: (hasVrboPick
             ? `A source returned a review link without a usable price. Re-run live search before confirming with the guest.`
-            : `A PM source returned a link without a usable price. Re-run live search before confirming with the guest.`)
+            : `A direct-link row did not have a usable Airbnb-backed price. Re-run live search before confirming with the guest.`)
             + comboSummary
             + (skipped.length ? ` · No URL found for: ${skipped.join(", ")}` : ""),
         });
@@ -6975,7 +6976,7 @@ function BuyInListingSitesDialog({
   );
 }
 
-// ─── Live search across Airbnb, Vrbo, Booking.com, and PM companies ─────────
+// ─── Live search across Airbnb, Vrbo, Booking.com, plus Airbnb Lens links ───
 
 type LiveCandidate = {
   source: "airbnb" | "vrbo" | "booking" | "pm";
@@ -7714,7 +7715,7 @@ function LiveSearchSection({
               <Globe className="h-4 w-4" /> Live search
             </p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Searches Airbnb (telemetry), Booking.com, and PM companies for {slot.bedrooms}BR+ rentals in the area
+              Searches Airbnb, Vrbo, and Booking.com for {slot.bedrooms}BR+ rentals at the resort
               covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
             </p>
           </div>
@@ -7864,21 +7865,26 @@ function LiveSearchSection({
 
   const directMatchToCandidate = (airbnbCandidate: LiveCandidate, match: ReverseImageListingMatch): LiveCandidate => ({
     source: "pm",
-    sourceLabel: `Direct PM (${match.domain})`,
+    sourceLabel: `Direct link (${match.domain})`,
     title: match.title || airbnbCandidate.title,
     url: match.url,
-    nightlyPrice: 0,
-    totalPrice: 0,
-    bedrooms: undefined,
+    nightlyPrice: airbnbCandidate.nightlyPrice,
+    totalPrice: airbnbCandidate.totalPrice,
+    bedrooms: airbnbCandidate.bedrooms,
     image: airbnbCandidate.image,
-    snippet: "Direct booking site found from this Airbnb listing's photos. It is evidence only until the PM page confirms bedroom count and a date-specific quote.",
+    snippet: "Direct booking site found from this Airbnb listing's photos. Airbnb supplied the date-specific availability and rate; the direct site was not scraped.",
     alternateUrls: [airbnbCandidate.url, match.url],
     identityKeys: airbnbCandidate.identityKeys,
     airbnbAnchorUrl: airbnbCandidate.url,
     airbnbAnchorPrice: airbnbCandidate.totalPrice,
-    verified: "skipped",
-    verifiedNightlyPrice: null,
-    verifiedReason: "Direct PM listing found by the listing-site scan, but the PM page has not confirmed bedroom count or a date-specific price.",
+    directBookingUrl: match.url,
+    directBookingHost: match.domain,
+    directBookingConfidence: "medium",
+    directBookingSource: "airbnb_image_reverse_search",
+    directBookingReason: "Google Lens found this direct booking site from the Airbnb listing photos.",
+    verified: "yes",
+    verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
+    verifiedReason: "Direct link found by Google Lens from Airbnb photos. Price and availability are inherited from Airbnb for the requested dates; the direct site was not scraped.",
     groundFloorStatus: airbnbCandidate.groundFloorStatus,
     groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
   });
@@ -8023,16 +8029,14 @@ function LiveSearchSection({
       )}
       {/* Raw hit counts + drop counts per source — lets us see why a source
           returned few results (upstream empty vs resort/bedroom filtered).
-          PR #340: pm count now sums every per-PM scraper from
-          pmSourceBreakdown rather than just the (legacy) Google-PM
-          rawCount, which was always 0 since we deprecated the
-          Google-PM path in PR #315. */}
+          Direct-link count now reflects only Airbnb Google Lens matches;
+          PM website discovery/scraping is intentionally not part of buy-in. */}
       {data?.debug?.rawCounts && (
         <div className="text-[11px] text-muted-foreground -mt-1 space-y-0.5">
           <div>
-            Raw: airbnb site {data.debug.rawCounts.airbnb ?? 0} · airbnb priced {data.debug.rawCounts.airbnbEngine ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · pm {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
+            Raw: airbnb site {data.debug.rawCounts.airbnb ?? 0} · airbnb priced {data.debug.rawCounts.airbnbEngine ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · direct links {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
             {pmSourceBreakdown.length > 0 && (
-              <> ({pmSourceBreakdown.filter((s) => s.count > 0).length}/{pmSourceBreakdown.length} PM sources had results)</>
+              <> ({pmSourceBreakdown.filter((s) => s.count > 0).length}/{pmSourceBreakdown.length} direct-link sources had results)</>
             )}
             {typeof (data.debug.rawCounts as any).photoMatches === "number" && (
               <> · photo-matches {(data.debug.rawCounts as any).photoMatches}</>
@@ -9734,7 +9738,7 @@ function RecordBuyInDialog({
       const defaultNotes = candidate.airbnbAnchorUrl
         ? [
           `Bought via ${candidate.sourceLabel} — ${candidate.title}`,
-          `Direct PM listing found from Airbnb photos. PM bedroom count and price must be confirmed on the direct site before booking.`,
+          `Direct booking link found from Airbnb photos. Airbnb supplied the date-specific availability and price; direct site was not scraped.`,
           `Airbnb anchor: ${candidate.airbnbAnchorUrl}`,
         ].join(" · ")
         : `Bought via ${candidate.sourceLabel} — ${candidate.title}`;
