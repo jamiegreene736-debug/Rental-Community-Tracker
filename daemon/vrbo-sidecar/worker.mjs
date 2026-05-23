@@ -54,6 +54,15 @@ const WORKER_SLOT = process.env.SIDECAR_WORKER_SLOT ?? "1";
 
 const CHROME_PRIMARY = String(process.env.CHROME_PRIMARY ?? "local").toLowerCase();
 const WORKER_ROLE = String(process.env.SIDECAR_WORKER_ROLE ?? (CHROME_PRIMARY === "server" ? "server" : "local")).toLowerCase();
+const SIDECAR_BROWSER_MODE = String(
+  process.env.SIDECAR_BROWSER_MODE ??
+    process.env.SIDECAR_LOCAL_BROWSER_MODE ??
+    "cdp",
+).toLowerCase();
+const USE_HEADLESS_LOCAL_BROWSER = /^(headless|local-headless|playwright-headless)$/.test(SIDECAR_BROWSER_MODE);
+const HEADLESS_BROWSER_CHANNEL = process.env.SIDECAR_HEADLESS_BROWSER_CHANNEL ?? "chrome";
+const HEADLESS_USER_DATA_ROOT = process.env.SIDECAR_HEADLESS_USER_DATA_DIR ??
+  path.join(os.homedir(), "Library/Application Support/VrboSidecar-Headless");
 const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 1_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
 const SERVER_WORKER_CLAIM_DELAY_MS = Number(process.env.SIDECAR_SERVER_WORKER_CLAIM_DELAY_MS ?? 4_000);
@@ -82,6 +91,7 @@ let page = null;
 let contextGuardsInstalled = false;
 let activeChromeAllocation = null;
 let captchaWindowVisible = false;
+let launchedPersistentContext = false;
 
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
@@ -207,6 +217,7 @@ function shouldBlockNavigation(rawUrl) {
 }
 
 async function minimizeSidecarWindow(targetPage = page) {
+  if (USE_HEADLESS_LOCAL_BROWSER) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
   if (!context || !targetPage || targetPage.isClosed?.()) return;
   const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
@@ -244,6 +255,7 @@ async function minimizeSidecarWindow(targetPage = page) {
 }
 
 function scheduleSidecarMinimize(targetPage = page) {
+  if (USE_HEADLESS_LOCAL_BROWSER) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
   for (const delay of [0, 150, 500, 1500]) {
     const timer = setTimeout(() => {
@@ -254,6 +266,13 @@ function scheduleSidecarMinimize(targetPage = page) {
 }
 
 async function setCaptchaWindowVisibility(targetPage = page, visible, label = "sidecar", id = "") {
+  if (USE_HEADLESS_LOCAL_BROWSER) {
+    if (visible) {
+      await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA needed in embedded screenshot", { captcha: true, force: true });
+      log(`${label} ${id}: CAPTCHA detected in headless mode; no local Chrome window will be surfaced`);
+    }
+    return false;
+  }
   if (SIDE_CAR_CHROME_VISIBLE) return true;
   if (!context || !targetPage || targetPage.isClosed?.()) return false;
   if (visible && !SIDECAR_CAPTCHA_SURFACE_WINDOW) {
@@ -740,6 +759,16 @@ async function ensureChromeRunning() {
 const chromeSidecarManager = new ChromeSidecarManager({ viewport: VIEWPORT, log });
 
 async function acquireChromeForRequest(request = {}) {
+  if (USE_HEADLESS_LOCAL_BROWSER) {
+    return {
+      type: "headless",
+      label: "local headless Chrome",
+      cdpUrl: null,
+      noVncUrl: null,
+      ephemeral: false,
+      release: async () => {},
+    };
+  }
   if (activeChromeAllocation) return activeChromeAllocation;
   activeChromeAllocation = await chromeSidecarManager.acquire(request);
   log(
@@ -753,6 +782,7 @@ async function acquireChromeForRequest(request = {}) {
 }
 
 async function verifyActiveChromeHealth(label = "chrome health") {
+  if (USE_HEADLESS_LOCAL_BROWSER) return true;
   if (!activeChromeAllocation?.cdpUrl) return true;
   const ok = await withSoftTimeout(chromeSidecarManager.isCdpReady(activeChromeAllocation.cdpUrl), 2_500, false);
   if (!ok) {
@@ -762,6 +792,7 @@ async function verifyActiveChromeHealth(label = "chrome health") {
 }
 
 async function releaseChromeForRequest() {
+  if (USE_HEADLESS_LOCAL_BROWSER) return;
   if (!activeChromeAllocation) return;
   const allocation = activeChromeAllocation;
   activeChromeAllocation = null;
@@ -787,6 +818,7 @@ async function normalizePageDisplay(targetPage = page) {
 }
 
 async function ensureBrowser() {
+  if (USE_HEADLESS_LOCAL_BROWSER) return ensureHeadlessBrowser();
   const allocation = await acquireChromeForRequest();
   if (browser && context && page && !page.isClosed()) return;
   log(`connecting to Chrome via CDP (${allocation.label})…`);
@@ -821,6 +853,46 @@ async function ensureBrowser() {
   await normalizePageDisplay(page);
   const closedCount = await closeExtraTabs("startup tab cleanup", page);
   log(`opened fresh daemon-owned tab; closed ${closedCount} stale tab(s)`);
+}
+
+function headlessUserDataDirForWorker() {
+  const safeSlot = String(WORKER_SLOT || "1").replace(/[^a-z0-9_-]/gi, "_");
+  return path.join(HEADLESS_USER_DATA_ROOT, `worker-${safeSlot}`);
+}
+
+async function ensureHeadlessBrowser() {
+  if (context && page && !page.isClosed()) return;
+  const userDataDir = headlessUserDataDirForWorker();
+  fs.mkdirSync(userDataDir, { recursive: true });
+  log(`launching local headless Chrome (${HEADLESS_BROWSER_CHANNEL}) with profile ${userDataDir}`);
+  context = await chromium.launchPersistentContext(userDataDir, {
+    channel: HEADLESS_BROWSER_CHANNEL,
+    headless: true,
+    viewport: VIEWPORT,
+    locale: process.env.SIDECAR_LOCALE ?? "en-US",
+    timezoneId: process.env.SIDECAR_TIMEZONE ?? "America/New_York",
+    deviceScaleFactor: 1,
+    args: [
+      "--disable-notifications",
+      "--disable-blink-features=AutomationControlled",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-dev-shm-usage",
+    ],
+  });
+  launchedPersistentContext = true;
+  browser = context.browser?.() ?? null;
+  await installContextGuards();
+  await syncRemoteCookies();
+  const cookies = loadCookies();
+  const seeded = cookies.length ? await addCookiesBestEffort(cookies, "headless startup cookie seed") : false;
+  log(seeded ? `seeded ${cookies.length} cookies into headless context` : `using existing headless profile cookies (${cookies.length} cookies available on disk)`);
+
+  const existingPages = context.pages().filter((p) => p && !p.isClosed?.());
+  page = existingPages[0] ?? await context.newPage();
+  await normalizePageDisplay(page);
+  const closedCount = await closeExtraTabs("headless startup tab cleanup", page);
+  log(`opened local headless daemon tab; closed ${closedCount} stale tab(s)`);
 }
 
 // Reset the daemon-owned page to a clean about:blank state. Called
@@ -879,12 +951,19 @@ async function showCompletePage(opType) {
 }
 
 async function teardownBrowser(reason) {
-  log(`disconnecting CDP: ${reason}`);
-  try { if (browser) await browser.close().catch(() => {}); } catch {}
+  log(`${USE_HEADLESS_LOCAL_BROWSER ? "closing headless browser" : "disconnecting CDP"}: ${reason}`);
+  try {
+    if (launchedPersistentContext && context) {
+      await context.close().catch(() => {});
+    } else if (browser) {
+      await browser.close().catch(() => {});
+    }
+  } catch {}
   browser = null;
   context = null;
   page = null;
   contextGuardsInstalled = false;
+  launchedPersistentContext = false;
   await releaseChromeForRequest();
 }
 
@@ -4974,9 +5053,12 @@ async function processRequest(req) {
     bedrooms: req.bedrooms,
   };
 
-  // Acquire the browser at the request boundary so the local worker pool
-  // can spread jobs across the configured Mac Chrome sidecars.
-  await acquireChromeForRequest({ id: req.id, opType });
+  // Acquire the browser at the request boundary so the worker pool can
+  // spread jobs across either configured CDP/noVNC sidecars or the
+  // no-window local headless fallback.
+  if (!USE_HEADLESS_LOCAL_BROWSER) {
+    await acquireChromeForRequest({ id: req.id, opType });
+  }
   await ensureBrowser();
   const stopScreenHeartbeat = startScreenHeartbeat({ ...req, opType });
 
@@ -5011,6 +5093,11 @@ async function processRequest(req) {
     await showCompletePage(opType);
     if (activeChromeAllocation?.ephemeral) {
       await teardownBrowser(`finished ${activeChromeAllocation.type}-side ${opType}`);
+    } else if (USE_HEADLESS_LOCAL_BROWSER) {
+      // Keep the persistent headless profile open in this worker for
+      // cookies/session continuity and fast follow-up queue items. It
+      // has no desktop window, and screenshots continue to stream to
+      // the dashboard from postScreenSnapshot().
     } else {
       // Keep a non-ephemeral local Chrome allocation pinned to this
       // worker process. Releasing the lock while keeping the CDP
@@ -5120,10 +5207,12 @@ async function tick() {
 
 async function main() {
   log(`starting (server=${SERVER}, admin-secret=${ADMIN_SECRET ? "set" : "none"})`);
-  log(`worker slot: ${WORKER_SLOT}; Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}`);
+  log(`worker slot: ${WORKER_SLOT}; Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}; browser mode: ${SIDECAR_BROWSER_MODE}`);
   log(`Chrome binary: ${process.env.LOCAL_CHROME_BINARY ?? CHROME_BINARY}`);
   log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
-  if (WORKER_SLOT === "1") {
+  if (USE_HEADLESS_LOCAL_BROWSER) {
+    log("local macOS Chrome warmup skipped; using no-window local headless browser mode");
+  } else if (WORKER_SLOT === "1") {
     try {
       if (process.env.SIDECAR_WARM_ALL_LOCAL_CHROME !== "0") {
         await chromeSidecarManager.warmAllLocal();

@@ -55,10 +55,19 @@ tail ~/Downloads/vrbo-sidecar/worker.log
 
 ## Chrome visibility
 
-The daemon launches a dedicated Google Chrome profile hidden/offscreen
-by default. This keeps the real local browser signal that Vrbo/Booking
-need without taking over the operator's desktop. If you need to watch
-or manually unblock the sidecar browser, restart the daemon with:
+The daemon defaults to `SIDECAR_BROWSER_MODE=headless`: a persistent
+local Playwright/Chrome profile with no macOS browser window. This
+keeps the operator's local network/IP and streams live screenshots to
+the dashboard without popping up Chrome on the desktop.
+
+For the highest-fidelity headed-browser setup, run the server
+Chrome/noVNC containers and set `SIDECAR_BROWSER_MODE=cdp` with
+`CHROME_PRIMARY=server`. That gives an embedded noVNC live view and
+can use sticky residential proxy settings.
+
+The older local headed Chrome grid is debug-only. If you need to watch
+or manually unblock the sidecar browser on the desktop, restart the
+daemon with:
 
 ```sh
 SIDECAR_CHROME_VISIBLE=1 /opt/homebrew/bin/node ~/Downloads/vrbo-sidecar/supervisor.mjs
@@ -73,6 +82,8 @@ manual wait times out, the worker returns that window to hidden mode.
 
 ```sh
 SIDECAR_CHROME_VISIBLE=0                 # default hidden/background mode
+SIDECAR_BROWSER_MODE=headless            # default no-window local mode
+SIDECAR_HEADLESS_BROWSER_CHANNEL=chrome  # use installed Chrome in headless mode
 SIDECAR_MACOS_BACKGROUND_LAUNCH=1        # use macOS background launch
 SIDECAR_CAPTCHA_SURFACE_WINDOW=1         # reveal only for manual CAPTCHA fallback
 SIDECAR_CAPTCHA_ALLOW_FOCUS=1            # allow focus stealing only for CAPTCHA fallback
@@ -199,6 +210,8 @@ from executing files there with `Operation not permitted`.
 The installer defaults to the in-dashboard viewing flow:
 
 ```sh
+SIDECAR_BROWSER_MODE=headless
+SIDECAR_HEADLESS_BROWSER_CHANNEL=chrome
 SIDECAR_CHROME_VISIBLE=0
 SIDECAR_WARM_ALL_LOCAL_CHROME=0
 SIDECAR_ALLOW_FOCUS=0

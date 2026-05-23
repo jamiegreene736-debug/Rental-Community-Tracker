@@ -53,6 +53,11 @@ fi
 
 SERVER_URL="${SIDECAR_SERVER:-https://rental-community-tracker-production.up.railway.app}"
 MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES:-8}"
+# Default to the no-window local browser path. It still uses this
+# machine's network/IP and streams screenshots to the dashboard, but it
+# does not launch macOS Google Chrome windows.
+SIDECAR_BROWSER_MODE="${SIDECAR_BROWSER_MODE:-headless}"
+SIDECAR_HEADLESS_BROWSER_CHANNEL="${SIDECAR_HEADLESS_BROWSER_CHANNEL:-chrome}"
 # Default to hidden/offscreen Chrome. The web dashboard now receives
 # sidecar screenshots, so the local browser grid is a debug-only mode.
 SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE:-0}"
@@ -112,6 +117,8 @@ cd "${INSTALL_DIR}"
 export SIDECAR_SERVER="${SERVER_URL}"
 export ADMIN_SECRET=${ADMIN_SECRET_EXPORT}
 export MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES}"
+export SIDECAR_BROWSER_MODE="${SIDECAR_BROWSER_MODE}"
+export SIDECAR_HEADLESS_BROWSER_CHANNEL="${SIDECAR_HEADLESS_BROWSER_CHANNEL}"
 export SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE}"
 export SIDECAR_CHROME_VISIBLE_SIZE="${SIDECAR_CHROME_VISIBLE_SIZE}"
 export SIDECAR_CHROME_VISIBLE_POSITIONS="${SIDECAR_CHROME_VISIBLE_POSITIONS}"
