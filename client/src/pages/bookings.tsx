@@ -641,6 +641,23 @@ function sourceLabelForUrl(url: string | null | undefined): string {
   }
 }
 
+function isAirbnbUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    return /(?:^|\.)airbnb\.com$/i.test(new URL(url).hostname.replace(/^www\./, ""));
+  } catch {
+    return false;
+  }
+}
+
+function buyInFoundViaAirbnbGoogleLens(
+  buyIn: Pick<BuyIn, "airbnbListingUrl" | "notes"> | null | undefined,
+): boolean {
+  if (!buyIn?.airbnbListingUrl || isAirbnbUrl(buyIn.airbnbListingUrl)) return false;
+  const notes = String(buyIn.notes ?? "");
+  return /found via airbnb google lens|google lens.*airbnb|airbnb.*google lens|direct booking link found from airbnb photos|photo-matched to airbnb listing/i.test(notes);
+}
+
 // Canonicalize listing URLs for de-duping across reservation slots.
 // Date/search params differ by scan, but the path identifies the same
 // physical listing page for Airbnb/VRBO/Booking/PM sites.
@@ -3690,6 +3707,9 @@ export default function Bookings() {
         const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
           ? ` · Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Direct link only; Airbnb supplied the date-specific price and availability.`
           : "";
+        const lensProvenanceSuffix = pick.directBookingSource === "airbnb_image_reverse_search" || pick.airbnbAnchorUrl
+          ? " · Found via Airbnb Google Lens search."
+          : "";
         const groundFloorSuffix = pick.groundFloorStatus === "confirmed"
           ? ` · Ground-floor: confirmed${pick.groundFloorEvidence ? ` (${pick.groundFloorEvidence})` : ""}`
           : pick.groundFloorStatus
@@ -3717,7 +3737,7 @@ export default function Bookings() {
             airbnbListingUrl: pick.url,
             groundFloorStatus: pick.groundFloorStatus ?? "unknown",
             groundFloorEvidence: pick.groundFloorEvidence ?? null,
-            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${groundFloorSuffix}${identitySuffix}`,
+            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${lensProvenanceSuffix}${groundFloorSuffix}${identitySuffix}`,
             status: "active",
           }).then((r) => r.json());
           if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -6097,6 +6117,15 @@ export default function Bookings() {
                                         >
                                           view on {sourceLabelForUrl(slot.buyIn.airbnbListingUrl)} <ExternalLink className="h-2.5 w-2.5" />
                                         </a>
+                                      )}
+                                      {buyInFoundViaAirbnbGoogleLens(slot.buyIn) && (
+                                        <Badge
+                                          variant="outline"
+                                          className="border-sky-200 bg-sky-50 text-[9px] text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
+                                          title="The direct booking website was found by reverse-image search from the Airbnb listing photos."
+                                        >
+                                          Found via Airbnb Google Lens
+                                        </Badge>
                                       )}
                                       {/* Manual-quote PMs (Suite Paradise, etc.) — show
                                           phone number inline so the operator knows the
@@ -10459,6 +10488,7 @@ function RecordBuyInDialog({
       const defaultNotes = candidate.airbnbAnchorUrl
         ? [
           `Bought via ${candidate.sourceLabel} — ${candidate.title}`,
+          `Found via Airbnb Google Lens search.`,
           `Direct booking link found from Airbnb photos. Airbnb supplied the date-specific availability and price; direct site was not scraped.`,
           `Airbnb anchor: ${candidate.airbnbAnchorUrl}`,
         ].join(" · ")
