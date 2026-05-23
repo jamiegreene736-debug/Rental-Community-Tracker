@@ -1031,7 +1031,10 @@ export class ChromeSidecarManager {
 
   async createSeleniumSession(instance, request = {}, proxyConfig = null) {
     const baseUrl = trimTrailingSlash(instance.webdriverUrl);
-    const endpoint = `${baseUrl}/session`;
+    const endpointCandidates = [
+      `${baseUrl}/session`,
+      ...(baseUrl.endsWith("/wd/hub") ? [] : [`${baseUrl}/wd/hub/session`]),
+    ];
     const chromeArgs = [
       "--remote-debugging-address=0.0.0.0",
       "--remote-debugging-port=9222",
@@ -1065,15 +1068,24 @@ export class ChromeSidecarManager {
         },
       },
     };
-    const r = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(12_000),
-    });
-    const text = await r.text();
-    if (!r.ok) {
-      throw new Error(`Selenium session failed (${r.status}): ${text.slice(0, 240)}`);
+    let r = null;
+    let text = "";
+    let endpoint = endpointCandidates[0];
+    for (const candidate of endpointCandidates) {
+      endpoint = candidate;
+      r = await fetch(candidate, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(12_000),
+      });
+      text = await r.text();
+      if (r.ok) break;
+      const looksLikeSelenium3HelpPage = r.status === 404 && /displayhelpservlet|selenium/i.test(text);
+      if (!looksLikeSelenium3HelpPage) break;
+    }
+    if (!r?.ok) {
+      throw new Error(`Selenium session failed at ${endpoint} (${r?.status ?? "unknown"}): ${text.slice(0, 240)}`);
     }
     const data = JSON.parse(text);
     const value = data.value ?? data;
