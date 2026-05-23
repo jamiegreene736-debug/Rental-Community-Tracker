@@ -19,6 +19,8 @@
 
 import { chromium } from "playwright";
 import fs from "fs";
+import http from "http";
+import net from "net";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -100,6 +102,7 @@ let activeChromeAllocation = null;
 let captchaWindowVisible = false;
 let launchedPersistentContext = false;
 let activeRuntimeRequest = null;
+let activeHeadlessProxyBridge = null;
 
 function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
@@ -202,6 +205,120 @@ function headlessProxyConfig() {
 
   if (isBrightData) username = appendBrightDataUsernameOptions(username);
   return { provider: provider || "brightdata", scheme, host, port, username, password };
+}
+
+function writeProxyError(socket, status = 502, message = "Bad Gateway") {
+  if (!socket || socket.destroyed) return;
+  try {
+    socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);
+  } catch {}
+}
+
+function proxyHeaderEntries(headers, proxyAuthorization) {
+  return Object.entries(headers || {})
+    .filter(([name]) => !/^proxy-(authorization|connection)$/i.test(name))
+    .flatMap(([name, value]) => {
+      if (value == null) return [];
+      if (Array.isArray(value)) return value.map((item) => `${name}: ${item}`);
+      return [`${name}: ${value}`];
+    })
+    .concat(`Proxy-Authorization: ${proxyAuthorization}`, "Proxy-Connection: Keep-Alive");
+}
+
+async function startHeadlessProxyAuthBridge(proxyConfig) {
+  const proxyAuthorization = `Basic ${Buffer.from(`${proxyConfig.username}:${proxyConfig.password}`).toString("base64")}`;
+  const upstreamHost = proxyConfig.host;
+  const upstreamPort = proxyConfig.port;
+
+  const server = http.createServer((clientReq, clientRes) => {
+    const upstream = net.connect(upstreamPort, upstreamHost);
+    upstream.once("connect", () => {
+      const headerLines = proxyHeaderEntries(clientReq.headers, proxyAuthorization).join("\r\n");
+      upstream.write(`${clientReq.method} ${clientReq.url} HTTP/${clientReq.httpVersion}\r\n${headerLines}\r\n\r\n`);
+      clientReq.pipe(upstream);
+    });
+    upstream.on("error", (e) => {
+      log(`headless proxy bridge HTTP upstream failed: ${e?.message ?? e}`);
+      if (!clientRes.headersSent) clientRes.writeHead(502, { Connection: "close" });
+      clientRes.end();
+    });
+    upstream.pipe(clientRes);
+  });
+
+  server.on("connect", (req, clientSocket, head) => {
+    const upstream = net.connect(upstreamPort, upstreamHost, () => {
+      const headerLines = [
+        `Host: ${req.url}`,
+        `Proxy-Authorization: ${proxyAuthorization}`,
+        "Proxy-Connection: Keep-Alive",
+      ].join("\r\n");
+      upstream.write(`CONNECT ${req.url} HTTP/1.1\r\n${headerLines}\r\n\r\n`);
+      if (head?.length) upstream.write(head);
+    });
+
+    let headerBuffer = Buffer.alloc(0);
+    const onData = (chunk) => {
+      headerBuffer = Buffer.concat([headerBuffer, chunk]);
+      const headerEnd = headerBuffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+
+      upstream.off("data", onData);
+      const rawHeader = headerBuffer.slice(0, headerEnd).toString("latin1");
+      const rest = headerBuffer.slice(headerEnd + 4);
+      const status = Number(rawHeader.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i)?.[1] ?? 0);
+
+      if (status >= 200 && status < 300) {
+        clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (rest.length) clientSocket.write(rest);
+        upstream.pipe(clientSocket);
+        clientSocket.pipe(upstream);
+        return;
+      }
+
+      const statusText = status === 407 ? "Proxy Authentication Required" : "Proxy upstream failure";
+      log(`headless proxy bridge upstream CONNECT failed: HTTP ${status || "unknown"} for ${req.url}`);
+      writeProxyError(clientSocket, status || 502, statusText);
+      upstream.destroy();
+    };
+
+    upstream.on("data", onData);
+    upstream.on("error", (e) => {
+      log(`headless proxy bridge CONNECT upstream failed: ${e?.message ?? e}`);
+      writeProxyError(clientSocket);
+    });
+    clientSocket.on("error", () => upstream.destroy());
+    clientSocket.on("close", () => upstream.destroy());
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    server,
+    serverUrl: `http://127.0.0.1:${port}`,
+    async close() {
+      await new Promise((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+async function closeHeadlessProxyBridge(reason) {
+  if (!activeHeadlessProxyBridge) return;
+  const bridge = activeHeadlessProxyBridge;
+  activeHeadlessProxyBridge = null;
+  try {
+    await bridge.close();
+    log(`closed headless proxy auth bridge: ${reason}`);
+  } catch (e) {
+    log(`headless proxy auth bridge close failed: ${e?.message ?? e}`);
+  }
 }
 
 async function boundedPageDelay(targetPage, timeoutMs) {
@@ -1000,9 +1117,13 @@ async function ensureHeadlessBrowser() {
   }
   fs.mkdirSync(userDataDir, { recursive: true });
   const proxyConfig = headlessProxyConfig();
+  if (proxyConfig) {
+    await closeHeadlessProxyBridge("new headless launch");
+    activeHeadlessProxyBridge = await startHeadlessProxyAuthBridge(proxyConfig);
+  }
   log(
     `launching local headless Chrome (${HEADLESS_BROWSER_CHANNEL}) with profile ${userDataDir}` +
-      (proxyConfig ? ` using ${proxyConfig.provider} proxy ${proxyConfig.host}:${proxyConfig.port}` : ""),
+      (proxyConfig ? ` using ${proxyConfig.provider} proxy ${proxyConfig.host}:${proxyConfig.port} via local auth bridge` : ""),
   );
   const launchOptions = {
     channel: HEADLESS_BROWSER_CHANNEL,
@@ -1021,9 +1142,7 @@ async function ensureHeadlessBrowser() {
   };
   if (proxyConfig) {
     launchOptions.proxy = {
-      server: `${proxyConfig.scheme}://${proxyConfig.host}:${proxyConfig.port}`,
-      username: proxyConfig.username,
-      password: proxyConfig.password,
+      server: activeHeadlessProxyBridge.serverUrl,
     };
   }
   context = await chromium.launchPersistentContext(userDataDir, launchOptions);
@@ -1118,6 +1237,7 @@ async function teardownBrowser(reason) {
   page = null;
   contextGuardsInstalled = false;
   launchedPersistentContext = false;
+  await closeHeadlessProxyBridge(reason);
   await releaseChromeForRequest();
 }
 
@@ -2160,11 +2280,27 @@ async function applyVrboBedroomFilter(bedrooms) {
   }
 }
 
-async function applyBookingBedroomFilter(bedrooms) {
+function bookingUrlMissingExpectedSearch(current, expected) {
+  if (!expected) return false;
+  const currentSearch = normalizeBookingSearchText(current.searchParams.get("ss") || current.searchParams.get("ssne") || "");
+  const expectedSearch = normalizeBookingSearchText(expected.searchParams.get("ss") || expected.searchParams.get("ssne") || "");
+  return Boolean(
+    (expectedSearch && currentSearch !== expectedSearch) ||
+      current.searchParams.get("checkin") !== expected.searchParams.get("checkin") ||
+      current.searchParams.get("checkout") !== expected.searchParams.get("checkout"),
+  );
+}
+
+async function applyBookingBedroomFilter(bedrooms, expectedUrl = null) {
   const targetBedrooms = Number.parseInt(String(bedrooms ?? ""), 10);
   if (!Number.isFinite(targetBedrooms) || targetBedrooms <= 0) return false;
   try {
-    const current = new URL(page.url());
+    const expected = expectedUrl ? new URL(expectedUrl) : null;
+    let current = new URL(page.url());
+    if (bookingUrlMissingExpectedSearch(current, expected)) {
+      current = expected;
+      log(`booking_search: bedroom filter restored intended search URL before applying ${targetBedrooms}BR filter`);
+    }
     const filters = current.searchParams
       .getAll("nflt")
       .join(";")
@@ -2178,7 +2314,7 @@ async function applyBookingBedroomFilter(bedrooms) {
     await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
     await page.waitForTimeout(PAGE_SETTLE_MS);
     await dismissObstructions(page, "booking_search_after_bedroom_filter");
-    log(`booking_search: applied bedroom filter (${targetBedrooms}BR) after visible search submit`);
+    log(`booking_search: applied bedroom filter (${targetBedrooms}BR) with intended dates/search preserved`);
     return true;
   } catch (e) {
     log(`booking bedroom filter failed: ${e.message ?? e}`);
@@ -2741,14 +2877,22 @@ function normalizeBookingSearchText(value) {
     .trim();
 }
 
-async function restoreBookingSearchUrlIfRewritten(expectedUrl, expectedSearchTerm) {
+async function restoreBookingSearchUrlIfRewritten(expectedUrl, expectedSearchTerm, expectedCheckIn = null, expectedCheckOut = null) {
   try {
     const current = new URL(page.url());
-    const actualSearchTerm = current.searchParams.get("ss") || "";
+    const actualSearchTerm = current.searchParams.get("ss") || current.searchParams.get("ssne") || "";
     const expected = normalizeBookingSearchText(expectedSearchTerm);
     const actual = normalizeBookingSearchText(actualSearchTerm);
-    if (actual && expected && actual !== expected) {
-      log(`booking_search: restored intended search term after autocomplete rewrite "${actualSearchTerm.slice(0, 90)}"`);
+    const searchMismatch = expected && actual !== expected;
+    const checkInMismatch = expectedCheckIn && current.searchParams.get("checkin") !== expectedCheckIn;
+    const checkOutMismatch = expectedCheckOut && current.searchParams.get("checkout") !== expectedCheckOut;
+    if (searchMismatch || checkInMismatch || checkOutMismatch) {
+      const reasons = [
+        searchMismatch ? `search="${actualSearchTerm.slice(0, 90) || "missing"}"` : "",
+        checkInMismatch ? `checkin="${current.searchParams.get("checkin") || "missing"}"` : "",
+        checkOutMismatch ? `checkout="${current.searchParams.get("checkout") || "missing"}"` : "",
+      ].filter(Boolean).join(", ");
+      log(`booking_search: restored intended URL after Booking rewrote ${reasons}`);
       await page.goto(expectedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
       await page.waitForTimeout(PAGE_SETTLE_MS);
       await dismissObstructions(page, "booking_search_after_query_restore");
@@ -3048,9 +3192,8 @@ async function processBookingSearch(id, params) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "booking_search");
-  await clickVisibleSearchSubmit(page, "booking_search").catch(() => null);
-  await restoreBookingSearchUrlIfRewritten(url, effectiveSearchTerm);
-  await applyBookingBedroomFilter(bedrooms).catch(() => false);
+  await restoreBookingSearchUrlIfRewritten(url, effectiveSearchTerm, checkIn, checkOut);
+  await applyBookingBedroomFilter(bedrooms, url).catch(() => false);
   const state = await dumpPageState("booking", { id, ...params });
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
     throw new Error("Booking.com bot wall — refresh cookies.json (booking.com)");
