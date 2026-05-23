@@ -5485,6 +5485,7 @@ export async function registerRoutes(
       }>();
       const bookings: Array<{
         id: string;
+        listingId: string | null;
         guestName: string;
         listingName: string;
         confirmationCode: string | null;
@@ -5512,7 +5513,8 @@ export async function registerRoutes(
           guest?.lastName ?? guest?.last_name,
         ].filter(Boolean).join(" ").trim();
         const listing = reservation?.listing ?? {};
-        const listingKey = String(reservation?.listingId ?? listing?._id ?? listing?.id ?? listing?.nickname ?? listing?.title ?? "Listing");
+        const reservationListingId = String(reservation?.listingId ?? listing?._id ?? listing?.id ?? "").trim();
+        const listingKey = reservationListingId || String(listing?.nickname ?? listing?.title ?? "Listing");
         const listingName = String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing");
         const existingListing = listingRevenue.get(listingKey) ?? {
           listingId: listingKey,
@@ -5525,6 +5527,7 @@ export async function registerRoutes(
         listingRevenue.set(listingKey, existingListing);
         bookings.push({
           id: String(reservation?._id ?? reservation?.id ?? ""),
+          listingId: reservationListingId || null,
           guestName: guestName || String(guest?.fullName ?? guest?.full_name ?? guest?.name ?? "Guest"),
           listingName,
           confirmationCode: reservation?.confirmationCode ? String(reservation.confirmationCode) : null,

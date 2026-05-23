@@ -970,6 +970,7 @@ export default function Home() {
 
   type RevenueBookingSummary = {
     id: string;
+    listingId: string | null;
     guestName: string;
     listingName: string;
     confirmationCode: string | null;
@@ -1016,6 +1017,30 @@ export default function Home() {
     if (!mapping) return revenueSummary?.highestListingEarner?.listingName ?? null;
     return propertyNameById.get(mapping.propertyId) ?? revenueSummary?.highestListingEarner?.listingName ?? null;
   }, [guestyMapData, propertyNameById, revenueSummary?.highestListingEarner]);
+  const propertyIdByGuestyListingId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const row of guestyMapData ?? []) map.set(row.guestyListingId, row.propertyId);
+    return map;
+  }, [guestyMapData]);
+  const operationsHrefForRevenueTarget = (
+    listingId: string | null | undefined,
+    reservationId?: string | null,
+  ) => {
+    if (!listingId) return "/bookings";
+    const params = new URLSearchParams();
+    const mappedPropertyId = propertyIdByGuestyListingId.get(listingId);
+    if (mappedPropertyId) {
+      params.set("propertyId", String(mappedPropertyId));
+    } else if (listingId) {
+      params.set("listingId", listingId);
+    }
+    if (reservationId) params.set("reservationId", reservationId);
+    if (reservationId) params.set("includePast", "true");
+    const query = params.toString();
+    return query ? `/bookings?${query}` : "/bookings";
+  };
+  const operationsHrefForBooking = (booking: RevenueBookingSummary | null | undefined) =>
+    booking ? operationsHrefForRevenueTarget(booking.listingId, booking.id) : "/bookings";
 
   const {
     data: cancellationData,
@@ -1549,7 +1574,11 @@ export default function Home() {
             </div>
             <p className="text-2xl font-bold" data-testid="text-avg-price">${avgLow.toLocaleString()}</p>
             <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
-              <div className="min-w-0 border-t pt-2">
+              <Link
+                href={operationsHrefForBooking(revenueSummary?.largestBooking)}
+                className="min-w-0 rounded-sm border-t px-1 pt-2 transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                data-testid="link-largest-booking"
+              >
                 <p className="font-medium text-muted-foreground">Largest booking</p>
                 <p className="truncate font-semibold">
                   {revenueSummaryLoading
@@ -1558,8 +1587,12 @@ export default function Home() {
                       ? `${revenueSummary.largestBooking.guestName} · ${revenueSummary.largestBooking.nights || 0} nights`
                       : "No bookings"}
                 </p>
-              </div>
-              <div className="min-w-0 border-t pt-2">
+              </Link>
+              <Link
+                href={operationsHrefForBooking(revenueSummary?.highestGrossingBooking)}
+                className="min-w-0 rounded-sm border-t px-1 pt-2 transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                data-testid="link-highest-grossing-booking"
+              >
                 <p className="font-medium text-muted-foreground">Highest grossing</p>
                 <p className="truncate font-semibold">
                   {revenueSummaryLoading
@@ -1568,8 +1601,12 @@ export default function Home() {
                       ? `${formatCurrency(revenueSummary.highestGrossingBooking.amount)} · ${revenueSummary.highestGrossingBooking.guestName}`
                       : "No bookings"}
                 </p>
-              </div>
-              <div className="min-w-0 border-t pt-2">
+              </Link>
+              <Link
+                href={operationsHrefForRevenueTarget(revenueSummary?.highestListingEarner?.listingId)}
+                className="min-w-0 rounded-sm border-t px-1 pt-2 transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                data-testid="link-top-listing-earner"
+              >
                 <p className="font-medium text-muted-foreground">Top listing earner</p>
                 <p className="truncate font-semibold">
                   {revenueSummaryLoading
@@ -1583,7 +1620,7 @@ export default function Home() {
                     {formatCurrency(revenueSummary.highestListingEarner.revenue)}
                   </p>
                 )}
-              </div>
+              </Link>
             </div>
           </Card>
           <Dialog>

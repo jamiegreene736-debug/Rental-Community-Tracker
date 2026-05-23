@@ -2156,6 +2156,19 @@ function checkOutOf(r: { checkOut?: string; checkOutDateLocalized?: string }): s
   return r.checkOutDateLocalized ?? r.checkOut;
 }
 
+function operationsLaunchParams() {
+  const params = typeof window === "undefined"
+    ? new URLSearchParams()
+    : new URLSearchParams(window.location.search);
+  const propertyIdRaw = Number(params.get("propertyId") ?? "");
+  return {
+    propertyId: Number.isFinite(propertyIdRaw) && propertyIdRaw > 0 ? propertyIdRaw : null,
+    listingId: params.get("listingId")?.trim() || null,
+    reservationId: params.get("reservationId")?.trim() || null,
+    includePast: params.get("includePast") === "true",
+  };
+}
+
 // Column header that toggles sort when clicked. Shows an up/down caret when
 // the column is the active sort target.
 function SortHeader({
@@ -2189,9 +2202,14 @@ function SortHeader({
 
 export default function Bookings() {
   const { toast } = useToast();
-  const [selectedPropertyId, setSelectedPropertyId] = useState<number | null>(null);
-  const [selectedGuestyListingId, setSelectedGuestyListingId] = useState<string | null>(null);
-  const [includePast, setIncludePast] = useState(false);
+  const launchParams = useMemo(() => operationsLaunchParams(), []);
+  const focusedReservationId = launchParams.reservationId;
+  const focusReservationScrolledRef = useRef(false);
+  const [selectedPropertyId, setSelectedPropertyId] = useState<number | null>(() => launchParams.propertyId);
+  const [selectedGuestyListingId, setSelectedGuestyListingId] = useState<string | null>(() => (
+    launchParams.propertyId ? null : launchParams.listingId
+  ));
+  const [includePast, setIncludePast] = useState(() => launchParams.includePast);
   const [reportMonth, setReportMonth] = useState(() => monthInputValue(new Date()));
   const emptyManualReservationForm = (): ManualReservationFormState => ({
     propertyId: selectedPropertyId?.toString() ?? "",
@@ -2205,7 +2223,9 @@ export default function Bookings() {
   });
   const [manualDialogOpen, setManualDialogOpen] = useState(false);
   const [manualForm, setManualForm] = useState<ManualReservationFormState>(() => emptyManualReservationForm());
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => (
+    focusedReservationId ? { [focusedReservationId]: true } : {}
+  ));
   const [picker, setPicker] = useState<
     | { reservation: GuestyReservation; slot: SlotInfo }
     | null
@@ -2584,6 +2604,25 @@ export default function Bookings() {
     });
     return list;
   }, [rawReservations, sortBy, sortDir]);
+
+  useEffect(() => {
+    if (!focusedReservationId) return;
+    const reservationIsVisible = reservations.some((reservation) => reservation._id === focusedReservationId);
+    if (!reservationIsVisible) return;
+
+    setExpanded((prev) => (
+      prev[focusedReservationId] ? prev : { ...prev, [focusedReservationId]: true }
+    ));
+
+    if (focusReservationScrolledRef.current) return;
+    focusReservationScrolledRef.current = true;
+    const timer = window.setTimeout(() => {
+      const target = Array.from(document.querySelectorAll<HTMLElement>("[data-reservation-id]"))
+        .find((element) => element.dataset.reservationId === focusedReservationId);
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [focusedReservationId, reservations]);
 
   const createManualReservationMutation = useMutation({
     mutationFn: (payload: ManualReservationFormState) =>
@@ -4721,7 +4760,12 @@ export default function Bookings() {
                 const searchAudits = lastAutoFillAudits[r._id] ?? [];
                 const manualReservation = isManualReservation(r);
                 return (
-                  <div key={r._id} className="border rounded-lg bg-card" data-testid={`booking-row-${r._id}`}>
+                  <div
+                    key={r._id}
+                    className={`border rounded-lg bg-card ${focusedReservationId === r._id ? "ring-2 ring-primary/40 ring-offset-2" : ""}`}
+                    data-reservation-id={r._id}
+                    data-testid={`booking-row-${r._id}`}
+                  >
                     {/* Summary row */}
                     <div
                       role="button"
