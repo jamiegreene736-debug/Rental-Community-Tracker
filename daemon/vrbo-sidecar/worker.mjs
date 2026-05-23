@@ -288,6 +288,7 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
         await targetPage.bringToFront().catch(() => {});
       }
       log(`${label} ${id}: surfaced only this Chrome window for manual CAPTCHA verification`);
+      await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA verification", { captcha: true, force: true });
     } else {
       captchaWindowVisible = false;
       const hidden = parseWindowPosition(process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? HIDDEN_WINDOW_POSITION, { left: -32000, top: -32000 });
@@ -305,6 +306,7 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
       );
       await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } }), 1_500);
       log(`${label} ${id}: returned Chrome window to hidden/background mode`);
+      await postScreenSnapshot({ id, opType: label }, targetPage, "CAPTCHA cleared/backgrounded", { force: true });
     }
     return true;
   } catch (e) {
@@ -1001,6 +1003,65 @@ async function postResult(id, results, error) {
   });
 }
 
+let lastScreenSnapshotSentAt = 0;
+
+async function postScreenSnapshot(req, targetPage = page, phase = "working", extra = {}) {
+  const now = Date.now();
+  if (!extra.force && now - lastScreenSnapshotSentAt < 3_500) return false;
+  lastScreenSnapshotSentAt = now;
+  try {
+    const snapshotPage = targetPage && !targetPage.isClosed?.() ? targetPage : page;
+    let screenshotDataUrl;
+    let url = "";
+    let title = "";
+    let width = VIEWPORT.width;
+    let height = VIEWPORT.height;
+    if (snapshotPage && !snapshotPage.isClosed?.()) {
+      try { url = snapshotPage.url?.() ?? ""; } catch {}
+      title = await snapshotPage.title?.().catch(() => "") ?? "";
+      const viewport = snapshotPage.viewportSize?.() ?? null;
+      width = viewport?.width ?? width;
+      height = viewport?.height ?? height;
+      const buffer = await withSoftTimeout(
+        snapshotPage.screenshot({ type: "jpeg", quality: 30, fullPage: false, timeout: 2_500 }),
+        3_000,
+        null,
+      );
+      if (buffer) screenshotDataUrl = `data:image/jpeg;base64,${buffer.toString("base64")}`;
+    }
+    await fetch(`${SERVER}/api/admin/vrbo-sidecar/screen`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        slot: WORKER_SLOT,
+        requestId: req?.id,
+        opType: req?.opType ?? "vrbo_search",
+        label: req?.opType ?? "sidecar",
+        phase,
+        url,
+        title,
+        width,
+        height,
+        screenshotDataUrl,
+        captcha: extra.captcha === true,
+        error: extra.error,
+      }),
+    }).catch(() => null);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startScreenHeartbeat(req) {
+  void postScreenSnapshot(req, page, `start ${req?.opType ?? "request"}`, { force: true });
+  const interval = setInterval(() => {
+    void postScreenSnapshot(req, page, `working ${req?.opType ?? "request"}`);
+  }, 7_500);
+  interval.unref?.();
+  return () => clearInterval(interval);
+}
+
 async function dumpPageState(label, requestForLog) {
   try {
     // Set a wider viewport before screenshot so we capture more of the
@@ -1268,6 +1329,7 @@ async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
       }
 
       await sendHeartbeat(`2Captcha VRBO slider attempt ${attempt}`, true, id);
+      await postScreenSnapshot({ id, opType: label }, targetPage, `2Captcha slider attempt ${attempt}`, { captcha: true, force: true });
       const imageBuffer = await targetPage.screenshot({
         type: "jpeg",
         quality: 70,
@@ -4916,19 +4978,21 @@ async function processRequest(req) {
   // can spread jobs across the configured Mac Chrome sidecars.
   await acquireChromeForRequest({ id: req.id, opType });
   await ensureBrowser();
-
-  // PR #307: clear the daemon page between ops so each scrape starts
-  // from a known blank state — no carryover from the previous scrape's
-  // modals, observers, timers, or scroll position. The batch op
-  // (pm_url_check_batch) opens its own per-URL tabs and closes them
-  // in finally, so it's already isolated; skip the reset for it to
-  // avoid an extra navigation on the daemon-owned page that the
-  // batch isn't going to use.
-  if (opType !== "pm_url_check_batch") {
-    await resetPage();
-  }
+  const stopScreenHeartbeat = startScreenHeartbeat({ ...req, opType });
 
   try {
+    // PR #307: clear the daemon page between ops so each scrape starts
+    // from a known blank state — no carryover from the previous scrape's
+    // modals, observers, timers, or scroll position. The batch op
+    // (pm_url_check_batch) opens its own per-URL tabs and closes them
+    // in finally, so it's already isolated; skip the reset for it to
+    // avoid an extra navigation on the daemon-owned page that the
+    // batch isn't going to use.
+    if (opType !== "pm_url_check_batch") {
+      await resetPage();
+    }
+    await postScreenSnapshot({ ...req, opType }, page, `ready ${opType}`, { force: true });
+
     switch (opType) {
       case "airbnb_search": return await processAirbnbSearch(req.id, params);
       case "vrbo_search": return await processVrboSearch(req.id, params);
@@ -4941,6 +5005,8 @@ async function processRequest(req) {
       default: throw new Error(`unknown opType: ${opType}`);
     }
   } finally {
+    stopScreenHeartbeat();
+    await postScreenSnapshot({ ...req, opType }, page, `finished ${opType}`, { force: true }).catch(() => {});
     await closeExtraTabs(`after ${opType}`, page).catch(() => {});
     await showCompletePage(opType);
     if (activeChromeAllocation?.ephemeral) {

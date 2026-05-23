@@ -12,11 +12,10 @@
 //   - airbnb_search    (drive airbnb.com search, return priced cards)
 //   - vrbo_search      (drive vrbo.com search, return priced cards)
 //   - booking_search   (drive booking.com search, return priced cards)
-//   - google_serp      (run a Google query, return organic results
-//                       — used for PM company discovery)
-//   - pm_site_search   (drive PM website search widgets/pages)
-//   - pm_url_check     (visit a specific PM URL, scrape availability +
-//                       price for the requested dates)
+//   - google_serp      (run a Google query, return organic results)
+//   - pm_site_search   (legacy only; market buy-in no longer scrapes
+//                       property-management websites)
+//   - pm_url_check     (legacy/detail tools only)
 //
 // Why one queue with op-type dispatch instead of four queues:
 //   - Single endpoint surface, single set of TTLs, single dedup logic.
@@ -247,6 +246,28 @@ export type SidecarPropertyCandidate = {
   // snippets set this false so the server can estimate all-in cost.
   priceIncludesFees?: boolean;
   priceBasis?: "all_in" | "pre_tax_total" | "stay_total" | "nightly_base" | "unknown";
+  directBookingUrl?: string;
+  directBookingHost?: string;
+  directBookingConfidence?: "high" | "medium" | "low";
+  directBookingSource?: "airbnb_image_reverse_search";
+  directBookingReason?: string;
+};
+
+export type SidecarScreenSnapshot = {
+  slot: string;
+  requestId?: string;
+  opType?: SidecarOpType | string;
+  label?: string;
+  phase?: string;
+  url?: string;
+  title?: string;
+  screenshotDataUrl?: string;
+  width?: number;
+  height?: number;
+  captcha?: boolean;
+  error?: string;
+  at: string;
+  ageMs: number;
 };
 
 export type SidecarSerpHit = {
@@ -344,12 +365,15 @@ let queuePaused = false;
 let queuePausedAt: number | null = null;
 let queuePausedReason: string | null = null;
 let queueStopGeneration = 0;
+const sidecarScreens = new Map<string, Omit<SidecarScreenSnapshot, "ageMs">>();
 
 // TTLs (per-status) — also bound the size of the queue so a wedged
 // worker can't accumulate state forever.
 const PENDING_TTL_MS = 5 * 60 * 1000;
 const IN_PROGRESS_RECLAIM_MS = 90 * 1000;
 const TERMINAL_TTL_MS = 5 * 60 * 1000;
+const SIDECAR_SCREEN_TTL_MS = 10 * 60 * 1000;
+const SIDECAR_SCREENSHOT_MAX_CHARS = 350_000;
 
 function nowMs(): number {
   return Date.now();
@@ -388,6 +412,62 @@ export function stampHeartbeat(id?: string, stage?: string): void {
   }
 }
 
+export function updateSidecarScreenSnapshot(snapshot: {
+  slot?: unknown;
+  requestId?: unknown;
+  opType?: unknown;
+  label?: unknown;
+  phase?: unknown;
+  url?: unknown;
+  title?: unknown;
+  screenshotDataUrl?: unknown;
+  width?: unknown;
+  height?: unknown;
+  captcha?: unknown;
+  error?: unknown;
+}): { ok: boolean } {
+  const slot = String(snapshot.slot || "1").replace(/[^\w.-]/g, "").slice(0, 32) || "1";
+  const screenshotDataUrl = typeof snapshot.screenshotDataUrl === "string" &&
+    snapshot.screenshotDataUrl.length <= SIDECAR_SCREENSHOT_MAX_CHARS
+    ? snapshot.screenshotDataUrl
+    : undefined;
+  sidecarScreens.set(slot, {
+    slot,
+    requestId: typeof snapshot.requestId === "string" ? snapshot.requestId.slice(0, 80) : undefined,
+    opType: typeof snapshot.opType === "string" ? snapshot.opType.slice(0, 80) : undefined,
+    label: typeof snapshot.label === "string" ? snapshot.label.replace(/\s+/g, " ").trim().slice(0, 120) : undefined,
+    phase: typeof snapshot.phase === "string" ? snapshot.phase.replace(/\s+/g, " ").trim().slice(0, 140) : undefined,
+    url: typeof snapshot.url === "string" ? snapshot.url.slice(0, 500) : undefined,
+    title: typeof snapshot.title === "string" ? snapshot.title.replace(/\s+/g, " ").trim().slice(0, 180) : undefined,
+    screenshotDataUrl,
+    width: typeof snapshot.width === "number" && Number.isFinite(snapshot.width) ? Math.round(snapshot.width) : undefined,
+    height: typeof snapshot.height === "number" && Number.isFinite(snapshot.height) ? Math.round(snapshot.height) : undefined,
+    captcha: snapshot.captcha === true,
+    error: typeof snapshot.error === "string" ? snapshot.error.replace(/\s+/g, " ").trim().slice(0, 240) : undefined,
+    at: new Date().toISOString(),
+  });
+  return { ok: true };
+}
+
+export function getSidecarScreenSnapshots(): SidecarScreenSnapshot[] {
+  const now = nowMs();
+  for (const [slot, snapshot] of sidecarScreens) {
+    const at = Date.parse(snapshot.at);
+    if (!Number.isFinite(at) || now - at > SIDECAR_SCREEN_TTL_MS) {
+      sidecarScreens.delete(slot);
+    }
+  }
+  return Array.from(sidecarScreens.values())
+    .map((snapshot) => {
+      const at = Date.parse(snapshot.at);
+      return {
+        ...snapshot,
+        ageMs: Number.isFinite(at) ? Math.max(0, now - at) : 0,
+      };
+    })
+    .sort((a, b) => a.slot.localeCompare(b.slot, undefined, { numeric: true }));
+}
+
 function cleanup(): void {
   const now = nowMs();
   for (const [id, r] of queue) {
@@ -411,6 +491,12 @@ function cleanup(): void {
     ) {
       queue.delete(id);
       requestKeyIndex.delete(r.requestKey);
+    }
+  }
+  for (const [slot, snapshot] of sidecarScreens) {
+    const at = Date.parse(snapshot.at);
+    if (!Number.isFinite(at) || now - at > SIDECAR_SCREEN_TTL_MS) {
+      sidecarScreens.delete(slot);
     }
   }
 }

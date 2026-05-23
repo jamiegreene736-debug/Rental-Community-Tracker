@@ -6993,6 +6993,11 @@ type LiveCandidate = {
   // Airbnb candidates server-side. Zero-length when no matches were
   // found OR the candidate isn't in the top-N pool.
   photoMatches?: Array<{ url: string; title: string; domain: string }>;
+  directBookingUrl?: string;
+  directBookingHost?: string;
+  directBookingConfidence?: "high" | "medium" | "low";
+  directBookingSource?: "airbnb_image_reverse_search";
+  directBookingReason?: string;
   // When this candidate is derived from a grouped physical unit, keep
   // every known listing URL in the cluster so Auto-fill can avoid
   // choosing the same unit again through another channel.
@@ -8160,7 +8165,7 @@ function LiveSearchSection({
       )}
 
       {/* Sortable table of every scanned option across all sources. Auto-fill
-          picks `cheapest[0]` (the highlighted ⭐ row) — this table is the
+          picks `cheapest[0]` (the highlighted row) — this table is the
           audit trail so the operator can see what else was scanned and
           override with one click. */}
       <details open={!hasCurrentFocusedRecommendation}>
@@ -8188,16 +8193,15 @@ function LiveSearchSection({
       </details>
 
       {/* By-source sections.
-          Airbnb stays as telemetry + photo source (the reverse-image PM
-          matches under each row are bookable). Vrbo rows are now
-          sidecar-priced only — raw Google/manual-quote rows are filtered
-          server-side. Booking.com + PM Companies are the direct-bookable
-          channels — both ALWAYS open. */}
+          Airbnb stays as a priced source plus photo bridge. Vrbo and
+          Booking.com are sidecar-priced. Direct rows are links discovered
+          from Airbnb listing photos; the direct site is not scraped and
+          the displayed rate remains the Airbnb rate. */}
       {[
-        { key: "airbnb",  label: "Airbnb (telemetry — see PM matches below each row)", items: availableAirbnb,  defaultOpen: !hasCurrentFocusedRecommendation && availableAirbnb.length > 0 && availableAirbnb.length <= 3 },
+        { key: "airbnb",  label: "Airbnb (sidecar-priced + direct-link Lens)", items: availableAirbnb,  defaultOpen: !hasCurrentFocusedRecommendation && availableAirbnb.length > 0 && availableAirbnb.length <= 3 },
         { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: !hasCurrentFocusedRecommendation && availableVrbo.length > 0 },
         { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: !hasCurrentFocusedRecommendation },
-        { key: "pm",      label: "PM Companies", items: availablePm, defaultOpen: !hasCurrentFocusedRecommendation },
+        { key: "pm",      label: "Direct links from Airbnb photos", items: availablePm, defaultOpen: !hasCurrentFocusedRecommendation },
       ].map((s) => (
         <details key={s.key} open={s.defaultOpen}>
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
@@ -8223,7 +8227,7 @@ function LiveSearchSection({
           {s.items.length === 0 ? (
             <p className="text-xs text-muted-foreground pl-2 py-2">
               No results.
-              {s.key === "pm" && " (Try clicking 'Open' on the top Airbnb row above — its reverse-image PM matches give you direct booking links even when this section is empty.)"}
+              {s.key === "pm" && " (No clean direct-booking links were found from the Airbnb photo reverse search.)"}
             </p>
           ) : (
             <div className="space-y-2 mt-1.5 pl-2">
@@ -9312,6 +9316,22 @@ function LiveRow({
             <p className="font-medium text-sm truncate">{c.title}</p>
           </div>
           {c.snippet && <p className="text-[11px] text-muted-foreground line-clamp-2">{c.snippet}</p>}
+          {c.directBookingUrl && (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+              <Badge variant="outline" className="h-5 border-emerald-300 bg-emerald-50 text-[10px] text-emerald-800">
+                Direct link found
+              </Badge>
+              <button
+                type="button"
+                className="max-w-[360px] truncate text-emerald-700 underline-offset-2 hover:underline"
+                title={c.directBookingReason ?? c.directBookingUrl}
+                onClick={() => window.open(c.directBookingUrl, "_blank", "noopener,noreferrer")}
+              >
+                {c.directBookingHost || sourceLabelForUrl(c.directBookingUrl)}
+              </button>
+              <span className="text-muted-foreground">Airbnb rate shown; direct site not scraped</span>
+            </div>
+          )}
         </div>
         <div className="text-right shrink-0 min-w-[80px]">
           {c.nightlyPrice > 0 ? (

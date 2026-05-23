@@ -7,17 +7,20 @@
 // This helper keeps that median as the persisted cost basis (so the
 // sell-price floor doesn't lurch around with one-off cheap deals) AND
 // adds a parallel "live channel snapshot": the cheapest verified
-// nightly across Airbnb / VRBO / Booking / PM websites for the SAME
-// 7-night window, pulled through the local-Chrome sidecar daemon.
+// nightly across Airbnb / VRBO / Booking.com for the SAME 7-night
+// window, pulled through the local-Chrome sidecar daemon.
 // The snapshot is ephemeral — returned in the
 // refresh response, surfaced in the Pricing tab, never persisted —
 // so the operator can see when one channel's cheapest is materially
 // below the median basis ("VRBO has $580/n today; basis is $620").
 //
-// Operator directive 2026-05-02: pricing/availability should use the
-// same website-search methodology as find-buy-in. SearchAPI is used
-// only to discover PM websites; Airbnb, VRBO, Booking.com, and PM
-// rental search pages are driven by sidecar/Chrome.
+// Operator directive 2026-05-22: OTA pricing stays Playwright/local
+// Chrome only: no Airbnb/VRBO/Booking APIs, and no PM website scraping
+// for market buy-in. The upgraded daemon can use up to 8 Chrome
+// windows/tabs, and the dashboard receives live thumbnail screenshots
+// so those searches can be watched in-app instead of on a second
+// monitor. Direct-booking discovery is handled separately from Airbnb
+// listing images; the direct site is linked, not scraped for price.
 
 import { fetchAmortizedNightlyByBR } from "./community-research";
 import { STREAMLINE_SITES } from "./pm-scraper-streamline";
@@ -711,7 +714,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   dateOverride?: { checkIn: string; checkOut: string };
   // Optional escape hatch for low-cost probes. Normal pricing and
   // availability scans do not skip sidecar: LOW/HIGH/HOLIDAY all use
-  // Airbnb + VRBO + Booking + PM website searches.
+  // Airbnb + VRBO + Booking.com local-Chrome searches.
   skipSidecar?: boolean;
   // Pricing refreshes can split the full market-rate check into
   // reusable stages: PM/direct once per season type and OTA checks per
@@ -780,11 +783,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const warningSeason = args.warningSeason ?? "LOW";
   if (!args.skipSidecar) assertSidecarRunCurrent();
 
-  // Fan out every website search concurrently. The sidecar daemon still
-  // serializes Chrome work, but enqueuing together prevents a slow PM
-  // site from delaying Airbnb/VRBO/Booking submission. SearchAPI is not
-  // used for OTA pricing here; it is only used inside the PM helper to
-  // discover candidate PM domains.
+  // Fan out every OTA website search concurrently. SearchAPI is not
+  // used for OTA pricing here; Airbnb, VRBO, and Booking.com all run
+  // through the operator's local Chrome sidecar.
   const airbnbFallbackPromise = args.skipSidecar
     ? fetchAmortizedNightlyByBR(
         args.community,
@@ -824,10 +825,11 @@ export async function fetchMultiChannelBuyInByBR(args: {
     : args.bedroomCounts;
   const reuseSharedPmSearch = args.reuseSharedPmSearch !== false && sortedBedroomCounts.length > 1;
   const pmSearchCount = reuseSharedPmSearch ? 1 : args.bedroomCounts.length;
+  const pmSearchEnabled = false;
   const progressTotal = args.skipSidecar
     ? 0
     : (args.skipOta ? 0 : otaSearchBedroomCounts.length * 3) +
-      (args.skipPm ? 0 : pmSearchCount);
+      (args.skipPm || !pmSearchEnabled ? 0 : pmSearchCount);
   let progressCompleted = 0;
   const emitProgress = (
     label: string,
@@ -893,11 +895,11 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // When caller asks us to skip sidecar, we still build the channel
   // map but browser-backed entries stay null. Normal pricing refreshes
   // do not skip sidecar: LOW/HIGH/HOLIDAY all use Airbnb + VRBO +
-  // Booking + PM website searches now.
+  // Booking.com searches now.
   if (!args.skipSidecar && !args.skipOta) for (const br of otaSearchBedroomCounts) {
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
-        const progressLabel = `Airbnb ${br}+BR`;
+        const progressLabel = `Airbnb ${br}+BR (8-window sidecar)`;
         try {
           assertSidecarRunCurrent();
           const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -960,7 +962,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     );
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
-        const progressLabel = `VRBO ${br}+BR`;
+        const progressLabel = `VRBO ${br}+BR (8-window sidecar)`;
         try {
           assertSidecarRunCurrent();
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -1042,7 +1044,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     );
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
-        const progressLabel = `Booking.com ${br}+BR`;
+        const progressLabel = `Booking.com ${br}+BR (8-window sidecar)`;
         try {
           assertSidecarRunCurrent();
           const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
@@ -1106,7 +1108,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
       })(),
     );
   }
-  if (!args.skipSidecar && !args.skipPm) {
+  if (!args.skipSidecar && !args.skipPm && pmSearchEnabled) {
     if (reuseSharedPmSearch) {
       pmOps.push((async () => {
         const progressLabel = `PM/direct sites ${sortedBedroomCounts.join("/")}BR`;

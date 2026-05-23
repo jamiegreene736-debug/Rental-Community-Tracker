@@ -7855,16 +7855,20 @@ export async function registerRoutes(
     // Result-cache fast path. Honors a `?nocache=1` query for the
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
-    const includePm = req.query.includePm !== "0" && req.query.pm !== "0";
+    // 2026-05-22 buy-in methodology: Airbnb, VRBO, and Booking.com
+    // are searched only through the local Playwright/Chrome sidecar.
+    // PM/direct websites are no longer scraped or searched for rates.
+    // Airbnb images may still be reverse-searched to surface a direct
+    // booking link; that link inherits the Airbnb rate and is never
+    // scraped for price.
+    const includePm = false;
+    const airbnbDirectLensEnabled = req.query.directLens !== "0";
     const propertyUnitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
-    const googleDiscoveryEnabled = includePm && (
-      propertyUnitConfig?.enableGoogleLensDiscovery === true
-      || propertyUnitConfig?.looseResortPhotoProof === true
-      || PM_GOOGLE_DISCOVERY_DEFAULT_ENABLED
-    );
+    const googleDiscoveryEnabled = airbnbDirectLensEnabled;
+    const pmGoogleDiscoveryEnabled = includePm && googleDiscoveryEnabled;
     const looseResortPhotoProof = propertyUnitConfig?.looseResortPhotoProof === true;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|${includePm ? "pm" : "ota-only"}|${groundFloorOnly ? "ground" : "any-floor"}`;
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct|${groundFloorOnly ? "ground" : "any-floor"}`;
     const noCache = req.query.nocache === "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -8203,6 +8207,11 @@ export async function registerRoutes(
       // for commercial use. Populated for the top N priced Airbnb
       // candidates (cap configurable via TOP_AIRBNB_FOR_LENS).
       photoMatches?: Array<{ url: string; title: string; domain: string }>;
+      directBookingUrl?: string;
+      directBookingHost?: string;
+      directBookingConfidence?: "high" | "medium" | "low";
+      directBookingSource?: "airbnb_image_reverse_search";
+      directBookingReason?: string;
       // For PM candidates discovered via reverse-image match against
       // an Airbnb listing: track the anchor for traceability only.
       // The PM URL must earn its own verified date-specific quote before
@@ -8899,7 +8908,7 @@ export async function registerRoutes(
     const pmPromise: Promise<Candidate[]> = (async () => {
       // PR #314: short-circuit when PM Google-discovery is disabled.
       // Operator directive after Google 403s on PM-domain queries.
-      if (!googleDiscoveryEnabled) {
+      if (!pmGoogleDiscoveryEnabled) {
         return [];
       }
       try {
@@ -9124,7 +9133,7 @@ export async function registerRoutes(
     // Only runs for Poipu — SP's footprint is Poipu only, so no point
     // hitting the sitemap from a non-Poipu search. `community.toLowerCase()`
     // contains "poipu" for both "Poipu Kai" and "Pili Mai at Poipu".
-    const isPoipu = /\bpoipu\b/i.test(`${community} ${searchLocation} ${resortName ?? ""}`);
+    const isPoipu = includePm && /\bpoipu\b/i.test(`${community} ${searchLocation} ${resortName ?? ""}`);
     const spDiscoveryPromise: Promise<Candidate[]> = isPoipu
       ? (async () => {
           pmDiscoveryStats.spCalls++;
@@ -9187,9 +9196,10 @@ export async function registerRoutes(
     // sitemap walk. We still gate to "is Hawaii" because both PMs are
     // HI-only and we don't want to walk their sitemaps for, say, a
     // Florida search.
-    const isHawaii =
+    const isHawaii = includePm && (
       communityRegion === "hawaii" ||
-      /\b(?:hawaii|kauai|koloa|poipu|princeville|kapaa|maui|oahu|kona)\b/i.test(`${community} ${searchLocation} ${resortName ?? ""}`);
+      /\b(?:hawaii|kauai|koloa|poipu|princeville|kapaa|maui|oahu|kona)\b/i.test(`${community} ${searchLocation} ${resortName ?? ""}`)
+    );
 
     const vrpDiscoveryPromise = (
       siteKey: keyof typeof VRP_SITES,
@@ -9344,7 +9354,7 @@ export async function registerRoutes(
     // long-tail PM pages that the per-domain Stage 2 search may miss.
     // Sidecar/Chrome is deliberately NOT used for Google search.
     const pmSearchApiFinderPromise: Promise<Candidate[]> = (async () => {
-      if (!googleDiscoveryEnabled) return [];
+      if (!pmGoogleDiscoveryEnabled) return [];
       try {
         const target = resortName ?? community;
         const locality = searchLocation.replace(/,/g, " ");
@@ -9719,7 +9729,7 @@ export async function registerRoutes(
     // Louisiana house for sale, not a Hawaii vacation rental. This
     // filter cleans them up at the lens-helper layer so they never
     // reach the candidate pool.
-    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|easemytrip\.com|hotelplanner\.com|reservations\.com|hotwire\.com|agoda\.com|google\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
+    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|easemytrip\.com|hotelplanner\.com|reservations\.com|hotwire\.com|agoda\.com|google\.com|gstatic\.com|googleusercontent\.com|bing\.com|yahoo\.com|duckduckgo\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com|threads\.net|amazon\.com|walmart\.com|target\.com|wayfair\.com|etsy\.com|ebay\.com|craigslist\.org|matches\.com|match\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
     async function lensMatches(imgUrl: string): Promise<Array<{ url: string; title: string; domain: string }>> {
       // PR #314: short-circuit when PM Google-discovery is disabled.
       // Google Lens (engine=google_lens) is a Google search surface
@@ -9761,12 +9771,11 @@ export async function registerRoutes(
         return [];
       }
     }
-    // Widen the Airbnb→Lens cap. Airbnb gives us verified-available
-    // inventory, and Google Lens can find the PM/direct page for that
-    // same physical unit. The Lens match is discovery only; the PM page
-    // still has to verify bedroom count and a date-specific quote before
-    // it can be auto-filled. Cap at 30 so we do not miss likely PM pages.
-    const TOP_AIRBNB_FOR_LENS = 30;
+    // Lens every priced Airbnb card we receive, capped defensively so a
+    // redesigned Airbnb infinite-scroll page cannot create an unbounded
+    // SearchAPI bill. The direct page is link-only: we do not scrape it,
+    // and any direct-link row keeps the Airbnb date-specific rate.
+    const TOP_AIRBNB_FOR_LENS = 50;
     const topAirbnb = airbnb
       .filter((c) => c.image && c.nightlyPrice > 0)
       .slice(0, TOP_AIRBNB_FOR_LENS);
@@ -9781,12 +9790,23 @@ export async function registerRoutes(
       );
       topAirbnb.forEach((c, i) => photoMatchesByUrl.set(c.url, lensResults[i]));
     }
-    const airbnbWithMatches: Candidate[] = airbnb.map((c) => ({
-      ...c,
-      verified: c.verified ?? "skipped",
-      verifiedReason: c.verifiedReason ?? "Airbnb organic result only; Airbnb engine did not return a date-specific price for this listing",
-      photoMatches: photoMatchesByUrl.get(c.url) ?? [],
-    }));
+    const airbnbWithMatches: Candidate[] = airbnb.map((c) => {
+      const matches = photoMatchesByUrl.get(c.url) ?? [];
+      const direct = matches[0];
+      return {
+        ...c,
+        verified: c.verified ?? "skipped",
+        verifiedReason: c.verifiedReason ?? "Airbnb organic result only; Airbnb engine did not return a date-specific price for this listing",
+        photoMatches: matches,
+        directBookingUrl: direct?.url,
+        directBookingHost: direct?.domain,
+        directBookingConfidence: direct ? "medium" : undefined,
+        directBookingSource: direct ? "airbnb_image_reverse_search" : undefined,
+        directBookingReason: direct
+          ? "Google Lens found the same Airbnb listing photo on this direct/PM domain. Rate shown remains the Airbnb date-specific rate; the direct site was not scraped."
+          : undefined,
+      };
+    });
 
     // Promote photo-match URLs into the PM source as verification targets.
     //
@@ -9877,7 +9897,7 @@ export async function registerRoutes(
         existingPmUrls.add(m.url);
         photoMatchPmCandidates.push({
           source: "pm",
-          sourceLabel: m.domain,
+          sourceLabel: `Direct link (${m.domain})`,
           // Wrap with `withStayDates("pm", ...)` so the URL carries
           // common check-in / check-out param spellings. PMs that use
           // any of `checkin`/`check_in`/`arrival` will pre-fill their
@@ -9887,13 +9907,21 @@ export async function registerRoutes(
           // page lands on the right window when it does support it.
           url: withStayDates("pm", m.url),
           title: m.title || `Match on ${m.domain}`,
-          nightlyPrice: 0,
-          totalPrice: 0,
+          nightlyPrice: anchor.nightlyPrice,
+          totalPrice: anchor.totalPrice,
           bedrooms: anchorBedrooms,
           image: anchor.image,
-          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}). Airbnb confirmed availability, but this PM URL still needs its own date-specific quote before it can be auto-filled.`,
+          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}). Direct site was not scraped; rate shown is the Airbnb date-specific rate for this same listing.`,
           airbnbAnchorUrl: anchor.url,
           airbnbAnchorPrice: anchor.totalPrice,
+          directBookingUrl: m.url,
+          directBookingHost: m.domain,
+          directBookingConfidence: "medium",
+          directBookingSource: "airbnb_image_reverse_search",
+          directBookingReason: "Google Lens found the Airbnb listing photo on this direct/PM domain; PM page was linked only, not scraped.",
+          verified: "yes",
+          verifiedNightlyPrice: anchor.nightlyPrice,
+          verifiedReason: "Direct booking link inferred by Google Lens from Airbnb photos. Price is inherited from Airbnb for the requested dates; direct site was not scraped.",
         });
       }
     }
@@ -16683,6 +16711,16 @@ Return ONLY compact JSON with this exact shape:
     });
   });
 
+  // POST /api/admin/vrbo-sidecar/screen — daemon pushes a compressed
+  // viewport screenshot + phase label for the dashboard's live mini
+  // browser grid. Short-lived and in-memory only; no cookies or secrets
+  // are returned by the public reader.
+  app.post("/api/admin/vrbo-sidecar/screen", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const { updateSidecarScreenSnapshot } = await import("./vrbo-sidecar-queue");
+    return res.json(updateSidecarScreenSnapshot(req.body ?? {}));
+  });
+
   // POST /api/admin/vrbo-sidecar/result — worker reports completion.
   // Body: { id, results?: unknown, error?: string }
   app.post("/api/admin/vrbo-sidecar/result", async (req, res) => {
@@ -16734,6 +16772,19 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/vrbo-sidecar/status", async (_req, res) => {
     const { getStatus } = await import("./vrbo-sidecar-queue");
     return res.json(getStatus());
+  });
+
+  // GET /api/vrbo-sidecar/screens — public dashboard view of the local
+  // Chrome workers. Exposes only TTL-bounded screenshot thumbnails and
+  // labels so Jamie can see the searches progressing without putting
+  // eight Chrome windows on a second monitor.
+  app.get("/api/vrbo-sidecar/screens", async (_req, res) => {
+    const { getHeartbeat, getSidecarScreenSnapshots } = await import("./vrbo-sidecar-queue");
+    return res.json({
+      heartbeat: getHeartbeat(),
+      screens: getSidecarScreenSnapshots(),
+      maxScreens: 8,
+    });
   });
 
   // POST /api/vrbo-sidecar/cancel — operator-facing panic button for
