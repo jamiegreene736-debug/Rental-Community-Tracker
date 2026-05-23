@@ -79,6 +79,10 @@ const PM_SITE_SEARCH_BUDGET_MS = Number(process.env.SIDECAR_PM_SITE_SEARCH_BUDGE
 const REQUEST_HARD_TIMEOUT_MS = Number(process.env.SIDECAR_REQUEST_HARD_TIMEOUT_MS ?? 10 * 60_000);
 const REQUEST_MAX_ATTEMPTS = Math.max(1, Math.floor(Number(process.env.SIDECAR_REQUEST_MAX_ATTEMPTS ?? 2) || 2));
 const REQUEST_RETRY_BASE_MS = Math.max(250, Number(process.env.SIDECAR_REQUEST_RETRY_BASE_MS ?? 1_500) || 1_500);
+const VRBO_HARD_BLOCK_FRESH_RETRIES = Math.max(
+  0,
+  Math.floor(Number(process.env.SIDECAR_VRBO_HARD_BLOCK_FRESH_RETRIES ?? 2) || 2),
+);
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
 const VIEWPORT = { width: 1280, height: 820 };
@@ -94,6 +98,7 @@ let contextGuardsInstalled = false;
 let activeChromeAllocation = null;
 let captchaWindowVisible = false;
 let launchedPersistentContext = false;
+let activeRuntimeRequest = null;
 
 function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
@@ -136,6 +141,14 @@ class SidecarHardTimeoutError extends Error {
   }
 }
 
+class VrboHardBlockError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "VrboHardBlockError";
+    this.details = details;
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -147,7 +160,7 @@ function transientErrorMessage(message) {
 }
 
 function isTransientScrapeError(error) {
-  if (error instanceof SidecarCancelledError || error instanceof SidecarHardTimeoutError) return false;
+  if (error instanceof SidecarCancelledError || error instanceof SidecarHardTimeoutError || error instanceof VrboHardBlockError) return false;
   return transientErrorMessage(error?.message ?? error);
 }
 
@@ -884,6 +897,13 @@ async function ensureBrowser() {
 
 function headlessUserDataDirForWorker() {
   const safeSlot = String(WORKER_SLOT || "1").replace(/[^a-z0-9_-]/gi, "_");
+  const freshAttempt = Number(activeRuntimeRequest?.vrboFreshAttempt ?? 0);
+  if (freshAttempt > 0 && activeRuntimeRequest?.freshSessionReason === "vrbo_hard_block") {
+    const safeRequestId = String(activeRuntimeRequest?.id || "vrbo")
+      .replace(/[^a-z0-9_-]/gi, "_")
+      .slice(0, 48);
+    return path.join(HEADLESS_USER_DATA_ROOT, `worker-${safeSlot}-vrbo-fresh-${safeRequestId}-${freshAttempt}`);
+  }
   return path.join(HEADLESS_USER_DATA_ROOT, `worker-${safeSlot}`);
 }
 
@@ -1200,6 +1220,8 @@ async function dumpPageState(label, requestForLog) {
 
 const VRBO_HUMAN_CHALLENGE_RE =
   /show us your human side|we can.?t tell if you.?re a human|press and hold|slide (?:the )?(?:lock|slider)|captcha|not a robot|bot or not|verify (?:that )?you(?:'re| are) human|human verification|unusual traffic/i;
+const VRBO_HARD_BLOCK_RE =
+  /you have been blocked|something about the behaviour of the browser|robot on the same network/i;
 
 function stateLooksLikeVrboHumanChallenge(state) {
   if (!state) return false;
@@ -1208,9 +1230,16 @@ function stateLooksLikeVrboHumanChallenge(state) {
   );
 }
 
-async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
-  if (!targetPage || targetPage.isClosed?.()) return false;
-  const state = await targetPage
+function stateLooksLikeVrboHardBlock(state) {
+  if (!state) return false;
+  return VRBO_HARD_BLOCK_RE.test(
+    `${state.title ?? ""}\n${state.bodyExcerpt ?? ""}\n${state.bodyHtmlSnippet ?? ""}\n${state.url ?? ""}`,
+  );
+}
+
+async function captureVrboChallengeState(targetPage = page) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  return targetPage
     .evaluate(() => ({
       url: location.href,
       title: document.title,
@@ -1218,6 +1247,25 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
       bodyHtmlSnippet: (document.body?.innerHTML ?? "").slice(0, 5000),
     }))
     .catch(() => null);
+}
+
+function throwIfVrboHardBlock(state, label, id) {
+  if (!stateLooksLikeVrboHardBlock(state)) return;
+  throw new VrboHardBlockError(
+    "VRBO hard-blocked this browser/IP session; retrying with a fresh isolated VRBO session",
+    {
+      label,
+      id,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+    },
+  );
+}
+
+async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
+  if (!targetPage || targetPage.isClosed?.()) return false;
+  const state = await captureVrboChallengeState(targetPage);
   return stateLooksLikeVrboHumanChallenge(state);
 }
 
@@ -1548,9 +1596,9 @@ async function showVrboManualVerificationBanner(targetPage, label) {
 }
 
 async function waitForVrboManualVerification(targetPage, label, id, initialState = null) {
-  const hasChallenge = initialState
-    ? stateLooksLikeVrboHumanChallenge(initialState)
-    : await pageLooksLikeVrboHumanChallenge(targetPage);
+  const state = initialState ?? await captureVrboChallengeState(targetPage);
+  throwIfVrboHardBlock(state, label, id);
+  const hasChallenge = stateLooksLikeVrboHumanChallenge(state);
   if (!hasChallenge) return false;
 
   await normalizePageDisplay(targetPage).catch(() => {});
@@ -1648,18 +1696,8 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
   const isVrbo = /vrbo/i.test(label) || /vrbo\.com/i.test(homeUrl);
   const maybeClearVrboChallenge = async (stage) => {
     if (!isVrbo) return false;
-    const state = await withSoftTimeout(
-      page
-        .evaluate(() => ({
-          url: location.href,
-          title: document.title,
-          bodyExcerpt: (document.body?.innerText ?? "").slice(0, 3000),
-          bodyHtmlSnippet: (document.body?.innerHTML ?? "").slice(0, 5000),
-        }))
-        .catch(() => null),
-      2_000,
-      null,
-    );
+    const state = await withSoftTimeout(captureVrboChallengeState(page), 2_000, null);
+    throwIfVrboHardBlock(state, label, requestId);
     if (stateLooksLikeVrboHumanChallenge(state) || (await pageLooksLikeVrboHumanChallenge(page))) {
       log(`${label} ${requestId}: VRBO challenge detected during homepage prime (${stage})`);
       return waitForVrboManualVerification(page, label, requestId, state);
@@ -2617,10 +2655,12 @@ async function processVrboSearch(id, params) {
   await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
   await applyVrboBedroomFilter(bedrooms).catch(() => false);
   let state = await dumpPageState("vrbo", { id, ...params });
+  throwIfVrboHardBlock(state, "vrbo_search", id);
   if (await waitForVrboManualVerification(page, "vrbo_search", id, state)) {
     await dismissObstructions(page, "vrbo_search_after_manual_verify").catch(() => null);
     await applyVrboBedroomFilter(bedrooms).catch(() => false);
     state = await dumpPageState("vrbo", { id, ...params });
+    throwIfVrboHardBlock(state, "vrbo_search", id);
   }
   if (stateLooksLikeVrboHumanChallenge(state)) {
     throw new Error("Vrbo manual verification still required; solve it in the sidecar Chrome window and rerun the request");
@@ -2783,9 +2823,11 @@ async function processVrboPhotoScrape(id, params) {
   await waitForVrboManualVerification(page, "vrbo_photo_scrape", id);
   await dismissObstructions(page, "vrbo_photo_scrape");
   let state = await dumpPageState("vrbo-photo", { id, ...params });
+  throwIfVrboHardBlock(state, "vrbo_photo_scrape", id);
   if (await waitForVrboManualVerification(page, "vrbo_photo_scrape", id, state)) {
     await dismissObstructions(page, "vrbo_photo_scrape_after_manual_verify").catch(() => null);
     state = await dumpPageState("vrbo-photo", { id, ...params });
+    throwIfVrboHardBlock(state, "vrbo_photo_scrape", id);
   }
   if (stateLooksLikeVrboHumanChallenge(state)) {
     throw new Error("Vrbo manual verification still required; solve it in the sidecar Chrome window and rerun the request");
@@ -5134,10 +5176,21 @@ async function processRequest(req) {
   // Acquire the browser at the request boundary so the worker pool can
   // spread jobs across either configured CDP/noVNC sidecars or the
   // no-window local headless fallback.
-  if (!USE_HEADLESS_LOCAL_BROWSER) {
-    await acquireChromeForRequest({ id: req.id, opType });
+  try {
+    if (!USE_HEADLESS_LOCAL_BROWSER) {
+      await acquireChromeForRequest({
+        id: req.id,
+        opType,
+        vrboFreshAttempt: req.vrboFreshAttempt ?? 0,
+        freshSessionReason: req.freshSessionReason,
+      });
+    }
+    activeRuntimeRequest = { id: req.id, opType, vrboFreshAttempt: req.vrboFreshAttempt ?? 0, freshSessionReason: req.freshSessionReason };
+    await ensureBrowser();
+  } catch (e) {
+    activeRuntimeRequest = null;
+    throw e;
   }
-  await ensureBrowser();
   const stopScreenHeartbeat = startScreenHeartbeat({ ...req, opType });
 
   try {
@@ -5165,6 +5218,7 @@ async function processRequest(req) {
       default: throw new Error(`unknown opType: ${opType}`);
     }
   } finally {
+    activeRuntimeRequest = null;
     stopScreenHeartbeat();
     await postScreenSnapshot({ ...req, opType }, page, `finished ${opType}`, { force: true }).catch(() => {});
     await closeExtraTabs(`after ${opType}`, page).catch(() => {});
@@ -5200,6 +5254,10 @@ async function processRequest(req) {
 
 // ─────────────────────── Tick / main loop ───────────────────────────
 let consecutiveErrors = 0;
+
+function isVrboBrowserOp(opType) {
+  return opType === "vrbo_search" || opType === "vrbo_photo_scrape";
+}
 
 // Returns true if a request was processed (so the main loop knows to
 // poll again immediately rather than sleeping POLL_IDLE_MS — that
@@ -5238,12 +5296,17 @@ async function tick() {
   const stopBusyHeartbeat = startBusyHeartbeat(req.opType ?? "request", req.id);
   try {
     let lastError = null;
-    const maxAttempts = Math.max(1, REQUEST_MAX_ATTEMPTS);
+    let vrboHardBlockRetries = 0;
+    const isVrboOp = isVrboBrowserOp(req.opType ?? "vrbo_search");
+    const maxAttempts = Math.max(1, REQUEST_MAX_ATTEMPTS + (isVrboOp ? VRBO_HARD_BLOCK_FRESH_RETRIES : 0));
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         if (attempt > 1) {
           const backoff = REQUEST_RETRY_BASE_MS * Math.pow(2, attempt - 2);
-          log(`retrying ${req.id} (${req.opType}) attempt ${attempt}/${maxAttempts} after ${backoff}ms`);
+          log(
+            `retrying ${req.id} (${req.opType}) attempt ${attempt}/${maxAttempts} after ${backoff}ms` +
+            (req.vrboFreshAttempt ? ` (fresh VRBO session #${req.vrboFreshAttempt})` : ""),
+          );
           await sleep(backoff);
         }
         await runWithHardTimeout(`request ${req.id} ${req.opType ?? "request"}`, req.opType ?? "request", () => processRequest(req));
@@ -5251,12 +5314,41 @@ async function tick() {
         break;
       } catch (e) {
         lastError = e;
-        const canRetry = attempt < maxAttempts && isTransientScrapeError(e);
+        const hardBlockRetry =
+          e instanceof VrboHardBlockError &&
+          isVrboOp &&
+          attempt < maxAttempts &&
+          vrboHardBlockRetries < VRBO_HARD_BLOCK_FRESH_RETRIES;
+        const transientRetry = attempt < maxAttempts && isTransientScrapeError(e);
+        const canRetry = hardBlockRetry || transientRetry;
+        if (hardBlockRetry) {
+          vrboHardBlockRetries += 1;
+          req.vrboFreshAttempt = vrboHardBlockRetries;
+          req.freshSessionReason = "vrbo_hard_block";
+          await sendHeartbeat(`VRBO hard block; retrying fresh session ${vrboHardBlockRetries}/${VRBO_HARD_BLOCK_FRESH_RETRIES}`, true, req.id).catch(() => {});
+          await postScreenSnapshot(
+            { ...req, opType: req.opType ?? "vrbo_search" },
+            page,
+            `VRBO blocked - fresh retry ${vrboHardBlockRetries}/${VRBO_HARD_BLOCK_FRESH_RETRIES}`,
+            { captcha: true, error: e?.message ?? String(e), force: true },
+          ).catch(() => {});
+        } else if (e instanceof VrboHardBlockError && isVrboOp) {
+          lastError = new VrboHardBlockError(
+            `VRBO hard block persisted after ${vrboHardBlockRetries} fresh session ${vrboHardBlockRetries === 1 ? "retry" : "retries"}; queued search needs manual review or a later retry`,
+            e.details ?? {},
+          );
+        }
         log(
-          `attempt ${attempt}/${maxAttempts} failed for ${req.id}: ${e?.message ?? e}` +
-          (canRetry ? " (transient; will retry)" : ""),
+          `attempt ${attempt}/${maxAttempts} failed for ${req.id}: ${lastError?.message ?? e?.message ?? e}` +
+          (hardBlockRetry ? " (VRBO hard block; fresh session retry)" : transientRetry ? " (transient; will retry)" : ""),
         );
-        await teardownBrowser(canRetry ? "retry after transient failure" : "request failure cleanup").catch(() => {});
+        await teardownBrowser(
+          hardBlockRetry
+            ? `fresh VRBO retry ${vrboHardBlockRetries}/${VRBO_HARD_BLOCK_FRESH_RETRIES} after hard block`
+            : canRetry
+              ? "retry after transient failure"
+              : "request failure cleanup",
+        ).catch(() => {});
         if (!canRetry) break;
       }
     }

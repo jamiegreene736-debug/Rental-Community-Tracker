@@ -155,6 +155,16 @@ SIDECAR_REQUEST_RETRY_BASE_MS=1500
 SIDECAR_REQUEST_HARD_TIMEOUT_MS=600000
 ```
 
+VRBO hard blocks are handled separately from transient browser errors.
+If a page says the browser/session has been blocked, the worker tears
+down only that VRBO browser allocation and retries the same VRBO request
+with a fresh session/proxy identity. Other channels in the same buy-in
+search continue through their own queue work.
+
+```sh
+SIDECAR_VRBO_HARD_BLOCK_FRESH_RETRIES=2 # default fresh VRBO-only retries
+```
+
 ## VRBO slider CAPTCHA automation
 
 When VRBO shows a slider CAPTCHA, the daemon first tries to clear it

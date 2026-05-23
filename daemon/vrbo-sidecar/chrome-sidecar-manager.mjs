@@ -324,6 +324,8 @@ function proxySessionId(instance, request) {
   const base = [
     request?.id,
     request?.opType,
+    request?.freshSessionReason,
+    request?.vrboFreshAttempt ? `fresh${request.vrboFreshAttempt}` : "",
     instance?.name,
     Date.now().toString(36),
   ]
@@ -845,7 +847,8 @@ export class ChromeSidecarManager {
       );
       chromeOptions.extensions = [proxyAuthExtensionBase64(proxyConfig)];
       this.log(
-        `launching ${instance.name} with ${proxyConfig.provider} proxy ${proxyConfig.host}:${proxyConfig.port}`,
+        `launching ${instance.name} with ${proxyConfig.provider} proxy ${proxyConfig.host}:${proxyConfig.port}` +
+          (request?.vrboFreshAttempt ? ` (fresh VRBO retry #${request.vrboFreshAttempt})` : ""),
       );
     }
 
