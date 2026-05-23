@@ -1263,6 +1263,10 @@ function throwIfVrboHardBlock(state, label, id) {
   );
 }
 
+function vrboManualVerificationUnavailableInHeadless() {
+  return usingHeadlessRuntime() && !activeChromeAllocation?.noVncUrl;
+}
+
 async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
   if (!targetPage || targetPage.isClosed?.()) return false;
   const state = await captureVrboChallengeState(targetPage);
@@ -1610,6 +1614,28 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
     return true;
   }
 
+  if (vrboManualVerificationUnavailableInHeadless()) {
+    const retryMessage =
+      "No live Chrome/noVNC browser is available for manual VRBO verification; retrying with a fresh isolated VRBO session.";
+    log(`${label} ${id}: ${retryMessage}`);
+    await postScreenSnapshot(
+      { id, opType: label },
+      targetPage,
+      "VRBO verification unavailable - retrying fresh session",
+      { captcha: true, error: retryMessage, force: true },
+    );
+    throw new VrboHardBlockError(
+      "VRBO verification cannot be manually solved in headless fallback; retrying with a fresh isolated VRBO session",
+      {
+        label,
+        id,
+        url: state?.url,
+        title: state?.title,
+        excerpt: retryMessage,
+      },
+    );
+  }
+
   log(`${label} ${id}: 2Captcha unavailable or failed; surfacing Chrome for manual verification`);
   await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
   await showVrboManualVerificationBanner(targetPage, label);
@@ -1718,6 +1744,7 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
       return true;
     }
   } catch (e) {
+    if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError) throw e;
     log(`${label}: homepage search prime skipped: ${e?.message ?? e}`);
   }
   return false;

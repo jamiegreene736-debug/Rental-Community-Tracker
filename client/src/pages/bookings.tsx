@@ -7838,6 +7838,13 @@ function SidecarScreensStrip() {
   const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
   const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
   const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
+  const selectedScreenCannotSurface = Boolean(
+    selectedScreen &&
+      !selectedScreen.liveViewUrl &&
+      /headless|no live chrome|no live browser|no local chrome|no local chrome window|unavailable/i.test(
+        `${selectedScreen.error ?? ""} ${selectedScreen.phase ?? ""}`,
+      ),
+  );
 
   useEffect(() => {
     try {
@@ -7972,7 +7979,9 @@ function SidecarScreensStrip() {
                   <p className="truncate text-muted-foreground">
                     {selectedScreen.liveViewUrl
                       ? "Open the live browser view for full keyboard/mouse control."
-                      : selectedScreen.title || selectedScreen.url || "Use the focus button if the screenshot does not respond."}
+                      : selectedScreenCannotSurface
+                        ? selectedScreen.error || "No live Chrome browser is available for this sidecar session."
+                        : selectedScreen.title || selectedScreen.url || "Use the focus button if the screenshot does not respond."}
                   </p>
                 </div>
                 <Button
@@ -7983,19 +7992,25 @@ function SidecarScreensStrip() {
                   onClick={() => {
                     if (selectedScreen.liveViewUrl) {
                       window.open(selectedScreen.liveViewUrl, "_blank", "noopener,noreferrer");
-                    } else {
+                    } else if (!selectedScreenCannotSurface) {
                       sendScreenCommand(selectedScreen, "surface");
                     }
                   }}
-                  disabled={selectedScreen.phase?.startsWith("finished") && !selectedScreen.liveViewUrl}
+                  disabled={selectedScreenCannotSurface || (selectedScreen.phase?.startsWith("finished") && !selectedScreen.liveViewUrl)}
                   title={selectedScreen.liveViewUrl
                     ? "Open the live noVNC browser for this sidecar"
+                    : selectedScreenCannotSurface
+                      ? "This run is using headless fallback, so there is no real Chrome window to focus."
                     : selectedScreen.phase?.startsWith("finished")
                       ? "This run has already finished; start a fresh search to control Chrome."
                       : "Bring the actual sidecar Chrome window to the front"}
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
-                  {selectedScreen.liveViewUrl ? "Open live browser" : "Focus real Chrome window"}
+                  {selectedScreen.liveViewUrl
+                    ? "Open live browser"
+                    : selectedScreenCannotSurface
+                      ? "No live browser"
+                      : "Focus real Chrome window"}
                 </Button>
               </div>
               <div
