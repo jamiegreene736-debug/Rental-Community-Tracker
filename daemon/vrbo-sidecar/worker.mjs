@@ -68,6 +68,7 @@ const HEADLESS_BROWSER_CHANNEL = process.env.SIDECAR_HEADLESS_BROWSER_CHANNEL ??
 const HEADLESS_USER_DATA_ROOT = process.env.SIDECAR_HEADLESS_USER_DATA_DIR ??
   path.join(os.homedir(), "Library/Application Support/VrboSidecar-Headless");
 const HEADLESS_PROXY_ENABLED = process.env.SIDECAR_HEADLESS_PROXY_ENABLED !== "0";
+const HEADLESS_PROXY_DIRECT_FALLBACK = process.env.SIDECAR_HEADLESS_PROXY_DIRECT_FALLBACK !== "0";
 const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 1_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
 const SERVER_WORKER_CLAIM_DELAY_MS = Number(process.env.SIDECAR_SERVER_WORKER_CLAIM_DELAY_MS ?? 4_000);
@@ -223,6 +224,40 @@ function proxyHeaderEntries(headers, proxyAuthorization) {
       return [`${name}: ${value}`];
     })
     .concat(`Proxy-Authorization: ${proxyAuthorization}`, "Proxy-Connection: Keep-Alive");
+}
+
+async function probeHeadlessProxyAuth(proxyConfig, target = "lumtest.com:443") {
+  const proxyAuthorization = `Basic ${Buffer.from(`${proxyConfig.username}:${proxyConfig.password}`).toString("base64")}`;
+  return await new Promise((resolve) => {
+    const socket = net.connect(proxyConfig.port, proxyConfig.host);
+    socket.setTimeout(8_000);
+    socket.once("connect", () => {
+      socket.write(
+        `CONNECT ${target} HTTP/1.1\r\n` +
+        `Host: ${target}\r\n` +
+        `Proxy-Authorization: ${proxyAuthorization}\r\n` +
+        "Proxy-Connection: Keep-Alive\r\n\r\n",
+      );
+    });
+    let headerBuffer = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      headerBuffer = Buffer.concat([headerBuffer, chunk]);
+      const headerEnd = headerBuffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+      const rawHeader = headerBuffer.slice(0, headerEnd).toString("latin1");
+      const statusLine = rawHeader.split("\r\n")[0] || "";
+      const status = Number(statusLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i)?.[1] ?? 0);
+      socket.destroy();
+      resolve({ ok: status >= 200 && status < 300, status, statusLine });
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve({ ok: false, status: 0, statusLine: "proxy auth probe timed out" });
+    });
+    socket.once("error", (e) => {
+      resolve({ ok: false, status: 0, statusLine: e?.message ?? "proxy auth probe failed" });
+    });
+  });
 }
 
 async function startHeadlessProxyAuthBridge(proxyConfig) {
@@ -1116,7 +1151,22 @@ async function ensureHeadlessBrowser() {
     fs.rmSync(userDataDir, { recursive: true, force: true });
   }
   fs.mkdirSync(userDataDir, { recursive: true });
-  const proxyConfig = headlessProxyConfig();
+  let proxyConfig = headlessProxyConfig();
+  if (proxyConfig) {
+    const probe = await probeHeadlessProxyAuth(proxyConfig);
+    if (!probe.ok) {
+      const probeStatus = probe.statusLine || `HTTP ${probe.status || "unknown"}`;
+      const message =
+        `headless proxy auth probe failed (${probeStatus}); ` +
+        (HEADLESS_PROXY_DIRECT_FALLBACK
+          ? "launching VRBO headless fallback without proxy"
+          : "direct fallback disabled");
+      log(message);
+      await sendHeartbeat(`VRBO proxy unavailable: ${probeStatus}`, true, activeRuntimeRequest?.id).catch(() => {});
+      if (!HEADLESS_PROXY_DIRECT_FALLBACK) throw new Error(message);
+      proxyConfig = null;
+    }
+  }
   if (proxyConfig) {
     await closeHeadlessProxyBridge("new headless launch");
     activeHeadlessProxyBridge = await startHeadlessProxyAuthBridge(proxyConfig);

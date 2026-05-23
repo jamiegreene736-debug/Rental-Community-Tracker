@@ -1,4 +1,5 @@
 import fs from "fs";
+import net from "net";
 import os from "os";
 import path from "path";
 import { spawn } from "child_process";
@@ -18,6 +19,7 @@ const DEFAULT_CHROME_BINARY =
   process.platform === "darwin"
     ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     : "/usr/bin/google-chrome";
+const SERVER_PROXY_DIRECT_FALLBACK = process.env.SERVER_CHROME_PROXY_DIRECT_FALLBACK !== "0";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -400,6 +402,40 @@ chrome.webRequest.onAuthRequired.addListener(
   ]);
 }
 
+async function probeServerChromeProxyAuth(proxyConfig, target = "lumtest.com:443") {
+  const proxyAuthorization = `Basic ${Buffer.from(`${proxyConfig.username}:${proxyConfig.password}`).toString("base64")}`;
+  return await new Promise((resolve) => {
+    const socket = net.connect(proxyConfig.port, proxyConfig.host);
+    socket.setTimeout(8_000);
+    socket.once("connect", () => {
+      socket.write(
+        `CONNECT ${target} HTTP/1.1\r\n` +
+        `Host: ${target}\r\n` +
+        `Proxy-Authorization: ${proxyAuthorization}\r\n` +
+        "Proxy-Connection: Keep-Alive\r\n\r\n",
+      );
+    });
+    let headerBuffer = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      headerBuffer = Buffer.concat([headerBuffer, chunk]);
+      const headerEnd = headerBuffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+      const rawHeader = headerBuffer.slice(0, headerEnd).toString("latin1");
+      const statusLine = rawHeader.split("\r\n")[0] || "";
+      const status = Number(statusLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i)?.[1] ?? 0);
+      socket.destroy();
+      resolve({ ok: status >= 200 && status < 300, status, statusLine });
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve({ ok: false, status: 0, statusLine: "proxy auth probe timed out" });
+    });
+    socket.once("error", (e) => {
+      resolve({ ok: false, status: 0, statusLine: e?.message ?? "proxy auth probe failed" });
+    });
+  });
+}
+
 async function isHttpReady(url, timeoutMs = 2_000) {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
@@ -740,9 +776,21 @@ export class ChromeSidecarManager {
     let webdriverSessionId = null;
     let sessionBaseUrl = null;
     try {
-      const proxyConfig = serverChromeProxyConfig(instance, request);
+      let proxyConfig = serverChromeProxyConfig(instance, request);
       if (proxyConfig && !instance.webdriverUrl) {
         throw new Error(`${instance.name} has no WebDriver URL; cannot enforce server Chrome proxy`);
+      }
+      if (proxyConfig) {
+        const probe = await probeServerChromeProxyAuth(proxyConfig);
+        if (!probe.ok) {
+          const probeStatus = probe.statusLine || `HTTP ${probe.status || "unknown"}`;
+          const message =
+            `server Chrome proxy auth probe failed (${probeStatus}); ` +
+            (SERVER_PROXY_DIRECT_FALLBACK ? "launching without proxy" : "direct fallback disabled");
+          this.log(message);
+          if (!SERVER_PROXY_DIRECT_FALLBACK) throw new Error(message);
+          proxyConfig = null;
+        }
       }
 
       let cdpReady = await this.isCdpReady(instance.cdpUrl);
