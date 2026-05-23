@@ -43,6 +43,7 @@ export const BUY_IN_RATES: Record<string, CommunityRate> = {
   "Keauhou":           { "2BR": 312,                          region: "hawaii" },
   "Southern Dunes":    { "2BR":  85, "3BR": 192, "4BR": 200,  region: "florida" },
   "Windsor Hills":     { "2BR": 150, "3BR": 210, "4BR": 294,  region: "florida" },
+  "Bonita National":   { "2BR": 160,                          region: "florida" },
   // Internal fallback key for Florida single-listing/community drafts
   // whose exact resort has no static buy-in row yet. Keeps live
   // season-band scans on Florida multipliers instead of falling through
@@ -134,7 +135,7 @@ export function suggestPricingArea(
     return "";
   }
   if (s === "florida" || s === "fl") {
-    // Three FL keys in BUY_IN_RATES — Southern Dunes (Haines City /
+    // Named FL keys in BUY_IN_RATES — Southern Dunes (Haines City /
     // Davenport, ~15-25mi from Disney, lower buy-in), Caribe Cove
     // (older Kissimmee resort), and Windsor Hills (Disney-proximate
     // newer-build tier). Kissimmee is broad but most STR-eligible
@@ -143,6 +144,7 @@ export function suggestPricingArea(
     // the operator downshift to Caribe Cove or Southern Dunes if the
     // build is older or further out.
     if (/\b(haines city|davenport)\b/.test(c)) return "Southern Dunes";
+    if (/\b(bonita springs|estero|naples)\b/.test(c)) return "Bonita National";
     if (/\b(orlando|kissimmee)\b/.test(c)) return "Windsor Hills";
     return "";
   }

@@ -459,6 +459,11 @@ assert.equal(
   "Windsor Hills",
   "Kissimmee with no community name still defaults to Windsor Hills",
 );
+assert.equal(
+  suggestPricingArea("Bonita Springs", "Florida", "Bonita National 2 Bedroom Condo"),
+  "Bonita National",
+  "Bonita Springs draft should resolve to the Bonita National buy-in market",
+);
 console.log("  ✓ suggestPricingArea matches by community name first");
 
 // ---------- SearchAPI airbnb engine listing parser ----------

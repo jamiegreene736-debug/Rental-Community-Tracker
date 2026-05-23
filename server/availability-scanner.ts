@@ -13,6 +13,8 @@ const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
   "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
   "Southern Dunes": "Southern Dunes, Haines City, Florida",
   "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
+  "Bonita National": "Bonita National Golf and Country Club, Bonita Springs, Florida",
+  "Florida Generic": "Florida, United States",
 };
 
 const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; units: { bedrooms: number }[] }> = {

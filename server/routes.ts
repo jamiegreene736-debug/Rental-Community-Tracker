@@ -3470,6 +3470,7 @@ function inferBuyInCommunityKeyFromText(...values: unknown[]): string | null {
   if (/\b(?:poipu\s+oceanfront|brennecke|ho'?one|makahuena)\b/.test(text)) return "Poipu Oceanfront";
   if (/\b(?:princeville|mauna\s+kai)\b/.test(text)) return "Princeville";
   if (/\b(?:kaha\s+lani|kapaa|wailua)\b/.test(text)) return "Kapaa Beachfront";
+  if (/\b(?:bonita\s+national|bonita\s+springs|estero|naples)\b/.test(text)) return "Bonita National";
   if (/\b(?:windsor\s+hills|kissimmee|orlando)\b/.test(text)) return "Windsor Hills";
   return null;
 }
@@ -3479,7 +3480,7 @@ function communityKeyForDraft(draft: any): string {
   if (pricingArea && BUY_IN_RATES[pricingArea]) {
     return pricingArea;
   }
-  return inferBuyInCommunityKeyFromText(
+  const inferred = inferBuyInCommunityKeyFromText(
     draft?.name,
     draft?.listingTitle,
     draft?.bookingTitle,
@@ -3490,7 +3491,11 @@ function communityKeyForDraft(draft: any): string {
     draft?.city,
     draft?.state,
     draft?.sourceUrl,
-  ) ?? pricingArea ?? draft?.name ?? (/\bfl(orida)?\b/i.test(draft?.state || "") ? "Florida Generic" : "Poipu Kai");
+  );
+  if (inferred) return inferred;
+  if (pricingArea) return pricingArea;
+  if (/\bfl(orida)?\b/i.test(draft?.state || "")) return "Florida Generic";
+  return draft?.name ?? "Poipu Kai";
 }
 
 function unitLabelFromDraftAddress(address: unknown, fallback: string): string {
@@ -12402,6 +12407,8 @@ export async function registerRoutes(
     "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
     "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
     "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
+    "Bonita National": "Bonita National Golf and Country Club, Bonita Springs, Florida",
+    "Florida Generic": "Florida, United States",
   };
 
   const COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS: Record<string, { airbnb?: string; booking?: string; vrbo?: string; pm?: string }> = {
@@ -12414,6 +12421,12 @@ export async function registerRoutes(
       booking: "Poipu Kai Resort, Koloa, HI",
       vrbo: "Poipu Kai",
       pm: "Poipu Kai",
+    },
+    "Bonita National": {
+      airbnb: "Bonita National Golf and Country Club, Bonita Springs, FL",
+      booking: "Bonita Springs, FL",
+      vrbo: "Bonita National Golf and Country Club",
+      pm: "Bonita National",
     },
   };
 
@@ -12483,6 +12496,7 @@ export async function registerRoutes(
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
     "Menehune Shores":   { searchName: "Menehune Shores",             city: "Kihei",       state: "Hawaii", streetAddress: "760 S Kihei Rd",               lat: 20.7638, lng: -156.4594 },
     "Windsor Hills":     { searchName: "Windsor Hills Resort",        city: "Kissimmee",   state: "Florida", streetAddress: "2600 N Old Lake Wilson Rd",   lat: 28.3222, lng: -81.5961 },
+    "Bonita National":   { searchName: "Bonita National",             city: "Bonita Springs", state: "Florida", streetAddress: "17501 Bonita National Blvd", lat: 26.3254, lng: -81.6713 },
   };
 
   // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
@@ -12501,6 +12515,7 @@ export async function registerRoutes(
     "Kekaha Beachfront":{ sw_lat: 21.955, sw_lng: -159.758, ne_lat: 21.978, ne_lng: -159.733 },
     "Keauhou":          { sw_lat: 19.528, sw_lng: -155.992, ne_lat: 19.558, ne_lng: -155.966 },
     "Windsor Hills":    { sw_lat: 28.305, sw_lng: -81.615, ne_lat: 28.340, ne_lng: -81.575 },
+    "Bonita National":  { sw_lat: 26.310, sw_lng: -81.695, ne_lat: 26.342, ne_lng: -81.648 },
   };
 
   app.get("/api/airbnb/search", async (req, res) => {
