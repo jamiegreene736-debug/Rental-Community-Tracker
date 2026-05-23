@@ -18,10 +18,17 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import {
+  aliasAttachmentHref,
+  filesToAliasEmailAttachments,
+  formatAttachmentSize,
+  parseAliasEmailAttachments,
+  type AliasEmailAttachment,
+} from "@/lib/emailAttachments";
+import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
-  FileText, Mail, ShieldCheck,
+  FileText, Mail, ShieldCheck, Paperclip,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -72,6 +79,7 @@ type InboxBuyInCommunications = {
     toEmail: string;
     subject: string;
     body: string;
+    attachmentsJson?: string | null;
     status?: string | null;
     sentAt?: string | null;
   }>;
@@ -1739,6 +1747,7 @@ function InboxBuyInPanel({
   const [form, setForm] = useState<Record<string, string>>({});
   const [composeId, setComposeId] = useState<number | null>(null);
   const [emailDrafts, setEmailDrafts] = useState<Record<number, { subject: string; body: string }>>({});
+  const [emailAttachments, setEmailAttachments] = useState<Record<number, AliasEmailAttachment[]>>({});
 
   const saveDetails = useMutation({
     mutationFn: ({ id, values }: { id: number; values: Record<string, string> }) =>
@@ -1763,10 +1772,12 @@ function InboxBuyInPanel({
         vendorEmail,
         subject: draft.subject,
         body: draft.body,
+        attachments: emailAttachments[unit.id] ?? [],
       }).then((r) => r.json());
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/bookings", reservationId, "buy-in-communications"] });
+      setEmailAttachments((prev) => composeId ? { ...prev, [composeId]: [] } : prev);
       setComposeId(null);
       toast({ title: "PM email sent", description: "The message is saved in this guest's buy-in email history." });
     },
@@ -1805,6 +1816,15 @@ function InboxBuyInPanel({
       ...prev,
       [unit.id]: prev[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName),
     }));
+  };
+  const addEmailAttachments = async (unitId: number, files: FileList | null) => {
+    if (!files?.length) return;
+    try {
+      const next = await filesToAliasEmailAttachments(files);
+      setEmailAttachments((prev) => ({ ...prev, [unitId]: [...(prev[unitId] ?? []), ...next] }));
+    } catch (err: any) {
+      toast({ title: "Attachment skipped", description: err?.message ?? "Could not read attachment", variant: "destructive" });
+    }
   };
 
   return (
@@ -1890,18 +1910,54 @@ function InboxBuyInPanel({
                   )}
                   {emails.map((email) => (
                     <div key={email.id} className="rounded border bg-muted/20 p-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium truncate">{email.subject}</span>
-                        <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
-                          {email.direction}
-                        </Badge>
-                      </div>
-                      <div className="text-[10px] text-muted-foreground truncate">
-                        {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
-                      </div>
-                      <div className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed">
-                        {email.body}
-                      </div>
+                      {(() => {
+                        const attachments = parseAliasEmailAttachments(email.attachmentsJson);
+                        return (
+                          <>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-medium truncate">{email.subject}</span>
+                              <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+                                {email.direction}
+                              </Badge>
+                            </div>
+                            <div className="text-[10px] text-muted-foreground truncate">
+                              {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
+                            </div>
+                            <div className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed">
+                              {email.body}
+                            </div>
+                            {attachments.length > 0 && (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {attachments.map((attachment, index) => {
+                                  const href = aliasAttachmentHref(attachment);
+                                  const label = `${attachment.filename}${formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ""}`;
+                                  return href ? (
+                                    <a
+                                      key={`${attachment.filename}-${index}`}
+                                      href={href}
+                                      download={attachment.filename}
+                                      target={attachment.url ? "_blank" : undefined}
+                                      rel={attachment.url ? "noreferrer" : undefined}
+                                      className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] text-primary hover:underline"
+                                    >
+                                      <Paperclip className="h-3 w-3 shrink-0" />
+                                      <span className="truncate">{label}</span>
+                                    </a>
+                                  ) : (
+                                    <span
+                                      key={`${attachment.filename}-${index}`}
+                                      className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                                    >
+                                      <Paperclip className="h-3 w-3 shrink-0" />
+                                      <span className="truncate">{label}</span>
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
@@ -1933,6 +1989,43 @@ function InboxBuyInPanel({
                       onChange={(e) => updateEmailDraft(unit, "body", e.target.value)}
                       placeholder="Message to PM/vendor"
                     />
+                    <div className="rounded-md border bg-background/60 p-2">
+                      <Label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium">
+                        <Paperclip className="h-3 w-3" />
+                        Attachments
+                      </Label>
+                      <Input
+                        type="file"
+                        multiple
+                        className="h-8 text-xs"
+                        onChange={(event) => {
+                          void addEmailAttachments(unit.id, event.currentTarget.files);
+                          event.currentTarget.value = "";
+                        }}
+                      />
+                      {(emailAttachments[unit.id] ?? []).length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {(emailAttachments[unit.id] ?? []).map((attachment, index) => (
+                            <Badge key={`${attachment.filename}-${index}`} variant="secondary" className="gap-1 text-[10px]">
+                              <Paperclip className="h-3 w-3" />
+                              <span className="max-w-[160px] truncate">{attachment.filename}</span>
+                              {formatAttachmentSize(attachment.size) && <span>{formatAttachmentSize(attachment.size)}</span>}
+                              <button
+                                type="button"
+                                className="ml-0.5 rounded-sm hover:bg-background/70"
+                                onClick={() => setEmailAttachments((prev) => ({
+                                  ...prev,
+                                  [unit.id]: (prev[unit.id] ?? []).filter((_, i) => i !== index),
+                                }))}
+                                aria-label={`Remove ${attachment.filename}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <Button
                       size="sm"
                       className="w-full"

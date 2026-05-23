@@ -21,13 +21,20 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import {
+  aliasAttachmentHref,
+  filesToAliasEmailAttachments,
+  formatAttachmentSize,
+  parseAliasEmailAttachments,
+  type AliasEmailAttachment,
+} from "@/lib/emailAttachments";
+import {
   ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, Maximize2, MousePointerClick,
-  ShieldCheck,
+  ShieldCheck, Paperclip, X,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -238,6 +245,7 @@ type BuyInEmailRecord = {
   toEmail: string;
   subject: string;
   body: string;
+  attachmentsJson?: string | null;
   sentAt?: string;
   status?: string;
 };
@@ -6922,6 +6930,7 @@ function BuyInVendorEmailPanel({
   const [vendorName, setVendorName] = useState(buyIn.managementCompany ?? "");
   const [vendorEmail, setVendorEmail] = useState(() => extractEmailForInput(buyIn.managementContact ?? ""));
   const [subject, setSubject] = useState(() => `Arrival details request for ${buyIn.unitLabel || buyIn.propertyName}`);
+  const [attachments, setAttachments] = useState<AliasEmailAttachment[]>([]);
   const [body, setBody] = useState(() => [
     `Aloha,`,
     ``,
@@ -6972,13 +6981,25 @@ function BuyInVendorEmailPanel({
       vendorEmail,
       subject,
       body,
+      attachments,
     }).then((r) => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
+      setAttachments([]);
       toast({ title: "Email sent", description: "The PM/vendor reply will come back through the alias." });
     },
     onError: (err: any) => toast({ title: "Email failed", description: err?.message ?? "Could not send vendor email", variant: "destructive" }),
   });
+
+  const addAttachments = async (files: FileList | null) => {
+    if (!files?.length) return;
+    try {
+      const next = await filesToAliasEmailAttachments(files);
+      setAttachments((prev) => [...prev, ...next]);
+    } catch (err: any) {
+      toast({ title: "Attachment skipped", description: err?.message ?? "Could not read attachment", variant: "destructive" });
+    }
+  };
 
   return (
     <div className="border-t bg-muted/15 px-3 py-2.5 space-y-2">
@@ -7032,6 +7053,40 @@ function BuyInVendorEmailPanel({
         <div className="mt-2 space-y-2">
           <Input value={subject} onChange={(e) => setSubject(e.target.value)} className="h-8 text-xs" />
           <Textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} className="text-xs" />
+          <div className="rounded-md border bg-background/60 p-2">
+            <Label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium">
+              <Paperclip className="h-3 w-3" />
+              Attachments
+            </Label>
+            <Input
+              type="file"
+              multiple
+              className="h-8 text-xs"
+              onChange={(event) => {
+                void addAttachments(event.currentTarget.files);
+                event.currentTarget.value = "";
+              }}
+            />
+            {attachments.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {attachments.map((attachment, index) => (
+                  <Badge key={`${attachment.filename}-${index}`} variant="secondary" className="gap-1 text-[10px]">
+                    <Paperclip className="h-3 w-3" />
+                    <span className="max-w-[180px] truncate">{attachment.filename}</span>
+                    {formatAttachmentSize(attachment.size) && <span>{formatAttachmentSize(attachment.size)}</span>}
+                    <button
+                      type="button"
+                      className="ml-0.5 rounded-sm hover:bg-background/70"
+                      onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== index))}
+                      aria-label={`Remove ${attachment.filename}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="flex items-center justify-between gap-2">
             <div className="text-[11px] text-muted-foreground">
               Sends from reservations mailbox to the SimpleLogin reverse alias so the vendor sees the guest alias.
@@ -7052,22 +7107,54 @@ function BuyInVendorEmailPanel({
           {emails.length === 0 && (
             <div className="text-[11px] text-muted-foreground">No PM/vendor emails saved for this unit yet.</div>
           )}
-          {emails.map((email) => (
-            <div key={email.id} className="rounded border bg-muted/20 p-2 text-[11px]">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium truncate">{email.subject}</span>
-                <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
-                  {email.direction}
-                </Badge>
+          {emails.map((email) => {
+            const emailAttachments = parseAliasEmailAttachments(email.attachmentsJson);
+            return (
+              <div key={email.id} className="rounded border bg-muted/20 p-2 text-[11px]">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium truncate">{email.subject}</span>
+                  <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+                    {email.direction}
+                  </Badge>
+                </div>
+                <div className="text-[10px] text-muted-foreground truncate">
+                  {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
+                </div>
+                <div className="mt-1 whitespace-pre-wrap leading-relaxed text-foreground">
+                  {email.body}
+                </div>
+                {emailAttachments.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {emailAttachments.map((attachment, index) => {
+                      const href = aliasAttachmentHref(attachment);
+                      const label = `${attachment.filename}${formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ""}`;
+                      return href ? (
+                        <a
+                          key={`${attachment.filename}-${index}`}
+                          href={href}
+                          download={attachment.filename}
+                          target={attachment.url ? "_blank" : undefined}
+                          rel={attachment.url ? "noreferrer" : undefined}
+                          className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] text-primary hover:underline"
+                        >
+                          <Paperclip className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{label}</span>
+                        </a>
+                      ) : (
+                        <span
+                          key={`${attachment.filename}-${index}`}
+                          className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                        >
+                          <Paperclip className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{label}</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-              <div className="text-[10px] text-muted-foreground truncate">
-                {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
-              </div>
-              <div className="mt-1 whitespace-pre-wrap leading-relaxed text-foreground">
-                {email.body}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </details>
     </div>

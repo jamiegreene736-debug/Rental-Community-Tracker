@@ -169,6 +169,7 @@ export const buyInEmails = pgTable("buy_in_emails", {
   toEmail: text("to_email").notNull(),
   subject: text("subject").notNull(),
   body: text("body").notNull(),
+  attachmentsJson: text("attachments_json"),
   providerMessageId: text("provider_message_id"),
   rawPayload: text("raw_payload"),
   parsedArrivalDetails: text("parsed_arrival_details"),

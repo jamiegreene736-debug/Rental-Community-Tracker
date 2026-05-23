@@ -134,7 +134,7 @@ import {
   getSimpleLoginStatus,
   SIMPLELOGIN_MAILBOX_EMAIL,
 } from "./simplelogin";
-import { parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
+import { normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
 
 const GUESTY_SUMMARY_SEPARATOR = "\n\n---\n\n";
 const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
@@ -6590,6 +6590,7 @@ export async function registerRoutes(
       const vendorName = String(req.body?.vendorName ?? "").trim() || null;
       const subject = String(req.body?.subject ?? "").trim();
       const body = String(req.body?.body ?? "").trim();
+      const attachments = normalizeBuyInEmailAttachments(req.body?.attachments);
       if (!reservationId || !vendorEmail || !subject || !body) {
         return res.status(400).json({ error: "reservationId, vendorEmail, subject, and body are required" });
       }
@@ -6605,7 +6606,7 @@ export async function registerRoutes(
         return res.status(500).json({ error: "Vendor contact is missing a reverse alias email" });
       }
       const from = process.env.SMTP_FROM || process.env.RESERVATIONS_EMAIL || SIMPLELOGIN_MAILBOX_EMAIL;
-      const sent = await sendBuyInEmail({ from, to: contact.reverseAliasEmail, subject, body });
+      const sent = await sendBuyInEmail({ from, to: contact.reverseAliasEmail, subject, body, attachments });
       const [email] = await db
         .insert(buyInEmails)
         .values({
@@ -6617,6 +6618,7 @@ export async function registerRoutes(
           toEmail: contact.reverseAliasEmail,
           subject,
           body,
+          attachmentsJson: attachments.length ? JSON.stringify(attachments) : null,
           providerMessageId: sent.messageId ?? null,
           rawPayload: JSON.stringify(sent),
           status: "sent",
@@ -6624,7 +6626,8 @@ export async function registerRoutes(
         .returning();
       res.json({ alias, contact, email });
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to send buy-in vendor email", message: err.message });
+      const message = err?.message ?? "Unknown error";
+      res.status(/attachment/i.test(message) ? 400 : 500).json({ error: "Failed to send buy-in vendor email", message });
     }
   });
 
@@ -6644,8 +6647,9 @@ export async function registerRoutes(
       const toEmail = extractEmailAddress(String(req.body?.to ?? req.body?.toEmail ?? "")).toLowerCase();
       const subject = String(req.body?.subject ?? "").trim() || "(no subject)";
       const body = String(req.body?.text ?? req.body?.body ?? req.body?.html ?? "").trim();
-      if (!fromEmail || !toEmail || !body) {
-        return res.status(400).json({ error: "from, to, and body are required" });
+      const attachments = normalizeBuyInEmailAttachments(req.body?.attachments ?? req.body?.files ?? req.body?.attachment);
+      if (!fromEmail || !toEmail || (!body && attachments.length === 0)) {
+        return res.status(400).json({ error: "from, to, and body or attachments are required" });
       }
 
       let [contact] = await db
@@ -6696,6 +6700,7 @@ export async function registerRoutes(
           toEmail,
           subject,
           body,
+          attachmentsJson: attachments.length ? JSON.stringify(attachments) : null,
           providerMessageId: String(req.body?.messageId ?? req.body?.message_id ?? "") || null,
           rawPayload: JSON.stringify(req.body ?? {}),
           parsedArrivalDetails: JSON.stringify(arrivalUpdates),
@@ -6704,7 +6709,8 @@ export async function registerRoutes(
         .returning();
       res.json({ email, parsedArrivalDetails: arrivalUpdates });
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to record inbound buy-in email", message: err.message });
+      const message = err?.message ?? "Unknown error";
+      res.status(/attachment/i.test(message) ? 400 : 500).json({ error: "Failed to record inbound buy-in email", message });
     }
   });
 

@@ -64,6 +64,7 @@ export async function ensureRuntimeSchema(): Promise<void> {
       to_email text NOT NULL,
       subject text NOT NULL,
       body text NOT NULL,
+      attachments_json text,
       provider_message_id text,
       raw_payload text,
       parsed_arrival_details text,
@@ -71,6 +72,10 @@ export async function ensureRuntimeSchema(): Promise<void> {
       sent_at timestamp NOT NULL DEFAULT now(),
       created_at timestamp NOT NULL DEFAULT now()
     )
+  `);
+  await db.execute(sql`
+    ALTER TABLE buy_in_emails
+      ADD COLUMN IF NOT EXISTS attachments_json text
   `);
   await db.execute(sql`
     CREATE INDEX IF NOT EXISTS buy_in_emails_reservation_idx
