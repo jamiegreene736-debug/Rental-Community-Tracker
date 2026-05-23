@@ -1,4 +1,5 @@
 import fs from "fs";
+import http from "http";
 import net from "net";
 import os from "os";
 import path from "path";
@@ -351,9 +352,9 @@ function appendBrightDataUsernameOptions(username, instance, request) {
   return next;
 }
 
-function serverChromeProxyConfig(instance, request) {
+function chromeProxyConfig(instance, request, { requireServer = false } = {}) {
   if (!boolFromEnv("CHROME_PROXY_ENABLED", false)) return null;
-  if (!instance?.server) return null;
+  if (requireServer && !instance?.server) return null;
 
   const provider = nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER").toLowerCase();
   const scheme = nonEmptyEnv("CHROME_PROXY_SCHEME", "PROXY_SCHEME") || "http";
@@ -373,6 +374,10 @@ function serverChromeProxyConfig(instance, request) {
 
   if (isBrightData) username = appendBrightDataUsernameOptions(username, instance, request);
   return { provider: provider || "brightdata", scheme, host, port, username, password };
+}
+
+function serverChromeProxyConfig(instance, request) {
+  return chromeProxyConfig(instance, request, { requireServer: true });
 }
 
 function proxyAuthExtensionBase64(proxyConfig) {
@@ -400,6 +405,108 @@ chrome.webRequest.onAuthRequired.addListener(
     { name: "manifest.json", content: JSON.stringify(manifest, null, 2) },
     { name: "background.js", content: background },
   ]);
+}
+
+function proxyHeaderEntries(headers, proxyAuthorization) {
+  return Object.entries(headers)
+    .filter(([name]) => !/^proxy-(authorization|connection)$/i.test(name))
+    .flatMap(([name, value]) => {
+      if (value == null) return [];
+      if (Array.isArray(value)) return value.map((item) => `${name}: ${item}`);
+      return [`${name}: ${value}`];
+    })
+    .concat(`Proxy-Authorization: ${proxyAuthorization}`, "Proxy-Connection: Keep-Alive");
+}
+
+function writeProxyError(socket, status = 502, statusText = "Proxy upstream failure") {
+  try {
+    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  } catch {}
+  try {
+    socket.destroy();
+  } catch {}
+}
+
+async function startLocalProxyAuthBridge(proxyConfig, log) {
+  const proxyAuthorization = `Basic ${Buffer.from(`${proxyConfig.username}:${proxyConfig.password}`).toString("base64")}`;
+  const upstreamHost = proxyConfig.host;
+  const upstreamPort = proxyConfig.port;
+
+  const server = http.createServer((clientReq, clientRes) => {
+    const upstream = net.connect(upstreamPort, upstreamHost);
+    upstream.once("connect", () => {
+      const headerLines = proxyHeaderEntries(clientReq.headers, proxyAuthorization).join("\r\n");
+      upstream.write(`${clientReq.method} ${clientReq.url} HTTP/${clientReq.httpVersion}\r\n${headerLines}\r\n\r\n`);
+      clientReq.pipe(upstream);
+    });
+    upstream.on("error", (e) => {
+      log(`local Chrome proxy bridge HTTP upstream failed: ${e?.message ?? e}`);
+      if (!clientRes.headersSent) clientRes.writeHead(502, { Connection: "close" });
+      clientRes.end();
+    });
+    upstream.pipe(clientRes);
+  });
+
+  server.on("connect", (req, clientSocket, head) => {
+    const upstream = net.connect(upstreamPort, upstreamHost, () => {
+      const headerLines = [
+        `Host: ${req.url}`,
+        `Proxy-Authorization: ${proxyAuthorization}`,
+        "Proxy-Connection: Keep-Alive",
+      ].join("\r\n");
+      upstream.write(`CONNECT ${req.url} HTTP/1.1\r\n${headerLines}\r\n\r\n`);
+      if (head?.length) upstream.write(head);
+    });
+
+    let headerBuffer = Buffer.alloc(0);
+    const onData = (chunk) => {
+      headerBuffer = Buffer.concat([headerBuffer, chunk]);
+      const headerEnd = headerBuffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+
+      upstream.off("data", onData);
+      const rawHeader = headerBuffer.slice(0, headerEnd).toString("latin1");
+      const rest = headerBuffer.slice(headerEnd + 4);
+      const status = Number(rawHeader.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i)?.[1] ?? 0);
+
+      if (status >= 200 && status < 300) {
+        clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (rest.length) clientSocket.write(rest);
+        upstream.pipe(clientSocket);
+        clientSocket.pipe(upstream);
+        return;
+      }
+
+      log(`local Chrome proxy bridge upstream CONNECT failed: HTTP ${status || "unknown"} for ${req.url}`);
+      writeProxyError(clientSocket, status || 502, status === 407 ? "Proxy Authentication Required" : "Proxy upstream failure");
+      upstream.destroy();
+    };
+
+    upstream.on("data", onData);
+    upstream.on("error", (e) => {
+      log(`local Chrome proxy bridge CONNECT upstream failed: ${e?.message ?? e}`);
+      writeProxyError(clientSocket);
+    });
+    clientSocket.on("error", () => upstream.destroy());
+    clientSocket.on("close", () => upstream.destroy());
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    serverUrl: `http://127.0.0.1:${port}`,
+    async close() {
+      await new Promise((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 async function probeServerChromeProxyAuth(proxyConfig, target = "lumtest.com:443") {
@@ -664,17 +771,56 @@ export class ChromeSidecarManager {
   }
 
   async tryAcquireLocalInstance(instance, request = {}) {
+    const opType = String(request?.opType ?? "");
+    const wantsVrboProxy = /^vrbo_/i.test(opType);
+    let proxyConfig = wantsVrboProxy ? chromeProxyConfig(instance, request) : null;
     const locked = tryWriteLock(instance.busyLock, {
       type: "local",
       requestId: request.id ?? null,
       opType: request.opType ?? null,
       cdpUrl: instance.cdpUrl,
       instance: instance.name,
+      proxy: proxyConfig
+        ? { provider: proxyConfig.provider, host: proxyConfig.host, port: proxyConfig.port }
+        : null,
     }, this.lockTtlMs);
     if (!locked) return null;
 
     let webdriverSessionId = null;
     let sessionBaseUrl = null;
+    let localProxyBridge = null;
+
+    if (proxyConfig) {
+      const probe = await probeServerChromeProxyAuth(proxyConfig);
+      if (!probe.ok) {
+        const probeStatus = probe.statusLine || `HTTP ${probe.status || "unknown"}`;
+        safeUnlink(instance.busyLock);
+        this.log(`${instance.label} proxy auth probe failed (${probeStatus}); skipping local Chrome fallback for ${opType}`);
+        return null;
+      }
+
+      if (await this.isCdpReady(instance.cdpUrl)) {
+        this.log(`${instance.label} relaunching with ${proxyConfig.provider} proxy for ${opType}`);
+        await sendBrowserCdpCommand(instance.cdpUrl, "Browser.close", {}, 2_000).catch(() => {});
+        const closeStartedAt = Date.now();
+        while (Date.now() - closeStartedAt < 5_000 && (await this.isCdpReady(instance.cdpUrl))) {
+          await sleep(250);
+        }
+        if (await this.isCdpReady(instance.cdpUrl)) {
+          safeUnlink(instance.busyLock);
+          this.log(`${instance.label} could not relaunch with proxy because existing Chrome stayed open`);
+          return null;
+        }
+      }
+
+      try {
+        localProxyBridge = await startLocalProxyAuthBridge(proxyConfig, this.log);
+      } catch (e) {
+        safeUnlink(instance.busyLock);
+        this.log(`${instance.label} local proxy auth bridge failed: ${e?.message ?? e}`);
+        return null;
+      }
+    }
 
     if (!(await this.isCdpReady(instance.cdpUrl)) && instance.webdriverUrl) {
       try {
@@ -693,8 +839,9 @@ export class ChromeSidecarManager {
 
     if (!(await this.isCdpReady(instance.cdpUrl))) {
       try {
-        await this.launchLocalChrome(instance);
+        await this.launchLocalChrome(instance, proxyConfig, request, localProxyBridge);
       } catch (e) {
+        await localProxyBridge?.close().catch(() => {});
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
@@ -704,6 +851,7 @@ export class ChromeSidecarManager {
       }
       const ready = await this.waitForCdp(instance.cdpUrl, 20_000);
       if (!ready) {
+        await localProxyBridge?.close().catch(() => {});
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
@@ -724,6 +872,9 @@ export class ChromeSidecarManager {
         opType: request.opType ?? null,
         cdpUrl: instance.cdpUrl,
         instance: instance.name,
+        proxy: proxyConfig
+          ? { provider: proxyConfig.provider, host: proxyConfig.host, port: proxyConfig.port }
+          : null,
       });
     }, 15_000);
     heartbeat.unref?.();
@@ -733,10 +884,12 @@ export class ChromeSidecarManager {
       label: instance.label,
       cdpUrl: instance.cdpUrl,
       noVncUrl: instance.noVncUrl || null,
+      proxyConfig,
       ephemeral: Boolean(webdriverSessionId),
       release: async () => {
         clearInterval(heartbeat);
         safeUnlink(instance.busyLock);
+        await localProxyBridge?.close().catch(() => {});
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
@@ -926,7 +1079,7 @@ export class ChromeSidecarManager {
     return { sessionId, baseUrl };
   }
 
-  async launchLocalChrome(instance = this.localInstances[0]) {
+  async launchLocalChrome(instance = this.localInstances[0], proxyConfig = null, request = {}, localProxyBridge = null) {
     if (!fs.existsSync(this.localChromeBinary)) {
       throw new Error(`Google Chrome not found at ${this.localChromeBinary}`);
     }
@@ -952,6 +1105,19 @@ export class ChromeSidecarManager {
       "--disable-gpu",
       "about:blank",
     ];
+    if (proxyConfig) {
+      chromeArgs.splice(
+        chromeArgs.length - 1,
+        0,
+        `--proxy-server=${localProxyBridge?.serverUrl || `${proxyConfig.scheme}://${proxyConfig.host}:${proxyConfig.port}`}`,
+        "--proxy-bypass-list=localhost;127.0.0.1;::1",
+        "--ignore-certificate-errors",
+      );
+      this.log(
+        `launching ${instance.label} with ${proxyConfig.provider} proxy ${proxyConfig.host}:${proxyConfig.port}` +
+          (request?.vrboFreshAttempt ? ` (fresh VRBO retry #${request.vrboFreshAttempt})` : ""),
+      );
+    }
     const launchViaMacOpen = process.platform === "darwin" && this.macosBackgroundLaunch;
     const launchHiddenOnMac = launchViaMacOpen && !this.localVisible;
     const macAppPath = launchViaMacOpen
