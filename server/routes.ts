@@ -1166,6 +1166,60 @@ function cancellationPolicyForAgreementChannel(channel: string, specificPolicy?:
   return "Cancellation policy: This reservation follows the cancellation, refund, no-show, payment, and date-change terms shown to the guest at the time of booking and in the reservation confirmation.";
 }
 
+function reservationChannelKind(value: any): "airbnb" | "booking" | "vrbo" | "manual" | "other" {
+  const raw = [
+    value?.integration?.platform,
+    value?.integration?.provider,
+    value?.source,
+    value?.channel,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (raw.includes("airbnb")) return "airbnb";
+  if (raw.includes("booking")) return "booking";
+  if (raw.includes("vrbo") || raw.includes("homeaway")) return "vrbo";
+  if (raw.includes("manual") || raw.includes("direct")) return "manual";
+  return "other";
+}
+
+function cancellationPolicyFallbackForChannel(kind: ReturnType<typeof reservationChannelKind>): string | null {
+  if (kind === "booking") return "Booking.com cancellation policy configured in Guesty";
+  if (kind === "vrbo") return "VRBO cancellation policy configured in Guesty";
+  return null;
+}
+
+function cancellationPolicyForReservation(
+  reservation: any,
+  listing?: any,
+): { label: string; source: string; assumed: boolean } | null {
+  const directPolicy = findCancellationPolicyValue(reservation);
+  if (directPolicy) {
+    return {
+      label: directPolicy,
+      source: "Guesty reservation policy",
+      assumed: false,
+    };
+  }
+
+  const listingPolicy = findCancellationPolicyValue(listing ?? reservation?.listing);
+  if (listingPolicy) {
+    return {
+      label: listingPolicy,
+      source: "Assumed from the Guesty listing/channel policy",
+      assumed: true,
+    };
+  }
+
+  const channelFallback = cancellationPolicyFallbackForChannel(reservationChannelKind(reservation));
+  if (channelFallback) {
+    return {
+      label: channelFallback,
+      source: "Assumed from the policy Guesty pushed to this channel",
+      assumed: true,
+    };
+  }
+
+  return null;
+}
+
 function buildRentalAgreementText(input: {
   guestName: string;
   propertyName: string;
@@ -11960,7 +12014,7 @@ export async function registerRoutes(
   };
 
   const fetchOperationsGuestyListings = async () => {
-    const fields = "title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street status active isActive";
+    const fields = "title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street status active isActive terms cancellationPolicy cancellationPolicies";
     const limit = 100;
     const maxPages = 100;
     const listings: any[] = [];
@@ -11998,6 +12052,7 @@ export async function registerRoutes(
       return { ...slot, buyIn };
     });
     const filled = slots.filter((s) => s.buyIn).length;
+    const cancellationPolicy = cancellationPolicyForReservation(reservation, target.listing);
     return {
       ...reservation,
       _id: reservationId,
@@ -12011,6 +12066,9 @@ export async function registerRoutes(
       slotsFilled: filled,
       slotsTotal: slots.length,
       fullyLinked: slots.length > 0 && filled === slots.length,
+      cancellationPolicy: cancellationPolicy?.label ?? null,
+      cancellationPolicySource: cancellationPolicy?.source ?? null,
+      cancellationPolicyAssumed: cancellationPolicy?.assumed ?? false,
     };
   };
 
@@ -12035,7 +12093,7 @@ export async function registerRoutes(
         );
       }
 
-      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId");
+      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
       const limit = 100;
       const maxRows = Math.min(Math.max(parseInt((req.query.maxRows as string) ?? "5000", 10) || 5000, 100), 10000);
       const filterArr: Array<Record<string, unknown>> = [];
@@ -12107,7 +12165,7 @@ export async function registerRoutes(
       const limit = Math.min(parseInt((req.query.limit as string) ?? "100", 10) || 100, 100);
       const maxRows = Math.min(Math.max(parseInt((req.query.maxRows as string) ?? "1000", 10) || 1000, 100), 5000);
 
-      const listingFields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street");
+      const listingFields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street terms cancellationPolicy cancellationPolicies");
       const listing = await guestyRequest("GET", `/listings/${listingId}?fields=${listingFields}`).catch((e: any) => {
         console.warn(`[bookings] couldn't load listing ${listingId}:`, e?.message ?? e);
         return {};
@@ -12120,7 +12178,7 @@ export async function registerRoutes(
       const resolvedUnitSlots = target.unitSlots;
 
       const today = new Date().toISOString().slice(0, 10);
-      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId");
+      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
       // Guesty Open API requires the JSON `filters=[...]` syntax for
       // listingId — the simple `listingId=X` query param is silently
       // ignored, so the account-wide reservation list comes back

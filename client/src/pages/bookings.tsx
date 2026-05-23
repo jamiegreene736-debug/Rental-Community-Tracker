@@ -27,6 +27,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, Maximize2, MousePointerClick,
+  ShieldCheck,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -163,6 +164,9 @@ interface GuestyReservation {
   source?: string;
   integration?: { platform?: string };
   confirmationCode?: string;
+  cancellationPolicy?: string | null;
+  cancellationPolicySource?: string | null;
+  cancellationPolicyAssumed?: boolean;
   slots: SlotInfo[];
   slotsFilled: number;
   slotsTotal: number;
@@ -1909,6 +1913,58 @@ function channelKindOf(r: GuestyReservation): "airbnb" | "booking" | "vrbo" | "m
   if (raw.includes("vrbo") || raw.includes("homeaway")) return "vrbo";
   if (raw.includes("manual") || raw.includes("direct")) return "manual";
   return "other";
+}
+
+function cancellationPolicySummaryOf(r: GuestyReservation): { label: string; source?: string | null; assumed: boolean } | null {
+  if (r.cancellationPolicy) {
+    return {
+      label: r.cancellationPolicy,
+      source: r.cancellationPolicySource,
+      assumed: r.cancellationPolicyAssumed === true,
+    };
+  }
+  const kind = channelKindOf(r);
+  if (kind === "booking") {
+    return {
+      label: "Booking.com cancellation policy configured in Guesty",
+      source: "Assumed from the policy Guesty pushed to Booking.com",
+      assumed: true,
+    };
+  }
+  if (kind === "vrbo") {
+    return {
+      label: "VRBO cancellation policy configured in Guesty",
+      source: "Assumed from the policy Guesty pushed to VRBO",
+      assumed: true,
+    };
+  }
+  return null;
+}
+
+function ReservationCancellationPolicyNotice({ reservation }: { reservation: GuestyReservation }) {
+  const policy = cancellationPolicySummaryOf(reservation);
+  if (!policy) return null;
+  return (
+    <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-950">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 items-start gap-2">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-sky-700" />
+          <div className="min-w-0">
+            <p className="font-semibold">Cancellation policy</p>
+            <p className="break-words">{policy.label}</p>
+          </div>
+        </div>
+        {policy.assumed && (
+          <Badge variant="outline" className="w-fit border-sky-300 bg-white/70 text-[10px] text-sky-900">
+            Assumed from Guesty
+          </Badge>
+        )}
+      </div>
+      {policy.source && (
+        <p className="mt-1 pl-6 text-[11px] text-sky-800">{policy.source}</p>
+      )}
+    </div>
+  );
 }
 
 function collectedPaymentDateOf(r: GuestyReservation): { date: Date | null; source: "payment" | "reservation" | "unknown" } {
@@ -5565,6 +5621,7 @@ export default function Bookings() {
                           <GroundFloorRequirementNotice reservation={r} propertyId={selectedPropertyId} />
                         )}
                         {manualReservation && <ManualReservationContactPanel reservation={r} />}
+                        {!manualReservation && <ReservationCancellationPolicyNotice reservation={r} />}
                         {/* Auto-fill: one click to search + attach cheapest
                             priced option for every empty slot on this row. */}
                         {r.slotsFilled < r.slotsTotal && (

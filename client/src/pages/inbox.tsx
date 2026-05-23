@@ -21,7 +21,7 @@ import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
-  FileText, Mail,
+  FileText, Mail, ShieldCheck,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -221,6 +221,10 @@ interface GuestyReservation {
   integration?: { platform?: string };
   source?: string;
   confirmationCode?: string;
+  cancellationPolicy?: string | null;
+  cancellationPolicySource?: string | null;
+  cancellationPolicyAssumed?: boolean;
+  listing?: Record<string, unknown>;
   nightsCount?: number;
   createdAt?: string;
   confirmedAt?: string;
@@ -590,6 +594,68 @@ function findCancellationPolicyValue(value: unknown, depth = 0): string | null {
       if (found) return found;
     }
   }
+  return null;
+}
+
+function reservationChannelKind(value: any): "airbnb" | "booking" | "vrbo" | "manual" | "other" {
+  const raw = [
+    value?.integration?.platform,
+    value?.integration?.provider,
+    value?.source,
+    value?.channel,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (raw.includes("airbnb")) return "airbnb";
+  if (raw.includes("booking")) return "booking";
+  if (raw.includes("vrbo") || raw.includes("homeaway")) return "vrbo";
+  if (raw.includes("manual") || raw.includes("direct")) return "manual";
+  return "other";
+}
+
+function cancellationPolicySummaryForReservation(value: any): { label: string; source?: string | null; assumed: boolean } | null {
+  if (!value) return null;
+  if (value.cancellationPolicy) {
+    const label = readableCancellationPolicy(value.cancellationPolicy) ?? String(value.cancellationPolicy);
+    return {
+      label,
+      source: value.cancellationPolicySource,
+      assumed: value.cancellationPolicyAssumed === true,
+    };
+  }
+
+  const directPolicy = findCancellationPolicyValue(value);
+  if (directPolicy) {
+    return {
+      label: directPolicy,
+      source: "Guesty reservation policy",
+      assumed: false,
+    };
+  }
+
+  const listingPolicy = findCancellationPolicyValue(value.listing);
+  if (listingPolicy) {
+    return {
+      label: listingPolicy,
+      source: "Assumed from the Guesty listing/channel policy",
+      assumed: true,
+    };
+  }
+
+  const kind = reservationChannelKind(value);
+  if (kind === "booking") {
+    return {
+      label: "Booking.com cancellation policy configured in Guesty",
+      source: "Assumed from the policy Guesty pushed to Booking.com",
+      assumed: true,
+    };
+  }
+  if (kind === "vrbo") {
+    return {
+      label: "VRBO cancellation policy configured in Guesty",
+      source: "Assumed from the policy Guesty pushed to VRBO",
+      assumed: true,
+    };
+  }
+
   return null;
 }
 
@@ -3439,6 +3505,7 @@ export default function InboxPage() {
                   const hostFee      = asNum(m.hostServiceFee);
                   const netPayout    = asNum(m.netIncome) || asNum(m.hostPayout) || Math.max(0, accommodation + cleaning - hostFee);
                   const hasMoney     = guestGross > 0 || netPayout > 0;
+                  const cancellationPolicy = cancellationPolicySummaryForReservation(res);
 
                   return (
                     <div className="p-4 space-y-4 text-sm">
@@ -3571,6 +3638,34 @@ export default function InboxPage() {
                           </div>
                         )}
                       </div>
+
+                      {cancellationPolicy && (
+                        <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sky-950">
+                          <div className="flex items-start gap-2">
+                            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-sky-700" />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="text-[10px] uppercase tracking-wider text-sky-800 font-medium">
+                                  Cancellation policy
+                                </div>
+                                {cancellationPolicy.assumed && (
+                                  <Badge variant="outline" className="border-sky-300 bg-white/70 text-[10px] text-sky-900">
+                                    Assumed from Guesty
+                                  </Badge>
+                                )}
+                              </div>
+                              <div className="mt-0.5 break-words text-xs font-medium">
+                                {cancellationPolicy.label}
+                              </div>
+                              {cancellationPolicy.source && (
+                                <div className="mt-1 text-[11px] text-sky-800">
+                                  {cancellationPolicy.source}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
 
                       {/* Guest */}
                       <div>
