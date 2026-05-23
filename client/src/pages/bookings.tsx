@@ -165,6 +165,7 @@ interface GuestyReservation {
   integration?: { platform?: string };
   confirmationCode?: string;
   cancellationPolicy?: string | null;
+  cancellationPolicySummary?: string | null;
   cancellationPolicySource?: string | null;
   cancellationPolicyAssumed?: boolean;
   slots: SlotInfo[];
@@ -2100,25 +2101,59 @@ function channelKindOf(r: GuestyReservation): "airbnb" | "booking" | "vrbo" | "m
   return "other";
 }
 
-function cancellationPolicySummaryOf(r: GuestyReservation): { label: string; source?: string | null; assumed: boolean } | null {
+function cancellationPolicyBriefSummary(label: string, kind: ReturnType<typeof channelKindOf>): string {
+  const lower = label.toLowerCase();
+  if (kind === "booking") {
+    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to Booking.com for this listing/rate plan.";
+  }
+  if (kind === "vrbo") {
+    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to VRBO/Homeaway for this listing.";
+  }
+  if (lower.includes("non-refundable") || lower.includes("non refundable") || lower.includes("no refund")) {
+    return "Guest booked a non-refundable policy; treat the stay as no-refund unless Guesty/channel rules or an approved exception say otherwise.";
+  }
+  if (lower.includes("flexible")) {
+    return "Guest booked the flexible cancellation policy; refund eligibility follows the flexible window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("moderate")) {
+    return "Guest booked the moderate cancellation policy; refund eligibility follows the moderate window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("firm")) {
+    return "Guest booked the firm cancellation policy; refund eligibility follows the firm window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("strict")) {
+    return "Guest booked the strict cancellation policy; refunds are limited to the strict terms configured in Guesty/channel rules.";
+  }
+  if (lower.includes("relaxed")) {
+    return "Guest booked the relaxed cancellation policy; refund eligibility follows the relaxed window configured in Guesty/channel rules.";
+  }
+  return "Guest is under the cancellation, refund, no-show, and date-change terms attached to this booking in Guesty.";
+}
+
+function cancellationPolicySummaryOf(r: GuestyReservation): { label: string; summary: string; source?: string | null; assumed: boolean } | null {
+  const kind = channelKindOf(r);
   if (r.cancellationPolicy) {
     return {
       label: r.cancellationPolicy,
+      summary: r.cancellationPolicySummary ?? cancellationPolicyBriefSummary(r.cancellationPolicy, kind),
       source: r.cancellationPolicySource,
       assumed: r.cancellationPolicyAssumed === true,
     };
   }
-  const kind = channelKindOf(r);
   if (kind === "booking") {
+    const label = "Booking.com cancellation policy configured in Guesty";
     return {
-      label: "Booking.com cancellation policy configured in Guesty",
+      label,
+      summary: cancellationPolicyBriefSummary(label, kind),
       source: "Assumed from the policy Guesty pushed to Booking.com",
       assumed: true,
     };
   }
   if (kind === "vrbo") {
+    const label = "VRBO cancellation policy configured in Guesty";
     return {
-      label: "VRBO cancellation policy configured in Guesty",
+      label,
+      summary: cancellationPolicyBriefSummary(label, kind),
       source: "Assumed from the policy Guesty pushed to VRBO",
       assumed: true,
     };
@@ -2137,6 +2172,9 @@ function ReservationCancellationPolicyNotice({ reservation }: { reservation: Gue
           <div className="min-w-0">
             <p className="font-semibold">Cancellation policy</p>
             <p className="break-words">{policy.label}</p>
+            <p className="mt-1 break-words text-[11px] leading-relaxed text-sky-900">
+              <span className="font-semibold">Policy summary:</span> {policy.summary}
+            </p>
           </div>
         </div>
         {policy.assumed && (

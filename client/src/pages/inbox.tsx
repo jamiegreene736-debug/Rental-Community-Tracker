@@ -222,6 +222,7 @@ interface GuestyReservation {
   source?: string;
   confirmationCode?: string;
   cancellationPolicy?: string | null;
+  cancellationPolicySummary?: string | null;
   cancellationPolicySource?: string | null;
   cancellationPolicyAssumed?: boolean;
   listing?: Record<string, unknown>;
@@ -611,12 +612,43 @@ function reservationChannelKind(value: any): "airbnb" | "booking" | "vrbo" | "ma
   return "other";
 }
 
-function cancellationPolicySummaryForReservation(value: any): { label: string; source?: string | null; assumed: boolean } | null {
+function cancellationPolicyBriefSummary(label: string, kind: ReturnType<typeof reservationChannelKind>): string {
+  const lower = label.toLowerCase();
+  if (kind === "booking") {
+    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to Booking.com for this listing/rate plan.";
+  }
+  if (kind === "vrbo") {
+    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to VRBO/Homeaway for this listing.";
+  }
+  if (lower.includes("non-refundable") || lower.includes("non refundable") || lower.includes("no refund")) {
+    return "Guest booked a non-refundable policy; treat the stay as no-refund unless Guesty/channel rules or an approved exception say otherwise.";
+  }
+  if (lower.includes("flexible")) {
+    return "Guest booked the flexible cancellation policy; refund eligibility follows the flexible window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("moderate")) {
+    return "Guest booked the moderate cancellation policy; refund eligibility follows the moderate window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("firm")) {
+    return "Guest booked the firm cancellation policy; refund eligibility follows the firm window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("strict")) {
+    return "Guest booked the strict cancellation policy; refunds are limited to the strict terms configured in Guesty/channel rules.";
+  }
+  if (lower.includes("relaxed")) {
+    return "Guest booked the relaxed cancellation policy; refund eligibility follows the relaxed window configured in Guesty/channel rules.";
+  }
+  return "Guest is under the cancellation, refund, no-show, and date-change terms attached to this booking in Guesty.";
+}
+
+function cancellationPolicySummaryForReservation(value: any): { label: string; summary: string; source?: string | null; assumed: boolean } | null {
   if (!value) return null;
+  const kind = reservationChannelKind(value);
   if (value.cancellationPolicy) {
     const label = readableCancellationPolicy(value.cancellationPolicy) ?? String(value.cancellationPolicy);
     return {
       label,
+      summary: value.cancellationPolicySummary ?? cancellationPolicyBriefSummary(label, kind),
       source: value.cancellationPolicySource,
       assumed: value.cancellationPolicyAssumed === true,
     };
@@ -626,6 +658,7 @@ function cancellationPolicySummaryForReservation(value: any): { label: string; s
   if (directPolicy) {
     return {
       label: directPolicy,
+      summary: cancellationPolicyBriefSummary(directPolicy, kind),
       source: "Guesty reservation policy",
       assumed: false,
     };
@@ -635,22 +668,26 @@ function cancellationPolicySummaryForReservation(value: any): { label: string; s
   if (listingPolicy) {
     return {
       label: listingPolicy,
+      summary: cancellationPolicyBriefSummary(listingPolicy, kind),
       source: "Assumed from the Guesty listing/channel policy",
       assumed: true,
     };
   }
 
-  const kind = reservationChannelKind(value);
   if (kind === "booking") {
+    const label = "Booking.com cancellation policy configured in Guesty";
     return {
-      label: "Booking.com cancellation policy configured in Guesty",
+      label,
+      summary: cancellationPolicyBriefSummary(label, kind),
       source: "Assumed from the policy Guesty pushed to Booking.com",
       assumed: true,
     };
   }
   if (kind === "vrbo") {
+    const label = "VRBO cancellation policy configured in Guesty";
     return {
-      label: "VRBO cancellation policy configured in Guesty",
+      label,
+      summary: cancellationPolicyBriefSummary(label, kind),
       source: "Assumed from the policy Guesty pushed to VRBO",
       assumed: true,
     };
@@ -3656,6 +3693,9 @@ export default function InboxPage() {
                               </div>
                               <div className="mt-0.5 break-words text-xs font-medium">
                                 {cancellationPolicy.label}
+                              </div>
+                              <div className="mt-1 break-words text-[11px] leading-relaxed text-sky-900">
+                                <span className="font-semibold">Policy summary:</span> {cancellationPolicy.summary}
                               </div>
                               {cancellationPolicy.source && (
                                 <div className="mt-1 text-[11px] text-sky-800">

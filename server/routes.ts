@@ -1186,14 +1186,45 @@ function cancellationPolicyFallbackForChannel(kind: ReturnType<typeof reservatio
   return null;
 }
 
+function cancellationPolicyBriefSummary(label: string, kind: ReturnType<typeof reservationChannelKind>): string {
+  const lower = label.toLowerCase();
+  if (kind === "booking") {
+    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to Booking.com for this listing/rate plan.";
+  }
+  if (kind === "vrbo") {
+    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to VRBO/Homeaway for this listing.";
+  }
+  if (lower.includes("non-refundable") || lower.includes("non refundable") || lower.includes("no refund")) {
+    return "Guest booked a non-refundable policy; treat the stay as no-refund unless Guesty/channel rules or an approved exception say otherwise.";
+  }
+  if (lower.includes("flexible")) {
+    return "Guest booked the flexible cancellation policy; refund eligibility follows the flexible window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("moderate")) {
+    return "Guest booked the moderate cancellation policy; refund eligibility follows the moderate window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("firm")) {
+    return "Guest booked the firm cancellation policy; refund eligibility follows the firm window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("strict")) {
+    return "Guest booked the strict cancellation policy; refunds are limited to the strict terms configured in Guesty/channel rules.";
+  }
+  if (lower.includes("relaxed")) {
+    return "Guest booked the relaxed cancellation policy; refund eligibility follows the relaxed window configured in Guesty/channel rules.";
+  }
+  return "Guest is under the cancellation, refund, no-show, and date-change terms attached to this booking in Guesty.";
+}
+
 function cancellationPolicyForReservation(
   reservation: any,
   listing?: any,
-): { label: string; source: string; assumed: boolean } | null {
+): { label: string; summary: string; source: string; assumed: boolean } | null {
+  const channelKind = reservationChannelKind(reservation);
   const directPolicy = findCancellationPolicyValue(reservation);
   if (directPolicy) {
     return {
       label: directPolicy,
+      summary: cancellationPolicyBriefSummary(directPolicy, channelKind),
       source: "Guesty reservation policy",
       assumed: false,
     };
@@ -1203,15 +1234,17 @@ function cancellationPolicyForReservation(
   if (listingPolicy) {
     return {
       label: listingPolicy,
+      summary: cancellationPolicyBriefSummary(listingPolicy, channelKind),
       source: "Assumed from the Guesty listing/channel policy",
       assumed: true,
     };
   }
 
-  const channelFallback = cancellationPolicyFallbackForChannel(reservationChannelKind(reservation));
+  const channelFallback = cancellationPolicyFallbackForChannel(channelKind);
   if (channelFallback) {
     return {
       label: channelFallback,
+      summary: cancellationPolicyBriefSummary(channelFallback, channelKind),
       source: "Assumed from the policy Guesty pushed to this channel",
       assumed: true,
     };
@@ -12077,6 +12110,7 @@ export async function registerRoutes(
       slotsTotal: slots.length,
       fullyLinked: slots.length > 0 && filled === slots.length,
       cancellationPolicy: cancellationPolicy?.label ?? null,
+      cancellationPolicySummary: cancellationPolicy?.summary ?? null,
       cancellationPolicySource: cancellationPolicy?.source ?? null,
       cancellationPolicyAssumed: cancellationPolicy?.assumed ?? false,
     };
