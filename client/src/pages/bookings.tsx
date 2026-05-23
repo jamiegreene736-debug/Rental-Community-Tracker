@@ -7309,6 +7309,13 @@ function sidecarScreenAge(ageMs: number): string {
 }
 
 function SidecarScreensStrip() {
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem("operationsSidecarScreensCollapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
   const { data } = useQuery<SidecarScreensResponse>({
     queryKey: ["/api/vrbo-sidecar/screens", "operations-header"],
     queryFn: async () => {
@@ -7327,6 +7334,14 @@ function SidecarScreensStrip() {
   const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
   const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
   const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("operationsSidecarScreensCollapsed", String(collapsed));
+    } catch {
+      // Local storage is a convenience only; the live sidecar panel still works without it.
+    }
+  }, [collapsed]);
 
   const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -7349,7 +7364,7 @@ function SidecarScreensStrip() {
 
   return (
     <div className="w-full rounded-lg border bg-background/70 p-2 shadow-sm">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <div className={`${collapsed ? "" : "mb-2"} flex flex-wrap items-center justify-between gap-2`}>
         <div className="flex min-w-0 items-center gap-2">
           <MonitorPlay className="h-4 w-4 text-muted-foreground" />
           <div>
@@ -7360,9 +7375,22 @@ function SidecarScreensStrip() {
             </p>
           </div>
         </div>
-        <Badge variant="outline" className="text-[10px]">Up to 8 Chrome windows</Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className="text-[10px]">Up to 8 Chrome windows</Badge>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1 px-2 text-[11px]"
+            onClick={() => setCollapsed((value) => !value)}
+            data-testid="button-toggle-sidecar-screens"
+          >
+            {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            {collapsed ? "Show screens" : "Collapse"}
+          </Button>
+        </div>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
+      {!collapsed && <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
         {slots.map((slot) => {
           const screen = bySlot.get(slot);
           const canOpen = Boolean(screen?.screenshotDataUrl);
@@ -7404,7 +7432,7 @@ function SidecarScreensStrip() {
             </button>
           );
         })}
-      </div>
+      </div>}
       <Dialog open={Boolean(selectedSlot)} onOpenChange={(open) => {
         if (!open) {
           setSelectedSlot(null);
