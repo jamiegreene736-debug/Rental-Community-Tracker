@@ -3450,6 +3450,30 @@ function inferBedroomsFromGuestyListing(listing: any): number | null {
   return match ? Number(match[1]) : null;
 }
 
+function virtualPropertyIdForGuestyListingId(listingId: string): number {
+  let hash = 0;
+  for (const ch of listingId) {
+    hash = ((hash * 31) + ch.charCodeAt(0)) >>> 0;
+  }
+  return -(100000 + (hash % 900000));
+}
+
+function inferBuyInCommunityKeyFromText(...values: unknown[]): string | null {
+  const text = values
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ")
+    .toLowerCase();
+  if (!text) return null;
+  if (/\b(?:na\s+hale\s+o\s+keauhou|keauhou|kailua[\s-]*kona|kona)\b/.test(text)) return "Keauhou";
+  if (/\bpili\s+mai\b/.test(text)) return "Pili Mai";
+  if (/\b(?:poipu\s+kai|regency\s+at\s+poipu|villas\s+at\s+poipu\s+kai)\b/.test(text)) return "Poipu Kai";
+  if (/\b(?:poipu\s+oceanfront|brennecke|ho'?one|makahuena)\b/.test(text)) return "Poipu Oceanfront";
+  if (/\b(?:princeville|mauna\s+kai)\b/.test(text)) return "Princeville";
+  if (/\b(?:kaha\s+lani|kapaa|wailua)\b/.test(text)) return "Kapaa Beachfront";
+  if (/\b(?:windsor\s+hills|kissimmee|orlando)\b/.test(text)) return "Windsor Hills";
+  return null;
+}
+
 function positiveDraftInteger(value: unknown): number | null {
   const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(n) && n > 0 ? n : null;
@@ -7603,6 +7627,8 @@ export async function registerRoutes(
     const bedrooms = parseInt(req.query.bedrooms as string, 10);
     const checkIn = req.query.checkIn as string;
     const checkOut = req.query.checkOut as string;
+    const requestedListingId = typeof req.query.listingId === "string" ? req.query.listingId.trim() : "";
+    const requestedCommunity = typeof req.query.community === "string" ? req.query.community.trim() : "";
 
     if (!propertyId || isNaN(propertyId)) return res.status(400).json({ error: "propertyId required" });
     if (!bedrooms || isNaN(bedrooms)) return res.status(400).json({ error: "bedrooms required" });
@@ -7610,8 +7636,36 @@ export async function registerRoutes(
       return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
     }
 
-    const config = PROPERTY_UNIT_NEEDS[propertyId];
-    if (!config) return res.status(404).json({ error: "Property not in config" });
+    let resolvedGuestyListingId: string | null = requestedListingId || null;
+    let resolvedGuestyListing: any | null = null;
+    let config = PROPERTY_UNIT_NEEDS[propertyId];
+    if (!config) {
+      if (!resolvedGuestyListingId) {
+        resolvedGuestyListingId = await storage.getGuestyListingId(propertyId).catch(() => null);
+      }
+      if (resolvedGuestyListingId) {
+        try {
+          const fields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street");
+          resolvedGuestyListing = await guestyRequest("GET", `/listings/${resolvedGuestyListingId}?fields=${fields}`) as any;
+        } catch (e: any) {
+          console.warn(`[find-buy-in] couldn't load Guesty listing ${resolvedGuestyListingId}:`, e?.message ?? e);
+        }
+      }
+      const inferredCommunity = requestedCommunity || inferBuyInCommunityKeyFromText(
+        resolvedGuestyListing?.nickname,
+        resolvedGuestyListing?.title,
+        resolvedGuestyListing?.name,
+        resolvedGuestyListing?.address?.full,
+        resolvedGuestyListing?.address?.city,
+        resolvedGuestyListing?.address?.state,
+      );
+      if (!inferredCommunity) {
+        return res.status(404).json({
+          error: "Property not in config and no supported community could be inferred from the Guesty listing",
+        });
+      }
+      config = { community: inferredCommunity, units: [{ bedrooms }] };
+    }
 
     // Result-cache fast path. Honors a `?nocache=1` query for the
     // rare case the operator wants a forced refresh (e.g. they know
@@ -7625,7 +7679,7 @@ export async function registerRoutes(
     );
     const looseResortPhotoProof = propertyUnitConfig?.looseResortPhotoProof === true;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
-    const cacheKey = `${propertyId}|${bedrooms}|${checkIn}|${checkOut}|${includePm ? "pm" : "ota-only"}|${groundFloorOnly ? "ground" : "any-floor"}`;
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|${includePm ? "pm" : "ota-only"}|${groundFloorOnly ? "ground" : "any-floor"}`;
     const noCache = req.query.nocache === "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -7717,9 +7771,9 @@ export async function registerRoutes(
     let resortName: string | null = null;
     let listingTitle: string | null = null;
     try {
-      const guestyListingId = await storage.getGuestyListingId(propertyId);
+      const guestyListingId = resolvedGuestyListingId ?? await storage.getGuestyListingId(propertyId);
       if (guestyListingId) {
-        const listing = await guestyRequest("GET", `/listings/${guestyListingId}?fields=title%20nickname`) as any;
+        const listing = resolvedGuestyListing ?? await guestyRequest("GET", `/listings/${guestyListingId}?fields=title%20nickname%20name%20address.full`) as any;
         listingTitle = listing?.title ?? listing?.nickname ?? null;
         if (listingTitle) {
           // Grab everything before the first " - " or " – " separator.
@@ -11788,11 +11842,40 @@ export async function registerRoutes(
     try {
       const listingId = req.params.listingId;
       const propertyIdRaw = parseInt((req.query.propertyId as string) ?? "", 10);
-      const propertyId = Number.isFinite(propertyIdRaw) && propertyIdRaw > 0 ? propertyIdRaw : null;
+      const propertyId = Number.isFinite(propertyIdRaw) && propertyIdRaw !== 0 ? propertyIdRaw : null;
+      const effectivePropertyId = propertyId ?? virtualPropertyIdForGuestyListingId(listingId);
       const includePast = req.query.includePast === "true";
       const limit = Math.min(parseInt((req.query.limit as string) ?? "100", 10) || 100, 200);
 
       const unitSlots = propertyId ? getPropertyUnits(propertyId) : [];
+      let resolvedUnitSlots: any[] = unitSlots;
+      if (resolvedUnitSlots.length === 0) {
+        try {
+          const listingFields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street");
+          const listing = await guestyRequest("GET", `/listings/${listingId}?fields=${listingFields}`) as any;
+          const bedrooms = inferBedroomsFromGuestyListing(listing);
+          const community = inferBuyInCommunityKeyFromText(
+            listing?.nickname,
+            listing?.title,
+            listing?.name,
+            listing?.address?.full,
+            listing?.address?.city,
+            listing?.address?.state,
+          );
+          if (bedrooms && bedrooms > 0) {
+            resolvedUnitSlots = [{
+              unitId: "main",
+              unitLabel: `${bedrooms}BR Guesty listing`,
+              bedrooms,
+              sourceListingId: listingId,
+              community,
+              adHoc: true,
+            }];
+          }
+        } catch (e: any) {
+          console.warn(`[bookings] couldn't infer buy-in slot for listing ${listingId}:`, e?.message ?? e);
+        }
+      }
 
       const today = new Date().toISOString().slice(0, 10);
       const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState");
@@ -11837,8 +11920,8 @@ export async function registerRoutes(
       // For each reservation build per-slot attachment info
       const enriched = await Promise.all(
         reservations.map(async (r) => {
-          const attached = unitSlots.length > 0 && r._id ? await storage.getBuyInsByReservation(r._id) : [];
-          const slots = unitSlots.map((slot) => {
+          const attached = resolvedUnitSlots.length > 0 && r._id ? await storage.getBuyInsByReservation(r._id) : [];
+          const slots = resolvedUnitSlots.map((slot) => {
             const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
             return { ...slot, buyIn };
           });
@@ -11860,7 +11943,7 @@ export async function registerRoutes(
         manualRows.map(async (row) => {
           const reservationId = `manual:${row.id}`;
           const attached = await storage.getBuyInsByReservation(reservationId);
-          const slots = unitSlots.map((slot) => {
+          const slots = resolvedUnitSlots.map((slot) => {
             const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
             return { ...slot, buyIn };
           });
@@ -11922,9 +12005,10 @@ export async function registerRoutes(
       res.json({
         reservations: allReservations,
         total: allReservations.length,
-        unitSlots,
-        propertyId,
+        unitSlots: resolvedUnitSlots,
+        propertyId: effectivePropertyId,
         buyInConfigured: unitSlots.length > 0,
+        adHocBuyInConfigured: resolvedUnitSlots.length > 0 && unitSlots.length === 0,
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch bookings", message: err.message });
@@ -12191,6 +12275,7 @@ export async function registerRoutes(
   // 2026-04 per business-model pivot.
   const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {
     1: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
+    2: { community: "Keauhou", units: [{ bedrooms: 4 }] },
     4: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     8: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     9: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
@@ -12204,6 +12289,7 @@ export async function registerRoutes(
     32: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
     33: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
+    37: { community: "Windsor Hills", units: [{ bedrooms: 3 }] },
   };
 
   const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
@@ -12215,6 +12301,7 @@ export async function registerRoutes(
     "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
     "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
     "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
+    "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
   };
 
   const COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS: Record<string, { airbnb?: string; booking?: string; vrbo?: string; pm?: string }> = {
@@ -12295,6 +12382,7 @@ export async function registerRoutes(
     "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
     "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
     "Menehune Shores":   { searchName: "Menehune Shores",             city: "Kihei",       state: "Hawaii", streetAddress: "760 S Kihei Rd",               lat: 20.7638, lng: -156.4594 },
+    "Windsor Hills":     { searchName: "Windsor Hills Resort",        city: "Kissimmee",   state: "Florida", streetAddress: "2600 N Old Lake Wilson Rd",   lat: 28.3222, lng: -81.5961 },
   };
 
   // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
@@ -12312,6 +12400,7 @@ export async function registerRoutes(
     "Kapaa Beachfront": { sw_lat: 22.021, sw_lng: -159.352, ne_lat: 22.051, ne_lng: -159.322 },
     "Kekaha Beachfront":{ sw_lat: 21.955, sw_lng: -159.758, ne_lat: 21.978, ne_lng: -159.733 },
     "Keauhou":          { sw_lat: 19.528, sw_lng: -155.992, ne_lat: 19.558, ne_lng: -155.966 },
+    "Windsor Hills":    { sw_lat: 28.305, sw_lng: -81.615, ne_lat: 28.340, ne_lng: -81.575 },
   };
 
   app.get("/api/airbnb/search", async (req, res) => {

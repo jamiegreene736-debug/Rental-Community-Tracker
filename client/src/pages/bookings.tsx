@@ -39,6 +39,9 @@ import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-f
 
 interface SlotInfo extends UnitConfig {
   buyIn: BuyIn | null;
+  adHoc?: boolean;
+  sourceListingId?: string;
+  community?: string | null;
 }
 
 type GuestyListingSummary = {
@@ -50,7 +53,13 @@ type GuestyListingSummary = {
   active?: boolean;
   isActive?: boolean;
   status?: string;
-  address?: { full?: string };
+  bedrooms?: number;
+  bedroomsCount?: number;
+  bedroomCount?: number;
+  beds?: number;
+  accommodates?: number;
+  personCapacity?: number;
+  address?: { full?: string; city?: string; state?: string; street?: string };
 };
 
 type OperationsPropertyOption = {
@@ -61,6 +70,14 @@ type OperationsPropertyOption = {
   mapped: boolean;
   buyInConfigured: boolean;
 };
+
+function virtualPropertyIdForGuestyListingId(listingId: string): number {
+  let hash = 0;
+  for (const ch of listingId) {
+    hash = ((hash * 31) + ch.charCodeAt(0)) >>> 0;
+  }
+  return -(100000 + (hash % 900000));
+}
 
 interface GuestyReservation {
   _id: string;
@@ -2204,7 +2221,7 @@ export default function Bookings() {
   // Pull Guesty's listing names so we can show human-readable property names
   // (e.g. "Poipu Kai - 6BR Villas, Pool - Sleeps 16") instead of internal IDs.
   const { data: guestyListings } = useQuery<any>({
-    queryKey: ["/api/guesty-proxy/listings?limit=200&fields=_id%20nickname%20title%20isListed%20active%20isActive%20status%20address.full"],
+    queryKey: ["/api/guesty-proxy/listings?limit=200&fields=_id%20nickname%20title%20isListed%20active%20isActive%20status%20bedrooms%20bedroomsCount%20bedroomCount%20beds%20accommodates%20personCapacity%20address.full%20address.city%20address.state%20address.street"],
     staleTime: 5 * 60_000,
   });
   const guestyListingId = (listing: GuestyListingSummary | null | undefined) =>
@@ -2294,6 +2311,8 @@ export default function Bookings() {
     ? listingNameById.get(selectedMapping.guestyListingId) ?? `Property ${selectedMapping.propertyId}`
     : selectedGuestyOnlyOption?.name ?? (selectedGuestyListingId ? `Guesty listing ${selectedGuestyListingId.slice(0, 8)}` : "");
   const isGlobalView = selectedPropertyId == null && selectedGuestyListingId == null;
+  const selectedQueryPropertyId = selectedPropertyId
+    ?? (selectedGuestyListingId ? virtualPropertyIdForGuestyListingId(selectedGuestyListingId) : null);
 
   const {
     data: bookingsData,
@@ -2303,13 +2322,13 @@ export default function Bookings() {
     error: selectedBookingsErr,
     refetch: refetchBookings,
   } = useQuery<{ reservations: GuestyReservation[]; total: number; unitSlots: UnitConfig[] }>({
-    queryKey: ["/api/bookings/listing", selectedListingId, selectedPropertyId, { includePast }],
+    queryKey: ["/api/bookings/listing", selectedListingId, selectedQueryPropertyId, { includePast }],
     queryFn: () => {
       if (!selectedListingId) {
         return Promise.resolve({ reservations: [], total: 0, unitSlots: [] });
       }
       const params = new URLSearchParams({ includePast: String(includePast) });
-      if (selectedPropertyId) params.set("propertyId", String(selectedPropertyId));
+      if (selectedQueryPropertyId) params.set("propertyId", String(selectedQueryPropertyId));
       const url = `/api/bookings/listing/${encodeURIComponent(selectedListingId)}?${params.toString()}`;
       return apiRequest("GET", url).then((r) => r.json());
     },
@@ -2377,6 +2396,9 @@ export default function Bookings() {
   const rawReservations = isGlobalView ? globalReservations : (bookingsData?.reservations ?? []);
   const unitSlots = isGlobalView ? [] : (bookingsData?.unitSlots ?? []);
   const hasBuyInSlots = unitSlots.length > 0;
+  const selectedBuyInPropertyId = !isGlobalView
+    ? ((bookingsData as any)?.propertyId ?? selectedQueryPropertyId)
+    : null;
 
   const {
     data: cancellationsData,
@@ -2590,7 +2612,7 @@ export default function Bookings() {
       clearAutoFillDiagnostics(reservation._id);
     },
     mutationFn: async ({ reservation }: { reservation: GuestyReservation }) => {
-      if (!selectedPropertyId) throw new Error("No property selected");
+      if (!selectedBuyInPropertyId) throw new Error("No property selected");
       const emptySlots = reservation.slots.filter((s) => !s.buyIn);
       if (emptySlots.length === 0) throw new Error("All slots already filled");
 
@@ -2604,19 +2626,28 @@ export default function Bookings() {
         throw new Error("Auto-fill needs valid check-in/check-out dates before it can search.");
       }
 
-      const groundFloorRequirement = await apiRequest(
-        "GET",
-        groundFloorRequirementHref(reservation, selectedPropertyId),
-      )
-        .then((r) => r.json() as Promise<GroundFloorRequirement & { conversationId?: string | null }>)
-        .catch((): GroundFloorRequirement => ({
-          requested: false,
-          scope: "none",
-          requiredUnits: 0,
-          confidence: "none",
-          evidence: [],
-          summary: "Ground-floor scan unavailable.",
-        }));
+      const groundFloorRequirement = selectedHasBuyInConfig && selectedPropertyId
+        ? await apiRequest(
+            "GET",
+            groundFloorRequirementHref(reservation, selectedPropertyId),
+          )
+            .then((r) => r.json() as Promise<GroundFloorRequirement & { conversationId?: string | null }>)
+            .catch((): GroundFloorRequirement => ({
+              requested: false,
+              scope: "none",
+              requiredUnits: 0,
+              confidence: "none",
+              evidence: [],
+              summary: "Ground-floor scan unavailable.",
+            }))
+        : ({
+            requested: false,
+            scope: "none",
+            requiredUnits: 0,
+            confidence: "none",
+            evidence: [],
+            summary: "Ground-floor scan skipped for auto-derived Guesty buy-in target.",
+          } satisfies GroundFloorRequirement);
       const requiredGroundFloorUnits = Math.min(
         emptySlots.length,
         groundFloorRequirement.requested ? Math.max(1, groundFloorRequirement.requiredUnits) : 0,
@@ -2656,11 +2687,14 @@ export default function Bookings() {
         const existing = findBuyInCache.get(key);
         if (existing) return existing;
         const params = new URLSearchParams({
-          propertyId: String(selectedPropertyId),
+          propertyId: String(selectedBuyInPropertyId),
           bedrooms: String(bedrooms),
           checkIn: ci,
           checkOut: co,
         });
+        if (selectedListingId) params.set("listingId", selectedListingId);
+        const searchCommunity = selectedUnitConfig?.community ?? emptySlots.find((slot) => slot.community)?.community ?? "";
+        if (searchCommunity) params.set("community", searchCommunity);
         if (!includePm) params.set("includePm", "0");
         if (requireGroundFloor) {
           params.set("groundFloor", "required");
@@ -2827,6 +2861,9 @@ export default function Bookings() {
       const selectedUnitConfig = selectedPropertyId
         ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]
         : undefined;
+      const selectedSearchCommunity = selectedUnitConfig?.community
+        ?? emptySlots.find((slot) => slot.community)?.community
+        ?? "";
       const directBookingScanCache = new Map<string, Promise<LiveCandidate[]>>();
       let autoDirectBookingScansStarted = 0;
       const autoDirectBookingScanLimit = selectedUnitConfig?.enableGoogleLensDiscovery ? 12 : 6;
@@ -2869,7 +2906,7 @@ export default function Bookings() {
         if (existing) return existing;
         const promise = (async () => {
           try {
-            const community = selectedUnitConfig?.community ?? "";
+            const community = selectedSearchCommunity;
             const resortName = directBookingTargetResortName(community);
             const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
               sourceUrl: candidate.url,
@@ -3077,7 +3114,7 @@ export default function Bookings() {
           skippedReasons.push(`${slot.unitLabel}: skipped photo-match result without PM page quote`);
           return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
         }
-        const community = selectedUnitConfig?.community ?? "";
+        const community = selectedSearchCommunity;
         const targetResortName = directBookingTargetResortName(community);
         const targetRejectReason = targetLocationRejectReason(targetResortName, community, pick);
         if (targetRejectReason) {
@@ -3086,7 +3123,8 @@ export default function Bookings() {
         }
         const propertyName =
           (selectedListingId && listingNameById.get(selectedListingId)) ||
-          `Property ${selectedPropertyId}`;
+          selectedDisplayName ||
+          `Property ${selectedBuyInPropertyId}`;
         if (hasUsedListingIdentity(pickedIdentities, pick)) {
           skippedReasons.push(`${slot.unitLabel}: skipped duplicate physical listing`);
           return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
@@ -3122,7 +3160,7 @@ export default function Bookings() {
           : "";
         try {
           const created = await apiRequest("POST", "/api/buy-ins", {
-            propertyId: selectedPropertyId,
+            propertyId: selectedBuyInPropertyId,
             propertyName,
             unitId: slot.unitId,
             unitLabel: slot.unitLabel,
@@ -3876,6 +3914,8 @@ export default function Bookings() {
     ? unitSlots.length > 0
       ? `${totalBedrooms} BR (${unitSlots.map((u) => `${u.bedrooms}BR`).join(" + ")})`
       : "buy-in configured"
+    : hasBuyInSlots
+      ? `${totalBedrooms} BR auto buy-in target`
     : selectedMapping
       ? "mapped in Guesty · no buy-in unit setup"
       : selectedGuestyListingId
@@ -4031,10 +4071,14 @@ export default function Bookings() {
             <CardContent className="py-5">
               <p className="text-sm font-medium text-amber-950">
                 <AlertCircle className="h-4 w-4 inline mr-1.5" />
-                Guesty bookings load automatically for this listing.
+                {hasBuyInSlots
+                  ? "Guesty listing details created a buy-in target automatically."
+                  : "Guesty bookings load automatically for this listing."}
               </p>
               <p className="text-sm text-amber-900/80 mt-1">
-                Buy-in unit slots are only needed when you want to attach buy-ins, run cheapest-buy-in searches, or add Operations-only manual reservations.
+                {hasBuyInSlots
+                  ? "You can now use Auto-fill cheapest or Find buy-in without manually configuring unit slots first."
+                  : "Buy-in unit slots are only needed when Guesty does not expose enough bedroom/community detail to create a search target."}
               </p>
             </CardContent>
           </Card>
@@ -4716,10 +4760,10 @@ export default function Bookings() {
                       <div className="border-t px-4 py-3 bg-muted/20 space-y-2">
                         {r.slotsTotal === 0 && (
                           <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                            This reservation came from Guesty. Configure buy-in unit slots only if you need unit-level buy-in tracking for this property.
+                            This reservation came from Guesty, but the listing does not expose enough bedroom detail to create a buy-in search target yet.
                           </div>
                         )}
-                        {selectedPropertyId && !manualReservation && (
+                        {selectedPropertyId && selectedHasBuyInConfig && !manualReservation && (
                           <GroundFloorRequirementNotice reservation={r} propertyId={selectedPropertyId} />
                         )}
                         {manualReservation && <ManualReservationContactPanel reservation={r} />}
@@ -4788,8 +4832,14 @@ export default function Bookings() {
                         {comboOptions.length > 0 && (
                           <ComboComparisonPanel
                             options={comboOptions}
-                            targetResortName={directBookingTargetResortName(selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? "" : "")}
-                            community={selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? "" : ""}
+                            targetResortName={directBookingTargetResortName(
+                              selectedPropertyId
+                                ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+                                : r.slots.find((slot) => slot.community)?.community ?? "",
+                            )}
+                            community={selectedPropertyId
+                              ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+                              : r.slots.find((slot) => slot.community)?.community ?? ""}
                           />
                         )}
                         {r.slots.map((slot) => {
@@ -4946,12 +4996,14 @@ export default function Bookings() {
                               showAliasControls={slot.buyIn.id === firstBuyInId}
                             />
                           )}
-                          {slotIsExpanded && selectedPropertyId && (
+                          {slotIsExpanded && selectedBuyInPropertyId && (
                             <div className="border-t bg-muted/20 px-3 py-3">
                               <LiveSearchSection
                                 reservation={r}
-                                propertyId={selectedPropertyId}
+                                propertyId={selectedBuyInPropertyId}
                                 slot={slot}
+                                listingId={selectedListingId}
+                                enableGroundFloorRequirement={selectedHasBuyInConfig}
                               />
                             </div>
                           )}
@@ -5486,11 +5538,13 @@ export default function Bookings() {
               )}
             </DialogDescription>
           </DialogHeader>
-          {picker && selectedPropertyId && (
+          {picker && selectedBuyInPropertyId && (
             <CandidateList
               reservation={picker.reservation}
-              propertyId={selectedPropertyId}
+              propertyId={selectedBuyInPropertyId}
               slot={picker.slot}
+              listingId={selectedListingId}
+              enableGroundFloorRequirement={selectedHasBuyInConfig}
             />
           )}
         </DialogContent>
@@ -5780,10 +5834,14 @@ function CandidateList({
   reservation,
   propertyId,
   slot,
+  listingId,
+  enableGroundFloorRequirement = true,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
+  listingId?: string | null;
+  enableGroundFloorRequirement?: boolean;
 }) {
   // Existing-buy-ins picker was removed (was here historically): when
   // auto-fill creates buy-in records and the operator detaches them,
@@ -5801,6 +5859,8 @@ function CandidateList({
         reservation={reservation}
         propertyId={propertyId}
         slot={slot}
+        listingId={listingId}
+        enableGroundFloorRequirement={enableGroundFloorRequirement}
       />
     </div>
   );
@@ -6539,10 +6599,14 @@ function LiveSearchSection({
   reservation,
   propertyId,
   slot,
+  listingId,
+  enableGroundFloorRequirement = true,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
+  listingId?: string | null;
+  enableGroundFloorRequirement?: boolean;
 }) {
   const { toast } = useToast();
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
@@ -6568,7 +6632,7 @@ function LiveSearchSection({
     queryFn: () => apiGetJson<GroundFloorRequirement & { conversationId?: string | null }>(
       groundFloorRequirementHref(reservation, propertyId),
     ),
-    enabled: !!reservation._id,
+    enabled: enableGroundFloorRequirement && !!reservation._id,
     staleTime: 60_000,
   });
   const confirmedGroundFloorSlots = reservation.slots.filter((s) => s.buyIn?.groundFloorStatus === "confirmed").length;
@@ -6587,12 +6651,16 @@ function LiveSearchSection({
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
   const { data, isLoading, isFetching, isError, error, dataUpdatedAt, isPlaceholderData } = useQuery<FindBuyInResponse>({
-    queryKey: ["/api/operations/find-buy-in", propertyId, slot.bedrooms, checkInYmd, checkOutYmd, groundFloorNeededForThisSlot, refreshNonce],
+    queryKey: ["/api/operations/find-buy-in", propertyId, listingId, slot.community, slot.bedrooms, checkInYmd, checkOutYmd, groundFloorNeededForThisSlot, refreshNonce],
     queryFn: ({ signal }) => {
       const noCache = refreshNonce > 0 ? "&nocache=1" : "";
       const groundFloorParam = groundFloorNeededForThisSlot ? "&groundFloor=required" : "";
+      const context = new URLSearchParams();
+      if (listingId) context.set("listingId", listingId);
+      if (slot.community) context.set("community", slot.community);
+      const contextSuffix = context.toString() ? `&${context.toString()}` : "";
       return apiGetJson<FindBuyInResponse>(
-        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${groundFloorParam}${noCache}`,
+        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${groundFloorParam}${noCache}${contextSuffix}`,
         signal,
       );
     },
