@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, type PointerEvent } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -26,7 +26,7 @@ import {
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
-  MapPin, Footprints, MessageSquare,
+  MapPin, Footprints, MessageSquare, MonitorPlay, Maximize2, MousePointerClick,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -4426,7 +4426,7 @@ export default function Bookings() {
         <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Operations</h1>
           <p className="text-xs text-muted-foreground">
-            Bookings · Buy-in tracking · Live sidecar search across Airbnb, VRBO, Booking.com, and PM rental sites
+            Bookings · Buy-in tracking · Live sidecar search across Airbnb, VRBO, Booking.com, plus Airbnb Lens direct links
           </p>
         </div>
         <div className="w-full sm:ml-auto sm:w-auto flex flex-wrap items-center gap-2">
@@ -4441,6 +4441,7 @@ export default function Bookings() {
             <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${bookingsLoading ? "animate-spin" : ""}`} /> Refresh
           </Button>
         </div>
+        <SidecarScreensStrip />
       </div>
 
       <div className="max-w-7xl mx-auto px-3 py-4 sm:px-6 sm:py-6 space-y-5">
@@ -7276,13 +7277,188 @@ type SidecarHeartbeat = {
   } | null;
 };
 
+type SidecarScreenSnapshot = {
+  slot: string;
+  requestId?: string;
+  opType?: string;
+  label?: string;
+  phase?: string;
+  url?: string;
+  title?: string;
+  screenshotDataUrl?: string;
+  width?: number;
+  height?: number;
+  captcha?: boolean;
+  error?: string;
+  at: string;
+  ageMs: number;
+};
+
+type SidecarScreensResponse = {
+  maxScreens: number;
+  screens: SidecarScreenSnapshot[];
+  heartbeat?: SidecarHeartbeat;
+};
+
+function sidecarScreenAge(ageMs: number): string {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return "now";
+  if (ageMs < 60_000) return `${Math.max(1, Math.round(ageMs / 1000))}s ago`;
+  return `${Math.round(ageMs / 60_000)}m ago`;
+}
+
+function SidecarScreensStrip() {
+  const { data } = useQuery<SidecarScreensResponse>({
+    queryKey: ["/api/vrbo-sidecar/screens", "operations-header"],
+    queryFn: async () => {
+      const r = await fetch("/api/vrbo-sidecar/screens", { cache: "no-store" });
+      if (!r.ok) throw new Error(`Sidecar screens unavailable (${r.status})`);
+      return r.json();
+    },
+    refetchInterval: 5_000,
+    retry: false,
+  });
+  const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
+  const draggingRef = useRef(false);
+  const screens = data?.screens ?? [];
+  const maxScreens = Math.max(1, data?.maxScreens ?? 8);
+  const bySlot = new Map(screens.map((screen) => [screen.slot, screen]));
+  const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
+  const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
+  const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
+
+  const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = Math.max(1, screen.width ?? 1280);
+    const height = Math.max(1, screen.height ?? 820);
+    const x = Math.max(0, Math.min(width, ((event.clientX - rect.left) / Math.max(1, rect.width)) * width));
+    const y = Math.max(0, Math.min(height, ((event.clientY - rect.top) / Math.max(1, rect.height)) * height));
+    void fetch("/api/vrbo-sidecar/screen-control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slot: screen.slot,
+        requestId: screen.requestId,
+        action,
+        x: Math.round(x),
+        y: Math.round(y),
+      }),
+    }).catch(() => {});
+  };
+
+  return (
+    <div className="w-full rounded-lg border bg-background/70 p-2 shadow-sm">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <MonitorPlay className="h-4 w-4 text-muted-foreground" />
+          <div>
+            <p className="text-xs font-semibold">Local Chrome sidecar screens</p>
+            <p className="text-[11px] text-muted-foreground">
+              {data?.heartbeat?.isOnline ? "Sidecar live" : "Sidecar offline"} · {activeCount} active thumbnail{activeCount === 1 ? "" : "s"}
+              {data?.heartbeat?.activeJob ? ` · ${data.heartbeat.activeJob.label} ${data.heartbeat.activeJob.activeSec}s` : ""}
+            </p>
+          </div>
+        </div>
+        <Badge variant="outline" className="text-[10px]">Up to 8 Chrome windows</Badge>
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
+        {slots.map((slot) => {
+          const screen = bySlot.get(slot);
+          const canOpen = Boolean(screen?.screenshotDataUrl);
+          const host = (() => {
+            try { return screen?.url ? new URL(screen.url).hostname.replace(/^www\./, "") : ""; } catch { return ""; }
+          })();
+          return (
+            <button
+              key={slot}
+              type="button"
+              className={`overflow-hidden rounded-md border bg-muted/20 text-left transition ${canOpen ? "hover:border-blue-400 hover:shadow-sm" : ""} ${screen?.captcha ? "border-amber-400 ring-1 ring-amber-300" : ""}`}
+              onClick={() => {
+                if (canOpen) setSelectedSlot(slot);
+              }}
+              disabled={!canOpen}
+              title={canOpen ? "Open interactive sidecar screen" : "No screen available"}
+            >
+              <div className="flex items-center justify-between gap-1 border-b bg-background px-2 py-1 text-[10px]">
+                <span className="font-medium">Slot {slot}</span>
+                <span className="flex items-center gap-1">
+                  {screen?.captcha && <MousePointerClick className="h-3 w-3 text-amber-700" />}
+                  {canOpen && <Maximize2 className="h-3 w-3 text-muted-foreground" />}
+                  <span className={screen?.captcha ? "text-amber-700" : "text-muted-foreground"}>
+                    {screen ? sidecarScreenAge(screen.ageMs) : "idle"}
+                  </span>
+                </span>
+              </div>
+              <div className="aspect-video bg-slate-950">
+                {screen?.screenshotDataUrl ? (
+                  <img src={screen.screenshotDataUrl} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-[10px] text-slate-400">No screen</div>
+                )}
+              </div>
+              <div className="min-h-[38px] space-y-0.5 px-2 py-1 text-[10px]">
+                <p className="truncate font-medium" title={screen?.phase}>{screen?.phase ?? "Waiting"}</p>
+                <p className="truncate text-muted-foreground" title={screen?.title ?? host}>{screen?.title || host || "Ready for next search"}</p>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <Dialog open={Boolean(selectedSlot)} onOpenChange={(open) => {
+        if (!open) {
+          setSelectedSlot(null);
+          draggingRef.current = false;
+        }
+      }}>
+        <DialogContent className="max-w-6xl">
+          <DialogHeader>
+            <DialogTitle>Sidecar screen {selectedScreen?.slot ?? selectedSlot}</DialogTitle>
+            <DialogDescription>
+              Click or drag on the screenshot to pass pointer input to that Chrome tab. Use this for manual CAPTCHA recovery only.
+            </DialogDescription>
+          </DialogHeader>
+          {selectedScreen?.screenshotDataUrl ? (
+            <div
+              role="button"
+              tabIndex={0}
+              className="overflow-hidden rounded-lg border bg-slate-950"
+              onPointerDown={(event) => {
+                draggingRef.current = true;
+                event.currentTarget.setPointerCapture?.(event.pointerId);
+                sendPointerCommand(selectedScreen, "down", event);
+              }}
+              onPointerMove={(event) => {
+                if (draggingRef.current) sendPointerCommand(selectedScreen, "move", event);
+              }}
+              onPointerUp={(event) => {
+                if (draggingRef.current) {
+                  sendPointerCommand(selectedScreen, "up", event);
+                  draggingRef.current = false;
+                } else {
+                  sendPointerCommand(selectedScreen, "click", event);
+                }
+              }}
+              onClick={(event) => {
+                if (!draggingRef.current) sendPointerCommand(selectedScreen, "click", event);
+              }}
+            >
+              <img src={selectedScreen.screenshotDataUrl} alt="" className="max-h-[72vh] w-full object-contain" />
+            </div>
+          ) : (
+            <div className="rounded-lg border bg-muted p-6 text-sm text-muted-foreground">No screenshot available for this slot.</div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 function SidecarStatusBadge() {
   const { toast } = useToast();
   const [state, setState] = useState<{ data: SidecarHeartbeat | null; everSeen: boolean }>({
     data: null,
     everSeen: false,
   });
-  const [acting, setActing] = useState<"stop" | "start" | "reset" | null>(null);
+  const [acting, setActing] = useState<"stop" | "start" | null>(null);
 
   const refresh = async (): Promise<SidecarHeartbeat | null> => {
     try {
@@ -7326,34 +7502,6 @@ function SidecarStatusBadge() {
       await refresh();
     } catch (e: any) {
       toast({ title: "Stop failed", description: e?.message ?? String(e), variant: "destructive" });
-    } finally {
-      setActing(null);
-    }
-  };
-
-  // CODEX NOTE (2026-05-06): Stop & Reset is now a hard stop, not a
-  // composed restart. The old flow called /stop and then /start, which
-  // meant any server-side search still running could enqueue more work
-  // during the pause window and the immediate /start would let the
-  // sidecar pick it up again. That made the sidecar appear to "randomly"
-  // restart after Jamie clicked reset. Keep the queue paused until the
-  // operator explicitly clicks Start Queue.
-  const stopAndResetSidecar = async () => {
-    setActing("reset");
-    try {
-      const r = await apiRequest("POST", "/api/vrbo-sidecar/stop", {
-        reason: "Stop & Reset button (Operations UI)",
-      });
-      const j = await r.json();
-      toast({
-        title: "Sidecar stopped and reset",
-        description: j.cancelled > 0
-          ? `Cancelled ${j.cancelled} job${j.cancelled === 1 ? "" : "s"}. Queue stays stopped until you click Start Queue.`
-          : "Queue stays stopped until you click Start Queue.",
-      });
-      await refresh();
-    } catch (e: any) {
-      toast({ title: "Reset failed", description: e?.message ?? String(e), variant: "destructive" });
     } finally {
       setActing(null);
     }
@@ -7498,33 +7646,10 @@ function SidecarStatusBadge() {
           </Button>
         </div>
 
-        {/* CODEX NOTE (2026-05-04, claude/sidecar-stop-reset):
-            Full-width Stop & Reset on its own row — it's the
-            most-used recovery action when the sidecar gets stuck.
-            It cancels active/pending work and leaves the queue
-            paused. The operator must explicitly click Start Queue
-            before new sidecar work can be dispatched. */}
-        <Button
-          size="sm"
-          variant="secondary"
-          className="w-full h-8 text-xs"
-          disabled={acting !== null}
-          onClick={stopAndResetSidecar}
-          data-testid="button-sidecar-stop-reset"
-        >
-          <RefreshCw className={`h-3 w-3 mr-1 ${acting === "reset" ? "animate-spin" : ""}`} />
-          {acting === "reset" ? "Resetting…" : "Stop & Reset"}
-        </Button>
-
         <div className="text-[10px] text-muted-foreground leading-snug space-y-1">
           <div>
             <strong>Stop</strong>: cancel running job + block new queue work.
             The Mac daemon idles if it is running.
-          </div>
-          <div>
-            <strong>Stop &amp; Reset</strong>: cancel running job + keep
-            the queue stopped. Use when the sidecar is stuck or opening
-            Chrome unexpectedly.
           </div>
           <div>
             <strong>Start Queue</strong>: unblock new queue work. If the
