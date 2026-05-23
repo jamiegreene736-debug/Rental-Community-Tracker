@@ -280,9 +280,11 @@ type AutoFillComboOption = {
   note?: string;
   picks: Array<{
     bedrooms: number;
+    source?: "airbnb" | "vrbo" | "booking" | "pm";
     sourceLabel: string;
     title: string;
     totalPrice: number;
+    nightlyPrice?: number;
     url: string;
     image?: string;
     airbnbAnchorUrl?: string | null;
@@ -290,6 +292,8 @@ type AutoFillComboOption = {
     alternateUrls?: Array<string | null | undefined>;
     photoMatches?: Array<{ url?: string | null }>;
     identityKeys?: Array<string | null | undefined>;
+    verified?: "yes" | "no" | "unclear" | "skipped";
+    verifiedReason?: string;
     groundFloorStatus?: GroundFloorStatus;
     groundFloorEvidence?: string | null;
   }>;
@@ -1562,10 +1566,14 @@ function ComboComparisonPanel({
   options,
   targetResortName,
   community,
+  onAttachCombo,
+  attachingComboLabel,
 }: {
   options: AutoFillComboOption[];
   targetResortName: string;
   community: string;
+  onAttachCombo?: (option: AutoFillComboOption) => void;
+  attachingComboLabel?: string | null;
 }) {
   const [directRows, setDirectRows] = useState<Array<{
     candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number];
@@ -1735,6 +1743,18 @@ function ComboComparisonPanel({
             }))
             : option.picks;
           const displayedTotal = optimizedCombo ? optimizedCombo.totalCost : option.totalCost;
+          const attachableOption: AutoFillComboOption = optimizedCombo
+            ? {
+                ...option,
+                totalCost: optimizedCombo.totalCost,
+                picks: optimizedCombo.picks.map((pick, index) => ({
+                  ...pick,
+                  bedrooms: optimizedCombo.option.bedrooms[index] ?? pick.bedrooms ?? 0,
+                })),
+              }
+            : option;
+          const canAttachCombo = !!onAttachCombo && displayedTotal != null && displayedPicks.length === option.bedrooms.length;
+          const attachingThisCombo = attachingComboLabel === option.label;
           return (
           <details
             key={option.label}
@@ -1775,6 +1795,54 @@ function ComboComparisonPanel({
                     <li key={`${option.label}-detail-${index}`}>{detail}</li>
                   ))}
                 </ul>
+              </div>
+            )}
+            {displayedPicks.length > 0 && (
+              <div className="mt-2 rounded border border-emerald-100 bg-white/80 px-2 py-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] font-medium text-emerald-950">Combo unit links</p>
+                  {canAttachCombo && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={option.selected || isOptimizedWinner ? "default" : "outline"}
+                      className="h-7 px-2 text-[11px]"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onAttachCombo?.(attachableOption);
+                      }}
+                      disabled={!!attachingComboLabel}
+                    >
+                      {attachingThisCombo ? (
+                        <><RefreshCw className="mr-1 h-3.5 w-3.5 animate-spin" /> Attaching...</>
+                      ) : (
+                        <><Link2 className="mr-1 h-3.5 w-3.5" /> Attach this combo</>
+                      )}
+                    </Button>
+                  )}
+                </div>
+                <div className="mt-1 grid gap-1">
+                  {displayedPicks.map((pick, index) => (
+                    <a
+                      key={`${option.label}-pick-${index}-${pick.url}`}
+                      href={pick.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(event) => event.stopPropagation()}
+                      className="grid grid-cols-[auto_1fr_auto] items-center gap-2 rounded border px-2 py-1 text-[11px] hover:bg-emerald-50"
+                    >
+                      <Badge className={`text-[9px] ${sourceBadgeClass(pick.source ?? "pm")}`}>{pick.bedrooms}BR</Badge>
+                      <span className="min-w-0 truncate">
+                        {pick.sourceLabel} · {pick.title}
+                      </span>
+                      <span className="inline-flex items-center gap-1 font-semibold tabular-nums">
+                        {fmtMoney(pick.totalPrice)}
+                        <ExternalLink className="h-2.5 w-2.5" />
+                      </span>
+                    </a>
+                  ))}
+                </div>
               </div>
             )}
             <div className="mt-2 space-y-2 border-t border-emerald-100 pt-2">
@@ -3123,6 +3191,96 @@ export default function Bookings() {
     onError: (e: any) => toast({ title: "Detach failed", description: e.message, variant: "destructive" }),
   });
 
+  const attachComboMutation = useMutation({
+    mutationFn: async ({ reservation, option }: { reservation: GuestyReservation; option: AutoFillComboOption }) => {
+      if (option.totalCost == null || option.picks.length !== reservation.slots.length) {
+        throw new Error("This combo does not have a complete priced unit set to attach.");
+      }
+      const meta = reservationPropertyMeta.get(reservation._id);
+      const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
+      if (!propertyId) throw new Error("No property selected for this booking.");
+      const propertyName = meta?.propertyName || selectedDisplayName || `Property ${propertyId}`;
+      const toDateOnly = (s: string | undefined): string => {
+        if (!s) return "";
+        return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+      };
+      const ci = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
+      const co = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ci) || !/^\d{4}-\d{2}-\d{2}$/.test(co)) {
+        throw new Error("Combo attach needs valid check-in/check-out dates.");
+      }
+
+      for (const slot of reservation.slots) {
+        if (!slot.buyIn?.id) continue;
+        await apiRequest("POST", `/api/bookings/detach-buy-in/${slot.buyIn.id}`).then((r) => r.json());
+      }
+
+      const created: any[] = [];
+      for (let index = 0; index < reservation.slots.length; index++) {
+        const slot = reservation.slots[index];
+        const pick = option.picks[index];
+        const cost = Number(pick.totalPrice);
+        if (!Number.isFinite(cost) || cost <= 0) {
+          throw new Error(`${option.label} has an invalid price for ${slot.unitLabel}.`);
+        }
+        const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
+          ? ` · Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Direct link only; Airbnb supplied the date-specific price and availability.`
+          : "";
+        const lensProvenanceSuffix = pick.airbnbAnchorUrl
+          ? " · Found via Airbnb Google Lens search."
+          : "";
+        const evidenceUrls = Array.from(new Set([
+          ...(pick.alternateUrls ?? []),
+          pick.airbnbAnchorUrl,
+          ...(pick.photoMatches ?? []).map((match) => match.url),
+          pick.image,
+        ].filter((url): url is string => !!url && listingUrlKey(url) !== listingUrlKey(pick.url)))).slice(0, 8);
+        const identitySuffix = evidenceUrls.length > 0
+          ? ` · Same-unit evidence: ${evidenceUrls.join(" ")}`
+          : "";
+        const createdBuyIn = await apiRequest("POST", "/api/buy-ins", {
+          propertyId,
+          propertyName,
+          unitId: slot.unitId,
+          unitLabel: slot.unitLabel,
+          checkIn: ci,
+          checkOut: co,
+          costPaid: cost.toFixed(2),
+          airbnbConfirmation: null,
+          airbnbListingUrl: pick.url,
+          groundFloorStatus: pick.groundFloorStatus ?? "unknown",
+          groundFloorEvidence: pick.groundFloorEvidence ?? null,
+          notes: `Manually attached from combo ${option.label} — ${pick.bedrooms}BR ${pick.sourceLabel} — ${pick.title} · Selected from saved auto-fill comparison for ${ci}→${co}.${anchorSuffix}${lensProvenanceSuffix}${identitySuffix}`,
+          status: "active",
+        }).then((r) => r.json());
+        if (!createdBuyIn?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
+        await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
+          buyInId: createdBuyIn.id,
+        }).then((r) => r.json());
+        created.push(createdBuyIn);
+      }
+      return { reservation, option, created };
+    },
+    onSuccess: ({ reservation, option }) => {
+      const listingId = reservation.operationsListingId ?? reservation.listingId ?? selectedListingId;
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", listingId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      setLastAutoFillCombos((prev) => ({
+        ...prev,
+        [reservation._id]: (prev[reservation._id] ?? []).map((combo) => ({
+          ...combo,
+          selected: combo.label === option.label,
+        })),
+      }));
+      toast({
+        title: `Attached ${option.label}`,
+        description: `Replaced this booking's buy-ins with the selected combo: ${fmtMoney(option.totalCost)}.`,
+      });
+    },
+    onError: (e: any) => toast({ title: "Combo attach failed", description: e.message, variant: "destructive" }),
+  });
+
   const saveArrivalDetails = useMutation({
     mutationFn: ({ id, data }: { id: number; data: Partial<BuyIn> }) =>
       apiRequest("PATCH", `/api/buy-ins/${id}`, data).then((r) => r.json()),
@@ -3817,9 +3975,11 @@ export default function Bookings() {
         note: evaluated.note,
         picks: evaluated.picks.map((pick, index) => ({
           bedrooms: evaluated.combo.bedrooms[index],
+          source: pick.source,
           sourceLabel: pick.sourceLabel,
           title: pick.title,
           totalPrice: pick.totalPrice,
+          nightlyPrice: pick.nightlyPrice,
           url: pick.url,
           image: pick.image,
           airbnbAnchorUrl: pick.airbnbAnchorUrl,
@@ -3827,6 +3987,8 @@ export default function Bookings() {
           alternateUrls: pick.alternateUrls,
           photoMatches: pick.photoMatches,
           identityKeys: pick.identityKeys,
+          verified: pick.verified,
+          verifiedReason: pick.verifiedReason,
           groundFloorStatus: pick.groundFloorStatus,
           groundFloorEvidence: pick.groundFloorEvidence,
         })),
@@ -6079,6 +6241,8 @@ export default function Bookings() {
                             community={selectedPropertyId
                               ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
                               : r.slots.find((slot) => slot.community)?.community ?? ""}
+                            onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
+                            attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
                           />
                         )}
                         {r.slots.map((slot) => {
