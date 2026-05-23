@@ -35,6 +35,7 @@ const CHROME_DATA_DIR = path.join(
 );
 const CHROME_BINARY = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CDP_PORT = 9222;
+const VIEWPORT = { width: 1280, height: 820 };
 const SIDE_CAR_CHROME_VISIBLE = process.env.SIDECAR_CHROME_VISIBLE === "1";
 const SIDECAR_ALLOW_FOCUS = process.env.SIDECAR_ALLOW_FOCUS === "1";
 const SIDECAR_CAPTCHA_SURFACE_WINDOW = process.env.SIDECAR_CAPTCHA_SURFACE_WINDOW !== "0";
@@ -89,7 +90,6 @@ const VRBO_HARD_BLOCK_FRESH_RETRIES = Math.max(
 );
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
-const VIEWPORT = { width: 1280, height: 820 };
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
 const VRBO_2CAPTCHA_ENABLED = process.env.SIDECAR_VRBO_2CAPTCHA !== "0";
 const VRBO_2CAPTCHA_POLL_SECONDS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS ?? 120);
