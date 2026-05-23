@@ -16465,6 +16465,7 @@ Return ONLY compact JSON with this exact shape:
     // Generic op-type shape — discriminate on body.opType.
     if (typeof body.opType === "string") {
       const opType = body.opType as
+        | "airbnb_search"
         | "vrbo_search"
         | "vrbo_photo_scrape"
         | "booking_search"
@@ -16477,7 +16478,7 @@ Return ONLY compact JSON with this exact shape:
       }
       try {
         let result;
-        if (opType === "vrbo_search" || opType === "booking_search") {
+        if (opType === "airbnb_search" || opType === "vrbo_search" || opType === "booking_search") {
           if (
             typeof params.destination !== "string" ||
             !params.destination ||
@@ -16494,6 +16495,9 @@ Return ONLY compact JSON with this exact shape:
             opType,
             params: {
               destination: String(params.destination),
+              searchTerm: typeof params.searchTerm === "string" && params.searchTerm.trim()
+                ? params.searchTerm.trim()
+                : undefined,
               checkIn: String(params.checkIn),
               checkOut: String(params.checkOut),
               bedrooms,
