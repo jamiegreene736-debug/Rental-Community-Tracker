@@ -4122,6 +4122,56 @@ export default function Bookings() {
       } => !!row.checkInDate);
   }, [listingNameById, reservationPropertyMeta, reservations, selectedMapping, selectedPropertyId]);
 
+  const globalBookingMonthSections = useMemo(() => {
+    if (!isGlobalView) return [];
+    const order = new Map(reservations.map((reservation, index) => [reservation._id, index]));
+    const buckets = new Map<string, typeof financialRows>();
+    for (const row of financialRows) {
+      const key = monthInputValue(row.checkInDate);
+      const bucket = buckets.get(key) ?? [];
+      bucket.push(row);
+      buckets.set(key, bucket);
+    }
+
+    const summarize = (rows: typeof financialRows) => ({
+      bookingCount: rows.length,
+      revenue: rows.reduce((sum, row) => sum + row.netRevenue, 0),
+      buyInCost: rows.reduce((sum, row) => sum + row.totalExpectedBuyInCost, 0),
+      profit: rows.reduce((sum, row) => sum + row.expectedProfit, 0),
+      openSlots: rows.reduce((sum, row) => sum + row.openSlots, 0),
+    });
+
+    return Array.from(buckets.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, rows]) => {
+        const sortedRows = [...rows].sort((a, b) => {
+          const ai = order.get(a.reservation._id) ?? Number.MAX_SAFE_INTEGER;
+          const bi = order.get(b.reservation._id) ?? Number.MAX_SAFE_INTEGER;
+          return ai - bi;
+        });
+        return {
+          key,
+          label: monthLabel(key),
+          rows: sortedRows,
+          totals: summarize(sortedRows),
+        };
+      });
+  }, [financialRows, isGlobalView, reservations]);
+
+  const globalBookingGrandTotals = useMemo(() => {
+    if (!isGlobalView || globalBookingMonthSections.length === 0) return null;
+    return globalBookingMonthSections.reduce(
+      (totals, section) => ({
+        bookingCount: totals.bookingCount + section.totals.bookingCount,
+        revenue: totals.revenue + section.totals.revenue,
+        buyInCost: totals.buyInCost + section.totals.buyInCost,
+        profit: totals.profit + section.totals.profit,
+        openSlots: totals.openSlots + section.totals.openSlots,
+      }),
+      { bookingCount: 0, revenue: 0, buyInCost: 0, profit: 0, openSlots: 0 },
+    );
+  }, [globalBookingMonthSections, isGlobalView]);
+
   const arrivalStats = useMemo(() => {
     const today = startOfLocalDay(new Date());
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -4573,7 +4623,7 @@ export default function Bookings() {
                     {bookingsLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground ml-1" />}
                   </CardTitle>
                   <CardDescription>
-                    Global booking list across every buy-in target. Sorted by soonest arrival unless you click a column.
+                    Global booking list across every buy-in target, grouped by arrival month with revenue and profit subtotals.
                   </CardDescription>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -4631,8 +4681,8 @@ export default function Bookings() {
             <CardContent>
               <div className="overflow-hidden rounded border">
                 <div className="max-h-[560px] overflow-auto">
-                  <div className="min-w-[1320px]">
-                    <div className="sticky top-0 z-10 grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                  <div className="min-w-[1450px]">
+                    <div className="sticky top-0 z-10 grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
                       <div>
                         <input
                           type="checkbox"
@@ -4652,162 +4702,222 @@ export default function Bookings() {
                       <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
                       <div>Queued for</div>
                       <div>Channel</div>
-                      <SortHeader label="Payout" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
+                      <SortHeader label="Revenue" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
                       <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
+                      <SortHeader label="Net profit" active={sortBy === "profit"} dir={sortDir} onClick={() => toggleSort("profit")} align="right" />
                       <SortHeader label="Fill" active={sortBy === "status"} dir={sortDir} onClick={() => toggleSort("status")} />
                       <div className="text-right">Open</div>
                     </div>
                     <div className="divide-y">
-                      {reservations.map((reservation) => {
-                        const meta = reservationPropertyMeta.get(reservation._id);
-                        const nights = reservation.nightsCount ?? nightsBetween(checkInOf(reservation), checkOutOf(reservation));
-                        const payout = reservation.money?.hostPayout ?? 0;
-                        const totalBuyInCost = reservation.slots.reduce(
-                          (sum, slot) => sum + parseFloat(String(slot.buyIn?.costPaid ?? 0)),
-                          0,
-                        );
-                        const channel = reservation.integration?.platform ?? reservation.source ?? "direct";
-                        const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
-                        const queueItem = bulkQueueItemsByReservationId.get(reservation._id);
-                        const eligibleForBulk = !!meta?.propertyId && reservation.slots.some((slot) => !slot.buyIn);
-                        const queuedFor = meta?.propertyId
-                          ? bulkBuyInQueuedForText(reservation, meta.propertyName, meta.propertyId)
-                          : "No mapped property";
-                        const queueStatus = queueItem?.status
-                          ?? (reservation.fullyLinked ? "completed" : eligibleForBulk ? "queued" : "skipped");
-                        const queueLabel = queueItem?.message
-                          ?? (reservation.fullyLinked ? "Filled" : eligibleForBulk ? "Ready" : "No open slots");
-                        return (
-                          <div
-                            key={`global-booking-${reservation._id}`}
-                            role="button"
-                            tabIndex={0}
-                            className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-                            onClick={() => openReservationDetail(reservation._id)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                openReservationDetail(reservation._id);
-                              }
-                            }}
-                            data-testid={`global-booking-row-${reservation._id}`}
-                          >
-                            <div onClick={(event) => event.stopPropagation()}>
-                              <input
-                                type="checkbox"
-                                className="rounded"
-                                checked={!!bulkSelectedReservations[reservation._id]}
-                                disabled={!eligibleForBulk || bulkBuyInQueueRunning}
-                                onChange={(event) => {
-                                  const checked = event.target.checked;
-                                  setBulkSelectedReservations((prev) => ({
-                                    ...prev,
-                                    [reservation._id]: checked,
-                                  }));
-                                }}
-                                aria-label={`Select ${guestName} for bulk buy-in queue`}
-                                data-testid={`checkbox-bulk-buy-in-${reservation._id}`}
-                              />
+                      {globalBookingMonthSections.map((section) => (
+                        <div key={`global-booking-month-${section.key}`} className="divide-y">
+                          <div className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800">
+                            <div style={{ gridColumn: "1 / span 7" }}>
+                              {section.label}
+                              <span className="ml-2 font-normal text-muted-foreground">
+                                {section.totals.bookingCount} booking{section.totals.bookingCount === 1 ? "" : "s"}
+                              </span>
                             </div>
-                            <div>
-                              <p className="font-medium">{fmtDate(checkInOf(reservation))}</p>
-                              <p className="text-[10px] text-muted-foreground">
-                                {fmtDate(checkOutOf(reservation))}
-                              </p>
+                            <div className="text-right">{fmtMoney(section.totals.revenue)}</div>
+                            <div className="text-right">{fmtMoney(section.totals.buyInCost)}</div>
+                            <div className={`text-right ${section.totals.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                              {fmtMoney(section.totals.profit)}
                             </div>
-                            <div className="min-w-0">
-                              <Badge
-                                variant={queueStatus === "completed" ? "default" : "outline"}
-                                className={`max-w-full text-[10px] ${
-                                  queueStatus === "completed"
-                                    ? "bg-green-600 text-white"
-                                    : queueStatus === "running"
-                                      ? "border-blue-300 text-blue-700"
-                                      : queueStatus === "failed"
-                                        ? "border-red-300 text-red-700"
-                                        : queueStatus === "skipped"
-                                          ? "border-amber-300 text-amber-700"
-                                          : queueStatus === "cancelled"
-                                            ? "border-muted-foreground/30 text-muted-foreground"
-                                            : ""
-                                }`}
-                              >
-                                {queueItem?.status === "running" && <Loader2 className="mr-1 h-2.5 w-2.5 animate-spin" />}
-                                <span className="truncate">{queueLabel}</span>
-                              </Badge>
-                              {queueItem?.error && (
-                                <p className="mt-1 truncate text-[10px] text-red-700" title={queueItem.error}>
-                                  {queueItem.error}
-                                </p>
-                              )}
-                            </div>
-                            <div className="min-w-0">
-                              <p className="truncate font-medium">{meta?.propertyName ?? "Property"}</p>
-                              <p className="text-[10px] text-muted-foreground">
-                                {meta?.mapped ? `#${meta.propertyId}` : "Guesty target"}
-                              </p>
-                            </div>
-                            <div className="min-w-0">
-                              <p className="truncate font-medium">{guestName}</p>
-                              <p className="truncate text-[10px] text-muted-foreground">
-                                {reservation.confirmationCode ?? reservation._id}
-                              </p>
-                            </div>
-                            <div className="min-w-0">
-                              <p className="truncate" title={queuedFor}>{queuedFor}</p>
-                              <p className="text-[10px] text-muted-foreground">
-                                {nights} night{nights === 1 ? "" : "s"} · {fmtDate(checkInOf(reservation))} to {fmtDate(checkOutOf(reservation))}
-                              </p>
-                            </div>
-                            <div>
-                              <Badge variant="outline" className="text-[10px] capitalize">
-                                {channel}
-                              </Badge>
-                            </div>
-                            <div className="text-right">
-                              <p className="font-medium">{fmtMoney(payout)}</p>
-                              {(reservation.money?.balanceDue ?? 0) > 0 && (
-                                <p className="text-[10px] text-amber-700">
-                                  {fmtMoney(reservation.money?.balanceDue ?? 0)} due
-                                </p>
-                              )}
-                            </div>
-                            <div className="text-right">
-                              <p className="font-medium">{fmtMoney(totalBuyInCost)}</p>
-                              <p className="text-[10px] text-muted-foreground">attached</p>
-                            </div>
-                            <div>
-                              <Badge
-                                variant={reservation.fullyLinked ? "default" : "outline"}
-                                className={`text-[10px] ${
-                                  reservation.fullyLinked
-                                    ? "bg-green-600 text-white"
-                                    : reservation.slotsTotal > 0
-                                      ? "border-amber-300 text-amber-700"
-                                      : ""
-                                }`}
-                              >
-                                {reservation.slotsTotal > 0
-                                  ? `${reservation.slotsFilled}/${reservation.slotsTotal}`
-                                  : "Guesty"}
-                              </Badge>
-                            </div>
-                            <div className="text-right">
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 px-2 text-xs"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openReservationDetail(reservation._id);
-                                }}
-                              >
-                                Open
-                              </Button>
+                            <div className="text-[10px] font-normal text-muted-foreground" style={{ gridColumn: "11 / span 2" }}>
+                              {section.totals.openSlots} open slot{section.totals.openSlots === 1 ? "" : "s"}
                             </div>
                           </div>
-                        );
-                      })}
+                          {section.rows.map((row) => {
+                            const reservation = row.reservation;
+                            const meta = reservationPropertyMeta.get(reservation._id);
+                            const nights = reservation.nightsCount ?? nightsBetween(checkInOf(reservation), checkOutOf(reservation));
+                            const channel = reservation.integration?.platform ?? reservation.source ?? "direct";
+                            const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+                            const queueItem = bulkQueueItemsByReservationId.get(reservation._id);
+                            const eligibleForBulk = !!meta?.propertyId && reservation.slots.some((slot) => !slot.buyIn);
+                            const queuedFor = meta?.propertyId
+                              ? bulkBuyInQueuedForText(reservation, meta.propertyName, meta.propertyId)
+                              : "No mapped property";
+                            const queueStatus = queueItem?.status
+                              ?? (reservation.fullyLinked ? "completed" : eligibleForBulk ? "queued" : "skipped");
+                            const queueLabel = queueItem?.message
+                              ?? (reservation.fullyLinked ? "Filled" : eligibleForBulk ? "Ready" : "No open slots");
+                            return (
+                              <div
+                                key={`global-booking-${reservation._id}`}
+                                role="button"
+                                tabIndex={0}
+                                className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                                onClick={() => openReservationDetail(reservation._id)}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter" || event.key === " ") {
+                                    event.preventDefault();
+                                    openReservationDetail(reservation._id);
+                                  }
+                                }}
+                                data-testid={`global-booking-row-${reservation._id}`}
+                              >
+                                <div onClick={(event) => event.stopPropagation()}>
+                                  <input
+                                    type="checkbox"
+                                    className="rounded"
+                                    checked={!!bulkSelectedReservations[reservation._id]}
+                                    disabled={!eligibleForBulk || bulkBuyInQueueRunning}
+                                    onChange={(event) => {
+                                      const checked = event.target.checked;
+                                      setBulkSelectedReservations((prev) => ({
+                                        ...prev,
+                                        [reservation._id]: checked,
+                                      }));
+                                    }}
+                                    aria-label={`Select ${guestName} for bulk buy-in queue`}
+                                    data-testid={`checkbox-bulk-buy-in-${reservation._id}`}
+                                  />
+                                </div>
+                                <div>
+                                  <p className="font-medium">{fmtDate(checkInOf(reservation))}</p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    {fmtDate(checkOutOf(reservation))}
+                                  </p>
+                                </div>
+                                <div className="min-w-0">
+                                  <Badge
+                                    variant={queueStatus === "completed" ? "default" : "outline"}
+                                    className={`max-w-full text-[10px] ${
+                                      queueStatus === "completed"
+                                        ? "bg-green-600 text-white"
+                                        : queueStatus === "running"
+                                          ? "border-blue-300 text-blue-700"
+                                          : queueStatus === "failed"
+                                            ? "border-red-300 text-red-700"
+                                            : queueStatus === "skipped"
+                                              ? "border-amber-300 text-amber-700"
+                                              : queueStatus === "cancelled"
+                                                ? "border-muted-foreground/30 text-muted-foreground"
+                                                : ""
+                                    }`}
+                                  >
+                                    {queueItem?.status === "running" && <Loader2 className="mr-1 h-2.5 w-2.5 animate-spin" />}
+                                    <span className="truncate">{queueLabel}</span>
+                                  </Badge>
+                                  {queueItem?.error && (
+                                    <p className="mt-1 truncate text-[10px] text-red-700" title={queueItem.error}>
+                                      {queueItem.error}
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="truncate font-medium">{meta?.propertyName ?? "Property"}</p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    {meta?.mapped ? `#${meta.propertyId}` : "Guesty target"}
+                                  </p>
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="truncate font-medium">{guestName}</p>
+                                  <p className="truncate text-[10px] text-muted-foreground">
+                                    {reservation.confirmationCode ?? reservation._id}
+                                  </p>
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="truncate" title={queuedFor}>{queuedFor}</p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    {nights} night{nights === 1 ? "" : "s"} · {fmtDate(checkInOf(reservation))} to {fmtDate(checkOutOf(reservation))}
+                                  </p>
+                                </div>
+                                <div>
+                                  <Badge variant="outline" className="text-[10px] capitalize">
+                                    {channel}
+                                  </Badge>
+                                </div>
+                                <div className="text-right">
+                                  <p className="font-medium">{fmtMoney(row.netRevenue)}</p>
+                                  {(reservation.money?.balanceDue ?? 0) > 0 && (
+                                    <p className="text-[10px] text-amber-700">
+                                      {fmtMoney(reservation.money?.balanceDue ?? 0)} due
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="text-right">
+                                  <p className="font-medium">{fmtMoney(row.totalExpectedBuyInCost)}</p>
+                                  {row.remainingBuyInCost > 0 ? (
+                                    <p className="text-[10px] text-amber-700">
+                                      {fmtMoney(row.remainingBuyInCost)} est.
+                                    </p>
+                                  ) : (
+                                    <p className="text-[10px] text-muted-foreground">attached</p>
+                                  )}
+                                </div>
+                                <div className="text-right">
+                                  <p className={`font-medium ${row.expectedProfit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                                    {fmtMoney(row.expectedProfit)}
+                                  </p>
+                                  <p className="text-[10px] text-muted-foreground">after buy-ins</p>
+                                </div>
+                                <div>
+                                  <Badge
+                                    variant={reservation.fullyLinked ? "default" : "outline"}
+                                    className={`text-[10px] ${
+                                      reservation.fullyLinked
+                                        ? "bg-green-600 text-white"
+                                        : reservation.slotsTotal > 0
+                                          ? "border-amber-300 text-amber-700"
+                                          : ""
+                                    }`}
+                                  >
+                                    {reservation.slotsTotal > 0
+                                      ? `${reservation.slotsFilled}/${reservation.slotsTotal}`
+                                      : "Guesty"}
+                                  </Badge>
+                                </div>
+                                <div className="text-right">
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 px-2 text-xs"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openReservationDetail(reservation._id);
+                                    }}
+                                  >
+                                    Open
+                                  </Button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                          <div className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-950">
+                            <div style={{ gridColumn: "1 / span 7" }}>
+                              Subtotal for {section.label}
+                            </div>
+                            <div className="text-right">{fmtMoney(section.totals.revenue)}</div>
+                            <div className="text-right">{fmtMoney(section.totals.buyInCost)}</div>
+                            <div className={`text-right ${section.totals.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                              {fmtMoney(section.totals.profit)}
+                            </div>
+                            <div className="text-[10px] font-normal text-blue-900/80" style={{ gridColumn: "11 / span 2" }}>
+                              {section.totals.bookingCount} booking{section.totals.bookingCount === 1 ? "" : "s"}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {globalBookingGrandTotals && (
+                        <div className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-t-2 border-slate-300 bg-slate-900 px-3 py-3 text-sm font-semibold text-white">
+                          <div style={{ gridColumn: "1 / span 7" }}>
+                            Total for all visible months
+                            <span className="ml-2 font-normal text-slate-300">
+                              {globalBookingGrandTotals.bookingCount} booking{globalBookingGrandTotals.bookingCount === 1 ? "" : "s"}
+                            </span>
+                          </div>
+                          <div className="text-right">{fmtMoney(globalBookingGrandTotals.revenue)}</div>
+                          <div className="text-right">{fmtMoney(globalBookingGrandTotals.buyInCost)}</div>
+                          <div className={`text-right ${globalBookingGrandTotals.profit >= 0 ? "text-green-300" : "text-red-300"}`}>
+                            {fmtMoney(globalBookingGrandTotals.profit)}
+                          </div>
+                          <div className="text-[10px] font-normal text-slate-300" style={{ gridColumn: "11 / span 2" }}>
+                            {globalBookingGrandTotals.openSlots} open slot{globalBookingGrandTotals.openSlots === 1 ? "" : "s"}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
