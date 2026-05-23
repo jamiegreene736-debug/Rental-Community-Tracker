@@ -2954,6 +2954,35 @@ async function restoreBookingSearchUrlIfRewritten(expectedUrl, expectedSearchTer
   return false;
 }
 
+async function enforceBookingSearchUrl(expectedUrl, expectedSearchTerm, expectedCheckIn, expectedCheckOut, label) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const restored = await restoreBookingSearchUrlIfRewritten(expectedUrl, expectedSearchTerm, expectedCheckIn, expectedCheckOut);
+    const current = new URL(page.url());
+    const expected = new URL(expectedUrl);
+    if (!bookingUrlMissingExpectedSearch(current, expected)) return true;
+    log(
+      `booking_search: ${label} still missing intended dates/search after ${restored ? "restore" : "check"} ` +
+      `${attempt}/3 (url=${current.toString().slice(0, 180)})`,
+    );
+    await page.goto(expectedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await page.waitForTimeout(PAGE_SETTLE_MS);
+    await dismissObstructions(page, `booking_search_${label}_${attempt}`).catch(() => null);
+  }
+  const finalUrl = page.url();
+  const finalState = await dumpPageState("booking-invalid-dates", {
+    expectedUrl,
+    expectedSearchTerm,
+    expectedCheckIn,
+    expectedCheckOut,
+    finalUrl,
+  }).catch(() => null);
+  const excerpt = finalState?.bodyExcerpt ? ` Body starts: ${finalState.bodyExcerpt.slice(0, 180)}` : "";
+  throw new Error(
+    `Booking.com rewrote the search away from ${expectedCheckIn}→${expectedCheckOut}; refusing to use default-date results. ` +
+    `Final URL: ${finalUrl.slice(0, 220)}.${excerpt}`,
+  );
+}
+
 async function processVrboSearch(id, params) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
@@ -3230,20 +3259,31 @@ async function processBookingSearch(id, params) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
-  await primeOtaHomepageSearch("https://www.booking.com/", effectiveSearchTerm, "booking_search");
   // Booking.com supports `nflt=entire_place_bedroom_count%3D${bedrooms}`
   // for the bedroom filter (URL-encoded "entire_place_bedroom_count=N"),
-  // sorted by price: `&order=price`.
-  const url =
-    `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(effectiveSearchTerm)}` +
-    `&checkin=${checkIn}&checkout=${checkOut}` +
-    `&group_adults=2&no_rooms=1&group_children=0` +
-    `&order=price&nflt=${encodeURIComponent("entire_place_bedroom_count=" + bedrooms)}`;
+  // sorted by price: `&order=price`. Do not click the Booking homepage
+  // form first: its visible calendar defaults to today/tomorrow and can
+  // asynchronously rewrite this URL back to the wrong dates.
+  const urlParams = new URLSearchParams({
+    ss: effectiveSearchTerm,
+    ssne: effectiveSearchTerm,
+    ssne_untouched: effectiveSearchTerm,
+    checkin: checkIn,
+    checkout: checkOut,
+    group_adults: "2",
+    no_rooms: "1",
+    group_children: "0",
+    order: "price",
+    selected_currency: "USD",
+    nflt: `entire_place_bedroom_count=${bedrooms}`,
+  });
+  const url = `https://www.booking.com/searchresults.html?${urlParams.toString()}`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "booking_search");
-  await restoreBookingSearchUrlIfRewritten(url, effectiveSearchTerm, checkIn, checkOut);
+  await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_initial_goto");
   await applyBookingBedroomFilter(bedrooms, url).catch(() => false);
+  await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_bedroom_filter");
   const state = await dumpPageState("booking", { id, ...params });
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
     throw new Error("Booking.com bot wall — refresh cookies.json (booking.com)");
