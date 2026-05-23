@@ -28,10 +28,15 @@ export async function ensureRuntimeSchema(): Promise<void> {
       simplelogin_alias_id integer,
       mailbox_email text NOT NULL,
       status text NOT NULL DEFAULT 'active',
+      expires_at timestamp,
       raw_payload text,
       created_at timestamp NOT NULL DEFAULT now(),
       updated_at timestamp NOT NULL DEFAULT now()
     )
+  `);
+  await db.execute(sql`
+    ALTER TABLE reservation_aliases
+      ADD COLUMN IF NOT EXISTS expires_at timestamp
   `);
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS buy_in_vendor_contacts (

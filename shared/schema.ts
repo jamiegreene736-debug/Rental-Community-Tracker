@@ -121,6 +121,7 @@ export const reservationAliases = pgTable("reservation_aliases", {
   simpleloginAliasId: integer("simplelogin_alias_id"),
   mailboxEmail: text("mailbox_email").notNull(),
   status: text("status").notNull().default("active"),
+  expiresAt: timestamp("expires_at"),
   rawPayload: text("raw_payload"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

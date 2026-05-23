@@ -226,6 +226,8 @@ type ReservationAliasRecord = {
   aliasEmail: string;
   simpleloginAliasId?: number | null;
   mailboxEmail: string;
+  status?: string | null;
+  expiresAt?: string | null;
 };
 
 type BuyInVendorContactRecord = {
@@ -607,6 +609,16 @@ function fmtDate(s: string | Date | undefined | null): string {
   const d = new Date(isoDate);
   if (isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function aliasExpirationSummary(expiresAt?: string | null) {
+  if (!expiresAt) return { date: "Not set", relative: "expiration not saved yet", expired: false };
+  const d = new Date(expiresAt);
+  if (Number.isNaN(d.getTime())) return { date: "Not set", relative: "expiration not saved yet", expired: false };
+  const days = Math.ceil((d.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  if (days < 0) return { date: fmtDate(expiresAt), relative: "expired", expired: true };
+  if (days === 0) return { date: fmtDate(expiresAt), relative: "expires today", expired: false };
+  return { date: fmtDate(expiresAt), relative: `${days} day${days === 1 ? "" : "s"} left`, expired: false };
 }
 
 // Best-effort source label from a URL. The buy-in's listing URL field
@@ -7008,7 +7020,17 @@ function BuyInVendorEmailPanel({
           <Mail className="h-3.5 w-3.5 text-muted-foreground" />
           <span className="font-medium">Booking email alias</span>
           {data?.alias ? (
-            <Badge variant="outline" className="font-mono text-[10px]">{data.alias.aliasEmail}</Badge>
+            <>
+              <Badge variant="outline" className="font-mono text-[10px]">{data.alias.aliasEmail}</Badge>
+              {(() => {
+                const expiry = aliasExpirationSummary(data.alias.expiresAt);
+                return (
+                  <Badge variant={expiry.expired ? "destructive" : "secondary"} className="text-[10px]">
+                    {expiry.expired ? "Expired" : `Expires ${expiry.date}`}
+                  </Badge>
+                );
+              })()}
+            </>
           ) : (
             <Button
               size="sm"
@@ -7022,6 +7044,11 @@ function BuyInVendorEmailPanel({
           )}
           {contact?.reverseAliasEmail && (
             <Badge variant="secondary" className="font-mono text-[10px]">to PM via {contact.reverseAliasEmail}</Badge>
+          )}
+          {data?.alias && (
+            <span className="basis-full text-[11px] text-muted-foreground">
+              Saved alias messages and attachments stay in history after the alias expires.
+            </span>
           )}
         </div>
       )}

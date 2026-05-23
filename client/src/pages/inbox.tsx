@@ -68,7 +68,7 @@ type InboxVendorContactRecord = {
 };
 
 type InboxBuyInCommunications = {
-  alias: { aliasEmail: string; mailboxEmail: string } | null;
+  alias: { aliasEmail: string; mailboxEmail: string; status?: string | null; expiresAt?: string | null } | null;
   buyIns: InboxBuyInRecord[];
   contacts: InboxVendorContactRecord[];
   emails: Array<{
@@ -522,6 +522,16 @@ function triggerLabel(trigger: string, daysOffset: number): string {
 function formatDate(d?: string) {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function aliasExpirationSummary(expiresAt?: string | null) {
+  if (!expiresAt) return { date: "Not set", relative: "expiration not saved yet", expired: false };
+  const date = new Date(expiresAt);
+  if (Number.isNaN(date.getTime())) return { date: "Not set", relative: "expiration not saved yet", expired: false };
+  const days = Math.ceil((date.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  if (days < 0) return { date: formatDate(expiresAt), relative: "expired", expired: true };
+  if (days === 0) return { date: formatDate(expiresAt), relative: "expires today", expired: false };
+  return { date: formatDate(expiresAt), relative: `${days} day${days === 1 ? "" : "s"} left`, expired: false };
 }
 
 function extractEmailForInput(value: string): string {
@@ -1835,11 +1845,26 @@ function InboxBuyInPanel({
       <div className="border rounded-lg divide-y text-xs">
         {data?.alias && (
           <div className="px-2.5 py-2">
-            <div className="flex items-center gap-1.5 font-medium">
+            <div className="flex flex-wrap items-center gap-1.5 font-medium">
               <Mail className="h-3.5 w-3.5" />
               <span className="truncate">{data.alias.aliasEmail}</span>
+              {(() => {
+                const expiry = aliasExpirationSummary(data.alias.expiresAt);
+                return (
+                  <Badge variant={expiry.expired ? "destructive" : "secondary"} className="text-[10px]">
+                    {expiry.expired ? "Expired" : `Expires ${expiry.date}`}
+                  </Badge>
+                );
+              })()}
             </div>
-            <div className="text-[11px] text-muted-foreground">Forwards to {data.alias.mailboxEmail}</div>
+            {(() => {
+              const expiry = aliasExpirationSummary(data.alias.expiresAt);
+              return (
+                <div className="text-[11px] text-muted-foreground">
+                  Forwards to {data.alias.mailboxEmail} until {expiry.date} ({expiry.relative}). Saved messages and attachments are retained after expiration.
+                </div>
+              );
+            })()}
           </div>
         )}
         {units.map((unit) => {

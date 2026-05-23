@@ -6368,16 +6368,73 @@ export async function registerRoutes(
     }
   });
 
+  const ALIAS_EXPIRES_DAYS_AFTER_CHECKOUT = Math.max(
+    1,
+    Number(process.env.SIMPLELOGIN_ALIAS_EXPIRES_DAYS_AFTER_CHECKOUT || 30),
+  );
+  const ALIAS_FALLBACK_ACTIVE_DAYS = Math.max(
+    ALIAS_EXPIRES_DAYS_AFTER_CHECKOUT,
+    Number(process.env.SIMPLELOGIN_ALIAS_FALLBACK_ACTIVE_DAYS || 180),
+  );
+
+  function parseAliasExpiryDate(value: unknown): Date | null {
+    if (!value) return null;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    const date = new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T12:00:00.000Z` : raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  function addAliasDays(base: Date, days: number): Date {
+    return new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+  }
+
+  function computeReservationAliasExpiresAt(buyIns: Array<{ checkOut?: unknown }>, fallbackBase: Date = new Date()): Date {
+    const latestCheckout = buyIns.reduce<Date | null>((latest, buyIn) => {
+      const parsed = parseAliasExpiryDate(buyIn.checkOut);
+      if (!parsed) return latest;
+      return !latest || parsed.getTime() > latest.getTime() ? parsed : latest;
+    }, null);
+    if (latestCheckout) return addAliasDays(latestCheckout, ALIAS_EXPIRES_DAYS_AFTER_CHECKOUT);
+    return addAliasDays(fallbackBase, ALIAS_FALLBACK_ACTIVE_DAYS);
+  }
+
+  async function ensureReservationAliasExpiresAt<T extends { id: number; expiresAt?: Date | string | null; createdAt?: Date | string | null }>(
+    alias: T,
+    buyIns: Array<{ checkOut?: unknown }>,
+  ): Promise<T> {
+    const fallbackBase = parseAliasExpiryDate(alias.createdAt) ?? new Date();
+    const expiresAt = computeReservationAliasExpiresAt(buyIns, fallbackBase);
+    const current = parseAliasExpiryDate(alias.expiresAt);
+    if (current && current.getTime() >= expiresAt.getTime() - 60_000) return alias;
+    const [updated] = await db
+      .update(reservationAliases)
+      .set({ expiresAt, updatedAt: new Date() })
+      .where(eq(reservationAliases.id, alias.id))
+      .returning();
+    return (updated ?? alias) as T;
+  }
+
+  function reservationAliasIsExpired(alias: { expiresAt?: Date | string | null }): boolean {
+    const expiresAt = parseAliasExpiryDate(alias.expiresAt);
+    return !!expiresAt && expiresAt.getTime() < Date.now();
+  }
+
   async function getOrCreateReservationAlias(input: {
     reservationId: string;
     guestName?: string | null;
+    buyIns?: Array<{ checkOut?: unknown }>;
   }) {
     const existing = await db
       .select()
       .from(reservationAliases)
       .where(eq(reservationAliases.reservationId, input.reservationId))
       .limit(1);
-    if (existing[0]) return { alias: existing[0], created: false };
+    if (existing[0]) {
+      const alias = await ensureReservationAliasExpiresAt(existing[0], input.buyIns ?? []);
+      return { alias, created: false };
+    }
 
     const payload = await createSimpleLoginAlias({
       prefix: aliasPrefixForGuest(input.guestName, input.reservationId),
@@ -6396,6 +6453,7 @@ export async function registerRoutes(
         aliasEmail,
         simpleloginAliasId,
         mailboxEmail: SIMPLELOGIN_MAILBOX_EMAIL,
+        expiresAt: computeReservationAliasExpiresAt(input.buyIns ?? []),
         rawPayload: JSON.stringify(payload),
       })
       .returning();
@@ -6423,6 +6481,7 @@ export async function registerRoutes(
     const { alias } = await getOrCreateReservationAlias({
       reservationId: input.reservationId,
       guestName: input.guestName,
+      buyIns: [buyIn],
     });
     if (!alias.simpleloginAliasId) throw new Error("Saved SimpleLogin alias is missing its alias id");
 
@@ -6532,11 +6591,12 @@ export async function registerRoutes(
     try {
       const reservationId = req.params.reservationId;
       const buyIns = await storage.getBuyInsByReservation(reservationId);
-      const [alias] = await db
+      const [rawAlias] = await db
         .select()
         .from(reservationAliases)
         .where(eq(reservationAliases.reservationId, reservationId))
         .limit(1);
+      const alias = rawAlias ? await ensureReservationAliasExpiresAt(rawAlias, buyIns) : null;
       const contacts = await db
         .select()
         .from(buyInVendorContacts)
@@ -6557,7 +6617,8 @@ export async function registerRoutes(
     try {
       const reservationId = req.params.reservationId;
       const guestName = String(req.body?.guestName ?? "").trim() || null;
-      const result = await getOrCreateReservationAlias({ reservationId, guestName });
+      const buyIns = await storage.getBuyInsByReservation(reservationId);
+      const result = await getOrCreateReservationAlias({ reservationId, guestName, buyIns });
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to create SimpleLogin alias", message: err.message });
@@ -6604,6 +6665,12 @@ export async function registerRoutes(
       });
       if (!contact.reverseAliasEmail) {
         return res.status(500).json({ error: "Vendor contact is missing a reverse alias email" });
+      }
+      if (reservationAliasIsExpired(alias)) {
+        return res.status(400).json({
+          error: "Booking email alias has expired",
+          message: "Create a new communication path before sending another PM/vendor email. Saved messages and attachments remain in history.",
+        });
       }
       const from = process.env.SMTP_FROM || process.env.RESERVATIONS_EMAIL || SIMPLELOGIN_MAILBOX_EMAIL;
       const sent = await sendBuyInEmail({ from, to: contact.reverseAliasEmail, subject, body, attachments });
