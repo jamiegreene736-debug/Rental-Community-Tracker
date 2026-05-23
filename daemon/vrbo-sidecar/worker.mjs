@@ -1708,9 +1708,19 @@ async function extractDataDomeChallengeParams(targetPage) {
   const userAgent = await targetPage.evaluate(() => navigator.userAgent).catch(() => "");
   const frameUrls = targetPage.frames().map((frame) => frame.url()).filter(Boolean);
   const iframeSrcs = await targetPage
-    .evaluate(() => Array.from(document.querySelectorAll("iframe[src]"))
-      .map((iframe) => iframe.getAttribute("src") || "")
-      .filter(Boolean))
+    .evaluate(() => {
+      const attrs = Array.from(document.querySelectorAll("iframe[src], script[src], link[href], a[href], form[action]"))
+        .flatMap((el) => [
+          el.getAttribute("src"),
+          el.getAttribute("href"),
+          el.getAttribute("action"),
+        ])
+        .filter(Boolean);
+      const html = document.documentElement?.innerHTML || "";
+      const embedded = Array.from(html.matchAll(/https?:\\?\/\\?\/[^"'<>\\\s]+(?:captcha-delivery\.com|datadome)[^"'<>\\\s]*/gi))
+        .map((match) => match[0].replace(/\\\//g, "/").replace(/&amp;/g, "&"));
+      return [...attrs, ...embedded];
+    })
     .catch(() => []);
   const candidates = [...iframeSrcs, ...frameUrls]
     .map((src) => {
@@ -1726,13 +1736,24 @@ async function extractDataDomeChallengeParams(targetPage) {
   return { websiteURL: pageUrl, captchaUrl, userAgent };
 }
 
+async function waitForDataDomeChallengeParams(targetPage, timeoutMs = 8_000) {
+  const startedAt = Date.now();
+  let lastParams = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    lastParams = await extractDataDomeChallengeParams(targetPage);
+    if (lastParams?.captchaUrl) return lastParams;
+    await targetPage.waitForTimeout(500).catch(() => {});
+  }
+  return lastParams;
+}
+
 function dataDomeCookieValue(cookieHeader) {
   const match = String(cookieHeader ?? "").match(/(?:^|;\s*)datadome=([^;]+)/i);
   return match?.[1] ? decodeURIComponent(match[1]) : "";
 }
 
 async function solveDataDomeCaptchaViaServer(targetPage, label, id) {
-  const params = await extractDataDomeChallengeParams(targetPage);
+  const params = await waitForDataDomeChallengeParams(targetPage);
   if (!params) {
     log(`${label} ${id}: no DataDome iframe URL found; falling back to coordinate solver`);
     return false;
