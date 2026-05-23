@@ -41,4 +41,8 @@ ENV NODE_ENV=production
 #      database-backed features such as manual buy-in reservations alive across
 #      deploys without hand-written migration SQL.
 #   4. Start the server.
-CMD ["sh", "-c", "mkdir -p /app/client/public/photos && cp -Rn /app/photos-seed/. /app/client/public/photos/ 2>/dev/null || true; npm run db:push && node dist/index.cjs"]
+#
+# A second Railway service can run the same image with
+# RAILWAY_SERVICE_ROLE=sidecar-worker. That keeps browser automation on Railway
+# instead of a visible local Mac Chrome process.
+CMD ["sh", "scripts/railway-start.sh"]
