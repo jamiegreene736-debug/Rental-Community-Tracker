@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -59,9 +59,6 @@ import {
   Square,
   CheckSquare,
   StopCircle,
-  MonitorPlay,
-  Maximize2,
-  MousePointerClick,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -159,32 +156,6 @@ type BulkPricingJob = {
   }>;
 };
 
-type SidecarScreenSnapshot = {
-  slot: string;
-  requestId?: string;
-  opType?: string;
-  label?: string;
-  phase?: string;
-  url?: string;
-  title?: string;
-  screenshotDataUrl?: string;
-  width?: number;
-  height?: number;
-  captcha?: boolean;
-  error?: string;
-  at: string;
-  ageMs: number;
-};
-
-type SidecarScreensResponse = {
-  maxScreens: number;
-  screens: SidecarScreenSnapshot[];
-  heartbeat?: {
-    isOnline: boolean;
-    activeJob?: { label: string; activeSec: number } | null;
-  };
-};
-
 type QueueJobEventPayload = {
   id?: number;
   jobType?: string;
@@ -280,161 +251,6 @@ function paymentLineDate(item: any): string | null {
 
 function paymentLineLabel(item: any): string {
   return String(item?.description ?? item?.note ?? item?.label ?? item?.type ?? item?.kind ?? item?.status ?? "Payment");
-}
-
-function sidecarScreenAge(ageMs: number): string {
-  if (!Number.isFinite(ageMs) || ageMs < 0) return "now";
-  if (ageMs < 60_000) return `${Math.max(1, Math.round(ageMs / 1000))}s ago`;
-  return `${Math.round(ageMs / 60_000)}m ago`;
-}
-
-function SidecarScreensPanel({ data }: { data?: SidecarScreensResponse }) {
-  const screens = data?.screens ?? [];
-  const maxScreens = Math.max(1, data?.maxScreens ?? 8);
-  const bySlot = new Map(screens.map((screen) => [screen.slot, screen]));
-  const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
-  const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
-  const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
-  const draggingRef = useRef(false);
-  const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
-
-  const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const width = Math.max(1, screen.width ?? 1280);
-    const height = Math.max(1, screen.height ?? 820);
-    const x = Math.max(0, Math.min(width, ((event.clientX - rect.left) / Math.max(1, rect.width)) * width));
-    const y = Math.max(0, Math.min(height, ((event.clientY - rect.top) / Math.max(1, rect.height)) * height));
-    void fetch("/api/vrbo-sidecar/screen-control", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        slot: screen.slot,
-        requestId: screen.requestId,
-        action,
-        x: Math.round(x),
-        y: Math.round(y),
-      }),
-    }).catch(() => {});
-  };
-
-  return (
-    <Card className="mb-4 p-4">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <MonitorPlay className="h-4 w-4 text-muted-foreground" />
-          <div>
-            <p className="text-sm font-semibold">Local Chrome sidecar screens</p>
-            <p className="text-xs text-muted-foreground">
-              {data?.heartbeat?.isOnline ? "Sidecar live" : "Sidecar offline"} · {activeCount} active thumbnail{activeCount === 1 ? "" : "s"}
-              {data?.heartbeat?.activeJob ? ` · ${data.heartbeat.activeJob.label} ${data.heartbeat.activeJob.activeSec}s` : ""}
-            </p>
-          </div>
-        </div>
-        <Badge variant="outline" className="text-[10px]">Up to 8 Chrome windows</Badge>
-      </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
-        {slots.map((slot) => {
-          const screen = bySlot.get(slot);
-          const host = (() => {
-            try { return screen?.url ? new URL(screen.url).hostname.replace(/^www\./, "") : ""; } catch { return ""; }
-          })();
-          const canOpen = Boolean(screen?.screenshotDataUrl);
-          return (
-            <button
-              key={slot}
-              type="button"
-              className={`overflow-hidden rounded-md border bg-muted/20 text-left transition ${canOpen ? "hover:border-blue-400 hover:shadow-sm" : ""} ${screen?.captcha ? "border-amber-400 ring-1 ring-amber-300" : ""}`}
-              onClick={() => {
-                if (screen?.screenshotDataUrl) setSelectedSlot(slot);
-              }}
-              disabled={!canOpen}
-              title={canOpen ? "Open interactive sidecar screen" : "No screen available"}
-            >
-              <div className="flex items-center justify-between gap-1 border-b bg-background px-2 py-1 text-[10px]">
-                <span className="font-medium">Slot {slot}</span>
-                <span className="flex items-center gap-1">
-                  {screen?.captcha && <MousePointerClick className="h-3 w-3 text-amber-700" />}
-                  {canOpen && <Maximize2 className="h-3 w-3 text-muted-foreground" />}
-                  <span className={screen?.captcha ? "text-amber-700" : "text-muted-foreground"}>
-                    {screen ? sidecarScreenAge(screen.ageMs) : "idle"}
-                  </span>
-                </span>
-              </div>
-              <div className="aspect-video bg-slate-950">
-                {screen?.screenshotDataUrl ? (
-                  <img src={screen.screenshotDataUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <div className="flex h-full items-center justify-center text-[10px] text-slate-400">No screen</div>
-                )}
-              </div>
-              <div className="min-h-[52px] space-y-0.5 px-2 py-1.5 text-[10px]">
-                <p className="truncate font-medium" title={screen?.phase}>{screen?.phase ?? "Waiting"}</p>
-                <p className="truncate text-muted-foreground" title={screen?.title ?? host}>{screen?.title || host || "Ready for next search"}</p>
-                {screen?.error && <p className="truncate text-red-600" title={screen.error}>{screen.error}</p>}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-      <Dialog open={Boolean(selectedSlot)} onOpenChange={(open) => {
-        if (!open) {
-          draggingRef.current = false;
-          setSelectedSlot(null);
-        }
-      }}>
-        <DialogContent className="max-w-6xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <MonitorPlay className="h-5 w-5" />
-              Sidecar screen {selectedSlot}
-              {selectedScreen?.captcha && <Badge className="bg-amber-500 text-white">CAPTCHA</Badge>}
-            </DialogTitle>
-          </DialogHeader>
-          {selectedScreen?.screenshotDataUrl ? (
-            <div className="space-y-3">
-              <div className="rounded-md border bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                Click and drag directly on the screen below to solve a slider CAPTCHA. The worker applies your mouse movement to the live sidecar page and the thumbnail updates every few seconds.
-              </div>
-              <div
-                className="relative overflow-hidden rounded-md border bg-slate-950 touch-none"
-                onPointerDown={(event) => {
-                  draggingRef.current = true;
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                  sendPointerCommand(selectedScreen, "down", event);
-                }}
-                onPointerMove={(event) => {
-                  if (!draggingRef.current) return;
-                  sendPointerCommand(selectedScreen, "move", event);
-                }}
-                onPointerUp={(event) => {
-                  if (!draggingRef.current) return;
-                  draggingRef.current = false;
-                  sendPointerCommand(selectedScreen, "up", event);
-                }}
-                onPointerCancel={(event) => {
-                  draggingRef.current = false;
-                  sendPointerCommand(selectedScreen, "up", event);
-                }}
-              >
-                <img
-                  src={selectedScreen.screenshotDataUrl}
-                  alt=""
-                  className="max-h-[72vh] w-full select-none object-contain"
-                  draggable={false}
-                />
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                <span className="truncate">{selectedScreen.phase ?? "Working"} · {sidecarScreenAge(selectedScreen.ageMs)}</span>
-                <span className="truncate">{selectedScreen.title || selectedScreen.url || "Sidecar browser"}</span>
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-md border bg-muted/20 p-6 text-sm text-muted-foreground">No live screen is available for this slot.</div>
-          )}
-        </DialogContent>
-      </Dialog>
-    </Card>
-  );
 }
 
 const properties: Property[] = [
@@ -1188,12 +1004,6 @@ export default function Home() {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
-  const { data: sidecarScreens } = useQuery<SidecarScreensResponse>({
-    queryKey: ["/api/vrbo-sidecar/screens"],
-    refetchInterval: 3_000,
-    refetchOnWindowFocus: true,
-  });
-
   const propertyNameById = useMemo(() => {
     const map = new Map<number, string>();
     for (const property of allProperties) map.set(property.id, property.name);
@@ -2133,8 +1943,6 @@ export default function Home() {
             </DialogContent>
           </Dialog>
         </div>
-
-        <SidecarScreensPanel data={sidecarScreens} />
 
         {/* PR #318: dashboard alerts banner removed. Alerts now live
             inside each listing's per-channel rows in the listing

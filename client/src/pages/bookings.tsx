@@ -4441,7 +4441,9 @@ export default function Bookings() {
             <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${bookingsLoading ? "animate-spin" : ""}`} /> Refresh
           </Button>
         </div>
-        <SidecarScreensStrip />
+        <div className="basis-full">
+          <SidecarScreensStrip />
+        </div>
       </div>
 
       <div className="max-w-7xl mx-auto px-3 py-4 sm:px-6 sm:py-6 space-y-5">
@@ -7436,9 +7438,6 @@ function SidecarScreensStrip() {
                 } else {
                   sendPointerCommand(selectedScreen, "click", event);
                 }
-              }}
-              onClick={(event) => {
-                if (!draggingRef.current) sendPointerCommand(selectedScreen, "click", event);
               }}
             >
               <img src={selectedScreen.screenshotDataUrl} alt="" className="max-h-[72vh] w-full object-contain" />
