@@ -2272,7 +2272,7 @@ export default function Bookings() {
 
   // Sort controls: click a column header to sort by that field; click again
   // to toggle asc/desc. Default = check-in ascending (soonest first).
-  type SortKey = "checkIn" | "guest" | "payout" | "buyIn" | "profit" | "status";
+  type SortKey = "checkIn" | "guest" | "property" | "payout" | "buyIn" | "profit" | "status";
   const [sortBy, setSortBy] = useState<SortKey>("checkIn");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const toggleSort = (key: SortKey) => {
@@ -2573,6 +2573,11 @@ export default function Bookings() {
             const bn = (b.guest?.fullName ?? b.guest?.firstName ?? "").toLowerCase();
             return an.localeCompare(bn);
           }
+          case "property": {
+            const an = (reservationPropertyMeta.get(a._id)?.propertyName ?? "").toLowerCase();
+            const bn = (reservationPropertyMeta.get(b._id)?.propertyName ?? "").toLowerCase();
+            return an.localeCompare(bn);
+          }
           case "payout": {
             return (a.money?.hostPayout ?? 0) - (b.money?.hostPayout ?? 0);
           }
@@ -2603,7 +2608,7 @@ export default function Bookings() {
       return diff * dir;
     });
     return list;
-  }, [rawReservations, sortBy, sortDir]);
+  }, [rawReservations, reservationPropertyMeta, sortBy, sortDir]);
 
   useEffect(() => {
     if (!focusedReservationId) return;
@@ -4053,6 +4058,18 @@ export default function Bookings() {
     }
     void refetchBookings();
   };
+  const openReservationDetail = (reservationId: string) => {
+    const meta = reservationPropertyMeta.get(reservationId);
+    if (!meta?.propertyId) return;
+    if (meta.mapped) {
+      setSelectedGuestyListingId(null);
+      setSelectedPropertyId(meta.propertyId);
+    } else {
+      setSelectedPropertyId(null);
+      setSelectedGuestyListingId(meta.guestyListingId);
+    }
+    setExpanded({ [reservationId]: true });
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -4257,6 +4274,138 @@ export default function Bookings() {
           </div>
         )}
 
+        {isGlobalView && stats && reservations.length > 0 && (
+          <Card data-testid="card-global-bookings">
+            <CardHeader className="pb-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Calendar className="h-4 w-4" /> All bookings
+                    {bookingsLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground ml-1" />}
+                  </CardTitle>
+                  <CardDescription>
+                    Global booking list across every buy-in target. Sorted by soonest arrival unless you click a column.
+                  </CardDescription>
+                </div>
+                <Badge variant="outline" className="w-fit">
+                  {reservations.length} booking{reservations.length === 1 ? "" : "s"}
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-hidden rounded border">
+                <div className="max-h-[560px] overflow-auto">
+                  <div className="min-w-[1040px]">
+                    <div className="sticky top-0 z-10 grid grid-cols-[120px_1.55fr_1.35fr_1.25fr_.8fr_.9fr_.9fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                      <SortHeader label="Check-in" active={sortBy === "checkIn"} dir={sortDir} onClick={() => toggleSort("checkIn")} />
+                      <SortHeader label="Property" active={sortBy === "property"} dir={sortDir} onClick={() => toggleSort("property")} />
+                      <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
+                      <div>Stay</div>
+                      <div>Channel</div>
+                      <SortHeader label="Payout" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
+                      <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
+                      <SortHeader label="Fill" active={sortBy === "status"} dir={sortDir} onClick={() => toggleSort("status")} />
+                      <div className="text-right">Open</div>
+                    </div>
+                    <div className="divide-y">
+                      {reservations.map((reservation) => {
+                        const meta = reservationPropertyMeta.get(reservation._id);
+                        const nights = reservation.nightsCount ?? nightsBetween(checkInOf(reservation), checkOutOf(reservation));
+                        const payout = reservation.money?.hostPayout ?? 0;
+                        const totalBuyInCost = reservation.slots.reduce(
+                          (sum, slot) => sum + parseFloat(String(slot.buyIn?.costPaid ?? 0)),
+                          0,
+                        );
+                        const channel = reservation.integration?.platform ?? reservation.source ?? "direct";
+                        const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+                        return (
+                          <div
+                            key={`global-booking-${reservation._id}`}
+                            role="button"
+                            tabIndex={0}
+                            className="grid grid-cols-[120px_1.55fr_1.35fr_1.25fr_.8fr_.9fr_.9fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                            onClick={() => openReservationDetail(reservation._id)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                openReservationDetail(reservation._id);
+                              }
+                            }}
+                            data-testid={`global-booking-row-${reservation._id}`}
+                          >
+                            <div>
+                              <p className="font-medium">{fmtDate(checkInOf(reservation))}</p>
+                              <p className="text-[10px] text-muted-foreground">
+                                {fmtDate(checkOutOf(reservation))}
+                              </p>
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate font-medium">{meta?.propertyName ?? "Property"}</p>
+                              <p className="text-[10px] text-muted-foreground">
+                                {meta?.mapped ? `#${meta.propertyId}` : "Guesty target"}
+                              </p>
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate font-medium">{guestName}</p>
+                              <p className="truncate text-[10px] text-muted-foreground">
+                                {reservation.confirmationCode ?? reservation._id}
+                              </p>
+                            </div>
+                            <div>
+                              <p>{nights} night{nights === 1 ? "" : "s"}</p>
+                              <p className="text-[10px] text-muted-foreground">
+                                {fmtDate(checkInOf(reservation))} to {fmtDate(checkOutOf(reservation))}
+                              </p>
+                            </div>
+                            <div>
+                              <Badge variant="outline" className="text-[10px] capitalize">
+                                {channel}
+                              </Badge>
+                            </div>
+                            <div className="text-right">
+                              <p className="font-medium">{fmtMoney(payout)}</p>
+                              {(reservation.money?.balanceDue ?? 0) > 0 && (
+                                <p className="text-[10px] text-amber-700">
+                                  {fmtMoney(reservation.money?.balanceDue ?? 0)} due
+                                </p>
+                              )}
+                            </div>
+                            <div className="text-right">
+                              <p className="font-medium">{fmtMoney(totalBuyInCost)}</p>
+                              <p className="text-[10px] text-muted-foreground">attached</p>
+                            </div>
+                            <div>
+                              <Badge
+                                variant={reservation.fullyLinked ? "default" : "outline"}
+                                className={`text-[10px] ${
+                                  reservation.fullyLinked
+                                    ? "bg-green-600 text-white"
+                                    : reservation.slotsTotal > 0
+                                      ? "border-amber-300 text-amber-700"
+                                      : ""
+                                }`}
+                              >
+                                {reservation.slotsTotal > 0
+                                  ? `${reservation.slotsFilled}/${reservation.slotsTotal}`
+                                  : "Guesty"}
+                              </Badge>
+                            </div>
+                            <div className="text-right">
+                              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs">
+                                Open
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {stats && arrivalStats && (
           <Card data-testid="card-upcoming-arrivals">
             <CardHeader className="pb-2">
@@ -4425,16 +4574,7 @@ export default function Bookings() {
                           type="button"
                           className="w-full px-3 py-2 text-left hover:bg-amber-100/50"
                           onClick={() => {
-                            if (meta?.propertyId) {
-                              if (meta.mapped) {
-                                setSelectedGuestyListingId(null);
-                                setSelectedPropertyId(meta.propertyId);
-                              } else {
-                                setSelectedPropertyId(null);
-                                setSelectedGuestyListingId(meta.guestyListingId);
-                              }
-                              setExpanded({ [row.reservation._id]: true });
-                            }
+                            openReservationDetail(row.reservation._id);
                           }}
                         >
                           <div className="grid grid-cols-1 gap-1 sm:grid-cols-[120px_1fr_110px_120px] sm:items-center">
@@ -4649,9 +4789,7 @@ export default function Bookings() {
                                   variant="ghost"
                                   className="h-7 px-2 text-xs"
                                   onClick={() => {
-                                    setSelectedGuestyListingId(null);
-                                    setSelectedPropertyId(row.propertyId);
-                                    setExpanded({ [row.reservation._id]: true });
+                                    openReservationDetail(row.reservation._id);
                                   }}
                                 >
                                   Open
