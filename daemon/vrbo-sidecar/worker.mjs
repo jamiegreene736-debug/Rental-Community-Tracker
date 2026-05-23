@@ -65,6 +65,7 @@ const HEADLESS_FALLBACK_ENABLED = process.env.SIDECAR_HEADLESS_FALLBACK_ENABLED 
 const HEADLESS_BROWSER_CHANNEL = process.env.SIDECAR_HEADLESS_BROWSER_CHANNEL ?? "chrome";
 const HEADLESS_USER_DATA_ROOT = process.env.SIDECAR_HEADLESS_USER_DATA_DIR ??
   path.join(os.homedir(), "Library/Application Support/VrboSidecar-Headless");
+const HEADLESS_PROXY_ENABLED = process.env.SIDECAR_HEADLESS_PROXY_ENABLED !== "0";
 const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 1_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
 const SERVER_WORKER_CLAIM_DELAY_MS = Number(process.env.SIDECAR_SERVER_WORKER_CLAIM_DELAY_MS ?? 4_000);
@@ -104,6 +105,10 @@ function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
 }
 
+function activeRequestIsVrbo() {
+  return isVrboBrowserOp(activeRuntimeRequest?.opType ?? "");
+}
+
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
   // eslint-disable-next-line no-console
@@ -124,6 +129,79 @@ function withSoftTimeout(promise, timeoutMs, fallback = undefined) {
     Promise.resolve(promise).catch(() => fallback),
     new Promise((resolve) => setTimeout(() => resolve(fallback), timeoutMs)),
   ]);
+}
+
+function boolFromEnv(name, defaultValue = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return defaultValue;
+  return /^(1|true|yes|on)$/i.test(raw);
+}
+
+function nonEmptyEnv(...names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value != null && String(value).trim() !== "") return String(value).trim();
+  }
+  return "";
+}
+
+function sanitizeProxyOption(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "")
+    .slice(0, 64);
+}
+
+function headlessProxySessionId() {
+  const base = [
+    activeRuntimeRequest?.id,
+    activeRuntimeRequest?.opType,
+    activeRuntimeRequest?.freshSessionReason,
+    activeRuntimeRequest?.vrboFreshAttempt ? `fresh${activeRuntimeRequest.vrboFreshAttempt}` : "initial",
+    `slot${WORKER_SLOT}`,
+    Date.now().toString(36),
+  ]
+    .filter(Boolean)
+    .join("-");
+  return base.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 48) || `sidecar${Date.now().toString(36)}`;
+}
+
+function appendBrightDataUsernameOptions(username) {
+  let next = username;
+  const country = sanitizeProxyOption(nonEmptyEnv("CHROME_PROXY_COUNTRY", "BRIGHTDATA_PROXY_COUNTRY"));
+  if (country && !/-country-[a-z0-9_]+(?:-|$)/i.test(next)) {
+    next += `-country-${country}`;
+  }
+  if (!/-session-[a-z0-9_]+(?:-|$)/i.test(next)) {
+    next += `-session-${headlessProxySessionId()}`;
+  }
+  return next;
+}
+
+function headlessProxyConfig() {
+  if (!HEADLESS_PROXY_ENABLED) return null;
+  if (!activeRequestIsVrbo()) return null;
+  if (!boolFromEnv("CHROME_PROXY_ENABLED", false)) return null;
+
+  const provider = nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER").toLowerCase();
+  const scheme = nonEmptyEnv("CHROME_PROXY_SCHEME", "PROXY_SCHEME") || "http";
+  const isBrightData = !provider || provider === "brightdata";
+  const host = nonEmptyEnv("BRIGHTDATA_PROXY_HOST", "CHROME_PROXY_HOST", "PROXY_HOST") ||
+    (isBrightData ? "brd.superproxy.io" : "");
+  const port = Number(nonEmptyEnv("BRIGHTDATA_PROXY_PORT", "CHROME_PROXY_PORT", "PROXY_PORT") ||
+    (isBrightData ? 33335 : ""));
+  let username = nonEmptyEnv("BRIGHTDATA_PROXY_USERNAME", "CHROME_PROXY_USERNAME", "PROXY_USERNAME");
+  const password = nonEmptyEnv("BRIGHTDATA_PROXY_PASSWORD", "CHROME_PROXY_PASSWORD", "PROXY_PASSWORD");
+
+  if (!host || !Number.isFinite(port) || !username || !password) {
+    throw new Error(
+      "SIDECAR_HEADLESS_PROXY_ENABLED=1 but proxy config is incomplete. Set BRIGHTDATA_PROXY_HOST, BRIGHTDATA_PROXY_PORT, BRIGHTDATA_PROXY_USERNAME, and BRIGHTDATA_PROXY_PASSWORD.",
+    );
+  }
+
+  if (isBrightData) username = appendBrightDataUsernameOptions(username);
+  return { provider: provider || "brightdata", scheme, host, port, username, password };
 }
 
 async function boundedPageDelay(targetPage, timeoutMs) {
@@ -897,6 +975,13 @@ async function ensureBrowser() {
 
 function headlessUserDataDirForWorker() {
   const safeSlot = String(WORKER_SLOT || "1").replace(/[^a-z0-9_-]/gi, "_");
+  if (activeRequestIsVrbo()) {
+    const safeRequestId = String(activeRuntimeRequest?.id || "vrbo")
+      .replace(/[^a-z0-9_-]/gi, "_")
+      .slice(0, 48);
+    const freshAttempt = Math.max(0, Number(activeRuntimeRequest?.vrboFreshAttempt ?? 0));
+    return path.join(HEADLESS_USER_DATA_ROOT, `worker-${safeSlot}-vrbo-${safeRequestId}-${freshAttempt}`);
+  }
   const freshAttempt = Number(activeRuntimeRequest?.vrboFreshAttempt ?? 0);
   if (freshAttempt > 0 && activeRuntimeRequest?.freshSessionReason === "vrbo_hard_block") {
     const safeRequestId = String(activeRuntimeRequest?.id || "vrbo")
@@ -910,9 +995,16 @@ function headlessUserDataDirForWorker() {
 async function ensureHeadlessBrowser() {
   if (context && page && !page.isClosed()) return;
   const userDataDir = headlessUserDataDirForWorker();
+  if (activeRequestIsVrbo()) {
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  }
   fs.mkdirSync(userDataDir, { recursive: true });
-  log(`launching local headless Chrome (${HEADLESS_BROWSER_CHANNEL}) with profile ${userDataDir}`);
-  context = await chromium.launchPersistentContext(userDataDir, {
+  const proxyConfig = headlessProxyConfig();
+  log(
+    `launching local headless Chrome (${HEADLESS_BROWSER_CHANNEL}) with profile ${userDataDir}` +
+      (proxyConfig ? ` using ${proxyConfig.provider} proxy ${proxyConfig.host}:${proxyConfig.port}` : ""),
+  );
+  const launchOptions = {
     channel: HEADLESS_BROWSER_CHANNEL,
     headless: true,
     viewport: VIEWPORT,
@@ -926,14 +1018,29 @@ async function ensureHeadlessBrowser() {
       "--no-default-browser-check",
       "--disable-dev-shm-usage",
     ],
-  });
+  };
+  if (proxyConfig) {
+    launchOptions.proxy = {
+      server: `${proxyConfig.scheme}://${proxyConfig.host}:${proxyConfig.port}`,
+      username: proxyConfig.username,
+      password: proxyConfig.password,
+    };
+  }
+  context = await chromium.launchPersistentContext(userDataDir, launchOptions);
   launchedPersistentContext = true;
   browser = context.browser?.() ?? null;
   await installContextGuards();
   await syncRemoteCookies();
   const cookies = loadCookies();
-  const seeded = cookies.length ? await addCookiesBestEffort(cookies, "headless startup cookie seed") : false;
-  log(seeded ? `seeded ${cookies.length} cookies into headless context` : `using existing headless profile cookies (${cookies.length} cookies available on disk)`);
+  const shouldSeedCookies = !activeRequestIsVrbo();
+  const seeded = shouldSeedCookies && cookies.length ? await addCookiesBestEffort(cookies, "headless startup cookie seed") : false;
+  log(
+    shouldSeedCookies
+      ? seeded
+        ? `seeded ${cookies.length} cookies into headless context`
+        : `using existing headless profile cookies (${cookies.length} cookies available on disk)`
+      : "skipped cookie seeding for isolated VRBO headless session",
+  );
 
   const existingPages = context.pages().filter((p) => p && !p.isClosed?.());
   page = existingPages[0] ?? await context.newPage();
@@ -1606,26 +1713,18 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
   if (!hasChallenge) return false;
 
   await normalizePageDisplay(targetPage).catch(() => {});
-  log(`${label} ${id}: VRBO verification challenge detected; keeping Chrome hidden while trying 2Captcha first`);
-  if (await trySolveVrboCaptchaWith2Captcha(targetPage, label, id)) {
-    await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
-    await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
-    await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
-    return true;
-  }
-
   if (vrboManualVerificationUnavailableInHeadless()) {
     const retryMessage =
-      "No live Chrome/noVNC browser is available for manual VRBO verification; retrying with a fresh isolated VRBO session.";
+      "VRBO verification appeared in no-live-browser mode; killing this browser and retrying with a new proxy/profile session.";
     log(`${label} ${id}: ${retryMessage}`);
     await postScreenSnapshot(
       { id, opType: label },
       targetPage,
-      "VRBO verification unavailable - retrying fresh session",
+      "VRBO blocked - rotating browser/IP",
       { captcha: true, error: retryMessage, force: true },
     );
     throw new VrboHardBlockError(
-      "VRBO verification cannot be manually solved in headless fallback; retrying with a fresh isolated VRBO session",
+      "VRBO verification cannot be trusted in headless fallback; retrying with a new proxy/profile session",
       {
         label,
         id,
@@ -1634,6 +1733,14 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
         excerpt: retryMessage,
       },
     );
+  }
+
+  log(`${label} ${id}: VRBO verification challenge detected; keeping Chrome hidden while trying 2Captcha first`);
+  if (await trySolveVrboCaptchaWith2Captcha(targetPage, label, id)) {
+    await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
+    await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+    await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
+    return true;
   }
 
   log(`${label} ${id}: 2Captcha unavailable or failed; surfacing Chrome for manual verification`);
