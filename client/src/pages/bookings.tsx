@@ -313,6 +313,28 @@ type AutoFillSearchAudit = {
   candidates: AutoFillAuditCandidate[];
 };
 
+type BulkBuyInQueueStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
+
+type BulkBuyInQueueItem = {
+  id: string;
+  jobId: string;
+  reservationId: string;
+  propertyId: number;
+  listingId: string | null;
+  propertyName: string;
+  guestName: string;
+  checkIn: string;
+  checkOut: string;
+  queuedFor: string;
+  status: BulkBuyInQueueStatus;
+  message: string;
+  error?: string;
+  filled?: number;
+  totalSlots?: number;
+  startedAt?: string;
+  finishedAt?: string;
+};
+
 interface Candidate {
   buyIn: BuyIn;
   buyInNights: number;
@@ -2169,6 +2191,31 @@ function operationsLaunchParams() {
   };
 }
 
+function wordForSmallCount(count: number): string {
+  return ({ 1: "one", 2: "two", 3: "three", 4: "four" } as Record<number, string>)[count] ?? String(count);
+}
+
+function bulkBuyInQueuedForText(
+  reservation: GuestyReservation,
+  propertyName: string,
+  propertyId: number,
+): string {
+  const emptySlots = reservation.slots.filter((slot) => !slot.buyIn);
+  const slots = emptySlots.length > 0 ? emptySlots : reservation.slots;
+  const bedroomCounts = new Map<number, number>();
+  for (const slot of slots) bedroomCounts.set(slot.bedrooms, (bedroomCounts.get(slot.bedrooms) ?? 0) + 1);
+  const unitText = Array.from(bedroomCounts.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([bedrooms, count]) => (
+      `${wordForSmallCount(count)} ${bedrooms} bedroom unit${count === 1 ? "" : "s"}`
+    ))
+    .join(" and ");
+  const community = PROPERTY_UNIT_CONFIGS[propertyId]?.community
+    ?? slots.find((slot) => slot.community)?.community
+    ?? propertyName;
+  return `Finding ${unitText || "buy-in units"} in ${community} and sub communities`;
+}
+
 // Column header that toggles sort when clicked. Shows an up/down caret when
 // the column is the active sort target.
 function SortHeader({
@@ -2269,6 +2316,11 @@ export default function Bookings() {
   };
   const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
   const [lastAutoFillAudits, setLastAutoFillAudits] = useState<Record<string, AutoFillSearchAudit[]>>({});
+  const [bulkSelectedReservations, setBulkSelectedReservations] = useState<Record<string, boolean>>({});
+  const [bulkBuyInQueueOpen, setBulkBuyInQueueOpen] = useState(false);
+  const [bulkBuyInQueueItems, setBulkBuyInQueueItems] = useState<BulkBuyInQueueItem[]>([]);
+  const [bulkBuyInQueueRunning, setBulkBuyInQueueRunning] = useState(false);
+  const bulkBuyInCancelRef = useRef(false);
 
   // Sort controls: click a column header to sort by that field; click again
   // to toggle asc/desc. Default = check-in ascending (soonest first).
@@ -2735,8 +2787,21 @@ export default function Bookings() {
     onMutate: ({ reservation }) => {
       clearAutoFillDiagnostics(reservation._id);
     },
-    mutationFn: async ({ reservation }: { reservation: GuestyReservation }) => {
-      if (!selectedBuyInPropertyId) throw new Error("No property selected");
+    mutationFn: async ({
+      reservation,
+      propertyId,
+      listingId,
+    }: {
+      reservation: GuestyReservation;
+      propertyId?: number | null;
+      listingId?: string | null;
+      silent?: boolean;
+    }) => {
+      const buyInPropertyId = propertyId ?? selectedBuyInPropertyId;
+      const buyInListingId = listingId ?? selectedListingId;
+      const staticPropertyId = buyInPropertyId && buyInPropertyId > 0 ? buyInPropertyId : selectedPropertyId;
+      const staticUnitConfig = staticPropertyId ? PROPERTY_UNIT_CONFIGS[staticPropertyId] : undefined;
+      if (!buyInPropertyId) throw new Error("No property selected");
       const emptySlots = reservation.slots.filter((s) => !s.buyIn);
       if (emptySlots.length === 0) throw new Error("All slots already filled");
 
@@ -2750,10 +2815,10 @@ export default function Bookings() {
         throw new Error("Auto-fill needs valid check-in/check-out dates before it can search.");
       }
 
-      const groundFloorRequirement = selectedHasBuyInConfig && selectedPropertyId
+      const groundFloorRequirement = staticUnitConfig && staticPropertyId
         ? await apiRequest(
             "GET",
-            groundFloorRequirementHref(reservation, selectedPropertyId),
+            groundFloorRequirementHref(reservation, staticPropertyId),
           )
             .then((r) => r.json() as Promise<GroundFloorRequirement & { conversationId?: string | null }>)
             .catch((): GroundFloorRequirement => ({
@@ -2811,13 +2876,13 @@ export default function Bookings() {
         const existing = findBuyInCache.get(key);
         if (existing) return existing;
         const params = new URLSearchParams({
-          propertyId: String(selectedBuyInPropertyId),
+          propertyId: String(buyInPropertyId),
           bedrooms: String(bedrooms),
           checkIn: ci,
           checkOut: co,
         });
-        if (selectedListingId) params.set("listingId", selectedListingId);
-        const searchCommunity = selectedUnitConfig?.community ?? emptySlots.find((slot) => slot.community)?.community ?? "";
+        if (buyInListingId) params.set("listingId", buyInListingId);
+        const searchCommunity = staticUnitConfig?.community ?? emptySlots.find((slot) => slot.community)?.community ?? "";
         if (searchCommunity) params.set("community", searchCommunity);
         if (!includePm) params.set("includePm", "0");
         if (requireGroundFloor) {
@@ -2982,15 +3047,12 @@ export default function Bookings() {
         ...candidate,
         identityKeys: candidate.identityKeys ?? listingIdentityKeys(candidate),
       });
-      const selectedUnitConfig = selectedPropertyId
-        ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]
-        : undefined;
-      const selectedSearchCommunity = selectedUnitConfig?.community
+      const selectedSearchCommunity = staticUnitConfig?.community
         ?? emptySlots.find((slot) => slot.community)?.community
         ?? "";
       const directBookingScanCache = new Map<string, Promise<LiveCandidate[]>>();
       let autoDirectBookingScansStarted = 0;
-      const autoDirectBookingScanLimit = selectedUnitConfig?.enableGoogleLensDiscovery ? 12 : 6;
+      const autoDirectBookingScanLimit = staticUnitConfig?.enableGoogleLensDiscovery ? 12 : 6;
       const directMatchToAutoFillCandidate = (
         airbnbCandidate: LiveCandidate,
         match: ReverseImageListingMatch,
@@ -3246,9 +3308,9 @@ export default function Bookings() {
           return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
         }
         const propertyName =
-          (selectedListingId && listingNameById.get(selectedListingId)) ||
+          (buyInListingId && listingNameById.get(buyInListingId)) ||
           selectedDisplayName ||
-          `Property ${selectedBuyInPropertyId}`;
+          `Property ${buyInPropertyId}`;
         if (hasUsedListingIdentity(pickedIdentities, pick)) {
           skippedReasons.push(`${slot.unitLabel}: skipped duplicate physical listing`);
           return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
@@ -3284,7 +3346,7 @@ export default function Bookings() {
           : "";
         try {
           const created = await apiRequest("POST", "/api/buy-ins", {
-            propertyId: selectedBuyInPropertyId,
+            propertyId: buyInPropertyId,
             propertyName,
             unitId: slot.unitId,
             unitLabel: slot.unitLabel,
@@ -3665,9 +3727,9 @@ export default function Bookings() {
         searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
       };
     },
-    onSuccess: ({ reservation, results, comboOptions, searchAudits }) => {
+    onSuccess: ({ reservation, results, comboOptions, searchAudits }, variables) => {
       stopTrackingAutoFill(reservation._id);
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", variables?.listingId ?? selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
       if (comboOptions.length > 0) {
         setLastAutoFillCombos((prev) => ({ ...prev, [reservation._id]: comboOptions }));
@@ -3705,6 +3767,7 @@ export default function Bookings() {
             .map((option) => `${option.label}: ${option.totalCost == null ? option.unavailableReason ?? "unavailable" : fmtMoney(option.totalCost)}`)
             .join("; ")}${selectedCombo ? ` · Selected ${selectedCombo.label}` : ""}`
         : "";
+      if (variables?.silent) return;
       if (filled.length === 0) {
         const uniqueSummaries = Array.from(
           new Map(results.map((r) => [r.searchSummary.bedrooms, r.searchSummary])).values(),
@@ -3756,6 +3819,7 @@ export default function Bookings() {
     },
     onError: (e: any, variables) => {
       stopTrackingAutoFill(variables?.reservation?._id);
+      if (variables?.silent) return;
       const raw = String(e?.message ?? "");
       // Railway returns a 502 JSON envelope when the find-buy-in
       // handler exceeds its edge timeout. Translate that into an
@@ -3783,6 +3847,214 @@ export default function Bookings() {
   const autoFillSidecarQueue = useSidecarQueueStatus(activeAutoFillCount > 0);
   const autoFillSidecarActive = activeAutoFillCount > 0
     && isSidecarStatusForSearch(autoFillSidecarQueue.status, earliestAutoFillStartedAtMs);
+
+  const bulkQueueItemsByReservationId = useMemo(() => {
+    return new Map(bulkBuyInQueueItems.map((item) => [item.reservationId, item]));
+  }, [bulkBuyInQueueItems]);
+  const selectedBulkReservationCount = Object.values(bulkSelectedReservations).filter(Boolean).length;
+  const eligibleGlobalReservations = useMemo(() => (
+    reservations.filter((reservation) => {
+      const meta = reservationPropertyMeta.get(reservation._id);
+      return !!meta?.propertyId
+        && reservation.slotsTotal > 0
+        && reservation.slots.some((slot) => !slot.buyIn);
+    })
+  ), [reservationPropertyMeta, reservations]);
+  const selectedBulkEligibleReservations = useMemo(() => (
+    eligibleGlobalReservations.filter((reservation) => bulkSelectedReservations[reservation._id])
+  ), [bulkSelectedReservations, eligibleGlobalReservations]);
+  const setBulkQueueItem = (reservationId: string, patch: Partial<BulkBuyInQueueItem>) => {
+    setBulkBuyInQueueItems((prev) => prev.map((item) => (
+      item.reservationId === reservationId ? { ...item, ...patch } : item
+    )));
+  };
+  const logBulkBuyInQueueEvent = async (
+    item: BulkBuyInQueueItem,
+    level: "info" | "warn" | "error",
+    message: string,
+    meta?: Record<string, unknown>,
+  ) => {
+    try {
+      await apiRequest("POST", "/api/operations/bulk-buy-in-log", {
+        level,
+        message,
+        jobId: item.jobId,
+        reservationId: item.reservationId,
+        propertyId: item.propertyId,
+        listingId: item.listingId,
+        propertyName: item.propertyName,
+        guestName: item.guestName,
+        queuedFor: item.queuedFor,
+        status: item.status,
+        error: item.error,
+        meta,
+      });
+    } catch (error) {
+      console.warn("[bulk-buy-ins] failed to write server log", error);
+    }
+  };
+  const buildBulkQueueItem = (reservation: GuestyReservation, jobId: string): BulkBuyInQueueItem | null => {
+    const meta = reservationPropertyMeta.get(reservation._id);
+    if (!meta?.propertyId) return null;
+    const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+    return {
+      id: `${jobId}:${reservation._id}`,
+      jobId,
+      reservationId: reservation._id,
+      propertyId: meta.propertyId,
+      listingId: meta.guestyListingId,
+      propertyName: meta.propertyName,
+      guestName,
+      checkIn: checkInOf(reservation) ?? "",
+      checkOut: checkOutOf(reservation) ?? "",
+      queuedFor: bulkBuyInQueuedForText(reservation, meta.propertyName, meta.propertyId),
+      status: "queued",
+      message: "Queued",
+      totalSlots: reservation.slots.filter((slot) => !slot.buyIn).length,
+    };
+  };
+  const selectAllEligibleGlobalBookings = () => {
+    setBulkSelectedReservations((prev) => {
+      const next = { ...prev };
+      for (const reservation of eligibleGlobalReservations) next[reservation._id] = true;
+      return next;
+    });
+  };
+  const clearBulkBookingSelection = () => setBulkSelectedReservations({});
+  const cancelBulkBuyInQueue = () => {
+    bulkBuyInCancelRef.current = true;
+    setBulkBuyInQueueItems((prev) => prev.map((item) => (
+      item.status === "queued"
+        ? { ...item, status: "cancelled", message: "Cancelled before running", finishedAt: new Date().toISOString() }
+        : item
+    )));
+  };
+  const startBulkBuyInQueue = async () => {
+    const jobId = `bulk-buy-in-${Date.now()}`;
+    const queue = selectedBulkEligibleReservations
+      .map((reservation) => buildBulkQueueItem(reservation, jobId))
+      .filter((item): item is BulkBuyInQueueItem => !!item);
+    if (queue.length === 0) {
+      toast({
+        title: "No eligible bookings selected",
+        description: "Select bookings with open buy-in slots from the global All bookings table.",
+      });
+      return;
+    }
+
+    bulkBuyInCancelRef.current = false;
+    setBulkBuyInQueueItems(queue);
+    setBulkBuyInQueueOpen(true);
+    setBulkBuyInQueueRunning(true);
+    await Promise.all(queue.map((item) => logBulkBuyInQueueEvent(item, "info", "Bulk buy-in queue item queued")));
+
+    for (const item of queue) {
+      if (bulkBuyInCancelRef.current) {
+        setBulkQueueItem(item.reservationId, {
+          status: "cancelled",
+          message: "Cancelled by operator",
+          finishedAt: new Date().toISOString(),
+        });
+        await logBulkBuyInQueueEvent({ ...item, status: "cancelled", message: "Cancelled by operator" }, "warn", "Bulk buy-in queue item cancelled");
+        continue;
+      }
+
+      const reservation = reservations.find((row) => row._id === item.reservationId);
+      if (!reservation) {
+        const message = "Reservation disappeared from the global list before it could run";
+        setBulkQueueItem(item.reservationId, {
+          status: "failed",
+          message,
+          error: message,
+          finishedAt: new Date().toISOString(),
+        });
+        await logBulkBuyInQueueEvent({ ...item, status: "failed", error: message }, "error", message);
+        continue;
+      }
+
+      setBulkQueueItem(item.reservationId, {
+        status: "running",
+        message: "Running buy-in search",
+        startedAt: new Date().toISOString(),
+      });
+      autoFillRunRef.current.add(item.reservationId);
+      clearAutoFillDiagnostics(item.reservationId);
+      setAutoFillStartedByReservation((prev) => ({ ...prev, [item.reservationId]: Date.now() }));
+
+      try {
+        const result = await autoFillMutation.mutateAsync({
+          reservation,
+          propertyId: item.propertyId,
+          listingId: item.listingId,
+          silent: true,
+        });
+        const filled = result.results.filter((row) => row.picked).length;
+        const total = result.results.length;
+        const failedReasons = result.results
+          .flatMap((row) => row.skippedReasons)
+          .filter(Boolean);
+        if (filled === 0) {
+          const message = failedReasons[0] ?? "No verified priced candidate was attached";
+          const updated = {
+            ...item,
+            status: "failed" as const,
+            message,
+            error: failedReasons.join(" | ") || message,
+            filled,
+            totalSlots: total,
+            finishedAt: new Date().toISOString(),
+          };
+          setBulkQueueItem(item.reservationId, updated);
+          await logBulkBuyInQueueEvent(updated, "error", "Bulk buy-in queue item failed to attach any buy-ins", {
+            reasons: failedReasons,
+            searchAudits: result.searchAudits,
+            comboOptions: result.comboOptions,
+          });
+          continue;
+        }
+
+        const updated = {
+          ...item,
+          status: filled === total ? "completed" as const : "skipped" as const,
+          message: filled === total
+            ? `Attached ${filled}/${total} buy-in${total === 1 ? "" : "s"}`
+            : `Attached ${filled}/${total}; review remaining slots`,
+          filled,
+          totalSlots: total,
+          finishedAt: new Date().toISOString(),
+        };
+        setBulkQueueItem(item.reservationId, updated);
+        await logBulkBuyInQueueEvent(
+          updated,
+          filled === total ? "info" : "warn",
+          filled === total ? "Bulk buy-in queue item completed" : "Bulk buy-in queue item partially completed",
+          {
+            searchAudits: result.searchAudits,
+            comboOptions: result.comboOptions,
+          },
+        );
+      } catch (error: any) {
+        const raw = String(error?.message ?? error ?? "Unknown bulk buy-in error");
+        const updated = {
+          ...item,
+          status: "failed" as const,
+          message: raw,
+          error: raw,
+          finishedAt: new Date().toISOString(),
+        };
+        setBulkQueueItem(item.reservationId, updated);
+        console.error("[bulk-buy-ins] queue item failed", updated, error);
+        await logBulkBuyInQueueEvent(updated, "error", "Bulk buy-in queue item crashed", {
+          stack: error?.stack,
+        });
+      }
+    }
+
+    setBulkBuyInQueueRunning(false);
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    toast({ title: "Bulk buy-in queue finished" });
+  };
 
   const toggleExpanded = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -4070,6 +4342,25 @@ export default function Bookings() {
     }
     setExpanded({ [reservationId]: true });
   };
+  const bulkQueueSummary = useMemo(() => {
+    const total = bulkBuyInQueueItems.length;
+    const completed = bulkBuyInQueueItems.filter((item) => item.status === "completed").length;
+    const failed = bulkBuyInQueueItems.filter((item) => item.status === "failed").length;
+    const skipped = bulkBuyInQueueItems.filter((item) => item.status === "skipped").length;
+    const cancelled = bulkBuyInQueueItems.filter((item) => item.status === "cancelled").length;
+    const running = bulkBuyInQueueItems.filter((item) => item.status === "running").length;
+    const finished = completed + failed + skipped + cancelled;
+    return {
+      total,
+      completed,
+      failed,
+      skipped,
+      cancelled,
+      running,
+      finished,
+      percent: total > 0 ? Math.round((finished / total) * 100) : 0,
+    };
+  }, [bulkBuyInQueueItems]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -4287,20 +4578,81 @@ export default function Bookings() {
                     Global booking list across every buy-in target. Sorted by soonest arrival unless you click a column.
                   </CardDescription>
                 </div>
-                <Badge variant="outline" className="w-fit">
-                  {reservations.length} booking{reservations.length === 1 ? "" : "s"}
-                </Badge>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline" className="w-fit">
+                    {reservations.length} booking{reservations.length === 1 ? "" : "s"}
+                  </Badge>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={selectAllEligibleGlobalBookings}
+                    disabled={bulkBuyInQueueRunning || eligibleGlobalReservations.length === 0}
+                    data-testid="button-select-eligible-bulk-buy-ins"
+                  >
+                    Select open
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={clearBulkBookingSelection}
+                    disabled={bulkBuyInQueueRunning || selectedBulkReservationCount === 0}
+                    data-testid="button-clear-bulk-buy-ins"
+                  >
+                    Clear
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={startBulkBuyInQueue}
+                    disabled={bulkBuyInQueueRunning || selectedBulkEligibleReservations.length === 0}
+                    data-testid="button-run-bulk-buy-ins"
+                  >
+                    {bulkBuyInQueueRunning ? (
+                      <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                    ) : (
+                      <Zap className="h-3.5 w-3.5 mr-1.5" />
+                    )}
+                    Run bulk buy-ins ({selectedBulkEligibleReservations.length})
+                  </Button>
+                  {bulkBuyInQueueItems.length > 0 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setBulkBuyInQueueOpen(true)}
+                      data-testid="button-open-bulk-buy-in-queue"
+                    >
+                      Queue status
+                    </Button>
+                  )}
+                </div>
               </div>
             </CardHeader>
             <CardContent>
               <div className="overflow-hidden rounded border">
                 <div className="max-h-[560px] overflow-auto">
-                  <div className="min-w-[1040px]">
-                    <div className="sticky top-0 z-10 grid grid-cols-[120px_1.55fr_1.35fr_1.25fr_.8fr_.9fr_.9fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                  <div className="min-w-[1320px]">
+                    <div className="sticky top-0 z-10 grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                      <div>
+                        <input
+                          type="checkbox"
+                          className="rounded"
+                          checked={eligibleGlobalReservations.length > 0 && eligibleGlobalReservations.every((reservation) => bulkSelectedReservations[reservation._id])}
+                          onChange={(event) => {
+                            if (event.target.checked) selectAllEligibleGlobalBookings();
+                            else clearBulkBookingSelection();
+                          }}
+                          aria-label="Select all eligible global bookings"
+                          data-testid="checkbox-select-all-bulk-buy-ins"
+                        />
+                      </div>
                       <SortHeader label="Check-in" active={sortBy === "checkIn"} dir={sortDir} onClick={() => toggleSort("checkIn")} />
+                      <div>Queue</div>
                       <SortHeader label="Property" active={sortBy === "property"} dir={sortDir} onClick={() => toggleSort("property")} />
                       <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
-                      <div>Stay</div>
+                      <div>Queued for</div>
                       <div>Channel</div>
                       <SortHeader label="Payout" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
                       <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
@@ -4318,12 +4670,21 @@ export default function Bookings() {
                         );
                         const channel = reservation.integration?.platform ?? reservation.source ?? "direct";
                         const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+                        const queueItem = bulkQueueItemsByReservationId.get(reservation._id);
+                        const eligibleForBulk = !!meta?.propertyId && reservation.slots.some((slot) => !slot.buyIn);
+                        const queuedFor = meta?.propertyId
+                          ? bulkBuyInQueuedForText(reservation, meta.propertyName, meta.propertyId)
+                          : "No mapped property";
+                        const queueStatus = queueItem?.status
+                          ?? (reservation.fullyLinked ? "completed" : eligibleForBulk ? "queued" : "skipped");
+                        const queueLabel = queueItem?.message
+                          ?? (reservation.fullyLinked ? "Filled" : eligibleForBulk ? "Ready" : "No open slots");
                         return (
                           <div
                             key={`global-booking-${reservation._id}`}
                             role="button"
                             tabIndex={0}
-                            className="grid grid-cols-[120px_1.55fr_1.35fr_1.25fr_.8fr_.9fr_.9fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                            className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
                             onClick={() => openReservationDetail(reservation._id)}
                             onKeyDown={(event) => {
                               if (event.key === "Enter" || event.key === " ") {
@@ -4333,11 +4694,54 @@ export default function Bookings() {
                             }}
                             data-testid={`global-booking-row-${reservation._id}`}
                           >
+                            <div onClick={(event) => event.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                className="rounded"
+                                checked={!!bulkSelectedReservations[reservation._id]}
+                                disabled={!eligibleForBulk || bulkBuyInQueueRunning}
+                                onChange={(event) => {
+                                  const checked = event.target.checked;
+                                  setBulkSelectedReservations((prev) => ({
+                                    ...prev,
+                                    [reservation._id]: checked,
+                                  }));
+                                }}
+                                aria-label={`Select ${guestName} for bulk buy-in queue`}
+                                data-testid={`checkbox-bulk-buy-in-${reservation._id}`}
+                              />
+                            </div>
                             <div>
                               <p className="font-medium">{fmtDate(checkInOf(reservation))}</p>
                               <p className="text-[10px] text-muted-foreground">
                                 {fmtDate(checkOutOf(reservation))}
                               </p>
+                            </div>
+                            <div className="min-w-0">
+                              <Badge
+                                variant={queueStatus === "completed" ? "default" : "outline"}
+                                className={`max-w-full text-[10px] ${
+                                  queueStatus === "completed"
+                                    ? "bg-green-600 text-white"
+                                    : queueStatus === "running"
+                                      ? "border-blue-300 text-blue-700"
+                                      : queueStatus === "failed"
+                                        ? "border-red-300 text-red-700"
+                                        : queueStatus === "skipped"
+                                          ? "border-amber-300 text-amber-700"
+                                          : queueStatus === "cancelled"
+                                            ? "border-muted-foreground/30 text-muted-foreground"
+                                            : ""
+                                }`}
+                              >
+                                {queueItem?.status === "running" && <Loader2 className="mr-1 h-2.5 w-2.5 animate-spin" />}
+                                <span className="truncate">{queueLabel}</span>
+                              </Badge>
+                              {queueItem?.error && (
+                                <p className="mt-1 truncate text-[10px] text-red-700" title={queueItem.error}>
+                                  {queueItem.error}
+                                </p>
+                              )}
                             </div>
                             <div className="min-w-0">
                               <p className="truncate font-medium">{meta?.propertyName ?? "Property"}</p>
@@ -4351,10 +4755,10 @@ export default function Bookings() {
                                 {reservation.confirmationCode ?? reservation._id}
                               </p>
                             </div>
-                            <div>
-                              <p>{nights} night{nights === 1 ? "" : "s"}</p>
+                            <div className="min-w-0">
+                              <p className="truncate" title={queuedFor}>{queuedFor}</p>
                               <p className="text-[10px] text-muted-foreground">
-                                {fmtDate(checkInOf(reservation))} to {fmtDate(checkOutOf(reservation))}
+                                {nights} night{nights === 1 ? "" : "s"} · {fmtDate(checkInOf(reservation))} to {fmtDate(checkOutOf(reservation))}
                               </p>
                             </div>
                             <div>
@@ -4391,7 +4795,15 @@ export default function Bookings() {
                               </Badge>
                             </div>
                             <div className="text-right">
-                              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 px-2 text-xs"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openReservationDetail(reservation._id);
+                                }}
+                              >
                                 Open
                               </Button>
                             </div>
@@ -5645,6 +6057,147 @@ export default function Bookings() {
           </Tabs>
         )}
       </div>
+
+      <Dialog open={bulkBuyInQueueOpen} onOpenChange={setBulkBuyInQueueOpen}>
+        <DialogContent className="max-w-6xl">
+          <DialogHeader>
+            <DialogTitle>Bulk buy-in queue</DialogTitle>
+            <DialogDescription>
+              Sequential buy-in searches using the same Auto-fill cheapest path as individual bookings.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+              <div className="rounded border bg-muted/20 px-3 py-2.5">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Queued</p>
+                <p className="text-xl font-semibold">{bulkQueueSummary.total}</p>
+              </div>
+              <div className="rounded border bg-muted/20 px-3 py-2.5">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Finished</p>
+                <p className="text-xl font-semibold">{bulkQueueSummary.finished}</p>
+              </div>
+              <div className="rounded border bg-muted/20 px-3 py-2.5">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Completed</p>
+                <p className="text-xl font-semibold text-green-700">{bulkQueueSummary.completed}</p>
+              </div>
+              <div className="rounded border bg-muted/20 px-3 py-2.5">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Needs review</p>
+                <p className="text-xl font-semibold text-amber-700">
+                  {bulkQueueSummary.failed + bulkQueueSummary.skipped + bulkQueueSummary.cancelled}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  {bulkBuyInQueueRunning ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4 text-green-700" />
+                  )}
+                  <span>
+                    {bulkBuyInQueueRunning
+                      ? `Running ${bulkQueueSummary.running || 1} item at a time`
+                      : bulkQueueSummary.total > 0
+                        ? "Queue finished"
+                        : "No queue has run yet"}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <SidecarStatusBadge />
+                  {bulkBuyInQueueRunning && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={cancelBulkBuyInQueue}
+                      data-testid="button-cancel-bulk-buy-in-queue"
+                    >
+                      <Square className="h-3.5 w-3.5 mr-1.5" />
+                      Cancel remaining
+                    </Button>
+                  )}
+                </div>
+              </div>
+              <Progress value={bulkQueueSummary.percent} className="h-2" />
+            </div>
+
+            <div className="overflow-hidden rounded border">
+              <div className="max-h-[460px] overflow-auto">
+                <div className="min-w-[980px]">
+                  <div className="sticky top-0 z-10 grid grid-cols-[120px_1.3fr_1.2fr_2fr_1.5fr] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                    <div>Status</div>
+                    <div>Listing name</div>
+                    <div>Guest</div>
+                    <div>Queued for</div>
+                    <div>Log</div>
+                  </div>
+                  <div className="divide-y">
+                    {bulkBuyInQueueItems.length === 0 ? (
+                      <div className="px-3 py-8 text-center text-sm text-muted-foreground">
+                        Select bookings in the global table and click Run bulk buy-ins.
+                      </div>
+                    ) : (
+                      bulkBuyInQueueItems.map((item) => (
+                        <div
+                          key={item.id}
+                          className="grid grid-cols-[120px_1.3fr_1.2fr_2fr_1.5fr] gap-3 px-3 py-2.5 text-sm"
+                          data-testid={`bulk-buy-in-queue-item-${item.reservationId}`}
+                        >
+                          <div>
+                            <Badge
+                              variant={item.status === "completed" ? "default" : "outline"}
+                              className={`text-[10px] ${
+                                item.status === "completed"
+                                  ? "bg-green-600 text-white"
+                                  : item.status === "running"
+                                    ? "border-blue-300 text-blue-700"
+                                    : item.status === "failed"
+                                      ? "border-red-300 text-red-700"
+                                      : item.status === "skipped"
+                                        ? "border-amber-300 text-amber-700"
+                                        : item.status === "cancelled"
+                                          ? "border-muted-foreground/30 text-muted-foreground"
+                                          : ""
+                              }`}
+                            >
+                              {item.status === "running" && <Loader2 className="mr-1 h-2.5 w-2.5 animate-spin" />}
+                              {item.status}
+                            </Badge>
+                            <p className="mt-1 text-[10px] text-muted-foreground">
+                              {fmtDate(item.checkIn)} to {fmtDate(item.checkOut)}
+                            </p>
+                          </div>
+                          <div className="min-w-0">
+                            <p className="truncate font-medium">{item.propertyName}</p>
+                            <p className="text-[10px] text-muted-foreground">#{item.propertyId}</p>
+                          </div>
+                          <div className="min-w-0">
+                            <p className="truncate">{item.guestName}</p>
+                            <p className="text-[10px] text-muted-foreground">{item.reservationId}</p>
+                          </div>
+                          <p className="text-xs text-muted-foreground">{item.queuedFor}</p>
+                          <div className="min-w-0">
+                            <p className={`text-xs ${item.status === "failed" ? "text-red-700" : "text-muted-foreground"}`}>
+                              {item.message}
+                            </p>
+                            {item.error && (
+                              <p className="mt-1 whitespace-pre-wrap break-words rounded bg-red-50 px-2 py-1 text-[10px] text-red-800">
+                                {item.error}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={manualDialogOpen}

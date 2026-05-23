@@ -12106,6 +12106,29 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/operations/bulk-buy-in-log", async (req, res) => {
+    const payload = req.body ?? {};
+    const level = String(payload.level ?? "info").toLowerCase();
+    const message = String(payload.message ?? "Bulk buy-in queue event");
+    const context = {
+      jobId: payload.jobId ?? null,
+      reservationId: payload.reservationId ?? null,
+      propertyId: payload.propertyId ?? null,
+      listingId: payload.listingId ?? null,
+      propertyName: payload.propertyName ?? null,
+      guestName: payload.guestName ?? null,
+      queuedFor: payload.queuedFor ?? null,
+      status: payload.status ?? null,
+      error: payload.error ?? null,
+      meta: payload.meta ?? null,
+    };
+    const line = `[bulk-buy-ins] ${message} ${JSON.stringify(context)}`;
+    if (level === "error") console.error(line);
+    else if (level === "warn") console.warn(line);
+    else console.log(line);
+    res.json({ ok: true });
+  });
+
   app.post("/api/manual-reservations", async (req, res) => {
     try {
       const parsed = insertManualReservationSchema.parse({
