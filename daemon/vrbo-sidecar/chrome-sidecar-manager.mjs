@@ -889,6 +889,9 @@ export class ChromeSidecarManager {
       release: async () => {
         clearInterval(heartbeat);
         safeUnlink(instance.busyLock);
+        if (localProxyBridge) {
+          await sendBrowserCdpCommand(instance.cdpUrl, "Browser.close", {}, 2_000).catch(() => {});
+        }
         await localProxyBridge?.close().catch(() => {});
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});

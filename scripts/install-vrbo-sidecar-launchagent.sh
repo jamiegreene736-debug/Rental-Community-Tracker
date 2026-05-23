@@ -101,8 +101,8 @@ CHROME_PRIMARY="${CHROME_PRIMARY:-server}"
 # isolated headless Chrome when the server pool or proxy is unavailable. OTA
 # search pages, especially Booking.com and VRBO, reject the headless fallback
 # far more often than a real local Chrome profile.
-SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK:-0}"
-SIDECAR_HEADLESS_FALLBACK_ENABLED="${SIDECAR_HEADLESS_FALLBACK_ENABLED:-1}"
+SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK:-1}"
+SIDECAR_HEADLESS_FALLBACK_ENABLED="${SIDECAR_HEADLESS_FALLBACK_ENABLED:-0}"
 # Default the local fallback to visible real Chrome. Server/noVNC is still the
 # primary path, but when OTA providers block the server/proxy path the operator
 # needs a reachable browser window for CAPTCHA recovery instead of an offscreen
