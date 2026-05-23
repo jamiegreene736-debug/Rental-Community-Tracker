@@ -7676,6 +7676,7 @@ type SidecarScreenSnapshot = {
   phase?: string;
   url?: string;
   title?: string;
+  liveViewUrl?: string;
   screenshotDataUrl?: string;
   width?: number;
   height?: number;
@@ -7855,7 +7856,9 @@ function SidecarScreensStrip() {
                       : "Live pointer control is queued through the sidecar worker."}
                   </p>
                   <p className="truncate text-muted-foreground">
-                    {selectedScreen.title || selectedScreen.url || "Use the focus button if the screenshot does not respond."}
+                    {selectedScreen.liveViewUrl
+                      ? "Open the live browser view for full keyboard/mouse control."
+                      : selectedScreen.title || selectedScreen.url || "Use the focus button if the screenshot does not respond."}
                   </p>
                 </div>
                 <Button
@@ -7863,12 +7866,22 @@ function SidecarScreensStrip() {
                   variant="outline"
                   size="sm"
                   className="h-8 gap-1 px-2 text-[11px]"
-                  onClick={() => sendScreenCommand(selectedScreen, "surface")}
-                  disabled={selectedScreen.phase?.startsWith("finished")}
-                  title={selectedScreen.phase?.startsWith("finished") ? "This run has already finished; start a fresh search to control Chrome." : "Bring the actual sidecar Chrome window to the front"}
+                  onClick={() => {
+                    if (selectedScreen.liveViewUrl) {
+                      window.open(selectedScreen.liveViewUrl, "_blank", "noopener,noreferrer");
+                    } else {
+                      sendScreenCommand(selectedScreen, "surface");
+                    }
+                  }}
+                  disabled={selectedScreen.phase?.startsWith("finished") && !selectedScreen.liveViewUrl}
+                  title={selectedScreen.liveViewUrl
+                    ? "Open the live noVNC browser for this sidecar"
+                    : selectedScreen.phase?.startsWith("finished")
+                      ? "This run has already finished; start a fresh search to control Chrome."
+                      : "Bring the actual sidecar Chrome window to the front"}
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
-                  Focus real Chrome window
+                  {selectedScreen.liveViewUrl ? "Open live browser" : "Focus real Chrome window"}
                 </Button>
               </div>
               <div

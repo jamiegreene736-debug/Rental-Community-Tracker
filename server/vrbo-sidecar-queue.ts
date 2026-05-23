@@ -261,6 +261,7 @@ export type SidecarScreenSnapshot = {
   phase?: string;
   url?: string;
   title?: string;
+  liveViewUrl?: string;
   screenshotDataUrl?: string;
   width?: number;
   height?: number;
@@ -432,6 +433,7 @@ export function updateSidecarScreenSnapshot(snapshot: {
   phase?: unknown;
   url?: unknown;
   title?: unknown;
+  liveViewUrl?: unknown;
   screenshotDataUrl?: unknown;
   width?: unknown;
   height?: unknown;
@@ -451,6 +453,9 @@ export function updateSidecarScreenSnapshot(snapshot: {
     phase: typeof snapshot.phase === "string" ? snapshot.phase.replace(/\s+/g, " ").trim().slice(0, 140) : undefined,
     url: typeof snapshot.url === "string" ? snapshot.url.slice(0, 500) : undefined,
     title: typeof snapshot.title === "string" ? snapshot.title.replace(/\s+/g, " ").trim().slice(0, 180) : undefined,
+    liveViewUrl: typeof snapshot.liveViewUrl === "string" && /^https?:\/\//i.test(snapshot.liveViewUrl)
+      ? snapshot.liveViewUrl.slice(0, 500)
+      : undefined,
     screenshotDataUrl,
     width: typeof snapshot.width === "number" && Number.isFinite(snapshot.width) ? Math.round(snapshot.width) : undefined,
     height: typeof snapshot.height === "number" && Number.isFinite(snapshot.height) ? Math.round(snapshot.height) : undefined,

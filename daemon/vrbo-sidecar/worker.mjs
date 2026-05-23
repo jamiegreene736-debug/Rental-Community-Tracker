@@ -1146,6 +1146,7 @@ async function postScreenSnapshot(req, targetPage = page, phase = "working", ext
         phase,
         url,
         title,
+        liveViewUrl: activeChromeAllocation?.noVncUrl ?? undefined,
         width,
         height,
         screenshotDataUrl,
