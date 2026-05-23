@@ -16908,7 +16908,12 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/admin/vrbo-sidecar/next", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
     const { next } = await import("./vrbo-sidecar-queue");
-    const r = next();
+    const r = next({
+      slot: typeof req.query.slot === "string" ? req.query.slot : undefined,
+      workerRole: typeof req.query.workerRole === "string" ? req.query.workerRole : undefined,
+      browserMode: typeof req.query.browserMode === "string" ? req.query.browserMode : undefined,
+      chromePrimary: typeof req.query.chromePrimary === "string" ? req.query.chromePrimary : undefined,
+    });
     if (!r) return res.json({ request: null });
     return res.json({
       request: {
@@ -16935,11 +16940,28 @@ Return ONLY compact JSON with this exact shape:
   // not look like "can't reach sidecar."
   app.post("/api/admin/vrbo-sidecar/heartbeat", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
-    const body = (req.body ?? {}) as { id?: unknown; stage?: unknown };
+    const body = (req.body ?? {}) as {
+      id?: unknown;
+      stage?: unknown;
+      workerRuntime?: {
+        slot?: unknown;
+        workerRole?: unknown;
+        browserMode?: unknown;
+        chromePrimary?: unknown;
+      };
+    };
     const { stampHeartbeat, isCancellationRequested } = await import("./vrbo-sidecar-queue");
     stampHeartbeat(
       typeof body.id === "string" ? body.id : undefined,
       typeof body.stage === "string" ? body.stage : undefined,
+      body.workerRuntime && typeof body.workerRuntime === "object"
+        ? {
+            slot: typeof body.workerRuntime.slot === "string" ? body.workerRuntime.slot : undefined,
+            workerRole: typeof body.workerRuntime.workerRole === "string" ? body.workerRuntime.workerRole : undefined,
+            browserMode: typeof body.workerRuntime.browserMode === "string" ? body.workerRuntime.browserMode : undefined,
+            chromePrimary: typeof body.workerRuntime.chromePrimary === "string" ? body.workerRuntime.chromePrimary : undefined,
+          }
+        : undefined,
     );
     return res.json({
       ok: true,

@@ -7973,12 +7973,11 @@ function groundFloorRequirementLabel(req?: GroundFloorRequirement | null): strin
   return "Ground-floor/accessibility need found: clarify scope";
 }
 
-// Local-Mac sidecar status indicator + manual stop/start controls.
+// Sidecar status indicator + manual stop/start controls.
 // The buy-in tool delegates Airbnb, VRBO, Booking.com, and PM website
-// searches to a daemon running on the operator's Mac, which drives
-// their real Chrome via CDP. When the Mac is asleep / Claude Code
-// closed without the daemon installed / daemon crashed, the operator
-// should know immediately. Polls /heartbeat every 5s anywhere
+// searches to a polling worker. In production that worker runs on
+// Railway and drives a server Chrome service; local workers are still
+// supported for development. Polls /heartbeat every 5s anywhere
 // Operations is mounted (was 30s; tighter cadence now that the popover
 // surfaces a live "active job for Ns" counter and the operator wants
 // to see it tick during a search).
@@ -7986,7 +7985,7 @@ function groundFloorRequirementLabel(req?: GroundFloorRequirement | null): strin
 // CODEX NOTE (2026-05-05): these controls manage the Railway queue,
 // not the macOS LaunchAgent process. Stop cancels active+pending work
 // and pauses dispatch. Start clears the pause flag. If the badge is
-// offline, the local Mac daemon must be kickstarted outside the web app.
+// offline, the worker process/service must be restarted outside the web app.
 type SidecarHeartbeat = {
   isOnline: boolean;
   everSeen: boolean;
@@ -8002,6 +8001,13 @@ type SidecarHeartbeat = {
     opType: string;
     stage?: string;
     activeSec: number;
+  } | null;
+  workerRuntime?: {
+    slot?: string;
+    workerRole?: string;
+    browserMode?: string;
+    chromePrimary?: string;
+    source?: "server" | "local" | "unknown";
   } | null;
 };
 
@@ -8035,6 +8041,19 @@ function sidecarScreenAge(ageMs: number): string {
   return `${Math.round(ageMs / 60_000)}m ago`;
 }
 
+function isServerSidecarRuntime(runtime: SidecarHeartbeat["workerRuntime"] | null | undefined): boolean {
+  return runtime?.source === "server" ||
+    runtime?.workerRole === "server" ||
+    runtime?.browserMode === "server" ||
+    runtime?.chromePrimary === "server";
+}
+
+function sidecarRuntimeName(runtime: SidecarHeartbeat["workerRuntime"] | null | undefined): string {
+  if (isServerSidecarRuntime(runtime)) return "Railway sidecar worker";
+  if (runtime?.source === "local" || runtime?.workerRole || runtime?.browserMode || runtime?.chromePrimary) return "Local sidecar worker";
+  return "Sidecar worker";
+}
+
 function SidecarScreensStrip() {
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -8061,6 +8080,9 @@ function SidecarScreensStrip() {
   const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
   const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
   const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
+  const runtime = data?.heartbeat?.workerRuntime;
+  const runtimeName = sidecarRuntimeName(runtime);
+  const serverRuntime = isServerSidecarRuntime(runtime);
   const selectedScreenCannotSurface = Boolean(
     selectedScreen &&
       !selectedScreen.liveViewUrl &&
@@ -8112,7 +8134,7 @@ function SidecarScreensStrip() {
         <div className="flex min-w-0 items-center gap-2">
           <MonitorPlay className="h-4 w-4 text-muted-foreground" />
           <div>
-            <p className="text-xs font-semibold">Local Chrome sidecar screens</p>
+            <p className="text-xs font-semibold">{runtimeName} screens</p>
             <p className="text-[11px] text-muted-foreground">
               {data?.heartbeat?.isOnline ? "Sidecar live" : "Sidecar offline"} · {activeCount} active thumbnail{activeCount === 1 ? "" : "s"}
               {data?.heartbeat?.activeJob ? ` · ${data.heartbeat.activeJob.label} ${data.heartbeat.activeJob.activeSec}s` : ""}
@@ -8120,7 +8142,9 @@ function SidecarScreensStrip() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Badge variant="outline" className="text-[10px]">Up to 8 Chrome windows</Badge>
+          <Badge variant="outline" className="text-[10px]">
+            {serverRuntime ? "Server Chrome" : "Local Chrome"}
+          </Badge>
           <Button
             type="button"
             variant="outline"
@@ -8187,7 +8211,7 @@ function SidecarScreensStrip() {
           <DialogHeader>
             <DialogTitle>Sidecar screen {selectedScreen?.slot ?? selectedSlot}</DialogTitle>
             <DialogDescription>
-              Click or drag on the screenshot to pass pointer input to that Chrome tab. Use this for manual CAPTCHA recovery only.
+              Click or drag on the screenshot to pass pointer input to that sidecar tab. Use this for manual CAPTCHA recovery only.
             </DialogDescription>
           </DialogHeader>
           {selectedScreen?.screenshotDataUrl ? (
@@ -8332,7 +8356,9 @@ function SidecarStatusBadge() {
       await apiRequest("POST", "/api/vrbo-sidecar/start", {});
       toast({
         title: "Sidecar queue started",
-        description: "Queue is unpaused. If the badge stays offline, kickstart the local Mac daemon.",
+        description: serverRuntime
+          ? "Queue is unpaused. The Railway sidecar worker will pick up jobs when it is online."
+          : "Queue is unpaused. If the badge stays offline, restart the sidecar worker.",
       });
       await refresh();
     } catch (e: any) {
@@ -8347,10 +8373,13 @@ function SidecarStatusBadge() {
     // First heartbeat poll hasn't returned yet — render nothing.
     return null;
   }
+  const runtime = data.workerRuntime;
+  const runtimeName = sidecarRuntimeName(runtime);
+  const serverRuntime = isServerSidecarRuntime(runtime);
 
   // Three visual states (priority order: paused > offline > online):
   //   - Paused (by operator): yellow-orange "Paused" badge
-  //   - Offline (Mac asleep / daemon down): amber "Sidecar offline"
+  //   - Offline (worker down): amber "Sidecar offline"
   //   - Online idle: green "Sidecar live"
   //   - Online with active job: green "Sidecar working {Ns}"
   let statusIcon: React.ReactNode;
@@ -8365,7 +8394,7 @@ function SidecarStatusBadge() {
   } else if (!data.isOnline) {
     statusIcon = <AlertCircle className="h-4 w-4" />;
     statusLabel = "Sidecar offline";
-    statusDetail = state.everSeen ? "Reconnect Mac" : "Not connected";
+    statusDetail = state.everSeen ? (serverRuntime ? "Check Railway" : "Reconnect worker") : "Not connected";
     triggerClass = "border-amber-300 bg-amber-50 text-amber-950 hover:bg-amber-100";
   } else if (data.activeJob) {
     statusIcon = <Loader2 className="h-4 w-4 animate-spin" />;
@@ -8399,29 +8428,39 @@ function SidecarStatusBadge() {
       </PopoverTrigger>
       <PopoverContent className="w-80 text-xs space-y-3" align="end">
         <div>
-          <div className="font-semibold text-sm mb-1">Local Mac sidecar</div>
+          <div className="font-semibold text-sm mb-1">{runtimeName}</div>
           <div className="text-muted-foreground leading-snug">
             {data.paused
               ? data.isOnline
-                ? "Queue paused by operator. The Mac daemon is still polling, but it will not pick up jobs until you start the queue."
-                : "Queue paused by operator. Start Queue will resume dispatch, but the Mac daemon also needs to be running."
+                ? "Queue paused by operator. The worker is still polling, but it will not pick up jobs until you start the queue."
+                : serverRuntime
+                  ? "Queue paused by operator. Start Queue will resume dispatch after the Railway worker is online."
+                  : "Queue paused by operator. Start Queue will resume dispatch, but the sidecar worker also needs to be running."
               : !data.isOnline
                 ? state.everSeen
-                  ? `Last poll ${data.ageMs != null ? Math.round(data.ageMs / 60_000) + "m" : "?"} ago. Mac asleep, daemon crashed, or launchd is not running.`
-                  : "Daemon never connected. See ~/Downloads/vrbo-sidecar/README.md to install."
+                  ? serverRuntime
+                    ? `Last poll ${data.ageMs != null ? Math.round(data.ageMs / 60_000) + "m" : "?"} ago. Check the Railway rct-sidecar-worker service.`
+                    : `Last poll ${data.ageMs != null ? Math.round(data.ageMs / 60_000) + "m" : "?"} ago. The sidecar worker is not polling.`
+                  : serverRuntime
+                    ? "Railway worker has not connected yet."
+                    : "Sidecar worker has not connected yet."
                 : data.activeJob
-                  ? `Polled ${data.ageMs != null ? Math.round(data.ageMs / 1000) + "s" : "?"} ago. Currently driving Chrome.`
+                  ? `Polled ${data.ageMs != null ? Math.round(data.ageMs / 1000) + "s" : "?"} ago. Currently driving ${serverRuntime ? "server Chrome" : "Chrome"}.`
                   : `Polled ${data.ageMs != null ? Math.round(data.ageMs / 1000) + "s" : "?"} ago. Idle, ready for work.`}
           </div>
         </div>
 
-        {!data.isOnline && (
+        {!data.isOnline && !serverRuntime && (
           <div className="rounded-md border border-amber-200 bg-amber-50 px-2 py-2 text-[10px] leading-snug text-amber-900">
-            The web app can stop/start the queue, but a stopped local Mac sidecar has to be
-            kickstarted on this computer:
+            The web app can stop/start the queue, but a stopped local sidecar has to be restarted on this computer:
             <code className="mt-1 block rounded bg-white/70 px-1.5 py-1 font-mono text-[9px] text-amber-950">
               launchctl kickstart -k gui/$(id -u)/com.vrbosidecar.worker
             </code>
+          </div>
+        )}
+        {!data.isOnline && serverRuntime && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-2 py-2 text-[10px] leading-snug text-amber-900">
+            This queue is server-controlled. If it stays offline, check the Railway <code>rct-sidecar-worker</code> service rather than this Mac.
           </div>
         )}
 
@@ -8468,11 +8507,10 @@ function SidecarStatusBadge() {
         <div className="text-[10px] text-muted-foreground leading-snug space-y-1">
           <div>
             <strong>Stop</strong>: cancel running job + block new queue work.
-            The Mac daemon idles if it is running.
+            The sidecar worker idles if it is running.
           </div>
           <div>
-            <strong>Start Queue</strong>: unblock new queue work. If the
-            sidecar is offline, kickstart the local Mac daemon too.
+            <strong>Start Queue</strong>: unblock new queue work. If the sidecar is offline, restart the {serverRuntime ? "Railway worker" : "sidecar worker"}.
           </div>
         </div>
       </PopoverContent>

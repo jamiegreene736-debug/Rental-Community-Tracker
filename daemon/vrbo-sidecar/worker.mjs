@@ -900,6 +900,15 @@ function authHeaders() {
   return ADMIN_SECRET ? { "X-Admin-Secret": ADMIN_SECRET } : {};
 }
 
+function workerRuntimeMetadata() {
+  return {
+    slot: WORKER_SLOT,
+    workerRole: WORKER_ROLE,
+    browserMode: SIDECAR_BROWSER_MODE,
+    chromePrimary: CHROME_PRIMARY,
+  };
+}
+
 function normaliseCookieRecords(arr) {
   const sameSiteMap = { strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax", none: "None" };
   return arr
@@ -1301,7 +1310,13 @@ async function fetchJson(url, init) {
 }
 
 async function pollNext() {
-  const data = await fetchJson(`${SERVER}/api/admin/vrbo-sidecar/next`, {
+  const url = new URL(`${SERVER}/api/admin/vrbo-sidecar/next`);
+  const runtime = workerRuntimeMetadata();
+  url.searchParams.set("slot", runtime.slot);
+  url.searchParams.set("workerRole", runtime.workerRole);
+  url.searchParams.set("browserMode", runtime.browserMode);
+  url.searchParams.set("chromePrimary", runtime.chromePrimary);
+  const data = await fetchJson(url.toString(), {
     headers: authHeaders(),
   });
   return data.request ?? null;
@@ -1325,7 +1340,10 @@ async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
     const r = await fetch(`${SERVER}/api/admin/vrbo-sidecar/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(id ? { id, stage: label } : {}),
+      body: JSON.stringify({
+        ...(id ? { id, stage: label } : {}),
+        workerRuntime: workerRuntimeMetadata(),
+      }),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json().catch(() => ({}));

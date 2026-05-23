@@ -1,11 +1,8 @@
-// Local-Chrome sidecar queue.
+// Chrome sidecar queue.
 //
-// Bridges find-buy-in (running on Railway) to a daemon running on the
-// operator's Mac that drives their REAL Chrome via CDP. Vrbo's anti-bot
-// fingerprints every Browserbase residential session (see PR #265's
-// diagnostic + the Decision Log entry from 2026-04-29); driving the
-// operator's actual home-IP Chrome is the only path that consistently
-// gets past the bot wall.
+// Bridges find-buy-in (running on Railway) to a polling sidecar worker.
+// The worker can run locally for development, but production now runs it
+// on Railway against a server Chrome/noVNC service and Bright Data proxy.
 //
 // Originally just for VRBO search. Generalized 2026-04-29 to handle
 // multiple op types with the same queue machinery:
@@ -348,6 +345,14 @@ export type SidecarStatusRequest = {
   activeSec?: number;
 };
 
+export type SidecarWorkerRuntime = {
+  slot?: string;
+  workerRole?: string;
+  browserMode?: string;
+  chromePrimary?: string;
+  source?: "server" | "local" | "unknown";
+};
+
 // Backward-compat alias — old code imported this name when the queue
 // was VRBO-only.
 export type SidecarVrboCandidate = SidecarPropertyCandidate;
@@ -361,6 +366,7 @@ const requestKeyIndex = new Map<string, string>(); // requestKey → id
 // correctness. Online window is 90s (1.5× the daemon's POLL_IDLE_MS so
 // a single missed poll doesn't flicker the indicator).
 let lastWorkerPollAt: number | null = null;
+let lastWorkerRuntime: SidecarWorkerRuntime | null = null;
 const HEARTBEAT_ONLINE_WINDOW_MS = 90 * 1000;
 
 // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): operator-
@@ -412,8 +418,36 @@ export function assertSidecarStopGenerationCurrent(generation: number | null | u
   }
 }
 
-export function stampHeartbeat(id?: string, stage?: string): void {
+function normalizeWorkerRuntime(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarWorkerRuntime | null {
+  if (!runtime) return null;
+  const clean = (value: unknown, max = 40): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.replace(/\s+/g, " ").trim().slice(0, max);
+    return trimmed || undefined;
+  };
+  const workerRole = clean(runtime.workerRole);
+  const browserMode = clean(runtime.browserMode);
+  const chromePrimary = clean(runtime.chromePrimary);
+  const slot = clean(runtime.slot, 16);
+  const source = workerRole === "server" || chromePrimary === "server" || browserMode === "server"
+    ? "server"
+    : workerRole || browserMode || chromePrimary
+      ? "local"
+      : undefined;
+  if (!workerRole && !browserMode && !chromePrimary && !slot && !source) return null;
+  return {
+    ...(slot ? { slot } : {}),
+    ...(workerRole ? { workerRole } : {}),
+    ...(browserMode ? { browserMode } : {}),
+    ...(chromePrimary ? { chromePrimary } : {}),
+    source: source ?? "unknown",
+  };
+}
+
+export function stampHeartbeat(id?: string, stage?: string, runtime?: Partial<SidecarWorkerRuntime> | null): void {
   lastWorkerPollAt = nowMs();
+  const normalizedRuntime = normalizeWorkerRuntime(runtime);
+  if (normalizedRuntime) lastWorkerRuntime = normalizedRuntime;
   if (!id) return;
   const r = queue.get(id);
   if (r?.status === "in_progress") {
@@ -733,9 +767,9 @@ export function enqueue(opts: SidecarVrboParams): {
  * Even an empty-queue poll counts as a heartbeat — the worker is
  * alive, just no work right now.
  */
-export function next(): SidecarRequest | null {
+export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarRequest | null {
   cleanup();
-  stampHeartbeat();
+  stampHeartbeat(undefined, undefined, runtime);
   // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): paused
   // queue returns null even when pending work exists. The worker
   // keeps polling (heartbeat stays green so the operator sees
@@ -1030,6 +1064,7 @@ export function getHeartbeat(): {
     stage?: string;
     activeSec: number;
   } | null;
+  workerRuntime: SidecarWorkerRuntime | null;
 } {
   const pausedState = isQueuePaused();
   // Inline-find the in-progress request without paying for a full
@@ -1062,6 +1097,7 @@ export function getHeartbeat(): {
       pausedAgeMs: pausedState.pausedAgeMs,
       pausedReason: pausedState.reason,
       activeJob,
+      workerRuntime: lastWorkerRuntime,
     };
   }
   const ageMs = nowMs() - lastWorkerPollAt;
@@ -1077,6 +1113,7 @@ export function getHeartbeat(): {
     pausedAgeMs: pausedState.pausedAgeMs,
     pausedReason: pausedState.reason,
     activeJob,
+    workerRuntime: lastWorkerRuntime,
   };
 }
 
