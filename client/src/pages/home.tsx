@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -60,6 +60,8 @@ import {
   CheckSquare,
   StopCircle,
   MonitorPlay,
+  Maximize2,
+  MousePointerClick,
 } from "lucide-react";
 import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -166,6 +168,8 @@ type SidecarScreenSnapshot = {
   url?: string;
   title?: string;
   screenshotDataUrl?: string;
+  width?: number;
+  height?: number;
   captcha?: boolean;
   error?: string;
   at: string;
@@ -290,6 +294,29 @@ function SidecarScreensPanel({ data }: { data?: SidecarScreensResponse }) {
   const bySlot = new Map(screens.map((screen) => [screen.slot, screen]));
   const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
   const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
+  const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
+  const draggingRef = useRef(false);
+  const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
+
+  const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = Math.max(1, screen.width ?? 1280);
+    const height = Math.max(1, screen.height ?? 820);
+    const x = Math.max(0, Math.min(width, ((event.clientX - rect.left) / Math.max(1, rect.width)) * width));
+    const y = Math.max(0, Math.min(height, ((event.clientY - rect.top) / Math.max(1, rect.height)) * height));
+    void fetch("/api/vrbo-sidecar/screen-control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slot: screen.slot,
+        requestId: screen.requestId,
+        action,
+        x: Math.round(x),
+        y: Math.round(y),
+      }),
+    }).catch(() => {});
+  };
+
   return (
     <Card className="mb-4 p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -311,12 +338,26 @@ function SidecarScreensPanel({ data }: { data?: SidecarScreensResponse }) {
           const host = (() => {
             try { return screen?.url ? new URL(screen.url).hostname.replace(/^www\./, "") : ""; } catch { return ""; }
           })();
+          const canOpen = Boolean(screen?.screenshotDataUrl);
           return (
-            <div key={slot} className="overflow-hidden rounded-md border bg-muted/20">
+            <button
+              key={slot}
+              type="button"
+              className={`overflow-hidden rounded-md border bg-muted/20 text-left transition ${canOpen ? "hover:border-blue-400 hover:shadow-sm" : ""} ${screen?.captcha ? "border-amber-400 ring-1 ring-amber-300" : ""}`}
+              onClick={() => {
+                if (screen?.screenshotDataUrl) setSelectedSlot(slot);
+              }}
+              disabled={!canOpen}
+              title={canOpen ? "Open interactive sidecar screen" : "No screen available"}
+            >
               <div className="flex items-center justify-between gap-1 border-b bg-background px-2 py-1 text-[10px]">
                 <span className="font-medium">Slot {slot}</span>
-                <span className={screen?.captcha ? "text-amber-700" : "text-muted-foreground"}>
-                  {screen ? sidecarScreenAge(screen.ageMs) : "idle"}
+                <span className="flex items-center gap-1">
+                  {screen?.captcha && <MousePointerClick className="h-3 w-3 text-amber-700" />}
+                  {canOpen && <Maximize2 className="h-3 w-3 text-muted-foreground" />}
+                  <span className={screen?.captcha ? "text-amber-700" : "text-muted-foreground"}>
+                    {screen ? sidecarScreenAge(screen.ageMs) : "idle"}
+                  </span>
                 </span>
               </div>
               <div className="aspect-video bg-slate-950">
@@ -331,10 +372,67 @@ function SidecarScreensPanel({ data }: { data?: SidecarScreensResponse }) {
                 <p className="truncate text-muted-foreground" title={screen?.title ?? host}>{screen?.title || host || "Ready for next search"}</p>
                 {screen?.error && <p className="truncate text-red-600" title={screen.error}>{screen.error}</p>}
               </div>
-            </div>
+            </button>
           );
         })}
       </div>
+      <Dialog open={Boolean(selectedSlot)} onOpenChange={(open) => {
+        if (!open) {
+          draggingRef.current = false;
+          setSelectedSlot(null);
+        }
+      }}>
+        <DialogContent className="max-w-6xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <MonitorPlay className="h-5 w-5" />
+              Sidecar screen {selectedSlot}
+              {selectedScreen?.captcha && <Badge className="bg-amber-500 text-white">CAPTCHA</Badge>}
+            </DialogTitle>
+          </DialogHeader>
+          {selectedScreen?.screenshotDataUrl ? (
+            <div className="space-y-3">
+              <div className="rounded-md border bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                Click and drag directly on the screen below to solve a slider CAPTCHA. The worker applies your mouse movement to the live sidecar page and the thumbnail updates every few seconds.
+              </div>
+              <div
+                className="relative overflow-hidden rounded-md border bg-slate-950 touch-none"
+                onPointerDown={(event) => {
+                  draggingRef.current = true;
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  sendPointerCommand(selectedScreen, "down", event);
+                }}
+                onPointerMove={(event) => {
+                  if (!draggingRef.current) return;
+                  sendPointerCommand(selectedScreen, "move", event);
+                }}
+                onPointerUp={(event) => {
+                  if (!draggingRef.current) return;
+                  draggingRef.current = false;
+                  sendPointerCommand(selectedScreen, "up", event);
+                }}
+                onPointerCancel={(event) => {
+                  draggingRef.current = false;
+                  sendPointerCommand(selectedScreen, "up", event);
+                }}
+              >
+                <img
+                  src={selectedScreen.screenshotDataUrl}
+                  alt=""
+                  className="max-h-[72vh] w-full select-none object-contain"
+                  draggable={false}
+                />
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span className="truncate">{selectedScreen.phase ?? "Working"} · {sidecarScreenAge(selectedScreen.ageMs)}</span>
+                <span className="truncate">{selectedScreen.title || selectedScreen.url || "Sidecar browser"}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-md border bg-muted/20 p-6 text-sm text-muted-foreground">No live screen is available for this slot.</div>
+          )}
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

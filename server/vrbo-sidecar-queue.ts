@@ -270,6 +270,16 @@ export type SidecarScreenSnapshot = {
   ageMs: number;
 };
 
+export type SidecarScreenControlCommand = {
+  id: string;
+  slot: string;
+  requestId?: string;
+  action: "move" | "down" | "up" | "click";
+  x: number;
+  y: number;
+  at: string;
+};
+
 export type SidecarSerpHit = {
   url: string;
   title: string;
@@ -366,6 +376,7 @@ let queuePausedAt: number | null = null;
 let queuePausedReason: string | null = null;
 let queueStopGeneration = 0;
 const sidecarScreens = new Map<string, Omit<SidecarScreenSnapshot, "ageMs">>();
+const sidecarScreenCommands = new Map<string, SidecarScreenControlCommand[]>();
 
 // TTLs (per-status) — also bound the size of the queue so a wedged
 // worker can't accumulate state forever.
@@ -374,6 +385,7 @@ const IN_PROGRESS_RECLAIM_MS = 90 * 1000;
 const TERMINAL_TTL_MS = 5 * 60 * 1000;
 const SIDECAR_SCREEN_TTL_MS = 10 * 60 * 1000;
 const SIDECAR_SCREENSHOT_MAX_CHARS = 350_000;
+const SIDECAR_SCREEN_COMMAND_TTL_MS = 60 * 1000;
 
 function nowMs(): number {
   return Date.now();
@@ -466,6 +478,77 @@ export function getSidecarScreenSnapshots(): SidecarScreenSnapshot[] {
       };
     })
     .sort((a, b) => a.slot.localeCompare(b.slot, undefined, { numeric: true }));
+}
+
+function screenCommandKey(slot: string): string {
+  return String(slot || "1").replace(/[^\w.-]/g, "").slice(0, 32) || "1";
+}
+
+function cleanupSidecarScreenCommands(): void {
+  const now = nowMs();
+  for (const [slot, commands] of sidecarScreenCommands) {
+    const fresh = commands.filter((cmd) => {
+      const at = Date.parse(cmd.at);
+      return Number.isFinite(at) && now - at <= SIDECAR_SCREEN_COMMAND_TTL_MS;
+    });
+    if (fresh.length) sidecarScreenCommands.set(slot, fresh);
+    else sidecarScreenCommands.delete(slot);
+  }
+}
+
+export function enqueueSidecarScreenControlCommand(command: {
+  slot?: unknown;
+  requestId?: unknown;
+  action?: unknown;
+  x?: unknown;
+  y?: unknown;
+}): { ok: boolean; error?: string; command?: SidecarScreenControlCommand } {
+  cleanupSidecarScreenCommands();
+  const slot = screenCommandKey(String(command.slot || "1"));
+  const action = String(command.action || "");
+  if (action !== "move" && action !== "down" && action !== "up" && action !== "click") {
+    return { ok: false, error: "action must be move, down, up, or click" };
+  }
+  const x = Number(command.x);
+  const y = Number(command.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
+    return { ok: false, error: "x and y must be non-negative numbers" };
+  }
+  const requestId = typeof command.requestId === "string" && command.requestId.trim()
+    ? command.requestId.trim().slice(0, 80)
+    : undefined;
+  const queued: SidecarScreenControlCommand = {
+    id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+    slot,
+    requestId,
+    action,
+    x: Math.round(x),
+    y: Math.round(y),
+    at: new Date().toISOString(),
+  };
+  const existing = sidecarScreenCommands.get(slot) ?? [];
+  existing.push(queued);
+  sidecarScreenCommands.set(slot, existing.slice(-80));
+  return { ok: true, command: queued };
+}
+
+export function takeSidecarScreenControlCommands(slotRaw: unknown, requestIdRaw?: unknown): SidecarScreenControlCommand[] {
+  cleanupSidecarScreenCommands();
+  const slot = screenCommandKey(String(slotRaw || "1"));
+  const requestId = typeof requestIdRaw === "string" && requestIdRaw.trim()
+    ? requestIdRaw.trim().slice(0, 80)
+    : undefined;
+  const commands = sidecarScreenCommands.get(slot) ?? [];
+  if (!commands.length) return [];
+  const take: SidecarScreenControlCommand[] = [];
+  const keep: SidecarScreenControlCommand[] = [];
+  for (const command of commands) {
+    if (!requestId || !command.requestId || command.requestId === requestId) take.push(command);
+    else keep.push(command);
+  }
+  if (keep.length) sidecarScreenCommands.set(slot, keep);
+  else sidecarScreenCommands.delete(slot);
+  return take;
 }
 
 function cleanup(): void {

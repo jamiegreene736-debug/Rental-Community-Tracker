@@ -1563,10 +1563,13 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
   log(`${label} ${id}: 2Captcha unavailable or failed; surfacing Chrome for manual verification`);
   await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
   await showVrboManualVerificationBanner(targetPage, label);
+  await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA - drag slider in dashboard", { captcha: true, force: true });
   try {
     const deadline = Date.now() + VRBO_MANUAL_VERIFY_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await targetPage.waitForTimeout(VRBO_MANUAL_VERIFY_POLL_MS).catch(() => {});
+      await applyScreenControlCommands({ id, opType: label }, targetPage, label);
+      await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA - drag slider in dashboard", { captcha: true, force: true });
       try {
         await sendHeartbeat(`manual VRBO verification: ${label}`, true, id);
       } catch (e) {
@@ -1588,6 +1591,49 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
     );
   } finally {
     await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
+  }
+}
+
+async function applyScreenControlCommands(req, targetPage = page, label = "sidecar") {
+  if (!targetPage || targetPage.isClosed?.()) return 0;
+  try {
+    const url = new URL(`${SERVER}/api/admin/vrbo-sidecar/screen-control`);
+    url.searchParams.set("slot", WORKER_SLOT);
+    if (req?.id) url.searchParams.set("requestId", String(req.id));
+    const r = await fetch(url, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(2_500),
+    });
+    if (!r.ok) return 0;
+    const data = await r.json();
+    const commands = Array.isArray(data?.commands) ? data.commands : [];
+    for (const command of commands) {
+      const x = Number(command?.x);
+      const y = Number(command?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const action = String(command?.action ?? "");
+      if (action === "move") {
+        await targetPage.mouse.move(x, y).catch(() => {});
+      } else if (action === "down") {
+        await targetPage.mouse.move(x, y).catch(() => {});
+        await targetPage.mouse.down().catch(() => {});
+      } else if (action === "up") {
+        await targetPage.mouse.move(x, y).catch(() => {});
+        await targetPage.mouse.up().catch(() => {});
+      } else if (action === "click") {
+        await targetPage.mouse.click(x, y, { delay: 60 }).catch(() => {});
+      }
+    }
+    if (commands.length) {
+      log(`${label} ${req?.id ?? ""}: applied ${commands.length} dashboard pointer command(s)`);
+      await postScreenSnapshot(req, targetPage, "manual CAPTCHA control", { captcha: true, force: true });
+    }
+    return commands.length;
+  } catch (e) {
+    if (!/AbortError|fetch failed/i.test(e?.message ?? "")) {
+      log(`${label} ${req?.id ?? ""}: screen control poll failed: ${e?.message ?? e}`);
+    }
+    return 0;
   }
 }
 

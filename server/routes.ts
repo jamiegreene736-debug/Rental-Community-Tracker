@@ -16721,6 +16721,19 @@ Return ONLY compact JSON with this exact shape:
     return res.json(updateSidecarScreenSnapshot(req.body ?? {}));
   });
 
+  // GET /api/admin/vrbo-sidecar/screen-control — worker pulls queued
+  // pointer commands from the dashboard's enlarged screenshot modal.
+  // This lets the operator manually drag a VRBO slider CAPTCHA even
+  // when the browser is running headless or in noVNC.
+  app.get("/api/admin/vrbo-sidecar/screen-control", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const { takeSidecarScreenControlCommands } = await import("./vrbo-sidecar-queue");
+    return res.json({
+      ok: true,
+      commands: takeSidecarScreenControlCommands(req.query.slot, req.query.requestId),
+    });
+  });
+
   // POST /api/admin/vrbo-sidecar/result — worker reports completion.
   // Body: { id, results?: unknown, error?: string }
   app.post("/api/admin/vrbo-sidecar/result", async (req, res) => {
@@ -16785,6 +16798,17 @@ Return ONLY compact JSON with this exact shape:
       screens: getSidecarScreenSnapshots(),
       maxScreens: 8,
     });
+  });
+
+  // POST /api/vrbo-sidecar/screen-control — dashboard sends a pointer
+  // action for an active sidecar screen. Coordinates are viewport
+  // pixels, not CSS pixels, so the daemon can apply them directly to
+  // Playwright's page.mouse.
+  app.post("/api/vrbo-sidecar/screen-control", async (req, res) => {
+    const { enqueueSidecarScreenControlCommand } = await import("./vrbo-sidecar-queue");
+    const result = enqueueSidecarScreenControlCommand(req.body ?? {});
+    if (!result.ok) return res.status(400).json(result);
+    return res.json(result);
   });
 
   // POST /api/vrbo-sidecar/cancel — operator-facing panic button for
