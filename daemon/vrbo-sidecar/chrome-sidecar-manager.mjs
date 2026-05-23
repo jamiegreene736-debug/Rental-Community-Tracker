@@ -101,7 +101,7 @@ async function sendBrowserCdpCommand(cdpUrl, method, params = {}, timeoutMs = 3_
   });
 }
 
-async function enforceChromeWindowBounds(cdpUrl, position, size) {
+async function getChromeWindowId(cdpUrl) {
   const targetsResp = await fetch(`${trimTrailingSlash(cdpUrl)}/json/list`, {
     signal: AbortSignal.timeout(3_000),
   });
@@ -113,8 +113,13 @@ async function enforceChromeWindowBounds(cdpUrl, position, size) {
   if (!target?.id) throw new Error("CDP page target missing");
   const windowInfo = await sendBrowserCdpCommand(cdpUrl, "Browser.getWindowForTarget", { targetId: target.id });
   if (typeof windowInfo.windowId !== "number") throw new Error("CDP window id missing");
+  return windowInfo.windowId;
+}
+
+async function enforceChromeWindowBounds(cdpUrl, position, size) {
+  const windowId = await getChromeWindowId(cdpUrl);
   await sendBrowserCdpCommand(cdpUrl, "Browser.setWindowBounds", {
-    windowId: windowInfo.windowId,
+    windowId,
     bounds: {
       left: Math.round(position.left),
       top: Math.round(position.top),
@@ -122,6 +127,23 @@ async function enforceChromeWindowBounds(cdpUrl, position, size) {
       height: Math.round(size.height),
       windowState: "normal",
     },
+  });
+}
+
+async function hideChromeWindow(cdpUrl, position, size) {
+  const windowId = await getChromeWindowId(cdpUrl);
+  await sendBrowserCdpCommand(cdpUrl, "Browser.setWindowBounds", {
+    windowId,
+    bounds: {
+      left: Math.round(position.left),
+      top: Math.round(position.top),
+      width: Math.round(size.width),
+      height: Math.round(size.height),
+    },
+  });
+  await sendBrowserCdpCommand(cdpUrl, "Browser.setWindowBounds", {
+    windowId,
+    bounds: { windowState: "minimized" },
   });
 }
 
@@ -537,7 +559,7 @@ export class ChromeSidecarManager {
       const ready = await this.waitForCdp(first.cdpUrl, 20_000);
       if (!ready) return false;
     }
-    await this.enforceVisibleBounds(first);
+    await this.enforceLocalWindowMode(first);
     return true;
   }
 
@@ -550,7 +572,7 @@ export class ChromeSidecarManager {
         await this.waitForCdp(instance.cdpUrl, 20_000);
       }
       if (await this.isCdpReady(instance.cdpUrl)) {
-        await this.enforceVisibleBounds(instance);
+        await this.enforceLocalWindowMode(instance);
         readyCount += 1;
       }
     }
@@ -642,7 +664,7 @@ export class ChromeSidecarManager {
     }
 
     if (await this.isCdpReady(instance.cdpUrl)) {
-      await this.enforceVisibleBounds(instance);
+      await this.enforceLocalWindowMode(instance);
     }
 
     const heartbeat = setInterval(() => {
@@ -885,6 +907,22 @@ export class ChromeSidecarManager {
     await enforceChromeWindowBounds(instance.cdpUrl, position, this.visibleWindowSize)
       .then(() => this.log(`${instance.label} visible bounds enforced at ${formatPosition(position)} ${this.visibleWindowSize.width}x${this.visibleWindowSize.height}`))
       .catch((e) => this.log(`${instance.label} visible bounds enforcement skipped: ${e?.message ?? e}`));
+  }
+
+  async enforceHiddenBounds(instance) {
+    const position = parsePosition(this.hiddenWindowPosition, { left: -32000, top: -32000 });
+    const size = { width: this.viewport.width, height: this.viewport.height + 80 };
+    await hideChromeWindow(instance.cdpUrl, position, size)
+      .then(() => this.log(`${instance.label} hidden bounds enforced at ${formatPosition(position)} ${size.width}x${size.height}`))
+      .catch((e) => this.log(`${instance.label} hidden bounds enforcement skipped: ${e?.message ?? e}`));
+  }
+
+  async enforceLocalWindowMode(instance) {
+    if (this.localVisible) {
+      await this.enforceVisibleBounds(instance);
+      return;
+    }
+    await this.enforceHiddenBounds(instance);
   }
 
   visiblePositionForInstance(instance) {

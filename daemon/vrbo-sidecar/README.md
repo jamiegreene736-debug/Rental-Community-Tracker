@@ -80,10 +80,11 @@ SIDECAR_CHROME_VISIBLE_POSITION=120,80   # where the manual fallback window appe
 SIDECAR_CHROME_HIDDEN_POSITION=-32000,-32000
 ```
 
-For a dedicated sidecar monitor, set `SIDECAR_CHROME_VISIBLE=1` and
-place the visible grid on that display. Chrome launches with macOS
-`open -g` so it should appear without stealing focus from Safari, and
-visible mode does not pass `--start-minimized`:
+For a dedicated sidecar monitor or local debugging session, set
+`SIDECAR_CHROME_VISIBLE=1` and place the visible grid on that display.
+Chrome launches with macOS `open -g` so it should appear without
+stealing focus from Safari, and visible mode does not pass
+`--start-minimized`:
 
 ```sh
 SIDECAR_CHROME_VISIBLE=1
@@ -195,7 +196,18 @@ starts it at login and restarts it if the sidecar exits. The daemon is
 installed outside `~/Downloads` because macOS can block LaunchAgents
 from executing files there with `Operation not permitted`.
 
-For the dedicated sidecar monitor setup, the installer defaults to:
+The installer defaults to the in-dashboard viewing flow:
+
+```sh
+SIDECAR_CHROME_VISIBLE=0
+SIDECAR_WARM_ALL_LOCAL_CHROME=0
+SIDECAR_ALLOW_FOCUS=0
+SIDECAR_CAPTCHA_SURFACE_WINDOW=1
+SIDECAR_CAPTCHA_ALLOW_FOCUS=1
+```
+
+To intentionally bring back the old dedicated monitor grid for local
+debugging, override these before running the installer:
 
 ```sh
 SIDECAR_CHROME_VISIBLE=1
@@ -209,8 +221,7 @@ SIDECAR_WARM_ALL_LOCAL_CHROME=1
 SIDECAR_ALLOW_FOCUS=0
 ```
 
-Override any of those before running the installer if the monitor
-layout changes.
+Override the grid values if the monitor layout changes.
 
 Manual plist reference:
 
