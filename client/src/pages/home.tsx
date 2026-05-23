@@ -1026,9 +1026,8 @@ export default function Home() {
     listingId: string | null | undefined,
     reservationId?: string | null,
   ) => {
-    if (!listingId) return "/bookings";
     const params = new URLSearchParams();
-    const mappedPropertyId = propertyIdByGuestyListingId.get(listingId);
+    const mappedPropertyId = listingId ? propertyIdByGuestyListingId.get(listingId) : undefined;
     if (mappedPropertyId) {
       params.set("propertyId", String(mappedPropertyId));
     } else if (listingId) {

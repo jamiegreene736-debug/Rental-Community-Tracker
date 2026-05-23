@@ -3474,6 +3474,28 @@ function guestyListTotal(data: any): number | null {
   return total && total > 0 ? total : null;
 }
 
+function guestyListingIdFromReservation(reservation: any): string {
+  const listing = reservation?.listing ?? {};
+  return firstNonEmptyString(
+    reservation?.listingId,
+    reservation?.listing_id,
+    reservation?.listingID,
+    listing?._id,
+    listing?.id,
+    listing?.listingId,
+  );
+}
+
+function guestyListingName(listing: any, fallback: string): string {
+  return firstNonEmptyString(listing?.nickname, listing?.title, listing?.name, fallback);
+}
+
+function isCommittedGuestyReservation(reservation: any): boolean {
+  const status = String(reservation?.status ?? "").toLowerCase();
+  if (/\b(cancel|declin|inquir|request|expired|closed|draft)\b/.test(status)) return false;
+  return !!(reservation?._id ?? reservation?.id) && !!(reservation?.checkIn ?? reservation?.checkInDateLocalized);
+}
+
 function virtualPropertyIdForGuestyListingId(listingId: string): number {
   let hash = 0;
   for (const ch of listingId) {
@@ -5531,7 +5553,7 @@ export async function registerRoutes(
           guest?.lastName ?? guest?.last_name,
         ].filter(Boolean).join(" ").trim();
         const listing = reservation?.listing ?? {};
-        const reservationListingId = String(reservation?.listingId ?? listing?._id ?? listing?.id ?? "").trim();
+        const reservationListingId = guestyListingIdFromReservation(reservation);
         const listingKey = reservationListingId || String(listing?.nickname ?? listing?.title ?? "Listing");
         const listingName = String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing");
         const existingListing = listingRevenue.get(listingKey) ?? {
@@ -12000,6 +12022,206 @@ export async function registerRoutes(
     }
   });
 
+  type OperationsListingTarget = {
+    listingId: string;
+    propertyId: number;
+    propertyName: string;
+    mapped: boolean;
+    listing: any;
+    unitSlots: Array<{
+      unitId: string;
+      unitLabel: string;
+      bedrooms: number;
+      sourceListingId?: string;
+      community?: string;
+      adHoc?: boolean;
+    }>;
+  };
+
+  const buildAdHocUnitSlotsFromListing = (listingId: string, listing: any) => {
+    const bedrooms = inferBedroomsFromGuestyListing(listing);
+    const community = resolveBuyInMarket({
+      name: firstNonEmptyString(listing?.nickname, listing?.title, listing?.name),
+      listingTitle: listing?.title,
+      streetAddress: firstNonEmptyString(listing?.address?.full, listing?.address?.street),
+      city: listing?.address?.city,
+      state: listing?.address?.state,
+    });
+    return bedrooms && bedrooms > 0
+      ? [{
+          unitId: "main",
+          unitLabel: `${bedrooms}BR Guesty listing`,
+          bedrooms,
+          sourceListingId: listingId,
+          community,
+          adHoc: true,
+        }]
+      : [];
+  };
+
+  const operationsListingTargetFor = async (
+    listingId: string,
+    listing: any,
+    mapping?: { propertyId: number; guestyListingId: string } | null,
+  ): Promise<OperationsListingTarget> => {
+    const propertyId = mapping?.propertyId ?? virtualPropertyIdForGuestyListingId(listingId);
+    let unitSlots: OperationsListingTarget["unitSlots"] = [];
+    if (mapping?.propertyId && mapping.propertyId > 0) {
+      unitSlots = getPropertyUnits(mapping.propertyId) as OperationsListingTarget["unitSlots"];
+    } else if (mapping?.propertyId && mapping.propertyId < 0) {
+      const draft = await storage.getCommunityDraft(Math.abs(mapping.propertyId)).catch(() => undefined);
+      if (draft) unitSlots = unitSlotsForCommunityDraft(draft, listingId);
+    }
+    if (unitSlots.length === 0) {
+      unitSlots = buildAdHocUnitSlotsFromListing(listingId, listing);
+    }
+    return {
+      listingId,
+      propertyId,
+      propertyName: guestyListingName(listing, `Guesty listing ${listingId.slice(0, 8)}`),
+      mapped: !!mapping,
+      listing,
+      unitSlots,
+    };
+  };
+
+  const fetchOperationsGuestyListings = async () => {
+    const fields = "title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street status active isActive";
+    const limit = 100;
+    const maxPages = 100;
+    const listings: any[] = [];
+    const seen = new Set<string>();
+    for (let page = 0; page < maxPages; page++) {
+      const params = new URLSearchParams({
+        limit: String(limit),
+        skip: String(page * limit),
+        fields,
+      });
+      const data = await guestyRequest("GET", `/listings?${params.toString()}`) as any;
+      const rows = unwrapGuestyListResponse(data);
+      for (const row of rows) {
+        const id = firstNonEmptyString(row?._id, row?.id);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        listings.push(row);
+      }
+      const total = guestyListTotal(data);
+      if (rows.length < limit || (total && listings.length >= total)) break;
+    }
+    return listings;
+  };
+
+  const enrichGuestyReservationForOperations = async (
+    reservation: any,
+    target: OperationsListingTarget,
+  ) => {
+    const reservationId = String(reservation?._id ?? reservation?.id ?? "");
+    const attached = target.unitSlots.length > 0 && reservationId
+      ? await storage.getBuyInsByReservation(reservationId)
+      : [];
+    const slots = target.unitSlots.map((slot) => {
+      const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
+      return { ...slot, buyIn };
+    });
+    const filled = slots.filter((s) => s.buyIn).length;
+    return {
+      ...reservation,
+      _id: reservationId,
+      listingId: target.listingId,
+      operationsListingId: target.listingId,
+      operationsPropertyId: target.propertyId,
+      operationsPropertyName: target.propertyName,
+      operationsMapped: target.mapped,
+      operationsBuyInConfigured: slots.length > 0,
+      slots,
+      slotsFilled: filled,
+      slotsTotal: slots.length,
+      fullyLinked: slots.length > 0 && filled === slots.length,
+    };
+  };
+
+  app.get("/api/bookings/guesty-all", async (req, res) => {
+    try {
+      const includePast = req.query.includePast === "true";
+      const today = new Date().toISOString().slice(0, 10);
+      const listingRows = await fetchOperationsGuestyListings();
+      const listingById = new Map<string, any>();
+      for (const listing of listingRows) {
+        const id = firstNonEmptyString(listing?._id, listing?.id);
+        if (id) listingById.set(id, listing);
+      }
+
+      const mappings = await storage.getGuestyPropertyMap();
+      const mappingByListingId = new Map(mappings.map((row) => [row.guestyListingId, row]));
+      const targetByListingId = new Map<string, OperationsListingTarget>();
+      for (const [listingId, listing] of listingById.entries()) {
+        targetByListingId.set(
+          listingId,
+          await operationsListingTargetFor(listingId, listing, mappingByListingId.get(listingId) ?? null),
+        );
+      }
+
+      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId");
+      const limit = 100;
+      const maxRows = Math.min(Math.max(parseInt((req.query.maxRows as string) ?? "5000", 10) || 5000, 100), 10000);
+      const filterArr: Array<Record<string, unknown>> = [];
+      if (!includePast) {
+        filterArr.push({ field: "checkOut", operator: "$gte", value: today });
+      }
+      const filterQuery = filterArr.length > 0
+        ? `filters=${encodeURIComponent(JSON.stringify(filterArr))}&`
+        : "";
+      const seenReservations = new Map<string, any>();
+      for (let skip = 0; skip < maxRows; skip += limit) {
+        const data = await guestyRequest("GET", `/reservations?${filterQuery}limit=${limit}&skip=${skip}&sort=checkIn&fields=${fields}`) as any;
+        const rows = unwrapGuestyListResponse(data);
+        for (const row of rows) {
+          if (!isCommittedGuestyReservation(row)) continue;
+          const id = String(row?._id ?? row?.id ?? "").trim();
+          if (id) seenReservations.set(id, row);
+        }
+        const total = guestyListTotal(data);
+        if (rows.length < limit || (total && skip + rows.length >= total)) break;
+      }
+
+      const enriched = [];
+      const missingListingIds = new Set<string>();
+      for (const reservation of seenReservations.values()) {
+        let listingId = guestyListingIdFromReservation(reservation);
+        let target = listingId ? targetByListingId.get(listingId) : undefined;
+        if (!target) {
+          const embeddedListing = reservation?.listing ?? {};
+          listingId = listingId || firstNonEmptyString(embeddedListing?._id, embeddedListing?.id);
+          if (listingId) {
+            target = await operationsListingTargetFor(listingId, embeddedListing, mappingByListingId.get(listingId) ?? null);
+            targetByListingId.set(listingId, target);
+          }
+        }
+        if (!target) {
+          missingListingIds.add(firstNonEmptyString(reservation?.listingId, reservation?.listing?._id, reservation?.listing?.id, "unknown"));
+          continue;
+        }
+        enriched.push(await enrichGuestyReservationForOperations(reservation, target));
+      }
+
+      enriched.sort((a, b) => {
+        const ad = String(a.checkInDateLocalized ?? a.checkIn ?? "");
+        const bd = String(b.checkInDateLocalized ?? b.checkIn ?? "");
+        return ad.localeCompare(bd);
+      });
+
+      res.json({
+        reservations: enriched,
+        total: enriched.length,
+        listingCount: listingById.size,
+        targetCount: targetByListingId.size,
+        missingListingIds: Array.from(missingListingIds),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch account-wide Guesty bookings", message: err.message });
+    }
+  });
+
   // List reservations for a Guesty listing, annotated with per-unit-slot fill status.
   app.get("/api/bookings/listing/:listingId", async (req, res) => {
     try {
@@ -12008,100 +12230,57 @@ export async function registerRoutes(
       const propertyId = Number.isFinite(propertyIdRaw) && propertyIdRaw !== 0 ? propertyIdRaw : null;
       const effectivePropertyId = propertyId ?? virtualPropertyIdForGuestyListingId(listingId);
       const includePast = req.query.includePast === "true";
-      const limit = Math.min(parseInt((req.query.limit as string) ?? "100", 10) || 100, 200);
+      const limit = Math.min(parseInt((req.query.limit as string) ?? "100", 10) || 100, 100);
+      const maxRows = Math.min(Math.max(parseInt((req.query.maxRows as string) ?? "1000", 10) || 1000, 100), 5000);
 
+      const listingFields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street");
+      const listing = await guestyRequest("GET", `/listings/${listingId}?fields=${listingFields}`).catch((e: any) => {
+        console.warn(`[bookings] couldn't load listing ${listingId}:`, e?.message ?? e);
+        return {};
+      }) as any;
+      const mappedRow = propertyId
+        ? { propertyId, guestyListingId: listingId }
+        : null;
+      const target = await operationsListingTargetFor(listingId, listing, mappedRow);
       const unitSlots = propertyId && propertyId > 0 ? getPropertyUnits(propertyId) : [];
-      let resolvedUnitSlots: any[] = unitSlots;
-      if (resolvedUnitSlots.length === 0 && propertyId && propertyId < 0) {
-        const draft = await storage.getCommunityDraft(Math.abs(propertyId)).catch(() => undefined);
-        if (draft) {
-          resolvedUnitSlots = unitSlotsForCommunityDraft(draft, listingId);
-        }
-      }
-      if (resolvedUnitSlots.length === 0) {
-        try {
-          const listingFields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street");
-          const listing = await guestyRequest("GET", `/listings/${listingId}?fields=${listingFields}`) as any;
-          const bedrooms = inferBedroomsFromGuestyListing(listing);
-          const community = resolveBuyInMarket({
-            name: firstNonEmptyString(listing?.nickname, listing?.title, listing?.name),
-            listingTitle: listing?.title,
-            streetAddress: firstNonEmptyString(listing?.address?.full, listing?.address?.street),
-            city: listing?.address?.city,
-            state: listing?.address?.state,
-          });
-          if (bedrooms && bedrooms > 0) {
-            resolvedUnitSlots = [{
-              unitId: "main",
-              unitLabel: `${bedrooms}BR Guesty listing`,
-              bedrooms,
-              sourceListingId: listingId,
-              community,
-              adHoc: true,
-            }];
-          }
-        } catch (e: any) {
-          console.warn(`[bookings] couldn't infer buy-in slot for listing ${listingId}:`, e?.message ?? e);
-        }
-      }
+      const resolvedUnitSlots = target.unitSlots;
 
       const today = new Date().toISOString().slice(0, 10);
-      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState");
+      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId");
       // Guesty Open API requires the JSON `filters=[...]` syntax for
       // listingId — the simple `listingId=X` query param is silently
       // ignored, so the account-wide reservation list comes back
-      // regardless. That was Jamie's bug: every property selection
-      // returned the same first reservation (Mike Stevens) because
-      // Guesty wasn't filtering at all. Status moves into the filter
-      // array too so the whole filter set goes through one consistent
-      // path; legacy `status[]=` is left out to avoid mixing syntaxes.
-      // checkOut date filter only applies when includePast is false.
+      // regardless. Keep listingId in the filter array, but filter out
+      // non-booking statuses locally. Guesty can add committed statuses
+      // beyond `confirmed` / `awaitingPayment`, and the Operations page
+      // should not hide a real booking just because its status vocabulary
+      // changed.
       // See https://open-api-docs.guesty.com/docs/how-to-search-for-reservations
       const filterArr: Array<Record<string, unknown>> = [
         { field: "listingId", operator: "$eq", value: listingId },
-        // Bookings page = real bookings only. Inquiries belong in the
-        // inbox; pulling them in here clutters the list with messages
-        // that haven't actually committed to dates. `awaitingPayment`
-        // stays because that's a confirmed booking that just hasn't
-        // settled the first payment yet — still a real booking from
-        // the operator's POV (units are blocked, dates are committed).
-        { field: "status", operator: "$in", value: ["confirmed", "awaitingPayment"] },
       ];
       if (!includePast) {
         filterArr.push({ field: "checkOut", operator: "$gte", value: today });
       }
       const filtersParam = encodeURIComponent(JSON.stringify(filterArr));
-      const url = `/reservations?filters=${filtersParam}&limit=${limit}&sort=checkIn&fields=${fields}`;
-      const data = await guestyRequest("GET", url) as any;
-      // Guesty wraps list responses inconsistently across accounts — could be
-      //   { results: [...] }         (legacy)
-      //   { data: [...] }            (new flat)
-      //   { data: { results: [...] } } (new envelope)
-      const reservations: any[] = Array.isArray(data?.results)
-        ? data.results
-        : Array.isArray(data?.data)
-          ? data.data
-          : Array.isArray(data?.data?.results)
-            ? data.data.results
-            : [];
+      const seenReservations = new Map<string, any>();
+      for (let skip = 0; skip < maxRows; skip += limit) {
+        const url = `/reservations?filters=${filtersParam}&limit=${limit}&skip=${skip}&sort=checkIn&fields=${fields}`;
+        const data = await guestyRequest("GET", url) as any;
+        const rows = unwrapGuestyListResponse(data);
+        for (const row of rows) {
+          if (!isCommittedGuestyReservation(row)) continue;
+          const id = String(row?._id ?? row?.id ?? "").trim();
+          if (id) seenReservations.set(id, row);
+        }
+        const total = guestyListTotal(data);
+        if (rows.length < limit || (total && skip + rows.length >= total)) break;
+      }
+      const reservations = Array.from(seenReservations.values());
 
       // For each reservation build per-slot attachment info
       const enriched = await Promise.all(
-        reservations.map(async (r) => {
-          const attached = resolvedUnitSlots.length > 0 && r._id ? await storage.getBuyInsByReservation(r._id) : [];
-          const slots = resolvedUnitSlots.map((slot) => {
-            const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
-            return { ...slot, buyIn };
-          });
-          const filled = slots.filter((s) => s.buyIn).length;
-          return {
-            ...r,
-            slots,
-            slotsFilled: filled,
-            slotsTotal: slots.length,
-            fullyLinked: slots.length > 0 && filled === slots.length,
-          };
-        }),
+        reservations.map((r) => enrichGuestyReservationForOperations(r, target)),
       );
 
       const manualRows = propertyId && unitSlots.length > 0

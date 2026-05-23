@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { Link } from "wouter";
-import { useQuery, useQueries, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -132,6 +132,12 @@ function buyInSetupLabelForOption(
 interface GuestyReservation {
   _id: string;
   status: string;
+  listingId?: string;
+  operationsListingId?: string;
+  operationsPropertyId?: number;
+  operationsPropertyName?: string;
+  operationsMapped?: boolean;
+  operationsBuyInConfigured?: boolean;
   createdAt?: string;
   checkIn: string;
   checkOut: string;
@@ -2481,43 +2487,38 @@ export default function Bookings() {
     refetchInterval: 120_000,
   });
 
-  const globalBookingQueries = useQueries({
-    queries: globalPropertyTargets.map((target) => ({
-      queryKey: ["/api/bookings/listing", target.guestyListingId, target.propertyId, { includePast, scope: "all-properties" }],
-      queryFn: async () => {
-        const url = `/api/bookings/listing/${encodeURIComponent(target.guestyListingId)}?propertyId=${target.propertyId}&includePast=${includePast}`;
-        return apiRequest("GET", url).then((r) => r.json()) as Promise<{
-          reservations: GuestyReservation[];
-          total: number;
-          unitSlots: UnitConfig[];
-        }>;
-      },
-      enabled: isGlobalView && globalPropertyTargets.length > 0,
-      staleTime: 60_000,
-      refetchInterval: 120_000,
-    })),
+  const globalBookingsQuery = useQuery<{
+    reservations: GuestyReservation[];
+    total: number;
+    listingCount: number;
+    targetCount: number;
+    missingListingIds?: string[];
+  }>({
+    queryKey: ["/api/bookings/guesty-all", { includePast }],
+    queryFn: () => apiRequest("GET", `/api/bookings/guesty-all?includePast=${includePast}`).then((r) => r.json()),
+    enabled: isGlobalView,
+    staleTime: 60_000,
+    refetchInterval: 120_000,
   });
 
   const globalReservations = useMemo(() => {
     if (!isGlobalView) return [];
-    return globalBookingQueries.flatMap((query) => query.data?.reservations ?? []);
-  }, [globalBookingQueries, isGlobalView]);
+    return globalBookingsQuery.data?.reservations ?? [];
+  }, [globalBookingsQuery.data?.reservations, isGlobalView]);
 
   const reservationPropertyMeta = useMemo(() => {
     const map = new Map<string, { propertyId: number; propertyName: string; guestyListingId: string; mapped: boolean }>();
     if (isGlobalView) {
-      globalBookingQueries.forEach((query, index) => {
-        const target = globalPropertyTargets[index];
-        if (!target) return;
-        for (const reservation of query.data?.reservations ?? []) {
-          map.set(reservation._id, {
-            propertyId: target.propertyId,
-            propertyName: target.propertyName,
-            guestyListingId: target.guestyListingId,
-            mapped: target.mapped,
-          });
-        }
-      });
+      for (const reservation of globalBookingsQuery.data?.reservations ?? []) {
+        const listingId = reservation.operationsListingId ?? reservation.listingId ?? "";
+        if (!listingId) continue;
+        map.set(reservation._id, {
+          propertyId: reservation.operationsPropertyId ?? virtualPropertyIdForGuestyListingId(listingId),
+          propertyName: reservation.operationsPropertyName ?? listingNameById.get(listingId) ?? `Guesty listing ${listingId.slice(0, 8)}`,
+          guestyListingId: listingId,
+          mapped: reservation.operationsMapped === true,
+        });
+      }
       return map;
     }
     if (selectedMapping) {
@@ -2532,11 +2533,11 @@ export default function Bookings() {
       }
     }
     return map;
-  }, [bookingsData?.reservations, globalBookingQueries, globalPropertyTargets, isGlobalView, listingNameById, selectedMapping]);
+  }, [bookingsData?.reservations, globalBookingsQuery.data?.reservations, isGlobalView, listingNameById, selectedMapping]);
 
-  const globalBookingsLoading = isGlobalView && globalBookingQueries.some((query) => query.isLoading || query.isFetching);
-  const globalBookingsError = isGlobalView && globalBookingQueries.some((query) => query.isError);
-  const globalBookingsErr = globalBookingQueries.find((query) => query.isError)?.error;
+  const globalBookingsLoading = isGlobalView && (globalBookingsQuery.isLoading || globalBookingsQuery.isFetching);
+  const globalBookingsError = isGlobalView && globalBookingsQuery.isError;
+  const globalBookingsErr = globalBookingsQuery.error;
   const bookingsLoading = isGlobalView ? globalBookingsLoading : (selectedBookingsLoading || selectedBookingsFetching);
   const bookingsError = isGlobalView ? globalBookingsError : selectedBookingsError;
   const bookingsErr = isGlobalView ? globalBookingsErr : selectedBookingsErr;
@@ -4369,11 +4370,12 @@ export default function Bookings() {
     ? `${selectedDisplayName || "Selected Guesty listing"}${selectedPropertyStatusLabel ? ` · ${selectedPropertyStatusLabel}` : ""}`
     : "";
   const activeGuestyCount = activeGuestyListings.length || sortedPropertyMap.length;
-  const globalLabel = `${activeGuestyCount} Guesty ${activeGuestyCount === 1 ? "listing" : "listings"} · ${globalPropertyTargets.length} buy-in targets`;
+  const scannedGuestyCount = globalBookingsQuery.data?.listingCount ?? activeGuestyCount;
+  const globalLabel = `${scannedGuestyCount} Guesty ${scannedGuestyCount === 1 ? "listing" : "listings"} scanned · ${globalPropertyTargets.length} buy-in targets`;
   const operationsDataEnabled = isGlobalView || !!selectedListingId;
   const refreshVisibleBookings = () => {
     if (isGlobalView) {
-      void Promise.all(globalBookingQueries.map((query) => query.refetch()));
+      void globalBookingsQuery.refetch();
       return;
     }
     void refetchBookings();
@@ -4534,13 +4536,13 @@ export default function Bookings() {
           </CardContent>
         </Card>
 
-        {isGlobalView && globalPropertyTargets.length === 0 && (
+        {isGlobalView && !bookingsLoading && !bookingsError && activeGuestyCount === 0 && !stats && (
           <Card>
             <CardContent className="py-12 text-center">
               <Building2 className="h-10 w-10 mx-auto mb-3 opacity-20" />
-              <p className="font-medium mb-1">No Guesty buy-in targets yet</p>
+              <p className="font-medium mb-1">No Guesty listings found yet</p>
               <p className="text-sm text-muted-foreground">
-                Guesty listings will appear here automatically once they expose bedroom details or are mapped to a dashboard property.
+                Once Guesty returns listings, all committed bookings for those listings will be scanned automatically.
               </p>
             </CardContent>
           </Card>
@@ -5140,17 +5142,17 @@ export default function Bookings() {
               <RefreshCw className="h-8 w-8 mx-auto mb-3 animate-spin opacity-40" />
               <p className="font-medium">Loading global booking summary</p>
               <p className="text-sm text-muted-foreground">
-                Pulling live reservations from each linked Guesty listing.
+                Pulling committed reservations directly from Guesty across the whole account.
               </p>
             </CardContent>
           </Card>
         )}
 
-        {isGlobalView && !bookingsLoading && !bookingsError && !stats && globalPropertyTargets.length > 0 && (
+        {isGlobalView && !bookingsLoading && !bookingsError && !stats && scannedGuestyCount > 0 && (
           <Card>
             <CardContent className="py-10 text-center">
               <Calendar className="h-8 w-8 mx-auto mb-3 opacity-30" />
-              <p className="font-medium">No bookings found across linked properties</p>
+              <p className="font-medium">No committed Guesty bookings found</p>
               <p className="text-sm text-muted-foreground">
                 Try enabling past stays or select an individual property to inspect it.
               </p>
