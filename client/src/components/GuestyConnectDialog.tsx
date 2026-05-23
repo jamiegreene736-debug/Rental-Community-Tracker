@@ -47,7 +47,7 @@ export function GuestyConnectDialog({ propertyId, propertyName, open, onOpenChan
   const [saving, setSaving] = useState<string | null>(null);
 
   const { data: listingsRaw, isLoading } = useQuery<any>({
-    queryKey: ["/api/guesty-proxy/listings?limit=200&fields=_id%20nickname%20title%20address.full"],
+    queryKey: ["/api/guesty-listings-all?limit=100&maxPages=50&fields=_id%20nickname%20title%20address.full"],
     enabled: open,
     staleTime: 5 * 60_000,
   });

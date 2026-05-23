@@ -2343,7 +2343,7 @@ export default function Bookings() {
   // Pull Guesty's listing names so we can show human-readable property names
   // (e.g. "Poipu Kai - 6BR Villas, Pool - Sleeps 16") instead of internal IDs.
   const { data: guestyListings } = useQuery<any>({
-    queryKey: ["/api/guesty-proxy/listings?limit=200&fields=_id%20nickname%20title%20isListed%20active%20isActive%20status%20bedrooms%20bedroomsCount%20bedroomCount%20beds%20accommodates%20personCapacity%20address.full%20address.city%20address.state%20address.street"],
+    queryKey: ["/api/guesty-listings-all?limit=100&maxPages=50&fields=_id%20nickname%20title%20isListed%20active%20isActive%20status%20bedrooms%20bedroomsCount%20bedroomCount%20beds%20accommodates%20personCapacity%20address.full%20address.city%20address.state%20address.street"],
     staleTime: 5 * 60_000,
   });
   const guestyListingId = (listing: GuestyListingSummary | null | undefined) =>
@@ -2359,10 +2359,8 @@ export default function Bookings() {
     return unwrapGuestyListings(guestyListings)
       .filter((listing) => {
         const status = String(listing.status ?? "").toLowerCase();
-        const inactive = listing.active === false
-          || listing.isActive === false
-          || /\b(?:inactive|archived|deleted|disabled)\b/.test(status);
-        return guestyListingId(listing) && !inactive;
+        const unavailable = /\b(?:archived|deleted|disabled)\b/.test(status);
+        return guestyListingId(listing) && !unavailable;
       });
   }, [guestyListings]);
   const listingNameById = useMemo(() => {
@@ -4315,13 +4313,13 @@ export default function Bookings() {
     : selectedMapping
       ? "mapped in Guesty · auto buy-in target"
       : selectedGuestyListingId
-        ? `active Guesty listing · ${selectedGuestyOnlyOption?.buyInSetupLabel ?? "auto buy-in target"}`
+        ? `Guesty listing · ${selectedGuestyOnlyOption?.buyInSetupLabel ?? "auto buy-in target"}`
         : "";
   const propertyLabel = !isGlobalView
     ? `${selectedDisplayName || "Selected Guesty listing"}${selectedPropertyStatusLabel ? ` · ${selectedPropertyStatusLabel}` : ""}`
     : "";
   const activeGuestyCount = activeGuestyListings.length || sortedPropertyMap.length;
-  const globalLabel = `${activeGuestyCount} active Guesty ${activeGuestyCount === 1 ? "listing" : "listings"} · ${globalPropertyTargets.length} buy-in targets`;
+  const globalLabel = `${activeGuestyCount} Guesty ${activeGuestyCount === 1 ? "listing" : "listings"} · ${globalPropertyTargets.length} buy-in targets`;
   const operationsDataEnabled = isGlobalView || !!selectedListingId;
   const refreshVisibleBookings = () => {
     if (isGlobalView) {
@@ -4431,7 +4429,7 @@ export default function Bookings() {
                       <SelectItem key={option.value} value={option.value}>
                         {option.name}
                         <span className="text-muted-foreground text-xs ml-1.5">
-                          · {option.mapped ? `#${option.propertyId}` : "active Guesty"}
+                          · {option.mapped ? `#${option.propertyId}` : "Guesty"}
                         </span>
                         <span className="text-muted-foreground text-xs ml-1.5">
                           · {option.buyInSetupLabel}
@@ -4490,9 +4488,9 @@ export default function Bookings() {
           <Card>
             <CardContent className="py-12 text-center">
               <Building2 className="h-10 w-10 mx-auto mb-3 opacity-20" />
-              <p className="font-medium mb-1">No mapped Guesty properties yet</p>
+              <p className="font-medium mb-1">No Guesty buy-in targets yet</p>
               <p className="text-sm text-muted-foreground">
-                Active Guesty listings can still appear in the dropdown, but the global Operations summary needs at least one mapped property.
+                Guesty listings will appear here automatically once they expose bedroom details or are mapped to a dashboard property.
               </p>
             </CardContent>
           </Card>

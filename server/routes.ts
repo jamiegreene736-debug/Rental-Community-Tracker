@@ -3456,6 +3456,24 @@ function inferBedroomsFromGuestyListing(listing: any): number | null {
   return match ? Number(match[1]) : null;
 }
 
+function unwrapGuestyListResponse(data: any): any[] {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.data?.results)) return data.data.results;
+  return [];
+}
+
+function guestyListTotal(data: any): number | null {
+  const total = numberFromUnknown(
+    data?.total
+      ?? data?.count
+      ?? data?.data?.total
+      ?? data?.data?.count,
+  );
+  return total && total > 0 ? total : null;
+}
+
 function virtualPropertyIdForGuestyListingId(listingId: string): number {
   let hash = 0;
   for (const ch of listingId) {
@@ -5608,6 +5626,65 @@ export async function registerRoutes(
       res.json({ success: true, source: status.source, expiresInSeconds: status.expiresInSeconds });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /api/guesty-listings-all
+  //
+  // UI dropdowns and Operations global booking scans need the complete
+  // Guesty listing set. A one-page `/listings?limit=200` call works until
+  // the account grows past that ceiling, then new properties can quietly
+  // disappear from buy-ins. This endpoint pages server-side and returns a
+  // normal `{ results: [...] }` envelope so existing client unwrappers keep
+  // working.
+  app.get("/api/guesty-listings-all", async (req, res) => {
+    try {
+      res.set("Cache-Control", "no-store");
+      const limitRaw = parseInt((req.query.limit as string) ?? "100", 10);
+      const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 100, 1), 100);
+      const maxPagesRaw = parseInt((req.query.maxPages as string) ?? "50", 10);
+      const maxPages = Math.min(Math.max(Number.isFinite(maxPagesRaw) ? maxPagesRaw : 50, 1), 100);
+      let skip = Math.max(parseInt((req.query.skip as string) ?? "0", 10) || 0, 0);
+      const fields = typeof req.query.fields === "string" ? req.query.fields.trim() : "";
+
+      const results: any[] = [];
+      const seen = new Set<string>();
+      let fetchedPages = 0;
+      let reportedTotal: number | null = null;
+
+      for (let page = 0; page < maxPages; page++) {
+        const params = new URLSearchParams({
+          limit: String(limit),
+          skip: String(skip),
+        });
+        if (fields) params.set("fields", fields);
+
+        const data = await guestyRequest("GET", `/listings?${params.toString()}`) as any;
+        const rows = unwrapGuestyListResponse(data);
+        reportedTotal ??= guestyListTotal(data);
+        fetchedPages += 1;
+
+        for (const row of rows) {
+          const id = String(row?._id ?? row?.id ?? "").trim();
+          const key = id || JSON.stringify(row);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          results.push(row);
+        }
+
+        if (rows.length < limit) break;
+        if (reportedTotal && results.length >= reportedTotal) break;
+        skip += limit;
+      }
+
+      res.json({
+        results,
+        total: reportedTotal ?? results.length,
+        returned: results.length,
+        fetchedPages,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch Guesty listings", message: err.message });
     }
   });
 

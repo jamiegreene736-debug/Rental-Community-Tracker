@@ -210,6 +210,14 @@ class GuestyService {
   }
 
   async getListings(limit = 25, skip = 0) {
+    if (skip === 0 && limit >= 200) {
+      const res = await fetch("/api/guesty-listings-all?limit=100&maxPages=50&fields=_id%20nickname%20title");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || body.error || `HTTP ${res.status}`);
+      }
+      return res.json() as Promise<{ results: Array<{ _id?: string; id?: string; nickname?: string; title?: string }> }>;
+    }
     return this.request<{ results: Array<{ _id?: string; id?: string; nickname?: string; title?: string }> }>(
       "GET", "/listings", null, `limit=${limit}&skip=${skip}`
     );
