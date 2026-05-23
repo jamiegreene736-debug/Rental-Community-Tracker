@@ -1162,6 +1162,7 @@ async function postScreenSnapshot(req, targetPage = page, phase = "working", ext
 function startScreenHeartbeat(req) {
   void postScreenSnapshot(req, page, `start ${req?.opType ?? "request"}`, { force: true });
   const interval = setInterval(() => {
+    void applyScreenControlCommands(req, page, req?.opType ?? "sidecar");
     void postScreenSnapshot(req, page, `working ${req?.opType ?? "request"}`);
   }, 7_500);
   interval.unref?.();
@@ -1622,6 +1623,9 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
         await targetPage.mouse.up().catch(() => {});
       } else if (action === "click") {
         await targetPage.mouse.click(x, y, { delay: 60 }).catch(() => {});
+      } else if (action === "surface") {
+        const surfaced = await setCaptchaWindowVisibility(targetPage, true, label, req?.id ?? "").catch(() => false);
+        if (!surfaced) await targetPage.bringToFront().catch(() => {});
       }
     }
     if (commands.length) {

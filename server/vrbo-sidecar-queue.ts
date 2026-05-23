@@ -274,7 +274,7 @@ export type SidecarScreenControlCommand = {
   id: string;
   slot: string;
   requestId?: string;
-  action: "move" | "down" | "up" | "click";
+  action: "move" | "down" | "up" | "click" | "surface";
   x: number;
   y: number;
   at: string;
@@ -506,12 +506,12 @@ export function enqueueSidecarScreenControlCommand(command: {
   cleanupSidecarScreenCommands();
   const slot = screenCommandKey(String(command.slot || "1"));
   const action = String(command.action || "");
-  if (action !== "move" && action !== "down" && action !== "up" && action !== "click") {
-    return { ok: false, error: "action must be move, down, up, or click" };
+  if (action !== "move" && action !== "down" && action !== "up" && action !== "click" && action !== "surface") {
+    return { ok: false, error: "action must be move, down, up, click, or surface" };
   }
   const x = Number(command.x);
   const y = Number(command.y);
-  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
+  if (action !== "surface" && (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0)) {
     return { ok: false, error: "x and y must be non-negative numbers" };
   }
   const requestId = typeof command.requestId === "string" && command.requestId.trim()
@@ -522,8 +522,8 @@ export function enqueueSidecarScreenControlCommand(command: {
     slot,
     requestId,
     action,
-    x: Math.round(x),
-    y: Math.round(y),
+    x: Number.isFinite(x) ? Math.round(x) : 0,
+    y: Number.isFinite(y) ? Math.round(y) : 0,
     at: new Date().toISOString(),
   };
   const existing = sidecarScreenCommands.get(slot) ?? [];

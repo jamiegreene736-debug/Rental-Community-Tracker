@@ -7732,12 +7732,11 @@ function SidecarScreensStrip() {
     }
   }, [collapsed]);
 
-  const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const width = Math.max(1, screen.width ?? 1280);
-    const height = Math.max(1, screen.height ?? 820);
-    const x = Math.max(0, Math.min(width, ((event.clientX - rect.left) / Math.max(1, rect.width)) * width));
-    const y = Math.max(0, Math.min(height, ((event.clientY - rect.top) / Math.max(1, rect.height)) * height));
+  const sendScreenCommand = (
+    screen: SidecarScreenSnapshot,
+    action: "move" | "down" | "up" | "click" | "surface",
+    coords: { x: number; y: number } = { x: 0, y: 0 },
+  ) => {
     void fetch("/api/vrbo-sidecar/screen-control", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -7745,10 +7744,21 @@ function SidecarScreensStrip() {
         slot: screen.slot,
         requestId: screen.requestId,
         action,
-        x: Math.round(x),
-        y: Math.round(y),
+        x: Math.round(coords.x),
+        y: Math.round(coords.y),
       }),
     }).catch(() => {});
+  };
+
+  const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
+    const target = event.currentTarget as HTMLElement;
+    const image = target.querySelector("img");
+    const rect = (image ?? target).getBoundingClientRect();
+    const width = Math.max(1, screen.width ?? 1280);
+    const height = Math.max(1, screen.height ?? 820);
+    const x = Math.max(0, Math.min(width, ((event.clientX - rect.left) / Math.max(1, rect.width)) * width));
+    const y = Math.max(0, Math.min(height, ((event.clientY - rect.top) / Math.max(1, rect.height)) * height));
+    sendScreenCommand(screen, action, { x, y });
   };
 
   return (
@@ -7836,28 +7846,56 @@ function SidecarScreensStrip() {
             </DialogDescription>
           </DialogHeader>
           {selectedScreen?.screenshotDataUrl ? (
-            <div
-              role="button"
-              tabIndex={0}
-              className="overflow-hidden rounded-lg border bg-slate-950"
-              onPointerDown={(event) => {
-                draggingRef.current = true;
-                event.currentTarget.setPointerCapture?.(event.pointerId);
-                sendPointerCommand(selectedScreen, "down", event);
-              }}
-              onPointerMove={(event) => {
-                if (draggingRef.current) sendPointerCommand(selectedScreen, "move", event);
-              }}
-              onPointerUp={(event) => {
-                if (draggingRef.current) {
-                  sendPointerCommand(selectedScreen, "up", event);
-                  draggingRef.current = false;
-                } else {
-                  sendPointerCommand(selectedScreen, "click", event);
-                }
-              }}
-            >
-              <img src={selectedScreen.screenshotDataUrl} alt="" className="max-h-[72vh] w-full object-contain" />
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    {selectedScreen.phase?.startsWith("finished")
+                      ? "This screenshot is from a finished sidecar run."
+                      : "Live pointer control is queued through the sidecar worker."}
+                  </p>
+                  <p className="truncate text-muted-foreground">
+                    {selectedScreen.title || selectedScreen.url || "Use the focus button if the screenshot does not respond."}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1 px-2 text-[11px]"
+                  onClick={() => sendScreenCommand(selectedScreen, "surface")}
+                  disabled={selectedScreen.phase?.startsWith("finished")}
+                  title={selectedScreen.phase?.startsWith("finished") ? "This run has already finished; start a fresh search to control Chrome." : "Bring the actual sidecar Chrome window to the front"}
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Focus real Chrome window
+                </Button>
+              </div>
+              <div
+                role="button"
+                tabIndex={0}
+                className={`overflow-hidden rounded-lg border bg-slate-950 ${selectedScreen.phase?.startsWith("finished") ? "cursor-not-allowed opacity-75" : "cursor-crosshair"}`}
+                onPointerDown={(event) => {
+                  if (selectedScreen.phase?.startsWith("finished")) return;
+                  draggingRef.current = true;
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                  sendPointerCommand(selectedScreen, "down", event);
+                }}
+                onPointerMove={(event) => {
+                  if (draggingRef.current && !selectedScreen.phase?.startsWith("finished")) sendPointerCommand(selectedScreen, "move", event);
+                }}
+                onPointerUp={(event) => {
+                  if (selectedScreen.phase?.startsWith("finished")) return;
+                  if (draggingRef.current) {
+                    sendPointerCommand(selectedScreen, "up", event);
+                    draggingRef.current = false;
+                  } else {
+                    sendPointerCommand(selectedScreen, "click", event);
+                  }
+                }}
+              >
+                <img src={selectedScreen.screenshotDataUrl} alt="" className="max-h-[72vh] w-full object-contain" draggable={false} />
+              </div>
             </div>
           ) : (
             <div className="rounded-lg border bg-muted p-6 text-sm text-muted-foreground">No screenshot available for this slot.</div>
