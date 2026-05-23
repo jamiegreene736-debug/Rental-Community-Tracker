@@ -12095,7 +12095,7 @@ export async function registerRoutes(
         total: allReservations.length,
         unitSlots: resolvedUnitSlots,
         propertyId: effectivePropertyId,
-        buyInConfigured: unitSlots.length > 0,
+        buyInConfigured: resolvedUnitSlots.length > 0,
         adHocBuyInConfigured: resolvedUnitSlots.length > 0 && unitSlots.length === 0,
       });
     } catch (err: any) {
