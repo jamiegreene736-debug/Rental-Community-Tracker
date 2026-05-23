@@ -51,13 +51,54 @@ if [[ ! -f "${INSTALL_DIR}/cookies.json" && -f "${LEGACY_COOKIES_FILE}" ]]; then
   echo "Migrated sidecar cookies from ${LEGACY_COOKIES_FILE}"
 fi
 
+quote_for_shell() {
+  printf "%q" "$1"
+}
+
+RAILWAY_VARS_KV=""
+load_railway_vars() {
+  if [[ -n "${RAILWAY_VARS_KV}" || "${RAILWAY_VARS_LOADED:-0}" == "1" ]]; then
+    return
+  fi
+  RAILWAY_VARS_LOADED="1"
+  if command -v railway >/dev/null 2>&1; then
+    RAILWAY_VARS_KV="$(railway variable list --kv 2>/dev/null || true)"
+  fi
+}
+
+railway_var() {
+  local key="$1"
+  load_railway_vars
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' <<<"${RAILWAY_VARS_KV}"
+}
+
+value_from_env_or_railway() {
+  local key="$1"
+  local fallback="${2:-}"
+  local current="${!key:-}"
+  if [[ -n "${current}" ]]; then
+    printf '%s' "${current}"
+    return
+  fi
+  local from_railway
+  from_railway="$(railway_var "${key}")"
+  if [[ -n "${from_railway}" ]]; then
+    printf '%s' "${from_railway}"
+    return
+  fi
+  printf '%s' "${fallback}"
+}
+
 SERVER_URL="${SIDECAR_SERVER:-https://rental-community-tracker-production.up.railway.app}"
 MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES:-8}"
-# Default to the no-window local browser path. It still uses this
-# machine's network/IP and streams screenshots to the dashboard, but it
-# does not launch macOS Google Chrome windows.
-SIDECAR_BROWSER_MODE="${SIDECAR_BROWSER_MODE:-headless}"
+# Prefer Grok's recommended architecture: remote headed Chrome/noVNC
+# with sticky residential proxy. Local headless remains the no-window
+# fallback if the server Chrome pool is unavailable.
+SIDECAR_BROWSER_MODE="${SIDECAR_BROWSER_MODE:-server}"
 SIDECAR_HEADLESS_BROWSER_CHANNEL="${SIDECAR_HEADLESS_BROWSER_CHANNEL:-chrome}"
+CHROME_PRIMARY="${CHROME_PRIMARY:-server}"
+SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK:-1}"
+SIDECAR_HEADLESS_FALLBACK_ENABLED="${SIDECAR_HEADLESS_FALLBACK_ENABLED:-1}"
 # Default to hidden/offscreen Chrome. The web dashboard now receives
 # sidecar screenshots, so the local browser grid is a debug-only mode.
 SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE:-0}"
@@ -72,18 +113,31 @@ SIDECAR_ALLOW_FOCUS="${SIDECAR_ALLOW_FOCUS:-0}"
 SIDECAR_CAPTCHA_SURFACE_WINDOW="${SIDECAR_CAPTCHA_SURFACE_WINDOW:-1}"
 SIDECAR_CAPTCHA_ALLOW_FOCUS="${SIDECAR_CAPTCHA_ALLOW_FOCUS:-1}"
 SIDECAR_MACOS_BACKGROUND_LAUNCH="${SIDECAR_MACOS_BACKGROUND_LAUNCH:-1}"
-SERVER_CHROME_FALLBACK_ENABLED="${SERVER_CHROME_FALLBACK_ENABLED:-0}"
+SERVER_CHROME_FALLBACK_ENABLED="${SERVER_CHROME_FALLBACK_ENABLED:-1}"
+SERVER_CHROME_FALLBACK_VRBO="${SERVER_CHROME_FALLBACK_VRBO:-1}"
+SIDECAR_OPEN_NOVNC_ON_ACQUIRE="${SIDECAR_OPEN_NOVNC_ON_ACQUIRE:-0}"
+SERVER_CHROME_HOST="$(value_from_env_or_railway SERVER_CHROME_HOST "")"
+SERVER_CHROME_SCHEME="$(value_from_env_or_railway SERVER_CHROME_SCHEME "http")"
+SERVER_CHROME_BASE_PORT="$(value_from_env_or_railway SERVER_CHROME_BASE_PORT "9223")"
+SERVER_CHROME_BASE_WEBDRIVER_PORT="$(value_from_env_or_railway SERVER_CHROME_BASE_WEBDRIVER_PORT "4445")"
+SERVER_CHROME_BASE_NOVNC_PORT="$(value_from_env_or_railway SERVER_CHROME_BASE_NOVNC_PORT "7901")"
+MAX_SERVER_INSTANCES="$(value_from_env_or_railway MAX_SERVER_INSTANCES "4")"
+CHROME_PROXY_ENABLED="$(value_from_env_or_railway CHROME_PROXY_ENABLED "1")"
+CHROME_PROXY_PROVIDER="$(value_from_env_or_railway CHROME_PROXY_PROVIDER "brightdata")"
+CHROME_PROXY_SCHEME="$(value_from_env_or_railway CHROME_PROXY_SCHEME "http")"
+CHROME_PROXY_COUNTRY="$(value_from_env_or_railway CHROME_PROXY_COUNTRY "us")"
+CHROME_PROXY_STICKY_SESSION_MINUTES="$(value_from_env_or_railway CHROME_PROXY_STICKY_SESSION_MINUTES "60")"
+BRIGHTDATA_PROXY_HOST="$(value_from_env_or_railway BRIGHTDATA_PROXY_HOST "brd.superproxy.io")"
+BRIGHTDATA_PROXY_PORT="$(value_from_env_or_railway BRIGHTDATA_PROXY_PORT "33335")"
+BRIGHTDATA_PROXY_USERNAME="$(value_from_env_or_railway BRIGHTDATA_PROXY_USERNAME "")"
+BRIGHTDATA_PROXY_PASSWORD="$(value_from_env_or_railway BRIGHTDATA_PROXY_PASSWORD "")"
 ADMIN_SECRET_VALUE="${SIDECAR_ADMIN_SECRET:-${ADMIN_SECRET:-}}"
 if [[ -z "${ADMIN_SECRET_VALUE}" ]] && command -v railway >/dev/null 2>&1; then
   # The 2Captcha key intentionally stays on Railway. The local sidecar still
   # needs ADMIN_SECRET so Railway's auth middleware lets it call the solver
   # endpoint. Pull it from the linked Railway service when available, but never
   # print the value.
-  ADMIN_SECRET_VALUE="$(
-    railway variable list --kv 2>/dev/null \
-      | awk -F= '$1 == "ADMIN_SECRET" { sub(/^[^=]*=/, ""); print; exit }' \
-      || true
-  )"
+  ADMIN_SECRET_VALUE="$(railway_var ADMIN_SECRET)"
   if [[ -n "${ADMIN_SECRET_VALUE}" ]]; then
     echo "Loaded ADMIN_SECRET from Railway variables for local sidecar auth."
   fi
@@ -101,10 +155,10 @@ if [[ -z "${ADMIN_SECRET_VALUE}" && -f "${EXISTING_RUNNER_PATH}" ]]; then
     fi
   fi
 fi
-quote_for_shell() {
-  printf "%q" "$1"
-}
 ADMIN_SECRET_EXPORT="$(quote_for_shell "${ADMIN_SECRET_VALUE}")"
+SERVER_CHROME_HOST_EXPORT="$(quote_for_shell "${SERVER_CHROME_HOST}")"
+BRIGHTDATA_PROXY_USERNAME_EXPORT="$(quote_for_shell "${BRIGHTDATA_PROXY_USERNAME}")"
+BRIGHTDATA_PROXY_PASSWORD_EXPORT="$(quote_for_shell "${BRIGHTDATA_PROXY_PASSWORD}")"
 SIDECAR_VRBO_2CAPTCHA="${SIDECAR_VRBO_2CAPTCHA:-1}"
 SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS="${SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS:-120}"
 SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS="${SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS:-2}"
@@ -119,6 +173,9 @@ export ADMIN_SECRET=${ADMIN_SECRET_EXPORT}
 export MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES}"
 export SIDECAR_BROWSER_MODE="${SIDECAR_BROWSER_MODE}"
 export SIDECAR_HEADLESS_BROWSER_CHANNEL="${SIDECAR_HEADLESS_BROWSER_CHANNEL}"
+export CHROME_PRIMARY="${CHROME_PRIMARY}"
+export SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK}"
+export SIDECAR_HEADLESS_FALLBACK_ENABLED="${SIDECAR_HEADLESS_FALLBACK_ENABLED}"
 export SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE}"
 export SIDECAR_CHROME_VISIBLE_SIZE="${SIDECAR_CHROME_VISIBLE_SIZE}"
 export SIDECAR_CHROME_VISIBLE_POSITIONS="${SIDECAR_CHROME_VISIBLE_POSITIONS}"
@@ -132,6 +189,23 @@ export SIDECAR_CAPTCHA_SURFACE_WINDOW="${SIDECAR_CAPTCHA_SURFACE_WINDOW}"
 export SIDECAR_CAPTCHA_ALLOW_FOCUS="${SIDECAR_CAPTCHA_ALLOW_FOCUS}"
 export SIDECAR_MACOS_BACKGROUND_LAUNCH="${SIDECAR_MACOS_BACKGROUND_LAUNCH}"
 export SERVER_CHROME_FALLBACK_ENABLED="${SERVER_CHROME_FALLBACK_ENABLED}"
+export SERVER_CHROME_FALLBACK_VRBO="${SERVER_CHROME_FALLBACK_VRBO}"
+export SIDECAR_OPEN_NOVNC_ON_ACQUIRE="${SIDECAR_OPEN_NOVNC_ON_ACQUIRE}"
+export SERVER_CHROME_HOST=${SERVER_CHROME_HOST_EXPORT}
+export SERVER_CHROME_SCHEME="${SERVER_CHROME_SCHEME}"
+export SERVER_CHROME_BASE_PORT="${SERVER_CHROME_BASE_PORT}"
+export SERVER_CHROME_BASE_WEBDRIVER_PORT="${SERVER_CHROME_BASE_WEBDRIVER_PORT}"
+export SERVER_CHROME_BASE_NOVNC_PORT="${SERVER_CHROME_BASE_NOVNC_PORT}"
+export MAX_SERVER_INSTANCES="${MAX_SERVER_INSTANCES}"
+export CHROME_PROXY_ENABLED="${CHROME_PROXY_ENABLED}"
+export CHROME_PROXY_PROVIDER="${CHROME_PROXY_PROVIDER}"
+export CHROME_PROXY_SCHEME="${CHROME_PROXY_SCHEME}"
+export CHROME_PROXY_COUNTRY="${CHROME_PROXY_COUNTRY}"
+export CHROME_PROXY_STICKY_SESSION_MINUTES="${CHROME_PROXY_STICKY_SESSION_MINUTES}"
+export BRIGHTDATA_PROXY_HOST="${BRIGHTDATA_PROXY_HOST}"
+export BRIGHTDATA_PROXY_PORT="${BRIGHTDATA_PROXY_PORT}"
+export BRIGHTDATA_PROXY_USERNAME=${BRIGHTDATA_PROXY_USERNAME_EXPORT}
+export BRIGHTDATA_PROXY_PASSWORD=${BRIGHTDATA_PROXY_PASSWORD_EXPORT}
 export SIDECAR_VRBO_2CAPTCHA="${SIDECAR_VRBO_2CAPTCHA}"
 export SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS="${SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS}"
 export SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS="${SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS}"

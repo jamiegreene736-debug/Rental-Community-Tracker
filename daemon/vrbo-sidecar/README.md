@@ -55,15 +55,16 @@ tail ~/Downloads/vrbo-sidecar/worker.log
 
 ## Chrome visibility
 
-The daemon defaults to `SIDECAR_BROWSER_MODE=headless`: a persistent
-local Playwright/Chrome profile with no macOS browser window. This
-keeps the operator's local network/IP and streams live screenshots to
-the dashboard without popping up Chrome on the desktop.
+The daemon defaults to Grok's recommended production path:
+`SIDECAR_BROWSER_MODE=server` with `CHROME_PRIMARY=server`. That
+prefers remote headed Chrome/noVNC workers and injects the configured
+sticky residential proxy settings, while the dashboard receives live
+screenshots from `page.screenshot()`.
 
-For the highest-fidelity headed-browser setup, run the server
-Chrome/noVNC containers and set `SIDECAR_BROWSER_MODE=cdp` with
-`CHROME_PRIMARY=server`. That gives an embedded noVNC live view and
-can use sticky residential proxy settings.
+If the server Chrome pool is unavailable, `SIDECAR_HEADLESS_FALLBACK_ENABLED=1`
+uses a local persistent headless Chrome profile as the no-window
+fallback. That fallback still uses the operator's local network/IP,
+but it is lower fidelity than headed noVNC Chrome.
 
 The older local headed Chrome grid is debug-only. If you need to watch
 or manually unblock the sidecar browser on the desktop, restart the
@@ -82,7 +83,10 @@ manual wait times out, the worker returns that window to hidden mode.
 
 ```sh
 SIDECAR_CHROME_VISIBLE=0                 # default hidden/background mode
-SIDECAR_BROWSER_MODE=headless            # default no-window local mode
+SIDECAR_BROWSER_MODE=server              # default server/noVNC mode
+CHROME_PRIMARY=server
+SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=1     # never open desktop Chrome from server mode
+SIDECAR_HEADLESS_FALLBACK_ENABLED=1      # no-window fallback if server Chrome is offline
 SIDECAR_HEADLESS_BROWSER_CHANNEL=chrome  # use installed Chrome in headless mode
 SIDECAR_MACOS_BACKGROUND_LAUNCH=1        # use macOS background launch
 SIDECAR_CAPTCHA_SURFACE_WINDOW=1         # reveal only for manual CAPTCHA fallback
@@ -111,9 +115,10 @@ SIDECAR_WARM_ALL_LOCAL_CHROME=1
 
 ## Local concurrency
 
-Server Chrome fallback is disabled by default. The supervisor starts a
-local worker pool instead, and `chrome-sidecar-manager.mjs` allocates
-up to eight local Chrome profiles by default:
+Server Chrome is enabled by default for the installed LaunchAgent. The
+supervisor still starts a local worker pool, but in default server mode
+those workers claim queue items and drive server Chrome/noVNC
+instances. In legacy local-CDP mode they map to local Chrome profiles:
 
 - `http://127.0.0.1:9222` using `VrboSidecar-Chrome`
 - `http://127.0.0.1:9223` using `VrboSidecar-Chrome-2`
@@ -129,15 +134,16 @@ SIDECAR_PM_SITE_TAB_CONCURRENCY=3
 SIDECAR_PM_URL_BATCH_CONCURRENCY=8
 ```
 
-Hybrid overflow is still opt-in. Set `SERVER_CHROME_FALLBACK_ENABLED=1`
-to let non-VRBO bulk work spill to server Chrome when every local
-worker is busy. VRBO stays local-only by default because CAPTCHA/manual
-solve needs the operator Mac; set `SERVER_CHROME_FALLBACK_VRBO=1` only
-when that tradeoff is intentional.
+Server Chrome is now the preferred path. `SERVER_CHROME_FALLBACK_ENABLED=1`
+enables the server/noVNC pool, `SERVER_CHROME_FALLBACK_VRBO=1` allows
+VRBO jobs to use it, and `SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=1`
+prevents the daemon from opening desktop Chrome windows if the server
+pool is down.
 
 ```sh
-SERVER_CHROME_FALLBACK_ENABLED=0
-SERVER_CHROME_FALLBACK_VRBO=0
+SERVER_CHROME_FALLBACK_ENABLED=1
+SERVER_CHROME_FALLBACK_VRBO=1
+SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=1
 ```
 
 Each worker retries transient browser/network failures once by default
@@ -210,7 +216,12 @@ from executing files there with `Operation not permitted`.
 The installer defaults to the in-dashboard viewing flow:
 
 ```sh
-SIDECAR_BROWSER_MODE=headless
+SIDECAR_BROWSER_MODE=server
+CHROME_PRIMARY=server
+SERVER_CHROME_FALLBACK_ENABLED=1
+SERVER_CHROME_FALLBACK_VRBO=1
+SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=1
+SIDECAR_HEADLESS_FALLBACK_ENABLED=1
 SIDECAR_HEADLESS_BROWSER_CHANNEL=chrome
 SIDECAR_CHROME_VISIBLE=0
 SIDECAR_WARM_ALL_LOCAL_CHROME=0

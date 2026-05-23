@@ -428,6 +428,10 @@ async function openExternalUrl(url, log) {
   }
 }
 
+function serverModeRequested() {
+  return /^(server|remote|novnc|server-cdp)$/i.test(String(process.env.SIDECAR_BROWSER_MODE ?? ""));
+}
+
 function parseServerEndpointList(raw) {
   if (!raw) return [];
   return String(raw)
@@ -494,6 +498,10 @@ export class ChromeSidecarManager {
     this.primary = String(process.env.CHROME_PRIMARY ?? "local").toLowerCase();
     this.serverFallbackEnabled = boolFromEnv("SERVER_CHROME_FALLBACK_ENABLED", false);
     this.serverFallbackForVrbo = boolFromEnv("SERVER_CHROME_FALLBACK_VRBO", false);
+    this.localCdpFallbackEnabled = !(
+      boolFromEnv("SIDECAR_DISABLE_LOCAL_CDP_FALLBACK", false) ||
+      (serverModeRequested() && process.env.SIDECAR_DISABLE_LOCAL_CDP_FALLBACK !== "0")
+    );
     this.maxLocalInstances = Math.min(
       HARD_MAX_LOCAL_INSTANCES,
       Math.max(1, Math.floor(numberFromEnv("MAX_LOCAL_CHROME_INSTANCES", DEFAULT_MAX_LOCAL_INSTANCES))),
@@ -594,13 +602,17 @@ export class ChromeSidecarManager {
       this.log(`${opType || "vrbo"} kept local-only; SERVER_CHROME_FALLBACK_VRBO=1 required for server fallback`);
     }
 
-    if (this.primary !== "local") {
+    if (this.primary !== "local" && this.localCdpFallbackEnabled) {
       const local = await this.tryAcquireLocal(request);
       if (local) return local;
+    } else if (this.primary !== "local") {
+      this.log("local macOS Chrome fallback disabled; not launching desktop Chrome from server mode");
     }
 
     throw new Error(
-      `All ${this.maxLocalInstances} local Chrome sidecars are busy. Wait for one to finish, or raise MAX_LOCAL_CHROME_INSTANCES up to ${HARD_MAX_LOCAL_INSTANCES}.`,
+      this.primary === "local"
+        ? `All ${this.maxLocalInstances} local Chrome sidecars are busy. Wait for one to finish, or raise MAX_LOCAL_CHROME_INSTANCES up to ${HARD_MAX_LOCAL_INSTANCES}.`
+        : "No server Chrome/noVNC sidecar is available, and local macOS Chrome fallback is disabled.",
     );
   }
 
@@ -698,8 +710,11 @@ export class ChromeSidecarManager {
     const instances = discoverServerInstances();
     if (instances.length === 0) return null;
 
-    // Required exact fallback message.
-    console.log("Local Chrome sidecar is currently in use, utilizing server processing...");
+    console.log(
+      this.primary === "server"
+        ? "Using server Chrome/noVNC sidecar processing..."
+        : "Local Chrome sidecar is currently in use, utilizing server processing...",
+    );
 
     for (const instance of instances) {
       const allocation = await this.tryAcquireServerInstance(instance, request);
@@ -707,7 +722,9 @@ export class ChromeSidecarManager {
 
       console.log(`Opened live view for this job: ${allocation.noVncUrl}`);
       console.log("Watch the search happening in real time.");
-      await openExternalUrl(allocation.noVncUrl, this.log);
+      if (boolFromEnv("SIDECAR_OPEN_NOVNC_ON_ACQUIRE", false)) {
+        await openExternalUrl(allocation.noVncUrl, this.log);
+      }
       return allocation;
     }
 

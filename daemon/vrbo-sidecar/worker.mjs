@@ -60,6 +60,8 @@ const SIDECAR_BROWSER_MODE = String(
     "cdp",
 ).toLowerCase();
 const USE_HEADLESS_LOCAL_BROWSER = /^(headless|local-headless|playwright-headless)$/.test(SIDECAR_BROWSER_MODE);
+const USE_SERVER_BROWSER = /^(server|remote|novnc|server-cdp)$/.test(SIDECAR_BROWSER_MODE);
+const HEADLESS_FALLBACK_ENABLED = process.env.SIDECAR_HEADLESS_FALLBACK_ENABLED !== "0";
 const HEADLESS_BROWSER_CHANNEL = process.env.SIDECAR_HEADLESS_BROWSER_CHANNEL ?? "chrome";
 const HEADLESS_USER_DATA_ROOT = process.env.SIDECAR_HEADLESS_USER_DATA_DIR ??
   path.join(os.homedir(), "Library/Application Support/VrboSidecar-Headless");
@@ -92,6 +94,10 @@ let contextGuardsInstalled = false;
 let activeChromeAllocation = null;
 let captchaWindowVisible = false;
 let launchedPersistentContext = false;
+
+function usingHeadlessRuntime() {
+  return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
+}
 
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
@@ -217,7 +223,7 @@ function shouldBlockNavigation(rawUrl) {
 }
 
 async function minimizeSidecarWindow(targetPage = page) {
-  if (USE_HEADLESS_LOCAL_BROWSER) return;
+  if (usingHeadlessRuntime()) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
   if (!context || !targetPage || targetPage.isClosed?.()) return;
   const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
@@ -255,7 +261,7 @@ async function minimizeSidecarWindow(targetPage = page) {
 }
 
 function scheduleSidecarMinimize(targetPage = page) {
-  if (USE_HEADLESS_LOCAL_BROWSER) return;
+  if (usingHeadlessRuntime()) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
   for (const delay of [0, 150, 500, 1500]) {
     const timer = setTimeout(() => {
@@ -266,7 +272,7 @@ function scheduleSidecarMinimize(targetPage = page) {
 }
 
 async function setCaptchaWindowVisibility(targetPage = page, visible, label = "sidecar", id = "") {
-  if (USE_HEADLESS_LOCAL_BROWSER) {
+  if (usingHeadlessRuntime()) {
     if (visible) {
       await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA needed in embedded screenshot", { captcha: true, force: true });
       log(`${label} ${id}: CAPTCHA detected in headless mode; no local Chrome window will be surfaced`);
@@ -770,10 +776,28 @@ async function acquireChromeForRequest(request = {}) {
     };
   }
   if (activeChromeAllocation) return activeChromeAllocation;
-  activeChromeAllocation = await chromeSidecarManager.acquire(request);
+  try {
+    activeChromeAllocation = await chromeSidecarManager.acquire(request);
+  } catch (e) {
+    if (USE_SERVER_BROWSER && HEADLESS_FALLBACK_ENABLED) {
+      log(`server Chrome unavailable; falling back to no-window local headless Chrome: ${e?.message ?? e}`);
+      activeChromeAllocation = {
+        type: "headless",
+        label: "local headless Chrome fallback",
+        cdpUrl: null,
+        noVncUrl: null,
+        ephemeral: false,
+        release: async () => {},
+      };
+    } else {
+      throw e;
+    }
+  }
   log(
-    `using ${activeChromeAllocation.label} via CDP (${activeChromeAllocation.cdpUrl})` +
-      (activeChromeAllocation.noVncUrl ? `; live view ${activeChromeAllocation.noVncUrl}` : ""),
+    activeChromeAllocation.cdpUrl
+      ? `using ${activeChromeAllocation.label} via CDP (${activeChromeAllocation.cdpUrl})` +
+          (activeChromeAllocation.noVncUrl ? `; live view ${activeChromeAllocation.noVncUrl}` : "")
+      : `using ${activeChromeAllocation.label} without desktop Chrome`,
   );
   if (activeChromeAllocation.noVncUrl && request.id) {
     await sendHeartbeat(`server Chrome live view ${activeChromeAllocation.noVncUrl}`, true, request.id).catch(() => {});
@@ -782,7 +806,7 @@ async function acquireChromeForRequest(request = {}) {
 }
 
 async function verifyActiveChromeHealth(label = "chrome health") {
-  if (USE_HEADLESS_LOCAL_BROWSER) return true;
+  if (usingHeadlessRuntime()) return true;
   if (!activeChromeAllocation?.cdpUrl) return true;
   const ok = await withSoftTimeout(chromeSidecarManager.isCdpReady(activeChromeAllocation.cdpUrl), 2_500, false);
   if (!ok) {
@@ -792,7 +816,10 @@ async function verifyActiveChromeHealth(label = "chrome health") {
 }
 
 async function releaseChromeForRequest() {
-  if (USE_HEADLESS_LOCAL_BROWSER) return;
+  if (usingHeadlessRuntime()) {
+    activeChromeAllocation = null;
+    return;
+  }
   if (!activeChromeAllocation) return;
   const allocation = activeChromeAllocation;
   activeChromeAllocation = null;
@@ -818,8 +845,8 @@ async function normalizePageDisplay(targetPage = page) {
 }
 
 async function ensureBrowser() {
-  if (USE_HEADLESS_LOCAL_BROWSER) return ensureHeadlessBrowser();
   const allocation = await acquireChromeForRequest();
+  if (usingHeadlessRuntime()) return ensureHeadlessBrowser();
   if (browser && context && page && !page.isClosed()) return;
   log(`connecting to Chrome via CDP (${allocation.label})…`);
   await verifyActiveChromeHealth("before connect");
@@ -951,7 +978,7 @@ async function showCompletePage(opType) {
 }
 
 async function teardownBrowser(reason) {
-  log(`${USE_HEADLESS_LOCAL_BROWSER ? "closing headless browser" : "disconnecting CDP"}: ${reason}`);
+  log(`${usingHeadlessRuntime() ? "closing headless browser" : "disconnecting CDP"}: ${reason}`);
   try {
     if (launchedPersistentContext && context) {
       await context.close().catch(() => {});
@@ -5093,7 +5120,13 @@ async function processRequest(req) {
     await showCompletePage(opType);
     if (activeChromeAllocation?.ephemeral) {
       await teardownBrowser(`finished ${activeChromeAllocation.type}-side ${opType}`);
-    } else if (USE_HEADLESS_LOCAL_BROWSER) {
+    } else if (usingHeadlessRuntime() && USE_SERVER_BROWSER) {
+      // Server mode should retry the noVNC/residential-proxy pool on
+      // the next request. If this op had to fall back to local
+      // headless, close it after the op instead of pinning this worker
+      // to fallback mode forever.
+      await teardownBrowser(`finished local headless fallback for ${opType}`);
+    } else if (usingHeadlessRuntime()) {
       // Keep the persistent headless profile open in this worker for
       // cookies/session continuity and fast follow-up queue items. It
       // has no desktop window, and screenshots continue to stream to
@@ -5212,6 +5245,8 @@ async function main() {
   log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
   if (USE_HEADLESS_LOCAL_BROWSER) {
     log("local macOS Chrome warmup skipped; using no-window local headless browser mode");
+  } else if (USE_SERVER_BROWSER) {
+    log("local macOS Chrome warmup skipped; preferring server Chrome/noVNC with residential proxy");
   } else if (WORKER_SLOT === "1") {
     try {
       if (process.env.SIDECAR_WARM_ALL_LOCAL_CHROME !== "0") {
