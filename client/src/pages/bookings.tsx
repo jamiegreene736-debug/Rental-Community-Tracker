@@ -4416,7 +4416,7 @@ export default function Bookings() {
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <div className="border-b bg-card px-4 py-3 sm:px-6 sm:py-4 flex flex-wrap items-center gap-3 sm:gap-4">
+      <div className="sticky top-[65px] z-40 flex flex-wrap items-center gap-3 border-b bg-card/95 px-4 py-3 shadow-sm backdrop-blur sm:gap-4 sm:px-6 sm:py-4">
         <Link href="/">
           <Button variant="ghost" size="sm" className="gap-1" data-testid="button-back-home">
             <ArrowLeft className="h-4 w-4" /> Dashboard
