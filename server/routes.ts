@@ -7350,6 +7350,23 @@ export async function registerRoutes(
     /(?:^|\.)(?:offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|1stdibs|facebook|fbcdn|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|shopify|myshopify)\./i;
   const isNonDirectBookingDomain = (domain: string | null | undefined): boolean =>
     NON_DIRECT_BOOKING_DOMAIN_RE.test(String(domain ?? "").toLowerCase());
+  const isNonDirectBookingSurface = (args: { domain?: string | null; title?: string | null; url?: string | null }): boolean => {
+    if (isNonDirectBookingDomain(args.domain)) return true;
+    const hay = `${args.domain ?? ""} ${args.title ?? ""} ${args.url ?? ""}`.toLowerCase();
+    if (/\b(offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|marketplace|classifieds)\b/.test(hay)) {
+      return true;
+    }
+    // Lens sometimes matches a unit photo's couch or decor item instead of
+    // the vacation-rental listing. Reject furniture/item-sale surfaces even
+    // when the domain is not already on the marketplace denylist.
+    if (/\b(couch|sofa|sectional|loveseat|recliner|furniture|mattress|headboard|dining table|coffee table)\b.*\b(for sale|used|marketplace|classified|listing|offer)\b/.test(hay)) {
+      return true;
+    }
+    if (/\b(for sale|used|marketplace|classified|listing|offer)\b.*\b(couch|sofa|sectional|loveseat|recliner|furniture|mattress|headboard|dining table|coffee table)\b/.test(hay)) {
+      return true;
+    }
+    return false;
+  };
 
   const uniqueScrapedPhotos = (photos: ScrapedPhoto[]): ScrapedPhoto[] => {
     const seen = new Set<string>();
@@ -9973,13 +9990,14 @@ export async function registerRoutes(
           if (!url) continue;
           let domain: string;
           try { domain = new URL(url).hostname.replace(/^www\./, ""); } catch { continue; }
+          const title = String(s?.title || s?.source || domain).slice(0, 80);
           if (OTA_DOMAIN_FILTER.test(domain)) continue;
-          if (isNonDirectBookingDomain(domain)) continue;
+          if (isNonDirectBookingSurface({ domain, title, url })) continue;
           if (seen.has(domain)) continue;
           seen.add(domain);
           out.push({
             url,
-            title: String(s?.title || s?.source || domain).slice(0, 80),
+            title,
             domain,
           });
           if (out.length >= 6) break;
@@ -10088,6 +10106,10 @@ export async function registerRoutes(
 
       for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
+        if (isNonDirectBookingSurface(m)) {
+          photoMatchLandingDropped++;
+          continue;
+        }
         // Drop landing/category PM URLs at the photo-match step too —
         // Lens hits on resort-collection pages are not a real per-unit
         // confirmation, even when the visual match is high.

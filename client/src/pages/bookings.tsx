@@ -658,6 +658,15 @@ function buyInFoundViaAirbnbGoogleLens(
   return /found via airbnb google lens|google lens.*airbnb|airbnb.*google lens|direct booking link found from airbnb photos|photo-matched to airbnb listing|airbnb supplied the date-specific|airbnb anchor|auto-filled from direct (?:link|pm)/i.test(notes);
 }
 
+function airbnbAnchorUrlFromBuyInNotes(
+  buyIn: Pick<BuyIn, "airbnbListingUrl" | "notes"> | null | undefined,
+): string | null {
+  if (!buyIn?.notes || isAirbnbUrl(buyIn.airbnbListingUrl)) return null;
+  const match = String(buyIn.notes).match(/https?:\/\/(?:www\.)?airbnb\.[^\s)]+/i);
+  if (!match?.[0]) return null;
+  return match[0].replace(/[.,;:]+$/, "");
+}
+
 // Canonicalize listing URLs for de-duping across reservation slots.
 // Date/search params differ by scan, but the path identifies the same
 // physical listing page for Airbnb/VRBO/Booking/PM sites.
@@ -1095,7 +1104,7 @@ function directCandidateFitsTarget(
 ): boolean {
   const targetText = normalizeDirectTargetText(`${targetResortName} ${community}`);
   const hay = normalizeDirectTargetText(`${item.domain ?? ""} ${item.sourceLabel ?? ""} ${item.title ?? ""} ${item.url ?? ""}`);
-  if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|marketplace|for sale|classifieds|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(hay)) {
+  if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|marketplace|for sale|classifieds|couch|sofa|sectional|loveseat|recliner|furniture|mattress|headboard|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(hay)) {
     return false;
   }
   const targetIsRegencyPoipuKai = /\bregency\b/.test(targetText) && /\bpoipu kai\b/.test(targetText);
@@ -1125,7 +1134,7 @@ function targetLocationRejectReason(
 ): string | null {
   const targetText = normalizeDirectTargetText(`${targetResortName} ${community}`);
   const hay = normalizeDirectTargetText(`${item.domain ?? ""} ${item.sourceLabel ?? ""} ${item.title ?? ""} ${item.url ?? ""} ${item.snippet ?? ""}`);
-  if (/\b(offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|marketplace|for sale|classifieds)\b/.test(hay)) {
+  if (/\b(offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|marketplace|for sale|classifieds|couch|sofa|sectional|loveseat|recliner|furniture|mattress|headboard)\b/.test(hay)) {
     return "not a direct booking site";
   }
   const targetIsRegencyPoipuKai = /\bregency\b/.test(targetText) && /\bpoipu kai\b/.test(targetText);
@@ -6132,6 +6141,22 @@ export default function Bookings() {
                                           Found via Airbnb Google Lens
                                         </Badge>
                                       )}
+                                      {(() => {
+                                        const airbnbAnchorUrl = airbnbAnchorUrlFromBuyInNotes(slot.buyIn);
+                                        if (!airbnbAnchorUrl) return null;
+                                        return (
+                                          <a
+                                            href={airbnbAnchorUrl}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="text-primary hover:underline inline-flex items-center gap-0.5"
+                                            title="Original Airbnb listing that supplied the date-specific price and availability."
+                                          >
+                                            original Airbnb <ExternalLink className="h-2.5 w-2.5" />
+                                          </a>
+                                        );
+                                      })()}
                                       {/* Manual-quote PMs (Suite Paradise, etc.) — show
                                           phone number inline so the operator knows the
                                           next action is a call, not a click-through. */}
