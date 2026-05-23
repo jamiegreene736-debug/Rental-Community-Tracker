@@ -66,6 +66,10 @@ const USE_HEADLESS_LOCAL_BROWSER = /^(headless|local-headless|playwright-headles
 const USE_SERVER_BROWSER = /^(server|remote|novnc|server-cdp)$/.test(SIDECAR_BROWSER_MODE);
 const HEADLESS_FALLBACK_ENABLED = process.env.SIDECAR_HEADLESS_FALLBACK_ENABLED !== "0";
 const HEADLESS_BROWSER_CHANNEL = process.env.SIDECAR_HEADLESS_BROWSER_CHANNEL ?? "chrome";
+const HEADLESS_CHROMIUM_EXECUTABLE_PATH =
+  process.env.SIDECAR_HEADLESS_EXECUTABLE_PATH ||
+  process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
+  "";
 const HEADLESS_USER_DATA_ROOT = process.env.SIDECAR_HEADLESS_USER_DATA_DIR ??
   path.join(os.homedir(), "Library/Application Support/VrboSidecar-Headless");
 const HEADLESS_PROXY_ENABLED = process.env.SIDECAR_HEADLESS_PROXY_ENABLED !== "0";
@@ -1021,7 +1025,7 @@ async function acquireChromeForRequest(request = {}) {
   if (USE_HEADLESS_LOCAL_BROWSER) {
     return {
       type: "headless",
-      label: "local headless Chrome",
+      label: WORKER_ROLE === "server" ? "Railway headless Chromium" : "local headless Chrome",
       cdpUrl: null,
       noVncUrl: null,
       ephemeral: false,
@@ -1033,10 +1037,13 @@ async function acquireChromeForRequest(request = {}) {
     activeChromeAllocation = await chromeSidecarManager.acquire(request);
   } catch (e) {
     if (USE_SERVER_BROWSER && HEADLESS_FALLBACK_ENABLED) {
-      log(`server Chrome unavailable; falling back to no-window local headless Chrome: ${e?.message ?? e}`);
+      const label = WORKER_ROLE === "server"
+        ? "Railway headless Chromium fallback"
+        : "no-window local headless Chrome fallback";
+      log(`server Chrome/noVNC unavailable; falling back to ${label}: ${e?.message ?? e}`);
       activeChromeAllocation = {
         type: "headless",
-        label: "local headless Chrome fallback",
+        label,
         cdpUrl: null,
         noVncUrl: null,
         proxyConfig: null,
@@ -1183,11 +1190,11 @@ async function ensureHeadlessBrowser() {
     activeHeadlessProxyBridge = await startHeadlessProxyAuthBridge(proxyConfig);
   }
   log(
-    `launching local headless Chrome (${HEADLESS_BROWSER_CHANNEL}) with profile ${userDataDir}` +
+    `launching ${WORKER_ROLE === "server" ? "Railway" : "local"} headless Chromium ` +
+      `(${HEADLESS_CHROMIUM_EXECUTABLE_PATH || HEADLESS_BROWSER_CHANNEL}) with profile ${userDataDir}` +
       (proxyConfig ? ` using ${proxyConfig.provider} proxy ${proxyConfig.host}:${proxyConfig.port} via local auth bridge` : ""),
   );
   const launchOptions = {
-    channel: HEADLESS_BROWSER_CHANNEL,
     headless: true,
     viewport: VIEWPORT,
     locale: process.env.SIDECAR_LOCALE ?? "en-US",
@@ -1201,6 +1208,11 @@ async function ensureHeadlessBrowser() {
       "--disable-dev-shm-usage",
     ],
   };
+  if (HEADLESS_CHROMIUM_EXECUTABLE_PATH) {
+    launchOptions.executablePath = HEADLESS_CHROMIUM_EXECUTABLE_PATH;
+  } else {
+    launchOptions.channel = HEADLESS_BROWSER_CHANNEL;
+  }
   if (proxyConfig) {
     launchOptions.proxy = {
       server: activeHeadlessProxyBridge.serverUrl,

@@ -961,10 +961,18 @@ export class ChromeSidecarManager {
         const session = await this.createSeleniumSession(instance, request, proxyConfig);
         webdriverSessionId = session.sessionId;
         sessionBaseUrl = session.baseUrl;
-        await this.waitForCdp(instance.cdpUrl, 15_000);
+        const becameReady = await this.waitForCdp(instance.cdpUrl, 15_000);
+        if (!becameReady) {
+          this.log(`${instance.name} WebDriver session started, but CDP never became reachable at ${instance.cdpUrl}`);
+        }
       }
 
-      if (!(await this.isCdpReady(instance.cdpUrl))) return null;
+      if (!(await this.isCdpReady(instance.cdpUrl))) {
+        if (webdriverSessionId && sessionBaseUrl) {
+          await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
+        }
+        return null;
+      }
 
       writeLock(lockFile, {
         type: "server",
