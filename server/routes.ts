@@ -16825,6 +16825,77 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
+  // POST /api/admin/solve-datadome-captcha
+  //
+  // Used by VRBO sidecar jobs when DataDome shows its slider iframe.
+  // Unlike generic coordinate solves, 2Captcha's DataDome task returns
+  // a `datadome=...` cookie that the daemon injects into the active
+  // browser context. The request must include the active page URL,
+  // DataDome iframe URL, browser User-Agent, and the residential proxy
+  // used by the browser session.
+  app.post("/api/admin/solve-datadome-captcha", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const apiKey = process.env.TWOCAPTCHA_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ ok: false, error: "TWOCAPTCHA_API_KEY not configured on Railway" });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const websiteURL = typeof body.websiteURL === "string" ? body.websiteURL.trim() : "";
+    const captchaUrl = typeof body.captchaUrl === "string" ? body.captchaUrl.trim() : "";
+    const userAgent = typeof body.userAgent === "string" ? body.userAgent.trim() : "";
+    const proxyTypeRaw = typeof body.proxyType === "string" ? body.proxyType.trim().toLowerCase() : "";
+    const proxyType = proxyTypeRaw === "socks4" || proxyTypeRaw === "socks5" ? proxyTypeRaw : "http";
+    const proxyAddress = typeof body.proxyAddress === "string" ? body.proxyAddress.trim() : "";
+    const proxyPort = Number(body.proxyPort);
+    const proxyLogin = typeof body.proxyLogin === "string" ? body.proxyLogin : undefined;
+    const proxyPassword = typeof body.proxyPassword === "string" ? body.proxyPassword : undefined;
+    const pollSeconds = typeof body.pollSeconds === "number" && body.pollSeconds > 0 && body.pollSeconds < 600
+      ? body.pollSeconds
+      : undefined;
+
+    if (!websiteURL || !/^https?:\/\//i.test(websiteURL)) {
+      return res.status(400).json({ ok: false, error: "websiteURL required" });
+    }
+    if (!captchaUrl || !/^https?:\/\//i.test(captchaUrl)) {
+      return res.status(400).json({ ok: false, error: "captchaUrl required" });
+    }
+    if (!userAgent) return res.status(400).json({ ok: false, error: "userAgent required" });
+    if (!proxyAddress || !Number.isFinite(proxyPort) || proxyPort <= 0) {
+      return res.status(400).json({ ok: false, error: "proxyAddress and proxyPort required" });
+    }
+
+    try {
+      const { solveDataDomeSliderCaptcha } = await import("./captcha-solver");
+      const captchaHost = (() => {
+        try { return new URL(captchaUrl).hostname; } catch { return "invalid-url"; }
+      })();
+      console.log(`[solve-datadome-captcha] website=${websiteURL.slice(0, 80)} captchaHost=${captchaHost} proxy=${proxyAddress}:${proxyPort}`);
+      const result = await solveDataDomeSliderCaptcha(
+        {
+          websiteURL,
+          captchaUrl,
+          userAgent,
+          proxyType,
+          proxyAddress,
+          proxyPort,
+          proxyLogin,
+          proxyPassword,
+        },
+        apiKey,
+        { pollSeconds },
+      );
+      if (result.ok) {
+        console.log(`[solve-datadome-captcha] ✓ id=${result.captchaId}${result.cost ? ` cost=${result.cost}` : ""}${result.ip ? ` ip=${result.ip}` : ""}`);
+      } else {
+        console.error(`[solve-datadome-captcha] ✗ ${result.error}`);
+      }
+      res.json(result);
+    } catch (e: any) {
+      console.error(`[solve-datadome-captcha] unhandled error: ${e?.message ?? e}`);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
   // GET /api/admin/vrbo-sidecar/next — worker poll endpoint. Honours
   // ADMIN_SECRET so only the operator's worker (not arbitrary callers)
   // can claim queue items.

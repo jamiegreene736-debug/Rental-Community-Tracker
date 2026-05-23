@@ -338,6 +338,7 @@ async function startHeadlessProxyAuthBridge(proxyConfig) {
   return {
     server,
     serverUrl: `http://127.0.0.1:${port}`,
+    proxyConfig,
     async close() {
       await new Promise((resolve) => server.close(() => resolve()));
     },
@@ -1029,6 +1030,7 @@ async function acquireChromeForRequest(request = {}) {
         label: "local headless Chrome fallback",
         cdpUrl: null,
         noVncUrl: null,
+        proxyConfig: null,
         ephemeral: false,
         release: async () => {},
       };
@@ -1687,6 +1689,121 @@ async function solveCoordinatesCaptchaViaServer(imageBase64, comment, id) {
   return { x: Number(point.x), y: Number(point.y), captchaId: r.captchaId };
 }
 
+function currentDataDomeProxyConfig() {
+  const proxyConfig = activeChromeAllocation?.proxyConfig ?? activeHeadlessProxyBridge?.proxyConfig ?? null;
+  if (!proxyConfig) return null;
+  const proxyTypeRaw = String(proxyConfig.scheme || "http").toLowerCase().replace(/:$/, "");
+  const proxyType = proxyTypeRaw === "socks4" || proxyTypeRaw === "socks5" ? proxyTypeRaw : "http";
+  return {
+    proxyType,
+    proxyAddress: proxyConfig.host,
+    proxyPort: Number(proxyConfig.port),
+    proxyLogin: proxyConfig.username,
+    proxyPassword: proxyConfig.password,
+  };
+}
+
+async function extractDataDomeChallengeParams(targetPage) {
+  const pageUrl = targetPage.url();
+  const userAgent = await targetPage.evaluate(() => navigator.userAgent).catch(() => "");
+  const frameUrls = targetPage.frames().map((frame) => frame.url()).filter(Boolean);
+  const iframeSrcs = await targetPage
+    .evaluate(() => Array.from(document.querySelectorAll("iframe[src]"))
+      .map((iframe) => iframe.getAttribute("src") || "")
+      .filter(Boolean))
+    .catch(() => []);
+  const candidates = [...iframeSrcs, ...frameUrls]
+    .map((src) => {
+      try {
+        return new URL(src, pageUrl).toString();
+      } catch {
+        return "";
+      }
+    })
+    .filter((src) => /captcha-delivery\.com\/captcha\//i.test(src) || /datadome/i.test(src));
+  const captchaUrl = candidates.find((src) => /[?&]t=fe(?:&|$)/i.test(src)) ?? candidates[0] ?? "";
+  if (!captchaUrl) return null;
+  return { websiteURL: pageUrl, captchaUrl, userAgent };
+}
+
+function dataDomeCookieValue(cookieHeader) {
+  const match = String(cookieHeader ?? "").match(/(?:^|;\s*)datadome=([^;]+)/i);
+  return match?.[1] ? decodeURIComponent(match[1]) : "";
+}
+
+async function solveDataDomeCaptchaViaServer(targetPage, label, id) {
+  const params = await extractDataDomeChallengeParams(targetPage);
+  if (!params) {
+    log(`${label} ${id}: no DataDome iframe URL found; falling back to coordinate solver`);
+    return false;
+  }
+  const captchaUrl = new URL(params.captchaUrl);
+  const t = captchaUrl.searchParams.get("t");
+  if (t === "bv") {
+    throw new VrboHardBlockError("VRBO DataDome returned t=bv for this browser/IP; rotating proxy/profile before retrying", {
+      label,
+      id,
+      url: params.websiteURL,
+      title: await targetPage.title().catch(() => ""),
+      excerpt: "DataDome iframe URL contained t=bv",
+    });
+  }
+  if (t !== "fe") {
+    log(`${label} ${id}: DataDome iframe t=${t || "missing"}; falling back to coordinate solver`);
+    return false;
+  }
+  const proxy = currentDataDomeProxyConfig();
+  if (!proxy?.proxyAddress || !Number.isFinite(proxy.proxyPort) || !proxy.proxyPort) {
+    log(`${label} ${id}: DataDome solver requires the active residential proxy details; falling back to coordinate solver`);
+    return false;
+  }
+  await sendHeartbeat("2Captcha DataDome slider solve", true, id);
+  await postScreenSnapshot({ id, opType: label }, targetPage, "2Captcha DataDome slider solve", { captcha: true, force: true });
+  const r = await fetchJson(`${SERVER}/api/admin/solve-datadome-captcha`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      ...params,
+      ...proxy,
+      pollSeconds: VRBO_2CAPTCHA_POLL_SECONDS,
+    }),
+  });
+  if (!r?.ok) {
+    if (r?.retryableWithFreshProxy) {
+      throw new VrboHardBlockError(`2Captcha DataDome solve needs fresh proxy/profile: ${r.error ?? "unsolved"}`, {
+        label,
+        id,
+        url: params.websiteURL,
+        title: await targetPage.title().catch(() => ""),
+        excerpt: String(r.error ?? "").slice(0, 500),
+      });
+    }
+    log(`${label} ${id}: 2Captcha DataDome solve failed: ${r?.error ?? "unknown error"}; falling back to coordinate solver`);
+    return false;
+  }
+  const cookieValue = dataDomeCookieValue(r.cookie);
+  if (!cookieValue) {
+    log(`${label} ${id}: 2Captcha DataDome solve returned no datadome value; falling back to coordinate solver`);
+    return false;
+  }
+  const host = (() => {
+    try { return new URL(params.websiteURL).hostname; } catch { return "www.vrbo.com"; }
+  })();
+  const domain = host.endsWith("vrbo.com") ? ".vrbo.com" : host;
+  await targetPage.context().addCookies([{
+    name: "datadome",
+    value: cookieValue,
+    domain,
+    path: "/",
+    secure: true,
+    sameSite: "Lax",
+  }]);
+  log(`${label} ${id}: injected DataDome cookie from 2Captcha id=${r.captchaId}${r.cost ? ` cost=${r.cost}` : ""}${r.ip ? ` solverIp=${r.ip}` : ""}`);
+  await targetPage.reload({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS }).catch(() => {});
+  await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+  return !(await pageLooksLikeVrboHumanChallenge(targetPage));
+}
+
 async function dragVrboSliderToPoint(targetPage, handle, absoluteTarget) {
   const startX = handle.x + handle.width / 2;
   const startY = handle.y + handle.height / 2;
@@ -1747,6 +1864,10 @@ async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
   if (!VRBO_2CAPTCHA_ENABLED) {
     log(`${label} ${id}: 2Captcha disabled by SIDECAR_VRBO_2CAPTCHA=0; manual fallback may be needed`);
     return false;
+  }
+  if (await solveDataDomeCaptchaViaServer(targetPage, label, id)) {
+    log(`${label} ${id}: VRBO DataDome CAPTCHA cleared by 2Captcha cookie solver`);
+    return true;
   }
   for (let attempt = 1; attempt <= Math.max(1, VRBO_2CAPTCHA_MAX_ATTEMPTS); attempt++) {
     try {

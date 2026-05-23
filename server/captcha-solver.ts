@@ -36,6 +36,9 @@ type PollResponse = { status: number; request: string };
 export type CoordinatesCaptchaSolveResult =
   | { ok: true; coordinates: Array<{ x: number; y: number }>; captchaId: string; cost?: string }
   | { ok: false; error: string };
+export type DataDomeCaptchaSolveResult =
+  | { ok: true; cookie: string; captchaId: string; cost?: string; ip?: string }
+  | { ok: false; error: string; retryableWithFreshProxy?: boolean };
 
 const SUBMIT_URL = "https://2captcha.com/in.php";
 const POLL_URL = "https://2captcha.com/res.php";
@@ -391,5 +394,121 @@ export async function solveCoordinatesCaptcha(
   return {
     ok: false,
     error: `2captcha didn't return coordinate solution for id ${captchaId} within ${pollSeconds}s. Worker queue may be slow; if persistent, increase pollSeconds or check 2captcha.com status.`,
+  };
+}
+
+/**
+ * Solve DataDome slider challenges using 2Captcha's token/cookie
+ * solver. DataDome binds the challenge to the browser fingerprint and
+ * proxy quality, so callers must pass the active page URL, iframe URL,
+ * browser User-Agent, and residential proxy details from the same run.
+ */
+export async function solveDataDomeSliderCaptcha(
+  input: {
+    websiteURL: string;
+    captchaUrl: string;
+    userAgent: string;
+    proxyType: "http" | "socks4" | "socks5";
+    proxyAddress: string;
+    proxyPort: number;
+    proxyLogin?: string;
+    proxyPassword?: string;
+  },
+  apiKey: string,
+  opts: { pollSeconds?: number; pollIntervalMs?: number } = {},
+): Promise<DataDomeCaptchaSolveResult> {
+  const pollSeconds = opts.pollSeconds ?? 180;
+  const pollIntervalMs = opts.pollIntervalMs ?? 5000;
+  const captchaUrl = input.captchaUrl.trim();
+  if (!/^https?:\/\//i.test(input.websiteURL)) return { ok: false, error: "websiteURL must be an absolute URL" };
+  if (!/^https?:\/\//i.test(captchaUrl)) return { ok: false, error: "captchaUrl must be an absolute URL" };
+  const captcha = new URL(captchaUrl);
+  const t = captcha.searchParams.get("t");
+  if (t === "bv") {
+    return {
+      ok: false,
+      retryableWithFreshProxy: true,
+      error: "DataDome captchaUrl has t=bv, which means this proxy/IP is banned; rotate proxy before retrying",
+    };
+  }
+  if (t !== "fe") {
+    return {
+      ok: false,
+      error: `DataDome captchaUrl must contain t=fe before solving; got ${t ? `t=${t}` : "no t parameter"}`,
+    };
+  }
+  const proxyPort = Number(input.proxyPort);
+  if (!input.userAgent.trim()) return { ok: false, error: "userAgent is required for DataDome solve" };
+  if (!input.proxyAddress.trim() || !Number.isFinite(proxyPort) || proxyPort <= 0) {
+    return { ok: false, error: "valid proxyAddress and proxyPort are required for DataDome solve" };
+  }
+
+  const task: Record<string, unknown> = {
+    type: "DataDomeSliderTask",
+    websiteURL: input.websiteURL,
+    captchaUrl,
+    userAgent: input.userAgent,
+    proxyType: input.proxyType,
+    proxyAddress: input.proxyAddress,
+    proxyPort,
+  };
+  if (input.proxyLogin) task.proxyLogin = input.proxyLogin;
+  if (input.proxyPassword) task.proxyPassword = input.proxyPassword;
+
+  let createData: any;
+  try {
+    const createRes = await fetch(`${API_V2_BASE_URL}/createTask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientKey: apiKey, task }),
+    });
+    createData = await createRes.json();
+  } catch (e: any) {
+    return { ok: false, error: `2captcha DataDome submit network error: ${e?.message ?? String(e)}` };
+  }
+  if (createData?.errorId !== 0 || !createData?.taskId) {
+    const errorCode = String(createData?.errorCode ?? "UNKNOWN");
+    return {
+      ok: false,
+      retryableWithFreshProxy: /ERR_PROXY_CONNECTION_FAILED|ERROR_CAPTCHA_UNSOLVABLE/i.test(errorCode),
+      error: `2captcha DataDome submit rejected: ${errorCode} ${createData?.errorDescription ?? ""}`.trim(),
+    };
+  }
+
+  const captchaId = String(createData.taskId);
+  const deadline = Date.now() + pollSeconds * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    let pollData: any;
+    try {
+      const pollRes = await fetch(`${API_V2_BASE_URL}/getTaskResult`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientKey: apiKey, taskId: createData.taskId }),
+      });
+      pollData = await pollRes.json();
+    } catch {
+      continue;
+    }
+    if (pollData?.errorId && pollData.errorId !== 0) {
+      const errorCode = String(pollData.errorCode ?? "UNKNOWN");
+      return {
+        ok: false,
+        retryableWithFreshProxy: /ERR_PROXY_CONNECTION_FAILED|ERROR_CAPTCHA_UNSOLVABLE/i.test(errorCode),
+        error: `2captcha DataDome poll returned error after id ${captchaId}: ${errorCode} ${pollData.errorDescription ?? ""}`.trim(),
+      };
+    }
+    if (pollData?.status === "ready") {
+      const cookie = typeof pollData?.solution?.cookie === "string" ? pollData.solution.cookie.trim() : "";
+      if (!/^datadome=/i.test(cookie)) {
+        return { ok: false, error: `2captcha DataDome result ${captchaId} did not include a datadome cookie` };
+      }
+      return { ok: true, cookie, captchaId, cost: pollData.cost, ip: pollData.ip };
+    }
+  }
+
+  return {
+    ok: false,
+    error: `2captcha didn't return DataDome solution for id ${captchaId} within ${pollSeconds}s. Worker queue may be slow; if persistent, increase pollSeconds or check 2captcha.com status.`,
   };
 }

@@ -840,6 +840,7 @@ export class ChromeSidecarManager {
         cdpUrl: instance.cdpUrl,
         noVncUrl: instance.noVncUrl,
         webdriverSessionId,
+        proxyConfig,
         ephemeral: true,
         release: async () => {
           clearInterval(heartbeat);
