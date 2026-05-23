@@ -3492,7 +3492,7 @@ function guestyListingName(listing: any, fallback: string): string {
 
 function isCommittedGuestyReservation(reservation: any): boolean {
   const status = String(reservation?.status ?? "").toLowerCase();
-  if (/\b(cancel|declin|inquir|request|expired|closed|draft)\b/.test(status)) return false;
+  if (/(cancel|declin|inquir|request|expired|closed|draft)/.test(status)) return false;
   return !!(reservation?._id ?? reservation?.id) && !!(reservation?.checkIn ?? reservation?.checkInDateLocalized);
 }
 
@@ -16683,6 +16683,16 @@ Return ONLY compact JSON with this exact shape:
     });
   });
 
+  // POST /api/admin/vrbo-sidecar/screen — daemon pushes a compressed
+  // viewport screenshot + phase label for the dashboard's live mini
+  // browser grid. Short-lived and in-memory only; no cookies or secrets
+  // are returned by the public reader.
+  app.post("/api/admin/vrbo-sidecar/screen", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const { updateSidecarScreenSnapshot } = await import("./vrbo-sidecar-queue");
+    return res.json(updateSidecarScreenSnapshot(req.body ?? {}));
+  });
+
   // POST /api/admin/vrbo-sidecar/result — worker reports completion.
   // Body: { id, results?: unknown, error?: string }
   app.post("/api/admin/vrbo-sidecar/result", async (req, res) => {
@@ -16734,6 +16744,19 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/vrbo-sidecar/status", async (_req, res) => {
     const { getStatus } = await import("./vrbo-sidecar-queue");
     return res.json(getStatus());
+  });
+
+  // GET /api/vrbo-sidecar/screens — public dashboard view of the local
+  // Chrome workers. Exposes only TTL-bounded screenshot thumbnails and
+  // labels so Jamie can see the searches progressing without putting
+  // eight Chrome windows on a second monitor.
+  app.get("/api/vrbo-sidecar/screens", async (_req, res) => {
+    const { getHeartbeat, getSidecarScreenSnapshots } = await import("./vrbo-sidecar-queue");
+    return res.json({
+      heartbeat: getHeartbeat(),
+      screens: getSidecarScreenSnapshots(),
+      maxScreens: 8,
+    });
   });
 
   // POST /api/vrbo-sidecar/cancel — operator-facing panic button for
