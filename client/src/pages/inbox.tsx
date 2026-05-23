@@ -223,6 +223,9 @@ interface GuestyReservation {
   confirmationCode?: string;
   cancellationPolicy?: string | null;
   cancellationPolicySummary?: string | null;
+  cancellationPolicyFreeCancellationUntil?: string | null;
+  cancellationPolicyPenalty?: string | null;
+  cancellationPolicyDetailsAvailable?: boolean;
   cancellationPolicySource?: string | null;
   cancellationPolicyAssumed?: boolean;
   listing?: Record<string, unknown>;
@@ -615,7 +618,7 @@ function reservationChannelKind(value: any): "airbnb" | "booking" | "vrbo" | "ma
 function cancellationPolicyBriefSummary(label: string, kind: ReturnType<typeof reservationChannelKind>): string {
   const lower = label.toLowerCase();
   if (kind === "booking") {
-    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to Booking.com for this listing/rate plan.";
+    return "Guest is under the Booking.com rate-plan cancellation terms configured in Guesty/Booking.com for this listing.";
   }
   if (kind === "vrbo") {
     return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to VRBO/Homeaway for this listing.";
@@ -641,14 +644,62 @@ function cancellationPolicyBriefSummary(label: string, kind: ReturnType<typeof r
   return "Guest is under the cancellation, refund, no-show, and date-change terms attached to this booking in Guesty.";
 }
 
-function cancellationPolicySummaryForReservation(value: any): { label: string; summary: string; source?: string | null; assumed: boolean } | null {
+function cancellationPolicyTerms(label: string, kind: ReturnType<typeof reservationChannelKind>) {
+  const lower = label.toLowerCase();
+  if (kind === "booking") {
+    return {
+      freeCancellationUntil: "Not exposed by Guesty for this Booking.com rate plan",
+      penalty: "Check the Booking.com rate-plan/extranet terms; Guesty only returned the booking/rate-plan reference, not the penalty schedule.",
+      detailsAvailable: false,
+    };
+  }
+  if (kind === "vrbo") {
+    if (lower.includes("relaxed")) {
+      return { freeCancellationUntil: "14+ days before check-in", penalty: "7-14 days before check-in: 50% refund. Less than 7 days before check-in: no refund.", detailsAvailable: true };
+    }
+    if (lower.includes("moderate")) {
+      return { freeCancellationUntil: "30+ days before check-in", penalty: "14-30 days before check-in: 50% refund. Less than 14 days before check-in: no refund.", detailsAvailable: true };
+    }
+    if (lower.includes("firm")) {
+      return { freeCancellationUntil: "60+ days before check-in", penalty: "30-60 days before check-in: 50% refund. Less than 30 days before check-in: no refund.", detailsAvailable: true };
+    }
+    if (lower.includes("strict")) {
+      return { freeCancellationUntil: "60+ days before check-in", penalty: "Less than 60 days before check-in: no refund.", detailsAvailable: true };
+    }
+  }
+  if (lower.includes("non-refundable") || lower.includes("non refundable") || lower.includes("no refund")) {
+    return { freeCancellationUntil: "No free-cancellation window", penalty: "Reservation is non-refundable once booked unless the channel/Guesty exception rules apply.", detailsAvailable: true };
+  }
+  if (lower.includes("flexible")) {
+    return { freeCancellationUntil: "1 day / 24 hours before check-in", penalty: "After that cutoff, Guesty/channel cancellation fees apply; for Airbnb Flexible, the first night is generally not refunded after the cutoff.", detailsAvailable: true };
+  }
+  if (lower.includes("moderate")) {
+    return { freeCancellationUntil: "5 days before check-in on Airbnb; 7 days before arrival for Guesty direct/manual policies", penalty: "After that cutoff, Guesty/channel cancellation fees apply; for Airbnb Moderate, the host is generally paid nights stayed, one extra night, and 50% of remaining nights.", detailsAvailable: true };
+  }
+  if (lower.includes("firm")) {
+    return { freeCancellationUntil: "14-30 days before check-in, depending on channel policy", penalty: "After that cutoff, Guesty/channel cancellation fees apply; Airbnb Firm usually becomes 50% refundable until 7 days before check-in, then non-refundable.", detailsAvailable: true };
+  }
+  if (lower.includes("strict")) {
+    return { freeCancellationUntil: "14-60 days before check-in, depending on channel policy", penalty: "After that cutoff, Guesty/channel cancellation fees apply; strict policies generally become non-refundable closer to check-in.", detailsAvailable: true };
+  }
+  if (lower.includes("relaxed")) {
+    return { freeCancellationUntil: "14+ days before check-in", penalty: "7-14 days before check-in: 50% refund. Less than 7 days before check-in: no refund.", detailsAvailable: true };
+  }
+  return { freeCancellationUntil: "Configured in Guesty, but the exact cutoff was not exposed", penalty: "Use the Guesty/channel reservation policy details for the cancellation fee or no-show penalty.", detailsAvailable: false };
+}
+
+function cancellationPolicySummaryForReservation(value: any): { label: string; summary: string; freeCancellationUntil: string; penalty: string; detailsAvailable: boolean; source?: string | null; assumed: boolean } | null {
   if (!value) return null;
   const kind = reservationChannelKind(value);
   if (value.cancellationPolicy) {
     const label = readableCancellationPolicy(value.cancellationPolicy) ?? String(value.cancellationPolicy);
+    const terms = cancellationPolicyTerms(label, kind);
     return {
       label,
       summary: value.cancellationPolicySummary ?? cancellationPolicyBriefSummary(label, kind),
+      freeCancellationUntil: value.cancellationPolicyFreeCancellationUntil ?? terms.freeCancellationUntil,
+      penalty: value.cancellationPolicyPenalty ?? terms.penalty,
+      detailsAvailable: value.cancellationPolicyDetailsAvailable ?? terms.detailsAvailable,
       source: value.cancellationPolicySource,
       assumed: value.cancellationPolicyAssumed === true,
     };
@@ -659,6 +710,7 @@ function cancellationPolicySummaryForReservation(value: any): { label: string; s
     return {
       label: directPolicy,
       summary: cancellationPolicyBriefSummary(directPolicy, kind),
+      ...cancellationPolicyTerms(directPolicy, kind),
       source: "Guesty reservation policy",
       assumed: false,
     };
@@ -669,6 +721,7 @@ function cancellationPolicySummaryForReservation(value: any): { label: string; s
     return {
       label: listingPolicy,
       summary: cancellationPolicyBriefSummary(listingPolicy, kind),
+      ...cancellationPolicyTerms(listingPolicy, kind),
       source: "Assumed from the Guesty listing/channel policy",
       assumed: true,
     };
@@ -679,6 +732,7 @@ function cancellationPolicySummaryForReservation(value: any): { label: string; s
     return {
       label,
       summary: cancellationPolicyBriefSummary(label, kind),
+      ...cancellationPolicyTerms(label, kind),
       source: "Assumed from the policy Guesty pushed to Booking.com",
       assumed: true,
     };
@@ -688,6 +742,7 @@ function cancellationPolicySummaryForReservation(value: any): { label: string; s
     return {
       label,
       summary: cancellationPolicyBriefSummary(label, kind),
+      ...cancellationPolicyTerms(label, kind),
       source: "Assumed from the policy Guesty pushed to VRBO",
       assumed: true,
     };
@@ -3697,6 +3752,16 @@ export default function InboxPage() {
                               <div className="mt-1 break-words text-[11px] leading-relaxed text-sky-900">
                                 <span className="font-semibold">Policy summary:</span> {cancellationPolicy.summary}
                               </div>
+                              <dl className="mt-2 grid gap-1 text-[11px] leading-relaxed">
+                                <div>
+                                  <dt className="font-semibold text-sky-900">Free until penalty</dt>
+                                  <dd className="break-words">{cancellationPolicy.freeCancellationUntil}</dd>
+                                </div>
+                                <div>
+                                  <dt className="font-semibold text-sky-900">Penalty</dt>
+                                  <dd className="break-words">{cancellationPolicy.penalty}</dd>
+                                </div>
+                              </dl>
                               {cancellationPolicy.source && (
                                 <div className="mt-1 text-[11px] text-sky-800">
                                   {cancellationPolicy.source}

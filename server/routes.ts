@@ -1189,7 +1189,7 @@ function cancellationPolicyFallbackForChannel(kind: ReturnType<typeof reservatio
 function cancellationPolicyBriefSummary(label: string, kind: ReturnType<typeof reservationChannelKind>): string {
   const lower = label.toLowerCase();
   if (kind === "booking") {
-    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to Booking.com for this listing/rate plan.";
+    return "Guest is under the Booking.com rate-plan cancellation terms configured in Guesty/Booking.com for this listing.";
   }
   if (kind === "vrbo") {
     return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to VRBO/Homeaway for this listing.";
@@ -1215,16 +1215,115 @@ function cancellationPolicyBriefSummary(label: string, kind: ReturnType<typeof r
   return "Guest is under the cancellation, refund, no-show, and date-change terms attached to this booking in Guesty.";
 }
 
+function cancellationPolicyTerms(
+  label: string,
+  kind: ReturnType<typeof reservationChannelKind>,
+): { freeCancellationUntil: string; penalty: string; detailsAvailable: boolean } {
+  const lower = label.toLowerCase();
+
+  if (kind === "booking") {
+    return {
+      freeCancellationUntil: "Not exposed by Guesty for this Booking.com rate plan",
+      penalty: "Check the Booking.com rate-plan/extranet terms; Guesty only returned the booking/rate-plan reference, not the penalty schedule.",
+      detailsAvailable: false,
+    };
+  }
+
+  if (kind === "vrbo") {
+    if (lower.includes("relaxed")) {
+      return {
+        freeCancellationUntil: "14+ days before check-in",
+        penalty: "7-14 days before check-in: 50% refund. Less than 7 days before check-in: no refund.",
+        detailsAvailable: true,
+      };
+    }
+    if (lower.includes("moderate")) {
+      return {
+        freeCancellationUntil: "30+ days before check-in",
+        penalty: "14-30 days before check-in: 50% refund. Less than 14 days before check-in: no refund.",
+        detailsAvailable: true,
+      };
+    }
+    if (lower.includes("firm")) {
+      return {
+        freeCancellationUntil: "60+ days before check-in",
+        penalty: "30-60 days before check-in: 50% refund. Less than 30 days before check-in: no refund.",
+        detailsAvailable: true,
+      };
+    }
+    if (lower.includes("strict")) {
+      return {
+        freeCancellationUntil: "60+ days before check-in",
+        penalty: "Less than 60 days before check-in: no refund.",
+        detailsAvailable: true,
+      };
+    }
+  }
+
+  if (lower.includes("non-refundable") || lower.includes("non refundable") || lower.includes("no refund")) {
+    return {
+      freeCancellationUntil: "No free-cancellation window",
+      penalty: "Reservation is non-refundable once booked unless the channel/Guesty exception rules apply.",
+      detailsAvailable: true,
+    };
+  }
+  if (lower.includes("flexible")) {
+    return {
+      freeCancellationUntil: "1 day / 24 hours before check-in",
+      penalty: "After that cutoff, Guesty/channel cancellation fees apply; for Airbnb Flexible, the first night is generally not refunded after the cutoff.",
+      detailsAvailable: true,
+    };
+  }
+  if (lower.includes("moderate")) {
+    return {
+      freeCancellationUntil: "5 days before check-in on Airbnb; 7 days before arrival for Guesty direct/manual policies",
+      penalty: "After that cutoff, Guesty/channel cancellation fees apply; for Airbnb Moderate, the host is generally paid nights stayed, one extra night, and 50% of remaining nights.",
+      detailsAvailable: true,
+    };
+  }
+  if (lower.includes("firm")) {
+    return {
+      freeCancellationUntil: "14-30 days before check-in, depending on channel policy",
+      penalty: "After that cutoff, Guesty/channel cancellation fees apply; Airbnb Firm usually becomes 50% refundable until 7 days before check-in, then non-refundable.",
+      detailsAvailable: true,
+    };
+  }
+  if (lower.includes("strict")) {
+    return {
+      freeCancellationUntil: "14-60 days before check-in, depending on channel policy",
+      penalty: "After that cutoff, Guesty/channel cancellation fees apply; strict policies generally become non-refundable closer to check-in.",
+      detailsAvailable: true,
+    };
+  }
+  if (lower.includes("relaxed")) {
+    return {
+      freeCancellationUntil: "14+ days before check-in",
+      penalty: "7-14 days before check-in: 50% refund. Less than 7 days before check-in: no refund.",
+      detailsAvailable: true,
+    };
+  }
+
+  return {
+    freeCancellationUntil: "Configured in Guesty, but the exact cutoff was not exposed",
+    penalty: "Use the Guesty/channel reservation policy details for the cancellation fee or no-show penalty.",
+    detailsAvailable: false,
+  };
+}
+
 function cancellationPolicyForReservation(
   reservation: any,
   listing?: any,
-): { label: string; summary: string; source: string; assumed: boolean } | null {
+): { label: string; summary: string; freeCancellationUntil: string; penalty: string; detailsAvailable: boolean; source: string; assumed: boolean } | null {
   const channelKind = reservationChannelKind(reservation);
   const directPolicy = findCancellationPolicyValue(reservation);
   if (directPolicy) {
+    const terms = cancellationPolicyTerms(directPolicy, channelKind);
     return {
       label: directPolicy,
       summary: cancellationPolicyBriefSummary(directPolicy, channelKind),
+      freeCancellationUntil: terms.freeCancellationUntil,
+      penalty: terms.penalty,
+      detailsAvailable: terms.detailsAvailable,
       source: "Guesty reservation policy",
       assumed: false,
     };
@@ -1232,9 +1331,13 @@ function cancellationPolicyForReservation(
 
   const listingPolicy = findCancellationPolicyValue(listing ?? reservation?.listing);
   if (listingPolicy) {
+    const terms = cancellationPolicyTerms(listingPolicy, channelKind);
     return {
       label: listingPolicy,
       summary: cancellationPolicyBriefSummary(listingPolicy, channelKind),
+      freeCancellationUntil: terms.freeCancellationUntil,
+      penalty: terms.penalty,
+      detailsAvailable: terms.detailsAvailable,
       source: "Assumed from the Guesty listing/channel policy",
       assumed: true,
     };
@@ -1242,9 +1345,13 @@ function cancellationPolicyForReservation(
 
   const channelFallback = cancellationPolicyFallbackForChannel(channelKind);
   if (channelFallback) {
+    const terms = cancellationPolicyTerms(channelFallback, channelKind);
     return {
       label: channelFallback,
       summary: cancellationPolicyBriefSummary(channelFallback, channelKind),
+      freeCancellationUntil: terms.freeCancellationUntil,
+      penalty: terms.penalty,
+      detailsAvailable: terms.detailsAvailable,
       source: "Assumed from the policy Guesty pushed to this channel",
       assumed: true,
     };
@@ -12111,6 +12218,9 @@ export async function registerRoutes(
       fullyLinked: slots.length > 0 && filled === slots.length,
       cancellationPolicy: cancellationPolicy?.label ?? null,
       cancellationPolicySummary: cancellationPolicy?.summary ?? null,
+      cancellationPolicyFreeCancellationUntil: cancellationPolicy?.freeCancellationUntil ?? null,
+      cancellationPolicyPenalty: cancellationPolicy?.penalty ?? null,
+      cancellationPolicyDetailsAvailable: cancellationPolicy?.detailsAvailable ?? false,
       cancellationPolicySource: cancellationPolicy?.source ?? null,
       cancellationPolicyAssumed: cancellationPolicy?.assumed ?? false,
     };
