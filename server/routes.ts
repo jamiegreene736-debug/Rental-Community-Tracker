@@ -3474,6 +3474,88 @@ function inferBuyInCommunityKeyFromText(...values: unknown[]): string | null {
   return null;
 }
 
+function communityKeyForDraft(draft: any): string {
+  const pricingArea = typeof draft?.pricingArea === "string" ? draft.pricingArea.trim() : "";
+  if (pricingArea && BUY_IN_RATES[pricingArea]) {
+    return pricingArea;
+  }
+  return inferBuyInCommunityKeyFromText(
+    draft?.name,
+    draft?.listingTitle,
+    draft?.bookingTitle,
+    draft?.unitTypes,
+    draft?.streetAddress,
+    draft?.unit1Address,
+    draft?.unit2Address,
+    draft?.city,
+    draft?.state,
+    draft?.sourceUrl,
+  ) ?? pricingArea ?? draft?.name ?? (/\bfl(orida)?\b/i.test(draft?.state || "") ? "Florida Generic" : "Poipu Kai");
+}
+
+function unitLabelFromDraftAddress(address: unknown, fallback: string): string {
+  if (typeof address !== "string" || !address.trim()) return fallback;
+  const match = address.match(/(?:#|unit|apt|apartment|suite|ste)\s*([A-Za-z]?\d{1,5}[A-Za-z]?)/i);
+  return match?.[1] ? `Unit ${match[1]}` : fallback;
+}
+
+function unitSlotsForCommunityDraft(draft: any, sourceListingId?: string): Array<{
+  unitId: string;
+  unitLabel: string;
+  bedrooms: number;
+  sourceListingId?: string;
+  community: string;
+  adHoc: boolean;
+}> {
+  const community = communityKeyForDraft(draft);
+  const isSingle = draft?.singleListing === true;
+  const combinedBedrooms = positiveDraftInteger(draft?.combinedBedrooms);
+  const unit1Bedrooms = inferCommunityDraftBedroomCount(draft, "unit1")
+    ?? (isSingle ? combinedBedrooms : null);
+  let unit2Bedrooms = isSingle ? null : inferCommunityDraftBedroomCount(draft, "unit2");
+
+  if (!isSingle && !unit2Bedrooms && combinedBedrooms && unit1Bedrooms && combinedBedrooms > unit1Bedrooms) {
+    unit2Bedrooms = combinedBedrooms - unit1Bedrooms;
+  }
+
+  if (isSingle) {
+    const bedrooms = unit1Bedrooms ?? combinedBedrooms;
+    return bedrooms
+      ? [{
+          unitId: "main",
+          unitLabel: unitLabelFromDraftAddress(draft?.unit1Address, `${bedrooms}BR Guesty listing`),
+          bedrooms,
+          sourceListingId,
+          community,
+          adHoc: true,
+        }]
+      : [];
+  }
+
+  let unitBedrooms = [unit1Bedrooms, unit2Bedrooms]
+    .filter((bedrooms): bedrooms is number => !!bedrooms && bedrooms > 0);
+  if (unitBedrooms.length === 0 && combinedBedrooms) {
+    unitBedrooms = combinedBedrooms % 2 === 0
+      ? [combinedBedrooms / 2, combinedBedrooms / 2]
+      : [Math.ceil(combinedBedrooms / 2), Math.floor(combinedBedrooms / 2)];
+  }
+  if (unitBedrooms.length === 1 && combinedBedrooms && combinedBedrooms > unitBedrooms[0]) {
+    unitBedrooms.push(combinedBedrooms - unitBedrooms[0]);
+  }
+
+  return unitBedrooms.map((bedrooms, index) => ({
+    unitId: index === 0 ? "unit-a" : "unit-b",
+    unitLabel: unitLabelFromDraftAddress(
+      index === 0 ? draft?.unit1Address : draft?.unit2Address,
+      index === 0 ? "Unit A" : "Unit B",
+    ),
+    bedrooms,
+    sourceListingId,
+    community,
+    adHoc: true,
+  }));
+}
+
 function positiveDraftInteger(value: unknown): number | null {
   const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(n) && n > 0 ? n : null;
@@ -7639,6 +7721,18 @@ export async function registerRoutes(
     let resolvedGuestyListingId: string | null = requestedListingId || null;
     let resolvedGuestyListing: any | null = null;
     let config = PROPERTY_UNIT_NEEDS[propertyId];
+    if (!config && propertyId < 0) {
+      const draft = await storage.getCommunityDraft(Math.abs(propertyId)).catch(() => undefined);
+      if (draft) {
+        const draftSlots = unitSlotsForCommunityDraft(draft, resolvedGuestyListingId ?? undefined);
+        if (draftSlots.length > 0) {
+          config = {
+            community: communityKeyForDraft(draft),
+            units: draftSlots.map((slot) => ({ bedrooms: slot.bedrooms })),
+          };
+        }
+      }
+    }
     if (!config) {
       if (!resolvedGuestyListingId) {
         resolvedGuestyListingId = await storage.getGuestyListingId(propertyId).catch(() => null);
@@ -11847,8 +11941,14 @@ export async function registerRoutes(
       const includePast = req.query.includePast === "true";
       const limit = Math.min(parseInt((req.query.limit as string) ?? "100", 10) || 100, 200);
 
-      const unitSlots = propertyId ? getPropertyUnits(propertyId) : [];
+      const unitSlots = propertyId && propertyId > 0 ? getPropertyUnits(propertyId) : [];
       let resolvedUnitSlots: any[] = unitSlots;
+      if (resolvedUnitSlots.length === 0 && propertyId && propertyId < 0) {
+        const draft = await storage.getCommunityDraft(Math.abs(propertyId)).catch(() => undefined);
+        if (draft) {
+          resolvedUnitSlots = unitSlotsForCommunityDraft(draft, listingId);
+        }
+      }
       if (resolvedUnitSlots.length === 0) {
         try {
           const listingFields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street");
