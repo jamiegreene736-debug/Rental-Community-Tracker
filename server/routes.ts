@@ -7346,6 +7346,11 @@ export async function registerRoutes(
     return host || "listing";
   };
 
+  const NON_DIRECT_BOOKING_DOMAIN_RE =
+    /(?:^|\.)(?:offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|1stdibs|facebook|fbcdn|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|shopify|myshopify)\./i;
+  const isNonDirectBookingDomain = (domain: string | null | undefined): boolean =>
+    NON_DIRECT_BOOKING_DOMAIN_RE.test(String(domain ?? "").toLowerCase());
+
   const uniqueScrapedPhotos = (photos: ScrapedPhoto[]): ScrapedPhoto[] => {
     const seen = new Set<string>();
     const out: ScrapedPhoto[] = [];
@@ -8115,7 +8120,7 @@ export async function registerRoutes(
     const pmGoogleDiscoveryEnabled = includePm && googleDiscoveryEnabled;
     const looseResortPhotoProof = propertyUnitConfig?.looseResortPhotoProof === true;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct|${groundFloorOnly ? "ground" : "any-floor"}`;
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v2|${groundFloorOnly ? "ground" : "any-floor"}`;
     const noCache = req.query.nocache === "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -9943,7 +9948,7 @@ export async function registerRoutes(
     // Louisiana house for sale, not a Hawaii vacation rental. This
     // filter cleans them up at the lens-helper layer so they never
     // reach the candidate pool.
-    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|easemytrip\.com|hotelplanner\.com|reservations\.com|hotwire\.com|agoda\.com|google\.com|gstatic\.com|googleusercontent\.com|bing\.com|yahoo\.com|duckduckgo\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com|threads\.net|amazon\.com|walmart\.com|target\.com|wayfair\.com|etsy\.com|ebay\.com|craigslist\.org|matches\.com|match\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
+    const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|easemytrip\.com|hotelplanner\.com|reservations\.com|hotwire\.com|agoda\.com|google\.com|gstatic\.com|googleusercontent\.com|bing\.com|yahoo\.com|duckduckgo\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com|threads\.net|amazon\.com|walmart\.com|target\.com|wayfair\.com|etsy\.com|ebay\.com|offerup\.com|mercari\.com|poshmark\.com|depop\.com|letgo\.com|chairish\.com|aptdeco\.com|craigslist\.org|matches\.com|match\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
     async function lensMatches(imgUrl: string): Promise<Array<{ url: string; title: string; domain: string }>> {
       // PR #314: short-circuit when PM Google-discovery is disabled.
       // Google Lens (engine=google_lens) is a Google search surface
@@ -9969,6 +9974,7 @@ export async function registerRoutes(
           let domain: string;
           try { domain = new URL(url).hostname.replace(/^www\./, ""); } catch { continue; }
           if (OTA_DOMAIN_FILTER.test(domain)) continue;
+          if (isNonDirectBookingDomain(domain)) continue;
           if (seen.has(domain)) continue;
           seen.add(domain);
           out.push({
@@ -10977,7 +10983,7 @@ export async function registerRoutes(
     const maxResultsRaw = Number(req.body?.maxResults ?? 15);
     const maxResults = Number.isFinite(maxResultsRaw) ? Math.min(25, Math.max(5, Math.round(maxResultsRaw))) : 15;
     const normalizedContext = `${resortName}|${community}|${sourceUrl}`.toLowerCase();
-    const cacheKey = `${imageUrl}|${normalizedContext}`;
+    const cacheKey = `v2|${imageUrl}|${normalizedContext}`;
     evictExpiredReverseImageListings();
     const cached = reverseImageListingCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
@@ -10993,6 +10999,7 @@ export async function registerRoutes(
       if (/(^|\.)airbnb\./.test(d)) return { platformKey: "airbnb", platform: "Airbnb" };
       if (/(^|\.)(vrbo|homeaway)\./.test(d)) return { platformKey: "vrbo", platform: "VRBO" };
       if (/(^|\.)booking\.com$/.test(d)) return { platformKey: "booking", platform: "Booking.com" };
+      if (isNonDirectBookingDomain(d)) return { platformKey: "other", platform: "Marketplace / shopping" };
       if (/(^|\.)expedia\./.test(d)) return { platformKey: "other", platform: "Expedia" };
       if (/(^|\.)hotels\.com$/.test(d)) return { platformKey: "other", platform: "Hotels.com" };
       if (/(^|\.)tripadvisor\./.test(d)) return { platformKey: "other", platform: "Tripadvisor" };
@@ -11007,6 +11014,7 @@ export async function registerRoutes(
       return /(?:^|\.)(?:google|gstatic|googleusercontent|searchapi|bing|yahoo|duckduckgo|facebook|instagram|pinterest|youtube|youtu|tiktok|twitter|x|threads|linkedin|reddit|wikimedia|wikipedia|imgur|flickr|staticflickr)\./.test(d)
         || /(?:^|\.)(?:muscache|bstatic|cloudfront|akamaized|fastly|shopifycdn|cdninstagram|twimg)\./.test(d)
         || /(?:^|\.)(?:amazon|walmart|potterybarn|wayfair|target|ebay|etsy|craigslist|ikea|homedepot|lowes|costco|samsclub|kohls|macys|overstock|bedbathandbeyond)\./.test(d)
+        || isNonDirectBookingDomain(d)
         || /(?:^|\.)(?:almosafer|charleston\.craigslist)\./.test(d)
         || /(?:^|\.)(?:careers|jobs|recruiting|apply)\./.test(d)
         || /(?:^|\.)(?:zillow|realtor|redfin|coldwellbanker|century21|compass|sothebysrealty|sothebys|hawaiilife|homes|trulia|movoto|mls|realtytrac|loopnet|apartments|hotpads|ramaui|emauirealestate)\./.test(d);
@@ -11199,7 +11207,7 @@ export async function registerRoutes(
     try {
       const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
       const sourceKey = normalizeListingSurfaceKey(sourceUrl);
-      const cacheKey = `buy-in-sites:v3:${sourceKey}`;
+      const cacheKey = `buy-in-sites:v4:${sourceKey}`;
       evictExpiredBuyInListingSites();
       const cached = buyInListingSitesCache.get(cacheKey);
       if (useCache && cached && cached.expiresAt > Date.now()) {

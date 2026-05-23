@@ -655,7 +655,7 @@ function buyInFoundViaAirbnbGoogleLens(
 ): boolean {
   if (!buyIn?.airbnbListingUrl || isAirbnbUrl(buyIn.airbnbListingUrl)) return false;
   const notes = String(buyIn.notes ?? "");
-  return /found via airbnb google lens|google lens.*airbnb|airbnb.*google lens|direct booking link found from airbnb photos|photo-matched to airbnb listing/i.test(notes);
+  return /found via airbnb google lens|google lens.*airbnb|airbnb.*google lens|direct booking link found from airbnb photos|photo-matched to airbnb listing|airbnb supplied the date-specific|airbnb anchor|auto-filled from direct (?:link|pm)/i.test(notes);
 }
 
 // Canonicalize listing URLs for de-duping across reservation slots.
@@ -1095,7 +1095,7 @@ function directCandidateFitsTarget(
 ): boolean {
   const targetText = normalizeDirectTargetText(`${targetResortName} ${community}`);
   const hay = normalizeDirectTargetText(`${item.domain ?? ""} ${item.sourceLabel ?? ""} ${item.title ?? ""} ${item.url ?? ""}`);
-  if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(hay)) {
+  if (/\b(travelocity|easemytrip|orbitz|priceline|kayak|trivago|hotwire|hotelplanner|reservations|offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|marketplace|for sale|classifieds|employer profile|career|careers|job|jobs|banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(hay)) {
     return false;
   }
   const targetIsRegencyPoipuKai = /\bregency\b/.test(targetText) && /\bpoipu kai\b/.test(targetText);
@@ -1125,6 +1125,9 @@ function targetLocationRejectReason(
 ): string | null {
   const targetText = normalizeDirectTargetText(`${targetResortName} ${community}`);
   const hay = normalizeDirectTargetText(`${item.domain ?? ""} ${item.sourceLabel ?? ""} ${item.title ?? ""} ${item.url ?? ""} ${item.snippet ?? ""}`);
+  if (/\b(offerup|mercari|poshmark|depop|letgo|chairish|aptdeco|craigslist|ebay|etsy|amazon|walmart|target|wayfair|potterybarn|homedepot|lowes|costco|ikea|overstock|bedbathandbeyond|marketplace|for sale|classifieds)\b/.test(hay)) {
+    return "not a direct booking site";
+  }
   const targetIsRegencyPoipuKai = /\bregency\b/.test(targetText) && /\bpoipu kai\b/.test(targetText);
   if (targetIsRegencyPoipuKai && /\b(banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|pili mai|kiahuna|makahuena|waikomo|nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston)\b/.test(hay)) {
     return `not in ${targetResortName}`;
@@ -6115,7 +6118,9 @@ export default function Bookings() {
                                           onClick={(e) => e.stopPropagation()}
                                           className="ml-2 text-primary hover:underline inline-flex items-center gap-0.5"
                                         >
-                                          view on {sourceLabelForUrl(slot.buyIn.airbnbListingUrl)} <ExternalLink className="h-2.5 w-2.5" />
+                                          {buyInFoundViaAirbnbGoogleLens(slot.buyIn)
+                                            ? `view on Airbnb Lens direct site (${sourceLabelForUrl(slot.buyIn.airbnbListingUrl)})`
+                                            : `view on ${sourceLabelForUrl(slot.buyIn.airbnbListingUrl)}`} <ExternalLink className="h-2.5 w-2.5" />
                                         </a>
                                       )}
                                       {buyInFoundViaAirbnbGoogleLens(slot.buyIn) && (
