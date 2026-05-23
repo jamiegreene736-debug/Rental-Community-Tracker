@@ -1116,7 +1116,7 @@ export default function AddSingleListing() {
       setEditedUnitA(data.unitA ?? null);
       // Seed pricing-area suggestion from city/state (same logic as combo flow).
       if (!editedPricingArea) {
-        const suggested = suggestPricingArea(pickedCity.city, pickedCity.state);
+        const suggested = suggestPricingArea(pickedCity.city, pickedCity.state, selectedCommunity?.name);
         if (suggested) setEditedPricingArea(suggested);
       }
       if (!strPermit && data.strPermitSample) {

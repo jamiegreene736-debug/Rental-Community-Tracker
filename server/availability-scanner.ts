@@ -1,21 +1,9 @@
 import { storage } from "./storage";
 import { log } from "./index";
 import { syncAllPropertiesToGuesty } from "./guesty-sync";
-
-const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
-  "Poipu Kai": "Regency at Poipu Kai, Koloa, Kauai, Hawaii",
-  "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
-  "Keauhou": "Keauhou, Kailua-Kona, Big Island, Hawaii",
-  "Princeville": "Princeville, Kauai, Hawaii",
-  "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
-  "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
-  "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
-  "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
-  "Southern Dunes": "Southern Dunes, Haines City, Florida",
-  "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
-  "Bonita National": "Bonita National Golf and Country Club, Bonita Springs, Florida",
-  "Florida Generic": "Florida, United States",
-};
+import {
+  searchLocationForBuyInMarket,
+} from "@shared/buy-in-market";
 
 const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; units: { bedrooms: number }[] }> = {
   1: { name: "Poipu Kai Sunset", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
@@ -164,7 +152,7 @@ async function searchAirbnb(
   const apiKey = process.env.SEARCHAPI_API_KEY;
   if (!apiKey) return -1;
 
-  const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
+  const searchLocation = searchLocationForBuyInMarket(community) || `${community}, Hawaii`;
   const params = new URLSearchParams({
     engine: "airbnb",
     check_in_date: checkIn,

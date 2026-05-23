@@ -1,6 +1,10 @@
 import { storage } from "./storage";
 import { log } from "./index";
 import { getGuestyToken } from "./guesty-token";
+import {
+  BUY_IN_MARKET_BOUNDS,
+  searchLocationForBuyInMarket,
+} from "@shared/buy-in-market";
 
 export async function guestyRequest(method: string, endpoint: string, body?: unknown) {
   const token = await getGuestyToken();
@@ -67,27 +71,7 @@ const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms
   34: { community: "Poipu Kai",         units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
 };
 
-const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
-  "Poipu Kai":         "Regency at Poipu Kai, Koloa, Kauai, Hawaii",
-  "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
-  "Keauhou":           "Keauhou, Kailua-Kona, Big Island, Hawaii",
-  "Princeville":       "Princeville, Kauai, Hawaii",
-  "Kapaa Beachfront":  "Kapaa, Kauai, Hawaii",
-  "Poipu Oceanfront":  "Poipu Beach, Koloa, Kauai, Hawaii",
-  "Poipu Brenneckes":  "Brenneckes Beach, Poipu, Kauai, Hawaii",
-  "Pili Mai":          "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
-};
-
-const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = {
-  "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.478, ne_lat: 21.895, ne_lng: -159.458 },
-  "Pili Mai":         { sw_lat: 21.882, sw_lng: -159.483, ne_lat: 21.899, ne_lng: -159.468 },
-  "Poipu Brenneckes": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
-  "Poipu Oceanfront": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
-  "Princeville":      { sw_lat: 22.210, sw_lng: -159.498, ne_lat: 22.235, ne_lng: -159.468 },
-  "Kapaa Beachfront": { sw_lat: 22.060, sw_lng: -159.333, ne_lat: 22.085, ne_lng: -159.308 },
-  "Kekaha Beachfront":{ sw_lat: 21.955, sw_lng: -159.758, ne_lat: 21.978, ne_lng: -159.733 },
-  "Keauhou":          { sw_lat: 19.528, sw_lng: -155.992, ne_lat: 19.558, ne_lng: -155.966 },
-};
+const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = BUY_IN_MARKET_BOUNDS;
 
 function formatDate(d: Date) { return d.toISOString().split("T")[0]; }
 
@@ -116,7 +100,7 @@ async function scanWindow(propertyId: number, checkIn: string, checkOut: string)
   if (!config) throw new Error(`Property ${propertyId} not in config`);
 
   const bounds = COMMUNITY_BOUNDS[config.community];
-  const location = COMMUNITY_SEARCH_LOCATIONS[config.community] || `${config.community}, Hawaii`;
+  const location = searchLocationForBuyInMarket(config.community) || `${config.community}, Hawaii`;
 
   const bedroomCounts: Record<number, number> = {};
   for (const u of config.units) bedroomCounts[u.bedrooms] = (bedroomCounts[u.bedrooms] || 0) + 1;

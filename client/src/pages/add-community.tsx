@@ -955,7 +955,7 @@ export default function AddCommunity() {
           community: selectedCommunity,
           pairing,
           streetAddress: editedStreetAddress.trim() || suggestedStreetAddress || undefined,
-          pricingArea: editedPricingArea || suggestPricingArea(selectedCommunity.city, selectedCommunity.state),
+          pricingArea: editedPricingArea || suggestPricingArea(selectedCommunity.city, selectedCommunity.state, selectedCommunity.name),
           strPermit: strPermit.trim() || null,
           dbprLicense: dbprLicense.trim() || null,
           touristTaxAccount: touristTaxAccount.trim() || null,
@@ -1363,7 +1363,7 @@ export default function AddCommunity() {
       // active rows (Hawaii cities → Poipu Kai / Princeville /
       // Kapaa Beachfront / Kekaha Beachfront / Keauhou).
       if (!editedPricingArea && selectedCommunity?.city && selectedCommunity?.state) {
-        const suggested = suggestPricingArea(selectedCommunity.city, selectedCommunity.state);
+        const suggested = suggestPricingArea(selectedCommunity.city, selectedCommunity.state, selectedCommunity.name);
         if (suggested) setEditedPricingArea(suggested);
       }
       // Pre-fill the STR permit field with the county-aware sample

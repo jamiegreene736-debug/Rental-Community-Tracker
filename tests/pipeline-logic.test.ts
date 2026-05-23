@@ -392,6 +392,7 @@ console.log("  ✓ live config has no duplicates");
 console.log("\npricing tables suite");
 
 import { getBuyInRate, suggestPricingArea, BUY_IN_RATES, setLivePropertyMarketRates } from "../shared/pricing-rates";
+import { resolveBuyInMarket, searchLocationForBuyInMarket } from "../shared/buy-in-market";
 
 // Caribe Cove (Kissimmee, FL) is the operator-validated 2BR low tier —
 // $125/unit base × 2 units = $250 buy-in, matching what the unit
@@ -463,6 +464,34 @@ assert.equal(
   suggestPricingArea("Bonita Springs", "Florida", "Bonita National 2 Bedroom Condo"),
   "Bonita National",
   "Bonita Springs draft should resolve to the Bonita National buy-in market",
+);
+assert.equal(
+  suggestPricingArea("Fort Myers Beach", "Florida", "Unmapped Gulf Condo"),
+  "Florida Generic",
+  "unknown Florida drafts should get the Florida fallback instead of a Hawaii market",
+);
+assert.equal(
+  resolveBuyInMarket({
+    name: "Bonita National 2 Bedroom Condo",
+    city: "Bonita Springs",
+    state: "Florida",
+  }),
+  "Bonita National",
+  "shared resolver should classify Bonita National before find-buy-in starts",
+);
+assert.equal(
+  resolveBuyInMarket({
+    name: "New Florida Condo",
+    city: "Fort Myers Beach",
+    state: "FL",
+  }),
+  "Florida Generic",
+  "shared resolver should preserve Florida geography for unknown future listings",
+);
+assert.equal(
+  searchLocationForBuyInMarket("Florida Generic"),
+  "Florida, United States",
+  "Florida fallback must have a real non-Hawaii search destination",
 );
 console.log("  ✓ suggestPricingArea matches by community name first");
 

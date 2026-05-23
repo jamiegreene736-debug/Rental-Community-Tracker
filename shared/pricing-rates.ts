@@ -11,6 +11,8 @@
 // which would inflate our target by ~80%. Treat live engine numbers as
 // telemetry only.
 
+import { resolveBuyInMarket } from "./buy-in-market";
+
 export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
 export type RegionType = "hawaii" | "florida";
 
@@ -124,6 +126,8 @@ export function suggestPricingArea(
       if (name.includes(key.toLowerCase())) return key;
     }
   }
+  const resolvedMarket = resolveBuyInMarket({ name: communityName, city, state });
+  if (resolvedMarket && BUY_IN_RATES[resolvedMarket]) return resolvedMarket;
   const c = (city || "").toLowerCase();
   const s = (state || "").toLowerCase();
   if (s === "hawaii" || s === "hi") {
@@ -146,7 +150,7 @@ export function suggestPricingArea(
     if (/\b(haines city|davenport)\b/.test(c)) return "Southern Dunes";
     if (/\b(bonita springs|estero|naples)\b/.test(c)) return "Bonita National";
     if (/\b(orlando|kissimmee)\b/.test(c)) return "Windsor Hills";
-    return "";
+    return "Florida Generic";
   }
   return "";
 }

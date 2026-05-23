@@ -76,6 +76,14 @@ import {
   type ChannelKey,
   type SeasonType,
 } from "@shared/pricing-rates";
+import {
+  BUY_IN_MARKET_BOUNDS,
+  BUY_IN_MARKET_LOCATIONS,
+  BUY_IN_MARKET_PLATFORM_SEARCH_TERMS,
+  BUY_IN_MARKET_SEARCH_LOCATIONS,
+  resolveBuyInMarket,
+  searchLocationForBuyInMarket,
+} from "@shared/buy-in-market";
 import { draftPhotoFolderRef, isScannableFolder, replacementPhotoFolderRef, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import {
   isCompoundUnitClaim,
@@ -555,9 +563,7 @@ async function buildBulkGuestySeasonalPlan(
     units = isSingle
       ? [{ bedrooms: unit1Bedrooms }]
       : [{ bedrooms: unit1Bedrooms }, { bedrooms: unit2Bedrooms }];
-    community = draft.pricingArea && BUY_IN_RATES[draft.pricingArea]
-      ? draft.pricingArea
-      : draft.name || (/\bfl(orida)?\b/i.test(draft.state || "") ? "Florida Generic" : "Poipu Kai");
+    community = communityKeyForDraft(draft);
   }
 
   const rows = await storage.getPropertyMarketRates(propertyId);
@@ -3458,43 +3464,22 @@ function virtualPropertyIdForGuestyListingId(listingId: string): number {
   return -(100000 + (hash % 900000));
 }
 
-function inferBuyInCommunityKeyFromText(...values: unknown[]): string | null {
-  const text = values
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join(" ")
-    .toLowerCase();
-  if (!text) return null;
-  if (/\b(?:na\s+hale\s+o\s+keauhou|keauhou|kailua[\s-]*kona|kona)\b/.test(text)) return "Keauhou";
-  if (/\bpili\s+mai\b/.test(text)) return "Pili Mai";
-  if (/\b(?:poipu\s+kai|regency\s+at\s+poipu|villas\s+at\s+poipu\s+kai)\b/.test(text)) return "Poipu Kai";
-  if (/\b(?:poipu\s+oceanfront|brennecke|ho'?one|makahuena)\b/.test(text)) return "Poipu Oceanfront";
-  if (/\b(?:princeville|mauna\s+kai)\b/.test(text)) return "Princeville";
-  if (/\b(?:kaha\s+lani|kapaa|wailua)\b/.test(text)) return "Kapaa Beachfront";
-  if (/\b(?:bonita\s+national|bonita\s+springs|estero|naples)\b/.test(text)) return "Bonita National";
-  if (/\b(?:windsor\s+hills|kissimmee|orlando)\b/.test(text)) return "Windsor Hills";
-  return null;
-}
-
 function communityKeyForDraft(draft: any): string {
   const pricingArea = typeof draft?.pricingArea === "string" ? draft.pricingArea.trim() : "";
-  if (pricingArea && BUY_IN_RATES[pricingArea]) {
-    return pricingArea;
-  }
-  const inferred = inferBuyInCommunityKeyFromText(
-    draft?.name,
-    draft?.listingTitle,
-    draft?.bookingTitle,
-    draft?.unitTypes,
-    draft?.streetAddress,
-    draft?.unit1Address,
-    draft?.unit2Address,
-    draft?.city,
-    draft?.state,
-    draft?.sourceUrl,
-  );
-  if (inferred) return inferred;
+  const resolved = resolveBuyInMarket({
+    marketKey: pricingArea,
+    name: draft?.name,
+    listingTitle: draft?.listingTitle,
+    bookingTitle: draft?.bookingTitle,
+    streetAddress: draft?.streetAddress,
+    unit1Address: draft?.unit1Address,
+    unit2Address: draft?.unit2Address,
+    city: draft?.city,
+    state: draft?.state,
+    sourceUrl: draft?.sourceUrl,
+  });
+  if (resolved) return resolved;
   if (pricingArea) return pricingArea;
-  if (/\bfl(orida)?\b/i.test(draft?.state || "")) return "Florida Generic";
   return draft?.name ?? "Poipu Kai";
 }
 
@@ -3781,7 +3766,7 @@ function buildCommunityDraftFromGuestyListing(listing: any, guestyListingId: str
     unit2PhotoFolder: null,
     combinedBedrooms: bedrooms,
     suggestedRate: null,
-    pricingArea: suggestPricingArea(address.city, address.state),
+    pricingArea: suggestPricingArea(address.city, address.state, title),
     singleListing: true,
     listingTitle: firstNonEmptyString(listing?.title, title),
     bookingTitle: firstNonEmptyString(listing?.title, title),
@@ -7750,14 +7735,13 @@ export async function registerRoutes(
           console.warn(`[find-buy-in] couldn't load Guesty listing ${resolvedGuestyListingId}:`, e?.message ?? e);
         }
       }
-      const inferredCommunity = requestedCommunity || inferBuyInCommunityKeyFromText(
-        resolvedGuestyListing?.nickname,
-        resolvedGuestyListing?.title,
-        resolvedGuestyListing?.name,
-        resolvedGuestyListing?.address?.full,
-        resolvedGuestyListing?.address?.city,
-        resolvedGuestyListing?.address?.state,
-      );
+      const inferredCommunity = requestedCommunity || resolveBuyInMarket({
+        name: firstNonEmptyString(resolvedGuestyListing?.nickname, resolvedGuestyListing?.title, resolvedGuestyListing?.name),
+        listingTitle: resolvedGuestyListing?.title,
+        streetAddress: firstNonEmptyString(resolvedGuestyListing?.address?.full, resolvedGuestyListing?.address?.street),
+        city: resolvedGuestyListing?.address?.city,
+        state: resolvedGuestyListing?.address?.state,
+      });
       if (!inferredCommunity) {
         return res.status(404).json({
           error: "Property not in config and no supported community could be inferred from the Guesty listing",
@@ -7857,7 +7841,7 @@ export async function registerRoutes(
 
     const community = config.community;
     const nights = Math.max(1, Math.round((new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86_400_000));
-    const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
+    const searchLocation = searchLocationForBuyInMarket(community) || `${community}, Hawaii`;
     const buyInPlatformSearch = COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS[community] ?? {};
     const vrboDestination = buyInPlatformSearch.vrbo ?? searchLocation;
     const bounds = COMMUNITY_BOUNDS[community];
@@ -11334,7 +11318,7 @@ export async function registerRoutes(
     const propertyConfig = propertyId && !isNaN(propertyId) ? PROPERTY_UNIT_NEEDS[propertyId] : null;
     const verificationBounds = propertyConfig ? COMMUNITY_BOUNDS[propertyConfig.community] : undefined;
     const verificationLocation = propertyConfig
-      ? COMMUNITY_SEARCH_LOCATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`
+      ? searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, Hawaii`
       : null;
 
     const addVerificationBounds = (sp: Record<string, string>): void => {
@@ -11388,7 +11372,7 @@ export async function registerRoutes(
             q || null,
             verificationLocation,
             verificationParts.length > 1 ? verificationParts.slice(1).join(", ") : null,
-            propertyConfig ? `${propertyConfig.community}, Hawaii` : null,
+            propertyConfig ? searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, Hawaii` : null,
           ].filter((v): v is string => !!v)));
 
       const searchOne = async (query: string): Promise<any[]> => {
@@ -11959,14 +11943,13 @@ export async function registerRoutes(
           const listingFields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street");
           const listing = await guestyRequest("GET", `/listings/${listingId}?fields=${listingFields}`) as any;
           const bedrooms = inferBedroomsFromGuestyListing(listing);
-          const community = inferBuyInCommunityKeyFromText(
-            listing?.nickname,
-            listing?.title,
-            listing?.name,
-            listing?.address?.full,
-            listing?.address?.city,
-            listing?.address?.state,
-          );
+          const community = resolveBuyInMarket({
+            name: firstNonEmptyString(listing?.nickname, listing?.title, listing?.name),
+            listingTitle: listing?.title,
+            streetAddress: firstNonEmptyString(listing?.address?.full, listing?.address?.street),
+            city: listing?.address?.city,
+            state: listing?.address?.state,
+          });
           if (bedrooms && bedrooms > 0) {
             resolvedUnitSlots = [{
               unitId: "main",
@@ -12397,38 +12380,9 @@ export async function registerRoutes(
     37: { community: "Windsor Hills", units: [{ bedrooms: 3 }] },
   };
 
-  const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
-    "Poipu Kai": "Poipu Kai Resort, Koloa, Kauai, Hawaii",
-    "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
-    "Keauhou": "Keauhou, Kailua-Kona, Big Island, Hawaii",
-    "Princeville": "Princeville, Kauai, Hawaii",
-    "Kapaa Beachfront": "Kaha Lani Resort, Wailua, Kauai, Hawaii",
-    "Poipu Oceanfront": "Poipu Beach, Koloa, Kauai, Hawaii",
-    "Poipu Brenneckes": "Brenneckes Beach, Poipu, Kauai, Hawaii",
-    "Pili Mai": "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
-    "Windsor Hills": "Windsor Hills Resort, Kissimmee, Florida",
-    "Bonita National": "Bonita National Golf and Country Club, Bonita Springs, Florida",
-    "Florida Generic": "Florida, United States",
-  };
+  const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = BUY_IN_MARKET_SEARCH_LOCATIONS;
 
-  const COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS: Record<string, { airbnb?: string; booking?: string; vrbo?: string; pm?: string }> = {
-    // OTA autocomplete works better when it receives the resort area name the
-    // platform exposes in its destination picker. PM/direct discovery should
-    // also search the whole Poipu Kai community, not only Regency, because
-    // valid replacement inventory can sit in named Poipu Kai sub-communities.
-    "Poipu Kai": {
-      airbnb: "Poipu Kai Resort, Koloa, HI",
-      booking: "Poipu Kai Resort, Koloa, HI",
-      vrbo: "Poipu Kai",
-      pm: "Poipu Kai",
-    },
-    "Bonita National": {
-      airbnb: "Bonita National Golf and Country Club, Bonita Springs, FL",
-      booking: "Bonita Springs, FL",
-      vrbo: "Bonita National Golf and Country Club",
-      pm: "Bonita National",
-    },
-  };
+  const COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS: Record<string, { airbnb?: string; booking?: string; vrbo?: string; pm?: string }> = BUY_IN_MARKET_PLATFORM_SEARCH_TERMS;
 
   // Decomposed location info per `PROPERTY_UNIT_NEEDS` community key,
   // used by `/api/property/:id/refresh-market-rates` to build the
@@ -12458,65 +12412,14 @@ export async function registerRoutes(
   // (also used in the SearchAPI `q=` parameter as additional context)
   // but is no longer the primary input to bbox computation.
   const COMMUNITY_LOCATION_BY_KEY: Record<string, { searchName: string; city: string; state: string; streetAddress?: string; lat: number; lng: number }> = {
-    "Poipu Kai":         { searchName: "Poipu Kai",                   city: "Koloa",       state: "Hawaii", streetAddress: "1831 Poipu Rd",                lat: 21.8794, lng: -159.4609 },
-    "Kekaha Beachfront": { searchName: "Kekaha Beachfront",           city: "Kekaha",      state: "Hawaii", streetAddress: "8497 Kekaha Rd",               lat: 21.9678, lng: -159.7464 },
-    "Keauhou":           { searchName: "Keauhou Estates",             city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr",             lat: 19.5493, lng: -155.9704 },
-    "Princeville":       { searchName: "Mauna Kai Princeville",       city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd",               lat: 22.2218, lng: -159.4849 },
-    // Kaha Lani Resort sits in Wailua at 22.036, -159.337.
-    //
-    // PR #295 (2026-04-29) moves the bbox back here after operator
-    // verification: Vrbo's "Kaha Lani Resort, Lihue, Hawaii" search
-    // returns ~12 listings clustered AT the resort, including multiple
-    // 3BR units ("Spacious 3 Bedroom Ocean Front W/Lanai-Kaha Lani",
-    // "#224 Oceanfront", etc.). The previous Kapaa-proper bbox at
-    // 22.072 was ~4km north and missed these entirely — every 3BR
-    // refresh came back empty.
-    //
-    // Why the previous Kapaa-proper compromise failed: PR #252's
-    // 22.05, -159.328 midpoint returned 18/18 outsideBbox because
-    // Airbnb's coordinate anonymization (±0.5–1km / ±0.005–0.010°)
-    // can shift a Kaha Lani listing from 22.036 → 22.026, which fell
-    // below the midpoint's sw_lat of 22.035. PR #252 reacted by
-    // moving the bbox + query both to Kapaa proper. That stopped the
-    // rejection but calibrated against Kapaa-proper inventory (Lae
-    // Nani, Pono Kai), not Kaha Lani's actual rooms.
-    //
-    // The right fix is to keep the bbox at Kaha Lani's actual coords
-    // and rely on the sparse-BR retry from PR #288 to widen to 2×
-    // (~0.030° half-width = ~3.3km radius) when a BR comes back
-    // empty on the initial pull. The widened range 22.006–22.066
-    // captures Kaha Lani's anonymized listings (22.026–22.046) with
-    // headroom to spare. Initial pull at 0.015° still works for 2BR
-    // in practice (operator-verified $256 LOW basis from a single
-    // Airbnb sample today).
-    "Kapaa Beachfront":  { searchName: "Kaha Lani Resort",            city: "Wailua",      state: "Hawaii",                                                lat: 22.0360, lng: -159.3370 },
+    ...BUY_IN_MARKET_LOCATIONS,
     "Makahuena at Poipu":{ searchName: "Makahuena at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "1661 Pe'e Rd",                lat: 21.8728, lng: -159.4448 },
-    "Poipu Oceanfront":  { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
-    "Poipu Brenneckes":  { searchName: "Poipu Brenneckes",            city: "Koloa",       state: "Hawaii", streetAddress: "2298 Ho'one Rd",               lat: 21.8744, lng: -159.4538 },
-    "Pili Mai":          { searchName: "Pili Mai at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr",   lat: 21.8865, lng: -159.4729 },
-    "Menehune Shores":   { searchName: "Menehune Shores",             city: "Kihei",       state: "Hawaii", streetAddress: "760 S Kihei Rd",               lat: 20.7638, lng: -156.4594 },
-    "Windsor Hills":     { searchName: "Windsor Hills Resort",        city: "Kissimmee",   state: "Florida", streetAddress: "2600 N Old Lake Wilson Rd",   lat: 28.3222, lng: -81.5961 },
-    "Bonita National":   { searchName: "Bonita National",             city: "Bonita Springs", state: "Florida", streetAddress: "17501 Bonita National Blvd", lat: 26.3254, lng: -81.6713 },
   };
 
   // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
   // SearchAPI Airbnb accepts these as a single bounding_box query param.
   // We also post-filter by GPS coordinates in the returned listings for extra precision.
-  const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = {
-    "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.478, ne_lat: 21.895, ne_lng: -159.458 },
-    "Pili Mai":         { sw_lat: 21.882, sw_lng: -159.483, ne_lat: 21.899, ne_lng: -159.468 },
-    "Poipu Brenneckes": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
-    "Poipu Oceanfront": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
-    "Princeville":      { sw_lat: 22.210, sw_lng: -159.498, ne_lat: 22.235, ne_lng: -159.468 },
-    // PR #295: realigned to Kaha Lani Resort area (Wailua) — center
-    // 22.036, -159.337 with a 0.015° half-width to match the multi-
-    // channel scanner's COMMUNITY_LOCATION_BY_KEY override above.
-    "Kapaa Beachfront": { sw_lat: 22.021, sw_lng: -159.352, ne_lat: 22.051, ne_lng: -159.322 },
-    "Kekaha Beachfront":{ sw_lat: 21.955, sw_lng: -159.758, ne_lat: 21.978, ne_lng: -159.733 },
-    "Keauhou":          { sw_lat: 19.528, sw_lng: -155.992, ne_lat: 19.558, ne_lng: -155.966 },
-    "Windsor Hills":    { sw_lat: 28.305, sw_lng: -81.615, ne_lat: 28.340, ne_lng: -81.575 },
-    "Bonita National":  { sw_lat: 26.310, sw_lng: -81.695, ne_lat: 26.342, ne_lng: -81.648 },
-  };
+  const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = BUY_IN_MARKET_BOUNDS;
 
   app.get("/api/airbnb/search", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
@@ -12541,7 +12444,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Property not found in multi-unit config" });
       }
 
-      const searchLocation = COMMUNITY_SEARCH_LOCATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`;
+      const searchLocation = searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, Hawaii`;
 
       const bedroomCounts: Record<number, number> = {};
       for (const unit of propertyConfig.units) {
@@ -12708,7 +12611,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Property not found in multi-unit config" });
       }
 
-      const destination = COMMUNITY_VRBO_DESTINATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`;
+      const destination = COMMUNITY_VRBO_DESTINATIONS[propertyConfig.community] || searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, Hawaii`;
       const spSlug = COMMUNITY_SP_SLUGS[propertyConfig.community];
 
       const bedroomCounts: Record<number, number> = {};
@@ -14387,7 +14290,7 @@ export async function registerRoutes(
 
     const totalBR = config.units.reduce((s, u) => s + u.bedrooms, 0);
     const community = config.community;
-    const searchLocation = COMMUNITY_SEARCH_LOCATIONS[community] || `${community}, Hawaii`;
+    const searchLocation = searchLocationForBuyInMarket(community) || `${community}, Hawaii`;
     const bounds = COMMUNITY_BOUNDS[community];
 
     // Pick one check-in per season bucket. We want recent-but-future dates —
@@ -18666,7 +18569,7 @@ Return ONLY compact JSON with this exact shape:
     if (!propertyConfig) return res.status(404).json({ error: "Property not in config" });
 
     const communityBounds = COMMUNITY_BOUNDS[propertyConfig.community];
-    const searchLocation = COMMUNITY_SEARCH_LOCATIONS[propertyConfig.community] || `${propertyConfig.community}, Hawaii`;
+    const searchLocation = searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, Hawaii`;
 
     // Count how many of each bedroom type we need
     const bedroomCounts: Record<number, number> = {};
@@ -26538,8 +26441,21 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
+    const resolvedPricingArea = result.data.pricingArea || resolveBuyInMarket({
+      name: result.data.name,
+      listingTitle: result.data.listingTitle,
+      bookingTitle: result.data.bookingTitle,
+      city: result.data.city,
+      state: result.data.state,
+      streetAddress: addressCheck.streetAddress,
+      unit1Address: normalizedUnit1Address,
+      unit2Address: result.data.unit2Address,
+      sourceUrl: result.data.sourceUrl,
+    });
+
     const draft = await storage.createCommunityDraft({
       ...result.data,
+      pricingArea: resolvedPricingArea,
       unit1Address: normalizedUnit1Address,
       streetAddress: addressCheck.streetAddress,
     });
