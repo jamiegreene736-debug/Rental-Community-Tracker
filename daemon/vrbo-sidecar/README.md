@@ -76,10 +76,12 @@ SIDECAR_CHROME_VISIBLE=1 /opt/homebrew/bin/node ~/Downloads/vrbo-sidecar/supervi
 
 Hidden mode also suppresses Playwright `bringToFront()` calls during
 normal scraping. When VRBO shows a human verification challenge, the
-worker first keeps Chrome hidden while it tries 2Captcha. Only if
-2Captcha is disabled, fails, or times out does the affected Chrome
-window surface for manual solving. After the challenge clears or the
-manual wait times out, the worker returns that window to hidden mode.
+worker keeps Chrome hidden while it checks whether CAPTCHA automation is
+explicitly enabled. By default automation is disabled and the request
+rotates/fails with a blocked provider status instead of silently using an
+old solver. If manual fallback is enabled, the affected Chrome window can
+surface for manual solving. After the challenge clears or the manual wait
+times out, the worker returns that window to hidden mode.
 
 ```sh
 SIDECAR_CHROME_VISIBLE=0                 # default hidden/background mode
@@ -165,33 +167,28 @@ search continue through their own queue work.
 SIDECAR_VRBO_HARD_BLOCK_FRESH_RETRIES=2 # default fresh VRBO-only retries
 ```
 
-## VRBO slider CAPTCHA automation
+## CAPTCHA provider configuration
 
-When VRBO shows a slider CAPTCHA, the daemon first tries to clear it
-with 2Captcha before falling back to manual verification. The 2Captcha
-key stays on Railway:
+CapSolver is the configured CAPTCHA provider surface. Automatic solving
+is disabled by default for provider scrapers; VRBO should surface a
+blocked provider status and rotate/fail according to provider policy.
+Keep the CapSolver key on Railway:
 
 ```sh
-railway variables set TWOCAPTCHA_API_KEY=<your-key>
+railway variables set CAPTCHA_PROVIDER=capsolver CAPSOLVER_API_KEY=<your-key> CAPTCHA_SOLVING_ENABLED=0
 ```
 
 Daemon knobs:
 
 ```sh
-SIDECAR_VRBO_2CAPTCHA=1                 # default; set 0 to disable
-SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS=120  # default solve wait
-SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS=2    # default attempts per wall
+SIDECAR_VRBO_CAPTCHA_AUTOMATION=0       # default; provider should rotate/fail
+SIDECAR_VRBO_CAPTCHA_POLL_SECONDS=120   # reserved for future authorized flows
+SIDECAR_VRBO_CAPTCHA_MAX_ATTEMPTS=2     # reserved for future authorized flows
 ```
 
-The daemon captures the challenge box while Chrome remains hidden,
-Railway submits it as a
-2Captcha CoordinatesTask, and the daemon drags the slider in the headed
-Chrome window using the returned coordinate. If the challenge does not
-clear, the worker also tries a full slider sweep before surfacing that
-specific Chrome window with the manual banner.
-
 The local LaunchAgent also needs `ADMIN_SECRET` so Railway's auth
-middleware allows the daemon to call `/api/admin/solve-coordinates-captcha`.
+middleware allows the daemon to call the sidecar queue and status
+endpoints.
 Run `./scripts/install-vrbo-sidecar-launchagent.sh` from a Railway-linked
 checkout; the installer will load `ADMIN_SECRET` from Railway variables
 when it is not already exported locally. A healthy startup log should show

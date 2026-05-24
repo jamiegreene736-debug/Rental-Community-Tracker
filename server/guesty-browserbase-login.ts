@@ -371,8 +371,9 @@ async function runRefreshSession(opts: {
  * falls back to native email/password. Mirrors the dispatch order in
  * loginToGuestyIfNeeded but slimmed down — Browserbase's residential IP
  * + persistent context's device-trust cookie make the previously-failing
- * Google challenges rare, so the heroics that loginToGuestyViaGoogleSso
- * does (2captcha, MFA fetch, etc.) aren't strictly needed here.
+ * Google challenges rare, so the fallback heroics that
+ * loginToGuestyViaGoogleSso does (MFA fetch, repeated UI recovery, etc.)
+ * aren't strictly needed here.
  *
  * If we hit a challenge anyway, return a clear error and let the
  * operator re-bootstrap the context.

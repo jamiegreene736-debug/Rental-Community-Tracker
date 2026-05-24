@@ -115,9 +115,18 @@ const VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES = Math.max(
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
-const VRBO_2CAPTCHA_ENABLED = process.env.SIDECAR_VRBO_2CAPTCHA !== "0";
-const VRBO_2CAPTCHA_POLL_SECONDS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS ?? 120);
-const VRBO_2CAPTCHA_MAX_ATTEMPTS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS ?? 2);
+const CAPTCHA_PROVIDER = String(process.env.CAPTCHA_PROVIDER ?? (process.env.CAPSOLVER_API_KEY ? "capsolver" : "none")).toLowerCase();
+const CAPTCHA_SOLVING_ENABLED = process.env.CAPTCHA_SOLVING_ENABLED === "1";
+const VRBO_CAPTCHA_AUTOMATION_ENABLED =
+  CAPTCHA_SOLVING_ENABLED &&
+  CAPTCHA_PROVIDER === "capsolver" &&
+  process.env.SIDECAR_VRBO_CAPTCHA_AUTOMATION === "1";
+const VRBO_CAPTCHA_POLL_SECONDS = Number(
+  process.env.SIDECAR_VRBO_CAPTCHA_POLL_SECONDS ?? 120,
+);
+const VRBO_CAPTCHA_MAX_ATTEMPTS = Number(
+  process.env.SIDECAR_VRBO_CAPTCHA_MAX_ATTEMPTS ?? 2,
+);
 const VRBO_COORDINATE_SOLVER_ENABLED = process.env.SIDECAR_VRBO_COORDINATE_SOLVER === "1";
 const VRBO_MANUAL_FALLBACK_ENABLED = process.env.SIDECAR_VRBO_MANUAL_FALLBACK === "1";
 
@@ -2149,17 +2158,17 @@ async function solveCoordinatesCaptchaViaServer(imageBase64, comment, id) {
     body: JSON.stringify({
       imageBase64,
       comment,
-      pollSeconds: VRBO_2CAPTCHA_POLL_SECONDS,
+      pollSeconds: VRBO_CAPTCHA_POLL_SECONDS,
     }),
   });
   if (!r?.ok) {
-    throw new Error(r?.error ?? "2Captcha coordinate solver failed");
+    throw new Error(r?.error ?? "CAPTCHA coordinate solver failed");
   }
   const point = Array.isArray(r.coordinates) ? r.coordinates[0] : null;
   if (!point || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) {
-    throw new Error("2Captcha did not return a usable coordinate");
+    throw new Error("CAPTCHA solver did not return a usable coordinate");
   }
-  log(`vrbo captcha ${id}: 2Captcha coordinate id=${r.captchaId} x=${point.x} y=${point.y}${r.cost ? ` cost=${r.cost}` : ""}`);
+  log(`vrbo captcha ${id}: CAPTCHA coordinate id=${r.captchaId} x=${point.x} y=${point.y}${r.cost ? ` cost=${r.cost}` : ""}`);
   return { x: Number(point.x), y: Number(point.y), captchaId: r.captchaId };
 }
 
@@ -2252,20 +2261,20 @@ async function solveDataDomeCaptchaViaServer(targetPage, label, id) {
     log(`${label} ${id}: DataDome solver requires the active residential proxy details; falling back to coordinate solver`);
     return false;
   }
-  await sendHeartbeat("2Captcha DataDome slider solve", true, id);
-  await postScreenSnapshot({ id, opType: label }, targetPage, "2Captcha DataDome slider solve", { captcha: true, force: true });
+  await sendHeartbeat("CAPTCHA DataDome slider solve", true, id);
+  await postScreenSnapshot({ id, opType: label }, targetPage, "CAPTCHA DataDome slider solve", { captcha: true, force: true });
   const r = await fetchJson(`${SERVER}/api/admin/solve-datadome-captcha`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({
       ...params,
       ...proxy,
-      pollSeconds: VRBO_2CAPTCHA_POLL_SECONDS,
+      pollSeconds: VRBO_CAPTCHA_POLL_SECONDS,
     }),
   });
   if (!r?.ok) {
     if (r?.retryableWithFreshProxy) {
-      throw new VrboHardBlockError(`2Captcha DataDome solve needs fresh proxy/profile: ${r.error ?? "unsolved"}`, {
+      throw new VrboHardBlockError(`DataDome solve needs fresh proxy/profile: ${r.error ?? "unsolved"}`, {
         label,
         id,
         url: params.websiteURL,
@@ -2273,12 +2282,12 @@ async function solveDataDomeCaptchaViaServer(targetPage, label, id) {
         excerpt: String(r.error ?? "").slice(0, 500),
       });
     }
-    log(`${label} ${id}: 2Captcha DataDome solve failed: ${r?.error ?? "unknown error"}; falling back to coordinate solver`);
+    log(`${label} ${id}: DataDome solve failed: ${r?.error ?? "unknown error"}; falling back to coordinate solver`);
     return false;
   }
   const cookieValue = dataDomeCookieValue(r.cookie);
   if (!cookieValue) {
-    log(`${label} ${id}: 2Captcha DataDome solve returned no datadome value; falling back to coordinate solver`);
+    log(`${label} ${id}: DataDome solve returned no datadome value; falling back to coordinate solver`);
     return false;
   }
   const host = (() => {
@@ -2293,14 +2302,14 @@ async function solveDataDomeCaptchaViaServer(targetPage, label, id) {
     secure: true,
     sameSite: "Lax",
   }]);
-  log(`${label} ${id}: injected DataDome cookie from 2Captcha id=${r.captchaId}${r.cost ? ` cost=${r.cost}` : ""}${r.ip ? ` solverIp=${r.ip}` : ""}`);
+  log(`${label} ${id}: injected DataDome cookie from CAPTCHA provider id=${r.captchaId}${r.cost ? ` cost=${r.cost}` : ""}${r.ip ? ` solverIp=${r.ip}` : ""}`);
   const cookieLanded = await targetPage.context()
     .cookies("https://www.vrbo.com/")
     .then((cookies) => cookies.some((cookie) => cookie.name === "datadome" && cookie.value === cookieValue))
     .catch(() => false);
   if (!cookieLanded) {
     log(`${label} ${id}: DataDome cookie injection did not appear in the VRBO cookie jar; rotating proxy/profile`);
-    throw new VrboHardBlockError("2Captcha DataDome cookie did not land in Chrome; rotating proxy/profile", {
+    throw new VrboHardBlockError("DataDome cookie did not land in Chrome; rotating proxy/profile", {
       label,
       id,
       url: params.websiteURL,
@@ -2386,24 +2395,24 @@ async function tryFullTrackSliderDrag(targetPage, handle, clip, label, id, reaso
   return !(await pageLooksLikeVrboHumanChallenge(targetPage));
 }
 
-async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
-  if (!VRBO_2CAPTCHA_ENABLED) {
-    log(`${label} ${id}: 2Captcha disabled by SIDECAR_VRBO_2CAPTCHA=0; manual fallback may be needed`);
+async function trySolveVrboCaptchaAutomatically(targetPage, label, id) {
+  if (!VRBO_CAPTCHA_AUTOMATION_ENABLED) {
+    log(`${label} ${id}: automatic CAPTCHA solving disabled (CAPTCHA_PROVIDER=${CAPTCHA_PROVIDER || "none"}, CAPTCHA_SOLVING_ENABLED=${CAPTCHA_SOLVING_ENABLED ? "1" : "0"}); rotating/failing according to provider policy`);
     return false;
   }
   if (await solveDataDomeCaptchaViaServer(targetPage, label, id)) {
-    log(`${label} ${id}: VRBO DataDome CAPTCHA cleared by 2Captcha cookie solver`);
+    log(`${label} ${id}: VRBO DataDome CAPTCHA cleared by CAPTCHA provider cookie solver`);
     return true;
   }
   if (!VRBO_COORDINATE_SOLVER_ENABLED) {
     log(`${label} ${id}: DataDome cookie solver did not clear CAPTCHA; rotating fresh browser/proxy instead of coordinate/manual fallback`);
     return false;
   }
-  for (let attempt = 1; attempt <= Math.max(1, VRBO_2CAPTCHA_MAX_ATTEMPTS); attempt++) {
+  for (let attempt = 1; attempt <= Math.max(1, VRBO_CAPTCHA_MAX_ATTEMPTS); attempt++) {
     try {
       const clip = await findVrboChallengeBox(targetPage);
       if (!clip) {
-        log(`${label} ${id}: no VRBO CAPTCHA box found for 2Captcha attempt`);
+        log(`${label} ${id}: no VRBO CAPTCHA box found for CAPTCHA automation attempt`);
         return false;
       }
       const handle = await findVrboSliderHandle(targetPage, clip);
@@ -2412,12 +2421,12 @@ async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
         return true;
       }
       if (!handle) {
-        log(`${label} ${id}: no slider handle found for 2Captcha attempt`);
+        log(`${label} ${id}: no slider handle found for CAPTCHA automation attempt`);
         return false;
       }
 
-      await sendHeartbeat(`2Captcha VRBO slider attempt ${attempt}`, true, id);
-      await postScreenSnapshot({ id, opType: label }, targetPage, `2Captcha slider attempt ${attempt}`, { captcha: true, force: true });
+      await sendHeartbeat(`CAPTCHA VRBO slider attempt ${attempt}`, true, id);
+      await postScreenSnapshot({ id, opType: label }, targetPage, `CAPTCHA slider attempt ${attempt}`, { captcha: true, force: true });
       const imageBuffer = await targetPage.screenshot({
         type: "jpeg",
         quality: 70,
@@ -2442,17 +2451,17 @@ async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
       await dragVrboSliderToPoint(targetPage, handle, absoluteTarget);
       await targetPage.waitForTimeout(5000).catch(() => {});
       if (!(await pageLooksLikeVrboHumanChallenge(targetPage))) {
-        log(`${label} ${id}: VRBO CAPTCHA cleared by 2Captcha`);
+        log(`${label} ${id}: VRBO CAPTCHA cleared by CAPTCHA automation`);
         return true;
       }
       const weakCoordinate = absoluteTarget.x <= handleCenterX + 70;
-      if (await tryFullTrackSliderDrag(targetPage, handle, clip, label, id, weakCoordinate ? "weak 2Captcha coordinate" : "2Captcha coordinate miss")) {
+      if (await tryFullTrackSliderDrag(targetPage, handle, clip, label, id, weakCoordinate ? "weak CAPTCHA coordinate" : "CAPTCHA coordinate miss")) {
         log(`${label} ${id}: VRBO CAPTCHA cleared by full slider sweep fallback`);
         return true;
       }
-      log(`${label} ${id}: 2Captcha slider attempt ${attempt} did not clear challenge`);
+      log(`${label} ${id}: CAPTCHA slider attempt ${attempt} did not clear challenge`);
     } catch (e) {
-      log(`${label} ${id}: 2Captcha slider attempt ${attempt} failed: ${e?.message ?? e}`);
+      log(`${label} ${id}: CAPTCHA slider attempt ${attempt} failed: ${e?.message ?? e}`);
     }
   }
   return false;
@@ -2557,8 +2566,8 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
     );
   }
 
-  log(`${label} ${id}: VRBO verification challenge detected; keeping Chrome hidden while trying 2Captcha first`);
-  if (await trySolveVrboCaptchaWith2Captcha(targetPage, label, id)) {
+  log(`${label} ${id}: VRBO verification challenge detected; checking configured CAPTCHA automation before rotating/failing`);
+  if (await trySolveVrboCaptchaAutomatically(targetPage, label, id)) {
     await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
     await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
     await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
@@ -2578,7 +2587,7 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
     );
   }
 
-  log(`${label} ${id}: 2Captcha unavailable or failed; surfacing Chrome for manual verification`);
+  log(`${label} ${id}: CAPTCHA automation unavailable or failed; surfacing Chrome for manual verification`);
   await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
   await showVrboManualVerificationBanner(targetPage, label);
   await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA - drag slider in dashboard", { captcha: true, force: true });

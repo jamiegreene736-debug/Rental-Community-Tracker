@@ -327,28 +327,25 @@ established it so you can read the rationale in the commit message.
     device-trusted by one successful login. Don't expand the SSO path
     to handle 2SV; expand the cookie-refresh ergonomics instead.
 
-29. **Google's identifier-step CAPTCHA is solved via 2captcha; 2SV
-    and "verify it's you" challenges still aren't.** The SSO path
-    routinely trips Google's "Type the text you hear or see" image
-    CAPTCHA on the email step because Railway's IP has no device
-    history. `loginToGuestyViaGoogleSso` detects this state — still
-    on `/signin/identifier` after submit + a CAPTCHA `<img>` present
-    — and submits the image to 2captcha (`server/captcha-solver.ts`)
-    with `TWOCAPTCHA_API_KEY`. Cost: ~$0.001/solve, typically once
-    every 4-7 days because the device-trust cookie persists. Up to 2
-    solves per run (Google sometimes chains a second CAPTCHA after a
-    correct first one); past that it's a session-suspect signal and
-    we bail with the cookie-refresh recommendation. Bad solutions
-    are reported back to 2captcha for credit refund.
+29. **Automatic CAPTCHA solving is disabled; CapSolver is only the
+    configured provider surface.** The SSO path can still trip
+    Google's "Type the text you hear or see" image CAPTCHA on the
+    email step because Railway's IP has no device history.
+    `loginToGuestyViaGoogleSso` detects this state — still on
+    `/signin/identifier` after submit + a CAPTCHA `<img>` present —
+    and now fails with a cookie-refresh recommendation instead of
+    submitting the image to an external solver. CapSolver config lives
+    behind `CAPTCHA_PROVIDER=capsolver`, `CAPSOLVER_API_KEY`, and
+    `CAPTCHA_SOLVING_ENABLED`, but provider scrapers should surface
+    blocked status rather than hiding the failure behind automatic
+    CAPTCHA attempts.
 
-    What 2captcha does NOT solve: the post-password challenges (2SV
+    What this does NOT solve: the post-password challenges (2SV
     Google Prompt, authenticator code, security key, "verify it's
     you" device check, "this browser may not be secure" wall). Those
     are genuine hard-blockers per #28; the answer remains refreshing
-    `GUESTY_SESSION_COOKIES`. The CAPTCHA gate just removes the most
-    common failure mode — the one that fires every single first
-    login from Railway — and turns a daily intervention into a
-    monthly one.
+    `GUESTY_SESSION_COOKIES` or using the Browserbase persistent
+    context path in #32.
 
 32. **Cookie refresh is self-healing via a Browserbase persistent
     context — operator no longer pastes cookies after every expiry.**

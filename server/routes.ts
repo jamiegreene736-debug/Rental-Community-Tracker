@@ -31,6 +31,7 @@ import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
 import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-availability";
+import { captchaAutomationUnavailable } from "./captcha-policy";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
@@ -16954,29 +16955,13 @@ Return ONLY compact JSON with this exact shape:
     return res.json(result);
   });
 
-  // POST /api/admin/solve-recaptcha (PR #313)
+  // POST /api/admin/solve-recaptcha
   //
-  // Phase 2b sidecar handlers (worker.mjs) call this when Google
-  // SERP scraping or any other Google-hosted page throws reCAPTCHA.
-  // Keeping the 2captcha API key in Railway env (not on the operator's
-  // Mac) means the daemon doesn't need its own copy or its own
-  // billing relationship — it just hits this endpoint, gets back the
-  // `g-recaptcha-response` token, and injects it into the page's
-  // hidden response field.
-  //
-  // Body: { kind: "v2" | "v3", sitekey, pageurl, action?, minScore?, invisible?, pollSeconds? }
-  // Returns: { ok: true, solution, captchaId } | { ok: false, error }
-  //
-  // Scope (per operator's call): Google reCAPTCHA only. VRBO /
-  // Booking partner-portal walls aren't 2captcha-solvable, so this
-  // endpoint isn't wired into those flows — the operator handles
-  // those manually when the loading bar's CAPTCHA warning fires.
+  // CAPTCHA automation is intentionally policy-gated. CAPSOLVER_API_KEY
+  // may be configured for future authorized flows, but provider scrapers
+  // should fail honestly when a third-party bot/CAPTCHA wall appears.
   app.post("/api/admin/solve-recaptcha", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
-    const apiKey = process.env.TWOCAPTCHA_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ ok: false, error: "TWOCAPTCHA_API_KEY not configured on Railway" });
-    }
     const body = req.body as {
       kind?: unknown;
       sitekey?: unknown;
@@ -16992,48 +16977,15 @@ Return ONLY compact JSON with this exact shape:
     const pageurl = typeof body.pageurl === "string" ? body.pageurl.trim() : "";
     if (!sitekey) return res.status(400).json({ ok: false, error: "sitekey required (Google reCAPTCHA data-sitekey)" });
     if (!pageurl || !/^https?:\/\//i.test(pageurl)) return res.status(400).json({ ok: false, error: "pageurl required (the URL of the page hosting the CAPTCHA)" });
-    const pollSeconds = typeof body.pollSeconds === "number" && body.pollSeconds > 0 && body.pollSeconds < 600 ? body.pollSeconds : undefined;
-
-    try {
-      const { solveRecaptchaV2, solveRecaptchaV3 } = await import("./captcha-solver");
-      console.log(`[solve-recaptcha] kind=${kind} sitekey=${sitekey.slice(0, 16)}… pageurl=${pageurl.slice(0, 80)}`);
-      const result = kind === "v2"
-        ? await solveRecaptchaV2(sitekey, pageurl, apiKey, {
-            pollSeconds,
-            invisible: body.invisible === true,
-          })
-        : await solveRecaptchaV3(sitekey, pageurl, typeof body.action === "string" ? body.action : "verify", apiKey, {
-            pollSeconds,
-            minScore: typeof body.minScore === "number" ? body.minScore : undefined,
-          });
-      if (result.ok) {
-        console.log(`[solve-recaptcha] ✓ id=${result.captchaId} (kind=${kind})`);
-      } else {
-        console.error(`[solve-recaptcha] ✗ kind=${kind}: ${result.error}`);
-      }
-      res.json(result);
-    } catch (e: any) {
-      console.error(`[solve-recaptcha] unhandled error: ${e?.message ?? e}`);
-      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
-    }
+    return res.status(501).json(captchaAutomationUnavailable("reCAPTCHA"));
   });
 
   // POST /api/admin/solve-coordinates-captcha
   //
-  // Used by the local/server Chrome sidecar when VRBO shows a custom
-  // slider CAPTCHA. The daemon captures the visible challenge box,
-  // sends the image here, and Railway calls 2Captcha with the API key
-  // kept in env. The response is a point in the screenshot; the daemon
-  // performs the actual mouse drag in the headed Chrome session.
-  //
-  // Body: { imageBase64, comment?, pollSeconds? }
-  // Returns: { ok: true, coordinates, captchaId, cost? } | { ok: false, error }
+  // Policy-gated placeholder. When a provider shows a CAPTCHA, the
+  // provider status should say blocked rather than hiding the failure.
   app.post("/api/admin/solve-coordinates-captcha", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
-    const apiKey = process.env.TWOCAPTCHA_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ ok: false, error: "TWOCAPTCHA_API_KEY not configured on Railway" });
-    }
     const body = req.body as {
       imageBase64?: unknown;
       comment?: unknown;
@@ -17042,48 +16994,17 @@ Return ONLY compact JSON with this exact shape:
     const imageBase64 = typeof body.imageBase64 === "string" ? body.imageBase64.trim() : "";
     if (!imageBase64) return res.status(400).json({ ok: false, error: "imageBase64 required" });
     if (imageBase64.length > 1_200_000) {
-      return res.status(413).json({ ok: false, error: "imageBase64 too large for 2Captcha coordinate solve" });
+      return res.status(413).json({ ok: false, error: "imageBase64 too large for coordinate solve" });
     }
-    const pollSeconds = typeof body.pollSeconds === "number" && body.pollSeconds > 0 && body.pollSeconds < 600
-      ? body.pollSeconds
-      : undefined;
-    const comment = typeof body.comment === "string" ? body.comment.slice(0, 500) : undefined;
-
-    try {
-      const { solveCoordinatesCaptcha } = await import("./captcha-solver");
-      console.log(`[solve-coordinates-captcha] imageBytes≈${Math.round(imageBase64.length * 0.75)} comment="${(comment ?? "").slice(0, 80)}"`);
-      const result = await solveCoordinatesCaptcha(imageBase64, apiKey, {
-        comment,
-        pollSeconds,
-        minClicks: 1,
-        maxClicks: 1,
-      });
-      if (result.ok) {
-        console.log(`[solve-coordinates-captcha] ✓ id=${result.captchaId} points=${result.coordinates.length}`);
-      } else {
-        console.error(`[solve-coordinates-captcha] ✗ ${result.error}`);
-      }
-      res.json(result);
-    } catch (e: any) {
-      console.error(`[solve-coordinates-captcha] unhandled error: ${e?.message ?? e}`);
-      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
-    }
+    return res.status(501).json(captchaAutomationUnavailable("coordinate CAPTCHA"));
   });
 
   // POST /api/admin/solve-datadome-captcha
   //
-  // Used by VRBO sidecar jobs when DataDome shows its slider iframe.
-  // Unlike generic coordinate solves, 2Captcha's DataDome task returns
-  // a `datadome=...` cookie that the daemon injects into the active
-  // browser context. The request must include the active page URL,
-  // DataDome iframe URL, browser User-Agent, and the residential proxy
-  // used by the browser session.
+  // Policy-gated placeholder for provider block pages. The sidecar
+  // should rotate/fail loudly instead of depending on the old provider.
   app.post("/api/admin/solve-datadome-captcha", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
-    const apiKey = process.env.TWOCAPTCHA_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ ok: false, error: "TWOCAPTCHA_API_KEY not configured on Railway" });
-    }
     const body = (req.body ?? {}) as Record<string, unknown>;
     const websiteURL = typeof body.websiteURL === "string" ? body.websiteURL.trim() : "";
     const captchaUrl = typeof body.captchaUrl === "string" ? body.captchaUrl.trim() : "";
@@ -17109,36 +17030,7 @@ Return ONLY compact JSON with this exact shape:
       return res.status(400).json({ ok: false, error: "proxyAddress and proxyPort required" });
     }
 
-    try {
-      const { solveDataDomeSliderCaptcha } = await import("./captcha-solver");
-      const captchaHost = (() => {
-        try { return new URL(captchaUrl).hostname; } catch { return "invalid-url"; }
-      })();
-      console.log(`[solve-datadome-captcha] website=${websiteURL.slice(0, 80)} captchaHost=${captchaHost} proxy=${proxyAddress}:${proxyPort}`);
-      const result = await solveDataDomeSliderCaptcha(
-        {
-          websiteURL,
-          captchaUrl,
-          userAgent,
-          proxyType,
-          proxyAddress,
-          proxyPort,
-          proxyLogin,
-          proxyPassword,
-        },
-        apiKey,
-        { pollSeconds },
-      );
-      if (result.ok) {
-        console.log(`[solve-datadome-captcha] ✓ id=${result.captchaId}${result.cost ? ` cost=${result.cost}` : ""}${result.ip ? ` ip=${result.ip}` : ""}`);
-      } else {
-        console.error(`[solve-datadome-captcha] ✗ ${result.error}`);
-      }
-      res.json(result);
-    } catch (e: any) {
-      console.error(`[solve-datadome-captcha] unhandled error: ${e?.message ?? e}`);
-      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
-    }
+    return res.status(501).json(captchaAutomationUnavailable("DataDome CAPTCHA"));
   });
 
   // GET /api/admin/vrbo-sidecar/next — worker poll endpoint. Honours
