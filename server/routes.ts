@@ -5730,20 +5730,17 @@ export async function registerRoutes(
     try {
       const fields = encodeURIComponent("_id status createdAt updatedAt confirmedAt bookedAt reservationDate checkIn checkOut nightsCount listing listingId money payments guest source integration confirmationCode");
       const filters = encodeURIComponent(JSON.stringify([
-        { field: "updatedAt", operator: "$gte", value: start.toISOString() },
+        { field: "createdAt", operator: "$gte", value: start.toISOString() },
       ]));
       let reservations: any[] = [];
       try {
         for (let page = 0; page < maxPages; page++) {
-          const data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=${limit}&skip=${page * limit}&sort=-updatedAt&fields=${fields}`);
+          const data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
           const pageRows = unwrapReservations(data);
           if (pageRows.length === 0) break;
           reservations.push(...pageRows);
           const datedRows = pageRows
-            .map((row) => {
-              const d = new Date(String(row?.updatedAt ?? row?.createdAt ?? ""));
-              return Number.isNaN(d.getTime()) ? null : d;
-            })
+            .map(bookingActivityAt)
             .filter((d): d is Date => !!d);
           const pageIsOlderThanWindow =
             datedRows.length > 0 && datedRows.every((d) => d < start);
@@ -5754,15 +5751,12 @@ export async function registerRoutes(
         // sorting works. Fall back to paged reads so the tile remains a
         // real rolling 30-day window instead of only the first page.
         for (let page = 0; page < maxPages; page++) {
-          const data = await guestyRequest("GET", `/reservations?limit=${limit}&skip=${page * limit}&sort=-updatedAt&fields=${fields}`);
+          const data = await guestyRequest("GET", `/reservations?limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
           const pageRows = unwrapReservations(data);
           if (pageRows.length === 0) break;
           reservations.push(...pageRows);
           const datedRows = pageRows
-            .map((row) => {
-              const d = new Date(String(row?.updatedAt ?? row?.createdAt ?? ""));
-              return Number.isNaN(d.getTime()) ? null : d;
-            })
+            .map(bookingActivityAt)
             .filter((d): d is Date => !!d);
           const pageIsOlderThanWindow =
             datedRows.length > 0 && datedRows.every((d) => d < start);
@@ -5823,6 +5817,7 @@ export async function registerRoutes(
         const listingName = String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing");
         const source = String(reservation?.source ?? reservation?.integration?.platform ?? "Guesty");
         const confirmationCode = reservation?.confirmationCode ? String(reservation.confirmationCode) : null;
+        let reservationDatedPaymentCount = 0;
         for (const payment of reservationPaymentItems(reservation)) {
           if (!paymentLooksCollected(payment)) continue;
           const amount = paymentAmount(payment);
@@ -5839,6 +5834,7 @@ export async function registerRoutes(
           seenPayments.add(key);
           fundsCollected30Days += amount;
           paymentsTaken30Days += 1;
+          reservationDatedPaymentCount += 1;
           payments.push({
             id: key,
             reservationId,
@@ -5858,6 +5854,37 @@ export async function registerRoutes(
         }
 
         const madeAt = bookingActivityAt(reservation);
+        if (reservationDatedPaymentCount === 0 && madeAt && madeAt >= start && madeAt <= now) {
+          const totalPaid = asNum(reservation?.money?.totalPaid ?? reservation?.totalPaid);
+          const totalRefunded = asNum(reservation?.money?.totalRefunded ?? reservation?.totalRefunded);
+          const retroactiveCollected = Math.max(0, totalPaid - totalRefunded);
+          const statusText = String(reservation?.status ?? "").toLowerCase();
+          if (retroactiveCollected > 0 && !/cancel|declin|inquir|request|expired|closed/.test(statusText)) {
+            const key = `${reservationId}|retroactive-total-paid|${retroactiveCollected.toFixed(2)}`;
+            if (!seenPayments.has(key)) {
+              seenPayments.add(key);
+              fundsCollected30Days += retroactiveCollected;
+              paymentsTaken30Days += 1;
+              if (madeAt >= fortyEightHourStart) {
+                fundsCollected48Hours += retroactiveCollected;
+                paymentsTaken48Hours += 1;
+              }
+              payments.push({
+                id: key,
+                reservationId,
+                listingId: reservationListingId || null,
+                guestName,
+                listingName,
+                confirmationCode,
+                source,
+                paidAt: madeAt.toISOString(),
+                amount: retroactiveCollected,
+                description: "Guesty total paid (retroactive)",
+              });
+            }
+          }
+        }
+
         if (!madeAt || madeAt < start || madeAt > now) continue;
         const status = String(reservation?.status ?? "").toLowerCase();
         if (/cancel|declin|inquir|request|expired|closed/.test(status)) continue;
