@@ -1203,6 +1203,7 @@ async function ensureHeadlessBrowser() {
   );
   const launchOptions = {
     headless: true,
+    ignoreHTTPSErrors: true,
     viewport: VIEWPORT,
     locale: process.env.SIDECAR_LOCALE ?? "en-US",
     timezoneId: process.env.SIDECAR_TIMEZONE ?? "America/New_York",
@@ -1210,6 +1211,7 @@ async function ensureHeadlessBrowser() {
     args: [
       "--disable-notifications",
       "--disable-blink-features=AutomationControlled",
+      "--ignore-certificate-errors",
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-dev-shm-usage",
@@ -1238,7 +1240,7 @@ async function ensureHeadlessBrowser() {
       ? seeded
         ? `seeded ${cookies.length} cookies into headless context`
         : `using existing headless profile cookies (${cookies.length} cookies available on disk)`
-      : "skipped cookie seeding for isolated VRBO headless session",
+      : "skipped cookie seeding for isolated proxied headless session",
   );
 
   const existingPages = context.pages().filter((p) => p && !p.isClosed?.());
