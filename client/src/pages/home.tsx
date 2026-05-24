@@ -985,7 +985,23 @@ export default function Home() {
   type DashboardRevenueSummary = {
     windowDays: number;
     revenue: number;
+    fundsCollected30Days?: number;
+    paymentsTaken30Days?: number;
+    fundsCollected48Hours?: number;
+    paymentsTaken48Hours?: number;
     bookingCount: number;
+    payments?: Array<{
+      id: string;
+      reservationId: string;
+      listingId: string | null;
+      guestName: string;
+      listingName: string;
+      confirmationCode: string | null;
+      source: string;
+      paidAt: string;
+      amount: number;
+      description: string;
+    }>;
     bookings: RevenueBookingSummary[];
     largestBooking: RevenueBookingSummary | null;
     highestGrossingBooking: RevenueBookingSummary | null;
@@ -1629,20 +1645,25 @@ export default function Home() {
               >
                 <div className="flex items-center gap-2 mb-1">
                   <TrendingUp className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-xs text-muted-foreground font-medium">Revenue, past 30 days</span>
+                  <span className="text-xs text-muted-foreground font-medium">Funds collected, past 30 days</span>
                 </div>
                 <p className="text-2xl font-bold" data-testid="text-weekly-revenue">
-                  {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue ?? 0)}
+                  {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollected30Days ?? 0)}
                 </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Rolling 30-day booking window
-                  {revenueSummary ? ` · ${revenueSummary.bookingCount} booking${revenueSummary.bookingCount === 1 ? "" : "s"}` : ""}
+                <p className="mt-1 text-xs leading-snug text-muted-foreground">
+                  {revenueSummary
+                    ? `${revenueSummary.paymentsTaken30Days ?? 0} payment${(revenueSummary.paymentsTaken30Days ?? 0) === 1 ? "" : "s"} taken`
+                    : "Actual collected payments"}
+                </p>
+                <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
+                  48 hours: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollected48Hours ?? 0)}
+                  {revenueSummary ? ` · ${revenueSummary.paymentsTaken48Hours ?? 0} payment${(revenueSummary.paymentsTaken48Hours ?? 0) === 1 ? "" : "s"}` : ""}
                 </p>
               </button>
             </DialogTrigger>
             <DialogContent className="max-w-4xl">
               <DialogHeader>
-                <DialogTitle>Revenue bookings, past 30 days</DialogTitle>
+                <DialogTitle>Funds collected, past 30 days</DialogTitle>
               </DialogHeader>
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
@@ -1651,13 +1672,68 @@ export default function Home() {
                     {revenueSummary ? ` · ${formatShortDate(revenueSummary.startDate)} to ${formatShortDate(revenueSummary.endDate)}` : ""}
                   </span>
                   <span className="font-semibold">
-                    {formatCurrency(revenueSummary?.revenue ?? 0)} from {revenueSummary?.bookingCount ?? 0} booking{(revenueSummary?.bookingCount ?? 0) === 1 ? "" : "s"}
+                    {formatCurrency(revenueSummary?.fundsCollected30Days ?? 0)} collected from {revenueSummary?.paymentsTaken30Days ?? 0} payment{(revenueSummary?.paymentsTaken30Days ?? 0) === 1 ? "" : "s"}
                   </span>
                 </div>
+                <div className="grid gap-2 text-sm sm:grid-cols-3">
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Payments taken, 48 hours</p>
+                    <p className="mt-1 text-lg font-semibold">{formatCurrency(revenueSummary?.fundsCollected48Hours ?? 0)}</p>
+                    <p className="text-xs text-muted-foreground">{revenueSummary?.paymentsTaken48Hours ?? 0} payment{(revenueSummary?.paymentsTaken48Hours ?? 0) === 1 ? "" : "s"}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Bookings made, 30 days</p>
+                    <p className="mt-1 text-lg font-semibold">{formatCurrency(revenueSummary?.revenue ?? 0)}</p>
+                    <p className="text-xs text-muted-foreground">{revenueSummary?.bookingCount ?? 0} booking{(revenueSummary?.bookingCount ?? 0) === 1 ? "" : "s"}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Collection basis</p>
+                    <p className="mt-1 text-sm font-semibold">Guesty paid payment records</p>
+                    <p className="text-xs text-muted-foreground">Excludes scheduled, pending, failed, voided, and refunded rows</p>
+                  </div>
+                </div>
                 {revenueSummaryLoading ? (
-                  <p className="text-sm text-muted-foreground">Loading booking details...</p>
-                ) : revenueSummary?.bookings?.length ? (
+                  <p className="text-sm text-muted-foreground">Loading payment details...</p>
+                ) : revenueSummary?.payments?.length ? (
                   <div className="overflow-x-auto rounded-md border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Paid</TableHead>
+                          <TableHead>Guest</TableHead>
+                          <TableHead>Listing</TableHead>
+                          <TableHead>Channel</TableHead>
+                          <TableHead>Description</TableHead>
+                          <TableHead className="text-right">Collected</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {revenueSummary.payments.map((payment) => (
+                          <TableRow key={payment.id}>
+                            <TableCell className="whitespace-nowrap">{formatShortDateTime(payment.paidAt)}</TableCell>
+                            <TableCell>
+                              <div className="font-medium">{payment.guestName}</div>
+                              {payment.confirmationCode && (
+                                <div className="text-xs text-muted-foreground">{payment.confirmationCode}</div>
+                              )}
+                            </TableCell>
+                            <TableCell className="min-w-[180px]">{payment.listingName}</TableCell>
+                            <TableCell>{payment.source}</TableCell>
+                            <TableCell className="min-w-[160px]">{payment.description || "Collected payment"}</TableCell>
+                            <TableCell className="text-right font-medium">{formatCurrency(payment.amount)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No collected payment records found in this rolling 30-day window.</p>
+                )}
+                {revenueSummary?.bookings?.length ? (
+                  <div className="overflow-x-auto rounded-md border">
+                    <div className="border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
+                      Supporting booking revenue created in this 30-day window
+                    </div>
                     <Table>
                       <TableHeader>
                         <TableRow>
@@ -1692,9 +1768,7 @@ export default function Home() {
                       </TableBody>
                     </Table>
                   </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No revenue bookings found in this rolling 30-day window.</p>
-                )}
+                ) : null}
               </div>
             </DialogContent>
           </Dialog>

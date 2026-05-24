@@ -5645,6 +5645,61 @@ export async function registerRoutes(
       return 0;
     };
 
+    const paymentAmount = (payment: any): number => {
+      return asNum(payment?.amount ?? payment?.paidAmount ?? payment?.collectedAmount ?? payment?.total ?? payment?.value);
+    };
+
+    const paymentDate = (payment: any): Date | null => {
+      const raw =
+        payment?.paidAt ??
+        payment?.collectedAt ??
+        payment?.processedAt ??
+        payment?.paymentDate ??
+        payment?.date ??
+        payment?.createdAt;
+      if (!raw) return null;
+      const d = new Date(String(raw));
+      return Number.isNaN(d.getTime()) ? null : d;
+    };
+
+    const paymentDescription = (payment: any): string => {
+      return String(payment?.description ?? payment?.note ?? payment?.label ?? payment?.type ?? payment?.kind ?? "");
+    };
+
+    const paymentLooksCollected = (payment: any): boolean => {
+      const status = String(payment?.status ?? payment?.paymentStatus ?? "").toLowerCase();
+      const description = paymentDescription(payment).toLowerCase();
+      if (/(refund|void|fail|declin|cancel|reversal|chargeback)/.test(status + " " + description)) return false;
+      if (/(scheduled|pending|unpaid|due|future|authorized|authorization)/.test(status + " " + description)) return false;
+      if (payment?.paidAt || payment?.collectedAt || payment?.processedAt) return true;
+      return /(paid|captured|collected|succeeded|settled|processed|payment|charge)/.test(status + " " + description);
+    };
+
+    const reservationPaymentItems = (reservation: any): any[] => {
+      const money = reservation?.money ?? {};
+      const items: any[] = [
+        ...(Array.isArray(reservation?.payments) ? reservation.payments : []),
+        ...(Array.isArray(money?.payments) ? money.payments : []),
+        ...(Array.isArray(money?.paymentSchedule) ? money.paymentSchedule : []),
+      ];
+      if (Array.isArray(money?.transactions)) {
+        for (const transaction of money.transactions) {
+          const type = String(transaction?.type ?? transaction?.kind ?? "").toLowerCase();
+          const status = String(transaction?.status ?? "").toLowerCase();
+          if (/refund|void|fail|declin|auth|chargeback/.test(type) && !/captured/.test(type)) continue;
+          if (/refund|fail|declin|void|chargeback/.test(status)) continue;
+          if (/payment|charge|paid|capture|succeeded|collected/.test(type + " " + status)) items.push(transaction);
+        }
+      }
+      if (Array.isArray(money?.invoiceItems)) {
+        for (const item of money.invoiceItems) {
+          const type = String(item?.type ?? item?.subType ?? "").toLowerCase();
+          if (/payment|paid|charge|capture|collected/.test(type)) items.push(item);
+        }
+      }
+      return items;
+    };
+
     const reservationNights = (reservation: any): number => {
       const explicit = asNum(reservation?.nightsCount ?? reservation?.nights);
       if (explicit > 0) return Math.round(explicit);
@@ -5673,19 +5728,22 @@ export async function registerRoutes(
     };
 
     try {
-      const fields = encodeURIComponent("_id status createdAt confirmedAt bookedAt reservationDate checkIn checkOut nightsCount listing listingId money guest source integration confirmationCode");
+      const fields = encodeURIComponent("_id status createdAt updatedAt confirmedAt bookedAt reservationDate checkIn checkOut nightsCount listing listingId money payments guest source integration confirmationCode");
       const filters = encodeURIComponent(JSON.stringify([
-        { field: "createdAt", operator: "$gte", value: start.toISOString() },
+        { field: "updatedAt", operator: "$gte", value: start.toISOString() },
       ]));
       let reservations: any[] = [];
       try {
         for (let page = 0; page < maxPages; page++) {
-          const data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
+          const data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=${limit}&skip=${page * limit}&sort=-updatedAt&fields=${fields}`);
           const pageRows = unwrapReservations(data);
           if (pageRows.length === 0) break;
           reservations.push(...pageRows);
           const datedRows = pageRows
-            .map(bookingActivityAt)
+            .map((row) => {
+              const d = new Date(String(row?.updatedAt ?? row?.createdAt ?? ""));
+              return Number.isNaN(d.getTime()) ? null : d;
+            })
             .filter((d): d is Date => !!d);
           const pageIsOlderThanWindow =
             datedRows.length > 0 && datedRows.every((d) => d < start);
@@ -5694,14 +5752,17 @@ export async function registerRoutes(
       } catch (filteredErr) {
         // Some Guesty accounts reject createdAt filters even though list
         // sorting works. Fall back to paged reads so the tile remains a
-        // real rolling seven-day window instead of only the first page.
+        // real rolling 30-day window instead of only the first page.
         for (let page = 0; page < maxPages; page++) {
-          const data = await guestyRequest("GET", `/reservations?limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
+          const data = await guestyRequest("GET", `/reservations?limit=${limit}&skip=${page * limit}&sort=-updatedAt&fields=${fields}`);
           const pageRows = unwrapReservations(data);
           if (pageRows.length === 0) break;
           reservations.push(...pageRows);
           const datedRows = pageRows
-            .map(bookingActivityAt)
+            .map((row) => {
+              const d = new Date(String(row?.updatedAt ?? row?.createdAt ?? ""));
+              return Number.isNaN(d.getTime()) ? null : d;
+            })
             .filter((d): d is Date => !!d);
           const pageIsOlderThanWindow =
             datedRows.length > 0 && datedRows.every((d) => d < start);
@@ -5711,6 +5772,12 @@ export async function registerRoutes(
 
       let revenue = 0;
       let bookingCount = 0;
+      let fundsCollected30Days = 0;
+      let paymentsTaken30Days = 0;
+      let fundsCollected48Hours = 0;
+      let paymentsTaken48Hours = 0;
+      const fortyEightHourStart = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+      const seenPayments = new Set<string>();
       const listingRevenue = new Map<string, {
         listingId: string;
         listingName: string;
@@ -5731,8 +5798,65 @@ export async function registerRoutes(
         nights: number;
         amount: number;
       }> = [];
+      const payments: Array<{
+        id: string;
+        reservationId: string;
+        listingId: string | null;
+        guestName: string;
+        listingName: string;
+        confirmationCode: string | null;
+        source: string;
+        paidAt: string;
+        amount: number;
+        description: string;
+      }> = [];
 
       for (const reservation of reservations) {
+        const reservationId = String(reservation?._id ?? reservation?.id ?? "");
+        const guest = reservation?.guest ?? {};
+        const guestName = [
+          guest?.firstName ?? guest?.first_name,
+          guest?.lastName ?? guest?.last_name,
+        ].filter(Boolean).join(" ").trim() || String(guest?.fullName ?? guest?.full_name ?? guest?.name ?? "Guest");
+        const listing = reservation?.listing ?? {};
+        const reservationListingId = guestyListingIdFromReservation(reservation);
+        const listingName = String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing");
+        const source = String(reservation?.source ?? reservation?.integration?.platform ?? "Guesty");
+        const confirmationCode = reservation?.confirmationCode ? String(reservation.confirmationCode) : null;
+        for (const payment of reservationPaymentItems(reservation)) {
+          if (!paymentLooksCollected(payment)) continue;
+          const amount = paymentAmount(payment);
+          if (amount <= 0) continue;
+          const paidAt = paymentDate(payment);
+          if (!paidAt || paidAt < start || paidAt > now) continue;
+          const key = [
+            reservationId,
+            paidAt.toISOString(),
+            amount.toFixed(2),
+            paymentDescription(payment).toLowerCase(),
+          ].join("|");
+          if (seenPayments.has(key)) continue;
+          seenPayments.add(key);
+          fundsCollected30Days += amount;
+          paymentsTaken30Days += 1;
+          payments.push({
+            id: key,
+            reservationId,
+            listingId: reservationListingId || null,
+            guestName,
+            listingName,
+            confirmationCode,
+            source,
+            paidAt: paidAt.toISOString(),
+            amount,
+            description: paymentDescription(payment) || "Collected payment",
+          });
+          if (paidAt >= fortyEightHourStart) {
+            fundsCollected48Hours += amount;
+            paymentsTaken48Hours += 1;
+          }
+        }
+
         const madeAt = bookingActivityAt(reservation);
         if (!madeAt || madeAt < start || madeAt > now) continue;
         const status = String(reservation?.status ?? "").toLowerCase();
@@ -5741,15 +5865,7 @@ export async function registerRoutes(
         if (amount <= 0) continue;
         revenue += amount;
         bookingCount += 1;
-        const guest = reservation?.guest ?? {};
-        const guestName = [
-          guest?.firstName ?? guest?.first_name,
-          guest?.lastName ?? guest?.last_name,
-        ].filter(Boolean).join(" ").trim();
-        const listing = reservation?.listing ?? {};
-        const reservationListingId = guestyListingIdFromReservation(reservation);
         const listingKey = reservationListingId || String(listing?.nickname ?? listing?.title ?? "Listing");
-        const listingName = String(listing?.nickname ?? listing?.title ?? reservation?.listingId ?? "Listing");
         const existingListing = listingRevenue.get(listingKey) ?? {
           listingId: listingKey,
           listingName,
@@ -5762,10 +5878,10 @@ export async function registerRoutes(
         bookings.push({
           id: String(reservation?._id ?? reservation?.id ?? ""),
           listingId: reservationListingId || null,
-          guestName: guestName || String(guest?.fullName ?? guest?.full_name ?? guest?.name ?? "Guest"),
+          guestName,
           listingName,
-          confirmationCode: reservation?.confirmationCode ? String(reservation.confirmationCode) : null,
-          source: String(reservation?.source ?? reservation?.integration?.platform ?? "Guesty"),
+          confirmationCode,
+          source,
           status: String(reservation?.status ?? ""),
           bookedAt: madeAt.toISOString(),
           checkIn: reservation?.checkIn ? String(reservation.checkIn) : null,
@@ -5776,6 +5892,7 @@ export async function registerRoutes(
       }
 
       const sortedBookings = bookings.sort((a, b) => b.bookedAt.localeCompare(a.bookedAt));
+      const sortedPayments = payments.sort((a, b) => b.paidAt.localeCompare(a.paidAt));
       const largestBooking = bookings
         .slice()
         .sort((a, b) => (b.nights - a.nights) || (b.amount - a.amount))[0] ?? null;
@@ -5788,7 +5905,12 @@ export async function registerRoutes(
       res.json({
         windowDays,
         revenue,
+        fundsCollected30Days,
+        paymentsTaken30Days,
+        fundsCollected48Hours,
+        paymentsTaken48Hours,
         bookingCount,
+        payments: sortedPayments,
         bookings: sortedBookings,
         largestBooking,
         highestGrossingBooking,
