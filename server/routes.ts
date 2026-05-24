@@ -8991,6 +8991,35 @@ export async function registerRoutes(
       if (c.source === "pm" && isLandingUrl("pm", c.url)) return "PM URL looks like a landing/search page";
       return "unknown target-filter rejection";
     };
+    const candidateHasFinalResortProof = (c: Candidate): boolean => {
+      const hay = candidateHaystack(c);
+      const strongRegencyProof = candidateHasStrongRegencyPoipuKaiProof(c);
+      if (mentionsKnownNonRegencyPoipuKaiComplex(hay) && !strongRegencyProof) return false;
+      if (mentionsKnownNonPoipuKaiComplex(hay)) return false;
+      if (mentionsKnownNonKahaLaniComplex(hay)) return false;
+      if (targetIsRegencyPoipuKai) {
+        return strongRegencyProof || mentionsRegencyPoipuKai(hay) || candidateHasResortPhotoProof(c);
+      }
+      if (normalizedResortName === "poipu kai") {
+        // Final auto-pick/attach must be anchored to an actual Poipu Kai
+        // signal, not merely a broad Koloa/Poipu search result.
+        return mentionsPoipuKai(hay) || candidateHasResortPhotoProof(c);
+      }
+      return mentionsResort(hay) || candidateHasResortPhotoProof(c);
+    };
+    const candidateFinalIdentityRejectReason = (c: Candidate): string | null => {
+      const targetReject = candidateTargetRejectReason(c);
+      if (targetReject !== "unknown target-filter rejection") return targetReject;
+      const inferredBedrooms = candidateBedroomSignal(c);
+      if (inferredBedrooms === null) return `no explicit ${bedrooms}BR proof on listing/search result`;
+      if (inferredBedrooms !== bedrooms) return `bedroom mismatch ${inferredBedrooms}BR != requested ${bedrooms}BR`;
+      if (!candidateHasFinalResortProof(c)) return `no final ${resortName ?? community} resort/community proof`;
+      return null;
+    };
+    const candidateIsFinalAutoPickSafe = (c: Candidate): boolean =>
+      candidateFitsTarget(c, { requireBedroomProof: true })
+      && candidateBedroomSignal(c) === bedrooms
+      && candidateHasFinalResortProof(c);
 
     // Append the reservation's check-in/out to the URL so the landing page
     // opens with availability already filtered for those dates. Each platform
@@ -10696,10 +10725,29 @@ export async function registerRoutes(
     //               operator can review.
     // - "skipped" → out of CHEAPEST.
     // - undefined → out (defensive — should never happen in production).
-    const verifiedCheapest = priced.filter((c) => c.verified === "yes");
+    const finalIdentityDroppedExamples: string[] = [];
+    const verifiedCheapestBeforeFinalIdentity = priced.filter((c) => c.verified === "yes");
+    const verifiedCheapest = verifiedCheapestBeforeFinalIdentity.filter((c) => {
+      if (candidateIsFinalAutoPickSafe(c)) return true;
+      if (finalIdentityDroppedExamples.length < 8) {
+        const host = (() => {
+          try { return new URL(c.url).hostname.replace(/^www\./, ""); } catch { return c.sourceLabel || c.source; }
+        })();
+        finalIdentityDroppedExamples.push(
+          `${candidateFinalIdentityRejectReason(c) ?? "final identity proof missing"} :: ${host} :: ${(c.title || c.url).replace(/\s+/g, " ").slice(0, 90)}`,
+        );
+      }
+      return false;
+    });
+    if (finalIdentityDroppedExamples.length > 0) {
+      console.log(
+        `[find-buy-in] final auto-pick identity gate dropped ${verifiedCheapestBeforeFinalIdentity.length - verifiedCheapest.length}/${verifiedCheapestBeforeFinalIdentity.length}: ${finalIdentityDroppedExamples.join(" | ")}`,
+      );
+    }
     // Cap at 20 — multi-slot reservations need enough variety to fill
     // distinct units per slot. Do not fall back to unpriced rows here.
     const cheapest = verifiedCheapest.slice(0, 20);
+    const finalIdentityDropped = verifiedCheapestBeforeFinalIdentity.length - verifiedCheapest.length;
     const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
 
     // ── Unit clustering ─────────────────────────────────────────────
@@ -10804,7 +10852,10 @@ export async function registerRoutes(
     // units by minNightlyPrice across the verified subset of listings.
     const units: CheapestUnit[] = [];
     for (const { anchor, members } of clusters.values()) {
+      const finalSafeVerifiedMembers = members.filter((c) => c.verified === "yes" && candidateIsFinalAutoPickSafe(c));
+      if (finalSafeVerifiedMembers.length === 0) continue; // skip clusters that cannot be auto-attached safely
       const listingChannels: ListingChannel[] = members
+        .filter((c) => c.verified !== "yes" || candidateIsFinalAutoPickSafe(c))
         .map(candidateToListing)
         .sort((a: ListingChannel, b: ListingChannel) => {
           const aRank = a.verified === "yes" ? 0 : 1;
@@ -10911,6 +10962,14 @@ export async function registerRoutes(
         detail: priced.length > 0
           ? `${priced.length} priced candidate(s) were scanned, but none passed verified=yes for ${checkIn} to ${checkOut}. Provider status: ${providerAvailabilitySummary}.`
           : `No scanned source produced a date-specific price for this stay window. Provider status: ${providerAvailabilitySummary}.`,
+      });
+    }
+    if (finalIdentityDropped > 0) {
+      issueList.push({
+        severity: cheapest.length > 0 ? "warning" : "error",
+        source: "Final identity gate",
+        summary: `Dropped ${finalIdentityDropped} verified candidate(s) before auto-pick because bedroom/resort proof was not exact enough`,
+        detail: finalIdentityDroppedExamples.join(" | "),
       });
     }
     const totalPricePlausibilityDropped = Object.values(targetFilterPriceDropped).reduce((sum, n) => sum + n, 0);
@@ -11039,6 +11098,8 @@ export async function registerRoutes(
           yes: preVerifyYes,
           no: preVerifyNo,
           unclear: preVerifyUnclear,
+          finalIdentityDropped,
+          finalIdentityDroppedExamples,
           sidecarReasonSummary,
           sidecarReasonBuckets: Object.fromEntries(sidecarVerifyReasonCounts.entries()),
         },
@@ -11116,6 +11177,8 @@ export async function registerRoutes(
           yes: preVerifyYes,
           no: preVerifyNo,
           unclear: preVerifyUnclear,
+          finalIdentityDropped,
+          finalIdentityDroppedExamples,
           sidecarReasonSummary,
           // Sidecar availability means at least one live website search
           // source was driven through the local Chrome worker.
