@@ -8616,7 +8616,7 @@ export async function registerRoutes(
       sourceErrors.push({ source, message: raw.slice(0, 600) });
     };
     const sidecarReasonIsProviderFailure = (reason: string | undefined): boolean =>
-      /\b(?:blocked|kyc|required|proxy|blank search page|bot wall|captcha|access denied|provider\/browser failure|worker reported failure|request expired)\b/i.test(
+      /\b(?:blocked|block|cooling down|cooldown|kyc|required|proxy|blank search page|bot wall|captcha|access denied|provider\/browser failure|worker reported failure|request expired|rate.?limit|tunnel)\b/i.test(
         String(reason ?? ""),
       );
 
@@ -8625,6 +8625,7 @@ export async function registerRoutes(
       sourceLabel: string;
       title: string;
       url: string;
+      originalSourceUrl?: string;
       nightlyPrice: number;
       totalPrice: number;
       bedrooms?: number;
@@ -8670,6 +8671,17 @@ export async function registerRoutes(
       bedroomSource?: "search-card" | "search-filter" | "detail-page" | "unknown";
       groundFloorStatus?: "confirmed" | "not_confirmed" | "conflict" | "unknown";
       groundFloorEvidence?: string | null;
+    };
+    type ProviderHealthSnapshot = {
+      provider?: string;
+      status?: "healthy" | "degraded" | "blocked" | "cooldown" | "unknown" | string;
+      consecutiveFailures?: number;
+      lastSuccessAt?: string | null;
+      lastFailureAt?: string | null;
+      failureReason?: string | null;
+      cooldownUntil?: string | null;
+      retryAfterMs?: number | null;
+      updatedAt?: string | null;
     };
 
     const asNum = (v: unknown): number => {
@@ -9123,6 +9135,7 @@ export async function registerRoutes(
               source,
               sourceLabel,
               title: String(o?.title ?? `${sourceLabel} listing`),
+              originalSourceUrl: String(o?.link ?? ""),
               url: withStayDates(source, String(o?.link ?? "")),
               nightlyPrice: 0, // Google organic results don't carry live prices
               totalPrice: 0,
@@ -9150,6 +9163,7 @@ export async function registerRoutes(
     let airbnbSidecarOnline = false;
     let airbnbSidecarMs = 0;
     let airbnbSidecarReason = "";
+    let airbnbProviderHealth: ProviderHealthSnapshot | null = null;
     const airbnbSidecarAbort = makeSidecarAbort("airbnb-sidecar");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       try {
@@ -9168,6 +9182,7 @@ export async function registerRoutes(
         airbnbSidecarOnline = r.workerOnline;
         airbnbSidecarMs = r.durationMs;
         airbnbSidecarReason = r.reason;
+        airbnbProviderHealth = r.providerHealth ?? null;
         if (sidecarReasonIsProviderFailure(r.reason)) {
           noteSourceError("Airbnb sidecar search", r.reason);
         }
@@ -9197,6 +9212,7 @@ export async function registerRoutes(
             source: "airbnb",
             sourceLabel: "Airbnb",
             title: c.title,
+            originalSourceUrl: c.url,
             url: withStayDates("airbnb", c.url),
             nightlyPrice: Math.round(nightly),
             totalPrice: Math.round(total),
@@ -9227,6 +9243,7 @@ export async function registerRoutes(
     let bookingSidecarOnline = false;
     let bookingSidecarMs = 0;
     let bookingSidecarReason = "";
+    let bookingProviderHealth: ProviderHealthSnapshot | null = null;
     const bookingSidecarAbort = makeSidecarAbort("booking-sidecar");
     const bookingPromise: Promise<Candidate[]> = (async () => {
       try {
@@ -9247,6 +9264,7 @@ export async function registerRoutes(
         bookingSidecarOnline = r.workerOnline;
         bookingSidecarMs = r.durationMs;
         bookingSidecarReason = r.reason;
+        bookingProviderHealth = r.providerHealth ?? null;
         if (sidecarReasonIsProviderFailure(r.reason)) {
           noteSourceError("Booking.com sidecar search", r.reason);
         }
@@ -9273,6 +9291,7 @@ export async function registerRoutes(
             source: "booking",
             sourceLabel: "Booking.com",
             title: c.title.slice(0, 100),
+            originalSourceUrl: c.url,
             url: withStayDates("booking", c.url),
             nightlyPrice: nightly,
             totalPrice: total,
@@ -9305,6 +9324,7 @@ export async function registerRoutes(
     let vrboSidecarOnline = false;
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
+    let vrboProviderHealth: ProviderHealthSnapshot | null = null;
     const vrboSidecarAbort = makeSidecarAbort("vrbo");
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const targetSearchTerm = vrboWebsiteSearchTerm;
@@ -9335,6 +9355,7 @@ export async function registerRoutes(
         vrboSidecarOnline = r.workerOnline;
         vrboSidecarMs = r.durationMs;
         vrboSidecarReason = r.reason;
+        vrboProviderHealth = r.providerHealth ?? null;
         if (sidecarReasonIsProviderFailure(r.reason)) {
           noteSourceError("Vrbo sidecar search", r.reason);
         }
@@ -9347,6 +9368,7 @@ export async function registerRoutes(
             source: "vrbo" as const,
             sourceLabel: "Vrbo",
             title: c.title,
+            originalSourceUrl: c.url,
             url: withStayDates("vrbo", c.url),
             nightlyPrice: c.nightlyPrice,
             totalPrice: c.totalPrice,
@@ -9555,6 +9577,7 @@ export async function registerRoutes(
                   source: "pm" as const,
                   sourceLabel: site.title,
                   title: String(h?.title ?? "Listing").slice(0, 100),
+                  originalSourceUrl: String(h?.link ?? ""),
                   url: withStayDates("pm", String(h?.link ?? "")),
                   nightlyPrice: nightly,
                   totalPrice: nightly ? nightly * nights : 0,
@@ -9637,6 +9660,7 @@ export async function registerRoutes(
               source: "pm" as const,
               sourceLabel: "Suite Paradise",
               title: u.title,
+              originalSourceUrl: u.url,
               url: withStayDates("pm", u.url),
               nightlyPrice: u.nightlyPrice,
               totalPrice: u.totalPrice,
@@ -9702,6 +9726,7 @@ export async function registerRoutes(
             source: "pm" as const,
             sourceLabel: site.label,
             title: u.name,
+            originalSourceUrl: u.url,
             url: withStayDates("pm", u.url),
             nightlyPrice: u.nightlyPrice,
             totalPrice: u.totalPrice,
@@ -9752,6 +9777,7 @@ export async function registerRoutes(
               source: "pm" as const,
               sourceLabel: "Gather Vacations",
               title: u.title,
+              originalSourceUrl: u.url,
               url: withStayDates("pm", u.url),
               nightlyPrice: u.nightlyPrice,
               totalPrice: u.totalPrice,
@@ -9803,6 +9829,7 @@ export async function registerRoutes(
             source: "pm" as const,
             sourceLabel: site.label,
             title: u.title,
+            originalSourceUrl: u.url,
             url: withStayDates("pm", u.url),
             nightlyPrice: u.nightlyPrice,
             totalPrice: u.totalPrice,
@@ -9869,6 +9896,7 @@ export async function registerRoutes(
               source: "pm",
               sourceLabel: host,
               title: String(hit?.title ?? host).slice(0, 100),
+              originalSourceUrl: url,
               url: withStayDates("pm", url),
               nightlyPrice: 0,
               totalPrice: 0,
@@ -10051,6 +10079,7 @@ export async function registerRoutes(
               source: "pm",
               sourceLabel: c.sourceLabel || "Property manager",
               title: c.title,
+              originalSourceUrl: c.url,
               url: withStayDates("pm", c.url),
               nightlyPrice: Math.round(nightly),
               totalPrice: Math.round(total),
@@ -10347,6 +10376,7 @@ export async function registerRoutes(
           // don't will ignore the params. Doesn't guarantee
           // availability (that's verifyPmRate's job) but at least the
           // page lands on the right window when it does support it.
+          originalSourceUrl: m.url,
           url: withStayDates("pm", m.url),
           title: m.title || `Match on ${m.domain}`,
           nightlyPrice: anchor.nightlyPrice,
@@ -10776,11 +10806,18 @@ export async function registerRoutes(
       channel: "airbnb" | "vrbo" | "booking" | "pm";
       channelLabel: string;
       url: string;
+      originalSourceUrl?: string;
       nightlyPrice: number;
       totalPrice: number;
       bedrooms?: number;
       verified?: "yes" | "no" | "unclear" | "skipped";
       verifiedReason?: string;
+      airbnbAnchorUrl?: string;
+      airbnbAnchorPrice?: number;
+      directBookingUrl?: string;
+      directBookingHost?: string;
+      directBookingSource?: "airbnb_image_reverse_search";
+      directBookingReason?: string;
       groundFloorStatus?: "confirmed" | "not_confirmed" | "conflict" | "unknown";
       groundFloorEvidence?: string | null;
     };
@@ -10801,11 +10838,18 @@ export async function registerRoutes(
       channel: c.source,
       channelLabel: c.sourceLabel,
       url: c.url,
+      originalSourceUrl: c.originalSourceUrl,
       nightlyPrice: c.nightlyPrice,
       totalPrice: c.totalPrice,
       bedrooms: c.bedrooms,
       verified: c.verified,
       verifiedReason: c.verifiedReason,
+      airbnbAnchorUrl: c.airbnbAnchorUrl,
+      airbnbAnchorPrice: c.airbnbAnchorPrice,
+      directBookingUrl: c.directBookingUrl,
+      directBookingHost: c.directBookingHost,
+      directBookingSource: c.directBookingSource,
+      directBookingReason: c.directBookingReason,
       groundFloorStatus: c.groundFloorStatus ?? "unknown",
       groundFloorEvidence: c.groundFloorEvidence ?? null,
     });
@@ -10996,13 +11040,69 @@ export async function registerRoutes(
     ): SearchDiagnosticStatus => {
       if (sourceTimeouts.some((t) => timeoutLabels.includes(t.source))) return "timeout";
       if (sourceErrors.some((e) => errorNeedles.some((needle) => e.source.includes(needle))) && kept === 0 && raw === 0) return "error";
-      if (sidecarReasonIsProviderFailure(reason) && kept === 0 && raw === 0) return "error";
+      if (sidecarReasonIsProviderFailure(reason)) return "error";
       if (searched) return "ok";
       if (verifiedRows > 0 || pricedRows > 0 || kept > 0 || raw > 0) return "ok";
       return messageWhenEmpty ? "warning" : "skipped";
     };
+    const providerConfidence = (
+      status: SearchDiagnosticStatus,
+      raw: number,
+      pricedRows: number,
+      verifiedRows: number,
+    ): "high" | "medium" | "low" | "none" => {
+      if (status === "error" || status === "timeout" || status === "skipped") return "none";
+      if (verifiedRows > 0) return "high";
+      if (pricedRows > 0 || raw > 0) return "medium";
+      return "low";
+    };
+    const providerFailureReason = (
+      status: SearchDiagnosticStatus,
+      reason: string | undefined,
+      health: ProviderHealthSnapshot | null,
+    ): string | null => {
+      const healthReason = health?.failureReason?.trim();
+      if (healthReason && (status === "error" || status === "timeout" || health?.status === "blocked" || health?.status === "cooldown")) {
+        return compactReason(healthReason);
+      }
+      if (status === "error" || status === "timeout") return compactReason(reason || "provider search did not complete");
+      return null;
+    };
+    const enrichProviderDiagnostic = (input: {
+      source: string;
+      status: SearchDiagnosticStatus;
+      searched?: boolean;
+      raw: number;
+      kept: number;
+      priced: number;
+      verified: number;
+      durationMs?: number;
+      message: string;
+      reason?: string;
+      health?: ProviderHealthSnapshot | null;
+      searchTerm?: string;
+      accessPattern?: string;
+    }) => ({
+      ...input,
+      failureReason: providerFailureReason(input.status, input.reason, input.health ?? null),
+      providerHealth: input.health?.status ?? null,
+      proxyHealth: input.health?.status ?? null,
+      cooldownUntil: input.health?.cooldownUntil ?? null,
+      retryAfterMs: input.health?.retryAfterMs ?? null,
+      confidence: providerConfidence(input.status, input.raw, input.priced, input.verified),
+      datesSearched: { checkIn, checkOut, nights },
+      bedroomFilter: { bedrooms, applied: true },
+      resultCounts: {
+        raw: input.raw,
+        kept: input.kept,
+        priced: input.priced,
+        verified: input.verified,
+      },
+      searchTerm: input.searchTerm ?? null,
+      accessPattern: input.accessPattern ?? "authorized website search via sidecar",
+    });
     const diagnosticSources = [
-      {
+      enrichProviderDiagnostic({
         source: "Airbnb",
         status: sourceStatus(["airbnb-sidecar"], ["airbnb", "Airbnb"], airbnbRawCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived website sidecar filters", airbnbSidecarOnline, airbnbSidecarReason),
         searched: airbnbSidecarOnline,
@@ -11011,9 +11111,12 @@ export async function registerRoutes(
         priced: pricedCount(airbnbTarget),
         verified: verifiedYesCount(airbnbTarget),
         durationMs: airbnbSidecarMs,
+        reason: airbnbSidecarReason,
+        health: airbnbProviderHealth,
+        searchTerm: airbnbWebsiteSearchTerm,
         message: `sidecarOnline=${airbnbSidecarOnline}; websitePriced=${airbnbPricedCount}; ${airbnbTarget.length} kept after target filters${airbnbSidecarReason ? `; ${airbnbSidecarReason}` : ""}.`,
-      },
-      {
+      }),
+      enrichProviderDiagnostic({
         source: "Vrbo",
         status: sourceStatus(["vrbo"], ["Vrbo", "vrbo"], vrboRawCount, vrboTarget.length, pricedCount(vrboTarget), verifiedYesCount(vrboTarget), "No Vrbo rows survived sidecar/bedroom filters", vrboSidecarOnline, vrboSidecarReason),
         searched: vrboSidecarOnline,
@@ -11022,9 +11125,12 @@ export async function registerRoutes(
         priced: pricedCount(vrboTarget),
         verified: verifiedYesCount(vrboTarget),
         durationMs: vrboSidecarMs,
+        reason: vrboSidecarReason,
+        health: vrboProviderHealth,
+        searchTerm: vrboWebsiteSearchTerm,
         message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
-      },
-      {
+      }),
+      enrichProviderDiagnostic({
         source: "Booking.com",
         status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com search-result card produced a bedroom-matching rate", bookingSidecarOnline, bookingSidecarReason),
         searched: bookingSidecarOnline,
@@ -11033,8 +11139,11 @@ export async function registerRoutes(
         priced: pricedCount(bookingTarget),
         verified: verifiedYesCount(bookingTarget),
         durationMs: bookingSidecarMs,
+        reason: bookingSidecarReason,
+        health: bookingProviderHealth,
+        searchTerm: bookingWebsiteSearchTerm,
         message: `sidecarOnline=${bookingSidecarOnline}; sidecarPriced=${bookingSidecarCount}; ${bookingSidecarCount} Booking.com website sidecar search card(s). Sidecar-priced search cards are trusted when Booking.com returned them after date and bedroom filtering${bookingSidecarReason ? `; ${bookingSidecarReason}` : ""}.`,
-      },
+      }),
       {
         source: "Airbnb Lens direct links",
         status: sourceStatus([], ["Google Lens"], totalPhotoMatches, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), ""),
@@ -11042,6 +11151,11 @@ export async function registerRoutes(
         kept: pmTarget.length,
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
+        confidence: totalPhotoMatches > 0 ? "medium" : "low",
+        datesSearched: { checkIn, checkOut, nights },
+        bedroomFilter: { bedrooms, applied: true },
+        resultCounts: { raw: totalPhotoMatches, kept: pmTarget.length, priced: pricedCount(pmTarget), verified: verifiedYesCount(pmTarget) },
+        accessPattern: "authorized SearchAPI Google Lens lookup; PM/direct pages are preserved as links only",
         message: `${photoMatchPmCandidates.length} direct link candidate(s) came only from Airbnb photo Lens matches. Direct sites were not scraped; rates remain Airbnb proof.`,
       },
       {
@@ -11051,6 +11165,16 @@ export async function registerRoutes(
         kept: sidecarBatchVerifiedUrls.size,
         priced: sidecarVerifyTargets.filter((c) => c.verified === "yes" && c.totalPrice > 0).length,
         verified: preVerifyYes,
+        confidence: sidecarVerifyTargets.length === 0 ? "none" : sidecarBatchVerifiedUrls.size > 0 ? "medium" : "low",
+        datesSearched: { checkIn, checkOut, nights },
+        bedroomFilter: { bedrooms, applied: true },
+        resultCounts: {
+          raw: sidecarVerifyTargets.length,
+          kept: sidecarBatchVerifiedUrls.size,
+          priced: sidecarVerifyTargets.filter((c) => c.verified === "yes" && c.totalPrice > 0).length,
+          verified: preVerifyYes,
+        },
+        accessPattern: "disabled for auto-buy-in; search-result pages and authorized PM APIs are source of truth",
         message: sidecarVerifyTargets.length === 0
           ? "Skipped by design: search-result pages are the source of truth for rates and availability."
           : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}${sidecarReasonSummary ? `; top outcomes: ${sidecarReasonSummary}` : ""}.`,
@@ -11074,7 +11198,7 @@ export async function registerRoutes(
       "",
       "Sources:",
       ...diagnosticSources.map((s) =>
-        `- ${s.source}: status=${s.status}; raw=${s.raw}; kept=${s.kept}; priced=${s.priced}; verified=${s.verified}${s.durationMs ? `; durationMs=${s.durationMs}` : ""}; ${s.message}`,
+        `- ${s.source}: status=${s.status}; confidence=${(s as any).confidence ?? "unknown"}; raw=${s.raw}; kept=${s.kept}; priced=${s.priced}; verified=${s.verified}${s.durationMs ? `; durationMs=${s.durationMs}` : ""}${(s as any).providerHealth ? `; providerHealth=${(s as any).providerHealth}` : ""}${(s as any).cooldownUntil ? `; cooldownUntil=${(s as any).cooldownUntil}` : ""}${(s as any).failureReason ? `; failureReason=${(s as any).failureReason}` : ""}; ${s.message}`,
       ),
       "",
       "Issues:",
@@ -11119,6 +11243,9 @@ export async function registerRoutes(
         source: livePlausibilityRate > 0 ? "property-market-rates" : staticPlausibilityRate > 0 ? "static-buy-in-rates" : "regional-fallback",
       },
       sources: diagnosticSources,
+      providerStatuses: diagnosticSources.filter((source) =>
+        /^Airbnb$|^Vrbo$|^Booking\.com$/i.test(source.source),
+      ),
       issues: issueList,
       report: diagnosticsReport,
     };
@@ -11185,6 +11312,11 @@ export async function registerRoutes(
           // source was driven through the local Chrome worker.
           available: airbnbSidecarOnline || vrboSidecarOnline || bookingSidecarOnline || pmWebsiteSidecarOnline,
         },
+        providerHealth: {
+          airbnb: airbnbProviderHealth,
+          vrbo: vrboProviderHealth,
+          booking: bookingProviderHealth,
+        },
         searchLocation,
         vrboDestination,
         airbnbWebsiteSearchTerm,
@@ -11200,7 +11332,7 @@ export async function registerRoutes(
       totalPricedResults: priced.length,
     };
     // Populate the result cache only when the scan itself is trustworthy.
-    // Partial/timeout diagnostics must be a fresh retry every time; caching
+    // Partial/timeout diagnostics must be recomputed every time; caching
     // them is how Auto-fill can immediately replay a stale "0 scanned rows"
     // result after the sidecar has already recovered.
     evictExpiredFindBuyIn();

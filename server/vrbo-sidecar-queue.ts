@@ -353,12 +353,34 @@ export type SidecarWorkerRuntime = {
   source?: "server" | "local" | "unknown";
 };
 
+export type SidecarProviderKey = "airbnb" | "vrbo" | "booking";
+
+export type SidecarProviderHealth = {
+  provider: SidecarProviderKey;
+  status: "healthy" | "degraded" | "blocked" | "cooldown" | "unknown";
+  consecutiveFailures: number;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  failureReason: string | null;
+  cooldownUntil: string | null;
+  retryAfterMs: number | null;
+  updatedAt: string | null;
+};
+
 // Backward-compat alias — old code imported this name when the queue
 // was VRBO-only.
 export type SidecarVrboCandidate = SidecarPropertyCandidate;
 
 const queue = new Map<string, SidecarRequest>();
 const requestKeyIndex = new Map<string, string>(); // requestKey → id
+const providerHealth = new Map<SidecarProviderKey, {
+  consecutiveFailures: number;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  failureReason: string | null;
+  cooldownUntil: number | null;
+  updatedAt: number | null;
+}>();
 
 // Worker liveness: every time the worker calls `next()`, we stamp this.
 // The UI polls `getHeartbeat()` to decide whether to show "Local sidecar
@@ -394,8 +416,8 @@ const SIDECAR_SCREEN_TTL_MS = 10 * 60 * 1000;
 const SIDECAR_SCREENSHOT_MAX_CHARS = 350_000;
 const SIDECAR_SCREEN_COMMAND_TTL_MS = 60 * 1000;
 const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
-  // VRBO's DataDome risk scoring gets worse when multiple fresh
-  // browser/proxy identities hit it at once. Keep VRBO serialized,
+  // VRBO block rates get worse when multiple provider visits hit it at
+  // once. Keep VRBO serialized and rely on rate-limited cooldowns,
   // while Airbnb/Booking/PM jobs can still use the worker pool.
   vrbo_search: 1,
 };
@@ -407,6 +429,134 @@ function nowMs(): number {
 function numberFromEnv(name: string, fallback: number): number {
   const n = Number(process.env[name]);
   return Number.isFinite(n) ? n : fallback;
+}
+
+const PROVIDER_BLOCK_COOLDOWN_BASE_MS = Math.max(
+  60_000,
+  numberFromEnv("SIDECAR_PROVIDER_BLOCK_COOLDOWN_MS", 15 * 60_000),
+);
+const PROVIDER_BLOCK_COOLDOWN_MAX_MS = Math.max(
+  PROVIDER_BLOCK_COOLDOWN_BASE_MS,
+  numberFromEnv("SIDECAR_PROVIDER_BLOCK_COOLDOWN_MAX_MS", 60 * 60_000),
+);
+
+function providerDisplayName(provider: SidecarProviderKey): string {
+  switch (provider) {
+    case "airbnb": return "Airbnb";
+    case "vrbo": return "VRBO";
+    case "booking": return "Booking.com";
+  }
+}
+
+function providerFailureIsBlockLike(reason: string | undefined | null): boolean {
+  return /\b(?:captcha|blocked|block page|bot|human verification|kyc|proxy|407|tunnel|access denied|rate.?limit|datadome|cloudflare|turnstile|unusual traffic|provider\/browser failure|blank search page|bad_endpoint)\b/i.test(
+    String(reason ?? ""),
+  );
+}
+
+function providerHealthState(provider: SidecarProviderKey) {
+  const existing = providerHealth.get(provider);
+  if (existing) return existing;
+  const fresh = {
+    consecutiveFailures: 0,
+    lastSuccessAt: null,
+    lastFailureAt: null,
+    failureReason: null,
+    cooldownUntil: null,
+    updatedAt: null,
+  };
+  providerHealth.set(provider, fresh);
+  return fresh;
+}
+
+function providerHealthSnapshot(provider: SidecarProviderKey): SidecarProviderHealth {
+  const state = providerHealthState(provider);
+  const now = nowMs();
+  const retryAfterMs = state.cooldownUntil && state.cooldownUntil > now
+    ? Math.max(0, state.cooldownUntil - now)
+    : null;
+  const status: SidecarProviderHealth["status"] = retryAfterMs !== null
+    ? "cooldown"
+    : state.lastFailureAt && (!state.lastSuccessAt || state.lastFailureAt > state.lastSuccessAt)
+      ? providerFailureIsBlockLike(state.failureReason) ? "blocked" : "degraded"
+      : state.lastSuccessAt
+        ? "healthy"
+        : "unknown";
+  return {
+    provider,
+    status,
+    consecutiveFailures: state.consecutiveFailures,
+    lastSuccessAt: state.lastSuccessAt ? new Date(state.lastSuccessAt).toISOString() : null,
+    lastFailureAt: state.lastFailureAt ? new Date(state.lastFailureAt).toISOString() : null,
+    failureReason: state.failureReason,
+    cooldownUntil: state.cooldownUntil ? new Date(state.cooldownUntil).toISOString() : null,
+    retryAfterMs,
+    updatedAt: state.updatedAt ? new Date(state.updatedAt).toISOString() : null,
+  };
+}
+
+export function getProviderHealth(provider?: SidecarProviderKey): SidecarProviderHealth[] {
+  const providers: SidecarProviderKey[] = provider ? [provider] : ["airbnb", "vrbo", "booking"];
+  return providers.map(providerHealthSnapshot);
+}
+
+function activeProviderCooldown(provider: SidecarProviderKey): SidecarProviderHealth | null {
+  const snapshot = providerHealthSnapshot(provider);
+  return snapshot.status === "cooldown" && snapshot.retryAfterMs !== null ? snapshot : null;
+}
+
+function recordProviderSuccess(provider: SidecarProviderKey): SidecarProviderHealth {
+  const state = providerHealthState(provider);
+  const now = nowMs();
+  state.consecutiveFailures = 0;
+  state.lastSuccessAt = now;
+  state.failureReason = null;
+  state.cooldownUntil = null;
+  state.updatedAt = now;
+  return providerHealthSnapshot(provider);
+}
+
+function recordProviderFailure(provider: SidecarProviderKey, reason: string): SidecarProviderHealth {
+  const state = providerHealthState(provider);
+  const now = nowMs();
+  state.consecutiveFailures += 1;
+  state.lastFailureAt = now;
+  state.failureReason = reason.replace(/\s+/g, " ").trim().slice(0, 600);
+  state.updatedAt = now;
+  if (providerFailureIsBlockLike(reason)) {
+    const multiplier = Math.min(4, Math.max(1, state.consecutiveFailures));
+    state.cooldownUntil = now + Math.min(PROVIDER_BLOCK_COOLDOWN_MAX_MS, PROVIDER_BLOCK_COOLDOWN_BASE_MS * multiplier);
+  }
+  return providerHealthSnapshot(provider);
+}
+
+function recordProviderOutcome(
+  provider: SidecarProviderKey,
+  result: { workerOnline: boolean; reason: string; candidates: SidecarPropertyCandidate[] },
+): SidecarProviderHealth {
+  if (providerFailureIsBlockLike(result.reason)) {
+    return recordProviderFailure(provider, result.reason);
+  }
+  if (result.workerOnline) return recordProviderSuccess(provider);
+  return recordProviderFailure(provider, result.reason);
+}
+
+function providerCooldownSearchResult(provider: SidecarProviderKey): {
+  candidates: SidecarPropertyCandidate[];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+  providerHealth: SidecarProviderHealth;
+} {
+  const health = providerHealthSnapshot(provider);
+  const retryAt = health.cooldownUntil ? ` Retry after ${health.cooldownUntil}.` : "";
+  return {
+    candidates: [],
+    workerOnline: getHeartbeat().isOnline,
+    durationMs: 0,
+    reason: `${providerDisplayName(provider)} provider is cooling down after a block/proxy failure: ${health.failureReason ?? "blocked"}.${retryAt}`,
+    providerHealth: health,
+  };
 }
 
 function opConcurrencyLimit(opType: SidecarOpType): number {
@@ -966,6 +1116,7 @@ export function getStatus(): {
   byOpType: Record<SidecarOpType, number>;
   activeRequests: SidecarStatusRequest[];
   pendingRequests: SidecarStatusRequest[];
+  providerHealth: SidecarProviderHealth[];
 } {
   cleanup();
   let pending = 0,
@@ -1077,6 +1228,7 @@ export function getStatus(): {
     byOpType,
     activeRequests: activeRequests.sort((a, b) => (b.activeSec ?? 0) - (a.activeSec ?? 0)).slice(0, 5),
     pendingRequests: pendingRequests.sort((a, b) => b.ageSec - a.ageSec).slice(0, 8),
+    providerHealth: getProviderHealth(),
   };
 }
 
@@ -1197,7 +1349,10 @@ export async function searchVrboViaSidecar(opts: {
   workerOnline: boolean;
   durationMs: number;
   reason: string;
+  providerHealth?: SidecarProviderHealth;
 } | null> {
+  const cooldown = activeProviderCooldown("vrbo");
+  if (cooldown) return providerCooldownSearchResult("vrbo");
   const vrboWalletMs = Math.max(
     opts.walletBudgetMs ?? 0,
     numberFromEnv("SIDECAR_VRBO_SEARCH_WALLET_BUDGET_MS", 6 * 60 * 1000),
@@ -1223,11 +1378,15 @@ export async function searchVrboViaSidecar(opts: {
     signal: opts.signal,
     stopGeneration: opts.stopGeneration,
   });
-  return {
+  const result = {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
+  };
+  return {
+    ...result,
+    providerHealth: recordProviderOutcome("vrbo", result),
   };
 }
 
@@ -1341,7 +1500,10 @@ export async function searchBookingViaSidecar(opts: {
   workerOnline: boolean;
   durationMs: number;
   reason: string;
+  providerHealth?: SidecarProviderHealth;
 }> {
+  const cooldown = activeProviderCooldown("booking");
+  if (cooldown) return providerCooldownSearchResult("booking");
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "booking_search",
@@ -1359,11 +1521,15 @@ export async function searchBookingViaSidecar(opts: {
     signal: opts.signal,
     stopGeneration: opts.stopGeneration,
   });
-  return {
+  const result = {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
+  };
+  return {
+    ...result,
+    providerHealth: recordProviderOutcome("booking", result),
   };
 }
 
@@ -1383,7 +1549,10 @@ export async function searchAirbnbViaSidecar(opts: {
   workerOnline: boolean;
   durationMs: number;
   reason: string;
+  providerHealth?: SidecarProviderHealth;
 }> {
+  const cooldown = activeProviderCooldown("airbnb");
+  if (cooldown) return providerCooldownSearchResult("airbnb");
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "airbnb_search",
@@ -1401,11 +1570,15 @@ export async function searchAirbnbViaSidecar(opts: {
     signal: opts.signal,
     stopGeneration: opts.stopGeneration,
   });
-  return {
+  const result = {
     candidates: (r.results ?? []) as SidecarPropertyCandidate[],
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
+  };
+  return {
+    ...result,
+    providerHealth: recordProviderOutcome("airbnb", result),
   };
 }
 

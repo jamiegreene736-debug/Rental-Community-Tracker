@@ -96,39 +96,15 @@ const SERVER_WORKER_CLAIM_DELAY_MS = Number(process.env.SIDECAR_SERVER_WORKER_CL
 const HEARTBEAT_BUSY_MS = Number(process.env.SIDECAR_HEARTBEAT_BUSY_MS ?? 30_000);
 const PAGE_NAV_TIMEOUT_MS = 35_000;
 const PAGE_SETTLE_MS = Number(process.env.SIDECAR_PAGE_SETTLE_MS ?? 3_000);
-const VRBO_MANUAL_VERIFY_TIMEOUT_MS = Number(process.env.SIDECAR_VRBO_MANUAL_VERIFY_TIMEOUT_MS ?? 8 * 60_000);
-const VRBO_MANUAL_VERIFY_POLL_MS = Number(process.env.SIDECAR_VRBO_MANUAL_VERIFY_POLL_MS ?? 3_000);
 const PM_PARTIAL_DATE_RETRY_MS = Number(process.env.SIDECAR_PM_PARTIAL_DATE_RETRY_MS ?? 1_500);
 const PM_POST_DATE_SETTLE_MS = Number(process.env.SIDECAR_PM_POST_DATE_SETTLE_MS ?? 2_500);
 const PM_SITE_SEARCH_BUDGET_MS = Number(process.env.SIDECAR_PM_SITE_SEARCH_BUDGET_MS ?? 150_000);
 const REQUEST_HARD_TIMEOUT_MS = Number(process.env.SIDECAR_REQUEST_HARD_TIMEOUT_MS ?? 10 * 60_000);
 const REQUEST_MAX_ATTEMPTS = Math.max(1, Math.floor(Number(process.env.SIDECAR_REQUEST_MAX_ATTEMPTS ?? 2) || 2));
 const REQUEST_RETRY_BASE_MS = Math.max(250, Number(process.env.SIDECAR_REQUEST_RETRY_BASE_MS ?? 1_500) || 1_500);
-const VRBO_HARD_BLOCK_FRESH_RETRIES = Math.max(
-  0,
-  Math.floor(Number(process.env.SIDECAR_VRBO_HARD_BLOCK_FRESH_RETRIES ?? 4) || 4),
-);
-const VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES = Math.max(
-  0,
-  Math.floor(Number(process.env.SIDECAR_VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES ?? VRBO_HARD_BLOCK_FRESH_RETRIES) || VRBO_HARD_BLOCK_FRESH_RETRIES),
-);
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
-const CAPTCHA_PROVIDER = String(process.env.CAPTCHA_PROVIDER ?? (process.env.CAPSOLVER_API_KEY ? "capsolver" : "none")).toLowerCase();
-const CAPTCHA_SOLVING_ENABLED = process.env.CAPTCHA_SOLVING_ENABLED === "1";
-const VRBO_CAPTCHA_AUTOMATION_ENABLED =
-  CAPTCHA_SOLVING_ENABLED &&
-  CAPTCHA_PROVIDER === "capsolver" &&
-  process.env.SIDECAR_VRBO_CAPTCHA_AUTOMATION === "1";
-const VRBO_CAPTCHA_POLL_SECONDS = Number(
-  process.env.SIDECAR_VRBO_CAPTCHA_POLL_SECONDS ?? 120,
-);
-const VRBO_CAPTCHA_MAX_ATTEMPTS = Number(
-  process.env.SIDECAR_VRBO_CAPTCHA_MAX_ATTEMPTS ?? 2,
-);
-const VRBO_COORDINATE_SOLVER_ENABLED = process.env.SIDECAR_VRBO_COORDINATE_SOLVER === "1";
-const VRBO_MANUAL_FALLBACK_ENABLED = process.env.SIDECAR_VRBO_MANUAL_FALLBACK === "1";
 
 let browser = null;
 let context = null;
@@ -471,11 +447,7 @@ function isTransientScrapeError(error) {
 }
 
 function hardTimeoutMsForOp(opType) {
-  const manualBuffer = VRBO_MANUAL_VERIFY_TIMEOUT_MS + 90_000;
   switch (opType) {
-    case "vrbo_search":
-    case "vrbo_photo_scrape":
-      return Math.max(REQUEST_HARD_TIMEOUT_MS, manualBuffer);
     case "pm_site_search":
       return Math.max(REQUEST_HARD_TIMEOUT_MS, PM_SITE_SEARCH_BUDGET_MS + 90_000);
     case "pm_url_check_batch":
@@ -2014,7 +1986,7 @@ async function captureVrboChallengeState(targetPage = page) {
 function throwIfVrboHardBlock(state, label, id) {
   if (!stateLooksLikeVrboHardBlock(state)) return;
   throw new VrboHardBlockError(
-    "VRBO hard-blocked this browser/IP session; retrying with a fresh isolated VRBO session",
+    "VRBO hard-blocked this browser/IP session; provider run stopped and retry is rate-limited until later",
     {
       label,
       id,
@@ -2025,607 +1997,40 @@ function throwIfVrboHardBlock(state, label, id) {
   );
 }
 
-function vrboManualVerificationUnavailableInHeadless() {
-  return usingHeadlessRuntime() && !activeChromeAllocation?.noVncUrl;
-}
-
 async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
   if (!targetPage || targetPage.isClosed?.()) return false;
   const state = await captureVrboChallengeState(targetPage);
   return stateLooksLikeVrboHumanChallenge(state);
 }
 
-async function findVrboChallengeBox(targetPage = page) {
-  if (!targetPage || targetPage.isClosed?.()) return null;
-  return targetPage.evaluate(() => {
-    const challengeRe =
-      /show us your human side|we can.?t tell if you.?re a human|press and hold|slide (?:the )?(?:lock|slider)|captcha|not a robot|bot or not|verify (?:that )?you(?:'re| are) human|human verification|unusual traffic/i;
-    const isVisible = (el) => {
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return (
-        style.visibility !== "hidden" &&
-        style.display !== "none" &&
-        rect.width >= 120 &&
-        rect.height >= 80 &&
-        rect.bottom > 0 &&
-        rect.right > 0 &&
-        rect.top < window.innerHeight &&
-        rect.left < window.innerWidth
-      );
-    };
-    const candidates = Array.from(document.querySelectorAll("body *"))
-      .filter((el) => el instanceof HTMLElement && isVisible(el))
-      .map((el) => {
-        const rect = el.getBoundingClientRect();
-        const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-        const attr = `${el.id || ""} ${el.className || ""} ${el.getAttribute("aria-label") || ""}`;
-        let score = 0;
-        if (challengeRe.test(text)) score += 8;
-        if (/captcha|px-|challenge|human|verify|slider/i.test(attr)) score += 4;
-        if (rect.width >= 260 && rect.height >= 160) score += 2;
-        if (rect.width <= 1000 && rect.height <= 1000) score += 1;
-        return { el, rect, text, score };
-      })
-      .filter((c) => c.score > 0)
-      .sort((a, b) => b.score - a.score || b.rect.width * b.rect.height - a.rect.width * a.rect.height);
-    const best = candidates[0];
-    if (!best) return null;
-    const x = Math.max(0, Math.floor(best.rect.left));
-    const y = Math.max(0, Math.floor(best.rect.top));
-    const maxWidth = Math.max(1, window.innerWidth - x);
-    const maxHeight = Math.max(1, window.innerHeight - y);
-    return {
-      x,
-      y,
-      width: Math.min(1000, Math.max(1, Math.ceil(best.rect.width)), maxWidth),
-      height: Math.min(1000, Math.max(1, Math.ceil(best.rect.height)), maxHeight),
-      text: best.text.slice(0, 500),
-    };
-  }).catch(() => null);
-}
-
-async function findVrboSliderHandle(targetPage = page, clip = null) {
-  if (!targetPage || targetPage.isClosed?.()) return null;
-  return targetPage.evaluate((clipArg) => {
-    const sliderRe = /press and hold|slide|slider|drag|hold/i;
-    const isVisible = (el) => {
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return (
-        style.visibility !== "hidden" &&
-        style.display !== "none" &&
-        rect.width >= 20 &&
-        rect.height >= 20 &&
-        rect.bottom > 0 &&
-        rect.right > 0 &&
-        rect.top < window.innerHeight &&
-        rect.left < window.innerWidth
-      );
-    };
-    const withinClip = (rect) => {
-      if (!clipArg) return true;
-      return (
-        rect.left >= clipArg.x - 10 &&
-        rect.right <= clipArg.x + clipArg.width + 10 &&
-        rect.top >= clipArg.y - 10 &&
-        rect.bottom <= clipArg.y + clipArg.height + 10
-      );
-    };
-    const selector = [
-      '[role="slider"]',
-      'input[type="range"]',
-      'button',
-      '[class*="slider" i]',
-      '[class*="slide" i]',
-      '[class*="captcha" i]',
-      '[class*="handle" i]',
-      '[aria-label*="slide" i]',
-      '[aria-label*="hold" i]',
-      '[aria-label*="captcha" i]',
-    ].join(",");
-    const candidates = Array.from(document.querySelectorAll(selector))
-      .filter((el) => el instanceof HTMLElement && isVisible(el))
-      .map((el) => {
-        const rect = el.getBoundingClientRect();
-        const text = `${el.innerText || el.textContent || ""} ${el.getAttribute("aria-label") || ""} ${el.className || ""}`.replace(/\s+/g, " ");
-        let score = 0;
-        if (sliderRe.test(text)) score += 8;
-        if (el.getAttribute("role") === "slider") score += 8;
-        if (el instanceof HTMLInputElement && el.type === "range") score += 8;
-        if (rect.width <= 160 && rect.height <= 120) score += 2;
-        if (clipArg && withinClip(rect)) score += 3;
-        return { rect, text, score };
-      })
-      .filter((c) => c.score > 0)
-      .sort((a, b) => b.score - a.score);
-    const best = candidates[0];
-    if (!best) return null;
-    return {
-      x: best.rect.left,
-      y: best.rect.top,
-      width: best.rect.width,
-      height: best.rect.height,
-      text: best.text.slice(0, 300),
-    };
-  }, clip).catch(() => null);
-}
-
-async function solveCoordinatesCaptchaViaServer(imageBase64, comment, id) {
-  const r = await fetchJson(`${SERVER}/api/admin/solve-coordinates-captcha`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({
-      imageBase64,
-      comment,
-      pollSeconds: VRBO_CAPTCHA_POLL_SECONDS,
-    }),
-  });
-  if (!r?.ok) {
-    throw new Error(r?.error ?? "CAPTCHA coordinate solver failed");
-  }
-  const point = Array.isArray(r.coordinates) ? r.coordinates[0] : null;
-  if (!point || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) {
-    throw new Error("CAPTCHA solver did not return a usable coordinate");
-  }
-  log(`vrbo captcha ${id}: CAPTCHA coordinate id=${r.captchaId} x=${point.x} y=${point.y}${r.cost ? ` cost=${r.cost}` : ""}`);
-  return { x: Number(point.x), y: Number(point.y), captchaId: r.captchaId };
-}
-
-function currentDataDomeProxyConfig() {
-  const proxyConfig = activeChromeAllocation?.proxyConfig ?? activeHeadlessProxyBridge?.proxyConfig ?? null;
-  if (!proxyConfig) return null;
-  const proxyTypeRaw = String(proxyConfig.scheme || "http").toLowerCase().replace(/:$/, "");
-  const proxyType = proxyTypeRaw === "socks4" || proxyTypeRaw === "socks5" ? proxyTypeRaw : "http";
-  return {
-    proxyType,
-    proxyAddress: proxyConfig.host,
-    proxyPort: Number(proxyConfig.port),
-    proxyLogin: proxyConfig.username,
-    proxyPassword: proxyConfig.password,
-  };
-}
-
-async function extractDataDomeChallengeParams(targetPage) {
-  const pageUrl = targetPage.url();
-  const userAgent = await targetPage.evaluate(() => navigator.userAgent).catch(() => "");
-  const frameUrls = targetPage.frames().map((frame) => frame.url()).filter(Boolean);
-  const iframeSrcs = await targetPage
-    .evaluate(() => {
-      const attrs = Array.from(document.querySelectorAll("iframe[src], script[src], link[href], a[href], form[action]"))
-        .flatMap((el) => [
-          el.getAttribute("src"),
-          el.getAttribute("href"),
-          el.getAttribute("action"),
-        ])
-        .filter(Boolean);
-      const html = document.documentElement?.innerHTML || "";
-      const embedded = Array.from(html.matchAll(/https?:\\?\/\\?\/[^"'<>\\\s]+(?:captcha-delivery\.com|datadome)[^"'<>\\\s]*/gi))
-        .map((match) => match[0].replace(/\\\//g, "/").replace(/&amp;/g, "&"));
-      return [...attrs, ...embedded];
-    })
-    .catch(() => []);
-  const candidates = [...iframeSrcs, ...frameUrls]
-    .map((src) => {
-      try {
-        return new URL(src, pageUrl).toString();
-      } catch {
-        return "";
-      }
-    })
-    .filter((src) => /captcha-delivery\.com\/captcha\//i.test(src) || /datadome/i.test(src));
-  const captchaUrl = candidates.find((src) => /[?&]t=fe(?:&|$)/i.test(src)) ?? candidates[0] ?? "";
-  if (!captchaUrl) return null;
-  return { websiteURL: pageUrl, captchaUrl, userAgent };
-}
-
-async function waitForDataDomeChallengeParams(targetPage, timeoutMs = 8_000) {
-  const startedAt = Date.now();
-  let lastParams = null;
-  while (Date.now() - startedAt < timeoutMs) {
-    lastParams = await extractDataDomeChallengeParams(targetPage);
-    if (lastParams?.captchaUrl) return lastParams;
-    await targetPage.waitForTimeout(500).catch(() => {});
-  }
-  return lastParams;
-}
-
-function dataDomeCookieValue(cookieHeader) {
-  const match = String(cookieHeader ?? "").match(/(?:^|;\s*)datadome=([^;]+)/i);
-  return match?.[1] ? decodeURIComponent(match[1]) : "";
-}
-
-async function solveDataDomeCaptchaViaServer(targetPage, label, id) {
-  const params = await waitForDataDomeChallengeParams(targetPage);
-  if (!params) {
-    log(`${label} ${id}: no DataDome iframe URL found; falling back to coordinate solver`);
-    return false;
-  }
-  const captchaUrl = new URL(params.captchaUrl);
-  const t = captchaUrl.searchParams.get("t");
-  if (t === "bv") {
-    throw new VrboHardBlockError("VRBO DataDome returned t=bv for this browser/IP; rotating proxy/profile before retrying", {
-      label,
-      id,
-      url: params.websiteURL,
-      title: await targetPage.title().catch(() => ""),
-      excerpt: "DataDome iframe URL contained t=bv",
-    });
-  }
-  if (t !== "fe") {
-    log(`${label} ${id}: DataDome iframe t=${t || "missing"}; falling back to coordinate solver`);
-    return false;
-  }
-  const proxy = currentDataDomeProxyConfig();
-  if (!proxy?.proxyAddress || !Number.isFinite(proxy.proxyPort) || !proxy.proxyPort) {
-    log(`${label} ${id}: DataDome solver requires the active residential proxy details; falling back to coordinate solver`);
-    return false;
-  }
-  await sendHeartbeat("CAPTCHA DataDome slider solve", true, id);
-  await postScreenSnapshot({ id, opType: label }, targetPage, "CAPTCHA DataDome slider solve", { captcha: true, force: true });
-  const r = await fetchJson(`${SERVER}/api/admin/solve-datadome-captcha`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({
-      ...params,
-      ...proxy,
-      pollSeconds: VRBO_CAPTCHA_POLL_SECONDS,
-    }),
-  });
-  if (!r?.ok) {
-    if (r?.retryableWithFreshProxy) {
-      throw new VrboHardBlockError(`DataDome solve needs fresh proxy/profile: ${r.error ?? "unsolved"}`, {
-        label,
-        id,
-        url: params.websiteURL,
-        title: await targetPage.title().catch(() => ""),
-        excerpt: String(r.error ?? "").slice(0, 500),
-      });
-    }
-    log(`${label} ${id}: DataDome solve failed: ${r?.error ?? "unknown error"}; falling back to coordinate solver`);
-    return false;
-  }
-  const cookieValue = dataDomeCookieValue(r.cookie);
-  if (!cookieValue) {
-    log(`${label} ${id}: DataDome solve returned no datadome value; falling back to coordinate solver`);
-    return false;
-  }
-  const host = (() => {
-    try { return new URL(params.websiteURL).hostname; } catch { return "www.vrbo.com"; }
-  })();
-  const domain = host.endsWith("vrbo.com") ? ".vrbo.com" : host;
-  await targetPage.context().addCookies([{
-    name: "datadome",
-    value: cookieValue,
-    domain,
-    path: "/",
-    secure: true,
-    sameSite: "Lax",
-  }]);
-  log(`${label} ${id}: injected DataDome cookie from CAPTCHA provider id=${r.captchaId}${r.cost ? ` cost=${r.cost}` : ""}${r.ip ? ` solverIp=${r.ip}` : ""}`);
-  const cookieLanded = await targetPage.context()
-    .cookies("https://www.vrbo.com/")
-    .then((cookies) => cookies.some((cookie) => cookie.name === "datadome" && cookie.value === cookieValue))
-    .catch(() => false);
-  if (!cookieLanded) {
-    log(`${label} ${id}: DataDome cookie injection did not appear in the VRBO cookie jar; rotating proxy/profile`);
-    throw new VrboHardBlockError("DataDome cookie did not land in Chrome; rotating proxy/profile", {
-      label,
-      id,
-      url: params.websiteURL,
-      title: await targetPage.title().catch(() => ""),
-      excerpt: "datadome cookie missing after context.addCookies",
-    });
-  }
-  const currentUrl = targetPage.url() || params.websiteURL;
-  const navError = await targetPage
-    .goto(currentUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS })
-    .then(() => null)
-    .catch((e) => e);
-  if (navError && isProviderTunnelProxyError(navError)) {
-    throw new VrboHardBlockError("VRBO proxy tunnel failed while validating DataDome cookie; rotating proxy/profile", {
-      label,
-      id,
-      url: currentUrl,
-      title: await targetPage.title().catch(() => ""),
-      excerpt: String(navError?.message ?? navError).slice(0, 500),
-      proxyTunnel: true,
-    });
-  }
-  if (navError) {
-    log(`${label} ${id}: DataDome validation navigation warning: ${navError?.message ?? navError}`);
-  }
-  await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
-  return !(await pageLooksLikeVrboHumanChallenge(targetPage));
-}
-
-async function dragVrboSliderToPoint(targetPage, handle, absoluteTarget) {
-  const startX = handle.x + handle.width / 2;
-  const startY = handle.y + handle.height / 2;
-  const targetX = Math.max(startX + 35, Math.min(absoluteTarget.x, startX + 850));
-  const targetY = startY + Math.max(-8, Math.min(8, absoluteTarget.y - startY));
-  await targetPage.mouse.move(startX, startY);
-  await targetPage.waitForTimeout(120).catch(() => {});
-  await targetPage.mouse.down();
-  const steps = 28;
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const eased = 1 - Math.pow(1 - t, 2.2);
-    const jitter = i % 4 === 0 ? 1.5 : i % 5 === 0 ? -1 : 0;
-    await targetPage.mouse.move(
-      startX + (targetX - startX) * eased,
-      startY + (targetY - startY) * t + jitter,
-      { steps: 1 },
-    );
-    await targetPage.waitForTimeout(18 + Math.round(Math.random() * 20)).catch(() => {});
-  }
-  await targetPage.waitForTimeout(250).catch(() => {});
-  await targetPage.mouse.up();
-  return { startX, startY, targetX, targetY };
-}
-
-async function tryPressAndHoldChallenge(targetPage, handle, label, id, challengeText = "") {
-  if (!handle || !/press and hold|hold/i.test(`${handle.text ?? ""}\n${challengeText ?? ""}`)) return false;
-  log(`${label} ${id}: attempting press-and-hold CAPTCHA clear`);
-  const x = handle.x + handle.width / 2;
-  const y = handle.y + handle.height / 2;
-  await targetPage.mouse.move(x, y);
-  await targetPage.mouse.down();
-  const started = Date.now();
-  while (Date.now() - started < 9000) {
-    await targetPage.waitForTimeout(1000).catch(() => {});
-    if (!(await pageLooksLikeVrboHumanChallenge(targetPage))) {
-      await targetPage.mouse.up().catch(() => {});
-      return true;
-    }
-  }
-  await targetPage.mouse.up().catch(() => {});
-  await targetPage.waitForTimeout(2500).catch(() => {});
-  return !(await pageLooksLikeVrboHumanChallenge(targetPage));
-}
-
-async function tryFullTrackSliderDrag(targetPage, handle, clip, label, id, reason) {
-  if (!handle || !clip) return false;
-  const startX = handle.x + handle.width / 2;
-  const targetX = Math.max(startX + 180, clip.x + clip.width - Math.max(28, handle.width / 2));
-  const targetY = handle.y + handle.height / 2;
-  log(`${label} ${id}: trying full VRBO slider sweep to x=${Math.round(targetX)} after ${reason}`);
-  await dragVrboSliderToPoint(targetPage, handle, { x: targetX, y: targetY });
-  await targetPage.waitForTimeout(5000).catch(() => {});
-  return !(await pageLooksLikeVrboHumanChallenge(targetPage));
-}
-
-async function trySolveVrboCaptchaAutomatically(targetPage, label, id) {
-  if (!VRBO_CAPTCHA_AUTOMATION_ENABLED) {
-    log(`${label} ${id}: automatic CAPTCHA solving disabled (CAPTCHA_PROVIDER=${CAPTCHA_PROVIDER || "none"}, CAPTCHA_SOLVING_ENABLED=${CAPTCHA_SOLVING_ENABLED ? "1" : "0"}); rotating/failing according to provider policy`);
-    return false;
-  }
-  if (await solveDataDomeCaptchaViaServer(targetPage, label, id)) {
-    log(`${label} ${id}: VRBO DataDome CAPTCHA cleared by CAPTCHA provider cookie solver`);
-    return true;
-  }
-  if (!VRBO_COORDINATE_SOLVER_ENABLED) {
-    log(`${label} ${id}: DataDome cookie solver did not clear CAPTCHA; rotating fresh browser/proxy instead of coordinate/manual fallback`);
-    return false;
-  }
-  for (let attempt = 1; attempt <= Math.max(1, VRBO_CAPTCHA_MAX_ATTEMPTS); attempt++) {
-    try {
-      const clip = await findVrboChallengeBox(targetPage);
-      if (!clip) {
-        log(`${label} ${id}: no VRBO CAPTCHA box found for CAPTCHA automation attempt`);
-        return false;
-      }
-      const handle = await findVrboSliderHandle(targetPage, clip);
-      if (await tryPressAndHoldChallenge(targetPage, handle, label, id, clip.text)) {
-        log(`${label} ${id}: press-and-hold challenge cleared`);
-        return true;
-      }
-      if (!handle) {
-        log(`${label} ${id}: no slider handle found for CAPTCHA automation attempt`);
-        return false;
-      }
-
-      await sendHeartbeat(`CAPTCHA VRBO slider attempt ${attempt}`, true, id);
-      await postScreenSnapshot({ id, opType: label }, targetPage, `CAPTCHA slider attempt ${attempt}`, { captcha: true, force: true });
-      const imageBuffer = await targetPage.screenshot({
-        type: "jpeg",
-        quality: 70,
-        clip: {
-          x: clip.x,
-          y: clip.y,
-          width: Math.max(1, clip.width),
-          height: Math.max(1, clip.height),
-        },
-      });
-      const imageBase64 = imageBuffer.toString("base64");
-      const point = await solveCoordinatesCaptchaViaServer(
-        imageBase64,
-        "This is a VRBO slider CAPTCHA. Click the center of the puzzle gap/target where the slider should be dragged. Return one coordinate only.",
-        id,
-      );
-      const absoluteTarget = { x: clip.x + point.x, y: clip.y + point.y };
-      const handleCenterX = handle.x + handle.width / 2;
-      log(
-        `${label} ${id}: dragging VRBO slider from x=${Math.round(handle.x + handle.width / 2)} to x=${Math.round(absoluteTarget.x)} (attempt ${attempt})`,
-      );
-      await dragVrboSliderToPoint(targetPage, handle, absoluteTarget);
-      await targetPage.waitForTimeout(5000).catch(() => {});
-      if (!(await pageLooksLikeVrboHumanChallenge(targetPage))) {
-        log(`${label} ${id}: VRBO CAPTCHA cleared by CAPTCHA automation`);
-        return true;
-      }
-      const weakCoordinate = absoluteTarget.x <= handleCenterX + 70;
-      if (await tryFullTrackSliderDrag(targetPage, handle, clip, label, id, weakCoordinate ? "weak CAPTCHA coordinate" : "CAPTCHA coordinate miss")) {
-        log(`${label} ${id}: VRBO CAPTCHA cleared by full slider sweep fallback`);
-        return true;
-      }
-      log(`${label} ${id}: CAPTCHA slider attempt ${attempt} did not clear challenge`);
-    } catch (e) {
-      log(`${label} ${id}: CAPTCHA slider attempt ${attempt} failed: ${e?.message ?? e}`);
-    }
-  }
-  return false;
-}
-
-async function showVrboManualVerificationBanner(targetPage, label) {
-  if (!targetPage || targetPage.isClosed?.()) return;
-  await targetPage
-    .evaluate((safeLabel) => {
-      const styleId = "vrbo-sidecar-manual-verification-style";
-      if (!document.getElementById(styleId)) {
-        const style = document.createElement("style");
-        style.id = styleId;
-        style.textContent = `
-          @keyframes vrboSidecarCaptchaPulse {
-            0%, 100% { opacity: 1; box-shadow: inset 0 0 0 12px #facc15, 0 0 42px rgba(250,204,21,.95); }
-            50% { opacity: .34; box-shadow: inset 0 0 0 12px #fde047, 0 0 16px rgba(250,204,21,.55); }
-          }
-          @keyframes vrboSidecarBannerPulse {
-            0%, 100% { background: #facc15; color: #111827; }
-            50% { background: #fff7ed; color: #7c2d12; }
-          }
-        `;
-        document.documentElement.appendChild(style);
-      }
-
-      const frameId = "vrbo-sidecar-manual-verification-frame";
-      let frame = document.getElementById(frameId);
-      if (!frame) {
-        frame = document.createElement("div");
-        frame.id = frameId;
-        frame.style.cssText = [
-          "position:fixed",
-          "inset:0",
-          "z-index:2147483646",
-          "pointer-events:none",
-          "border-radius:10px",
-          "animation:vrboSidecarCaptchaPulse .82s ease-in-out infinite",
-        ].join(";");
-        document.documentElement.appendChild(frame);
-      }
-
-      const id = "vrbo-sidecar-manual-verification-banner";
-      let banner = document.getElementById(id);
-      if (!banner) {
-        banner = document.createElement("div");
-        banner.id = id;
-        banner.style.cssText = [
-          "position:fixed",
-          "top:0",
-          "left:0",
-          "right:0",
-          "z-index:2147483647",
-          "pointer-events:none",
-          "background:#facc15",
-          "color:#111827",
-          "border-bottom:2px solid #92400e",
-          "box-shadow:0 10px 34px rgba(15,23,42,.28)",
-          "font:900 16px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
-          "letter-spacing:.02em",
-          "padding:13px 18px",
-          "text-align:center",
-          "text-transform:uppercase",
-          "animation:vrboSidecarBannerPulse .82s ease-in-out infinite",
-        ].join(";");
-        document.documentElement.appendChild(banner);
-      }
-      banner.textContent =
-        `VRBO CAPTCHA NEEDS MANUAL SOLVE - ${safeLabel} - Complete the check in this Chrome window`;
-      document.title = "VRBO CAPTCHA ACTION NEEDED";
-    }, label)
-    .catch(() => {});
-}
-
-async function waitForVrboManualVerification(targetPage, label, id, initialState = null) {
+async function stopVrboProviderIfBlocked(targetPage, label, id, initialState = null) {
   const state = initialState ?? await captureVrboChallengeState(targetPage);
   throwIfVrboHardBlock(state, label, id);
   const hasChallenge = stateLooksLikeVrboHumanChallenge(state);
   if (!hasChallenge) return false;
 
   await normalizePageDisplay(targetPage).catch(() => {});
-  if (vrboManualVerificationUnavailableInHeadless()) {
-    const retryMessage =
-      "VRBO CAPTCHA appeared in Railway headless mode; no live Chrome/noVNC session is available, so this VRBO provider search will fail fast instead of blocking the buy-in scan.";
-    log(`${label} ${id}: ${retryMessage}`);
-    await postScreenSnapshot(
-      { id, opType: label },
-      targetPage,
-      "VRBO failed - CAPTCHA requires live browser",
-      { captcha: true, error: retryMessage, force: true },
-    );
-    throw new VrboHardBlockError(
-      retryMessage,
-      {
-        label,
-        id,
-        url: state?.url,
-        title: state?.title,
-        excerpt: retryMessage,
-        noLiveBrowser: true,
-      },
-    );
-  }
-
-  log(`${label} ${id}: VRBO verification challenge detected; checking configured CAPTCHA automation before rotating/failing`);
-  if (await trySolveVrboCaptchaAutomatically(targetPage, label, id)) {
-    await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
-    await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
-    await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
-    return true;
-  }
-
-  if (!VRBO_MANUAL_FALLBACK_ENABLED) {
-    throw new VrboHardBlockError(
-      "VRBO CAPTCHA was not cleared by DataDome cookie solve; rotating to a fresh Chrome profile and proxy session instead of waiting on the blocked browser",
-      {
-        label,
-        id,
-        url: state?.url,
-        title: state?.title,
-        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
-      },
-    );
-  }
-
-  log(`${label} ${id}: CAPTCHA automation unavailable or failed; surfacing Chrome for manual verification`);
-  await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
-  await showVrboManualVerificationBanner(targetPage, label);
-  await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA - drag slider in dashboard", { captcha: true, force: true });
-  try {
-    const deadline = Date.now() + VRBO_MANUAL_VERIFY_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      await targetPage.waitForTimeout(VRBO_MANUAL_VERIFY_POLL_MS).catch(() => {});
-      await applyScreenControlCommands({ id, opType: label }, targetPage, label);
-      await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA - drag slider in dashboard", { captcha: true, force: true });
-      try {
-        await sendHeartbeat(`manual VRBO verification: ${label}`, true, id);
-      } catch (e) {
-        if (e instanceof SidecarCancelledError) throw e;
-      }
-
-      const stillBlocked = await pageLooksLikeVrboHumanChallenge(targetPage);
-      if (!stillBlocked) {
-        log(`${label} ${id}: VRBO manual verification cleared; resuming`);
-        await targetPage.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
-        await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
-        return true;
-      }
-      await showVrboManualVerificationBanner(targetPage, label);
-    }
-
-    throw new VrboHardBlockError(
-      "VRBO CAPTCHA was not cleared before the manual verification timeout; rotating to a fresh Chrome profile and proxy session",
-      {
-        label,
-        id,
-        url: state?.url,
-        title: state?.title,
-        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
-      },
-    );
-  } finally {
-    await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
-  }
+  const stopMessage =
+    "VRBO CAPTCHA/human-verification page detected. The compliant provider runner stops this VRBO search cleanly, records provider cooldown/health, preserves the original source URL for manual verification, and lets other providers continue without attempting to bypass the challenge.";
+  log(`${label} ${id}: ${stopMessage}`);
+  await postScreenSnapshot(
+    { id, opType: label },
+    targetPage,
+    "VRBO blocked - provider stopped",
+    { captcha: true, error: stopMessage, force: true },
+  );
+  await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
+  throw new VrboHardBlockError(
+    stopMessage,
+    {
+      label,
+      id,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      retryLater: true,
+    },
+  );
 }
 
 async function applyScreenControlCommands(req, targetPage = page, label = "sidecar") {
@@ -2685,7 +2090,7 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     throwIfVrboHardBlock(state, label, requestId);
     if (stateLooksLikeVrboHumanChallenge(state) || (await pageLooksLikeVrboHumanChallenge(page))) {
       log(`${label} ${requestId}: VRBO challenge detected during homepage prime (${stage})`);
-      return waitForVrboManualVerification(page, label, requestId, state);
+      return stopVrboProviderIfBlocked(page, label, requestId, state);
     }
     return false;
   };
@@ -3689,22 +3094,23 @@ async function processVrboSearch(id, params) {
     `&adults=2&sort=PRICE_LOW_TO_HIGH&currency=USD`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
-  await waitForVrboManualVerification(page, "vrbo_search", id);
+  await stopVrboProviderIfBlocked(page, "vrbo_search", id);
   await dismissObstructions(page, "vrbo_search");
   await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
   await applyVrboBedroomFilter(bedrooms).catch(() => false);
   let state = await dumpPageState("vrbo", { id, ...params });
   throwIfBrightDataKycBlock(state, "vrbo_search", id);
   throwIfVrboHardBlock(state, "vrbo_search", id);
-  if (await waitForVrboManualVerification(page, "vrbo_search", id, state)) {
-    await dismissObstructions(page, "vrbo_search_after_manual_verify").catch(() => null);
-    await applyVrboBedroomFilter(bedrooms).catch(() => false);
-    state = await dumpPageState("vrbo", { id, ...params });
-    throwIfBrightDataKycBlock(state, "vrbo_search", id);
-    throwIfVrboHardBlock(state, "vrbo_search", id);
-  }
+  await stopVrboProviderIfBlocked(page, "vrbo_search", id, state);
   if (stateLooksLikeVrboHumanChallenge(state)) {
-    throw new Error("Vrbo manual verification still required; solve it in the sidecar Chrome window and rerun the request");
+    throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
+      label: "vrbo_search",
+      id,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      retryLater: true,
+    });
   }
   // Still extract all visible cards and bucket by BR client-side:
   // VRBO's browser-side filter is useful for relevance and operator
@@ -3861,17 +3267,20 @@ async function processVrboPhotoScrape(id, params) {
   await ensureBrowser();
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
-  await waitForVrboManualVerification(page, "vrbo_photo_scrape", id);
+  await stopVrboProviderIfBlocked(page, "vrbo_photo_scrape", id);
   await dismissObstructions(page, "vrbo_photo_scrape");
   let state = await dumpPageState("vrbo-photo", { id, ...params });
   throwIfVrboHardBlock(state, "vrbo_photo_scrape", id);
-  if (await waitForVrboManualVerification(page, "vrbo_photo_scrape", id, state)) {
-    await dismissObstructions(page, "vrbo_photo_scrape_after_manual_verify").catch(() => null);
-    state = await dumpPageState("vrbo-photo", { id, ...params });
-    throwIfVrboHardBlock(state, "vrbo_photo_scrape", id);
-  }
+  await stopVrboProviderIfBlocked(page, "vrbo_photo_scrape", id, state);
   if (stateLooksLikeVrboHumanChallenge(state)) {
-    throw new Error("Vrbo manual verification still required; solve it in the sidecar Chrome window and rerun the request");
+    throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
+      label: "vrbo_photo_scrape",
+      id,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      retryLater: true,
+    });
   }
 
   await page
@@ -6352,18 +5761,14 @@ async function tick() {
   const stopBusyHeartbeat = startBusyHeartbeat(req.opType ?? "request", req.id);
   try {
     let lastError = null;
-    let vrboHardBlockRetries = 0;
     const isVrboOp = isVrboBrowserOp(req.opType ?? "vrbo_search");
-    const maxAttempts = Math.max(1, REQUEST_MAX_ATTEMPTS + (isVrboOp ? VRBO_HARD_BLOCK_FRESH_RETRIES : 0));
+    const maxAttempts = Math.max(1, REQUEST_MAX_ATTEMPTS);
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         throwIfRequestCancelled(req.id);
         if (attempt > 1) {
           const backoff = REQUEST_RETRY_BASE_MS * Math.pow(2, attempt - 2);
-          log(
-            `retrying ${req.id} (${req.opType}) attempt ${attempt}/${maxAttempts} after ${backoff}ms` +
-            (req.vrboFreshAttempt ? ` (fresh VRBO session #${req.vrboFreshAttempt})` : ""),
-          );
+          log(`retrying ${req.id} (${req.opType}) attempt ${attempt}/${maxAttempts} after ${backoff}ms`);
           await sleep(backoff);
           throwIfRequestCancelled(req.id);
         }
@@ -6380,64 +5785,32 @@ async function tick() {
           break;
         }
         lastError = e;
-        const vrboFreshRetryLimit = e instanceof VrboHardBlockError && e.details?.noLiveBrowser === true
-          ? VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES
-          : VRBO_HARD_BLOCK_FRESH_RETRIES;
-        const providerTunnelProxyRetry =
+        const providerTunnelProxyFailure =
           isVrboOp &&
-          isProviderTunnelProxyError(e) &&
-          attempt < maxAttempts &&
-          vrboHardBlockRetries < vrboFreshRetryLimit;
-        if (providerTunnelProxyRetry) {
-          lastError = new VrboHardBlockError("VRBO provider proxy tunnel failed; retrying with a fresh Chrome profile and proxy session", {
+          isProviderTunnelProxyError(e);
+        if (providerTunnelProxyFailure) {
+          lastError = new VrboHardBlockError("VRBO provider proxy tunnel failed; provider run stopped and retry is rate-limited until later", {
             url: req.url,
             title: "VRBO proxy tunnel failure",
             excerpt: String(e?.message ?? e).slice(0, 500),
             proxyTunnel: true,
+            retryLater: true,
           });
         }
-        const hardBlockRetry =
-          (lastError instanceof VrboHardBlockError || e instanceof VrboHardBlockError) &&
-          isVrboOp &&
-          attempt < maxAttempts &&
-          vrboHardBlockRetries < vrboFreshRetryLimit;
-        const transientRetry = attempt < maxAttempts && isTransientScrapeError(e);
-        const canRetry = hardBlockRetry || transientRetry;
-        if (hardBlockRetry) {
-          vrboHardBlockRetries += 1;
-          req.vrboFreshAttempt = vrboHardBlockRetries;
-          req.freshSessionReason = providerTunnelProxyRetry ? "vrbo_proxy_tunnel" : "vrbo_hard_block";
-          await sendHeartbeat(
-            providerTunnelProxyRetry
-              ? `VRBO proxy tunnel failed; retrying fresh session ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`
-              : `VRBO hard block; retrying fresh session ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`,
-            true,
-            req.id,
-          ).catch(() => {});
-          await postScreenSnapshot(
-            { ...req, opType: req.opType ?? "vrbo_search" },
-            page,
-            providerTunnelProxyRetry
-              ? `VRBO proxy tunnel failed - fresh retry ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`
-              : `VRBO blocked - fresh retry ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`,
-            { captcha: !providerTunnelProxyRetry, error: lastError?.message ?? e?.message ?? String(e), force: true },
-          ).catch(() => {});
-        } else if (e instanceof VrboHardBlockError && isVrboOp) {
+        const transientRetry = !providerTunnelProxyFailure && attempt < maxAttempts && isTransientScrapeError(e);
+        const canRetry = transientRetry;
+        if (e instanceof VrboHardBlockError && isVrboOp) {
           lastError = new VrboHardBlockError(
-            e.details?.noLiveBrowser === true
-              ? "VRBO CAPTCHA requires a live noVNC browser session, but Railway headless fallback is the only browser currently reachable. VRBO was marked failed so the buy-in scan can finish with other providers."
-              : `VRBO hard block persisted after ${vrboHardBlockRetries} fresh session ${vrboHardBlockRetries === 1 ? "retry" : "retries"}; queued search needs manual review or a later retry`,
+            "VRBO CAPTCHA/block page detected; provider run stopped cleanly and retry is rate-limited until later. Original VRBO URL remains available in the search diagnostics/manual verification links.",
             e.details ?? {},
           );
         }
         log(
           `attempt ${attempt}/${maxAttempts} failed for ${req.id}: ${lastError?.message ?? e?.message ?? e}` +
-          (hardBlockRetry ? " (VRBO fresh session retry)" : transientRetry ? " (transient; will retry)" : ""),
+          (transientRetry ? " (transient; will retry)" : ""),
         );
         await teardownBrowser(
-          hardBlockRetry
-            ? `fresh VRBO retry ${vrboHardBlockRetries}/${vrboFreshRetryLimit} after hard block`
-            : canRetry
+          canRetry
               ? "retry after transient failure"
               : "request failure cleanup",
         ).catch(() => {});

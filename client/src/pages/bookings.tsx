@@ -286,9 +286,14 @@ type AutoFillComboOption = {
     totalPrice: number;
     nightlyPrice?: number;
     url: string;
+    originalSourceUrl?: string;
     image?: string;
     airbnbAnchorUrl?: string | null;
     airbnbAnchorPrice?: number;
+    directBookingUrl?: string;
+    directBookingHost?: string;
+    directBookingSource?: "airbnb_image_reverse_search";
+    directBookingReason?: string;
     alternateUrls?: Array<string | null | undefined>;
     photoMatches?: Array<{ url?: string | null }>;
     identityKeys?: Array<string | null | undefined>;
@@ -309,9 +314,14 @@ type AutoFillComboOption = {
       nightlyPrice: number;
       bedrooms?: number;
       url: string;
+      originalSourceUrl?: string;
       image?: string;
       airbnbAnchorUrl?: string | null;
       airbnbAnchorPrice?: number;
+      directBookingUrl?: string;
+      directBookingHost?: string;
+      directBookingSource?: "airbnb_image_reverse_search";
+      directBookingReason?: string;
       alternateUrls?: Array<string | null | undefined>;
       photoMatches?: Array<{ url?: string | null }>;
       identityKeys?: Array<string | null | undefined>;
@@ -328,6 +338,7 @@ type AutoFillAuditCandidate = {
   sourceLabel: string;
   title: string;
   url: string;
+  originalSourceUrl?: string;
   totalPrice: number;
   nightlyPrice: number;
   image?: string;
@@ -409,6 +420,17 @@ type SidecarQueueStatus = {
     siteCount?: number;
     ageSec: number;
     activeSec?: number;
+  }>;
+  providerHealth?: Array<{
+    provider: "airbnb" | "vrbo" | "booking" | string;
+    status: "healthy" | "degraded" | "blocked" | "cooldown" | "unknown" | string;
+    consecutiveFailures?: number;
+    lastSuccessAt?: string | null;
+    lastFailureAt?: string | null;
+    failureReason?: string | null;
+    cooldownUntil?: string | null;
+    retryAfterMs?: number | null;
+    updatedAt?: string | null;
   }>;
 };
 
@@ -1033,19 +1055,33 @@ function buyInProviderSearchStatus(
   const stats = buyInProviderStats(summary, diagnostics, key);
   const hardFailed = stats.status === "error" || stats.status === "timeout";
   const searched = stats.searched || stats.raw > 0;
-  const passed = !hardFailed && stats.status === "ok" && searched;
+  const passed = !hardFailed && stats.status === "ok" && searched && stats.raw > 0;
+  const warned = !passed && !hardFailed && searched;
   const message = compactDiagnosticMessage(stats.diagnostic?.message);
+  const failureReason = compactDiagnosticMessage(stats.diagnostic?.failureReason ?? undefined);
+  const providerHealth = stats.diagnostic?.providerHealth || stats.diagnostic?.proxyHealth || null;
+  const confidence = stats.diagnostic?.confidence || null;
+  const retryAfterMs = stats.diagnostic?.retryAfterMs;
+  const cooldownUntil = stats.diagnostic?.cooldownUntil;
+  const searchTerm = stats.diagnostic?.searchTerm;
+  const accessPattern = stats.diagnostic?.accessPattern;
+  const dateLabel = stats.diagnostic?.datesSearched?.checkIn && stats.diagnostic?.datesSearched?.checkOut
+    ? `${stats.diagnostic.datesSearched.checkIn} -> ${stats.diagnostic.datesSearched.checkOut}`
+    : null;
+  const bedroomLabel = typeof stats.diagnostic?.bedroomFilter?.bedrooms === "number"
+    ? `${stats.diagnostic.bedroomFilter.bedrooms}BR filter${stats.diagnostic.bedroomFilter.applied ? " applied" : ""}`
+    : null;
   let reason: string;
   if (passed) {
-    reason = stats.raw === 0
-      ? "Search completed; no rows returned"
-      : stats.priced > 0
+    reason = stats.priced > 0
       ? `${pluralizeRows(stats.priced, "priced row")} returned`
       : `${pluralizeRows(stats.raw, "row")} returned`;
   } else if (hardFailed) {
-    reason = stats.status === "timeout" ? "Timed out" : "Search failed";
+    reason = failureReason || (stats.status === "timeout" ? "Timed out" : "Search failed");
   } else if (!searched) {
     reason = "Search did not complete";
+  } else if (stats.raw === 0) {
+    reason = "Search completed; no rows returned";
   } else if (stats.kept === 0) {
     reason = "Rows failed community/bedroom/date filters";
   } else if (stats.priced === 0) {
@@ -1053,7 +1089,24 @@ function buyInProviderSearchStatus(
   } else {
     reason = `${stats.status} status`;
   }
-  return { config, stats, passed, reason, message };
+  return {
+    config,
+    stats,
+    passed,
+    warned,
+    hardFailed,
+    reason,
+    message,
+    failureReason,
+    providerHealth,
+    confidence,
+    retryAfterMs,
+    cooldownUntil,
+    searchTerm,
+    accessPattern,
+    dateLabel,
+    bedroomLabel,
+  };
 }
 
 function ProviderSearchStatusStrip({ audit }: { audit: AutoFillSearchAudit }) {
@@ -1073,22 +1126,35 @@ function ProviderSearchStatusStrip({ audit }: { audit: AutoFillSearchAudit }) {
       <div className="grid gap-1.5 md:grid-cols-3">
         {BUY_IN_OTA_PROVIDER_KEYS.map((key) => {
           const status = buyInProviderSearchStatus(audit.counts, audit.diagnostics, key);
-          const iconClass = status.passed ? "text-emerald-700" : "text-red-700";
+          const iconClass = status.passed
+            ? "text-emerald-700"
+            : status.warned
+              ? "text-amber-700"
+              : "text-red-700";
           const boxClass = status.passed
             ? "border-emerald-200 bg-emerald-50 text-emerald-950"
+            : status.warned
+            ? "border-amber-200 bg-amber-50 text-amber-950"
             : "border-red-200 bg-red-50 text-red-950";
+          const retryLabel = typeof status.retryAfterMs === "number" && status.retryAfterMs > 0
+            ? `retry in ${Math.ceil(status.retryAfterMs / 60000)}m`
+            : status.cooldownUntil
+              ? `retry after ${status.cooldownUntil}`
+              : null;
           return (
             <div key={`${audit.bedrooms}-${key}-provider-status`} className={`rounded border px-2 py-1.5 ${boxClass}`}>
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-1.5">
                   {status.passed ? (
                     <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${iconClass}`} />
+                  ) : status.warned ? (
+                    <AlertCircle className={`h-3.5 w-3.5 shrink-0 ${iconClass}`} />
                   ) : (
                     <XCircle className={`h-3.5 w-3.5 shrink-0 ${iconClass}`} />
                   )}
                   <span className="truncate text-[11px] font-semibold">{status.config.label}</span>
                 </div>
-                <span className="shrink-0 text-[9px] uppercase tracking-wide">{status.passed ? "pass" : "fail"}</span>
+                <span className="shrink-0 text-[9px] uppercase tracking-wide">{status.passed ? "pass" : status.warned ? "warn" : "fail"}</span>
               </div>
               <p className="mt-0.5 text-[10px]">{status.reason}</p>
               <p className="mt-0.5 text-[10px] opacity-80">
@@ -1096,7 +1162,25 @@ function ProviderSearchStatusStrip({ audit }: { audit: AutoFillSearchAudit }) {
                 {typeof status.stats.diagnostic?.durationMs === "number"
                   ? ` · ${Math.round(status.stats.diagnostic.durationMs / 1000)}s`
                   : ""}
+                {status.confidence ? ` · confidence ${status.confidence}` : ""}
               </p>
+              {(status.providerHealth || retryLabel) && (
+                <p className="mt-0.5 text-[10px] opacity-80">
+                  {status.providerHealth ? `provider ${status.providerHealth}` : ""}
+                  {status.providerHealth && retryLabel ? " · " : ""}
+                  {retryLabel ?? ""}
+                </p>
+              )}
+              {(status.dateLabel || status.bedroomLabel || status.searchTerm) && (
+                <p className="mt-0.5 line-clamp-2 text-[10px] opacity-75">
+                  {[status.dateLabel, status.bedroomLabel, status.searchTerm ? `query ${status.searchTerm}` : null]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+              )}
+              {status.accessPattern && (
+                <p className="mt-0.5 line-clamp-2 text-[10px] opacity-75">{status.accessPattern}</p>
+              )}
               {status.message && (
                 <p className="mt-0.5 line-clamp-2 text-[10px] opacity-75">{status.message}</p>
               )}
@@ -1911,23 +1995,38 @@ function ComboComparisonPanel({
                 </div>
                 <div className="mt-1 grid gap-1">
                   {displayedPicks.map((pick, index) => (
-                    <a
+                    <div
                       key={`${option.label}-pick-${index}-${pick.url}`}
-                      href={pick.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
                       onClick={(event) => event.stopPropagation()}
                       className="grid grid-cols-[auto_1fr_auto] items-center gap-2 rounded border px-2 py-1 text-[11px] hover:bg-emerald-50"
                     >
                       <Badge className={`text-[9px] ${sourceBadgeClass(pick.source ?? "pm")}`}>{pick.bedrooms}BR</Badge>
-                      <span className="min-w-0 truncate">
-                        {pick.sourceLabel} · {pick.title}
+                      <span className="min-w-0">
+                        <span className="block truncate">{pick.sourceLabel} · {pick.title}</span>
+                        <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                          {pick.directBookingSource === "airbnb_image_reverse_search" && (
+                            <span className="text-emerald-700">Airbnb Google Lens match</span>
+                          )}
+                          {pick.originalSourceUrl && pick.originalSourceUrl !== pick.url && (
+                            <button
+                              type="button"
+                              className="underline-offset-2 hover:text-foreground hover:underline"
+                              onClick={() => window.open(pick.originalSourceUrl, "_blank", "noopener,noreferrer")}
+                            >
+                              Original URL
+                            </button>
+                          )}
+                        </span>
                       </span>
-                      <span className="inline-flex items-center gap-1 font-semibold tabular-nums">
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-end gap-1 font-semibold tabular-nums underline-offset-2 hover:underline"
+                        onClick={() => window.open(pick.url, "_blank", "noopener,noreferrer")}
+                      >
                         {fmtMoney(pick.totalPrice)}
                         <ExternalLink className="h-2.5 w-2.5" />
-                      </span>
-                    </a>
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -3594,6 +3693,7 @@ export default function Bookings() {
         sourceLabel: candidate.sourceLabel,
         title: candidate.title,
         url: candidate.url,
+        originalSourceUrl: candidate.originalSourceUrl,
         totalPrice: candidate.totalPrice,
         nightlyPrice: candidate.nightlyPrice,
         image: candidate.image,
@@ -3615,6 +3715,7 @@ export default function Bookings() {
             sourceLabel: listing.channelLabel,
             title: unit.unitTitle,
             url: listing.url,
+            originalSourceUrl: listing.originalSourceUrl,
             totalPrice: listing.totalPrice,
             nightlyPrice: listing.nightlyPrice,
             image: unit.image,
@@ -4069,9 +4170,14 @@ export default function Bookings() {
           totalPrice: pick.totalPrice,
           nightlyPrice: pick.nightlyPrice,
           url: pick.url,
+          originalSourceUrl: pick.originalSourceUrl,
           image: pick.image,
           airbnbAnchorUrl: pick.airbnbAnchorUrl,
           airbnbAnchorPrice: pick.airbnbAnchorPrice,
+          directBookingUrl: pick.directBookingUrl,
+          directBookingHost: pick.directBookingHost,
+          directBookingSource: pick.directBookingSource,
+          directBookingReason: pick.directBookingReason,
           alternateUrls: pick.alternateUrls,
           photoMatches: pick.photoMatches,
           identityKeys: pick.identityKeys,
@@ -4092,9 +4198,14 @@ export default function Bookings() {
             nightlyPrice: candidate.nightlyPrice,
             bedrooms: candidate.bedrooms,
             url: candidate.url,
+            originalSourceUrl: candidate.originalSourceUrl,
             image: candidate.image,
             airbnbAnchorUrl: candidate.airbnbAnchorUrl,
             airbnbAnchorPrice: candidate.airbnbAnchorPrice,
+            directBookingUrl: candidate.directBookingUrl,
+            directBookingHost: candidate.directBookingHost,
+            directBookingSource: candidate.directBookingSource,
+            directBookingReason: candidate.directBookingReason,
             alternateUrls: candidate.alternateUrls,
             photoMatches: candidate.photoMatches,
             identityKeys: candidate.identityKeys,
@@ -7800,6 +7911,7 @@ type LiveCandidate = {
   sourceLabel: string;
   title: string;
   url: string;
+  originalSourceUrl?: string;
   nightlyPrice: number;
   totalPrice: number;
   bedrooms?: number;
@@ -7847,11 +7959,18 @@ type LiveUnitListing = {
   channel: "airbnb" | "vrbo" | "booking" | "pm";
   channelLabel: string;
   url: string;
+  originalSourceUrl?: string;
   nightlyPrice: number;
   totalPrice: number;
   bedrooms?: number;
   verified?: "yes" | "no" | "unclear" | "skipped";
   verifiedReason?: string;
+  airbnbAnchorUrl?: string;
+  airbnbAnchorPrice?: number;
+  directBookingUrl?: string;
+  directBookingHost?: string;
+  directBookingSource?: "airbnb_image_reverse_search";
+  directBookingReason?: string;
   groundFloorStatus?: GroundFloorStatus;
   groundFloorEvidence?: string | null;
 };
@@ -8016,6 +8135,39 @@ type FindBuyInDiagnostics = {
     verified?: number;
     durationMs?: number;
     message?: string;
+    failureReason?: string | null;
+    providerHealth?: string | null;
+    proxyHealth?: string | null;
+    cooldownUntil?: string | null;
+    retryAfterMs?: number | null;
+    confidence?: "high" | "medium" | "low" | "none" | string;
+    searchTerm?: string | null;
+    accessPattern?: string | null;
+    datesSearched?: { checkIn?: string; checkOut?: string; nights?: number };
+    bedroomFilter?: { bedrooms?: number; applied?: boolean };
+    resultCounts?: { raw?: number; kept?: number; priced?: number; verified?: number };
+  }>;
+  providerStatuses?: Array<{
+    source: string;
+    status: "ok" | "warning" | "error" | "timeout" | "skipped";
+    searched?: boolean;
+    raw?: number;
+    kept?: number;
+    priced?: number;
+    verified?: number;
+    durationMs?: number;
+    message?: string;
+    failureReason?: string | null;
+    providerHealth?: string | null;
+    proxyHealth?: string | null;
+    cooldownUntil?: string | null;
+    retryAfterMs?: number | null;
+    confidence?: "high" | "medium" | "low" | "none" | string;
+    searchTerm?: string | null;
+    accessPattern?: string | null;
+    datesSearched?: { checkIn?: string; checkOut?: string; nights?: number };
+    bedroomFilter?: { bedrooms?: number; applied?: boolean };
+    resultCounts?: { raw?: number; kept?: number; priced?: number; verified?: number };
   }>;
   issues?: Array<{
     severity: "warning" | "error";
@@ -8923,12 +9075,19 @@ function LiveSearchSection({
       sourceLabel: listing.channelLabel,
       title: u.unitTitle,
       url: listing.url,
+      originalSourceUrl: listing.originalSourceUrl,
       nightlyPrice: listing.nightlyPrice,
       totalPrice: listing.totalPrice,
       bedrooms: listing.bedrooms ?? u.bedrooms,
       image: u.image,
       verified: listing.verified,
       verifiedReason: listing.verifiedReason,
+      airbnbAnchorUrl: listing.airbnbAnchorUrl,
+      airbnbAnchorPrice: listing.airbnbAnchorPrice,
+      directBookingUrl: listing.directBookingUrl,
+      directBookingHost: listing.directBookingHost,
+      directBookingSource: listing.directBookingSource,
+      directBookingReason: listing.directBookingReason,
       groundFloorStatus: listingFloorConfirmed ? listing.groundFloorStatus : (u.groundFloorStatus ?? listing.groundFloorStatus),
       groundFloorEvidence: listingFloorConfirmed ? listing.groundFloorEvidence : (u.groundFloorEvidence ?? listing.groundFloorEvidence),
     };
@@ -8939,6 +9098,7 @@ function LiveSearchSection({
     sourceLabel: `Direct link (${match.domain})`,
     title: match.title || airbnbCandidate.title,
     url: match.url,
+    originalSourceUrl: match.url,
     nightlyPrice: airbnbCandidate.nightlyPrice,
     totalPrice: airbnbCandidate.totalPrice,
     bedrooms: airbnbCandidate.bedrooms,
@@ -9943,6 +10103,29 @@ function ScannedOptionsTable({
                   {c.bedrooms ? (
                     <p className="text-[10px] text-muted-foreground">{c.bedrooms}BR</p>
                   ) : null}
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px]">
+                    <a
+                      href={c.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-primary underline-offset-2 hover:underline"
+                    >
+                      Open result
+                    </a>
+                    {c.originalSourceUrl && c.originalSourceUrl !== c.url && (
+                      <a
+                        href={c.originalSourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                      >
+                        Original source
+                      </a>
+                    )}
+                    {c.directBookingSource === "airbnb_image_reverse_search" && (
+                      <span className="text-emerald-700">Airbnb Google Lens match</span>
+                    )}
+                  </div>
                 </TableCell>
                 <TableCell className="py-1.5 text-right">
                   {c.totalPrice > 0 ? (
@@ -10309,6 +10492,31 @@ function UnitRow({
               ) : (
                 <p className="text-[11px] text-muted-foreground italic">{liveRateFallbackText(l.verified)}</p>
               )}
+              <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px]">
+                {l.directBookingSource === "airbnb_image_reverse_search" && (
+                  <span className="text-emerald-700">Found via Airbnb Google Lens</span>
+                )}
+                {l.airbnbAnchorUrl && (
+                  <a
+                    href={l.airbnbAnchorUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    Airbnb source
+                  </a>
+                )}
+                {l.originalSourceUrl && l.originalSourceUrl !== l.url && (
+                  <a
+                    href={l.originalSourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    Original URL
+                  </a>
+                )}
+              </div>
             </div>
             <Button
               size="sm"
@@ -10391,10 +10599,32 @@ function LiveRow({
             <p className="font-medium text-sm truncate">{c.title}</p>
           </div>
           {c.snippet && <p className="text-[11px] text-muted-foreground line-clamp-2">{c.snippet}</p>}
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+            {c.originalSourceUrl && c.originalSourceUrl !== c.url && (
+              <button
+                type="button"
+                className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                onClick={() => window.open(c.originalSourceUrl, "_blank", "noopener,noreferrer")}
+              >
+                Original source URL
+              </button>
+            )}
+            {c.airbnbAnchorUrl && (
+              <button
+                type="button"
+                className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                onClick={() => window.open(c.airbnbAnchorUrl, "_blank", "noopener,noreferrer")}
+              >
+                Airbnb source
+              </button>
+            )}
+          </div>
           {c.directBookingUrl && (
             <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
               <Badge variant="outline" className="h-5 border-emerald-300 bg-emerald-50 text-[10px] text-emerald-800">
-                Direct link found
+                {c.directBookingSource === "airbnb_image_reverse_search"
+                  ? "Found via Airbnb Google Lens"
+                  : "Direct link found"}
               </Badge>
               <button
                 type="button"
