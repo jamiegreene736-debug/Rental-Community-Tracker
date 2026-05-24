@@ -1689,6 +1689,29 @@ function throwIfBrightDataKycBlock(state, label, id) {
   );
 }
 
+function stateLooksLikeBlankSearchPage(state, providerHost) {
+  if (!state) return false;
+  const body = String(state.bodyExcerpt ?? "").replace(/\s+/g, " ").trim();
+  const title = String(state.title ?? "").trim();
+  const url = String(state.url ?? "");
+  return url.includes(providerHost) && title.length === 0 && body.length < 40;
+}
+
+function throwIfBlankSearchPage(state, providerHost, label, id) {
+  if (!stateLooksLikeBlankSearchPage(state, providerHost)) return;
+  throw new ProviderBrowserUnavailableError(
+    `${providerHost} returned a blank search page for the requested dates/bedrooms; treating this as a provider/browser failure instead of a valid zero-result search.`,
+    {
+      label,
+      id,
+      provider: providerHost,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+    },
+  );
+}
+
 function stateLooksLikeVrboHumanChallenge(state) {
   if (!state) return false;
   return VRBO_HUMAN_CHALLENGE_RE.test(
@@ -3635,6 +3658,8 @@ async function processBookingSearch(id, params) {
   await applyBookingBedroomFilter(bedrooms, url).catch(() => false);
   await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_bedroom_filter");
   const state = await dumpPageState("booking", { id, ...params });
+  throwIfBrightDataKycBlock(state, "booking_search", id);
+  throwIfBlankSearchPage(state, "booking.com", "booking_search", id);
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
     throw new Error("Booking.com bot wall — refresh cookies.json (booking.com)");
   }

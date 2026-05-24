@@ -8457,6 +8457,10 @@ export async function registerRoutes(
       const raw = error instanceof Error ? error.message : String(error ?? "unknown error");
       sourceErrors.push({ source, message: raw.slice(0, 600) });
     };
+    const sidecarReasonIsProviderFailure = (reason: string | undefined): boolean =>
+      /\b(?:blocked|kyc|required|proxy|blank search page|bot wall|captcha|access denied|provider\/browser failure|worker reported failure|request expired)\b/i.test(
+        String(reason ?? ""),
+      );
 
     type Candidate = {
       source: "airbnb" | "vrbo" | "booking" | "pm";
@@ -8977,6 +8981,9 @@ export async function registerRoutes(
         airbnbSidecarOnline = r.workerOnline;
         airbnbSidecarMs = r.durationMs;
         airbnbSidecarReason = r.reason;
+        if (sidecarReasonIsProviderFailure(r.reason)) {
+          noteSourceError("Airbnb sidecar search", r.reason);
+        }
         airbnbRawCount = r.candidates.length;
         airbnbPricedCount = r.candidates.length;
         let noResort = 0;
@@ -9053,6 +9060,9 @@ export async function registerRoutes(
         bookingSidecarOnline = r.workerOnline;
         bookingSidecarMs = r.durationMs;
         bookingSidecarReason = r.reason;
+        if (sidecarReasonIsProviderFailure(r.reason)) {
+          noteSourceError("Booking.com sidecar search", r.reason);
+        }
         bookingPricedCount = r.candidates.filter((c) => c.totalPrice > 0 || c.nightlyPrice > 0).length;
         const accepted = r.candidates.filter((c) => {
           const inferred = rawCandidateBedroomSignal(c);
@@ -9138,6 +9148,9 @@ export async function registerRoutes(
         vrboSidecarOnline = r.workerOnline;
         vrboSidecarMs = r.durationMs;
         vrboSidecarReason = r.reason;
+        if (sidecarReasonIsProviderFailure(r.reason)) {
+          noteSourceError("Vrbo sidecar search", r.reason);
+        }
         vrboDropped = { noResort: 0, wrongBedrooms: droppedVrbo };
         vrboRawCount = r.candidates.length;
         vrboDetailPricedCount = 0;
@@ -10762,9 +10775,11 @@ export async function registerRoutes(
       verifiedRows: number,
       messageWhenEmpty: string,
       searched = false,
+      reason = "",
     ): SearchDiagnosticStatus => {
       if (sourceTimeouts.some((t) => timeoutLabels.includes(t.source))) return "timeout";
       if (sourceErrors.some((e) => errorNeedles.some((needle) => e.source.includes(needle))) && kept === 0 && raw === 0) return "error";
+      if (sidecarReasonIsProviderFailure(reason) && kept === 0 && raw === 0) return "error";
       if (searched) return "ok";
       if (verifiedRows > 0 || pricedRows > 0 || kept > 0 || raw > 0) return "ok";
       return messageWhenEmpty ? "warning" : "skipped";
@@ -10772,7 +10787,7 @@ export async function registerRoutes(
     const diagnosticSources = [
       {
         source: "Airbnb",
-        status: sourceStatus(["airbnb-sidecar"], ["airbnb", "Airbnb"], airbnbRawCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived website sidecar filters", airbnbSidecarOnline),
+        status: sourceStatus(["airbnb-sidecar"], ["airbnb", "Airbnb"], airbnbRawCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived website sidecar filters", airbnbSidecarOnline, airbnbSidecarReason),
         searched: airbnbSidecarOnline,
         raw: airbnbRawCount,
         kept: airbnbTarget.length,
@@ -10783,7 +10798,7 @@ export async function registerRoutes(
       },
       {
         source: "Vrbo",
-        status: sourceStatus(["vrbo"], ["Vrbo", "vrbo"], vrboRawCount, vrboTarget.length, pricedCount(vrboTarget), verifiedYesCount(vrboTarget), "No Vrbo rows survived sidecar/bedroom filters", vrboSidecarOnline),
+        status: sourceStatus(["vrbo"], ["Vrbo", "vrbo"], vrboRawCount, vrboTarget.length, pricedCount(vrboTarget), verifiedYesCount(vrboTarget), "No Vrbo rows survived sidecar/bedroom filters", vrboSidecarOnline, vrboSidecarReason),
         searched: vrboSidecarOnline,
         raw: vrboRawCount,
         kept: vrboTarget.length,
@@ -10794,7 +10809,7 @@ export async function registerRoutes(
       },
       {
         source: "Booking.com",
-        status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com search-result card produced a bedroom-matching rate", bookingSidecarOnline),
+        status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com search-result card produced a bedroom-matching rate", bookingSidecarOnline, bookingSidecarReason),
         searched: bookingSidecarOnline,
         raw: bookingRawCount + bookingPricedCount + bookingSidecarCount,
         kept: bookingTarget.length,
