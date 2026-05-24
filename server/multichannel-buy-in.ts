@@ -73,12 +73,18 @@ export function classifyScanReason(reason: string | undefined | null): ScanWarni
 function describeWarning(kind: ScanWarning["kind"], channel: ScanWarning["channel"], season: ScanWarning["season"]): string {
   const ch = channel === "engine" ? "Airbnb fallback" : channel.toUpperCase();
   switch (kind) {
-    case "captcha":    return `${ch} hit a CAPTCHA during the ${season} scan — sidecar daemon may need manual unblock before retrying.`;
-    case "blocked":    return `${ch} blocked the ${season} scan (Cloudflare / bot wall) — try again later or rotate the daemon's session.`;
-    case "rate-limit": return `${ch} rate-limited the ${season} scan — back off a few minutes and retry.`;
-    case "timeout":    return `${ch} timed out during the ${season} scan — daemon queue may be busy or the page didn't load.`;
-    case "network":    return `${ch} network error during the ${season} scan — check daemon Mac connectivity.`;
-    case "unknown":    return `${ch} reported an issue during the ${season} scan.`;
+    case "captcha":
+      return `${ch} hit a slider CAPTCHA during the ${season} scan — open the live noVNC browser link in the sidecar panel (works great from your phone) and manually slide to solve it. Once you solve it the buy-in will auto-resume and cache the fresh VRBO session. You have several minutes before timeout.`;
+    case "blocked":
+      return `${ch} blocked the ${season} scan (Cloudflare / bot wall) — try again later or rotate the daemon's session.`;
+    case "rate-limit":
+      return `${ch} rate-limited the ${season} scan — back off a few minutes and retry.`;
+    case "timeout":
+      return `${ch} timed out during the ${season} scan — daemon queue may be busy or the page didn't load.`;
+    case "network":
+      return `${ch} network error during the ${season} scan — check daemon Mac connectivity.`;
+    case "unknown":
+      return `${ch} reported an issue during the ${season} scan.`;
   }
 }
 
