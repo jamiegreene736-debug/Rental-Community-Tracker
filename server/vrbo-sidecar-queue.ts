@@ -393,9 +393,40 @@ const TERMINAL_TTL_MS = 5 * 60 * 1000;
 const SIDECAR_SCREEN_TTL_MS = 10 * 60 * 1000;
 const SIDECAR_SCREENSHOT_MAX_CHARS = 350_000;
 const SIDECAR_SCREEN_COMMAND_TTL_MS = 60 * 1000;
+const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
+  // VRBO's DataDome risk scoring gets worse when multiple fresh
+  // browser/proxy identities hit it at once. Keep VRBO serialized,
+  // while Airbnb/Booking/PM jobs can still use the worker pool.
+  vrbo_search: 1,
+};
 
 function nowMs(): number {
   return Date.now();
+}
+
+function numberFromEnv(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function opConcurrencyLimit(opType: SidecarOpType): number {
+  const envName = `SIDECAR_${opType.toUpperCase()}_CONCURRENCY`;
+  const fallback = DEFAULT_OP_CONCURRENCY[opType] ?? Number.POSITIVE_INFINITY;
+  const configured = numberFromEnv(envName, fallback);
+  if (!Number.isFinite(configured)) return Number.POSITIVE_INFINITY;
+  return Math.max(1, Math.floor(configured));
+}
+
+function activeCountForOp(opType: SidecarOpType): number {
+  let count = 0;
+  for (const r of queue.values()) {
+    if (r.status === "in_progress" && r.opType === opType) count++;
+  }
+  return count;
+}
+
+function canClaimOp(opType: SidecarOpType): boolean {
+  return activeCountForOp(opType) < opConcurrencyLimit(opType);
 }
 
 function sidecarRunCancelledError(reason = "sidecar run cancelled by operator stop"): Error {
@@ -784,6 +815,7 @@ export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarReq
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
     if (r.status !== "pending") continue;
+    if (!canClaimOp(r.opType)) continue;
     if (!oldest || r.createdAt < oldest.createdAt) oldest = r;
   }
   if (!oldest) return null;
