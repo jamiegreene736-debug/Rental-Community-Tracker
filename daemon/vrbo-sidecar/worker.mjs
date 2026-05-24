@@ -26,6 +26,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { ChromeSidecarManager } from "./chrome-sidecar-manager.mjs";
+import { resolveChromeProxyConfig } from "./proxy-config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COOKIES_FILE = path.join(__dirname, "cookies.json");
@@ -231,29 +232,16 @@ function appendBrightDataUsernameOptions(username) {
   return next;
 }
 
-function headlessProxyConfig() {
+async function headlessProxyConfig() {
   if (!HEADLESS_PROXY_ENABLED) return null;
   if (!activeRequestShouldUseHeadlessProxy()) return null;
-  if (!boolFromEnv("CHROME_PROXY_ENABLED", false)) return null;
 
-  const provider = nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER").toLowerCase();
-  const scheme = nonEmptyEnv("CHROME_PROXY_SCHEME", "PROXY_SCHEME") || "http";
-  const isBrightData = !provider || provider === "brightdata";
-  const host = nonEmptyEnv("BRIGHTDATA_PROXY_HOST", "CHROME_PROXY_HOST", "PROXY_HOST") ||
-    (isBrightData ? "brd.superproxy.io" : "");
-  const port = Number(nonEmptyEnv("BRIGHTDATA_PROXY_PORT", "CHROME_PROXY_PORT", "PROXY_PORT") ||
-    (isBrightData ? 33335 : ""));
-  let username = nonEmptyEnv("BRIGHTDATA_PROXY_USERNAME", "CHROME_PROXY_USERNAME", "PROXY_USERNAME");
-  const password = nonEmptyEnv("BRIGHTDATA_PROXY_PASSWORD", "CHROME_PROXY_PASSWORD", "PROXY_PASSWORD");
-
-  if (!host || !Number.isFinite(port) || !username || !password) {
-    throw new Error(
-      "SIDECAR_HEADLESS_PROXY_ENABLED=1 but proxy config is incomplete. Set BRIGHTDATA_PROXY_HOST, BRIGHTDATA_PROXY_PORT, BRIGHTDATA_PROXY_USERNAME, and BRIGHTDATA_PROXY_PASSWORD.",
-    );
-  }
-
-  if (isBrightData) username = appendBrightDataUsernameOptions(username);
-  return { provider: provider || "brightdata", scheme, host, port, username, password };
+  return resolveChromeProxyConfig({
+    enabled: boolFromEnv("CHROME_PROXY_ENABLED", false),
+    brightDataUsernameOptions: (username) => appendBrightDataUsernameOptions(username),
+    incompleteConfigMessage:
+      "SIDECAR_HEADLESS_PROXY_ENABLED=1 but proxy config is incomplete. Set CHROME_PROXY_HOST, CHROME_PROXY_PORT, CHROME_PROXY_USERNAME, and CHROME_PROXY_PASSWORD, or set CHROME_PROXY_PROVIDER=gonzoproxy with GONZOPROXY_API_KEY.",
+  });
 }
 
 function writeProxyError(socket, status = 502, message = "Bad Gateway") {
@@ -1278,7 +1266,7 @@ async function ensureHeadlessBrowser() {
     fs.rmSync(userDataDir, { recursive: true, force: true });
   }
   fs.mkdirSync(userDataDir, { recursive: true });
-  let proxyConfig = headlessProxyConfig();
+  let proxyConfig = await headlessProxyConfig();
   if (proxyConfig) {
     const probe = await probeHeadlessProxyAuth(proxyConfig);
     if (!probe.ok) {

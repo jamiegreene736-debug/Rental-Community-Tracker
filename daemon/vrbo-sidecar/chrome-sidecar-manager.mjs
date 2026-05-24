@@ -4,6 +4,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 import { spawn } from "child_process";
+import { boolFromEnv, nonEmptyEnv, resolveChromeProxyConfig, sanitizeProxyOption } from "./proxy-config.mjs";
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 820 };
 const DEFAULT_LOCAL_CDP_PORT = 9222;
@@ -14,8 +15,6 @@ const DEFAULT_SERVER_WEBDRIVER_BASE_PORT = 4445;
 const DEFAULT_SERVER_NOVNC_BASE_PORT = 7901;
 const DEFAULT_MAX_SERVER_INSTANCES = 4;
 const DEFAULT_LOCK_TTL_MS = 45 * 60_000;
-const DEFAULT_BRIGHTDATA_HOST = "brd.superproxy.io";
-const DEFAULT_BRIGHTDATA_PORT = 33335;
 const DEFAULT_CHROME_BINARY =
   process.platform === "darwin"
     ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -28,12 +27,6 @@ function sleep(ms) {
 
 function trimTrailingSlash(value) {
   return String(value ?? "").replace(/\/+$/g, "");
-}
-
-function boolFromEnv(name, defaultValue = false) {
-  const raw = process.env[name];
-  if (raw == null || raw === "") return defaultValue;
-  return /^(1|true|yes|on)$/i.test(raw);
 }
 
 function numberFromEnv(name, defaultValue) {
@@ -157,14 +150,6 @@ function parsePositionList(value) {
     .filter(Boolean)
     .map((part) => parsePosition(part, null))
     .filter((pos) => pos && Number.isFinite(pos.left) && Number.isFinite(pos.top));
-}
-
-function nonEmptyEnv(...names) {
-  for (const name of names) {
-    const value = process.env[name];
-    if (value != null && String(value).trim() !== "") return String(value).trim();
-  }
-  return "";
 }
 
 function macAppPathFromChromeBinary(binary) {
@@ -315,14 +300,6 @@ function zipFilesBase64(files) {
   return Buffer.concat([...localParts, ...centralParts, end]).toString("base64");
 }
 
-function sanitizeProxyOption(value) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]/g, "")
-    .slice(0, 64);
-}
-
 function proxySessionId(instance, request) {
   const base = [
     request?.id,
@@ -353,31 +330,19 @@ function appendBrightDataUsernameOptions(username, instance, request) {
   return next;
 }
 
-function chromeProxyConfig(instance, request, { requireServer = false } = {}) {
-  if (!boolFromEnv("CHROME_PROXY_ENABLED", false)) return null;
-  if (requireServer && !instance?.server) return null;
-
-  const provider = nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER").toLowerCase();
-  const scheme = nonEmptyEnv("CHROME_PROXY_SCHEME", "PROXY_SCHEME") || "http";
-  const isBrightData = !provider || provider === "brightdata";
-  const host = nonEmptyEnv("BRIGHTDATA_PROXY_HOST", "CHROME_PROXY_HOST", "PROXY_HOST") ||
-    (isBrightData ? DEFAULT_BRIGHTDATA_HOST : "");
-  const port = Number(nonEmptyEnv("BRIGHTDATA_PROXY_PORT", "CHROME_PROXY_PORT", "PROXY_PORT") ||
-    (isBrightData ? DEFAULT_BRIGHTDATA_PORT : ""));
-  let username = nonEmptyEnv("BRIGHTDATA_PROXY_USERNAME", "CHROME_PROXY_USERNAME", "PROXY_USERNAME");
-  const password = nonEmptyEnv("BRIGHTDATA_PROXY_PASSWORD", "CHROME_PROXY_PASSWORD", "PROXY_PASSWORD");
-
-  if (!host || !Number.isFinite(port) || !username || !password) {
-    throw new Error(
-      "CHROME_PROXY_ENABLED=1 but Bright Data proxy config is incomplete. Set BRIGHTDATA_PROXY_HOST, BRIGHTDATA_PROXY_PORT, BRIGHTDATA_PROXY_USERNAME, and BRIGHTDATA_PROXY_PASSWORD.",
-    );
-  }
-
-  if (isBrightData) username = appendBrightDataUsernameOptions(username, instance, request);
-  return { provider: provider || "brightdata", scheme, host, port, username, password };
+async function chromeProxyConfig(instance, request, { requireServer = false } = {}) {
+  return resolveChromeProxyConfig({
+    enabled: boolFromEnv("CHROME_PROXY_ENABLED", false),
+    requireServer,
+    isServer: Boolean(instance?.server),
+    sessionId: { instance, request },
+    brightDataUsernameOptions: (username) => appendBrightDataUsernameOptions(username, instance, request),
+    incompleteConfigMessage:
+      "CHROME_PROXY_ENABLED=1 but proxy config is incomplete. Set CHROME_PROXY_HOST, CHROME_PROXY_PORT, CHROME_PROXY_USERNAME, and CHROME_PROXY_PASSWORD, or set CHROME_PROXY_PROVIDER=gonzoproxy with GONZOPROXY_API_KEY.",
+  });
 }
 
-function serverChromeProxyConfig(instance, request) {
+async function serverChromeProxyConfig(instance, request) {
   return chromeProxyConfig(instance, request, { requireServer: true });
 }
 
@@ -786,7 +751,7 @@ export class ChromeSidecarManager {
     const chromeInstance = wantsFreshProxiedChrome
       ? { ...instance, chromeDataDir: freshLocalChromeDataDir(instance, request) }
       : instance;
-    let proxyConfig = wantsFreshProxiedChrome ? chromeProxyConfig(chromeInstance, request) : null;
+    let proxyConfig = wantsFreshProxiedChrome ? await chromeProxyConfig(chromeInstance, request) : null;
     const locked = tryWriteLock(instance.busyLock, {
       type: "local",
       requestId: request.id ?? null,
@@ -948,7 +913,7 @@ export class ChromeSidecarManager {
     let webdriverSessionId = null;
     let sessionBaseUrl = null;
     try {
-      let proxyConfig = serverChromeProxyConfig(instance, request);
+      let proxyConfig = await serverChromeProxyConfig(instance, request);
       if (proxyConfig && !instance.webdriverUrl) {
         throw new Error(`${instance.name} has no WebDriver URL; cannot enforce server Chrome proxy`);
       }
