@@ -414,6 +414,14 @@ class VrboHardBlockError extends Error {
   }
 }
 
+class ProviderBrowserUnavailableError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "ProviderBrowserUnavailableError";
+    this.details = details;
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -425,7 +433,12 @@ function transientErrorMessage(message) {
 }
 
 function isTransientScrapeError(error) {
-  if (error instanceof SidecarCancelledError || error instanceof SidecarHardTimeoutError || error instanceof VrboHardBlockError) return false;
+  if (
+    error instanceof SidecarCancelledError ||
+    error instanceof SidecarHardTimeoutError ||
+    error instanceof VrboHardBlockError ||
+    error instanceof ProviderBrowserUnavailableError
+  ) return false;
   return transientErrorMessage(error?.message ?? error);
 }
 
@@ -1071,10 +1084,11 @@ async function acquireChromeForRequest(request = {}) {
         ? "Railway headless Chromium fallback"
         : "no-window local headless Chrome fallback";
       if (requiresServerChromeForOp(request?.opType)) {
-        throw new Error(
+        throw new ProviderBrowserUnavailableError(
           `${providerKeyForOp(request?.opType).toUpperCase()} requires headed server Google Chrome/noVNC for this search, ` +
-          `but server Chrome CDP was unavailable: ${e?.message ?? e}. ` +
+          `but server Chrome was unavailable: ${e?.message ?? e}. ` +
           "Not falling back to headless Chromium because it gets stuck behind CAPTCHA or bot checks.",
+          { opType: request?.opType, provider: providerKeyForOp(request?.opType) },
         );
       }
       log(`server Chrome/noVNC unavailable; falling back to ${label}: ${e?.message ?? e}`);
