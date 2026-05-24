@@ -1661,7 +1661,8 @@ export default function Home() {
                 </p>
               </button>
             </DialogTrigger>
-            <DialogContent className="max-w-4xl">
+            <DialogContent className="max-h-[85vh] w-[calc(100vw-2rem)] max-w-5xl overflow-hidden p-0">
+              <div className="max-h-[85vh] overflow-y-auto p-6">
               <DialogHeader>
                 <DialogTitle>Funds collected, past 30 days</DialogTitle>
               </DialogHeader>
@@ -1695,32 +1696,32 @@ export default function Home() {
                 {revenueSummaryLoading ? (
                   <p className="text-sm text-muted-foreground">Loading payment details...</p>
                 ) : revenueSummary?.payments?.length ? (
-                  <div className="overflow-x-auto rounded-md border">
-                    <Table>
+                  <div className="max-w-full overflow-x-auto rounded-md border">
+                    <Table className="min-w-[860px] table-fixed">
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Paid</TableHead>
-                          <TableHead>Guest</TableHead>
-                          <TableHead>Listing</TableHead>
-                          <TableHead>Channel</TableHead>
-                          <TableHead>Description</TableHead>
-                          <TableHead className="text-right">Collected</TableHead>
+                          <TableHead className="w-[130px]">Paid</TableHead>
+                          <TableHead className="w-[170px]">Guest</TableHead>
+                          <TableHead className="w-[220px]">Listing</TableHead>
+                          <TableHead className="w-[120px]">Channel</TableHead>
+                          <TableHead className="w-[150px]">Description</TableHead>
+                          <TableHead className="w-[110px] text-right">Collected</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {revenueSummary.payments.map((payment) => (
                           <TableRow key={payment.id}>
-                            <TableCell className="whitespace-nowrap">{formatShortDateTime(payment.paidAt)}</TableCell>
-                            <TableCell>
+                            <TableCell className="whitespace-nowrap align-top">{formatShortDateTime(payment.paidAt)}</TableCell>
+                            <TableCell className="align-top">
                               <div className="font-medium">{payment.guestName}</div>
                               {payment.confirmationCode && (
                                 <div className="text-xs text-muted-foreground">{payment.confirmationCode}</div>
                               )}
                             </TableCell>
-                            <TableCell className="min-w-[180px]">{payment.listingName}</TableCell>
-                            <TableCell>{payment.source}</TableCell>
-                            <TableCell className="min-w-[160px]">{payment.description || "Collected payment"}</TableCell>
-                            <TableCell className="text-right font-medium">{formatCurrency(payment.amount)}</TableCell>
+                            <TableCell className="align-top">{payment.listingName}</TableCell>
+                            <TableCell className="align-top">{payment.source}</TableCell>
+                            <TableCell className="align-top">{payment.description || "Collected payment"}</TableCell>
+                            <TableCell className="whitespace-nowrap text-right align-top font-medium">{formatCurrency(payment.amount)}</TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -1730,45 +1731,46 @@ export default function Home() {
                   <p className="text-sm text-muted-foreground">No collected payment records found in this rolling 30-day window.</p>
                 )}
                 {revenueSummary?.bookings?.length ? (
-                  <div className="overflow-x-auto rounded-md border">
+                  <div className="max-w-full overflow-x-auto rounded-md border">
                     <div className="border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
                       Supporting booking revenue created in this 30-day window
                     </div>
-                    <Table>
+                    <Table className="min-w-[960px] table-fixed">
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Booked</TableHead>
-                          <TableHead>Guest</TableHead>
-                          <TableHead>Listing</TableHead>
-                          <TableHead>Stay</TableHead>
-                          <TableHead>Channel</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead className="text-right">Amount</TableHead>
+                          <TableHead className="w-[130px]">Booked</TableHead>
+                          <TableHead className="w-[170px]">Guest</TableHead>
+                          <TableHead className="w-[220px]">Listing</TableHead>
+                          <TableHead className="w-[150px]">Stay</TableHead>
+                          <TableHead className="w-[120px]">Channel</TableHead>
+                          <TableHead className="w-[100px]">Status</TableHead>
+                          <TableHead className="w-[110px] text-right">Amount</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {revenueSummary.bookings.map((booking) => (
                           <TableRow key={booking.id || `${booking.guestName}-${booking.bookedAt}`}>
-                            <TableCell className="whitespace-nowrap">{formatShortDateTime(booking.bookedAt)}</TableCell>
-                            <TableCell>
+                            <TableCell className="whitespace-nowrap align-top">{formatShortDateTime(booking.bookedAt)}</TableCell>
+                            <TableCell className="align-top">
                               <div className="font-medium">{booking.guestName}</div>
                               {booking.confirmationCode && (
                                 <div className="text-xs text-muted-foreground">{booking.confirmationCode}</div>
                               )}
                             </TableCell>
-                            <TableCell className="min-w-[180px]">{booking.listingName}</TableCell>
-                            <TableCell className="whitespace-nowrap">
+                            <TableCell className="align-top">{booking.listingName}</TableCell>
+                            <TableCell className="whitespace-nowrap align-top">
                               {formatShortDate(booking.checkIn)} - {formatShortDate(booking.checkOut)}
                             </TableCell>
-                            <TableCell>{booking.source}</TableCell>
-                            <TableCell>{booking.status || "N/A"}</TableCell>
-                            <TableCell className="text-right font-medium">{formatCurrency(booking.amount)}</TableCell>
+                            <TableCell className="align-top">{booking.source}</TableCell>
+                            <TableCell className="align-top">{booking.status || "N/A"}</TableCell>
+                            <TableCell className="whitespace-nowrap text-right align-top font-medium">{formatCurrency(booking.amount)}</TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
                     </Table>
                   </div>
                 ) : null}
+              </div>
               </div>
             </DialogContent>
           </Dialog>
