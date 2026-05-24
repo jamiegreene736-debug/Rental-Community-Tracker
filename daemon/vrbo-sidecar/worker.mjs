@@ -108,6 +108,8 @@ const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|
 const VRBO_2CAPTCHA_ENABLED = process.env.SIDECAR_VRBO_2CAPTCHA !== "0";
 const VRBO_2CAPTCHA_POLL_SECONDS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_POLL_SECONDS ?? 120);
 const VRBO_2CAPTCHA_MAX_ATTEMPTS = Number(process.env.SIDECAR_VRBO_2CAPTCHA_MAX_ATTEMPTS ?? 2);
+const VRBO_COORDINATE_SOLVER_ENABLED = process.env.SIDECAR_VRBO_COORDINATE_SOLVER === "1";
+const VRBO_MANUAL_FALLBACK_ENABLED = process.env.SIDECAR_VRBO_MANUAL_FALLBACK === "1";
 
 let browser = null;
 let context = null;
@@ -144,6 +146,10 @@ function requiresServerChromeForOp(opType) {
   const op = String(opType || "").toLowerCase();
   const provider = providerKeyForOp(op);
   return REQUIRE_SERVER_CHROME_PROVIDERS.has(provider) || REQUIRE_SERVER_CHROME_PROVIDERS.has(op);
+}
+
+function needsFreshChromeForOp(opType) {
+  return /^(airbnb|booking|vrbo)_/i.test(String(opType || ""));
 }
 
 function log(msg, ...rest) {
@@ -1075,7 +1081,11 @@ async function acquireChromeForRequest(request = {}) {
       release: async () => {},
     };
   }
-  if (activeChromeAllocation) return activeChromeAllocation;
+  if (activeChromeAllocation && needsFreshChromeForOp(request?.opType)) {
+    await teardownBrowser(`fresh browser required for ${request.opType}`);
+  } else if (activeChromeAllocation) {
+    return activeChromeAllocation;
+  }
   try {
     activeChromeAllocation = await chromeSidecarManager.acquire(request);
   } catch (e) {
@@ -2025,6 +2035,10 @@ async function trySolveVrboCaptchaWith2Captcha(targetPage, label, id) {
     log(`${label} ${id}: VRBO DataDome CAPTCHA cleared by 2Captcha cookie solver`);
     return true;
   }
+  if (!VRBO_COORDINATE_SOLVER_ENABLED) {
+    log(`${label} ${id}: DataDome cookie solver did not clear CAPTCHA; rotating fresh browser/proxy instead of coordinate/manual fallback`);
+    return false;
+  }
   for (let attempt = 1; attempt <= Math.max(1, VRBO_2CAPTCHA_MAX_ATTEMPTS); attempt++) {
     try {
       const clip = await findVrboChallengeBox(targetPage);
@@ -2189,6 +2203,19 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
     await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
     await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
     return true;
+  }
+
+  if (!VRBO_MANUAL_FALLBACK_ENABLED) {
+    throw new VrboHardBlockError(
+      "VRBO CAPTCHA was not cleared by DataDome cookie solve; rotating to a fresh Chrome profile and proxy session instead of waiting on the blocked browser",
+      {
+        label,
+        id,
+        url: state?.url,
+        title: state?.title,
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      },
+    );
   }
 
   log(`${label} ${id}: 2Captcha unavailable or failed; surfacing Chrome for manual verification`);
