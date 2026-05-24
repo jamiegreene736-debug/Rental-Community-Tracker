@@ -1015,6 +1015,7 @@ function buyInProviderStats(
   const keptFallback = diagnostic ? 0 : fallbackScanned;
   return {
     diagnostic,
+    searched: diagnostic?.searched === true || /\bsidecarOnline=true\b/i.test(String(diagnostic?.message ?? "")),
     raw: metricNumber(diagnostic?.raw ?? fallbackScanned),
     kept: metricNumber(diagnostic?.kept ?? keptFallback),
     priced: metricNumber(diagnostic?.priced ?? 0),
@@ -1031,18 +1032,20 @@ function buyInProviderSearchStatus(
   const config = BUY_IN_SEARCH_PROVIDER_CONFIG.find((provider) => provider.key === key)!;
   const stats = buyInProviderStats(summary, diagnostics, key);
   const hardFailed = stats.status === "error" || stats.status === "timeout";
-  const searchedWithRows = stats.raw > 0;
-  const passed = !hardFailed && stats.status === "ok" && searchedWithRows;
+  const searched = stats.searched || stats.raw > 0;
+  const passed = !hardFailed && stats.status === "ok" && searched;
   const message = compactDiagnosticMessage(stats.diagnostic?.message);
   let reason: string;
   if (passed) {
-    reason = stats.priced > 0
+    reason = stats.raw === 0
+      ? "Search completed; no rows returned"
+      : stats.priced > 0
       ? `${pluralizeRows(stats.priced, "priced row")} returned`
       : `${pluralizeRows(stats.raw, "row")} returned`;
   } else if (hardFailed) {
     reason = stats.status === "timeout" ? "Timed out" : "Search failed";
-  } else if (!searchedWithRows) {
-    reason = "No rows returned";
+  } else if (!searched) {
+    reason = "Search did not complete";
   } else if (stats.kept === 0) {
     reason = "Rows failed community/bedroom/date filters";
   } else if (stats.priced === 0) {
@@ -8006,6 +8009,7 @@ type FindBuyInDiagnostics = {
   sources?: Array<{
     source: string;
     status: "ok" | "warning" | "error" | "timeout" | "skipped";
+    searched?: boolean;
     raw?: number;
     kept?: number;
     priced?: number;

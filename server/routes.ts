@@ -9031,6 +9031,8 @@ export async function registerRoutes(
     let bookingPricedCount = 0;
     let bookingSidecarCount = 0;
     let bookingSidecarOnline = false;
+    let bookingSidecarMs = 0;
+    let bookingSidecarReason = "";
     const bookingSidecarAbort = makeSidecarAbort("booking-sidecar");
     const bookingPromise: Promise<Candidate[]> = (async () => {
       try {
@@ -9049,6 +9051,8 @@ export async function registerRoutes(
         bookingRawCount = r.candidates.length;
         bookingSidecarCount = r.candidates.length;
         bookingSidecarOnline = r.workerOnline;
+        bookingSidecarMs = r.durationMs;
+        bookingSidecarReason = r.reason;
         bookingPricedCount = r.candidates.filter((c) => c.totalPrice > 0 || c.nightlyPrice > 0).length;
         const accepted = r.candidates.filter((c) => {
           const inferred = rawCandidateBedroomSignal(c);
@@ -10757,16 +10761,19 @@ export async function registerRoutes(
       pricedRows: number,
       verifiedRows: number,
       messageWhenEmpty: string,
+      searched = false,
     ): SearchDiagnosticStatus => {
       if (sourceTimeouts.some((t) => timeoutLabels.includes(t.source))) return "timeout";
       if (sourceErrors.some((e) => errorNeedles.some((needle) => e.source.includes(needle))) && kept === 0 && raw === 0) return "error";
+      if (searched) return "ok";
       if (verifiedRows > 0 || pricedRows > 0 || kept > 0 || raw > 0) return "ok";
       return messageWhenEmpty ? "warning" : "skipped";
     };
     const diagnosticSources = [
       {
         source: "Airbnb",
-        status: sourceStatus(["airbnb-sidecar"], ["airbnb", "Airbnb"], airbnbRawCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived website sidecar filters"),
+        status: sourceStatus(["airbnb-sidecar"], ["airbnb", "Airbnb"], airbnbRawCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived website sidecar filters", airbnbSidecarOnline),
+        searched: airbnbSidecarOnline,
         raw: airbnbRawCount,
         kept: airbnbTarget.length,
         priced: pricedCount(airbnbTarget),
@@ -10776,7 +10783,8 @@ export async function registerRoutes(
       },
       {
         source: "Vrbo",
-        status: sourceStatus(["vrbo"], ["Vrbo", "vrbo"], vrboRawCount, vrboTarget.length, pricedCount(vrboTarget), verifiedYesCount(vrboTarget), "No Vrbo rows survived sidecar/bedroom filters"),
+        status: sourceStatus(["vrbo"], ["Vrbo", "vrbo"], vrboRawCount, vrboTarget.length, pricedCount(vrboTarget), verifiedYesCount(vrboTarget), "No Vrbo rows survived sidecar/bedroom filters", vrboSidecarOnline),
+        searched: vrboSidecarOnline,
         raw: vrboRawCount,
         kept: vrboTarget.length,
         priced: pricedCount(vrboTarget),
@@ -10786,12 +10794,14 @@ export async function registerRoutes(
       },
       {
         source: "Booking.com",
-        status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com search-result card produced a bedroom-matching rate"),
+        status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com search-result card produced a bedroom-matching rate", bookingSidecarOnline),
+        searched: bookingSidecarOnline,
         raw: bookingRawCount + bookingPricedCount + bookingSidecarCount,
         kept: bookingTarget.length,
         priced: pricedCount(bookingTarget),
         verified: verifiedYesCount(bookingTarget),
-        message: `${bookingSidecarCount} Booking.com website sidecar search card(s). Sidecar-priced search cards are trusted when Booking.com returned them after date and bedroom filtering.`,
+        durationMs: bookingSidecarMs,
+        message: `sidecarOnline=${bookingSidecarOnline}; sidecarPriced=${bookingSidecarCount}; ${bookingSidecarCount} Booking.com website sidecar search card(s). Sidecar-priced search cards are trusted when Booking.com returned them after date and bedroom filtering${bookingSidecarReason ? `; ${bookingSidecarReason}` : ""}.`,
       },
       {
         source: "Airbnb Lens direct links",
