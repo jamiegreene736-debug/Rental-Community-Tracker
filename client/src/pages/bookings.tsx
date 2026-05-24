@@ -980,6 +980,8 @@ const BUY_IN_SEARCH_PROVIDER_CONFIG: Array<{
   { key: "pm", label: "Direct/Lens", diagnosticName: /Airbnb Lens direct links|Direct/i },
 ];
 
+const BUY_IN_OTA_PROVIDER_KEYS = ["airbnb", "vrbo", "booking"] as const satisfies BuyInSearchProviderKey[];
+
 function metricNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
@@ -1019,6 +1021,88 @@ function buyInProviderStats(
     verified: metricNumber(diagnostic?.verified ?? 0),
     status: diagnostic?.status ?? (fallbackScanned > 0 ? "warning" : "skipped"),
   };
+}
+
+function buyInProviderSearchStatus(
+  summary: AutoFillSearchSummary,
+  diagnostics: FindBuyInDiagnostics | undefined,
+  key: BuyInSearchProviderKey,
+) {
+  const config = BUY_IN_SEARCH_PROVIDER_CONFIG.find((provider) => provider.key === key)!;
+  const stats = buyInProviderStats(summary, diagnostics, key);
+  const hardFailed = stats.status === "error" || stats.status === "timeout";
+  const searchedWithRows = stats.raw > 0;
+  const passed = !hardFailed && stats.status === "ok" && searchedWithRows;
+  const message = compactDiagnosticMessage(stats.diagnostic?.message);
+  let reason: string;
+  if (passed) {
+    reason = stats.priced > 0
+      ? `${pluralizeRows(stats.priced, "priced row")} returned`
+      : `${pluralizeRows(stats.raw, "row")} returned`;
+  } else if (hardFailed) {
+    reason = stats.status === "timeout" ? "Timed out" : "Search failed";
+  } else if (!searchedWithRows) {
+    reason = "No rows returned";
+  } else if (stats.kept === 0) {
+    reason = "Rows failed community/bedroom/date filters";
+  } else if (stats.priced === 0) {
+    reason = "Rows returned without live prices";
+  } else {
+    reason = `${stats.status} status`;
+  }
+  return { config, stats, passed, reason, message };
+}
+
+function ProviderSearchStatusStrip({ audit }: { audit: AutoFillSearchAudit }) {
+  const request = audit.diagnostics?.request;
+  const dateLabel = request?.checkIn && request?.checkOut ? `${request.checkIn} -> ${request.checkOut}` : null;
+  const locationLabel = request?.resortName || request?.community || null;
+  return (
+    <div className="border-b bg-slate-50/70 px-2 py-2">
+      <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
+        <span className="font-semibold uppercase tracking-wide text-slate-700">Provider status</span>
+        {locationLabel && <span>{locationLabel}</span>}
+        {dateLabel && <span>{dateLabel}</span>}
+        {typeof audit.diagnostics?.elapsedMs === "number" && (
+          <span>{Math.round(audit.diagnostics.elapsedMs / 1000)}s total</span>
+        )}
+      </div>
+      <div className="grid gap-1.5 md:grid-cols-3">
+        {BUY_IN_OTA_PROVIDER_KEYS.map((key) => {
+          const status = buyInProviderSearchStatus(audit.counts, audit.diagnostics, key);
+          const iconClass = status.passed ? "text-emerald-700" : "text-red-700";
+          const boxClass = status.passed
+            ? "border-emerald-200 bg-emerald-50 text-emerald-950"
+            : "border-red-200 bg-red-50 text-red-950";
+          return (
+            <div key={`${audit.bedrooms}-${key}-provider-status`} className={`rounded border px-2 py-1.5 ${boxClass}`}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  {status.passed ? (
+                    <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${iconClass}`} />
+                  ) : (
+                    <XCircle className={`h-3.5 w-3.5 shrink-0 ${iconClass}`} />
+                  )}
+                  <span className="truncate text-[11px] font-semibold">{status.config.label}</span>
+                </div>
+                <span className="shrink-0 text-[9px] uppercase tracking-wide">{status.passed ? "pass" : "fail"}</span>
+              </div>
+              <p className="mt-0.5 text-[10px]">{status.reason}</p>
+              <p className="mt-0.5 text-[10px] opacity-80">
+                raw {status.stats.raw} · kept {status.stats.kept} · priced {status.stats.priced} · verified {status.stats.verified}
+                {typeof status.stats.diagnostic?.durationMs === "number"
+                  ? ` · ${Math.round(status.stats.diagnostic.durationMs / 1000)}s`
+                  : ""}
+              </p>
+              {status.message && (
+                <p className="mt-0.5 line-clamp-2 text-[10px] opacity-75">{status.message}</p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function formatBuyInProviderAvailability(
@@ -2048,6 +2132,7 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
                   {new Date(audit.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}
                 </span>
               </div>
+              <ProviderSearchStatusStrip audit={audit} />
               {availabilityDetails.length > 0 && (
                 <div className={`border-b px-2 py-1.5 text-[11px] ${
                   hasSearchProblem ? "border-amber-200 bg-amber-50/80 text-amber-950" : "bg-slate-50 text-slate-700"
