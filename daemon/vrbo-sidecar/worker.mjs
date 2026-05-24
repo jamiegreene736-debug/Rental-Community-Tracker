@@ -74,6 +74,12 @@ const HEADLESS_USER_DATA_ROOT = process.env.SIDECAR_HEADLESS_USER_DATA_DIR ??
   path.join(os.homedir(), "Library/Application Support/VrboSidecar-Headless");
 const HEADLESS_PROXY_ENABLED = process.env.SIDECAR_HEADLESS_PROXY_ENABLED !== "0";
 const HEADLESS_PROXY_DIRECT_FALLBACK = process.env.SIDECAR_HEADLESS_PROXY_DIRECT_FALLBACK !== "0";
+const REQUIRE_SERVER_CHROME_PROVIDERS = new Set(
+  String(process.env.SIDECAR_REQUIRE_SERVER_CHROME_PROVIDERS ?? "vrbo,booking")
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean),
+);
 const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 1_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
 const SERVER_WORKER_CLAIM_DELAY_MS = Number(process.env.SIDECAR_SERVER_WORKER_CLAIM_DELAY_MS ?? 4_000);
@@ -125,6 +131,21 @@ function activeRequestShouldUseHeadlessProxy() {
   return Boolean(activeRuntimeRequest?.opType);
 }
 
+function providerKeyForOp(opType) {
+  const op = String(opType || "").toLowerCase();
+  if (op.startsWith("vrbo_")) return "vrbo";
+  if (op.startsWith("booking_")) return "booking";
+  if (op.startsWith("airbnb_")) return "airbnb";
+  return op.replace(/_.*/, "");
+}
+
+function requiresServerChromeForOp(opType) {
+  if (!USE_SERVER_BROWSER) return false;
+  const op = String(opType || "").toLowerCase();
+  const provider = providerKeyForOp(op);
+  return REQUIRE_SERVER_CHROME_PROVIDERS.has(provider) || REQUIRE_SERVER_CHROME_PROVIDERS.has(op);
+}
+
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
   // eslint-disable-next-line no-console
@@ -174,6 +195,7 @@ function headlessProxySessionId() {
     activeRuntimeRequest?.id,
     activeRuntimeRequest?.opType,
     activeRuntimeRequest?.freshSessionReason,
+    activeRuntimeRequest?.requestAttempt ? `attempt${activeRuntimeRequest.requestAttempt}` : "attempt0",
     activeRuntimeRequest?.vrboFreshAttempt ? `fresh${activeRuntimeRequest.vrboFreshAttempt}` : "initial",
     `slot${WORKER_SLOT}`,
     Date.now().toString(36),
@@ -1048,6 +1070,13 @@ async function acquireChromeForRequest(request = {}) {
       const label = WORKER_ROLE === "server"
         ? "Railway headless Chromium fallback"
         : "no-window local headless Chrome fallback";
+      if (requiresServerChromeForOp(request?.opType)) {
+        throw new Error(
+          `${providerKeyForOp(request?.opType).toUpperCase()} requires headed server Google Chrome/noVNC for this search, ` +
+          `but server Chrome CDP was unavailable: ${e?.message ?? e}. ` +
+          "Not falling back to headless Chromium because it gets stuck behind CAPTCHA or bot checks.",
+        );
+      }
       log(`server Chrome/noVNC unavailable; falling back to ${label}: ${e?.message ?? e}`);
       activeChromeAllocation = {
         type: "headless",
@@ -1113,6 +1142,41 @@ async function normalizePageDisplay(targetPage = page) {
   scheduleSidecarMinimize(targetPage);
 }
 
+async function clearContextStorageForFreshRun(label = "fresh browser run") {
+  if (!context) return;
+  await withSoftTimeout(context.clearCookies?.(), 2_000, null);
+  const pages = typeof context.pages === "function" ? context.pages() : [];
+  const targetPage = pages.find((p) => p && !p.isClosed?.()) ?? page;
+  if (!targetPage || targetPage.isClosed?.()) {
+    log(`${label}: cleared cookies; no page available for CDP cache clear`);
+    return;
+  }
+  const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
+  if (!session) {
+    log(`${label}: cleared cookies; CDP cache clear unavailable`);
+    return;
+  }
+  try {
+    await withSoftTimeout(session.send("Network.clearBrowserCookies"), 1_500, null);
+    await withSoftTimeout(session.send("Network.clearBrowserCache"), 1_500, null);
+    await withSoftTimeout(session.send("Storage.clearDataForOrigin", {
+      origin: "https://www.vrbo.com",
+      storageTypes: "all",
+    }), 1_500, null);
+    await withSoftTimeout(session.send("Storage.clearDataForOrigin", {
+      origin: "https://www.booking.com",
+      storageTypes: "all",
+    }), 1_500, null);
+    await withSoftTimeout(session.send("Storage.clearDataForOrigin", {
+      origin: "https://www.airbnb.com",
+      storageTypes: "all",
+    }), 1_500, null);
+    log(`${label}: cleared cookies, cache, and OTA origin storage`);
+  } finally {
+    await withSoftTimeout(session.detach(), 500, null);
+  }
+}
+
 async function ensureBrowser() {
   const allocation = await acquireChromeForRequest();
   if (usingHeadlessRuntime()) return ensureHeadlessBrowser();
@@ -1122,6 +1186,7 @@ async function ensureBrowser() {
   browser = await chromium.connectOverCDP(allocation.cdpUrl);
   context = browser.contexts()[0] ?? (await browser.newContext());
   await installContextGuards();
+  await clearContextStorageForFreshRun("server Chrome startup");
   await syncRemoteCookies();
   const cookies = loadCookies();
   const seeded = cookies.length ? await addCookiesBestEffort(cookies, "startup cookie seed") : false;
@@ -1158,10 +1223,11 @@ function headlessUserDataDirForWorker() {
       .replace(/[^a-z0-9_-]/gi, "_")
       .slice(0, 48);
     const freshAttempt = Math.max(0, Number(activeRuntimeRequest?.vrboFreshAttempt ?? 0));
+    const requestAttempt = Math.max(0, Number(activeRuntimeRequest?.requestAttempt ?? 0));
     const safeOpType = String(activeRuntimeRequest?.opType || "request")
       .replace(/[^a-z0-9_-]/gi, "_")
       .slice(0, 32);
-    return path.join(HEADLESS_USER_DATA_ROOT, `worker-${safeSlot}-${safeOpType}-${safeRequestId}-${freshAttempt}`);
+    return path.join(HEADLESS_USER_DATA_ROOT, `worker-${safeSlot}-${safeOpType}-${safeRequestId}-try${requestAttempt}-fresh${freshAttempt}`);
   }
   const freshAttempt = Number(activeRuntimeRequest?.vrboFreshAttempt ?? 0);
   if (freshAttempt > 0 && activeRuntimeRequest?.freshSessionReason === "vrbo_hard_block") {
@@ -1176,7 +1242,7 @@ function headlessUserDataDirForWorker() {
 async function ensureHeadlessBrowser() {
   if (context && page && !page.isClosed()) return;
   const userDataDir = headlessUserDataDirForWorker();
-  if (activeRequestIsVrbo()) {
+  if (WORKER_ROLE === "server" || activeRequestShouldUseHeadlessProxy() || activeRequestIsVrbo()) {
     fs.rmSync(userDataDir, { recursive: true, force: true });
   }
   fs.mkdirSync(userDataDir, { recursive: true });
@@ -1235,6 +1301,7 @@ async function ensureHeadlessBrowser() {
   launchedPersistentContext = true;
   browser = context.browser?.() ?? null;
   await installContextGuards();
+  await clearContextStorageForFreshRun("headless startup");
   await syncRemoteCookies();
   const cookies = loadCookies();
   const shouldSeedCookies = !proxyConfig && !activeRequestIsVrbo();
@@ -5745,11 +5812,18 @@ async function processRequest(req) {
       await acquireChromeForRequest({
         id: req.id,
         opType,
+        requestAttempt: req.requestAttempt ?? 0,
         vrboFreshAttempt: req.vrboFreshAttempt ?? 0,
         freshSessionReason: req.freshSessionReason,
       });
     }
-    activeRuntimeRequest = { id: req.id, opType, vrboFreshAttempt: req.vrboFreshAttempt ?? 0, freshSessionReason: req.freshSessionReason };
+    activeRuntimeRequest = {
+      id: req.id,
+      opType,
+      requestAttempt: req.requestAttempt ?? 0,
+      vrboFreshAttempt: req.vrboFreshAttempt ?? 0,
+      freshSessionReason: req.freshSessionReason,
+    };
     await ensureBrowser();
   } catch (e) {
     activeRuntimeRequest = null;
@@ -5873,6 +5947,7 @@ async function tick() {
           );
           await sleep(backoff);
         }
+        req.requestAttempt = attempt - 1;
         await runWithHardTimeout(`request ${req.id} ${req.opType ?? "request"}`, req.opType ?? "request", () => processRequest(req));
         lastError = null;
         break;

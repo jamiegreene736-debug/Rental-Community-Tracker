@@ -328,6 +328,7 @@ function proxySessionId(instance, request) {
     request?.id,
     request?.opType,
     request?.freshSessionReason,
+    request?.requestAttempt ? `attempt${request.requestAttempt}` : "attempt0",
     request?.vrboFreshAttempt ? `fresh${request.vrboFreshAttempt}` : "",
     instance?.name,
     Date.now().toString(36),
@@ -1043,6 +1044,7 @@ export class ChromeSidecarManager {
       `${baseUrl}/session`,
       ...(baseUrl.endsWith("/wd/hub") ? [] : [`${baseUrl}/wd/hub/session`]),
     ];
+    const profileSessionId = proxySessionId(instance, request);
     const chromeArgs = [
       "--remote-debugging-address=0.0.0.0",
       "--remote-debugging-port=9222",
@@ -1053,6 +1055,9 @@ export class ChromeSidecarManager {
       "--force-device-scale-factor=1",
       "--no-first-run",
       "--no-default-browser-check",
+      `--user-data-dir=/tmp/rct-sidecar-chrome-${profileSessionId}`,
+      "--disk-cache-size=1",
+      "--media-cache-size=1",
     ];
     const chromeOptions = { args: chromeArgs };
 
