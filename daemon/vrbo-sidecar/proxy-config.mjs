@@ -1,6 +1,8 @@
 const DEFAULT_BRIGHTDATA_HOST = "brd.superproxy.io";
 const DEFAULT_BRIGHTDATA_PORT = 33335;
 const DEFAULT_GONZOPROXY_API_URL = "https://api.gonzoproxy.app/functions/v1/proxy-api/generate";
+const DEFAULT_DECODO_HOST = "gate.decodo.com";
+const DEFAULT_DECODO_PORT = 7000;
 
 function boolFromEnv(name, defaultValue = false) {
   const raw = process.env[name];
@@ -27,6 +29,26 @@ function sanitizeProxyOption(value) {
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, "")
     .slice(0, 64);
+}
+
+function proxySessionToken(sessionId) {
+  const request = sessionId?.request ?? {};
+  const instance = sessionId?.instance ?? {};
+  const base = [
+    request?.id,
+    request?.opType,
+    request?.freshSessionReason,
+    request?.requestAttempt ? `attempt${request.requestAttempt}` : "attempt0",
+    request?.vrboFreshAttempt ? `fresh${request.vrboFreshAttempt}` : "",
+    instance?.name,
+    Date.now().toString(36),
+  ]
+    .filter(Boolean)
+    .join("-");
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 48) || `sidecar${Date.now().toString(36)}`;
 }
 
 function parseProxyCredentialLine(value) {
@@ -148,12 +170,42 @@ function explicitProxyConfig(provider) {
     };
   }
 
+  if (provider === "decodo") {
+    return {
+      host: nonEmptyEnv("DECODO_PROXY_HOST", "CHROME_PROXY_HOST", "PROXY_HOST") || DEFAULT_DECODO_HOST,
+      port: Number(nonEmptyEnv("DECODO_PROXY_PORT", "CHROME_PROXY_PORT", "PROXY_PORT") || DEFAULT_DECODO_PORT),
+      username: nonEmptyEnv("DECODO_PROXY_USERNAME", "CHROME_PROXY_USERNAME", "PROXY_USERNAME"),
+      password: nonEmptyEnv("DECODO_PROXY_PASSWORD", "CHROME_PROXY_PASSWORD", "PROXY_PASSWORD"),
+    };
+  }
+
   return {
     host: nonEmptyEnv("CHROME_PROXY_HOST", "PROXY_HOST"),
     port: Number(nonEmptyEnv("CHROME_PROXY_PORT", "PROXY_PORT")),
     username: nonEmptyEnv("CHROME_PROXY_USERNAME", "PROXY_USERNAME"),
     password: nonEmptyEnv("CHROME_PROXY_PASSWORD", "PROXY_PASSWORD"),
   };
+}
+
+function appendDecodoUsernameOptions(username, sessionId) {
+  const parts = [String(username ?? "").trim()];
+  const country = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_COUNTRY", "CHROME_PROXY_COUNTRY", "PROXY_COUNTRY"));
+  const state = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_STATE", "CHROME_PROXY_STATE", "PROXY_STATE"));
+  const city = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_CITY", "CHROME_PROXY_CITY", "PROXY_CITY"));
+  const zip = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_ZIP", "CHROME_PROXY_ZIP", "PROXY_ZIP"));
+  const sessionDuration = Math.max(1, Math.min(1440, Math.floor(numberFromEnv("DECODO_PROXY_SESSION_DURATION_MINUTES", 20))));
+  const session = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_SESSION")) || proxySessionToken(sessionId);
+
+  if (country && !/-country-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`country-${country}`);
+  if (state && !/-state-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`state-${state}`);
+  if (city && !/-city-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`city-${city}`);
+  if (zip && !/-zip-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`zip-${zip}`);
+  if (!/-session-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`session-${session}`);
+  if (!/-sessionduration-\d+(?:-|$)/i.test(parts[0])) parts.push(`sessionduration-${sessionDuration}`);
+
+  const needsUserPrefix = boolFromEnv("DECODO_PROXY_USER_PREFIX", true) && !/^user-/i.test(parts[0]);
+  if (needsUserPrefix) parts[0] = `user-${parts[0]}`;
+  return parts.filter(Boolean).join("-");
 }
 
 export async function resolveChromeProxyConfig({
@@ -170,6 +222,7 @@ export async function resolveChromeProxyConfig({
   const provider = (nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER") || "brightdata").toLowerCase();
   const scheme = nonEmptyEnv("CHROME_PROXY_SCHEME", "PROXY_SCHEME") || "http";
   const isBrightData = provider === "brightdata";
+  const isDecodo = provider === "decodo";
   const explicit = explicitProxyConfig(provider);
   let { host, port, username, password } = explicit;
 
@@ -190,6 +243,9 @@ export async function resolveChromeProxyConfig({
 
   if (isBrightData && typeof brightDataUsernameOptions === "function") {
     username = brightDataUsernameOptions(username, sessionId);
+  }
+  if (isDecodo) {
+    username = appendDecodoUsernameOptions(username, sessionId);
   }
 
   return { provider, scheme, host, port, username, password };

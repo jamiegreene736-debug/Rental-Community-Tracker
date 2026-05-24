@@ -238,9 +238,10 @@ async function headlessProxyConfig() {
 
   return resolveChromeProxyConfig({
     enabled: boolFromEnv("CHROME_PROXY_ENABLED", false),
+    sessionId: { instance: { name: `worker-${WORKER_SLOT}` }, request: activeRuntimeRequest },
     brightDataUsernameOptions: (username) => appendBrightDataUsernameOptions(username),
     incompleteConfigMessage:
-      "SIDECAR_HEADLESS_PROXY_ENABLED=1 but proxy config is incomplete. Set CHROME_PROXY_HOST, CHROME_PROXY_PORT, CHROME_PROXY_USERNAME, and CHROME_PROXY_PASSWORD, or set CHROME_PROXY_PROVIDER=gonzoproxy with GONZOPROXY_API_KEY.",
+      "SIDECAR_HEADLESS_PROXY_ENABLED=1 but proxy config is incomplete. Set CHROME_PROXY_HOST, CHROME_PROXY_PORT, CHROME_PROXY_USERNAME, and CHROME_PROXY_PASSWORD, or set CHROME_PROXY_PROVIDER=gonzoproxy with GONZOPROXY_API_KEY, or CHROME_PROXY_PROVIDER=decodo with DECODO_PROXY_USERNAME/PASSWORD.",
   });
 }
 
