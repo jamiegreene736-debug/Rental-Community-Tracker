@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7-labs
 FROM node:22-slim
 
-RUN apt-get update && apt-get install -y chromium \
+RUN apt-get update && apt-get install -y chromium xvfb ca-certificates fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
@@ -45,4 +45,4 @@ ENV NODE_ENV=production
 # A second Railway service can run the same image with
 # RAILWAY_SERVICE_ROLE=sidecar-worker. That keeps browser automation on Railway
 # instead of a visible local Mac Chrome process.
-CMD ["sh", "-c", "if [ \"${RAILWAY_SERVICE_ROLE:-web}\" = \"sidecar-worker\" ]; then export SIDECAR_BROWSER_MODE=\"${SIDECAR_BROWSER_MODE:-server}\" CHROME_PRIMARY=\"${CHROME_PRIMARY:-server}\" SIDECAR_WORKER_ROLE=\"${SIDECAR_WORKER_ROLE:-server}\" SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=\"${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK:-1}\" SIDECAR_HEADLESS_FALLBACK_ENABLED=\"${SIDECAR_HEADLESS_FALLBACK_ENABLED:-1}\" SIDECAR_HEADLESS_PROXY_DIRECT_FALLBACK=\"${SIDECAR_HEADLESS_PROXY_DIRECT_FALLBACK:-0}\" SERVER_CHROME_FALLBACK_ENABLED=\"${SERVER_CHROME_FALLBACK_ENABLED:-1}\" SERVER_CHROME_FALLBACK_VRBO=\"${SERVER_CHROME_FALLBACK_VRBO:-1}\" SIDECAR_OPEN_NOVNC_ON_ACQUIRE=\"${SIDECAR_OPEN_NOVNC_ON_ACQUIRE:-0}\" MAX_LOCAL_CHROME_INSTANCES=\"${MAX_LOCAL_CHROME_INSTANCES:-1}\"; echo 'Starting Railway sidecar worker role'; exec node daemon/vrbo-sidecar/supervisor.mjs; fi; mkdir -p /app/client/public/photos && cp -Rn /app/photos-seed/. /app/client/public/photos/ 2>/dev/null || true; npm run db:push && exec node dist/index.cjs"]
+CMD ["sh", "-c", "if [ \"${RAILWAY_SERVICE_ROLE:-web}\" = \"sidecar-worker\" ]; then export DISPLAY=\"${DISPLAY:-:99}\" SIDECAR_BROWSER_MODE=\"cdp\" CHROME_PRIMARY=\"local\" SIDECAR_WORKER_ROLE=\"server\" LOCAL_CHROME_BINARY=\"/usr/bin/chromium\" LOCAL_CHROME_USER_DATA_DIR=\"/tmp/rct-sidecar-chrome\" SIDECAR_CHROME_VISIBLE=\"1\" SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=\"0\" SIDECAR_HEADLESS_FALLBACK_ENABLED=\"0\" SIDECAR_HEADLESS_PROXY_DIRECT_FALLBACK=\"0\" SERVER_CHROME_FALLBACK_ENABLED=\"0\" SERVER_CHROME_FALLBACK_VRBO=\"0\" SIDECAR_OPEN_NOVNC_ON_ACQUIRE=\"0\" MAX_LOCAL_CHROME_INSTANCES=\"${MAX_LOCAL_CHROME_INSTANCES:-1}\"; echo 'Starting Railway sidecar worker role with headed Chromium under Xvfb'; Xvfb \"$DISPLAY\" -screen 0 1280x900x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & exec node daemon/vrbo-sidecar/supervisor.mjs; fi; mkdir -p /app/client/public/photos && cp -Rn /app/photos-seed/. /app/client/public/photos/ 2>/dev/null || true; npm run db:push && exec node dist/index.cjs"]

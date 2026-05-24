@@ -637,6 +637,15 @@ function localBusyLockForIndex(lockDir, explicitLock, index) {
   return path.join(lockDir, `local-chrome-${index + 1}.busy.json`);
 }
 
+function shouldUseFreshProxiedLocalChrome(opType) {
+  return /^(vrbo|booking|airbnb)_/i.test(String(opType || ""));
+}
+
+function freshLocalChromeDataDir(instance, request) {
+  const safeId = proxySessionId(instance, request);
+  return path.join(os.tmpdir(), `rct-sidecar-${instance.name}-${safeId}`);
+}
+
 export class ChromeSidecarManager {
   constructor(options = {}) {
     this.log = options.log ?? (() => {});
@@ -773,8 +782,11 @@ export class ChromeSidecarManager {
 
   async tryAcquireLocalInstance(instance, request = {}) {
     const opType = String(request?.opType ?? "");
-    const wantsVrboProxy = /^vrbo_/i.test(opType);
-    let proxyConfig = wantsVrboProxy ? chromeProxyConfig(instance, request) : null;
+    const wantsFreshProxiedChrome = shouldUseFreshProxiedLocalChrome(opType);
+    const chromeInstance = wantsFreshProxiedChrome
+      ? { ...instance, chromeDataDir: freshLocalChromeDataDir(instance, request) }
+      : instance;
+    let proxyConfig = wantsFreshProxiedChrome ? chromeProxyConfig(chromeInstance, request) : null;
     const locked = tryWriteLock(instance.busyLock, {
       type: "local",
       requestId: request.id ?? null,
@@ -840,9 +852,10 @@ export class ChromeSidecarManager {
 
     if (!(await this.isCdpReady(instance.cdpUrl))) {
       try {
-        await this.launchLocalChrome(instance, proxyConfig, request, localProxyBridge);
+        await this.launchLocalChrome(chromeInstance, proxyConfig, request, localProxyBridge);
       } catch (e) {
         await localProxyBridge?.close().catch(() => {});
+        if (wantsFreshProxiedChrome) fs.rmSync(chromeInstance.chromeDataDir, { recursive: true, force: true });
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
@@ -853,6 +866,7 @@ export class ChromeSidecarManager {
       const ready = await this.waitForCdp(instance.cdpUrl, 20_000);
       if (!ready) {
         await localProxyBridge?.close().catch(() => {});
+        if (wantsFreshProxiedChrome) fs.rmSync(chromeInstance.chromeDataDir, { recursive: true, force: true });
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
@@ -894,6 +908,7 @@ export class ChromeSidecarManager {
           await sendBrowserCdpCommand(instance.cdpUrl, "Browser.close", {}, 2_000).catch(() => {});
         }
         await localProxyBridge?.close().catch(() => {});
+        if (wantsFreshProxiedChrome) fs.rmSync(chromeInstance.chromeDataDir, { recursive: true, force: true });
         if (webdriverSessionId && sessionBaseUrl) {
           await fetch(`${sessionBaseUrl}/session/${webdriverSessionId}`, { method: "DELETE" }).catch(() => {});
         }
