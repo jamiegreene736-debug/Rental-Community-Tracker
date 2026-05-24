@@ -473,8 +473,14 @@ export function updateSidecarScreenSnapshot(snapshot: {
   height?: unknown;
   captcha?: unknown;
   error?: unknown;
+  clear?: unknown;
 }): { ok: boolean } {
   const slot = String(snapshot.slot || "1").replace(/[^\w.-]/g, "").slice(0, 32) || "1";
+  if (snapshot.clear === true) {
+    sidecarScreens.delete(slot);
+    sidecarScreenCommands.delete(slot);
+    return { ok: true };
+  }
   const screenshotDataUrl = typeof snapshot.screenshotDataUrl === "string" &&
     snapshot.screenshotDataUrl.length <= SIDECAR_SCREENSHOT_MAX_CHARS
     ? snapshot.screenshotDataUrl

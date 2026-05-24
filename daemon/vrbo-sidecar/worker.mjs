@@ -1617,6 +1617,26 @@ async function postScreenSnapshot(req, targetPage = page, phase = "working", ext
   }
 }
 
+async function clearScreenSnapshot(req, phase = "Ready for next search") {
+  try {
+    await fetch(`${SERVER}/api/admin/vrbo-sidecar/screen`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        slot: WORKER_SLOT,
+        requestId: req?.id,
+        opType: req?.opType ?? "sidecar",
+        label: req?.opType ?? "sidecar",
+        phase,
+        clear: true,
+      }),
+    }).catch(() => null);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function startScreenHeartbeat(req) {
   void postScreenSnapshot(req, page, `start ${req?.opType ?? "request"}`, { force: true });
   const interval = setInterval(() => {
@@ -6012,9 +6032,9 @@ async function processRequest(req) {
   } finally {
     activeRuntimeRequest = null;
     stopScreenHeartbeat();
-    await postScreenSnapshot({ ...req, opType }, page, `finished ${opType}`, { force: true }).catch(() => {});
     await closeExtraTabs(`after ${opType}`, page).catch(() => {});
     await showCompletePage(opType);
+    await clearScreenSnapshot({ ...req, opType }).catch(() => {});
     if (activeChromeAllocation?.ephemeral) {
       await teardownBrowser(`finished ${activeChromeAllocation.type}-side ${opType}`);
     } else if (usingHeadlessRuntime() && USE_SERVER_BROWSER) {
