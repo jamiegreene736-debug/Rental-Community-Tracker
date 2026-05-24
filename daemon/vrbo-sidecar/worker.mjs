@@ -102,6 +102,21 @@ const PM_SITE_SEARCH_BUDGET_MS = Number(process.env.SIDECAR_PM_SITE_SEARCH_BUDGE
 const REQUEST_HARD_TIMEOUT_MS = Number(process.env.SIDECAR_REQUEST_HARD_TIMEOUT_MS ?? 10 * 60_000);
 const REQUEST_MAX_ATTEMPTS = Math.max(1, Math.floor(Number(process.env.SIDECAR_REQUEST_MAX_ATTEMPTS ?? 2) || 2));
 const REQUEST_RETRY_BASE_MS = Math.max(250, Number(process.env.SIDECAR_REQUEST_RETRY_BASE_MS ?? 1_500) || 1_500);
+const VRBO_MANUAL_VERIFICATION_ENABLED = process.env.SIDECAR_VRBO_MANUAL_VERIFICATION !== "0";
+const VRBO_MANUAL_VERIFICATION_TIMEOUT_MS = Math.max(
+  60_000,
+  Number(process.env.SIDECAR_VRBO_MANUAL_VERIFICATION_TIMEOUT_MS ?? 8 * 60_000) || 8 * 60_000,
+);
+const VRBO_MANUAL_VERIFICATION_POLL_MS = Math.max(
+  1_000,
+  Number(process.env.SIDECAR_VRBO_MANUAL_VERIFICATION_POLL_MS ?? 2_000) || 2_000,
+);
+const VRBO_MANUAL_SESSION_TTL_MS = Math.max(
+  5 * 60_000,
+  Number(process.env.SIDECAR_VRBO_MANUAL_SESSION_TTL_MS ?? 24 * 60 * 60_000) || 24 * 60 * 60_000,
+);
+const VRBO_MANUAL_SESSION_STATE_PATH = process.env.SIDECAR_VRBO_MANUAL_SESSION_STATE_PATH ||
+  path.join(os.tmpdir(), `rct-vrbo-manual-session-${WORKER_SLOT}.json`);
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
@@ -1006,6 +1021,67 @@ async function addCookiesBestEffort(cookies, label) {
   }
 }
 
+function vrboCookiesFromStorageState(state) {
+  const cookies = Array.isArray(state?.cookies) ? state.cookies : [];
+  return cookies.filter((cookie) => /(^|\.)vrbo\.com$/i.test(String(cookie?.domain ?? "").replace(/^\./, "")));
+}
+
+function readVrboManualSessionState() {
+  try {
+    if (!fs.existsSync(VRBO_MANUAL_SESSION_STATE_PATH)) return null;
+    const parsed = JSON.parse(fs.readFileSync(VRBO_MANUAL_SESSION_STATE_PATH, "utf8"));
+    const savedAt = Number(parsed?.savedAt ?? 0);
+    if (!Number.isFinite(savedAt) || Date.now() - savedAt > VRBO_MANUAL_SESSION_TTL_MS) {
+      fs.rmSync(VRBO_MANUAL_SESSION_STATE_PATH, { force: true });
+      return null;
+    }
+    const cookies = vrboCookiesFromStorageState(parsed?.state);
+    if (!cookies.length) return null;
+    return { savedAt, state: parsed.state, cookies };
+  } catch (e) {
+    log(`VRBO manual session cache read failed: ${e?.message ?? e}`);
+    return null;
+  }
+}
+
+async function restoreVrboManualSessionCookies(label = "VRBO manual session restore") {
+  if (!context) return false;
+  const snapshot = readVrboManualSessionState();
+  if (!snapshot?.cookies?.length) return false;
+  const restored = await addCookiesBestEffort(snapshot.cookies, label).catch((e) => {
+    log(`${label}: failed to restore cached VRBO cookies: ${e?.message ?? e}`);
+    return false;
+  });
+  if (restored) {
+    const ageMinutes = Math.max(0, Math.round((Date.now() - snapshot.savedAt) / 60_000));
+    log(`${label}: restored ${snapshot.cookies.length} VRBO cookie(s) from manual solve cache (${ageMinutes}m old)`);
+  }
+  return restored;
+}
+
+async function saveVrboManualSessionState(targetPage = page, label = "vrbo", id = "") {
+  if (!targetPage || targetPage.isClosed?.()) return false;
+  try {
+    const state = await targetPage.context().storageState();
+    const cookies = vrboCookiesFromStorageState(state);
+    if (!cookies.length) {
+      log(`${label} ${id}: manual solve finished but no VRBO cookies were available to cache`);
+      return false;
+    }
+    fs.mkdirSync(path.dirname(VRBO_MANUAL_SESSION_STATE_PATH), { recursive: true });
+    fs.writeFileSync(
+      VRBO_MANUAL_SESSION_STATE_PATH,
+      JSON.stringify({ savedAt: Date.now(), state }, null, 2),
+      "utf8",
+    );
+    log(`${label} ${id}: cached ${cookies.length} VRBO cookie(s) from manual CAPTCHA solve`);
+    return true;
+  } catch (e) {
+    log(`${label} ${id}: failed to cache VRBO manual solve state: ${e?.message ?? e}`);
+    return false;
+  }
+}
+
 async function isCdpReady() {
   try {
     const r = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, {
@@ -1410,6 +1486,9 @@ async function ensureBrowser() {
   await syncRemoteCookies();
   const cookies = loadCookies();
   const seeded = cookies.length ? await addCookiesBestEffort(cookies, "startup cookie seed") : false;
+  if (activeRequestIsVrbo()) {
+    await restoreVrboManualSessionCookies("server Chrome VRBO manual session restore");
+  }
   log(seeded ? `seeded ${cookies.length} cookies into Chrome context` : `using existing Chrome profile/server cookies (${cookies.length} cookies available on disk)`);
 
   // PR #302 (revised): always create a NEW page rather than reusing
@@ -1545,6 +1624,9 @@ async function ensureHeadlessBrowser() {
   const cookies = loadCookies();
   const shouldSeedCookies = !proxyConfig && !activeRequestIsVrbo();
   const seeded = shouldSeedCookies && cookies.length ? await addCookiesBestEffort(cookies, "headless startup cookie seed") : false;
+  if (activeRequestIsVrbo()) {
+    await restoreVrboManualSessionCookies("headless VRBO manual session restore");
+  }
   log(
     shouldSeedCookies
       ? seeded
@@ -2004,10 +2086,82 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
 }
 
 async function stopVrboProviderIfBlocked(targetPage, label, id, initialState = null) {
-  const state = initialState ?? await captureVrboChallengeState(targetPage);
-  throwIfVrboHardBlock(state, label, id);
+  let state = initialState ?? await captureVrboChallengeState(targetPage);
   const hasChallenge = stateLooksLikeVrboHumanChallenge(state);
-  if (!hasChallenge) return false;
+  if (!hasChallenge) {
+    throwIfVrboHardBlock(state, label, id);
+    return false;
+  }
+
+  if (VRBO_MANUAL_VERIFICATION_ENABLED) {
+    const timeoutAt = Date.now() + VRBO_MANUAL_VERIFICATION_TIMEOUT_MS;
+    const sourceUrl = state?.url;
+    const instructions =
+      "VRBO CAPTCHA/human-verification page detected. This provider run is paused for manual verification in the live server Chrome/noVNC session. Solve it there; once the challenge clears, the worker will continue this exact browser session and cache the resulting VRBO cookies.";
+    log(`${label} ${id}: ${instructions}`);
+    await normalizePageDisplay(targetPage).catch(() => {});
+    await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
+    await postScreenSnapshot(
+      { id, opType: label },
+      targetPage,
+      "VRBO waiting for manual CAPTCHA solve",
+      { captcha: true, error: instructions, force: true },
+    );
+
+    let lastSnapshotAt = 0;
+    while (Date.now() < timeoutAt) {
+      throwIfRequestCancelled(id);
+      await sendHeartbeat("VRBO waiting for manual CAPTCHA solve", true, id).catch((e) => {
+        if (e instanceof SidecarCancelledError) throw e;
+      });
+      await applyScreenControlCommands({ id, opType: label }, targetPage, label).catch(() => 0);
+      await boundedPageDelay(targetPage, VRBO_MANUAL_VERIFICATION_POLL_MS);
+      state = await captureVrboChallengeState(targetPage);
+      if (state && !stateLooksLikeVrboHumanChallenge(state)) {
+        throwIfVrboHardBlock(state, label, id);
+        await boundedPageDelay(targetPage, 1_000);
+        await saveVrboManualSessionState(targetPage, label, id);
+        await postScreenSnapshot(
+          { id, opType: label },
+          targetPage,
+          "VRBO manual CAPTCHA solved",
+          { force: true },
+        );
+        await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
+        log(`${label} ${id}: manual VRBO verification cleared; continuing provider run`);
+        return true;
+      }
+      const now = Date.now();
+      if (now - lastSnapshotAt >= Math.max(SCREENSHOT_HEARTBEAT_MS, 5_000)) {
+        lastSnapshotAt = now;
+        await postScreenSnapshot(
+          { id, opType: label },
+          targetPage,
+          "VRBO waiting for manual CAPTCHA solve",
+          { captcha: true, error: instructions },
+        );
+      }
+    }
+
+    const timeoutMessage =
+      "VRBO CAPTCHA/human-verification page was not solved before the manual verification timeout. The provider run stopped cleanly, kept the original VRBO URL for manual verification, and will respect retry cooldown.";
+    await postScreenSnapshot(
+      { id, opType: label },
+      targetPage,
+      "VRBO manual CAPTCHA timed out",
+      { captcha: true, error: timeoutMessage, force: true },
+    );
+    await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
+    throw new VrboHardBlockError(timeoutMessage, {
+      label,
+      id,
+      url: state?.url || sourceUrl,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      retryLater: true,
+      manualVerificationTimedOut: true,
+    });
+  }
 
   await normalizePageDisplay(targetPage).catch(() => {});
   const stopMessage =
@@ -2087,11 +2241,11 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     if (!isVrbo) return false;
     const state = await withSoftTimeout(captureVrboChallengeState(page), 2_000, null);
     throwIfBrightDataKycBlock(state, label, requestId);
-    throwIfVrboHardBlock(state, label, requestId);
     if (stateLooksLikeVrboHumanChallenge(state) || (await pageLooksLikeVrboHumanChallenge(page))) {
       log(`${label} ${requestId}: VRBO challenge detected during homepage prime (${stage})`);
       return stopVrboProviderIfBlocked(page, label, requestId, state);
     }
+    throwIfVrboHardBlock(state, label, requestId);
     return false;
   };
   try {
@@ -2991,8 +3145,10 @@ async function processVrboSearch(id, params) {
   // loads without hiding provider blocks or bypassing controls.
   let state = await dumpPageState("vrbo", { id, ...params });
   throwIfBrightDataKycBlock(state, "vrbo_search", id);
+  if (await stopVrboProviderIfBlocked(page, "vrbo_search", id, state)) {
+    state = await dumpPageState("vrbo-after-manual-solve", { id, ...params });
+  }
   throwIfVrboHardBlock(state, "vrbo_search", id);
-  await stopVrboProviderIfBlocked(page, "vrbo_search", id, state);
   if (stateLooksLikeVrboHumanChallenge(state)) {
     throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
       label: "vrbo_search",
@@ -3160,8 +3316,10 @@ async function processVrboPhotoScrape(id, params) {
   await stopVrboProviderIfBlocked(page, "vrbo_photo_scrape", id);
   await dismissObstructions(page, "vrbo_photo_scrape");
   let state = await dumpPageState("vrbo-photo", { id, ...params });
+  if (await stopVrboProviderIfBlocked(page, "vrbo_photo_scrape", id, state)) {
+    state = await dumpPageState("vrbo-photo-after-manual-solve", { id, ...params });
+  }
   throwIfVrboHardBlock(state, "vrbo_photo_scrape", id);
-  await stopVrboProviderIfBlocked(page, "vrbo_photo_scrape", id, state);
   if (stateLooksLikeVrboHumanChallenge(state)) {
     throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
       label: "vrbo_photo_scrape",

@@ -8455,7 +8455,7 @@ function SidecarScreensStrip() {
           <DialogHeader>
             <DialogTitle>Sidecar screen {selectedScreen?.slot ?? selectedSlot}</DialogTitle>
             <DialogDescription>
-              Click or drag on the screenshot to pass pointer input to that sidecar tab. Use this for manual CAPTCHA recovery only.
+              Click or drag on the screenshot to pass pointer input to that sidecar tab. On mobile, open the live browser view for noVNC touch control; desktop is best for slider precision.
             </DialogDescription>
           </DialogHeader>
           {selectedScreen?.screenshotDataUrl ? (
@@ -8469,7 +8469,7 @@ function SidecarScreensStrip() {
                   </p>
                   <p className="truncate text-muted-foreground">
                     {selectedScreen.liveViewUrl
-                      ? "Open the live browser view for full keyboard/mouse control."
+                      ? "Open the live browser view for full keyboard/mouse control. This also works from your phone through noVNC."
                       : selectedScreenCannotSurface
                         ? selectedScreen.error || "No live Chrome browser is available for this sidecar session."
                         : selectedScreen.title || selectedScreen.url || "Use the focus button if the screenshot does not respond."}
