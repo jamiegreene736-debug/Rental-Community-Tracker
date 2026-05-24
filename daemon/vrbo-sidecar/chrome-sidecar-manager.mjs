@@ -15,6 +15,7 @@ const DEFAULT_SERVER_WEBDRIVER_BASE_PORT = 4445;
 const DEFAULT_SERVER_NOVNC_BASE_PORT = 7901;
 const DEFAULT_MAX_SERVER_INSTANCES = 4;
 const DEFAULT_LOCK_TTL_MS = 45 * 60_000;
+const REQUIRED_PROXY_COUNTRY = "us";
 const DEFAULT_CHROME_BINARY =
   process.platform === "darwin"
     ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -32,6 +33,14 @@ function trimTrailingSlash(value) {
 function numberFromEnv(name, defaultValue) {
   const n = Number(process.env[name]);
   return Number.isFinite(n) ? n : defaultValue;
+}
+
+function replaceOrAppendProxyOption(value, option, optionValue) {
+  const safeOptionValue = sanitizeProxyOption(optionValue);
+  if (!safeOptionValue) return value;
+  const pattern = new RegExp(`(^|-)${option}-[a-z0-9_]+(?=-|$)`, "i");
+  if (pattern.test(value)) return value.replace(pattern, `$1${option}-${safeOptionValue}`);
+  return `${value}-${option}-${safeOptionValue}`;
 }
 
 function parsePosition(value, fallback = { left: 120, top: 80 }) {
@@ -319,11 +328,7 @@ function proxySessionId(instance, request) {
 }
 
 function appendBrightDataUsernameOptions(username, instance, request) {
-  let next = username;
-  const country = sanitizeProxyOption(nonEmptyEnv("CHROME_PROXY_COUNTRY", "BRIGHTDATA_PROXY_COUNTRY"));
-  if (country && !/-country-[a-z0-9_]+(?:-|$)/i.test(next)) {
-    next += `-country-${country}`;
-  }
+  let next = replaceOrAppendProxyOption(username, "country", REQUIRED_PROXY_COUNTRY);
   if (!/-session-[a-z0-9_]+(?:-|$)/i.test(next)) {
     next += `-session-${proxySessionId(instance, request)}`;
   }

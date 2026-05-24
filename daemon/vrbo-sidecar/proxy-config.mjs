@@ -3,6 +3,7 @@ const DEFAULT_BRIGHTDATA_PORT = 33335;
 const DEFAULT_GONZOPROXY_API_URL = "https://api.gonzoproxy.app/functions/v1/proxy-api/generate";
 const DEFAULT_DECODO_HOST = "gate.decodo.com";
 const DEFAULT_DECODO_PORT = 7000;
+const REQUIRED_PROXY_COUNTRY = "us";
 
 function boolFromEnv(name, defaultValue = false) {
   const raw = process.env[name];
@@ -29,6 +30,18 @@ function sanitizeProxyOption(value) {
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, "")
     .slice(0, 64);
+}
+
+function requiredProxyCountry() {
+  return REQUIRED_PROXY_COUNTRY;
+}
+
+function replaceOrAppendProxyOption(value, option, optionValue) {
+  const safeOptionValue = sanitizeProxyOption(optionValue);
+  if (!safeOptionValue) return value;
+  const pattern = new RegExp(`(^|-)${option}-[a-z0-9_]+(?=-|$)`, "i");
+  if (pattern.test(value)) return value.replace(pattern, `$1${option}-${safeOptionValue}`);
+  return `${value}-${option}-${safeOptionValue}`;
 }
 
 function proxySessionToken(sessionId) {
@@ -121,7 +134,7 @@ async function generateGonzoProxyCredential() {
   }
 
   const body = {
-    country: nonEmptyEnv("GONZOPROXY_COUNTRY", "CHROME_PROXY_COUNTRY", "PROXY_COUNTRY") || "US",
+    country: "US",
     count: numberFromEnv("GONZOPROXY_COUNT", 1),
     rotation: boolFromEnv("GONZOPROXY_ROTATION", false),
     ttl: numberFromEnv("GONZOPROXY_TTL", 12),
@@ -188,15 +201,13 @@ function explicitProxyConfig(provider) {
 }
 
 function appendDecodoUsernameOptions(username, sessionId) {
-  const parts = [String(username ?? "").trim()];
-  const country = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_COUNTRY", "CHROME_PROXY_COUNTRY", "PROXY_COUNTRY"));
+  const parts = [replaceOrAppendProxyOption(String(username ?? "").trim(), "country", requiredProxyCountry())];
   const state = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_STATE", "CHROME_PROXY_STATE", "PROXY_STATE"));
   const city = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_CITY", "CHROME_PROXY_CITY", "PROXY_CITY"));
   const zip = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_ZIP", "CHROME_PROXY_ZIP", "PROXY_ZIP"));
   const sessionDuration = Math.max(1, Math.min(1440, Math.floor(numberFromEnv("DECODO_PROXY_SESSION_DURATION_MINUTES", 20))));
   const session = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_SESSION")) || proxySessionToken(sessionId);
 
-  if (country && !/-country-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`country-${country}`);
   if (state && !/-state-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`state-${state}`);
   if (city && !/-city-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`city-${city}`);
   if (zip && !/-zip-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`zip-${zip}`);

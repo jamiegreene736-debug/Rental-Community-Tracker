@@ -75,6 +75,7 @@ const HEADLESS_USER_DATA_ROOT = process.env.SIDECAR_HEADLESS_USER_DATA_DIR ??
   path.join(os.homedir(), "Library/Application Support/VrboSidecar-Headless");
 const HEADLESS_PROXY_ENABLED = process.env.SIDECAR_HEADLESS_PROXY_ENABLED !== "0";
 const HEADLESS_PROXY_DIRECT_FALLBACK = process.env.SIDECAR_HEADLESS_PROXY_DIRECT_FALLBACK !== "0";
+const REQUIRED_PROXY_COUNTRY = "us";
 const REQUIRE_SERVER_CHROME_PROVIDERS = new Set(
   String(process.env.SIDECAR_REQUIRE_SERVER_CHROME_PROVIDERS ?? "vrbo,booking")
     .split(",")
@@ -206,6 +207,14 @@ function sanitizeProxyOption(value) {
     .slice(0, 64);
 }
 
+function replaceOrAppendProxyOption(value, option, optionValue) {
+  const safeOptionValue = sanitizeProxyOption(optionValue);
+  if (!safeOptionValue) return value;
+  const pattern = new RegExp(`(^|-)${option}-[a-z0-9_]+(?=-|$)`, "i");
+  if (pattern.test(value)) return value.replace(pattern, `$1${option}-${safeOptionValue}`);
+  return `${value}-${option}-${safeOptionValue}`;
+}
+
 function headlessProxySessionId() {
   const base = [
     activeRuntimeRequest?.id,
@@ -222,11 +231,7 @@ function headlessProxySessionId() {
 }
 
 function appendBrightDataUsernameOptions(username) {
-  let next = username;
-  const country = sanitizeProxyOption(nonEmptyEnv("CHROME_PROXY_COUNTRY", "BRIGHTDATA_PROXY_COUNTRY"));
-  if (country && !/-country-[a-z0-9_]+(?:-|$)/i.test(next)) {
-    next += `-country-${country}`;
-  }
+  let next = replaceOrAppendProxyOption(username, "country", REQUIRED_PROXY_COUNTRY);
   if (!/-session-[a-z0-9_]+(?:-|$)/i.test(next)) {
     next += `-session-${headlessProxySessionId()}`;
   }
