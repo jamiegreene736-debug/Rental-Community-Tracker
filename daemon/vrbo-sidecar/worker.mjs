@@ -1068,6 +1068,13 @@ const chromeSidecarManager = new ChromeSidecarManager({ viewport: VIEWPORT, log 
 
 async function acquireChromeForRequest(request = {}) {
   if (USE_HEADLESS_LOCAL_BROWSER) {
+    if (requiresServerChromeForOp(request?.opType)) {
+      throw new ProviderBrowserUnavailableError(
+        `${providerKeyForOp(request?.opType).toUpperCase()} requires headed server Google Chrome/noVNC for this search. ` +
+        `SIDECAR_BROWSER_MODE=${SIDECAR_BROWSER_MODE} would run it headless, so the provider search was refused instead of getting stuck behind CAPTCHA or bot checks.`,
+        { opType: request?.opType, provider: providerKeyForOp(request?.opType) },
+      );
+    }
     return {
       type: "headless",
       label: WORKER_ROLE === "server" ? "Railway headless Chromium" : "local headless Chrome",
