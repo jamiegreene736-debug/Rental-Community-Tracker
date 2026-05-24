@@ -105,11 +105,11 @@ const REQUEST_MAX_ATTEMPTS = Math.max(1, Math.floor(Number(process.env.SIDECAR_R
 const REQUEST_RETRY_BASE_MS = Math.max(250, Number(process.env.SIDECAR_REQUEST_RETRY_BASE_MS ?? 1_500) || 1_500);
 const VRBO_HARD_BLOCK_FRESH_RETRIES = Math.max(
   0,
-  Math.floor(Number(process.env.SIDECAR_VRBO_HARD_BLOCK_FRESH_RETRIES ?? 2) || 2),
+  Math.floor(Number(process.env.SIDECAR_VRBO_HARD_BLOCK_FRESH_RETRIES ?? 4) || 4),
 );
 const VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES = Math.max(
   0,
-  Math.floor(Number(process.env.SIDECAR_VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES ?? 0) || 0),
+  Math.floor(Number(process.env.SIDECAR_VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES ?? VRBO_HARD_BLOCK_FRESH_RETRIES) || VRBO_HARD_BLOCK_FRESH_RETRIES),
 );
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
@@ -2297,8 +2297,15 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
       await showVrboManualVerificationBanner(targetPage, label);
     }
 
-    throw new Error(
-      "Vrbo manual verification still required. Complete the human check in the sidecar Chrome window, then rerun the request.",
+    throw new VrboHardBlockError(
+      "VRBO CAPTCHA was not cleared before the manual verification timeout; rotating to a fresh Chrome profile and proxy session",
+      {
+        label,
+        id,
+        url: state?.url,
+        title: state?.title,
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      },
     );
   } finally {
     await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});

@@ -44,6 +44,12 @@ const SUBMIT_URL = "https://2captcha.com/in.php";
 const POLL_URL = "https://2captcha.com/res.php";
 const API_V2_BASE_URL = "https://api.2captcha.com";
 
+function dataDomeSolveShouldUseFreshProxy(error: string): boolean {
+  return /ERR_PROXY_CONNECTION_FAILED|ERROR_CAPTCHA_UNSOLVABLE|ERROR_BAD_PROXY|ERROR_PROXY|ERROR_TASK_ABSENT|timeout|didn'?t return DataDome solution/i.test(
+    String(error ?? ""),
+  );
+}
+
 /**
  * Submit a base64-encoded image to 2captcha and poll until the
  * solution arrives or we hit the polling ceiling.
@@ -468,10 +474,11 @@ export async function solveDataDomeSliderCaptcha(
   }
   if (createData?.errorId !== 0 || !createData?.taskId) {
     const errorCode = String(createData?.errorCode ?? "UNKNOWN");
+    const error = `2captcha DataDome submit rejected: ${errorCode} ${createData?.errorDescription ?? ""}`.trim();
     return {
       ok: false,
-      retryableWithFreshProxy: /ERR_PROXY_CONNECTION_FAILED|ERROR_CAPTCHA_UNSOLVABLE/i.test(errorCode),
-      error: `2captcha DataDome submit rejected: ${errorCode} ${createData?.errorDescription ?? ""}`.trim(),
+      retryableWithFreshProxy: dataDomeSolveShouldUseFreshProxy(error),
+      error,
     };
   }
 
@@ -492,10 +499,11 @@ export async function solveDataDomeSliderCaptcha(
     }
     if (pollData?.errorId && pollData.errorId !== 0) {
       const errorCode = String(pollData.errorCode ?? "UNKNOWN");
+      const error = `2captcha DataDome poll returned error after id ${captchaId}: ${errorCode} ${pollData.errorDescription ?? ""}`.trim();
       return {
         ok: false,
-        retryableWithFreshProxy: /ERR_PROXY_CONNECTION_FAILED|ERROR_CAPTCHA_UNSOLVABLE/i.test(errorCode),
-        error: `2captcha DataDome poll returned error after id ${captchaId}: ${errorCode} ${pollData.errorDescription ?? ""}`.trim(),
+        retryableWithFreshProxy: dataDomeSolveShouldUseFreshProxy(error),
+        error,
       };
     }
     if (pollData?.status === "ready") {
@@ -507,8 +515,6 @@ export async function solveDataDomeSliderCaptcha(
     }
   }
 
-  return {
-    ok: false,
-    error: `2captcha didn't return DataDome solution for id ${captchaId} within ${pollSeconds}s. Worker queue may be slow; if persistent, increase pollSeconds or check 2captcha.com status.`,
-  };
+  const error = `2captcha didn't return DataDome solution for id ${captchaId} within ${pollSeconds}s. Worker queue may be slow; if persistent, increase pollSeconds or check 2captcha.com status.`;
+  return { ok: false, retryableWithFreshProxy: true, error };
 }
