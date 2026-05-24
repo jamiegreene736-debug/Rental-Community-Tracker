@@ -434,6 +434,16 @@ function transientErrorMessage(message) {
   );
 }
 
+function providerTunnelProxyErrorMessage(message) {
+  return /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_PROXY_AUTH_UNSUPPORTED|tunnel connection failed|proxy.*(?:407|429|500|502|503|504)|HTTP\s+(?:407|429|500|502|503|504).*(?:CONNECT|proxy)|upstream CONNECT failed/i.test(
+    String(message ?? ""),
+  );
+}
+
+function isProviderTunnelProxyError(error) {
+  return providerTunnelProxyErrorMessage(error?.message ?? error);
+}
+
 function isTransientScrapeError(error) {
   if (
     error instanceof SidecarCancelledError ||
@@ -2025,7 +2035,38 @@ async function solveDataDomeCaptchaViaServer(targetPage, label, id) {
     sameSite: "Lax",
   }]);
   log(`${label} ${id}: injected DataDome cookie from 2Captcha id=${r.captchaId}${r.cost ? ` cost=${r.cost}` : ""}${r.ip ? ` solverIp=${r.ip}` : ""}`);
-  await targetPage.reload({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS }).catch(() => {});
+  const cookieLanded = await targetPage.context()
+    .cookies("https://www.vrbo.com/")
+    .then((cookies) => cookies.some((cookie) => cookie.name === "datadome" && cookie.value === cookieValue))
+    .catch(() => false);
+  if (!cookieLanded) {
+    log(`${label} ${id}: DataDome cookie injection did not appear in the VRBO cookie jar; rotating proxy/profile`);
+    throw new VrboHardBlockError("2Captcha DataDome cookie did not land in Chrome; rotating proxy/profile", {
+      label,
+      id,
+      url: params.websiteURL,
+      title: await targetPage.title().catch(() => ""),
+      excerpt: "datadome cookie missing after context.addCookies",
+    });
+  }
+  const currentUrl = targetPage.url() || params.websiteURL;
+  const navError = await targetPage
+    .goto(currentUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS })
+    .then(() => null)
+    .catch((e) => e);
+  if (navError && isProviderTunnelProxyError(navError)) {
+    throw new VrboHardBlockError("VRBO proxy tunnel failed while validating DataDome cookie; rotating proxy/profile", {
+      label,
+      id,
+      url: currentUrl,
+      title: await targetPage.title().catch(() => ""),
+      excerpt: String(navError?.message ?? navError).slice(0, 500),
+      proxyTunnel: true,
+    });
+  }
+  if (navError) {
+    log(`${label} ${id}: DataDome validation navigation warning: ${navError?.message ?? navError}`);
+  }
   await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
   return !(await pageLooksLikeVrboHumanChallenge(targetPage));
 }
@@ -6069,8 +6110,21 @@ async function tick() {
         const vrboFreshRetryLimit = e instanceof VrboHardBlockError && e.details?.noLiveBrowser === true
           ? VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES
           : VRBO_HARD_BLOCK_FRESH_RETRIES;
+        const providerTunnelProxyRetry =
+          isVrboOp &&
+          isProviderTunnelProxyError(e) &&
+          attempt < maxAttempts &&
+          vrboHardBlockRetries < vrboFreshRetryLimit;
+        if (providerTunnelProxyRetry) {
+          lastError = new VrboHardBlockError("VRBO provider proxy tunnel failed; retrying with a fresh Chrome profile and proxy session", {
+            url: req.url,
+            title: "VRBO proxy tunnel failure",
+            excerpt: String(e?.message ?? e).slice(0, 500),
+            proxyTunnel: true,
+          });
+        }
         const hardBlockRetry =
-          e instanceof VrboHardBlockError &&
+          (lastError instanceof VrboHardBlockError || e instanceof VrboHardBlockError) &&
           isVrboOp &&
           attempt < maxAttempts &&
           vrboHardBlockRetries < vrboFreshRetryLimit;
@@ -6079,13 +6133,21 @@ async function tick() {
         if (hardBlockRetry) {
           vrboHardBlockRetries += 1;
           req.vrboFreshAttempt = vrboHardBlockRetries;
-          req.freshSessionReason = "vrbo_hard_block";
-          await sendHeartbeat(`VRBO hard block; retrying fresh session ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`, true, req.id).catch(() => {});
+          req.freshSessionReason = providerTunnelProxyRetry ? "vrbo_proxy_tunnel" : "vrbo_hard_block";
+          await sendHeartbeat(
+            providerTunnelProxyRetry
+              ? `VRBO proxy tunnel failed; retrying fresh session ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`
+              : `VRBO hard block; retrying fresh session ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`,
+            true,
+            req.id,
+          ).catch(() => {});
           await postScreenSnapshot(
             { ...req, opType: req.opType ?? "vrbo_search" },
             page,
-            `VRBO blocked - fresh retry ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`,
-            { captcha: true, error: e?.message ?? String(e), force: true },
+            providerTunnelProxyRetry
+              ? `VRBO proxy tunnel failed - fresh retry ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`
+              : `VRBO blocked - fresh retry ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`,
+            { captcha: !providerTunnelProxyRetry, error: lastError?.message ?? e?.message ?? String(e), force: true },
           ).catch(() => {});
         } else if (e instanceof VrboHardBlockError && isVrboOp) {
           lastError = new VrboHardBlockError(
@@ -6097,7 +6159,7 @@ async function tick() {
         }
         log(
           `attempt ${attempt}/${maxAttempts} failed for ${req.id}: ${lastError?.message ?? e?.message ?? e}` +
-          (hardBlockRetry ? " (VRBO hard block; fresh session retry)" : transientRetry ? " (transient; will retry)" : ""),
+          (hardBlockRetry ? " (VRBO fresh session retry)" : transientRetry ? " (transient; will retry)" : ""),
         );
         await teardownBrowser(
           hardBlockRetry
