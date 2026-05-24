@@ -5733,6 +5733,22 @@ export async function registerRoutes(
         { field: "createdAt", operator: "$gte", value: start.toISOString() },
       ]));
       let reservations: any[] = [];
+      const fetchUnfilteredRecentReservations = async () => {
+        const fallbackRows: any[] = [];
+        for (let page = 0; page < maxPages; page++) {
+          const data = await guestyRequest("GET", `/reservations?limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
+          const pageRows = unwrapReservations(data);
+          if (pageRows.length === 0) break;
+          fallbackRows.push(...pageRows);
+          const datedRows = pageRows
+            .map(bookingActivityAt)
+            .filter((d): d is Date => !!d);
+          const pageIsOlderThanWindow =
+            datedRows.length > 0 && datedRows.every((d) => d < start);
+          if (pageRows.length < limit || pageIsOlderThanWindow) break;
+        }
+        return fallbackRows;
+      };
       try {
         for (let page = 0; page < maxPages; page++) {
           const data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
@@ -5746,22 +5762,14 @@ export async function registerRoutes(
             datedRows.length > 0 && datedRows.every((d) => d < start);
           if (pageRows.length < limit || pageIsOlderThanWindow) break;
         }
+        if (reservations.length === 0) {
+          reservations = await fetchUnfilteredRecentReservations();
+        }
       } catch (filteredErr) {
         // Some Guesty accounts reject createdAt filters even though list
         // sorting works. Fall back to paged reads so the tile remains a
         // real rolling 30-day window instead of only the first page.
-        for (let page = 0; page < maxPages; page++) {
-          const data = await guestyRequest("GET", `/reservations?limit=${limit}&skip=${page * limit}&sort=-createdAt&fields=${fields}`);
-          const pageRows = unwrapReservations(data);
-          if (pageRows.length === 0) break;
-          reservations.push(...pageRows);
-          const datedRows = pageRows
-            .map(bookingActivityAt)
-            .filter((d): d is Date => !!d);
-          const pageIsOlderThanWindow =
-            datedRows.length > 0 && datedRows.every((d) => d < start);
-          if (pageRows.length < limit || pageIsOlderThanWindow) break;
-        }
+        reservations = await fetchUnfilteredRecentReservations();
       }
 
       let revenue = 0;
