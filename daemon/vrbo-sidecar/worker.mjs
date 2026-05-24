@@ -1654,6 +1654,40 @@ const VRBO_HUMAN_CHALLENGE_RE =
   /show us your human side|we can.?t tell if you.?re a human|press and hold|slide (?:the )?(?:lock|slider)|captcha|not a robot|bot or not|verify (?:that )?you(?:'re| are) human|human verification|unusual traffic/i;
 const VRBO_HARD_BLOCK_RE =
   /you have been blocked|something about the behaviour of the browser|robot on the same network/i;
+const BRIGHTDATA_KYC_BLOCK_RE =
+  /residential failed.*bad_endpoint|not available for immediate residential|no kyc access mode|brightdata\.com\/cp\/kyc/i;
+
+function stateLooksLikeBrightDataKycBlock(state) {
+  if (!state) return false;
+  return BRIGHTDATA_KYC_BLOCK_RE.test(
+    `${state.title ?? ""}\n${state.bodyExcerpt ?? ""}\n${state.bodyHtmlSnippet ?? ""}\n${state.url ?? ""}`,
+  );
+}
+
+function providerHostFromUrl(rawUrl) {
+  try {
+    return new URL(String(rawUrl || "")).hostname.replace(/^www\./, "") || "provider";
+  } catch {
+    return "provider";
+  }
+}
+
+function throwIfBrightDataKycBlock(state, label, id) {
+  if (!stateLooksLikeBrightDataKycBlock(state)) return;
+  const host = providerHostFromUrl(state?.url);
+  throw new ProviderBrowserUnavailableError(
+    `Bright Data residential proxy blocked ${host}: KYC is required for this target site. ` +
+      "Complete Bright Data KYC for the active residential zone or switch this worker to a proxy zone that is approved for the target.",
+    {
+      label,
+      id,
+      provider: host,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+    },
+  );
+}
 
 function stateLooksLikeVrboHumanChallenge(state) {
   if (!state) return false;
@@ -2313,6 +2347,7 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
   const maybeClearVrboChallenge = async (stage) => {
     if (!isVrbo) return false;
     const state = await withSoftTimeout(captureVrboChallengeState(page), 2_000, null);
+    throwIfBrightDataKycBlock(state, label, requestId);
     throwIfVrboHardBlock(state, label, requestId);
     if (stateLooksLikeVrboHumanChallenge(state) || (await pageLooksLikeVrboHumanChallenge(page))) {
       log(`${label} ${requestId}: VRBO challenge detected during homepage prime (${stage})`);
@@ -2334,7 +2369,7 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
       return true;
     }
   } catch (e) {
-    if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError) throw e;
+    if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError || e instanceof ProviderBrowserUnavailableError) throw e;
     log(`${label}: homepage search prime skipped: ${e?.message ?? e}`);
   }
   return false;
@@ -3325,11 +3360,13 @@ async function processVrboSearch(id, params) {
   await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
   await applyVrboBedroomFilter(bedrooms).catch(() => false);
   let state = await dumpPageState("vrbo", { id, ...params });
+  throwIfBrightDataKycBlock(state, "vrbo_search", id);
   throwIfVrboHardBlock(state, "vrbo_search", id);
   if (await waitForVrboManualVerification(page, "vrbo_search", id, state)) {
     await dismissObstructions(page, "vrbo_search_after_manual_verify").catch(() => null);
     await applyVrboBedroomFilter(bedrooms).catch(() => false);
     state = await dumpPageState("vrbo", { id, ...params });
+    throwIfBrightDataKycBlock(state, "vrbo_search", id);
     throwIfVrboHardBlock(state, "vrbo_search", id);
   }
   if (stateLooksLikeVrboHumanChallenge(state)) {
@@ -6054,6 +6091,14 @@ async function tick() {
       log(`cancelled ${req.id} in ${Date.now() - startedAt}ms`);
     } else {
       log(`process error for ${req.id}: ${e.message}`);
+    }
+    if (e instanceof ProviderBrowserUnavailableError) {
+      await postScreenSnapshot(
+        { ...req, opType: req.opType ?? "request" },
+        page,
+        "provider proxy unavailable",
+        { error: e.message, force: true },
+      ).catch(() => {});
     }
     try { await postResult(req.id, undefined, e.message ?? String(e)); } catch {}
     if (e instanceof SidecarHardTimeoutError) {
