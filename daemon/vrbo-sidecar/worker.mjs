@@ -129,6 +129,7 @@ let captchaWindowVisible = false;
 let launchedPersistentContext = false;
 let activeRuntimeRequest = null;
 let activeHeadlessProxyBridge = null;
+let activeBrowserFingerprint = null;
 
 function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
@@ -664,6 +665,7 @@ async function installContextGuards() {
   context.on("page", (createdPage) => {
     scheduleSidecarMinimize(createdPage);
     void (async () => {
+      await applyFingerprintToPage(createdPage).catch(() => {});
       await createdPage.waitForLoadState("domcontentloaded", { timeout: 3_000 }).catch(() => {});
       scheduleSidecarMinimize(createdPage);
       const rawUrl = createdPage.url?.() ?? "";
@@ -1151,6 +1153,189 @@ async function verifyActiveChromeHealth(label = "chrome health") {
   return true;
 }
 
+function hashString(value) {
+  let hash = 2166136261;
+  const text = String(value ?? "");
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state += 0x6D2B79F5;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function pickOne(items, rand) {
+  return items[Math.floor(rand() * items.length) % items.length];
+}
+
+function browserFingerprintForRequest(request = activeRuntimeRequest) {
+  if (process.env.SIDECAR_BROWSER_FINGERPRINT_RANDOMIZATION === "0") return null;
+  const seedText = [
+    request?.id,
+    request?.opType,
+    request?.freshSessionReason,
+    request?.requestAttempt ?? 0,
+    request?.vrboFreshAttempt ?? 0,
+    WORKER_SLOT,
+    Date.now().toString(36),
+  ].filter((part) => part != null && part !== "").join("|");
+  const rand = seededRandom(hashString(seedText));
+  const chromeMajor = pickOne([124, 125, 126, 127], rand);
+  const chromePatch = 6000 + Math.floor(rand() * 2200);
+  const personas = [
+    {
+      os: "windows",
+      platform: "Win32",
+      uaPlatform: "Windows",
+      userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.${chromePatch}.0 Safari/537.36`,
+      viewport: pickOne([{ width: 1366, height: 768 }, { width: 1440, height: 900 }, { width: 1536, height: 864 }, { width: 1600, height: 900 }, { width: 1920, height: 1080 }], rand),
+      webglVendor: "Google Inc. (Intel)",
+      webglRenderer: pickOne([
+        "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      ], rand),
+    },
+    {
+      os: "macos",
+      platform: "MacIntel",
+      uaPlatform: "macOS",
+      userAgent: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.${chromePatch}.0 Safari/537.36`,
+      viewport: pickOne([{ width: 1440, height: 900 }, { width: 1512, height: 982 }, { width: 1680, height: 1050 }, { width: 1728, height: 1117 }], rand),
+      webglVendor: "Google Inc. (Apple)",
+      webglRenderer: pickOne([
+        "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)",
+        "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "ANGLE (Apple, ANGLE Metal Renderer: Intel(R) Iris(TM) Plus Graphics, Unspecified Version)",
+      ], rand),
+    },
+  ];
+  const persona = pickOne(personas, rand);
+  const timezone = pickOne(["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Pacific/Honolulu"], rand);
+  const deviceScaleFactor = persona.os === "macos" ? pickOne([1, 2], rand) : pickOne([1, 1.25, 1.5], rand);
+  const hardwareConcurrency = pickOne([4, 6, 8, 10, 12], rand);
+  const deviceMemory = pickOne([4, 8, 16], rand);
+  const id = hashString(`${seedText}|${persona.os}|${persona.viewport.width}x${persona.viewport.height}|${timezone}`).toString(16);
+  return {
+    id,
+    ...persona,
+    locale: "en-US",
+    language: "en-US",
+    languages: ["en-US", "en"],
+    acceptLanguage: "en-US,en;q=0.9",
+    timezone,
+    deviceScaleFactor,
+    hardwareConcurrency,
+    deviceMemory,
+    maxTouchPoints: 0,
+    screen: {
+      width: persona.viewport.width,
+      height: persona.viewport.height,
+      availWidth: persona.viewport.width,
+      availHeight: Math.max(640, persona.viewport.height - 40),
+      colorDepth: 24,
+      pixelDepth: 24,
+    },
+  };
+}
+
+async function installFingerprintInitScript(targetContext, fingerprint) {
+  if (!targetContext || !fingerprint) return;
+  await withSoftTimeout(targetContext.setExtraHTTPHeaders?.({ "Accept-Language": fingerprint.acceptLanguage }), 1_500, null);
+  await withSoftTimeout(targetContext.addInitScript((fp) => {
+    const defineGetter = (target, prop, value) => {
+      try {
+        Object.defineProperty(target, prop, { get: () => value, configurable: true });
+      } catch {}
+    };
+    defineGetter(Navigator.prototype, "webdriver", undefined);
+    defineGetter(Navigator.prototype, "platform", fp.platform);
+    defineGetter(Navigator.prototype, "hardwareConcurrency", fp.hardwareConcurrency);
+    defineGetter(Navigator.prototype, "deviceMemory", fp.deviceMemory);
+    defineGetter(Navigator.prototype, "language", fp.language);
+    defineGetter(Navigator.prototype, "languages", fp.languages);
+    defineGetter(Navigator.prototype, "maxTouchPoints", fp.maxTouchPoints);
+    defineGetter(Screen.prototype, "width", fp.screen.width);
+    defineGetter(Screen.prototype, "height", fp.screen.height);
+    defineGetter(Screen.prototype, "availWidth", fp.screen.availWidth);
+    defineGetter(Screen.prototype, "availHeight", fp.screen.availHeight);
+    defineGetter(Screen.prototype, "colorDepth", fp.screen.colorDepth);
+    defineGetter(Screen.prototype, "pixelDepth", fp.screen.pixelDepth);
+    try {
+      if (!window.chrome) {
+        Object.defineProperty(window, "chrome", {
+          value: { runtime: {} },
+          configurable: true,
+        });
+      }
+    } catch {}
+    const patchWebGL = (Proto) => {
+      if (!Proto?.prototype?.getParameter) return;
+      const original = Proto.prototype.getParameter;
+      Object.defineProperty(Proto.prototype, "getParameter", {
+        value(parameter) {
+          if (parameter === 37445) return fp.webglVendor;
+          if (parameter === 37446) return fp.webglRenderer;
+          return original.apply(this, arguments);
+        },
+        configurable: true,
+      });
+    };
+    patchWebGL(window.WebGLRenderingContext);
+    patchWebGL(window.WebGL2RenderingContext);
+  }, fingerprint), 1_500, null);
+}
+
+async function applyFingerprintToPage(targetPage = page, fingerprint = activeBrowserFingerprint) {
+  if (!targetPage || targetPage.isClosed?.() || !fingerprint) return;
+  await withSoftTimeout(targetPage.addInitScript((fp) => {
+    const defineGetter = (target, prop, value) => {
+      try { Object.defineProperty(target, prop, { get: () => value, configurable: true }); } catch {}
+    };
+    defineGetter(Navigator.prototype, "webdriver", undefined);
+    defineGetter(Navigator.prototype, "platform", fp.platform);
+    defineGetter(Navigator.prototype, "hardwareConcurrency", fp.hardwareConcurrency);
+    defineGetter(Navigator.prototype, "deviceMemory", fp.deviceMemory);
+    defineGetter(Navigator.prototype, "language", fp.language);
+    defineGetter(Navigator.prototype, "languages", fp.languages);
+    defineGetter(Navigator.prototype, "maxTouchPoints", fp.maxTouchPoints);
+  }, fingerprint), 1_500, null);
+  await withSoftTimeout(targetPage.setViewportSize(fingerprint.viewport), 1_500, null);
+  const session = await withSoftTimeout(context?.newCDPSession(targetPage), 1_500, null);
+  if (!session) return;
+  try {
+    await withSoftTimeout(session.send("Network.setUserAgentOverride", {
+      userAgent: fingerprint.userAgent,
+      acceptLanguage: fingerprint.acceptLanguage,
+      platform: fingerprint.uaPlatform,
+    }), 1_500, null);
+    await withSoftTimeout(session.send("Emulation.setTimezoneOverride", { timezoneId: fingerprint.timezone }), 1_500, null);
+    await withSoftTimeout(session.send("Emulation.setLocaleOverride", { locale: fingerprint.locale }), 1_500, null);
+    await withSoftTimeout(session.send("Emulation.setDeviceMetricsOverride", {
+      width: fingerprint.viewport.width,
+      height: fingerprint.viewport.height,
+      deviceScaleFactor: fingerprint.deviceScaleFactor,
+      mobile: false,
+      screenWidth: fingerprint.screen.width,
+      screenHeight: fingerprint.screen.height,
+      positionX: 0,
+      positionY: 0,
+    }), 1_500, null);
+  } finally {
+    await withSoftTimeout(session.detach(), 500, null);
+  }
+}
+
 async function releaseChromeForRequest() {
   if (usingHeadlessRuntime()) {
     activeChromeAllocation = null;
@@ -1168,7 +1353,9 @@ async function releaseChromeForRequest() {
 
 async function normalizePageDisplay(targetPage = page) {
   if (!targetPage || targetPage.isClosed?.()) return;
-  await withSoftTimeout(targetPage.setViewportSize(VIEWPORT), 1_500);
+  const viewport = activeBrowserFingerprint?.viewport ?? VIEWPORT;
+  await withSoftTimeout(targetPage.setViewportSize(viewport), 1_500);
+  await applyFingerprintToPage(targetPage).catch(() => {});
   const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
   if (session) {
     await withSoftTimeout(session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 }), 1_500);
@@ -1223,6 +1410,15 @@ async function ensureBrowser() {
   await verifyActiveChromeHealth("before connect");
   browser = await chromium.connectOverCDP(allocation.cdpUrl);
   context = browser.contexts()[0] ?? (await browser.newContext());
+  activeBrowserFingerprint = browserFingerprintForRequest(activeRuntimeRequest);
+  await installFingerprintInitScript(context, activeBrowserFingerprint);
+  if (activeBrowserFingerprint) {
+    log(
+      `browser fingerprint ${activeBrowserFingerprint.id}: ${activeBrowserFingerprint.os} ` +
+      `${activeBrowserFingerprint.viewport.width}x${activeBrowserFingerprint.viewport.height} ` +
+      `tz=${activeBrowserFingerprint.timezone} hc=${activeBrowserFingerprint.hardwareConcurrency} dm=${activeBrowserFingerprint.deviceMemory}`,
+    );
+  }
   await installContextGuards();
   await clearContextStorageForFreshRun("server Chrome startup");
   await syncRemoteCookies();
@@ -1322,9 +1518,20 @@ async function ensureHeadlessBrowser() {
       "--ignore-certificate-errors",
       "--no-first-run",
       "--no-default-browser-check",
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+      "--webrtc-ip-handling-policy=disable_non_proxied_udp",
       "--disable-dev-shm-usage",
     ],
   };
+  activeBrowserFingerprint = browserFingerprintForRequest(activeRuntimeRequest);
+  if (activeBrowserFingerprint) {
+    launchOptions.viewport = activeBrowserFingerprint.viewport;
+    launchOptions.locale = activeBrowserFingerprint.locale;
+    launchOptions.timezoneId = activeBrowserFingerprint.timezone;
+    launchOptions.deviceScaleFactor = activeBrowserFingerprint.deviceScaleFactor;
+    launchOptions.userAgent = activeBrowserFingerprint.userAgent;
+    launchOptions.args.push(`--lang=${activeBrowserFingerprint.language}`);
+  }
   if (HEADLESS_CHROMIUM_EXECUTABLE_PATH) {
     launchOptions.executablePath = HEADLESS_CHROMIUM_EXECUTABLE_PATH;
   } else {
@@ -1338,6 +1545,14 @@ async function ensureHeadlessBrowser() {
   context = await chromium.launchPersistentContext(userDataDir, launchOptions);
   launchedPersistentContext = true;
   browser = context.browser?.() ?? null;
+  await installFingerprintInitScript(context, activeBrowserFingerprint);
+  if (activeBrowserFingerprint) {
+    log(
+      `browser fingerprint ${activeBrowserFingerprint.id}: ${activeBrowserFingerprint.os} ` +
+      `${activeBrowserFingerprint.viewport.width}x${activeBrowserFingerprint.viewport.height} ` +
+      `tz=${activeBrowserFingerprint.timezone} hc=${activeBrowserFingerprint.hardwareConcurrency} dm=${activeBrowserFingerprint.deviceMemory}`,
+    );
+  }
   await installContextGuards();
   await clearContextStorageForFreshRun("headless startup");
   await syncRemoteCookies();
@@ -1439,6 +1654,7 @@ async function teardownBrowser(reason) {
   page = null;
   contextGuardsInstalled = false;
   launchedPersistentContext = false;
+  activeBrowserFingerprint = null;
   await closeHeadlessProxyBridge(reason);
   await releaseChromeForRequest();
 }
@@ -5979,26 +6195,22 @@ async function processRequest(req) {
     bedrooms: req.bedrooms,
   };
 
+  const runtimeRequest = {
+    id: req.id,
+    opType,
+    requestAttempt: req.requestAttempt ?? 0,
+    vrboFreshAttempt: req.vrboFreshAttempt ?? 0,
+    freshSessionReason: req.freshSessionReason,
+  };
+
   // Acquire the browser at the request boundary so the worker pool can
   // spread jobs across either configured CDP/noVNC sidecars or the
   // no-window local headless fallback.
   try {
+    activeRuntimeRequest = runtimeRequest;
     if (!USE_HEADLESS_LOCAL_BROWSER) {
-      await acquireChromeForRequest({
-        id: req.id,
-        opType,
-        requestAttempt: req.requestAttempt ?? 0,
-        vrboFreshAttempt: req.vrboFreshAttempt ?? 0,
-        freshSessionReason: req.freshSessionReason,
-      });
+      await acquireChromeForRequest(runtimeRequest);
     }
-    activeRuntimeRequest = {
-      id: req.id,
-      opType,
-      requestAttempt: req.requestAttempt ?? 0,
-      vrboFreshAttempt: req.vrboFreshAttempt ?? 0,
-      freshSessionReason: req.freshSessionReason,
-    };
     await ensureBrowser();
   } catch (e) {
     activeRuntimeRequest = null;
