@@ -1694,6 +1694,20 @@ class SidecarCancelledError extends Error {
   }
 }
 
+const cancelledRequestIds = new Set();
+
+function noteRequestCancelled(id) {
+  if (id) cancelledRequestIds.add(id);
+}
+
+function forgetRequestCancelled(id) {
+  if (id) cancelledRequestIds.delete(id);
+}
+
+function throwIfRequestCancelled(id) {
+  if (id && cancelledRequestIds.has(id)) throw new SidecarCancelledError(id);
+}
+
 async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
   const now = Date.now();
   if (!force && now - lastHeartbeatSentAt < 15_000) return false;
@@ -1710,6 +1724,7 @@ async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json().catch(() => ({}));
     if (id && data?.cancelled) {
+      noteRequestCancelled(id);
       log(`${label}: server cancelled request ${id}; closing active Chrome task`);
       await teardownBrowser(`server cancelled ${id}`);
       throw new SidecarCancelledError(id);
@@ -1726,11 +1741,13 @@ async function sendHeartbeat(label = "heartbeat", force = false, id = null) {
 
 function startBusyHeartbeat(label, id = null) {
   void sendHeartbeat(`start ${label}`, true, id).catch((e) => {
-    if (!(e instanceof SidecarCancelledError)) log(`start ${label} heartbeat failed: ${e?.message ?? e}`);
+    if (e instanceof SidecarCancelledError) noteRequestCancelled(id);
+    else log(`start ${label} heartbeat failed: ${e?.message ?? e}`);
   });
   const interval = setInterval(() => {
     void sendHeartbeat(`busy ${label}`, true, id).catch((e) => {
-      if (!(e instanceof SidecarCancelledError)) log(`busy ${label} heartbeat failed: ${e?.message ?? e}`);
+      if (e instanceof SidecarCancelledError) noteRequestCancelled(id);
+      else log(`busy ${label} heartbeat failed: ${e?.message ?? e}`);
     });
   }, Math.min(HEARTBEAT_BUSY_MS, 5_000));
   interval.unref?.();
@@ -6331,6 +6348,7 @@ async function tick() {
     const maxAttempts = Math.max(1, REQUEST_MAX_ATTEMPTS + (isVrboOp ? VRBO_HARD_BLOCK_FRESH_RETRIES : 0));
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
+        throwIfRequestCancelled(req.id);
         if (attempt > 1) {
           const backoff = REQUEST_RETRY_BASE_MS * Math.pow(2, attempt - 2);
           log(
@@ -6338,12 +6356,20 @@ async function tick() {
             (req.vrboFreshAttempt ? ` (fresh VRBO session #${req.vrboFreshAttempt})` : ""),
           );
           await sleep(backoff);
+          throwIfRequestCancelled(req.id);
         }
         req.requestAttempt = attempt - 1;
         await runWithHardTimeout(`request ${req.id} ${req.opType ?? "request"}`, req.opType ?? "request", () => processRequest(req));
+        throwIfRequestCancelled(req.id);
         lastError = null;
         break;
       } catch (e) {
+        if (e instanceof SidecarCancelledError || cancelledRequestIds.has(req.id)) {
+          lastError = e instanceof SidecarCancelledError ? e : new SidecarCancelledError(req.id);
+          log(`attempt ${attempt}/${maxAttempts} stopped for ${req.id}: ${lastError.message}`);
+          await teardownBrowser("request cancelled during retry").catch(() => {});
+          break;
+        }
         lastError = e;
         const vrboFreshRetryLimit = e instanceof VrboHardBlockError && e.details?.noLiveBrowser === true
           ? VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES
@@ -6443,6 +6469,7 @@ async function tick() {
     } catch (e) {
       if (!(e instanceof SidecarCancelledError)) throw e;
     }
+    forgetRequestCancelled(req.id);
   }
 }
 

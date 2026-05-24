@@ -1198,6 +1198,14 @@ export async function searchVrboViaSidecar(opts: {
   durationMs: number;
   reason: string;
 } | null> {
+  const vrboWalletMs = Math.max(
+    opts.walletBudgetMs ?? 0,
+    numberFromEnv("SIDECAR_VRBO_SEARCH_WALLET_BUDGET_MS", 6 * 60 * 1000),
+  );
+  const vrboQueueBudgetMs = Math.max(
+    opts.queueBudgetMs ?? 0,
+    numberFromEnv("SIDECAR_VRBO_SEARCH_QUEUE_BUDGET_MS", vrboWalletMs + 60_000),
+  );
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "vrbo_search",
@@ -1210,8 +1218,8 @@ export async function searchVrboViaSidecar(opts: {
       },
     },
     pollIntervalMs: opts.pollIntervalMs,
-    walletBudgetMs: opts.walletBudgetMs,
-    queueBudgetMs: opts.queueBudgetMs,
+    walletBudgetMs: vrboWalletMs,
+    queueBudgetMs: vrboQueueBudgetMs,
     signal: opts.signal,
     stopGeneration: opts.stopGeneration,
   });
