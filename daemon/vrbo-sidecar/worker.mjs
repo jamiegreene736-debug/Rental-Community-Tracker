@@ -82,6 +82,14 @@ const REQUIRE_SERVER_CHROME_PROVIDERS = new Set(
 );
 const POLL_IDLE_MS = Number(process.env.SIDECAR_POLL_IDLE_MS ?? 1_000);
 const POLL_BUSY_MS = Number(process.env.SIDECAR_POLL_BUSY_MS ?? 2_000);
+const SCREENSHOT_MIN_INTERVAL_MS = Math.max(
+  500,
+  Number(process.env.SIDECAR_SCREENSHOT_MIN_INTERVAL_MS ?? 1_500) || 1_500,
+);
+const SCREENSHOT_HEARTBEAT_MS = Math.max(
+  1_000,
+  Number(process.env.SIDECAR_SCREENSHOT_HEARTBEAT_MS ?? 2_500) || 2_500,
+);
 const SERVER_WORKER_CLAIM_DELAY_MS = Number(process.env.SIDECAR_SERVER_WORKER_CLAIM_DELAY_MS ?? 4_000);
 const HEARTBEAT_BUSY_MS = Number(process.env.SIDECAR_HEARTBEAT_BUSY_MS ?? 30_000);
 const PAGE_NAV_TIMEOUT_MS = 35_000;
@@ -1557,7 +1565,7 @@ let lastScreenSnapshotSentAt = 0;
 
 async function postScreenSnapshot(req, targetPage = page, phase = "working", extra = {}) {
   const now = Date.now();
-  if (!extra.force && now - lastScreenSnapshotSentAt < 3_500) return false;
+  if (!extra.force && now - lastScreenSnapshotSentAt < SCREENSHOT_MIN_INTERVAL_MS) return false;
   lastScreenSnapshotSentAt = now;
   try {
     const snapshotPage = targetPage && !targetPage.isClosed?.() ? targetPage : page;
@@ -1609,7 +1617,7 @@ function startScreenHeartbeat(req) {
   const interval = setInterval(() => {
     void applyScreenControlCommands(req, page, req?.opType ?? "sidecar");
     void postScreenSnapshot(req, page, `working ${req?.opType ?? "request"}`);
-  }, 7_500);
+  }, SCREENSHOT_HEARTBEAT_MS);
   interval.unref?.();
   return () => clearInterval(interval);
 }
