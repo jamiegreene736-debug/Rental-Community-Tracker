@@ -92,6 +92,10 @@ const VRBO_HARD_BLOCK_FRESH_RETRIES = Math.max(
   0,
   Math.floor(Number(process.env.SIDECAR_VRBO_HARD_BLOCK_FRESH_RETRIES ?? 2) || 2),
 );
+const VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES = Math.max(
+  0,
+  Math.floor(Number(process.env.SIDECAR_VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES ?? 0) || 0),
+);
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
@@ -1274,7 +1278,17 @@ async function showCompletePage(opType) {
   if (!page || page.isClosed?.()) return;
   try {
     const now = new Date();
-    const html = `<!doctype html>
+    await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 }).catch(() => {});
+    await page.evaluate(
+      ({ html, title }) => {
+        document.title = title;
+        document.open();
+        document.write(html);
+        document.close();
+      },
+      {
+        title: "Sidecar Search Complete",
+        html: `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -1297,8 +1311,9 @@ async function showCompletePage(opType) {
     <div class="meta">${escapeHtml(now.toLocaleString())}</div>
   </main>
 </body>
-</html>`;
-    await page.setContent(html, { waitUntil: "domcontentloaded", timeout: 5_000 });
+</html>`,
+      },
+    );
     await normalizePageDisplay(page);
   } catch (e) {
     log(`complete page failed: ${e?.message ?? e}`);
@@ -2066,22 +2081,23 @@ async function waitForVrboManualVerification(targetPage, label, id, initialState
   await normalizePageDisplay(targetPage).catch(() => {});
   if (vrboManualVerificationUnavailableInHeadless()) {
     const retryMessage =
-      "VRBO verification appeared in no-live-browser mode; killing this browser and retrying with a new proxy/profile session.";
+      "VRBO CAPTCHA appeared in Railway headless mode; no live Chrome/noVNC session is available, so this VRBO provider search will fail fast instead of blocking the buy-in scan.";
     log(`${label} ${id}: ${retryMessage}`);
     await postScreenSnapshot(
       { id, opType: label },
       targetPage,
-      "VRBO blocked - rotating browser/IP",
+      "VRBO failed - CAPTCHA requires live browser",
       { captcha: true, error: retryMessage, force: true },
     );
     throw new VrboHardBlockError(
-      "VRBO verification cannot be trusted in headless fallback; retrying with a new proxy/profile session",
+      retryMessage,
       {
         label,
         id,
         url: state?.url,
         title: state?.title,
         excerpt: retryMessage,
+        noLiveBrowser: true,
       },
     );
   }
@@ -5862,27 +5878,32 @@ async function tick() {
         break;
       } catch (e) {
         lastError = e;
+        const vrboFreshRetryLimit = e instanceof VrboHardBlockError && e.details?.noLiveBrowser === true
+          ? VRBO_HEADLESS_HARD_BLOCK_FRESH_RETRIES
+          : VRBO_HARD_BLOCK_FRESH_RETRIES;
         const hardBlockRetry =
           e instanceof VrboHardBlockError &&
           isVrboOp &&
           attempt < maxAttempts &&
-          vrboHardBlockRetries < VRBO_HARD_BLOCK_FRESH_RETRIES;
+          vrboHardBlockRetries < vrboFreshRetryLimit;
         const transientRetry = attempt < maxAttempts && isTransientScrapeError(e);
         const canRetry = hardBlockRetry || transientRetry;
         if (hardBlockRetry) {
           vrboHardBlockRetries += 1;
           req.vrboFreshAttempt = vrboHardBlockRetries;
           req.freshSessionReason = "vrbo_hard_block";
-          await sendHeartbeat(`VRBO hard block; retrying fresh session ${vrboHardBlockRetries}/${VRBO_HARD_BLOCK_FRESH_RETRIES}`, true, req.id).catch(() => {});
+          await sendHeartbeat(`VRBO hard block; retrying fresh session ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`, true, req.id).catch(() => {});
           await postScreenSnapshot(
             { ...req, opType: req.opType ?? "vrbo_search" },
             page,
-            `VRBO blocked - fresh retry ${vrboHardBlockRetries}/${VRBO_HARD_BLOCK_FRESH_RETRIES}`,
+            `VRBO blocked - fresh retry ${vrboHardBlockRetries}/${vrboFreshRetryLimit}`,
             { captcha: true, error: e?.message ?? String(e), force: true },
           ).catch(() => {});
         } else if (e instanceof VrboHardBlockError && isVrboOp) {
           lastError = new VrboHardBlockError(
-            `VRBO hard block persisted after ${vrboHardBlockRetries} fresh session ${vrboHardBlockRetries === 1 ? "retry" : "retries"}; queued search needs manual review or a later retry`,
+            e.details?.noLiveBrowser === true
+              ? "VRBO CAPTCHA requires a live noVNC browser session, but Railway headless fallback is the only browser currently reachable. VRBO was marked failed so the buy-in scan can finish with other providers."
+              : `VRBO hard block persisted after ${vrboHardBlockRetries} fresh session ${vrboHardBlockRetries === 1 ? "retry" : "retries"}; queued search needs manual review or a later retry`,
             e.details ?? {},
           );
         }
@@ -5892,7 +5913,7 @@ async function tick() {
         );
         await teardownBrowser(
           hardBlockRetry
-            ? `fresh VRBO retry ${vrboHardBlockRetries}/${VRBO_HARD_BLOCK_FRESH_RETRIES} after hard block`
+            ? `fresh VRBO retry ${vrboHardBlockRetries}/${vrboFreshRetryLimit} after hard block`
             : canRetry
               ? "retry after transient failure"
               : "request failure cleanup",
