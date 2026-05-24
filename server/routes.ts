@@ -11082,6 +11082,8 @@ export async function registerRoutes(
       health?: ProviderHealthSnapshot | null;
       searchTerm?: string;
       accessPattern?: string;
+      bedroomFilterApplied?: boolean;
+      bedroomFilterMode?: string;
     }) => ({
       ...input,
       failureReason: providerFailureReason(input.status, input.reason, input.health ?? null),
@@ -11091,7 +11093,11 @@ export async function registerRoutes(
       retryAfterMs: input.health?.retryAfterMs ?? null,
       confidence: providerConfidence(input.status, input.raw, input.priced, input.verified),
       datesSearched: { checkIn, checkOut, nights },
-      bedroomFilter: { bedrooms, applied: true },
+      bedroomFilter: {
+        bedrooms,
+        applied: input.bedroomFilterApplied ?? true,
+        mode: input.bedroomFilterMode ?? "provider/date/search result filtering plus server-side curation",
+      },
       resultCounts: {
         raw: input.raw,
         kept: input.kept,
@@ -11128,7 +11134,10 @@ export async function registerRoutes(
         reason: vrboSidecarReason,
         health: vrboProviderHealth,
         searchTerm: vrboWebsiteSearchTerm,
-        message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
+        accessPattern: "authorized website search via sidecar; one shared all-bedroom VRBO search per resort/date, then server-side bedroom curation",
+        bedroomFilterApplied: false,
+        bedroomFilterMode: "server-side bedroom curation after shared VRBO search",
+        message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}; bedroom filter applied server-side after shared VRBO provider search${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
       }),
       enrichProviderDiagnostic({
         source: "Booking.com",

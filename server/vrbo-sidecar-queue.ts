@@ -818,10 +818,19 @@ function makeRequestKey(
 ): string {
   switch (opType) {
     case "airbnb_search":
-    case "vrbo_search":
     case "booking_search": {
       const p = params as SidecarAirbnbParams | SidecarVrboParams | SidecarBookingParams;
       return `${opType}|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.bedrooms}`;
+    }
+    case "vrbo_search": {
+      const p = params as SidecarVrboParams;
+      // VRBO searches intentionally fetch the full resort/date result
+      // set and let the server-side curation apply bedroom rules. One
+      // browser run can therefore satisfy the 3BR, 4BR, etc. passes for
+      // the same booking. Keeping bedroom count out of the dedupe key
+      // reduces repeat VRBO page loads and lowers block/CAPTCHA pressure
+      // without bypassing provider controls.
+      return `${opType}|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|all-bedrooms`;
     }
     case "vrbo_photo_scrape": {
       const p = params as SidecarVrboPhotoScrapeParams;

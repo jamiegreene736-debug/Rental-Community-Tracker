@@ -1068,8 +1068,11 @@ function buyInProviderSearchStatus(
   const dateLabel = stats.diagnostic?.datesSearched?.checkIn && stats.diagnostic?.datesSearched?.checkOut
     ? `${stats.diagnostic.datesSearched.checkIn} -> ${stats.diagnostic.datesSearched.checkOut}`
     : null;
+  const bedroomFilterMode = stats.diagnostic?.bedroomFilter?.mode;
   const bedroomLabel = typeof stats.diagnostic?.bedroomFilter?.bedrooms === "number"
-    ? `${stats.diagnostic.bedroomFilter.bedrooms}BR filter${stats.diagnostic.bedroomFilter.applied ? " applied" : ""}`
+    ? stats.diagnostic.bedroomFilter.applied
+      ? `${stats.diagnostic.bedroomFilter.bedrooms}BR filter applied`
+      : `${stats.diagnostic.bedroomFilter.bedrooms}BR ${bedroomFilterMode || "server-side curation"}`
     : null;
   let reason: string;
   if (passed) {
@@ -8144,7 +8147,7 @@ type FindBuyInDiagnostics = {
     searchTerm?: string | null;
     accessPattern?: string | null;
     datesSearched?: { checkIn?: string; checkOut?: string; nights?: number };
-    bedroomFilter?: { bedrooms?: number; applied?: boolean };
+    bedroomFilter?: { bedrooms?: number; applied?: boolean; mode?: string };
     resultCounts?: { raw?: number; kept?: number; priced?: number; verified?: number };
   }>;
   providerStatuses?: Array<{
@@ -8166,7 +8169,7 @@ type FindBuyInDiagnostics = {
     searchTerm?: string | null;
     accessPattern?: string | null;
     datesSearched?: { checkIn?: string; checkOut?: string; nights?: number };
-    bedroomFilter?: { bedrooms?: number; applied?: boolean };
+    bedroomFilter?: { bedrooms?: number; applied?: boolean; mode?: string };
     resultCounts?: { raw?: number; kept?: number; priced?: number; verified?: number };
   }>;
   issues?: Array<{
