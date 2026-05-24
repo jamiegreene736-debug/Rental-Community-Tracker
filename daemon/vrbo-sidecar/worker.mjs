@@ -117,6 +117,10 @@ function activeRequestIsVrbo() {
   return isVrboBrowserOp(activeRuntimeRequest?.opType ?? "");
 }
 
+function activeRequestShouldUseHeadlessProxy() {
+  return Boolean(activeRuntimeRequest?.opType);
+}
+
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
   // eslint-disable-next-line no-console
@@ -189,7 +193,7 @@ function appendBrightDataUsernameOptions(username) {
 
 function headlessProxyConfig() {
   if (!HEADLESS_PROXY_ENABLED) return null;
-  if (!activeRequestIsVrbo()) return null;
+  if (!activeRequestShouldUseHeadlessProxy()) return null;
   if (!boolFromEnv("CHROME_PROXY_ENABLED", false)) return null;
 
   const provider = nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER").toLowerCase();
@@ -1145,12 +1149,15 @@ async function ensureBrowser() {
 
 function headlessUserDataDirForWorker() {
   const safeSlot = String(WORKER_SLOT || "1").replace(/[^a-z0-9_-]/gi, "_");
-  if (activeRequestIsVrbo()) {
+  if (WORKER_ROLE === "server" || activeRequestIsVrbo()) {
     const safeRequestId = String(activeRuntimeRequest?.id || "vrbo")
       .replace(/[^a-z0-9_-]/gi, "_")
       .slice(0, 48);
     const freshAttempt = Math.max(0, Number(activeRuntimeRequest?.vrboFreshAttempt ?? 0));
-    return path.join(HEADLESS_USER_DATA_ROOT, `worker-${safeSlot}-vrbo-${safeRequestId}-${freshAttempt}`);
+    const safeOpType = String(activeRuntimeRequest?.opType || "request")
+      .replace(/[^a-z0-9_-]/gi, "_")
+      .slice(0, 32);
+    return path.join(HEADLESS_USER_DATA_ROOT, `worker-${safeSlot}-${safeOpType}-${safeRequestId}-${freshAttempt}`);
   }
   const freshAttempt = Number(activeRuntimeRequest?.vrboFreshAttempt ?? 0);
   if (freshAttempt > 0 && activeRuntimeRequest?.freshSessionReason === "vrbo_hard_block") {
@@ -1224,7 +1231,7 @@ async function ensureHeadlessBrowser() {
   await installContextGuards();
   await syncRemoteCookies();
   const cookies = loadCookies();
-  const shouldSeedCookies = !activeRequestIsVrbo();
+  const shouldSeedCookies = !proxyConfig && !activeRequestIsVrbo();
   const seeded = shouldSeedCookies && cookies.length ? await addCookiesBestEffort(cookies, "headless startup cookie seed") : false;
   log(
     shouldSeedCookies
