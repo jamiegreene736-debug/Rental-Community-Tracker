@@ -26,14 +26,20 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
    | `SIDECAR_SERVER` | `https://rental-community-tracker-production.up.railway.app` (your main app URL) |
    | `ADMIN_SECRET` | Same as production |
    | `MAX_LOCAL_CHROME_INSTANCES` | `8` |
-   | `CHROME_PROXY_*` / `BRIGHTDATA_*` | Same proxy vars as production if used |
+   | `CHROME_PROXY_ENABLED` | `1` |
+   | `CHROME_PROXY_PROVIDER` | `decodo` (default; do not use Bright Data unless intentional) |
+   | `DECODO_PROXY_USERNAME` / `DECODO_PROXY_PASSWORD` | Decodo residential credentials (or `CHROME_PROXY_USERNAME` / `CHROME_PROXY_PASSWORD`) |
+   | `DECODO_PROXY_HOST` | `gate.decodo.com` (default) |
+   | `DECODO_PROXY_PORT` | `7000` (default) |
+   | Optional `DECODO_PROXY_STATE`, `DECODO_PROXY_CITY`, `DECODO_PROXY_SESSION_DURATION_MINUTES` | Geo targeting |
    | `CAPTCHA_SOLVING_ENABLED` | `1` |
    | `CAPSOLVER_API_KEY` | Your CapSolver key (same as production or worker-only) |
    | `SIDECAR_VRBO_MANUAL_VERIFICATION` | `1` (fallback if CapSolver cannot solve a slider) |
 
 4. Deploy. Logs should show:
    - `Starting Railway remote sidecar worker (Xvfb + Chromium...)`
-   - `config: ... CapSolver=on` on worker slot 1
+   - `config: ... CapSolver=on; proxy=on (decodo)` on worker slot 1
+   - `proxy preflight OK: provider=decodo ... egress=<IP>` on worker slot 1
    - `using local Chrome sidecar #N via CDP` when a search starts
 
 ### VRBO + Booking search path (remote worker)
@@ -42,7 +48,7 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
 |------|----------|
 | Queue | Railway web app enqueues `vrbo_search` / `booking_search` |
 | Worker | `rct-sidecar-worker` claims job, launches Chromium in-container (Xvfb) |
-| Proxy | Bright Data vars apply when `CHROME_PROXY_ENABLED=1` |
+| Proxy | **Decodo** residential (default provider) when `CHROME_PROXY_ENABLED=1`; each VRBO job gets a new `-session-…` in the proxy username |
 | VRBO CAPTCHA | `stopOtaProviderIfBlocked` → CapSolver VisionEngine `slider_1` (puzzle + background images) → human-like drag → manual wait if still blocked |
 | Booking CAPTCHA | Same `stopOtaProviderIfBlocked` hook before scraping result cards |
 

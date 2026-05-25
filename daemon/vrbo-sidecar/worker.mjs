@@ -26,7 +26,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { ChromeSidecarManager } from "./chrome-sidecar-manager.mjs";
-import { resolveChromeProxyConfig } from "./proxy-config.mjs";
+import { resolveChromeProxyConfig, runChromeProxyStartupPreflight } from "./proxy-config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COOKIES_FILE = path.join(__dirname, "cookies.json");
@@ -6193,11 +6193,67 @@ function logSidecarStartupConfig() {
   if (WORKER_SLOT !== "1") return;
   const captchaOn =
     process.env.CAPTCHA_SOLVING_ENABLED === "1" && Boolean(String(process.env.CAPSOLVER_API_KEY ?? "").trim());
+  const proxyOn = process.env.CHROME_PROXY_ENABLED !== "0";
+  const proxyProvider = (process.env.CHROME_PROXY_PROVIDER ?? process.env.PROXY_PROVIDER ?? "decodo").toLowerCase();
   log(
     `config: server=${SERVER}; role=${WORKER_ROLE}; browserMode=${SIDECAR_BROWSER_MODE}; ` +
       `chromePrimary=${CHROME_PRIMARY}; slots=${process.env.MAX_LOCAL_CHROME_INSTANCES ?? "8"}; ` +
-      `CapSolver=${captchaOn ? "on" : "off"}; proxy=${process.env.CHROME_PROXY_ENABLED !== "0" ? "on" : "off"}`,
+      `CapSolver=${captchaOn ? "on" : "off"}; proxy=${proxyOn ? `on (${proxyProvider})` : "off"}`,
   );
+}
+
+async function logProxyStartupPreflight() {
+  if (WORKER_SLOT !== "1") return;
+  const enabled = boolFromEnv("CHROME_PROXY_ENABLED", false);
+  if (!enabled) {
+    log("proxy preflight: skipped (CHROME_PROXY_ENABLED=0)");
+    return;
+  }
+
+  const result = await runChromeProxyStartupPreflight({
+    enabled: true,
+    sessionId: {
+      instance: { name: `worker-${WORKER_SLOT}` },
+      request: { id: "startup-preflight", opType: "vrbo_search", requestAttempt: 0 },
+    },
+    brightDataUsernameOptions: (username) => appendBrightDataUsernameOptions(username),
+    verifySessionRotation: true,
+  });
+
+  if (result.skipped) {
+    log(`proxy preflight: ${result.reason}`);
+    return;
+  }
+  if (!result.ok) {
+    log(
+      `proxy preflight FAILED [${result.phase}]: provider=${result.provider ?? "?"} ` +
+        `${result.host ?? ""}:${result.port ?? ""} — ${result.error ?? result.statusLine ?? "unknown"}`,
+    );
+    if (result.provider === "decodo") {
+      log(
+        "hint: set CHROME_PROXY_PROVIDER=decodo, DECODO_PROXY_USERNAME, DECODO_PROXY_PASSWORD " +
+          "(or CHROME_PROXY_USERNAME/PASSWORD) on rct-sidecar-worker",
+      );
+    }
+    return;
+  }
+
+  log(
+    `proxy preflight OK: provider=${result.provider} ${result.host}:${result.port} ` +
+      `egress=${result.ip} (${result.city ?? "?"}, ${result.region ?? "?"}, ${result.country ?? "?"}) ` +
+      `isp=${result.isp ?? "?"} proxy_flag=${result.proxy} hosting=${result.hosting}`,
+  );
+  log(`proxy session username: ${result.usernameHint}`);
+
+  const rotation = result.rotationCheck;
+  if (rotation?.error) {
+    log(`proxy rotation check skipped: ${rotation.error}`);
+  } else if (rotation) {
+    log(
+      `proxy rotation check: session-a=${rotation.ipA} session-b=${rotation.ipB} ` +
+        `distinct_ips=${rotation.distinctIps ? "yes" : "no (same IP — verify Decodo sticky session)"}`,
+    );
+  }
 }
 
 async function logServerChromePoolHealth() {
@@ -6233,6 +6289,7 @@ async function main() {
   log(`starting (server=${SERVER}, admin-secret=${ADMIN_SECRET ? "set" : "none"})`);
   log(`worker slot: ${WORKER_SLOT}; Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}; browser mode: ${SIDECAR_BROWSER_MODE}`);
   logSidecarStartupConfig();
+  await logProxyStartupPreflight();
   log(`Chrome binary: ${process.env.LOCAL_CHROME_BINARY ?? CHROME_BINARY}`);
   log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
   if (USE_HEADLESS_LOCAL_BROWSER) {
