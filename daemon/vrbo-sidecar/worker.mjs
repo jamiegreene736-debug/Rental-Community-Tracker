@@ -2668,8 +2668,9 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
 }
 
 // ─────────────────────── Airbnb search ──────────────────────────────
-async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "homepage") {
+async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "homepage", options = {}) {
   if (!searchTerm) return false;
+  const submitAfterSearch = options?.submitAfterSearch !== false;
   const isVrbo = /vrbo/i.test(label) || /vrbo\.com/i.test(homeUrl);
   const maybeClearVrboChallenge = async (stage) => {
     if (!isVrbo) return false;
@@ -2689,10 +2690,14 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     await dismissObstructions(page, `${label}_home`);
     const filled = await fillVisibleSearchField(page, searchTerm, `${label}_home`).catch(() => null);
     if (filled) {
-      await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`), PAGE_SETTLE_MS + 2_000, null);
-      await boundedPageDelay(page, 1_200);
-      await maybeClearVrboChallenge("after-homepage-submit");
-      log(`${label}: primed public homepage search with "${searchTerm}"`);
+      if (submitAfterSearch) {
+        await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`), PAGE_SETTLE_MS + 2_000, null);
+        await boundedPageDelay(page, 1_200);
+        await maybeClearVrboChallenge("after-homepage-submit");
+        log(`${label}: primed public homepage search with "${searchTerm}"`);
+      } else {
+        log(`${label}: entered public homepage search term "${searchTerm}"`);
+      }
       return true;
     }
   } catch (e) {
@@ -3553,25 +3558,35 @@ async function processVrboSearch(id, params) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
-  await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search", id);
-  // PR #301: drop minBedrooms URL filter — Vrbo's server-side filter
-  // is unreliable (returns 5 properties for a regionId+minBedrooms=3
-  // search where only 0 are actually 3BR). Pull ALL listings for the
-  // resort and let the helper filter by minimum bedroom downstream.
-  // Same pattern lets one Vrbo fetch satisfy multiple BR scans —
-  // server-side dedup in the queue avoids hitting Vrbo multiple times
-  // per property/date window.
-  // Force currency=USD so Canadian operators don't get CAD values
-  // mistakenly persisted as USD.
-  const url =
-    `https://www.vrbo.com/search?destination=${encodeURIComponent(effectiveSearchTerm)}` +
-    `&startDate=${checkIn}&endDate=${checkOut}` +
-    `&adults=2&sort=PRICE_LOW_TO_HIGH&currency=USD`;
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search", id, {
+    submitAfterSearch: false,
+  });
+  // Drive VRBO like a user from the public homepage. Do not jump to a
+  // preformatted /search URL; those URLs appear to raise bot scrutiny.
+  await stopVrboProviderIfBlocked(page, "vrbo_search", id);
+  const dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "vrbo_search").catch((e) => {
+    log(`vrbo_search ${id}: homepage date entry failed: ${e?.message ?? e}`);
+    return null;
+  });
+  if (!pmDateEntryComplete(dateEntry)) {
+    throw new ProviderBrowserUnavailableError(
+      `VRBO homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to use a preformatted search URL.`,
+      {
+        label: "vrbo_search",
+        id,
+        provider: "vrbo",
+        url: page.url(),
+        title: await page.title().catch(() => ""),
+        dateEntry,
+      },
+    );
+  }
+  log(`vrbo_search ${id}: entered dates via VRBO homepage controls (${checkIn}→${checkOut})`);
+  await stopVrboProviderIfBlocked(page, "vrbo_search", id);
+  await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
   await dismissObstructions(page, "vrbo_search");
-  await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
   // Do not apply VRBO's browser-side bedroom filter here. The same
   // resort/date browser run is shared across all bedroom-combination
   // checks for a booking, and the API curation layer applies the
@@ -4673,7 +4688,7 @@ async function applyVisualPmDateFallback(targetPage, checkIn, checkOut) {
   ).catch(() => null);
 }
 
-async function applyPmDateInputs(targetPage, checkIn, checkOut) {
+async function applyPmDateInputs(targetPage, checkIn, checkOut, label = "pm_url_check") {
   if (!targetPage || targetPage.isClosed?.()) return null;
   const attempt = async (allowOpenOnly) => withSoftTimeout(
     targetPage.evaluate(({ checkIn, checkOut, allowOpenOnly }) => {
@@ -5022,13 +5037,13 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
   let result = first;
   if (first?.openedLabel && (!first.filled || first.filled.length === 0)) {
     await targetPage.waitForTimeout(1_000).catch(() => {});
-    await dismissObstructions(targetPage, "pm_date_entry_after_open");
+    await dismissObstructions(targetPage, `${label}_date_entry_after_open`);
     const second = await attempt(false);
     result = mergeDateEntry(first, second);
   }
   for (let i = 0; result?.filled?.length > 0 && !hasCompleteDateEntry(result) && i < 2; i++) {
     await targetPage.waitForTimeout(PM_PARTIAL_DATE_RETRY_MS).catch(() => {});
-    await dismissObstructions(targetPage, "pm_date_entry_after_partial");
+    await dismissObstructions(targetPage, `${label}_date_entry_after_partial`);
     const next = await attempt(false);
     result = mergeDateEntry(result, next);
     if (!next?.filled?.length && !next?.openedLabel && !next?.submitLabel) break;
@@ -5039,12 +5054,12 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
     result = mergeDateEntry(result, knownPairRetry);
   }
   if (!hasCompleteDateEntry(result)) {
-    await dismissObstructions(targetPage, "pm_date_entry_visual_fallback");
+    await dismissObstructions(targetPage, `${label}_date_entry_visual_fallback`);
     const visual = await applyVisualPmDateFallback(targetPage, checkIn, checkOut);
     result = mergeDateEntry(result, visual);
   }
   if (!hasCompleteDateEntry(result)) {
-    await dismissObstructions(targetPage, "pm_date_entry_calendar_fallback");
+    await dismissObstructions(targetPage, `${label}_date_entry_calendar_fallback`);
     const calendar = await clickPmCalendarDates(targetPage, checkIn, checkOut);
     result = mergeDateEntry(result, calendar);
   }
@@ -5057,7 +5072,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
   const entryComplete = hasCompleteDateEntry(result);
   if (filledCount > 0 || result?.openedLabel || result?.submitLabel) {
     log(
-      `pm_url_check: date entry controls=${result?.controlCount ?? 0} filled=${filledCount}` +
+      `${label}: date entry controls=${result?.controlCount ?? 0} filled=${filledCount}` +
       `${result?.filled?.length ? ` roles=${result.filled.map((f) => f.role).join("+")}` : ""}` +
       `${entryComplete ? " complete=true" : filledCount > 0 ? " complete=false" : ""}` +
       `${result?.openedLabel ? ` opened="${result.openedLabel}"` : ""}` +
@@ -5069,7 +5084,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut) {
         await withSoftTimeout(targetPage.waitForLoadState("networkidle", { timeout: 4_000 }), 4_500);
       }
       await targetPage.waitForTimeout(entryComplete ? PM_POST_DATE_SETTLE_MS : 1_000).catch(() => {});
-      await dismissObstructions(targetPage, entryComplete ? "pm_url_check_after_date_entry" : "pm_url_check_after_date_submit");
+      await dismissObstructions(targetPage, entryComplete ? `${label}_after_date_entry` : `${label}_after_date_submit`);
     }
   }
   return result;
