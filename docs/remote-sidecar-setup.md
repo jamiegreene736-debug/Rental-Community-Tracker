@@ -32,6 +32,7 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
    | `DECODO_PROXY_HOST` | `gate.decodo.com` (default) |
    | `DECODO_PROXY_PORT` | `7000` (default) |
    | Optional `DECODO_PROXY_STATE`, `DECODO_PROXY_CITY`, `DECODO_PROXY_SESSION_DURATION_MINUTES` | Geo targeting. Do **not** set `DECODO_PROXY_SESSION` unless you intentionally want a static IP session. |
+   | `SIDECAR_FINGERPRINT_OS` | `macos` (default; set `random` only if you want to restore mixed Windows/macOS fingerprints) |
    | `CAPTCHA_SOLVING_ENABLED` | `1` |
    | `CAPSOLVER_API_KEY` | Your CapSolver key (same as production or worker-only) |
    | `SIDECAR_VRBO_MANUAL_VERIFICATION` | `1` (fallback if CapSolver cannot solve a slider) |
@@ -50,6 +51,7 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
 | Worker | `rct-sidecar-worker` claims job, launches Chromium in-container (Xvfb) |
 | Proxy | **Decodo** residential (default provider) when `CHROME_PROXY_ENABLED=1`; each OTA job gets a new `-session-…` in the proxy username |
 | Identity reset | Each OTA job starts from a fresh Chrome profile/fingerprint and skips persisted cookies; VRBO manual-solve cookies are not reused unless `SIDECAR_VRBO_REUSE_MANUAL_SESSION=1` is explicitly set |
+| Fingerprint | Browser fingerprint defaults to macOS-only (`navigator.platform=MacIntel`, macOS UA/UA-CH, Apple WebGL renderer) to better match a real Mac sidecar |
 | VRBO CAPTCHA | `stopOtaProviderIfBlocked` → CapSolver VisionEngine `slider_1` (puzzle + background images) → human-like drag → manual wait if still blocked |
 | Booking CAPTCHA | Same `stopOtaProviderIfBlocked` hook before scraping result cards |
 

@@ -1382,6 +1382,14 @@ function pickOne(items, rand) {
   return items[Math.floor(rand() * items.length) % items.length];
 }
 
+function preferredFingerprintOs() {
+  const raw = nonEmptyEnv("SIDECAR_FINGERPRINT_OS", "SIDECAR_BROWSER_FINGERPRINT_OS") || "macos";
+  const value = raw.toLowerCase().replace(/[^a-z]/g, "");
+  if (value === "random" || value === "any") return "random";
+  if (value === "windows" || value === "win") return "windows";
+  return "macos";
+}
+
 function browserFingerprintForRequest(request = activeRuntimeRequest) {
   if (process.env.SIDECAR_BROWSER_FINGERPRINT_RANDOMIZATION === "0") return null;
   const seedText = [
@@ -1424,7 +1432,11 @@ function browserFingerprintForRequest(request = activeRuntimeRequest) {
       ], rand),
     },
   ];
-  const persona = pickOne(personas, rand);
+  const osPreference = preferredFingerprintOs();
+  const eligiblePersonas = osPreference === "random"
+    ? personas
+    : personas.filter((persona) => persona.os === osPreference);
+  const persona = pickOne(eligiblePersonas.length ? eligiblePersonas : personas, rand);
   const configuredTimezone = nonEmptyEnv("SIDECAR_FINGERPRINT_TIMEZONE", "SIDECAR_TIMEZONE");
   const configuredLocale = nonEmptyEnv("SIDECAR_LOCALE") || "en-US";
   const configuredLanguage = nonEmptyEnv("SIDECAR_LANGUAGE") || configuredLocale;
@@ -1441,6 +1453,25 @@ function browserFingerprintForRequest(request = activeRuntimeRequest) {
     language: configuredLanguage,
     languages: [configuredLanguage, "en"],
     acceptLanguage: configuredAcceptLanguage,
+    userAgentMetadata: {
+      brands: [
+        { brand: "Google Chrome", version: String(chromeMajor) },
+        { brand: "Chromium", version: String(chromeMajor) },
+        { brand: "Not A(Brand", version: "99" },
+      ],
+      fullVersionList: [
+        { brand: "Google Chrome", version: `${chromeMajor}.0.${chromePatch}.0` },
+        { brand: "Chromium", version: `${chromeMajor}.0.${chromePatch}.0` },
+        { brand: "Not A(Brand", version: "99.0.0.0" },
+      ],
+      platform: persona.uaPlatform,
+      platformVersion: persona.os === "macos" ? "14.7.0" : "10.0.0",
+      architecture: persona.os === "macos" ? "arm" : "x86",
+      model: "",
+      mobile: false,
+      bitness: "64",
+      wow64: false,
+    },
     timezone,
     deviceScaleFactor,
     hardwareConcurrency,
@@ -1473,6 +1504,33 @@ async function installFingerprintInitScript(targetContext, fingerprint) {
     defineGetter(Navigator.prototype, "language", fp.language);
     defineGetter(Navigator.prototype, "languages", fp.languages);
     defineGetter(Navigator.prototype, "maxTouchPoints", fp.maxTouchPoints);
+    if ("userAgentData" in Navigator.prototype) {
+      defineGetter(Navigator.prototype, "userAgentData", {
+        brands: fp.userAgentMetadata.brands,
+        mobile: false,
+        platform: fp.userAgentMetadata.platform,
+        getHighEntropyValues: async (hints = []) => {
+          const values = {
+            architecture: fp.userAgentMetadata.architecture,
+            bitness: fp.userAgentMetadata.bitness,
+            brands: fp.userAgentMetadata.brands,
+            fullVersionList: fp.userAgentMetadata.fullVersionList,
+            mobile: false,
+            model: "",
+            platform: fp.userAgentMetadata.platform,
+            platformVersion: fp.userAgentMetadata.platformVersion,
+            uaFullVersion: fp.userAgentMetadata.fullVersionList[0]?.version ?? "",
+            wow64: false,
+          };
+          return Object.fromEntries(String(hints).split(",").filter(Boolean).map((hint) => [hint, values[hint]]).filter(([, value]) => value !== undefined));
+        },
+        toJSON: () => ({
+          brands: fp.userAgentMetadata.brands,
+          mobile: false,
+          platform: fp.userAgentMetadata.platform,
+        }),
+      });
+    }
     defineGetter(Screen.prototype, "width", fp.screen.width);
     defineGetter(Screen.prototype, "height", fp.screen.height);
     defineGetter(Screen.prototype, "availWidth", fp.screen.availWidth);
@@ -1517,6 +1575,33 @@ async function applyFingerprintToPage(targetPage = page, fingerprint = activeBro
     defineGetter(Navigator.prototype, "language", fp.language);
     defineGetter(Navigator.prototype, "languages", fp.languages);
     defineGetter(Navigator.prototype, "maxTouchPoints", fp.maxTouchPoints);
+    if ("userAgentData" in Navigator.prototype) {
+      defineGetter(Navigator.prototype, "userAgentData", {
+        brands: fp.userAgentMetadata.brands,
+        mobile: false,
+        platform: fp.userAgentMetadata.platform,
+        getHighEntropyValues: async (hints = []) => {
+          const values = {
+            architecture: fp.userAgentMetadata.architecture,
+            bitness: fp.userAgentMetadata.bitness,
+            brands: fp.userAgentMetadata.brands,
+            fullVersionList: fp.userAgentMetadata.fullVersionList,
+            mobile: false,
+            model: "",
+            platform: fp.userAgentMetadata.platform,
+            platformVersion: fp.userAgentMetadata.platformVersion,
+            uaFullVersion: fp.userAgentMetadata.fullVersionList[0]?.version ?? "",
+            wow64: false,
+          };
+          return Object.fromEntries(String(hints).split(",").filter(Boolean).map((hint) => [hint, values[hint]]).filter(([, value]) => value !== undefined));
+        },
+        toJSON: () => ({
+          brands: fp.userAgentMetadata.brands,
+          mobile: false,
+          platform: fp.userAgentMetadata.platform,
+        }),
+      });
+    }
   }, fingerprint), 1_500, null);
   await withSoftTimeout(targetPage.setViewportSize(fingerprint.viewport), 1_500, null);
   const session = await withSoftTimeout(context?.newCDPSession(targetPage), 1_500, null);
@@ -1526,6 +1611,7 @@ async function applyFingerprintToPage(targetPage = page, fingerprint = activeBro
       userAgent: fingerprint.userAgent,
       acceptLanguage: fingerprint.acceptLanguage,
       platform: fingerprint.uaPlatform,
+      userAgentMetadata: fingerprint.userAgentMetadata,
     }), 1_500, null);
     await withSoftTimeout(session.send("Emulation.setTimezoneOverride", { timezoneId: fingerprint.timezone }), 1_500, null);
     await withSoftTimeout(session.send("Emulation.setLocaleOverride", { locale: fingerprint.locale }), 1_500, null);
