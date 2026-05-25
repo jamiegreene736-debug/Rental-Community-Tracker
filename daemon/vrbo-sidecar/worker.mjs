@@ -7079,7 +7079,7 @@ function logSidecarStartupConfig() {
   const captchaOn =
     process.env.CAPTCHA_SOLVING_ENABLED === "1" && Boolean(String(process.env.CAPSOLVER_API_KEY ?? "").trim());
   const proxyOn = process.env.CHROME_PROXY_ENABLED !== "0";
-  const proxyProvider = (process.env.CHROME_PROXY_PROVIDER ?? process.env.PROXY_PROVIDER ?? "decodo").toLowerCase();
+  const proxyProvider = (process.env.CHROME_PROXY_PROVIDER ?? process.env.PROXY_PROVIDER ?? "none").toLowerCase();
   log(
     `config: server=${SERVER}; role=${WORKER_ROLE}; browserMode=${SIDECAR_BROWSER_MODE}; ` +
       `chromePrimary=${CHROME_PRIMARY}; slots=${process.env.MAX_LOCAL_CHROME_INSTANCES ?? "8"}; ` +

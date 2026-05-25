@@ -3,8 +3,6 @@ import net from "net";
 const DEFAULT_BRIGHTDATA_HOST = "brd.superproxy.io";
 const DEFAULT_BRIGHTDATA_PORT = 33335;
 const DEFAULT_GONZOPROXY_API_URL = "https://api.gonzoproxy.app/functions/v1/proxy-api/generate";
-const DEFAULT_DECODO_HOST = "gate.decodo.com";
-const DEFAULT_DECODO_PORT = 7000;
 const REQUIRED_PROXY_COUNTRY = "us";
 
 function boolFromEnv(name, defaultValue = false) {
@@ -187,8 +185,8 @@ function explicitProxyConfig(provider) {
 
   if (provider === "decodo") {
     return {
-      host: nonEmptyEnv("DECODO_PROXY_HOST", "CHROME_PROXY_HOST", "PROXY_HOST") || DEFAULT_DECODO_HOST,
-      port: Number(nonEmptyEnv("DECODO_PROXY_PORT", "CHROME_PROXY_PORT", "PROXY_PORT") || DEFAULT_DECODO_PORT),
+      host: nonEmptyEnv("DECODO_PROXY_HOST", "CHROME_PROXY_HOST", "PROXY_HOST"),
+      port: Number(nonEmptyEnv("DECODO_PROXY_PORT", "CHROME_PROXY_PORT", "PROXY_PORT")),
       username: nonEmptyEnv("DECODO_PROXY_USERNAME", "CHROME_PROXY_USERNAME", "PROXY_USERNAME"),
       password: nonEmptyEnv("DECODO_PROXY_PASSWORD", "CHROME_PROXY_PASSWORD", "PROXY_PASSWORD"),
     };
@@ -240,7 +238,7 @@ export async function resolveChromeProxyConfig({
   if (!enabled) return null;
   if (requireServer && !isServer) return null;
 
-  const provider = (nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER") || "decodo").toLowerCase();
+  const provider = (nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER") || "none").toLowerCase();
   const scheme = nonEmptyEnv("CHROME_PROXY_SCHEME", "PROXY_SCHEME") || "http";
   const isBrightData = provider === "brightdata";
   const isDecodo = provider === "decodo";

@@ -26,12 +26,9 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
    | `SIDECAR_SERVER` | `https://rental-community-tracker-production.up.railway.app` (your main app URL) |
    | `ADMIN_SECRET` | Same as production |
    | `MAX_LOCAL_CHROME_INSTANCES` | `8` |
-   | `CHROME_PROXY_ENABLED` | `1` |
-   | `CHROME_PROXY_PROVIDER` | `decodo` (default; do not use Bright Data unless intentional) |
-   | `DECODO_PROXY_USERNAME` / `DECODO_PROXY_PASSWORD` | Decodo residential credentials (or `CHROME_PROXY_USERNAME` / `CHROME_PROXY_PASSWORD`) |
-   | `DECODO_PROXY_HOST` | `gate.decodo.com` (default) |
-   | `DECODO_PROXY_PORT` | `7000` (default) |
-   | Optional `DECODO_PROXY_STATE`, `DECODO_PROXY_CITY`, `DECODO_PROXY_SESSION_DURATION_MINUTES` | Geo targeting. Do **not** set `DECODO_PROXY_SESSION` unless you intentionally want a static IP session. |
+   | `CHROME_PROXY_ENABLED` | `0` |
+   | `CHROME_PROXY_PROVIDER` | `none` |
+   | Proxy credentials | Do not set `DECODO_*` variables. If a future provider is approved, configure that provider explicitly. |
    | `SIDECAR_FINGERPRINT_OS` | `macos` (default; set `random` only if you want to restore mixed Windows/macOS fingerprints) |
    | `CAPTCHA_SOLVING_ENABLED` | `1` |
    | `CAPSOLVER_API_KEY` | Your CapSolver key (same as production or worker-only) |
@@ -39,8 +36,8 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
 
 4. Deploy. Logs should show:
    - `Starting Railway remote sidecar worker (Xvfb + Chromium...)`
-   - `config: ... CapSolver=on; proxy=on (decodo)` on worker slot 1
-   - `proxy preflight OK: provider=decodo ... egress=<IP>` on worker slot 1
+   - `config: ... CapSolver=on; proxy=off` on worker slot 1
+   - `proxy preflight: skipped (CHROME_PROXY_ENABLED=0)` on worker slot 1
    - `using local Chrome sidecar #N via CDP` when a search starts
 
 ### VRBO + Booking search path (remote worker)
@@ -49,7 +46,7 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
 |------|----------|
 | Queue | Railway web app enqueues `vrbo_search` / `booking_search` |
 | Worker | `rct-sidecar-worker` claims job, launches Chromium in-container (Xvfb) |
-| Proxy | **Decodo** residential (default provider) when `CHROME_PROXY_ENABLED=1`; each OTA job gets a new `-session-…` in the proxy username |
+| Proxy | Disabled by default. Do not use Decodo. If a future proxy is approved, set `CHROME_PROXY_ENABLED=1` and a non-Decodo `CHROME_PROXY_PROVIDER` explicitly. |
 | Identity reset | Each OTA job starts from a fresh Chrome profile/fingerprint and skips persisted cookies; VRBO manual-solve cookies are not reused unless `SIDECAR_VRBO_REUSE_MANUAL_SESSION=1` is explicitly set |
 | Fingerprint | Browser fingerprint defaults to macOS-only (`navigator.platform=MacIntel`, macOS UA/UA-CH, Apple WebGL renderer) to better match a real Mac sidecar |
 | VRBO CAPTCHA | `stopOtaProviderIfBlocked` → CapSolver VisionEngine `slider_1` (puzzle + background images) → human-like drag → manual wait if still blocked |

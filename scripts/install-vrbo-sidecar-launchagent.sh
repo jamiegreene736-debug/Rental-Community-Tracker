@@ -165,20 +165,14 @@ if [[ "${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK}" == "1" ]]; then
   fi
 fi
 CHROME_PROXY_ENABLED="${CHROME_PROXY_ENABLED:-0}"
-CHROME_PROXY_PROVIDER="$(value_from_env_or_railway CHROME_PROXY_PROVIDER "decodo")"
+CHROME_PROXY_PROVIDER="$(value_from_env_or_railway CHROME_PROXY_PROVIDER "none")"
 CHROME_PROXY_SCHEME="$(value_from_env_or_railway CHROME_PROXY_SCHEME "http")"
 CHROME_PROXY_COUNTRY="$(value_from_env_or_railway CHROME_PROXY_COUNTRY "us")"
 CHROME_PROXY_STICKY_SESSION_MINUTES="$(value_from_env_or_railway CHROME_PROXY_STICKY_SESSION_MINUTES "60")"
-DECODO_PROXY_HOST="$(value_from_env_or_railway DECODO_PROXY_HOST "gate.decodo.com")"
-DECODO_PROXY_PORT="$(value_from_env_or_railway DECODO_PROXY_PORT "7000")"
-DECODO_PROXY_USERNAME="$(value_from_env_or_railway DECODO_PROXY_USERNAME "")"
-DECODO_PROXY_PASSWORD="$(value_from_env_or_railway DECODO_PROXY_PASSWORD "")"
-if [[ -z "${DECODO_PROXY_USERNAME}" ]]; then
-  DECODO_PROXY_USERNAME="$(value_from_env_or_railway CHROME_PROXY_USERNAME "")"
-fi
-if [[ -z "${DECODO_PROXY_PASSWORD}" ]]; then
-  DECODO_PROXY_PASSWORD="$(value_from_env_or_railway CHROME_PROXY_PASSWORD "")"
-fi
+DECODO_PROXY_HOST=""
+DECODO_PROXY_PORT=""
+DECODO_PROXY_USERNAME=""
+DECODO_PROXY_PASSWORD=""
 BRIGHTDATA_PROXY_HOST="$(value_from_env_or_railway BRIGHTDATA_PROXY_HOST "brd.superproxy.io")"
 BRIGHTDATA_PROXY_PORT="$(value_from_env_or_railway BRIGHTDATA_PROXY_PORT "33335")"
 BRIGHTDATA_PROXY_USERNAME="$(value_from_env_or_railway BRIGHTDATA_PROXY_USERNAME "")"
