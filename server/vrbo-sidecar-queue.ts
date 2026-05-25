@@ -263,6 +263,7 @@ export type SidecarScreenSnapshot = {
   width?: number;
   height?: number;
   captcha?: boolean;
+  active?: boolean;
   error?: string;
   at: string;
   ageMs: number;
@@ -421,7 +422,13 @@ const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
   // once. Keep VRBO serialized and rely on rate-limited cooldowns,
   // while Airbnb/Booking/PM jobs can still use the worker pool.
   vrbo_search: 1,
+  vrbo_photo_scrape: 1,
 };
+
+function opConcurrencyGroup(opType: SidecarOpType): string {
+  if (opType === "vrbo_search" || opType === "vrbo_photo_scrape") return "vrbo";
+  return opType;
+}
 
 function nowMs(): number {
   return Date.now();
@@ -575,9 +582,10 @@ function opConcurrencyLimit(opType: SidecarOpType): number {
 }
 
 function activeCountForOp(opType: SidecarOpType): number {
+  const group = opConcurrencyGroup(opType);
   let count = 0;
   for (const r of queue.values()) {
-    if (r.status === "in_progress" && r.opType === opType) count++;
+    if (r.status === "in_progress" && opConcurrencyGroup(r.opType) === group) count++;
   }
   return count;
 }
@@ -705,8 +713,11 @@ export function getSidecarScreenSnapshots(): SidecarScreenSnapshot[] {
   return Array.from(sidecarScreens.values())
     .map((snapshot) => {
       const at = Date.parse(snapshot.at);
+      const active = Boolean(snapshot.requestId && queue.get(snapshot.requestId)?.status === "in_progress");
       return {
         ...snapshot,
+        active,
+        captcha: snapshot.captcha === true && active,
         ageMs: Number.isFinite(at) ? Math.max(0, now - at) : 0,
       };
     })
@@ -750,6 +761,12 @@ export function enqueueSidecarScreenControlCommand(command: {
   const requestId = typeof command.requestId === "string" && command.requestId.trim()
     ? command.requestId.trim().slice(0, 80)
     : undefined;
+  if (requestId) {
+    const activeRequest = queue.get(requestId);
+    if (!activeRequest || activeRequest.status !== "in_progress") {
+      return { ok: false, error: "sidecar screen is no longer active; start a fresh search or click the current flashing screen" };
+    }
+  }
   const queued: SidecarScreenControlCommand = {
     id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
     slot,

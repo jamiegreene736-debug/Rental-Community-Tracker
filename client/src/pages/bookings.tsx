@@ -8268,6 +8268,7 @@ type SidecarScreenSnapshot = {
   width?: number;
   height?: number;
   captcha?: boolean;
+  active?: boolean;
   error?: string;
   at: string;
   ageMs: number;
@@ -8326,7 +8327,7 @@ function SidecarScreensStrip() {
   const bySlot = new Map(screens.map((screen) => [screen.slot, screen]));
   const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
   const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
-  const captchaScreens = screens.filter((screen) => screen.captcha && screen.screenshotDataUrl);
+  const captchaScreens = screens.filter((screen) => screen.captcha && screen.active !== false && screen.screenshotDataUrl);
   const hasCaptchaScreen = captchaScreens.length > 0;
   const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
   const runtime = data?.heartbeat?.workerRuntime;
@@ -8458,19 +8459,19 @@ function SidecarScreensStrip() {
             <button
               key={slot}
               type="button"
-              className={`overflow-hidden rounded-md border bg-muted/20 text-left transition ${canOpen ? "hover:border-blue-400 hover:shadow-sm" : ""} ${screen?.captcha ? "animate-sidecar-captcha-flash border-yellow-600 ring-2 ring-yellow-400" : ""}`}
+              className={`overflow-hidden rounded-md border bg-muted/20 text-left transition ${canOpen ? "hover:border-blue-400 hover:shadow-sm" : ""} ${screen?.captcha && screen.active !== false ? "animate-sidecar-captcha-flash border-yellow-600 ring-2 ring-yellow-400" : ""} ${screen?.active === false ? "opacity-60" : ""}`}
               onClick={() => {
                 if (canOpen) setSelectedSlot(slot);
               }}
               disabled={!canOpen}
               title={canOpen ? "Open interactive sidecar screen" : "No screen available"}
             >
-              <div className={`flex items-center justify-between gap-1 border-b px-2 py-1 text-[10px] ${screen?.captcha ? "border-yellow-500 bg-yellow-200 text-yellow-950" : "bg-background"}`}>
+              <div className={`flex items-center justify-between gap-1 border-b px-2 py-1 text-[10px] ${screen?.captcha && screen.active !== false ? "border-yellow-500 bg-yellow-200 text-yellow-950" : "bg-background"}`}>
                 <span className="font-medium">Slot {slot}</span>
                 <span className="flex items-center gap-1">
-                  {screen?.captcha && <MousePointerClick className="h-3 w-3 text-amber-700" />}
+                  {screen?.captcha && screen.active !== false && <MousePointerClick className="h-3 w-3 text-amber-700" />}
                   {canOpen && <Maximize2 className="h-3 w-3 text-muted-foreground" />}
-                  <span className={screen?.captcha ? "text-amber-700" : "text-muted-foreground"}>
+                  <span className={screen?.captcha && screen.active !== false ? "text-amber-700" : "text-muted-foreground"}>
                     {screen ? sidecarScreenAge(screen.ageMs) : "idle"}
                   </span>
                 </span>
@@ -8482,8 +8483,8 @@ function SidecarScreensStrip() {
                   <div className="flex h-full items-center justify-center text-[10px] text-slate-400">No screen</div>
                 )}
               </div>
-              <div className={`min-h-[38px] space-y-0.5 px-2 py-1 text-[10px] ${screen?.captcha ? "bg-yellow-50 text-yellow-950" : ""}`}>
-                <p className="truncate font-medium" title={screen?.phase}>{screen?.captcha ? "CAPTCHA: click to take over" : screen?.phase ?? "Waiting"}</p>
+              <div className={`min-h-[38px] space-y-0.5 px-2 py-1 text-[10px] ${screen?.captcha && screen.active !== false ? "bg-yellow-50 text-yellow-950" : ""}`}>
+                <p className="truncate font-medium" title={screen?.phase}>{screen?.captcha && screen.active !== false ? "CAPTCHA: click to take over" : screen?.active === false ? "Finished/stale screen" : screen?.phase ?? "Waiting"}</p>
                 <p className="truncate text-muted-foreground" title={screen?.title ?? host}>{screen?.title || host || "Ready for next search"}</p>
               </div>
             </button>
@@ -8509,7 +8510,7 @@ function SidecarScreensStrip() {
           </DialogHeader>
           {selectedScreen?.screenshotDataUrl ? (
             <div className="space-y-2">
-              {selectedScreen.captcha && (
+              {selectedScreen.captcha && selectedScreen.active !== false && (
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-500 bg-yellow-100 px-3 py-2 text-xs text-yellow-950 shadow-sm">
                   <span className="inline-flex items-center gap-2 font-semibold">
                     <MousePointerClick className="h-4 w-4" />
@@ -8518,16 +8519,18 @@ function SidecarScreensStrip() {
                   <span>Click and hold the challenge button, or drag the slider, directly on the screenshot below.</span>
                 </div>
               )}
-              {selectedScreen.captcha && controlStatus && (
+              {selectedScreen.captcha && selectedScreen.active !== false && controlStatus && (
                 <div className="rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs font-medium text-yellow-950">
                   {controlStatus}
                 </div>
               )}
-              <div className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs ${selectedScreen.captcha ? "border-yellow-300 bg-yellow-50" : "bg-muted/40"}`}>
+              <div className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs ${selectedScreen.captcha && selectedScreen.active !== false ? "border-yellow-300 bg-yellow-50" : "bg-muted/40"}`}>
                 <div className="min-w-0">
                   <p className="font-medium">
-                    {selectedScreen.captcha
+                    {selectedScreen.captcha && selectedScreen.active !== false
                       ? "Use this enlarged screenshot for takeover, or open the live browser if available."
+                      : selectedScreen.active === false
+                      ? "This sidecar screen is no longer active; start a fresh search or click the current flashing screen."
                       : selectedScreen.phase?.startsWith("finished")
                       ? "This screenshot is from a finished sidecar run."
                       : "Live pointer control is queued through the sidecar worker."}
@@ -8572,9 +8575,9 @@ function SidecarScreensStrip() {
               <div
                 role="button"
                 tabIndex={0}
-                className={`overflow-hidden rounded-lg border bg-slate-950 touch-none select-none ${selectedScreen.captcha ? "border-yellow-500 ring-4 ring-yellow-300" : ""} ${selectedScreen.phase?.startsWith("finished") ? "cursor-not-allowed opacity-75" : "cursor-crosshair"}`}
+                className={`overflow-hidden rounded-lg border bg-slate-950 touch-none select-none ${selectedScreen.captcha && selectedScreen.active !== false ? "border-yellow-500 ring-4 ring-yellow-300" : ""} ${(selectedScreen.phase?.startsWith("finished") || selectedScreen.active === false) ? "cursor-not-allowed opacity-75" : "cursor-crosshair"}`}
                 onPointerDown={(event) => {
-                  if (selectedScreen.phase?.startsWith("finished")) return;
+                  if (selectedScreen.phase?.startsWith("finished") || selectedScreen.active === false) return;
                   event.preventDefault();
                   event.stopPropagation();
                   clearLongPressTimer();
@@ -8591,7 +8594,7 @@ function SidecarScreensStrip() {
                   }
                 }}
                 onPointerMove={(event) => {
-                  if (!draggingRef.current || selectedScreen.phase?.startsWith("finished")) return;
+                  if (!draggingRef.current || selectedScreen.phase?.startsWith("finished") || selectedScreen.active === false) return;
                   event.preventDefault();
                   event.stopPropagation();
                   const start = pointerStartRef.current;
@@ -8601,7 +8604,7 @@ function SidecarScreensStrip() {
                   sendPointerCommand(selectedScreen, "move", event);
                 }}
                 onPointerUp={(event) => {
-                  if (selectedScreen.phase?.startsWith("finished")) return;
+                  if (selectedScreen.phase?.startsWith("finished") || selectedScreen.active === false) return;
                   event.preventDefault();
                   event.stopPropagation();
                   clearLongPressTimer();
