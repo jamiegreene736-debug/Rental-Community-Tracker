@@ -168,6 +168,10 @@ function needsFreshIdentityForOp(opType) {
   return /^(airbnb|booking|vrbo)_/i.test(String(opType || ""));
 }
 
+function keepVisibleLocalChromeGrid() {
+  return SIDE_CAR_CHROME_VISIBLE && !USE_HEADLESS_LOCAL_BROWSER && !USE_SERVER_BROWSER && CHROME_PRIMARY === "local";
+}
+
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
   // eslint-disable-next-line no-console
@@ -514,6 +518,58 @@ function parseWindowPosition(raw, fallback) {
   return fallback;
 }
 
+function gridWindowPositionForWorker() {
+  const slotIndex = Math.max(0, Math.floor(Number(WORKER_SLOT) || 1) - 1);
+  const explicitPositions = String(process.env.SIDECAR_CHROME_VISIBLE_POSITIONS ?? "")
+    .split(/[;|]/)
+    .map((part) => parseWindowPosition(part, null))
+    .filter(Boolean);
+  if (explicitPositions[slotIndex]) return explicitPositions[slotIndex];
+  const origin = parseWindowPosition(process.env.SIDECAR_CHROME_VISIBLE_GRID_ORIGIN ?? VISIBLE_WINDOW_POSITION, { left: 120, top: 80 });
+  const columns = Math.max(1, Math.floor(Number(process.env.SIDECAR_CHROME_VISIBLE_GRID_COLUMNS ?? 4) || 4));
+  const gapX = Math.max(0, Math.floor(Number(process.env.SIDECAR_CHROME_VISIBLE_GRID_GAP_X ?? 24) || 0));
+  const gapY = Math.max(0, Math.floor(Number(process.env.SIDECAR_CHROME_VISIBLE_GRID_GAP_Y ?? 36) || 0));
+  return {
+    left: origin.left + (slotIndex % columns) * (VISIBLE_WINDOW_SIZE.width + gapX),
+    top: origin.top + Math.floor(slotIndex / columns) * (VISIBLE_WINDOW_SIZE.height + gapY),
+  };
+}
+
+async function snapSidecarWindowToGrid(targetPage = page, { focus = false, label = "sidecar", id = "" } = {}) {
+  if (usingHeadlessRuntime()) return false;
+  if (!context || !targetPage || targetPage.isClosed?.()) return false;
+  const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
+  if (!session) return false;
+  try {
+    const info = await withSoftTimeout(session.send("Browser.getWindowForTarget"), 1_500, null);
+    const windowId = info?.windowId;
+    if (typeof windowId !== "number") return false;
+    const pos = gridWindowPositionForWorker();
+    await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }), 1_500, null);
+    await withSoftTimeout(
+      session.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: {
+          left: pos.left,
+          top: pos.top,
+          width: VISIBLE_WINDOW_SIZE.width,
+          height: VISIBLE_WINDOW_SIZE.height,
+        },
+      }),
+      1_500,
+      null,
+    );
+    if (focus) await targetPage.bringToFront().catch(() => {});
+    log(`${label} ${id}: snapped Chrome sidecar window to grid slot ${WORKER_SLOT}${focus ? " and focused it" : ""}`);
+    return true;
+  } catch (e) {
+    log(`${label} ${id}: Chrome grid snap failed: ${e?.message ?? e}`);
+    return false;
+  } finally {
+    await withSoftTimeout(session.detach(), 500, null);
+  }
+}
+
 function macAppPathFromChromeBinary(binary) {
   const marker = ".app/Contents/MacOS/";
   const idx = String(binary ?? "").indexOf(marker);
@@ -590,7 +646,11 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
     }
     return false;
   }
-  if (SIDE_CAR_CHROME_VISIBLE) return true;
+  if (SIDE_CAR_CHROME_VISIBLE) {
+    if (visible) await snapSidecarWindowToGrid(targetPage, { focus: false, label, id }).catch(() => false);
+    captchaWindowVisible = visible;
+    return true;
+  }
   if (!context || !targetPage || targetPage.isClosed?.()) return false;
   if (visible && !SIDECAR_CAPTCHA_SURFACE_WINDOW) {
     log(`${label} ${id}: CAPTCHA manual surfacing disabled by SIDECAR_CAPTCHA_SURFACE_WINDOW=0`);
@@ -1301,7 +1361,7 @@ async function acquireChromeForRequest(request = {}) {
       release: async () => {},
     };
   }
-  if (activeChromeAllocation && needsFreshChromeForOp(request?.opType)) {
+  if (activeChromeAllocation && needsFreshChromeForOp(request?.opType) && !keepVisibleLocalChromeGrid()) {
     await teardownBrowser(`fresh browser required for ${request.opType}`);
   } else if (activeChromeAllocation) {
     return activeChromeAllocation;
@@ -2961,7 +3021,9 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
         await boundedPageDelay(targetPage, durationMs);
         await targetPage.mouse.up().catch(() => {});
       } else if (action === "surface") {
-        const surfaced = await setCaptchaWindowVisibility(targetPage, true, label, req?.id ?? "").catch(() => false);
+        const surfaced = SIDE_CAR_CHROME_VISIBLE
+          ? await snapSidecarWindowToGrid(targetPage, { focus: true, label, id: req?.id ?? "" }).catch(() => false)
+          : await setCaptchaWindowVisibility(targetPage, true, label, req?.id ?? "").catch(() => false);
         if (!surfaced) await targetPage.bringToFront().catch(() => {});
       }
     }
@@ -6474,7 +6536,7 @@ async function processRequest(req) {
     activeRuntimeRequest = runtimeRequest;
     if (needsFreshIdentityForOp(opType)) {
       clearVrboManualSessionState(`${opType} ${req.id} fresh identity`);
-      if (browser || context || page || activeChromeAllocation || activeHeadlessProxyBridge) {
+      if (!keepVisibleLocalChromeGrid() && (browser || context || page || activeChromeAllocation || activeHeadlessProxyBridge)) {
         await teardownBrowser(`fresh identity required for ${opType} ${req.id}`);
       }
     }
@@ -6497,6 +6559,7 @@ async function processRequest(req) {
     // avoid an extra navigation on the daemon-owned page that the
     // batch isn't going to use.
     if (opType !== "pm_url_check_batch") {
+      await clearContextStorageForFreshRun(`${opType} ${req.id} fresh cache`);
       await resetPage();
     }
     await postScreenSnapshot({ ...req, opType }, page, `ready ${opType}`, { force: true });
@@ -6518,7 +6581,7 @@ async function processRequest(req) {
     await closeExtraTabs(`after ${opType}`, page).catch(() => {});
     await showCompletePage(opType);
     await clearScreenSnapshot({ ...req, opType }).catch(() => {});
-    if (needsFreshIdentityForOp(opType)) {
+    if (needsFreshIdentityForOp(opType) && !keepVisibleLocalChromeGrid()) {
       await teardownBrowser(`finished fresh-identity ${opType}`);
     } else if (activeChromeAllocation?.ephemeral) {
       await teardownBrowser(`finished ${activeChromeAllocation.type}-side ${opType}`);

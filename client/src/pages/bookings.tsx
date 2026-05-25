@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, type PointerEvent } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -33,7 +33,7 @@ import {
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
-  MapPin, Footprints, MessageSquare, MonitorPlay, Maximize2, MousePointerClick,
+  MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick,
   ShieldCheck, Paperclip, X,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -8300,13 +8300,6 @@ function sidecarRuntimeName(runtime: SidecarHeartbeat["workerRuntime"] | null | 
 }
 
 function SidecarScreensStrip() {
-  const [collapsed, setCollapsed] = useState(() => {
-    try {
-      return window.localStorage.getItem("operationsSidecarScreensCollapsed") === "true";
-    } catch {
-      return false;
-    }
-  });
   const { data } = useQuery<SidecarScreensResponse>({
     queryKey: ["/api/vrbo-sidecar/screens", "operations-header"],
     queryFn: async () => {
@@ -8317,325 +8310,98 @@ function SidecarScreensStrip() {
     refetchInterval: 1_000,
     retry: false,
   });
-  const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
-  const [controlStatus, setControlStatus] = useState<string | null>(null);
-  const draggingRef = useRef(false);
-  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pointerStartRef = useRef<{ clientX: number; clientY: number; startedAt: number } | null>(null);
+  const [focusStatus, setFocusStatus] = useState<string | null>(null);
   const screens = data?.screens ?? [];
-  const maxScreens = Math.max(1, data?.maxScreens ?? 8);
-  const bySlot = new Map(screens.map((screen) => [screen.slot, screen]));
-  const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
-  const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
-  const captchaScreens = screens.filter((screen) => screen.captcha && screen.active !== false && screen.screenshotDataUrl);
-  const hasCaptchaScreen = captchaScreens.length > 0;
-  const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
+  const activeScreens = screens.filter((screen) => screen.active !== false && (screen.requestId || screen.phase));
+  const captchaScreens = screens.filter((screen) => screen.captcha && screen.active !== false);
   const runtime = data?.heartbeat?.workerRuntime;
   const runtimeName = sidecarRuntimeName(runtime);
   const serverRuntime = isServerSidecarRuntime(runtime);
-  const selectedScreenCannotSurface = Boolean(
-    selectedScreen &&
-      !selectedScreen.liveViewUrl &&
-      /headless|no live chrome|no live browser|no local chrome|no local chrome window|unavailable/i.test(
-        `${selectedScreen.error ?? ""} ${selectedScreen.phase ?? ""}`,
-      ),
-  );
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem("operationsSidecarScreensCollapsed", String(collapsed));
-    } catch {
-      // Local storage is a convenience only; the live sidecar panel still works without it.
-    }
-  }, [collapsed]);
-
-  useEffect(() => {
-    if (hasCaptchaScreen) setCollapsed(false);
-  }, [hasCaptchaScreen]);
-
-  const clearLongPressTimer = () => {
-    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = null;
-  };
-
-  const sendScreenCommand = (
-    screen: SidecarScreenSnapshot,
-    action: "move" | "down" | "up" | "click" | "hold" | "surface",
-    coords: { x: number; y: number } = { x: 0, y: 0 },
-    durationMs?: number,
-  ) => {
-    if (screen.captcha && action !== "move") {
-      setControlStatus(action === "hold"
-        ? "Sending a 9 second hold to the sidecar..."
-        : "Sending pointer input to the sidecar...");
-    }
+  const focusSidecarWindow = (screen: SidecarScreenSnapshot) => {
+    setFocusStatus(`Focusing Chrome slot ${screen.slot}...`);
     void fetch("/api/vrbo-sidecar/screen-control", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         slot: screen.slot,
         requestId: screen.requestId,
-        action,
-        x: Math.round(coords.x),
-        y: Math.round(coords.y),
-        durationMs,
+        action: "surface",
+        x: 0,
+        y: 0,
       }),
     })
       .then((response) => {
-        if (!screen.captcha || action === "move") return;
-        setControlStatus(response.ok
-          ? "Input relayed. The screenshot will refresh after the worker applies it."
-          : "The sidecar did not accept that pointer input; try opening the live browser or retry.");
+        setFocusStatus(response.ok
+          ? `Chrome slot ${screen.slot} focused and snapped back to the grid.`
+          : `Chrome slot ${screen.slot} is no longer active.`);
       })
       .catch(() => {
-        if (screen.captcha && action !== "move") {
-          setControlStatus("Pointer relay failed; try again or use the live browser button if available.");
-        }
+        setFocusStatus(`Could not focus Chrome slot ${screen.slot}; try clicking the Chrome window directly.`);
       });
-  };
-
-  const screenCoordsForPointerEvent = (screen: SidecarScreenSnapshot, event: PointerEvent<HTMLElement>) => {
-    const target = event.currentTarget as HTMLElement;
-    const image = target.querySelector("img");
-    const rect = (image ?? target).getBoundingClientRect();
-    const width = Math.max(1, screen.width ?? 1280);
-    const height = Math.max(1, screen.height ?? 820);
-    const x = Math.max(0, Math.min(width, ((event.clientX - rect.left) / Math.max(1, rect.width)) * width));
-    const y = Math.max(0, Math.min(height, ((event.clientY - rect.top) / Math.max(1, rect.height)) * height));
-    return { x, y };
-  };
-
-  const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
-    sendScreenCommand(screen, action, screenCoordsForPointerEvent(screen, event));
   };
 
   return (
     <div className="w-full rounded-lg border bg-background/70 p-2 shadow-sm">
-      <div className={`${collapsed ? "" : "mb-2"} flex flex-wrap items-center justify-between gap-2`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <MonitorPlay className="h-4 w-4 text-muted-foreground" />
           <div>
-            <p className="text-xs font-semibold">{runtimeName} screens</p>
+            <p className="text-xs font-semibold">{runtimeName}</p>
             <p className="text-[11px] text-muted-foreground">
-              {data?.heartbeat?.isOnline ? "Sidecar live" : "Sidecar offline"} · {activeCount} active thumbnail{activeCount === 1 ? "" : "s"}
+              {data?.heartbeat?.isOnline ? "Sidecar live" : "Sidecar offline"} · Google Chrome windows stay open in your external-monitor grid
               {data?.heartbeat?.activeJob ? ` · ${data.heartbeat.activeJob.label} ${data.heartbeat.activeJob.activeSec}s` : ""}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="outline" className="text-[10px]">
-            {serverRuntime ? "Server Chrome" : "Local Chrome"}
+            {serverRuntime ? "Server Chrome" : "Local Mac Chrome"}
           </Badge>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 gap-1 px-2 text-[11px]"
-            onClick={() => setCollapsed((value) => !value)}
-            data-testid="button-toggle-sidecar-screens"
-          >
-            {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-            {collapsed ? "Show screens" : "Collapse"}
-          </Button>
+          {activeScreens.length > 0 && <Badge variant="secondary" className="text-[10px]">{activeScreens.length} active</Badge>}
         </div>
       </div>
-      {!collapsed && hasCaptchaScreen && (
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-500 bg-yellow-100 px-3 py-2 text-xs text-yellow-950 shadow-sm">
+      {captchaScreens.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-500 bg-yellow-100 px-3 py-2 text-xs text-yellow-950 shadow-sm animate-sidecar-captcha-flash">
           <span className="inline-flex items-center gap-2 font-semibold">
             <AlertCircle className="h-4 w-4" />
-            CAPTCHA takeover needed on sidecar slot{captchaScreens.length === 1 ? "" : "s"} {captchaScreens.map((screen) => screen.slot).join(", ")}
+            CAPTCHA takeover needed on Chrome slot{captchaScreens.length === 1 ? "" : "s"} {captchaScreens.map((screen) => screen.slot).join(", ")}
           </span>
-          <span>Click the flashing screen, then click/hold or drag directly on the enlarged screenshot.</span>
+          <div className="flex flex-wrap items-center gap-2">
+            {captchaScreens.map((screen) => (
+              <Button
+                key={screen.slot}
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 border-yellow-600 bg-white px-2 text-[11px] text-yellow-950 hover:bg-yellow-50"
+                onClick={() => focusSidecarWindow(screen)}
+              >
+                <MousePointerClick className="mr-1 h-3.5 w-3.5" />
+                Focus slot {screen.slot}
+              </Button>
+            ))}
+          </div>
         </div>
       )}
-      {!collapsed && <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
-        {slots.map((slot) => {
-          const screen = bySlot.get(slot);
-          const canOpen = Boolean(screen?.screenshotDataUrl);
-          const host = (() => {
-            try { return screen?.url ? new URL(screen.url).hostname.replace(/^www\./, "") : ""; } catch { return ""; }
-          })();
-          return (
+      {activeScreens.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {activeScreens.map((screen) => (
             <button
-              key={slot}
+              key={`${screen.slot}-${screen.requestId ?? "active"}`}
               type="button"
-              className={`overflow-hidden rounded-md border bg-muted/20 text-left transition ${canOpen ? "hover:border-blue-400 hover:shadow-sm" : ""} ${screen?.captcha && screen.active !== false ? "animate-sidecar-captcha-flash border-yellow-600 ring-2 ring-yellow-400" : ""} ${screen?.active === false ? "opacity-60" : ""}`}
-              onClick={() => {
-                if (canOpen) setSelectedSlot(slot);
-              }}
-              disabled={!canOpen}
-              title={canOpen ? "Open interactive sidecar screen" : "No screen available"}
+              onClick={() => focusSidecarWindow(screen)}
+              className={`rounded border px-2 py-1 text-[10px] transition hover:border-blue-400 ${
+                screen.captcha ? "border-yellow-500 bg-yellow-50 text-yellow-950" : "bg-muted/40 text-muted-foreground"
+              }`}
+              title="Focus this Chrome sidecar window"
             >
-              <div className={`flex items-center justify-between gap-1 border-b px-2 py-1 text-[10px] ${screen?.captcha && screen.active !== false ? "border-yellow-500 bg-yellow-200 text-yellow-950" : "bg-background"}`}>
-                <span className="font-medium">Slot {slot}</span>
-                <span className="flex items-center gap-1">
-                  {screen?.captcha && screen.active !== false && <MousePointerClick className="h-3 w-3 text-amber-700" />}
-                  {canOpen && <Maximize2 className="h-3 w-3 text-muted-foreground" />}
-                  <span className={screen?.captcha && screen.active !== false ? "text-amber-700" : "text-muted-foreground"}>
-                    {screen ? sidecarScreenAge(screen.ageMs) : "idle"}
-                  </span>
-                </span>
-              </div>
-              <div className="aspect-video bg-slate-950">
-                {screen?.screenshotDataUrl ? (
-                  <img src={screen.screenshotDataUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <div className="flex h-full items-center justify-center text-[10px] text-slate-400">No screen</div>
-                )}
-              </div>
-              <div className={`min-h-[38px] space-y-0.5 px-2 py-1 text-[10px] ${screen?.captcha && screen.active !== false ? "bg-yellow-50 text-yellow-950" : ""}`}>
-                <p className="truncate font-medium" title={screen?.phase}>{screen?.captcha && screen.active !== false ? "CAPTCHA: click to take over" : screen?.active === false ? "Finished/stale screen" : screen?.phase ?? "Waiting"}</p>
-                <p className="truncate text-muted-foreground" title={screen?.title ?? host}>{screen?.title || host || "Ready for next search"}</p>
-              </div>
+              Slot {screen.slot}: {screen.captcha ? "CAPTCHA" : screen.phase ?? "working"} · {sidecarScreenAge(screen.ageMs)}
             </button>
-          );
-        })}
-      </div>}
-      <Dialog open={Boolean(selectedSlot)} onOpenChange={(open) => {
-        if (!open) {
-          setSelectedSlot(null);
-          draggingRef.current = false;
-          pointerStartRef.current = null;
-          clearLongPressTimer();
-        }
-      }}>
-        <DialogContent className="max-w-6xl">
-          <DialogHeader>
-            <DialogTitle>Sidecar screen {selectedScreen?.slot ?? selectedSlot}</DialogTitle>
-            <DialogDescription>
-              {selectedScreen?.captcha
-                ? "CAPTCHA takeover is active. Click and hold or drag on the screenshot to pass pointer input to this sidecar tab."
-                : "Click or drag on the screenshot to pass pointer input to that sidecar tab. On mobile, open the live browser view for noVNC touch control; desktop is best for slider precision."}
-            </DialogDescription>
-          </DialogHeader>
-          {selectedScreen?.screenshotDataUrl ? (
-            <div className="space-y-2">
-              {selectedScreen.captcha && selectedScreen.active !== false && (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-500 bg-yellow-100 px-3 py-2 text-xs text-yellow-950 shadow-sm">
-                  <span className="inline-flex items-center gap-2 font-semibold">
-                    <MousePointerClick className="h-4 w-4" />
-                    Manual CAPTCHA control is live for this browser session.
-                  </span>
-                  <span>Click and hold the challenge button, or drag the slider, directly on the screenshot below.</span>
-                </div>
-              )}
-              {selectedScreen.captcha && selectedScreen.active !== false && controlStatus && (
-                <div className="rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs font-medium text-yellow-950">
-                  {controlStatus}
-                </div>
-              )}
-              <div className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs ${selectedScreen.captcha && selectedScreen.active !== false ? "border-yellow-300 bg-yellow-50" : "bg-muted/40"}`}>
-                <div className="min-w-0">
-                  <p className="font-medium">
-                    {selectedScreen.captcha && selectedScreen.active !== false
-                      ? "Use this enlarged screenshot for takeover, or open the live browser if available."
-                      : selectedScreen.active === false
-                      ? "This sidecar screen is no longer active; start a fresh search or click the current flashing screen."
-                      : selectedScreen.phase?.startsWith("finished")
-                      ? "This screenshot is from a finished sidecar run."
-                      : "Live pointer control is queued through the sidecar worker."}
-                  </p>
-                  <p className="truncate text-muted-foreground">
-                    {selectedScreen.liveViewUrl
-                      ? "Open the live browser view for full keyboard/mouse control. This also works from your phone through noVNC."
-                      : selectedScreenCannotSurface
-                        ? selectedScreen.error || "No live Chrome browser is available for this sidecar session."
-                        : selectedScreen.title || selectedScreen.url || "Use the focus button if the screenshot does not respond."}
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-8 gap-1 px-2 text-[11px]"
-                  onClick={() => {
-                    if (selectedScreen.liveViewUrl) {
-                      window.open(selectedScreen.liveViewUrl, "_blank", "noopener,noreferrer");
-                    } else if (!selectedScreenCannotSurface) {
-                      sendScreenCommand(selectedScreen, "surface");
-                    }
-                  }}
-                  disabled={selectedScreenCannotSurface || (selectedScreen.phase?.startsWith("finished") && !selectedScreen.liveViewUrl)}
-                  title={selectedScreen.liveViewUrl
-                    ? "Open the live noVNC browser for this sidecar"
-                    : selectedScreenCannotSurface
-                      ? "This run is using headless fallback, so there is no real Chrome window to focus."
-                    : selectedScreen.phase?.startsWith("finished")
-                      ? "This run has already finished; start a fresh search to control Chrome."
-                      : "Bring the actual sidecar Chrome window to the front"}
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                  {selectedScreen.liveViewUrl
-                    ? "Open live browser"
-                    : selectedScreenCannotSurface
-                      ? "No live browser"
-                      : "Focus real Chrome window"}
-                </Button>
-              </div>
-              <div
-                role="button"
-                tabIndex={0}
-                className={`overflow-hidden rounded-lg border bg-slate-950 touch-none select-none ${selectedScreen.captcha && selectedScreen.active !== false ? "border-yellow-500 ring-4 ring-yellow-300" : ""} ${(selectedScreen.phase?.startsWith("finished") || selectedScreen.active === false) ? "cursor-not-allowed opacity-75" : "cursor-crosshair"}`}
-                onPointerDown={(event) => {
-                  if (selectedScreen.phase?.startsWith("finished") || selectedScreen.active === false) return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  clearLongPressTimer();
-                  draggingRef.current = true;
-                  pointerStartRef.current = { clientX: event.clientX, clientY: event.clientY, startedAt: Date.now() };
-                  event.currentTarget.setPointerCapture?.(event.pointerId);
-                  const coords = screenCoordsForPointerEvent(selectedScreen, event);
-                  sendScreenCommand(selectedScreen, "down", coords);
-                  if (selectedScreen.captcha) {
-                    longPressTimerRef.current = setTimeout(() => {
-                      if (!draggingRef.current) return;
-                      sendScreenCommand(selectedScreen, "hold", coords, 9_000);
-                    }, 700);
-                  }
-                }}
-                onPointerMove={(event) => {
-                  if (!draggingRef.current || selectedScreen.phase?.startsWith("finished") || selectedScreen.active === false) return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const start = pointerStartRef.current;
-                  if (start && Math.hypot(event.clientX - start.clientX, event.clientY - start.clientY) > 8) {
-                    clearLongPressTimer();
-                  }
-                  sendPointerCommand(selectedScreen, "move", event);
-                }}
-                onPointerUp={(event) => {
-                  if (selectedScreen.phase?.startsWith("finished") || selectedScreen.active === false) return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  clearLongPressTimer();
-                  if (draggingRef.current) {
-                    sendPointerCommand(selectedScreen, "up", event);
-                    const start = pointerStartRef.current;
-                    const moved = start ? Math.hypot(event.clientX - start.clientX, event.clientY - start.clientY) : Infinity;
-                    const elapsed = start ? Date.now() - start.startedAt : Infinity;
-                    if (moved < 8 && elapsed < 500) {
-                      sendPointerCommand(selectedScreen, "click", event);
-                    }
-                    draggingRef.current = false;
-                    pointerStartRef.current = null;
-                  } else {
-                    sendPointerCommand(selectedScreen, "click", event);
-                  }
-                }}
-                onPointerCancel={() => {
-                  clearLongPressTimer();
-                  draggingRef.current = false;
-                  pointerStartRef.current = null;
-                }}
-              >
-                <img src={selectedScreen.screenshotDataUrl} alt="" className="max-h-[72vh] w-full select-none object-contain" draggable={false} />
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-lg border bg-muted p-6 text-sm text-muted-foreground">No screenshot available for this slot.</div>
-          )}
-        </DialogContent>
-      </Dialog>
+          ))}
+        </div>
+      )}
+      {focusStatus && <p className="mt-2 text-[11px] text-muted-foreground">{focusStatus}</p>}
     </div>
   );
 }

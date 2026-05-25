@@ -752,7 +752,7 @@ export class ChromeSidecarManager {
 
   async tryAcquireLocalInstance(instance, request = {}) {
     const opType = String(request?.opType ?? "");
-    const wantsFreshProxiedChrome = shouldUseFreshProxiedLocalChrome(opType);
+    const wantsFreshProxiedChrome = shouldUseFreshProxiedLocalChrome(opType) && boolFromEnv("CHROME_PROXY_ENABLED", false);
     const chromeInstance = wantsFreshProxiedChrome
       ? { ...instance, chromeDataDir: freshLocalChromeDataDir(instance, request) }
       : instance;
