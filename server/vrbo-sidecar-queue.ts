@@ -391,6 +391,8 @@ const providerHealth = new Map<SidecarProviderKey, {
 // a single missed poll doesn't flicker the indicator).
 let lastWorkerPollAt: number | null = null;
 let lastWorkerRuntime: SidecarWorkerRuntime | null = null;
+let lastWorkerActiveRequestId: string | null = null;
+let lastWorkerActiveStage: string | null = null;
 const HEARTBEAT_ONLINE_WINDOW_MS = 90 * 1000;
 
 // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): operator-
@@ -644,6 +646,12 @@ export function stampHeartbeat(id?: string, stage?: string, runtime?: Partial<Si
   lastWorkerPollAt = nowMs();
   const normalizedRuntime = normalizeWorkerRuntime(runtime);
   if (normalizedRuntime) lastWorkerRuntime = normalizedRuntime;
+  if (id) {
+    lastWorkerActiveRequestId = id;
+    lastWorkerActiveStage = stage && typeof stage === "string"
+      ? stage.replace(/\s+/g, " ").trim().slice(0, 140)
+      : null;
+  }
   if (!id) return;
   const r = queue.get(id);
   if (r?.status === "in_progress") {
@@ -653,6 +661,13 @@ export function stampHeartbeat(id?: string, stage?: string, runtime?: Partial<Si
       r.stageUpdatedAt = lastWorkerPollAt;
     }
   }
+}
+
+function heartbeatIndicatesActiveRequest(id?: string): boolean {
+  if (!id || lastWorkerActiveRequestId !== id || lastWorkerPollAt === null) return false;
+  if (nowMs() - lastWorkerPollAt > HEARTBEAT_ONLINE_WINDOW_MS) return false;
+  if (lastWorkerActiveStage && /^finish\b/i.test(lastWorkerActiveStage)) return false;
+  return true;
 }
 
 export function updateSidecarScreenSnapshot(snapshot: {
@@ -713,7 +728,10 @@ export function getSidecarScreenSnapshots(): SidecarScreenSnapshot[] {
   return Array.from(sidecarScreens.values())
     .map((snapshot) => {
       const at = Date.parse(snapshot.at);
-      const active = Boolean(snapshot.requestId && queue.get(snapshot.requestId)?.status === "in_progress");
+      const active = Boolean(
+        snapshot.requestId &&
+        (queue.get(snapshot.requestId)?.status === "in_progress" || heartbeatIndicatesActiveRequest(snapshot.requestId)),
+      );
       return {
         ...snapshot,
         active,
@@ -763,7 +781,8 @@ export function enqueueSidecarScreenControlCommand(command: {
     : undefined;
   if (requestId) {
     const activeRequest = queue.get(requestId);
-    if (!activeRequest || activeRequest.status !== "in_progress") {
+    const requestIsActive = activeRequest?.status === "in_progress" || heartbeatIndicatesActiveRequest(requestId);
+    if (!requestIsActive) {
       return { ok: false, error: "sidecar screen is no longer active; start a fresh search or click the current flashing screen" };
     }
   }
