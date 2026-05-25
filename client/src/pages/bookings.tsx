@@ -8323,6 +8323,8 @@ function SidecarScreensStrip() {
   const bySlot = new Map(screens.map((screen) => [screen.slot, screen]));
   const slots = Array.from({ length: maxScreens }, (_, i) => String(i + 1));
   const activeCount = screens.filter((screen) => screen.screenshotDataUrl || screen.phase).length;
+  const captchaScreens = screens.filter((screen) => screen.captcha && screen.screenshotDataUrl);
+  const hasCaptchaScreen = captchaScreens.length > 0;
   const selectedScreen = selectedSlot ? bySlot.get(selectedSlot) ?? null : null;
   const runtime = data?.heartbeat?.workerRuntime;
   const runtimeName = sidecarRuntimeName(runtime);
@@ -8342,6 +8344,10 @@ function SidecarScreensStrip() {
       // Local storage is a convenience only; the live sidecar panel still works without it.
     }
   }, [collapsed]);
+
+  useEffect(() => {
+    if (hasCaptchaScreen) setCollapsed(false);
+  }, [hasCaptchaScreen]);
 
   const sendScreenCommand = (
     screen: SidecarScreenSnapshot,
@@ -8402,6 +8408,15 @@ function SidecarScreensStrip() {
           </Button>
         </div>
       </div>
+      {!collapsed && hasCaptchaScreen && (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-500 bg-yellow-100 px-3 py-2 text-xs text-yellow-950 shadow-sm">
+          <span className="inline-flex items-center gap-2 font-semibold">
+            <AlertCircle className="h-4 w-4" />
+            CAPTCHA takeover needed on sidecar slot{captchaScreens.length === 1 ? "" : "s"} {captchaScreens.map((screen) => screen.slot).join(", ")}
+          </span>
+          <span>Click the flashing screen, then click/hold or drag directly on the enlarged screenshot.</span>
+        </div>
+      )}
       {!collapsed && <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
         {slots.map((slot) => {
           const screen = bySlot.get(slot);
@@ -8413,14 +8428,14 @@ function SidecarScreensStrip() {
             <button
               key={slot}
               type="button"
-              className={`overflow-hidden rounded-md border bg-muted/20 text-left transition ${canOpen ? "hover:border-blue-400 hover:shadow-sm" : ""} ${screen?.captcha ? "border-amber-400 ring-1 ring-amber-300" : ""}`}
+              className={`overflow-hidden rounded-md border bg-muted/20 text-left transition ${canOpen ? "hover:border-blue-400 hover:shadow-sm" : ""} ${screen?.captcha ? "animate-sidecar-captcha-flash border-yellow-600 ring-2 ring-yellow-400" : ""}`}
               onClick={() => {
                 if (canOpen) setSelectedSlot(slot);
               }}
               disabled={!canOpen}
               title={canOpen ? "Open interactive sidecar screen" : "No screen available"}
             >
-              <div className="flex items-center justify-between gap-1 border-b bg-background px-2 py-1 text-[10px]">
+              <div className={`flex items-center justify-between gap-1 border-b px-2 py-1 text-[10px] ${screen?.captcha ? "border-yellow-500 bg-yellow-200 text-yellow-950" : "bg-background"}`}>
                 <span className="font-medium">Slot {slot}</span>
                 <span className="flex items-center gap-1">
                   {screen?.captcha && <MousePointerClick className="h-3 w-3 text-amber-700" />}
@@ -8437,8 +8452,8 @@ function SidecarScreensStrip() {
                   <div className="flex h-full items-center justify-center text-[10px] text-slate-400">No screen</div>
                 )}
               </div>
-              <div className="min-h-[38px] space-y-0.5 px-2 py-1 text-[10px]">
-                <p className="truncate font-medium" title={screen?.phase}>{screen?.phase ?? "Waiting"}</p>
+              <div className={`min-h-[38px] space-y-0.5 px-2 py-1 text-[10px] ${screen?.captcha ? "bg-yellow-50 text-yellow-950" : ""}`}>
+                <p className="truncate font-medium" title={screen?.phase}>{screen?.captcha ? "CAPTCHA: click to take over" : screen?.phase ?? "Waiting"}</p>
                 <p className="truncate text-muted-foreground" title={screen?.title ?? host}>{screen?.title || host || "Ready for next search"}</p>
               </div>
             </button>
@@ -8455,15 +8470,28 @@ function SidecarScreensStrip() {
           <DialogHeader>
             <DialogTitle>Sidecar screen {selectedScreen?.slot ?? selectedSlot}</DialogTitle>
             <DialogDescription>
-              Click or drag on the screenshot to pass pointer input to that sidecar tab. On mobile, open the live browser view for noVNC touch control; desktop is best for slider precision.
+              {selectedScreen?.captcha
+                ? "CAPTCHA takeover is active. Click and hold or drag on the screenshot to pass pointer input to this sidecar tab."
+                : "Click or drag on the screenshot to pass pointer input to that sidecar tab. On mobile, open the live browser view for noVNC touch control; desktop is best for slider precision."}
             </DialogDescription>
           </DialogHeader>
           {selectedScreen?.screenshotDataUrl ? (
             <div className="space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+              {selectedScreen.captcha && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-500 bg-yellow-100 px-3 py-2 text-xs text-yellow-950 shadow-sm">
+                  <span className="inline-flex items-center gap-2 font-semibold">
+                    <MousePointerClick className="h-4 w-4" />
+                    Manual CAPTCHA control is live for this browser session.
+                  </span>
+                  <span>Click and hold the challenge button, or drag the slider, directly on the screenshot below.</span>
+                </div>
+              )}
+              <div className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs ${selectedScreen.captcha ? "border-yellow-300 bg-yellow-50" : "bg-muted/40"}`}>
                 <div className="min-w-0">
                   <p className="font-medium">
-                    {selectedScreen.phase?.startsWith("finished")
+                    {selectedScreen.captcha
+                      ? "Use this enlarged screenshot for takeover, or open the live browser if available."
+                      : selectedScreen.phase?.startsWith("finished")
                       ? "This screenshot is from a finished sidecar run."
                       : "Live pointer control is queued through the sidecar worker."}
                   </p>
@@ -8507,7 +8535,7 @@ function SidecarScreensStrip() {
               <div
                 role="button"
                 tabIndex={0}
-                className={`overflow-hidden rounded-lg border bg-slate-950 ${selectedScreen.phase?.startsWith("finished") ? "cursor-not-allowed opacity-75" : "cursor-crosshair"}`}
+                className={`overflow-hidden rounded-lg border bg-slate-950 ${selectedScreen.captcha ? "border-yellow-500 ring-4 ring-yellow-300" : ""} ${selectedScreen.phase?.startsWith("finished") ? "cursor-not-allowed opacity-75" : "cursor-crosshair"}`}
                 onPointerDown={(event) => {
                   if (selectedScreen.phase?.startsWith("finished")) return;
                   draggingRef.current = true;

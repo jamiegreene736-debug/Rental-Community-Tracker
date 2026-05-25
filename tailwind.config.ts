@@ -96,10 +96,21 @@ export default {
           from: { height: "var(--radix-accordion-content-height)" },
           to: { height: "0" },
         },
+        "sidecar-captcha-flash": {
+          "0%, 100%": {
+            backgroundColor: "rgb(254 249 195)",
+            boxShadow: "0 0 0 1px rgb(251 191 36), 0 0 0 0 rgba(250, 204, 21, 0.75)",
+          },
+          "50%": {
+            backgroundColor: "rgb(250 204 21)",
+            boxShadow: "0 0 0 2px rgb(217 119 6), 0 0 24px 8px rgba(250, 204, 21, 0.75)",
+          },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "sidecar-captcha-flash": "sidecar-captcha-flash 0.9s ease-in-out infinite",
       },
     },
   },
