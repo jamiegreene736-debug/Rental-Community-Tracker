@@ -1,24 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# LEGACY: Mac LaunchAgent local sidecar (debug only).
-# Production uses remote workers — see docs/remote-sidecar-setup.md and:
-#   ./scripts/setup-remote-sidecar.sh
-
-if [[ "$(uname -s)" == "Darwin" && "${SIDECAR_ALLOW_LOCAL_MAC:-0}" != "1" ]]; then
-  cat <<'EOF' >&2
-Mac local sidecar install is disabled by default.
-
-Use fully remote sidecar instead:
-  ./scripts/setup-remote-sidecar.sh
-
-See: docs/remote-sidecar-setup.md
-
-To force this legacy Mac installer:
-  SIDECAR_ALLOW_LOCAL_MAC=1 ./scripts/install-vrbo-sidecar-launchagent.sh
-EOF
-  exit 1
-fi
+# Mac LaunchAgent local sidecar.
+#
+# This is the preferred VRBO path when the remote container/noVNC browser
+# gets hard-blocked after manual CAPTCHA solves. It runs real Google Chrome
+# on macOS and keeps the sidecar windows hidden/offscreen by default so Safari
+# browsing is not interrupted.
 
 # Install the local Chrome sidecar as a macOS LaunchAgent.
 #
@@ -121,23 +109,17 @@ value_from_env_or_railway() {
 
 SERVER_URL="${SIDECAR_SERVER:-https://rental-community-tracker-production.up.railway.app}"
 MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES:-8}"
-# Prefer Grok's recommended architecture: remote headed Chrome/noVNC
-# with sticky residential proxy. Local headless remains the no-window
-# fallback if the server Chrome pool is unavailable.
-SIDECAR_BROWSER_MODE="${SIDECAR_BROWSER_MODE:-server}"
+# Prefer local macOS Chrome/CDP. The browser is launched offscreen and
+# minimized by default; the dashboard screenshot strip remains the control
+# surface for observing jobs and manual CAPTCHA input.
+SIDECAR_BROWSER_MODE="${SIDECAR_BROWSER_MODE:-cdp}"
 SIDECAR_HEADLESS_BROWSER_CHANNEL="${SIDECAR_HEADLESS_BROWSER_CHANNEL:-chrome}"
-CHROME_PRIMARY="${CHROME_PRIMARY:-server}"
-# Keep server/noVNC Chrome as the preferred path, but do not fall through to
-# isolated headless Chrome when the server pool or proxy is unavailable. OTA
-# search pages, especially Booking.com and VRBO, reject the headless fallback
-# far more often than a real local Chrome profile.
-SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK:-1}"
+CHROME_PRIMARY="${CHROME_PRIMARY:-local}"
+SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK:-0}"
 SIDECAR_HEADLESS_FALLBACK_ENABLED="${SIDECAR_HEADLESS_FALLBACK_ENABLED:-0}"
-# Default the local fallback to visible real Chrome. Server/noVNC is still the
-# primary path, but when OTA providers block the server/proxy path the operator
-# needs a reachable browser window for CAPTCHA recovery instead of an offscreen
-# or headless session that cannot be rescued.
-SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE:-1}"
+# Hidden/offscreen by default so local sidecar Chrome does not steal focus from
+# Safari. Set SIDECAR_CHROME_VISIBLE=1 only when intentionally debugging.
+SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE:-0}"
 SIDECAR_CHROME_VISIBLE_GRID_ORIGIN="${SIDECAR_CHROME_VISIBLE_GRID_ORIGIN:-1440,60}"
 SIDECAR_CHROME_VISIBLE_SIZE="${SIDECAR_CHROME_VISIBLE_SIZE:-500,375}"
 SIDECAR_CHROME_VISIBLE_GRID_COLUMNS="${SIDECAR_CHROME_VISIBLE_GRID_COLUMNS:-4}"
@@ -145,12 +127,12 @@ SIDECAR_CHROME_VISIBLE_GRID_GAP_X="${SIDECAR_CHROME_VISIBLE_GRID_GAP_X:-0}"
 SIDECAR_CHROME_VISIBLE_GRID_GAP_Y="${SIDECAR_CHROME_VISIBLE_GRID_GAP_Y:-35}"
 SIDECAR_CHROME_VISIBLE_POSITIONS="${SIDECAR_CHROME_VISIBLE_POSITIONS:-1440,60;1820,60;2200,60;2580,60;1440,470;1820,470;2200,470;2580,470}"
 SIDECAR_WARM_ALL_LOCAL_CHROME="${SIDECAR_WARM_ALL_LOCAL_CHROME:-0}"
-SIDECAR_ALLOW_FOCUS="${SIDECAR_ALLOW_FOCUS:-1}"
-SIDECAR_CAPTCHA_SURFACE_WINDOW="${SIDECAR_CAPTCHA_SURFACE_WINDOW:-1}"
-SIDECAR_CAPTCHA_ALLOW_FOCUS="${SIDECAR_CAPTCHA_ALLOW_FOCUS:-1}"
-SIDECAR_MACOS_BACKGROUND_LAUNCH="${SIDECAR_MACOS_BACKGROUND_LAUNCH:-0}"
-SERVER_CHROME_FALLBACK_ENABLED="${SERVER_CHROME_FALLBACK_ENABLED:-1}"
-SERVER_CHROME_FALLBACK_VRBO="${SERVER_CHROME_FALLBACK_VRBO:-1}"
+SIDECAR_ALLOW_FOCUS="${SIDECAR_ALLOW_FOCUS:-0}"
+SIDECAR_CAPTCHA_SURFACE_WINDOW="${SIDECAR_CAPTCHA_SURFACE_WINDOW:-0}"
+SIDECAR_CAPTCHA_ALLOW_FOCUS="${SIDECAR_CAPTCHA_ALLOW_FOCUS:-0}"
+SIDECAR_MACOS_BACKGROUND_LAUNCH="${SIDECAR_MACOS_BACKGROUND_LAUNCH:-1}"
+SERVER_CHROME_FALLBACK_ENABLED="${SERVER_CHROME_FALLBACK_ENABLED:-0}"
+SERVER_CHROME_FALLBACK_VRBO="${SERVER_CHROME_FALLBACK_VRBO:-0}"
 SIDECAR_OPEN_NOVNC_ON_ACQUIRE="${SIDECAR_OPEN_NOVNC_ON_ACQUIRE:-0}"
 EXISTING_RUNNER_PATH="${INSTALL_DIR}/run-vrbo-sidecar.sh"
 SERVER_CHROME_HOST="$(value_from_env_or_railway SERVER_CHROME_HOST "")"
@@ -175,13 +157,11 @@ if [[ "${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK}" == "1" ]]; then
   if [[ -z "${SERVER_CHROME_HOST}" ]]; then
     echo "Warning: SERVER_CHROME_HOST is unset; enabling local macOS Chrome fallback (SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=0)."
     SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="0"
-    SIDECAR_CHROME_VISIBLE="1"
   elif ! server_chrome_cdp_reachable "${SERVER_CHROME_HOST}" "${SERVER_CHROME_BASE_PORT}" "${SERVER_CHROME_SCHEME}"; then
     echo "Warning: server Chrome pool is not reachable at ${SERVER_CHROME_SCHEME}://${SERVER_CHROME_HOST}:${SERVER_CHROME_BASE_PORT}."
     echo "         Enabling local macOS Chrome fallback (SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=0)."
     echo "         To use remote noVNC instead, install Docker and run: ./scripts/start-server-sidecars.sh ${MAX_SERVER_INSTANCES}"
     SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="0"
-    SIDECAR_CHROME_VISIBLE="1"
   else
     echo "Server Chrome pool reachable at ${SERVER_CHROME_SCHEME}://${SERVER_CHROME_HOST}:${SERVER_CHROME_BASE_PORT}."
   fi
