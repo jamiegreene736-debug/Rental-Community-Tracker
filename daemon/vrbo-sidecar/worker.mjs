@@ -877,6 +877,122 @@ async function dismissObstructions(targetPage = page, label = "page") {
   return actions;
 }
 
+async function dismissBookingPopups(targetPage = page, label = "booking_search") {
+  if (!targetPage || targetPage.isClosed?.()) return [];
+  const actions = [...await dismissObstructions(targetPage, label)];
+  for (let pass = 0; pass < 4; pass++) {
+    const action = await withSoftTimeout(
+      targetPage.evaluate(() => {
+        const rootSelector = [
+          "[role='dialog']",
+          "[aria-modal='true']",
+          "[class*='modal' i]",
+          "[class*='overlay' i]",
+          "[class*='popup' i]",
+          "[data-testid*='modal' i]",
+          "[data-testid*='overlay' i]",
+          "[data-testid*='sign' i]",
+        ].join(",");
+        const controlSelector = [
+          "button",
+          "[role='button']",
+          "a",
+          "[aria-label]",
+          "[title]",
+          "[data-testid]",
+        ].join(",");
+        const closeRe = /\b(?:close|dismiss|not now|maybe later|no thanks|skip|continue without|sign in later)\b|^(?:×|x)$/i;
+        const badRe = /\b(?:sign in|register|create account|search|reserve|book|select|favorite|share|facebook|google|apple|email)\b/i;
+
+        function isVisible(el) {
+          if (!el || !(el instanceof HTMLElement)) return false;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width >= 4 && rect.height >= 4 &&
+            rect.bottom >= 0 && rect.right >= 0 &&
+            rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+            style.display !== "none" && style.visibility !== "hidden" &&
+            Number(style.opacity || "1") > 0.05;
+        }
+
+        function textOf(el) {
+          return [
+            el.textContent,
+            el.getAttribute?.("aria-label"),
+            el.getAttribute?.("title"),
+            el.getAttribute?.("data-testid"),
+            el.getAttribute?.("data-test"),
+          ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        }
+
+        function click(el, kind, label) {
+          const rect = el.getBoundingClientRect();
+          el.scrollIntoView?.({ block: "center", inline: "center" });
+          el.click();
+          return {
+            clicked: true,
+            kind,
+            label: (label || textOf(el) || el.tagName.toLowerCase()).slice(0, 80),
+            rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+          };
+        }
+
+        const roots = Array.from(document.querySelectorAll(rootSelector))
+          .filter(isVisible)
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return (br.width * br.height) - (ar.width * ar.height);
+          });
+
+        for (const root of roots) {
+          const rootRect = root.getBoundingClientRect();
+          const rootText = textOf(root).slice(0, 1500);
+          const looksBookingPopup = /sign in|genius|save|unlock|account|deal|app|booking/i.test(rootText) ||
+            rootRect.width > window.innerWidth * 0.25 ||
+            rootRect.height > window.innerHeight * 0.18;
+          if (!looksBookingPopup) continue;
+
+          const controls = Array.from(root.querySelectorAll(controlSelector))
+            .filter((el) => isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
+          const labeledClose = controls.find((el) => {
+            const label = textOf(el);
+            return closeRe.test(label) && !badRe.test(label.replace(closeRe, ""));
+          });
+          if (labeledClose) return click(labeledClose, "booking-popup-close", textOf(labeledClose));
+
+          const iconClose = controls
+            .map((el) => ({ el, rect: el.getBoundingClientRect(), label: textOf(el) }))
+            .filter(({ rect, label }) => {
+              const small = rect.width <= 72 && rect.height <= 72;
+              const nearTopRight = rect.top <= rootRect.top + Math.max(120, rootRect.height * 0.25) &&
+                rect.left >= rootRect.right - Math.max(180, rootRect.width * 0.35);
+              const notPrimaryAction = !badRe.test(label);
+              return small && nearTopRight && notPrimaryAction;
+            })
+            .sort((a, b) => {
+              const ax = Math.abs(a.rect.top - rootRect.top) + Math.abs(a.rect.right - rootRect.right);
+              const bx = Math.abs(b.rect.top - rootRect.top) + Math.abs(b.rect.right - rootRect.right);
+              return ax - bx;
+            })[0];
+          if (iconClose) return click(iconClose.el, "booking-popup-icon-close", iconClose.label || "top-right close");
+        }
+
+        return null;
+      }),
+      2_500,
+      null,
+    );
+    if (!action?.clicked) break;
+    actions.push(action);
+    await targetPage.waitForTimeout(500).catch(() => {});
+  }
+  if (actions.length > 0) {
+    log(`${label}: dismissed Booking popup(s): ${actions.map((a) => `${a.kind}:${a.label}`).join("; ")}`);
+  }
+  return actions;
+}
+
 function withPagePrepReason(result, dismissals, dateEntry) {
   if (!result) return result;
   const parts = [];
@@ -1984,7 +2100,9 @@ async function dumpPageState(label, requestForLog) {
 const VRBO_HUMAN_CHALLENGE_RE =
   /show us your human side|we can.?t tell if you.?re a human|press and hold|slide (?:the )?(?:lock|slider)|captcha|not a robot|bot or not|verify (?:that )?you(?:'re| are) human|human verification|unusual traffic/i;
 const OTA_PRESS_AND_HOLD_CHALLENGE_RE =
-  /press\s+and\s+hold|hold\s+(?:the\s+)?(?:button|slider)|show us your human side|we can.?t tell if you.?re a human/i;
+  /press\s+and\s+hold|hold\s+(?:the\s+)?(?:button|slider)|show us your human side|we can.?t tell if you.?re a human|bot or not/i;
+const OTA_SLIDER_CHALLENGE_RE =
+  /slide\s+(?:the\s+)?(?:lock|slider)|drag\s+(?:the\s+)?(?:slider|piece|puzzle)|slider\s+(?:captcha|verification)|puzzle\s+(?:piece|captcha)|move\s+(?:the\s+)?(?:slider|piece)/i;
 const VRBO_HARD_BLOCK_RE =
   /you have been blocked|something about the behaviour of the browser|robot on the same network/i;
 const BRIGHTDATA_KYC_BLOCK_RE =
@@ -2057,6 +2175,20 @@ function stateLooksLikePressAndHoldChallenge(state) {
   return OTA_PRESS_AND_HOLD_CHALLENGE_RE.test(
     `${state.title ?? ""}\n${state.bodyExcerpt ?? ""}\n${state.bodyHtmlSnippet ?? ""}\n${state.url ?? ""}`,
   );
+}
+
+function stateLooksLikeSliderChallenge(state) {
+  if (!state) return false;
+  return OTA_SLIDER_CHALLENGE_RE.test(
+    `${state.title ?? ""}\n${state.bodyExcerpt ?? ""}\n${state.bodyHtmlSnippet ?? ""}\n${state.url ?? ""}`,
+  );
+}
+
+function classifyOtaHumanChallenge(state) {
+  if (!stateLooksLikeVrboHumanChallenge(state)) return "none";
+  if (stateLooksLikePressAndHoldChallenge(state)) return "press_and_hold";
+  if (stateLooksLikeSliderChallenge(state)) return "image_slider";
+  return "unknown";
 }
 
 function stateLooksLikeVrboHardBlock(state) {
@@ -2409,33 +2541,32 @@ async function trySolveOtaSliderWithCapSolver(page, label = "vrbo", id = "") {
 
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
-      log(`${label} ${id}: CapSolver VisionEngine slider_1 (attempt ${attempt}/${maxRetries})...`);
       const challengeState = await captureVrboChallengeState(page);
-      const pressAndHoldChallenge = stateLooksLikePressAndHoldChallenge(challengeState);
+      const challengeType = classifyOtaHumanChallenge(challengeState);
+      if (challengeType === "press_and_hold") {
+        if (attempt === 1) {
+          log(
+            `${label} ${id}: detected press-and-hold challenge; CapSolver VisionEngine slider_1 is not applicable ` +
+              "because VRBO did not expose separate puzzle + background images",
+          );
+        }
+        const held = await performHumanLikePressAndHold(page, label, id);
+        if (held) return { solved: true, method: "press_and_hold" };
+        if (attempt === maxRetries) return { solved: false, reason: "press_hold_failed", challengeType };
+        continue;
+      }
 
+      log(`${label} ${id}: CapSolver VisionEngine slider_1 (attempt ${attempt}/${maxRetries}, challenge=${challengeType})...`);
       const imagePair = await extractSliderCaptchaImagePair(page);
       if (!imagePair?.image || !imagePair?.imageBackground) {
-        if (pressAndHoldChallenge) {
-          log(`${label} ${id}: no slider images found; challenge appears to be press-and-hold, trying human-like hold`);
-          const held = await performHumanLikePressAndHold(page, label, id);
-          if (held) return { solved: true, method: "press_and_hold" };
-          if (attempt === maxRetries) return { solved: false, reason: "press_hold_failed" };
-          continue;
-        }
         log(`${label} ${id}: Could not extract slider puzzle + background images for CapSolver`);
-        if (attempt === maxRetries) return { solved: false, reason: "captcha_images_not_found" };
+        if (attempt === maxRetries) return { solved: false, reason: "captcha_images_not_found", challengeType };
         continue;
       }
 
       if (imagePair.mode === "container_clip_fallback") {
         log(`${label} ${id}: only captured a single captcha container screenshot; VisionEngine slider_1 requires separate puzzle + background images`);
-        if (pressAndHoldChallenge) {
-          const held = await performHumanLikePressAndHold(page, label, id);
-          if (held) return { solved: true, method: "press_and_hold" };
-          if (attempt === maxRetries) return { solved: false, reason: "press_hold_failed" };
-          continue;
-        }
-        if (attempt === maxRetries) return { solved: false, reason: "captcha_images_not_found" };
+        if (attempt === maxRetries) return { solved: false, reason: "captcha_images_not_found", challengeType };
         continue;
       } else {
         log(
@@ -2460,14 +2591,14 @@ async function trySolveOtaSliderWithCapSolver(page, label = "vrbo", id = "") {
       );
 
       if (!solution) {
-        if (attempt === maxRetries) return { solved: false, reason: "no_solution" };
+        if (attempt === maxRetries) return { solved: false, reason: "no_solution", challengeType };
         continue;
       }
 
       const distance = solution.distance ?? solution.x ?? solution.move ?? null;
       if (distance === null) {
         log(`${label} ${id}: CapSolver solution missing distance/x (${JSON.stringify(solution).slice(0, 200)})`);
-        if (attempt === maxRetries) return { solved: false, reason: "unexpected_solution" };
+        if (attempt === maxRetries) return { solved: false, reason: "unexpected_solution", challengeType };
         continue;
       }
 
@@ -2475,7 +2606,7 @@ async function trySolveOtaSliderWithCapSolver(page, label = "vrbo", id = "") {
       const dragged = await performHumanLikeSliderDrag(page, distance);
       if (!dragged) {
         log(`${label} ${id}: Could not perform slider drag`);
-        if (attempt === maxRetries) return { solved: false, reason: "drag_failed" };
+        if (attempt === maxRetries) return { solved: false, reason: "drag_failed", challengeType };
         continue;
       }
 
@@ -2490,7 +2621,7 @@ async function trySolveOtaSliderWithCapSolver(page, label = "vrbo", id = "") {
       }
 
       log(`${label} ${id}: Drag applied but challenge still present`);
-      if (attempt === maxRetries) return { solved: false, reason: "verification_failed" };
+      if (attempt === maxRetries) return { solved: false, reason: "verification_failed", challengeType };
     } catch (err) {
       log(`${label} ${id}: CapSolver attempt ${attempt} crashed — ${err?.message || err}`);
       if (attempt === maxRetries) return { solved: false, reason: "error" };
@@ -2521,7 +2652,7 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
     log(`${label} ${id}: CapSolver successfully solved slider — auto-continuing`);
     return false;
   }
-  const challengeType = stateLooksLikePressAndHoldChallenge(state) ? "press_and_hold" : "slider_or_unknown";
+  const challengeType = solveResult.challengeType || classifyOtaHumanChallenge(state);
   const solverReason = solveResult.reason || "not_solved";
   log(`${label} ${id}: CAPTCHA automation did not clear challenge (type=${challengeType}, reason=${solverReason})`);
 
@@ -2930,7 +3061,7 @@ async function applyBookingBedroomFilter(bedrooms, expectedUrl = null) {
     current.searchParams.set("nflt", filters.join(";"));
     await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
     await page.waitForTimeout(PAGE_SETTLE_MS);
-    await dismissObstructions(page, "booking_search_after_bedroom_filter");
+    await dismissBookingPopups(page, "booking_search_after_bedroom_filter");
     log(`booking_search: applied bedroom filter (${targetBedrooms}BR) with intended dates/search preserved`);
     return true;
   } catch (e) {
@@ -3871,14 +4002,20 @@ async function processBookingSearch(id, params) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopOtaProviderIfBlocked(page, "booking_search", id);
-  await dismissObstructions(page, "booking_search");
+  await dismissBookingPopups(page, "booking_search");
   await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_initial_goto");
   await applyBookingBedroomFilter(bedrooms, url).catch(() => false);
   await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_bedroom_filter");
+  await dismissBookingPopups(page, "booking_search_before_scrape");
   let state = await dumpPageState("booking", { id, ...params });
   throwIfBrightDataKycBlock(state, "booking_search", id);
   if (await stopOtaProviderIfBlocked(page, "booking_search", id, state)) {
     state = await dumpPageState("booking-after-captcha", { id, ...params });
+  }
+  const lateDismissals = await dismissBookingPopups(page, "booking_search_after_block_check");
+  if (lateDismissals.length > 0) {
+    await page.waitForTimeout(800).catch(() => {});
+    state = await dumpPageState("booking-after-popup-dismiss", { id, ...params });
   }
   throwIfBlankSearchPage(state, "booking.com", "booking_search", id);
   if (state && stateLooksLikeVrboHumanChallenge(state)) {
