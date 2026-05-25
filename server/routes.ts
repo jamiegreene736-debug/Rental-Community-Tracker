@@ -17185,15 +17185,22 @@ Return ONLY compact JSON with this exact shape:
   // break — both `worker.mjs` and routes.ts here ship together.
   app.get("/api/admin/vrbo-sidecar/next", async (req, res) => {
     if (!checkAdminSecret(req, res)) return;
-    const { next } = await import("./vrbo-sidecar-queue");
+    const { getSidecarStopGeneration, isQueuePaused, next } = await import("./vrbo-sidecar-queue");
     const r = next({
       slot: typeof req.query.slot === "string" ? req.query.slot : undefined,
       workerRole: typeof req.query.workerRole === "string" ? req.query.workerRole : undefined,
       browserMode: typeof req.query.browserMode === "string" ? req.query.browserMode : undefined,
       chromePrimary: typeof req.query.chromePrimary === "string" ? req.query.chromePrimary : undefined,
     });
-    if (!r) return res.json({ request: null });
+    const pausedState = isQueuePaused();
+    const control = {
+      generation: getSidecarStopGeneration(),
+      paused: pausedState.paused,
+      reason: pausedState.reason,
+    };
+    if (!r) return res.json({ request: null, control });
     return res.json({
+      control,
       request: {
         id: r.id,
         opType: r.opType,

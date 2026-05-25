@@ -132,6 +132,8 @@ let launchedPersistentContext = false;
 let activeRuntimeRequest = null;
 let activeHeadlessProxyBridge = null;
 let activeBrowserFingerprint = null;
+let lastObservedQueueControlGeneration = null;
+let pendingIdleChromeReset = false;
 
 function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
@@ -1961,6 +1963,28 @@ async function resetPage() {
   }
 }
 
+async function resetVisibleChromeToIdle(reason = "idle reset") {
+  if (!keepVisibleLocalChromeGrid()) return false;
+  try {
+    await acquireChromeForRequest({ id: `idle-${WORKER_SLOT}`, opType: "idle" });
+    await ensureBrowser();
+    if (!context) return false;
+    if (!page || page.isClosed?.()) {
+      page = context.pages().find((p) => p && !p.isClosed?.()) ?? await context.newPage();
+      await normalizePageDisplay(page);
+    }
+    await clearContextStorageForFreshRun(`${reason}: clear idle browser state`);
+    await closeExtraTabs(`${reason}: idle tab cleanup`, page);
+    await resetPage();
+    await snapSidecarWindowToGrid(page, { focus: false, label: "idle reset", id: String(reason).slice(0, 80) }).catch(() => false);
+    log(`${reason}: reset visible Chrome slot to blank idle state`);
+    return true;
+  } catch (e) {
+    log(`${reason}: idle Chrome reset failed: ${e?.message ?? e}`);
+    return false;
+  }
+}
+
 async function showCompletePage(opType) {
   if (!page || page.isClosed?.()) return;
   try {
@@ -2043,7 +2067,25 @@ async function pollNext() {
   const data = await fetchJson(url.toString(), {
     headers: authHeaders(),
   });
-  return data.request ?? null;
+  return data;
+}
+
+async function handleQueueControlState(control, hasRequest) {
+  const generation = Number(control?.generation);
+  if (!Number.isFinite(generation)) return;
+  if (lastObservedQueueControlGeneration === null) {
+    lastObservedQueueControlGeneration = generation;
+    pendingIdleChromeReset = true;
+  } else if (generation !== lastObservedQueueControlGeneration) {
+    lastObservedQueueControlGeneration = generation;
+    pendingIdleChromeReset = true;
+  }
+  if (!pendingIdleChromeReset || hasRequest || !keepVisibleLocalChromeGrid()) return;
+  const reason = control?.paused
+    ? "sidecar queue paused/cleared"
+    : "sidecar idle startup";
+  const reset = await resetVisibleChromeToIdle(reason);
+  if (reset) pendingIdleChromeReset = false;
 }
 
 let lastHeartbeatSentAt = 0;
@@ -6644,7 +6686,9 @@ async function tick() {
     if (WORKER_ROLE === "server" && SERVER_WORKER_CLAIM_DELAY_MS > 0) {
       await new Promise((r) => setTimeout(r, SERVER_WORKER_CLAIM_DELAY_MS));
     }
-    req = await pollNext();
+    const poll = await pollNext();
+    req = poll?.request ?? null;
+    await handleQueueControlState(poll?.control, Boolean(req));
   } catch (e) {
     consecutiveErrors++;
     log(`poll error (${consecutiveErrors}): ${e.message}`);
@@ -6893,6 +6937,9 @@ async function main() {
     }
   } else {
     log("local Chrome warmup skipped on non-primary worker slot");
+  }
+  if (keepVisibleLocalChromeGrid()) {
+    await resetVisibleChromeToIdle("sidecar startup");
   }
   process.on("SIGINT", async () => { await teardownBrowser("SIGINT"); process.exit(0); });
   process.on("SIGTERM", async () => { await teardownBrowser("SIGTERM"); process.exit(0); });
