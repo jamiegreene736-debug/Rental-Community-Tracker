@@ -2085,6 +2085,112 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
   return stateLooksLikeVrboHumanChallenge(state);
 }
 
+async function extractSliderCaptchaImagePair(page) {
+  const root = page
+    .locator(
+      '[class*="captcha" i], [id*="captcha" i], [class*="arkose" i], [class*="slider" i], [class*="human" i], [class*="verify" i]',
+    )
+    .first();
+
+  const imgCount = await root.locator("img").count().catch(() => 0);
+  if (imgCount >= 2) {
+    const imgs = root.locator("img");
+    const candidates = [];
+    for (let i = 0; i < Math.min(imgCount, 8); i += 1) {
+      const loc = imgs.nth(i);
+      const box = await loc.boundingBox().catch(() => null);
+      if (box && box.width > 15 && box.height > 15) {
+        candidates.push({ loc, area: box.width * box.height });
+      }
+    }
+    if (candidates.length >= 2) {
+      candidates.sort((a, b) => b.area - a.area);
+      const bgLoc = candidates[0].loc;
+      const pieceLoc = candidates[candidates.length - 1].loc;
+      try {
+        const imageBackground = (await bgLoc.screenshot({ type: "jpeg", quality: 85 })).toString("base64");
+        const image = (await pieceLoc.screenshot({ type: "jpeg", quality: 85 })).toString("base64");
+        if (image && imageBackground) {
+          return { image, imageBackground, mode: "dual_element_screenshot" };
+        }
+      } catch {
+        // fall through to container clip
+      }
+    }
+  }
+
+  const box = await root.boundingBox().catch(() => null);
+  if (box && box.width > 80 && box.height > 50) {
+    const clip = {
+      x: Math.max(0, box.x),
+      y: Math.max(0, box.y),
+      width: box.width,
+      height: box.height,
+    };
+    const full = await page.screenshot({ clip, type: "jpeg", quality: 85 }).catch(() => null);
+    if (full) {
+      const b64 = full.toString("base64");
+      return { image: b64, imageBackground: b64, mode: "container_clip_fallback" };
+    }
+  }
+
+  return null;
+}
+
+async function callCapSolverVisionEngineSlider(apiKey, websiteURL, image, imageBackground, label, id) {
+  const createResponse = await fetch("https://api.capsolver.com/createTask", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      clientKey: apiKey,
+      task: {
+        type: "VisionEngine",
+        module: "slider_1",
+        websiteURL,
+        image,
+        imageBackground,
+      },
+    }),
+  });
+
+  if (!createResponse.ok) {
+    log(`${label} ${id}: CapSolver HTTP ${createResponse.status}`);
+    return null;
+  }
+
+  const createResult = await createResponse.json();
+  if (createResult.errorId !== 0) {
+    log(`${label} ${id}: CapSolver createTask error → ${createResult.errorDescription || createResult.errorCode}`);
+    return null;
+  }
+
+  if (createResult.status === "ready" && createResult.solution) {
+    return createResult.solution;
+  }
+
+  const taskId = createResult.taskId;
+  if (!taskId) return null;
+
+  for (let poll = 0; poll < 15; poll += 1) {
+    await new Promise((r) => setTimeout(r, 1_500));
+    const resultResponse = await fetch("https://api.capsolver.com/getTaskResult", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientKey: apiKey, taskId }),
+    });
+    const resultData = await resultResponse.json();
+    if (resultData.errorId !== 0) {
+      log(`${label} ${id}: CapSolver getTaskResult error → ${resultData.errorDescription || resultData.errorCode}`);
+      return null;
+    }
+    if (resultData.status === "ready" && resultData.solution) {
+      return resultData.solution;
+    }
+  }
+
+  return null;
+}
+
 async function performHumanLikeSliderDrag(page, distancePx) {
   const distance = Math.max(0, Math.round(Number(distancePx) || 0));
   if (!page || distance <= 0) return false;
@@ -2165,7 +2271,7 @@ async function performHumanLikeSliderDrag(page, distancePx) {
   }
 }
 
-async function trySolveVrboSliderWithCapSolver(page, label = "vrbo", id = "") {
+async function trySolveOtaSliderWithCapSolver(page, label = "vrbo", id = "") {
   const solvingEnabled = process.env.CAPTCHA_SOLVING_ENABLED === "1";
   const apiKey = process.env.CAPSOLVER_API_KEY;
 
@@ -2177,136 +2283,81 @@ async function trySolveVrboSliderWithCapSolver(page, label = "vrbo", id = "") {
 
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
-      log(`${label} ${id}: Attempting CapSolver VisionEngine solve (attempt ${attempt}/${maxRetries})...`);
+      log(`${label} ${id}: CapSolver VisionEngine slider_1 (attempt ${attempt}/${maxRetries})...`);
 
-      const captchaLocator = page
-        .locator('[class*="captcha"], [class*="slider"], [class*="human"], [role="slider"], [class*="verify"]')
-        .first();
-
-      let screenshotOptions = { fullPage: false };
-      const box = await captchaLocator.boundingBox().catch(() => null);
-      if (box && box.width > 50 && box.height > 50) {
-        screenshotOptions = {
-          clip: {
-            x: Math.max(0, box.x - 20),
-            y: Math.max(0, box.y - 20),
-            width: box.width + 40,
-            height: box.height + 40,
-          },
-        };
-        log(`${label} ${id}: Cropped screenshot to captcha area`);
-      }
-
-      const screenshotBuffer = await page.screenshot(screenshotOptions).catch(() => null);
-      if (!screenshotBuffer) {
-        log(`${label} ${id}: Failed to capture screenshot`);
-        return { solved: false, reason: "screenshot_failed" };
-      }
-
-      const imageBase64 = screenshotBuffer.toString("base64");
-      const websiteURL = await page.url().catch(() => "");
-
-      const createTaskPayload = {
-        clientKey: apiKey,
-        task: {
-          type: "VisionEngine",
-          websiteURL,
-          image: imageBase64,
-          module: "slider_1",
-          instruction: "Solve the slider / puzzle captcha by moving the piece to complete the image",
-        },
-      };
-
-      const createResponse = await fetch("https://api.capsolver.com/createTask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(createTaskPayload),
-      });
-
-      const createResult = await createResponse.json();
-
-      if (createResult.errorId !== 0) {
-        log(`${label} ${id}: CapSolver createTask error → ${createResult.errorDescription}`);
-        if (attempt === maxRetries) return { solved: false, reason: "create_task_failed" };
+      const imagePair = await extractSliderCaptchaImagePair(page);
+      if (!imagePair?.image || !imagePair?.imageBackground) {
+        log(`${label} ${id}: Could not extract slider puzzle + background images for CapSolver`);
+        if (attempt === maxRetries) return { solved: false, reason: "captcha_images_not_found" };
         continue;
       }
 
-      const taskId = createResult.taskId;
-
-      let solution = null;
-      const maxPollAttempts = 30;
-
-      for (let poll = 0; poll < maxPollAttempts; poll += 1) {
-        await new Promise((r) => setTimeout(r, 2_000));
-
-        const resultResponse = await fetch("https://api.capsolver.com/getTaskResult", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientKey: apiKey, taskId }),
-        });
-
-        const resultData = await resultResponse.json();
-
-        if (resultData.errorId !== 0) {
-          log(`${label} ${id}: getTaskResult error → ${resultData.errorDescription}`);
-          break;
-        }
-
-        if (resultData.status === "ready") {
-          solution = resultData.solution;
-          break;
-        }
+      if (imagePair.mode === "container_clip_fallback") {
+        log(`${label} ${id}: Using captcha container clip fallback (single image for both CapSolver inputs)`);
+      } else {
+        log(`${label} ${id}: CapSolver image capture mode: ${imagePair.mode}`);
       }
 
+      const websiteURL = await page.url().catch(() => "");
+      const solution = await callCapSolverVisionEngineSlider(
+        apiKey,
+        websiteURL,
+        imagePair.image,
+        imagePair.imageBackground,
+        label,
+        id,
+      );
+
       if (!solution) {
-        log(`${label} ${id}: No solution from CapSolver`);
         if (attempt === maxRetries) return { solved: false, reason: "no_solution" };
         continue;
       }
 
       const distance = solution.distance ?? solution.x ?? solution.move ?? null;
-
-      if (distance !== null) {
-        log(`${label} ${id}: CapSolver returned distance/x: ${distance}`);
-
-        const dragged = await performHumanLikeSliderDrag(page, distance);
-        if (!dragged) {
-          log(`${label} ${id}: Could not perform slider drag`);
-          if (attempt === maxRetries) return { solved: false, reason: "drag_failed" };
-          continue;
-        }
-
-        await page.waitForTimeout(1_400).catch(() => {});
-
-        const stillChallenged = await stateLooksLikeVrboHumanChallenge(
-          await captureVrboChallengeState(page),
-        );
-
-        if (!stillChallenged) {
-          log(`${label} ${id}: ✅ CapSolver VisionEngine successfully solved the slider`);
-          return { solved: true };
-        }
-
-        log(`${label} ${id}: Drag applied but challenge still present`);
-        if (attempt === maxRetries) return { solved: false, reason: "verification_failed" };
+      if (distance === null) {
+        log(`${label} ${id}: CapSolver solution missing distance/x (${JSON.stringify(solution).slice(0, 200)})`);
+        if (attempt === maxRetries) return { solved: false, reason: "unexpected_solution" };
         continue;
       }
 
-      log(`${label} ${id}: Solution received but no usable distance/x value`);
-      if (attempt === maxRetries) return { solved: false, reason: "unexpected_solution" };
-      continue;
+      log(`${label} ${id}: CapSolver returned distance: ${distance}`);
+      const dragged = await performHumanLikeSliderDrag(page, distance);
+      if (!dragged) {
+        log(`${label} ${id}: Could not perform slider drag`);
+        if (attempt === maxRetries) return { solved: false, reason: "drag_failed" };
+        continue;
+      }
+
+      await boundedPageDelay(page, 1_400);
+
+      const stillChallenged = await stateLooksLikeVrboHumanChallenge(
+        await captureVrboChallengeState(page),
+      );
+      if (!stillChallenged) {
+        log(`${label} ${id}: CapSolver VisionEngine successfully solved the slider`);
+        return { solved: true };
+      }
+
+      log(`${label} ${id}: Drag applied but challenge still present`);
+      if (attempt === maxRetries) return { solved: false, reason: "verification_failed" };
     } catch (err) {
       log(`${label} ${id}: CapSolver attempt ${attempt} crashed — ${err?.message || err}`);
-      if (attempt === maxRetries) {
-        return { solved: false, reason: "error" };
-      }
+      if (attempt === maxRetries) return { solved: false, reason: "error" };
     }
   }
 
   return { solved: false, reason: "max_retries_exceeded" };
 }
 
+async function trySolveVrboSliderWithCapSolver(page, label = "vrbo", id = "") {
+  return trySolveOtaSliderWithCapSolver(page, label, id);
+}
+
 async function stopVrboProviderIfBlocked(targetPage, label, id, initialState = null) {
+  return stopOtaProviderIfBlocked(targetPage, label, id, initialState);
+}
+
+async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = null) {
   let state = initialState ?? await captureVrboChallengeState(targetPage);
 
   throwIfVrboHardBlock(state, label, id);
@@ -2314,7 +2365,7 @@ async function stopVrboProviderIfBlocked(targetPage, label, id, initialState = n
   const hasChallenge = stateLooksLikeVrboHumanChallenge(state);
   if (!hasChallenge) return false;
 
-  const solveResult = await trySolveVrboSliderWithCapSolver(targetPage, label, id).catch(() => ({ solved: false }));
+  const solveResult = await trySolveOtaSliderWithCapSolver(targetPage, label, id).catch(() => ({ solved: false }));
   if (solveResult.solved) {
     log(`${label} ${id}: CapSolver successfully solved slider — auto-continuing`);
     return false;
@@ -3646,15 +3697,25 @@ async function processBookingSearch(id, params) {
   const url = `https://www.booking.com/searchresults.html?${urlParams.toString()}`;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
+  await stopOtaProviderIfBlocked(page, "booking_search", id);
   await dismissObstructions(page, "booking_search");
   await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_initial_goto");
   await applyBookingBedroomFilter(bedrooms, url).catch(() => false);
   await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_bedroom_filter");
-  const state = await dumpPageState("booking", { id, ...params });
+  let state = await dumpPageState("booking", { id, ...params });
   throwIfBrightDataKycBlock(state, "booking_search", id);
+  if (await stopOtaProviderIfBlocked(page, "booking_search", id, state)) {
+    state = await dumpPageState("booking-after-captcha", { id, ...params });
+  }
   throwIfBlankSearchPage(state, "booking.com", "booking_search", id);
+  if (state && stateLooksLikeVrboHumanChallenge(state)) {
+    throw new VrboHardBlockError(
+      "Booking.com human-verification page remained visible after CapSolver/manual handling",
+      { label: "booking_search", id, url: state?.url, retryLater: true },
+    );
+  }
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
-    throw new Error("Booking.com bot wall — refresh cookies.json (booking.com)");
+    throw new Error("Booking.com bot wall — refresh cookies or retry after proxy rotation");
   }
 
   const expectedNights = nightsBetween(checkIn, checkOut);
@@ -6128,6 +6189,17 @@ async function tick() {
   }
 }
 
+function logSidecarStartupConfig() {
+  if (WORKER_SLOT !== "1") return;
+  const captchaOn =
+    process.env.CAPTCHA_SOLVING_ENABLED === "1" && Boolean(String(process.env.CAPSOLVER_API_KEY ?? "").trim());
+  log(
+    `config: server=${SERVER}; role=${WORKER_ROLE}; browserMode=${SIDECAR_BROWSER_MODE}; ` +
+      `chromePrimary=${CHROME_PRIMARY}; slots=${process.env.MAX_LOCAL_CHROME_INSTANCES ?? "8"}; ` +
+      `CapSolver=${captchaOn ? "on" : "off"}; proxy=${process.env.CHROME_PROXY_ENABLED !== "0" ? "on" : "off"}`,
+  );
+}
+
 async function logServerChromePoolHealth() {
   if (!USE_SERVER_BROWSER || WORKER_SLOT !== "1") return;
   const host = process.env.SERVER_CHROME_HOST;
@@ -6160,6 +6232,7 @@ async function logServerChromePoolHealth() {
 async function main() {
   log(`starting (server=${SERVER}, admin-secret=${ADMIN_SECRET ? "set" : "none"})`);
   log(`worker slot: ${WORKER_SLOT}; Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}; browser mode: ${SIDECAR_BROWSER_MODE}`);
+  logSidecarStartupConfig();
   log(`Chrome binary: ${process.env.LOCAL_CHROME_BINARY ?? CHROME_BINARY}`);
   log(`Chrome user-data-dir: ${process.env.LOCAL_CHROME_USER_DATA_DIR ?? CHROME_DATA_DIR}`);
   if (USE_HEADLESS_LOCAL_BROWSER) {

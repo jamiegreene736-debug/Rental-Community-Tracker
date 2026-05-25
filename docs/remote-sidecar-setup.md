@@ -27,10 +27,26 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
    | `ADMIN_SECRET` | Same as production |
    | `MAX_LOCAL_CHROME_INSTANCES` | `8` |
    | `CHROME_PROXY_*` / `BRIGHTDATA_*` | Same proxy vars as production if used |
-   | `CAPTCHA_SOLVING_ENABLED` | `1` (optional) |
-   | `CAPSOLVER_API_KEY` | Your CapSolver key (optional) |
+   | `CAPTCHA_SOLVING_ENABLED` | `1` |
+   | `CAPSOLVER_API_KEY` | Your CapSolver key (same as production or worker-only) |
+   | `SIDECAR_VRBO_MANUAL_VERIFICATION` | `1` (fallback if CapSolver cannot solve a slider) |
 
-4. Deploy. Logs should show: `Starting Railway sidecar worker role with headed Chromium under Xvfb`.
+4. Deploy. Logs should show:
+   - `Starting Railway remote sidecar worker (Xvfb + Chromium...)`
+   - `config: ... CapSolver=on` on worker slot 1
+   - `using local Chrome sidecar #N via CDP` when a search starts
+
+### VRBO + Booking search path (remote worker)
+
+| Step | Behavior |
+|------|----------|
+| Queue | Railway web app enqueues `vrbo_search` / `booking_search` |
+| Worker | `rct-sidecar-worker` claims job, launches Chromium in-container (Xvfb) |
+| Proxy | Bright Data vars apply when `CHROME_PROXY_ENABLED=1` |
+| VRBO CAPTCHA | `stopOtaProviderIfBlocked` → CapSolver VisionEngine `slider_1` (puzzle + background images) → human-like drag → manual wait if still blocked |
+| Booking CAPTCHA | Same `stopOtaProviderIfBlocked` hook before scraping result cards |
+
+CapSolver VisionEngine requires **two** images (`image` = puzzle piece, `imageBackground` = background). The worker extracts them from the captcha widget before calling the API.
 5. On your Mac, disable the old LaunchAgent (optional but recommended):
 
    ```bash
