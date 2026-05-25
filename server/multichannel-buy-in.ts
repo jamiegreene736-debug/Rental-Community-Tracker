@@ -923,6 +923,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchVrboViaSidecar({
             destination: targetDest,
+            searchTerm: targetDest,
             checkIn,
             checkOut,
             bedrooms: br,
@@ -1005,6 +1006,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
           const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchBookingViaSidecar({
             destination: targetDest,
+            searchTerm: targetDest,
             checkIn,
             checkOut,
             bedrooms: br,

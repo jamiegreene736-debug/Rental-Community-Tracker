@@ -4123,9 +4123,23 @@ async function processVrboSearch(id, params) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
-  await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search", id, {
+  const primedDestination = await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search", id, {
     submitAfterSearch: false,
   });
+  if (!primedDestination) {
+    const state = await dumpPageState("vrbo-unprimed-destination", { id, ...params }).catch(() => null);
+    throw new ProviderBrowserUnavailableError(
+      `VRBO homepage did not accept destination "${effectiveSearchTerm}"; refusing to submit the provider's default/geolocated search.`,
+      {
+        label: "vrbo_search",
+        id,
+        provider: "vrbo",
+        url: page.url(),
+        title: await page.title().catch(() => state?.title ?? ""),
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      },
+    );
+  }
   // Drive VRBO like a user from the public homepage. Do not jump to a
   // preformatted /search URL; those URLs appear to raise bot scrutiny.
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
