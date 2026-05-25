@@ -1283,7 +1283,11 @@ function browserFingerprintForRequest(request = activeRuntimeRequest) {
     },
   ];
   const persona = pickOne(personas, rand);
-  const timezone = pickOne(["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Pacific/Honolulu"], rand);
+  const configuredTimezone = nonEmptyEnv("SIDECAR_FINGERPRINT_TIMEZONE", "SIDECAR_TIMEZONE");
+  const configuredLocale = nonEmptyEnv("SIDECAR_LOCALE") || "en-US";
+  const configuredLanguage = nonEmptyEnv("SIDECAR_LANGUAGE") || configuredLocale;
+  const configuredAcceptLanguage = nonEmptyEnv("SIDECAR_ACCEPT_LANGUAGE") || `${configuredLanguage},en;q=0.9`;
+  const timezone = configuredTimezone || pickOne(["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Pacific/Honolulu"], rand);
   const deviceScaleFactor = persona.os === "macos" ? pickOne([1, 2], rand) : pickOne([1, 1.25, 1.5], rand);
   const hardwareConcurrency = pickOne([4, 6, 8, 10, 12], rand);
   const deviceMemory = pickOne([4, 8, 16], rand);
@@ -1291,10 +1295,10 @@ function browserFingerprintForRequest(request = activeRuntimeRequest) {
   return {
     id,
     ...persona,
-    locale: "en-US",
-    language: "en-US",
-    languages: ["en-US", "en"],
-    acceptLanguage: "en-US,en;q=0.9",
+    locale: configuredLocale,
+    language: configuredLanguage,
+    languages: [configuredLanguage, "en"],
+    acceptLanguage: configuredAcceptLanguage,
     timezone,
     deviceScaleFactor,
     hardwareConcurrency,
@@ -2517,6 +2521,9 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
     log(`${label} ${id}: CapSolver successfully solved slider — auto-continuing`);
     return false;
   }
+  const challengeType = stateLooksLikePressAndHoldChallenge(state) ? "press_and_hold" : "slider_or_unknown";
+  const solverReason = solveResult.reason || "not_solved";
+  log(`${label} ${id}: CAPTCHA automation did not clear challenge (type=${challengeType}, reason=${solverReason})`);
 
   const manualVerificationEnabled = process.env.SIDECAR_VRBO_MANUAL_VERIFICATION !== "0";
   if (manualVerificationEnabled) {
@@ -2585,12 +2592,14 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
       url: state?.url || sourceUrl,
       title: state?.title,
       excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      challengeType,
+      captchaSolverReason: solverReason,
       manualVerificationTimedOut: true,
       retryLater: true,
     });
   }
 
-  log(`${label} ${id}: CAPTCHA detected and manual verification is disabled — stopping provider`);
+  log(`${label} ${id}: CAPTCHA detected and manual verification is disabled — rotating/failing provider (type=${challengeType}, reason=${solverReason})`);
   await normalizePageDisplay(targetPage).catch(() => {});
   await postScreenSnapshot(
     { id, opType: label },
@@ -2600,12 +2609,14 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
   );
   await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
 
-  throw new VrboHardBlockError("VRBO CAPTCHA detected. Manual verification is disabled.", {
+  throw new VrboHardBlockError(`VRBO CAPTCHA detected and automation did not solve it (${challengeType}: ${solverReason}).`, {
     label,
     id,
     url: state?.url,
     title: state?.title,
     excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+    challengeType,
+    captchaSolverReason: solverReason,
     retryLater: true,
   });
 }
@@ -6243,7 +6254,10 @@ async function tick() {
   try {
     let lastError = null;
     const isVrboOp = isVrboBrowserOp(req.opType ?? "vrbo_search");
-    const maxAttempts = Math.max(1, REQUEST_MAX_ATTEMPTS);
+    const vrboFreshRetryLimit = isVrboOp
+      ? Math.max(0, Math.floor(Number(process.env.SIDECAR_VRBO_HARD_BLOCK_FRESH_RETRIES ?? 2)))
+      : 0;
+    const maxAttempts = Math.max(1, REQUEST_MAX_ATTEMPTS, isVrboOp ? vrboFreshRetryLimit + 1 : REQUEST_MAX_ATTEMPTS);
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         throwIfRequestCancelled(req.id);
@@ -6278,17 +6292,34 @@ async function tick() {
             retryLater: true,
           });
         }
+        const currentVrboFreshAttempt = Math.max(0, Number(req.vrboFreshAttempt ?? 0));
+        const vrboBlockFreshRetry =
+          e instanceof VrboHardBlockError &&
+          isVrboOp &&
+          !providerTunnelProxyFailure &&
+          attempt < maxAttempts &&
+          currentVrboFreshAttempt < vrboFreshRetryLimit;
         const transientRetry = !providerTunnelProxyFailure && attempt < maxAttempts && isTransientScrapeError(e);
-        const canRetry = transientRetry;
+        const canRetry = transientRetry || vrboBlockFreshRetry;
         if (e instanceof VrboHardBlockError && isVrboOp) {
           lastError = new VrboHardBlockError(
-            "VRBO CAPTCHA/block page detected; provider run stopped cleanly and retry is rate-limited until later. Original VRBO URL remains available in the search diagnostics/manual verification links.",
-            e.details ?? {},
+            vrboBlockFreshRetry
+              ? "VRBO CAPTCHA/block page detected; retrying with a fresh Decodo session and browser fingerprint."
+              : "VRBO CAPTCHA/block page detected; provider run stopped cleanly and retry is rate-limited until later. Original VRBO URL remains available in the search diagnostics/manual verification links.",
+            {
+              ...(e.details ?? {}),
+              freshRetry: vrboBlockFreshRetry,
+              vrboFreshAttempt: currentVrboFreshAttempt,
+            },
           );
+          if (vrboBlockFreshRetry) {
+            req.vrboFreshAttempt = currentVrboFreshAttempt + 1;
+            req.freshSessionReason = "vrbo_hard_block";
+          }
         }
         log(
           `attempt ${attempt}/${maxAttempts} failed for ${req.id}: ${lastError?.message ?? e?.message ?? e}` +
-          (transientRetry ? " (transient; will retry)" : ""),
+          (vrboBlockFreshRetry ? " (fresh identity; will retry)" : transientRetry ? " (transient; will retry)" : ""),
         );
         await teardownBrowser(
           canRetry
