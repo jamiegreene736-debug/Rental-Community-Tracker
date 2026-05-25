@@ -2437,6 +2437,36 @@ async function performHumanLikeSliderDrag(page, distancePx) {
   }
 }
 
+async function setCaptchaTextSelectionSuppressed(targetPage = page, enabled = true) {
+  if (!targetPage || targetPage.isClosed?.()) return;
+  const applyToScope = (scope) => scope.evaluate(({ enabled }) => {
+    const styleId = "rct-captcha-no-text-selection";
+    if (enabled) {
+      let style = document.getElementById(styleId);
+      if (!style) {
+        style = document.createElement("style");
+        style.id = styleId;
+        style.textContent = [
+          "html, body, body * {",
+          "  -webkit-user-select: none !important;",
+          "  user-select: none !important;",
+          "}",
+        ].join("\n");
+        document.documentElement.appendChild(style);
+      }
+    } else {
+      document.getElementById(styleId)?.remove();
+    }
+    try { window.getSelection?.()?.removeAllRanges?.(); } catch {}
+  }, { enabled });
+
+  await applyToScope(targetPage).catch(() => {});
+  for (const frame of targetPage.frames?.() ?? []) {
+    if (frame === targetPage.mainFrame?.()) continue;
+    await applyToScope(frame).catch(() => {});
+  }
+}
+
 async function performHumanLikePressAndHold(page, label = "vrbo", id = "") {
   if (!page || page.isClosed?.()) return false;
   const selectors = [
@@ -2457,7 +2487,6 @@ async function performHumanLikePressAndHold(page, label = "vrbo", id = "") {
     '[class*="human" i]',
     '[class*="verify" i]',
     '[class*="challenge" i]',
-    'body',
   ];
   const scopes = [page, ...page.frames().filter((frame) => frame !== page.mainFrame())];
 
@@ -2496,6 +2525,7 @@ async function performHumanLikePressAndHold(page, label = "vrbo", id = "") {
 
   try {
     log(`${label} ${id}: attempting human-like press-and-hold (${Math.round(holdMs / 1000)}s)`);
+    await setCaptchaTextSelectionSuppressed(page, true).catch(() => {});
     await page.mouse.move(startX + (Math.random() - 0.5) * 4, startY + (Math.random() - 0.5) * 3).catch(() => {});
     await boundedPageDelay(page, 180 + Math.floor(Math.random() * 220));
     await page.mouse.down().catch(() => {});
@@ -2514,6 +2544,7 @@ async function performHumanLikePressAndHold(page, label = "vrbo", id = "") {
     }
 
     await page.mouse.up().catch(() => {});
+    await setCaptchaTextSelectionSuppressed(page, false).catch(() => {});
     await boundedPageDelay(page, 2_000);
     const stillChallenged = stateLooksLikeVrboHumanChallenge(await captureVrboChallengeState(page));
     if (!stillChallenged) {
@@ -2525,6 +2556,7 @@ async function performHumanLikePressAndHold(page, label = "vrbo", id = "") {
   } catch (err) {
     log(`${label} ${id}: press-and-hold failed — ${err?.message || err}`);
     await page.mouse.up().catch(() => {});
+    await setCaptchaTextSelectionSuppressed(page, false).catch(() => {});
     return false;
   }
 }
@@ -2667,6 +2699,7 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
 
     log(`${label} ${id}: Falling back to manual noVNC verification (CapSolver did not solve)`);
     await normalizePageDisplay(targetPage).catch(() => {});
+    await setCaptchaTextSelectionSuppressed(targetPage, true).catch(() => {});
     await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
     await postScreenSnapshot(
       { id, opType: label },
@@ -2694,6 +2727,7 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
           "VRBO manual CAPTCHA solved",
           { force: true },
         );
+        await setCaptchaTextSelectionSuppressed(targetPage, false).catch(() => {});
         await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
         log(`${label} ${id}: manual VRBO verification cleared; continuing provider run`);
         return true;
@@ -2716,6 +2750,7 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
       "VRBO manual CAPTCHA timed out",
       { captcha: true, force: true },
     );
+    await setCaptchaTextSelectionSuppressed(targetPage, false).catch(() => {});
     await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
     throw new VrboHardBlockError("VRBO manual verification timed out.", {
       label,
@@ -2773,12 +2808,15 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
       if (action === "move") {
         await targetPage.mouse.move(x, y).catch(() => {});
       } else if (action === "down") {
+        await setCaptchaTextSelectionSuppressed(targetPage, true).catch(() => {});
         await targetPage.mouse.move(x, y).catch(() => {});
         await targetPage.mouse.down().catch(() => {});
       } else if (action === "up") {
         await targetPage.mouse.move(x, y).catch(() => {});
         await targetPage.mouse.up().catch(() => {});
+        await setCaptchaTextSelectionSuppressed(targetPage, true).catch(() => {});
       } else if (action === "click") {
+        await setCaptchaTextSelectionSuppressed(targetPage, true).catch(() => {});
         await targetPage.mouse.click(x, y, { delay: 60 }).catch(() => {});
       } else if (action === "surface") {
         const surfaced = await setCaptchaWindowVisibility(targetPage, true, label, req?.id ?? "").catch(() => false);
