@@ -34,7 +34,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick,
-  ShieldCheck, Paperclip, X,
+  ShieldCheck, Paperclip, X, Minimize2,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -8341,6 +8341,29 @@ function SidecarScreensStrip() {
       });
   };
 
+  const restoreSidecarWindow = (screen: SidecarScreenSnapshot) => {
+    setFocusStatus(`Shrinking Chrome slot ${screen.slot} back to the grid...`);
+    void fetch("/api/vrbo-sidecar/screen-control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slot: screen.slot,
+        requestId: screen.requestId,
+        action: "restore",
+        x: 0,
+        y: 0,
+      }),
+    })
+      .then((response) => {
+        setFocusStatus(response.ok
+          ? `Chrome slot ${screen.slot} snapped back to its grid size.`
+          : `Chrome slot ${screen.slot} is no longer active.`);
+      })
+      .catch(() => {
+        setFocusStatus(`Could not shrink Chrome slot ${screen.slot}; use the Chrome green button or try Focus again.`);
+      });
+  };
+
   return (
     <div className="w-full rounded-lg border bg-background/70 p-2 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -8369,17 +8392,29 @@ function SidecarScreensStrip() {
           </span>
           <div className="flex flex-wrap items-center gap-2">
             {captchaScreens.map((screen) => (
-              <Button
-                key={screen.slot}
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-7 border-yellow-600 bg-white px-2 text-[11px] text-yellow-950 hover:bg-yellow-50"
-                onClick={() => focusSidecarWindow(screen)}
-              >
-                <MousePointerClick className="mr-1 h-3.5 w-3.5" />
-                Focus slot {screen.slot}
-              </Button>
+              <div key={screen.slot} className="inline-flex items-center gap-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 border-yellow-600 bg-white px-2 text-[11px] text-yellow-950 hover:bg-yellow-50"
+                  onClick={() => focusSidecarWindow(screen)}
+                >
+                  <MousePointerClick className="mr-1 h-3.5 w-3.5" />
+                  Focus slot {screen.slot}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 border-yellow-600 bg-white px-2 text-[11px] text-yellow-950 hover:bg-yellow-50"
+                  onClick={() => restoreSidecarWindow(screen)}
+                  title="Shrink this Chrome window back to its grid size"
+                >
+                  <Minimize2 className="mr-1 h-3.5 w-3.5" />
+                  Shrink
+                </Button>
+              </div>
             ))}
           </div>
         </div>

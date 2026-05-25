@@ -787,12 +787,12 @@ export function enqueueSidecarScreenControlCommand(command: {
   cleanupSidecarScreenCommands();
   const slot = screenCommandKey(String(command.slot || "1"));
   const action = String(command.action || "");
-  if (action !== "move" && action !== "down" && action !== "up" && action !== "click" && action !== "hold" && action !== "surface") {
-    return { ok: false, error: "action must be move, down, up, click, hold, or surface" };
+  if (action !== "move" && action !== "down" && action !== "up" && action !== "click" && action !== "hold" && action !== "surface" && action !== "restore") {
+    return { ok: false, error: "action must be move, down, up, click, hold, surface, or restore" };
   }
   const x = Number(command.x);
   const y = Number(command.y);
-  if (action !== "surface" && (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0)) {
+  if (action !== "surface" && action !== "restore" && (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0)) {
     return { ok: false, error: "x and y must be non-negative numbers" };
   }
   const requestId = typeof command.requestId === "string" && command.requestId.trim()

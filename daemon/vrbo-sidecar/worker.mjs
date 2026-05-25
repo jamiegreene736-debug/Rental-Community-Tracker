@@ -134,6 +134,7 @@ let activeHeadlessProxyBridge = null;
 let activeBrowserFingerprint = null;
 let lastObservedQueueControlGeneration = null;
 let pendingIdleChromeReset = false;
+let lastObservedWindowState = null;
 
 function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
@@ -572,6 +573,34 @@ async function snapSidecarWindowToGrid(targetPage = page, { focus = false, label
   }
 }
 
+async function getSidecarWindowBounds(targetPage = page) {
+  if (usingHeadlessRuntime()) return null;
+  if (!context || !targetPage || targetPage.isClosed?.()) return null;
+  const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
+  if (!session) return null;
+  try {
+    const info = await withSoftTimeout(session.send("Browser.getWindowForTarget"), 1_500, null);
+    const windowId = info?.windowId;
+    if (typeof windowId !== "number") return null;
+    const bounds = await withSoftTimeout(session.send("Browser.getWindowBounds", { windowId }), 1_500, null);
+    return bounds ?? null;
+  } catch {
+    return null;
+  } finally {
+    await withSoftTimeout(session.detach(), 500, null);
+  }
+}
+
+async function snapGridAfterNativeRestore(targetPage = page, label = "sidecar", id = "") {
+  if (!SIDE_CAR_CHROME_VISIBLE || !captchaWindowVisible) return false;
+  const bounds = await getSidecarWindowBounds(targetPage);
+  const state = String(bounds?.windowState ?? "normal");
+  const wasZoomed = lastObservedWindowState === "maximized" || lastObservedWindowState === "fullscreen";
+  lastObservedWindowState = state;
+  if (!wasZoomed || state !== "normal") return false;
+  return snapSidecarWindowToGrid(targetPage, { focus: false, label: "green restore", id }).catch(() => false);
+}
+
 function macAppPathFromChromeBinary(binary) {
   const marker = ".app/Contents/MacOS/";
   const idx = String(binary ?? "").indexOf(marker);
@@ -649,7 +678,12 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
     return false;
   }
   if (SIDE_CAR_CHROME_VISIBLE) {
-    if (visible) await snapSidecarWindowToGrid(targetPage, { focus: false, label, id }).catch(() => false);
+    if (visible) {
+      lastObservedWindowState = "normal";
+      await snapSidecarWindowToGrid(targetPage, { focus: false, label, id }).catch(() => false);
+    } else {
+      lastObservedWindowState = null;
+    }
     captchaWindowVisible = visible;
     return true;
   }
@@ -669,6 +703,7 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
     if (visible) {
       const pos = parseWindowPosition(VISIBLE_WINDOW_POSITION, { left: 120, top: 80 });
       captchaWindowVisible = true;
+      lastObservedWindowState = "normal";
       await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }), 1_500);
       await withSoftTimeout(
         session.send("Browser.setWindowBounds", {
@@ -689,6 +724,7 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
       await postScreenSnapshot({ id, opType: label }, targetPage, "manual CAPTCHA verification", { captcha: true, force: true });
     } else {
       captchaWindowVisible = false;
+      lastObservedWindowState = null;
       const hidden = parseWindowPosition(process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? HIDDEN_WINDOW_POSITION, { left: -32000, top: -32000 });
       await withSoftTimeout(
         session.send("Browser.setWindowBounds", {
@@ -3139,9 +3175,14 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
         const surfaced = SIDE_CAR_CHROME_VISIBLE
           ? await snapSidecarWindowToGrid(targetPage, { focus: true, label, id: req?.id ?? "" }).catch(() => false)
           : await setCaptchaWindowVisibility(targetPage, true, label, req?.id ?? "").catch(() => false);
+        lastObservedWindowState = "normal";
         if (!surfaced) await targetPage.bringToFront().catch(() => {});
+      } else if (action === "restore") {
+        await snapSidecarWindowToGrid(targetPage, { focus: false, label: "dashboard restore", id: req?.id ?? "" }).catch(() => false);
+        lastObservedWindowState = "normal";
       }
     }
+    await snapGridAfterNativeRestore(targetPage, label, req?.id ?? "").catch(() => false);
     if (commands.length) {
       log(`${label} ${req?.id ?? ""}: applied ${commands.length} dashboard pointer command(s)`);
       await postScreenSnapshot(req, targetPage, "manual CAPTCHA control", { captcha: true, force: true });
