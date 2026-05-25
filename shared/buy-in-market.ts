@@ -38,7 +38,7 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     platformSearch: {
       airbnb: "Poipu Kai Resort, Koloa, HI",
       booking: "Poipu Kai Resort, Koloa, HI",
-      vrbo: "Poipu Kai",
+      vrbo: "Poipu Kai Resort, Koloa, HI",
       pm: "Poipu Kai",
     },
     location: { searchName: "Poipu Kai", city: "Koloa", state: "Hawaii", streetAddress: "1831 Poipu Rd", lat: 21.8794, lng: -159.4609 },

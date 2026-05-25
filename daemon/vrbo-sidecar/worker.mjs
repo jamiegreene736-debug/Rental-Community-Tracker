@@ -2384,6 +2384,76 @@ function throwIfBlankSearchPage(state, providerHost, label, id) {
   );
 }
 
+function normalizeDestinationGuardText(value) {
+  let text = String(value || "");
+  try {
+    text = decodeURIComponent(text);
+  } catch {}
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function destinationGuardTokens(...values) {
+  const stop = new Set([
+    "resort",
+    "vacation",
+    "rental",
+    "rentals",
+    "places",
+    "place",
+    "stays",
+    "stay",
+    "homes",
+    "home",
+    "condo",
+    "condos",
+    "villa",
+    "villas",
+    "the",
+    "and",
+    "near",
+    "area",
+    "united",
+    "states",
+    "america",
+  ]);
+  return Array.from(new Set(
+    values
+      .flatMap((value) => normalizeDestinationGuardText(value).split(/\s+/))
+      .filter((token) => token.length >= 3 && !stop.has(token)),
+  ));
+}
+
+function stateMatchesExpectedDestination(state, ...expectedValues) {
+  if (!state) return false;
+  const expectedText = normalizeDestinationGuardText(expectedValues.filter(Boolean).join(" "));
+  const haystack = normalizeDestinationGuardText(`${state.url ?? ""} ${state.title ?? ""} ${state.bodyExcerpt ?? ""}`);
+  const tokens = destinationGuardTokens(...expectedValues);
+  if (tokens.length === 0) return true;
+  if (tokens.every((token) => haystack.includes(token))) return true;
+  if (/\bpoipu\s+kai\b/.test(expectedText)) {
+    return /\bpoipu\b/.test(haystack) &&
+      /\b(kai|koloa|kauai)\b/.test(haystack) &&
+      !/\b(kissimmee|orlando|florida)\b/.test(haystack);
+  }
+  return false;
+}
+
+function throwIfDestinationMismatch(state, label, id, ...expectedValues) {
+  if (stateMatchesExpectedDestination(state, ...expectedValues)) return;
+  const expected = expectedValues.filter(Boolean).join(" / ");
+  throw new ProviderBrowserUnavailableError(
+    `${label} landed on a different destination than requested; refusing to return stale provider results for "${expected}".`,
+    {
+      label,
+      id,
+      expected,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+    },
+  );
+}
+
 function stateLooksLikeVrboHumanChallenge(state) {
   if (!state) return false;
   return VRBO_HUMAN_CHALLENGE_RE.test(
@@ -3106,7 +3176,13 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     await boundedPageDelay(page, 1_200);
     await maybeClearVrboChallenge("after-homepage-load");
     await dismissObstructions(page, `${label}_home`);
-    const filled = await fillVisibleSearchField(page, searchTerm, `${label}_home`).catch(() => null);
+    const vrboFilled = isVrbo
+      ? await fillVrboDestinationField(page, searchTerm, `${label}_home`).catch(() => null)
+      : null;
+    const filled = vrboFilled?.filled ?? (await fillVisibleSearchField(page, searchTerm, `${label}_home`).catch(() => null));
+    if (isVrbo && filled && !vrboFilled?.suggestion) {
+      log(`${label}: destination suggestion was not confirmed for "${searchTerm}"; final VRBO page will be destination-checked before accepting results`);
+    }
     if (filled) {
       if (submitAfterSearch) {
         await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`), PAGE_SETTLE_MS + 2_000, null);
@@ -3123,6 +3199,36 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     log(`${label}: homepage search prime skipped: ${e?.message ?? e}`);
   }
   return false;
+}
+
+async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_search") {
+  if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
+  const selectors = [
+    'input[name="destination"]',
+    '#destination_form_field',
+    'input[id*="destination" i]',
+    'input[placeholder*="Where" i]',
+    'input[aria-label*="Where" i]',
+    '[role="textbox"][aria-label*="Where" i]',
+  ];
+  for (const selector of selectors) {
+    const locator = targetPage.locator(selector).first();
+    const visible = await locator.isVisible({ timeout: 800 }).catch(() => false);
+    if (!visible) continue;
+    try {
+      await locator.click({ timeout: 1_500 });
+      await locator.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+      await locator.press("Backspace").catch(() => {});
+      await locator.type(searchTerm, { delay: 35, timeout: 6_000 });
+      await targetPage.waitForTimeout(1_000).catch(() => {});
+      const suggestion = await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label).catch(() => null);
+      log(`${label}: typed destination into VRBO field "${selector}"${suggestion ? ` and selected "${suggestion}"` : ""}`);
+      return { filled: selector, suggestion };
+    } catch (e) {
+      log(`${label}: VRBO destination field "${selector}" failed: ${e?.message ?? e}`);
+    }
+  }
+  return null;
 }
 
 async function processAirbnbSearch(id, params) {
@@ -4026,6 +4132,7 @@ async function processVrboSearch(id, params) {
       retryLater: true,
     });
   }
+  throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, destination);
   // Extract all visible cards and bucket by BR client-side. The
   // downstream minimum-bedroom guard remains the authoritative
   // protection against mismatched 1BR/2BR rows.
