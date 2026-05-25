@@ -343,7 +343,7 @@ async function chromeProxyConfig(instance, request, { requireServer = false } = 
     sessionId: { instance, request },
     brightDataUsernameOptions: (username) => appendBrightDataUsernameOptions(username, instance, request),
     incompleteConfigMessage:
-      "CHROME_PROXY_ENABLED=1 but proxy config is incomplete. Set CHROME_PROXY_HOST, CHROME_PROXY_PORT, CHROME_PROXY_USERNAME, and CHROME_PROXY_PASSWORD, or set CHROME_PROXY_PROVIDER=gonzoproxy with GONZOPROXY_API_KEY, or CHROME_PROXY_PROVIDER=decodo with DECODO_PROXY_USERNAME/PASSWORD.",
+      "CHROME_PROXY_ENABLED=1 but proxy config is incomplete. Set CHROME_PROXY_HOST, CHROME_PROXY_PORT, CHROME_PROXY_USERNAME, and CHROME_PROXY_PASSWORD, or set CHROME_PROXY_PROVIDER=gonzoproxy with GONZOPROXY_API_KEY.",
   });
 }
 

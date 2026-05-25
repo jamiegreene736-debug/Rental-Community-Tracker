@@ -259,7 +259,7 @@ async function headlessProxyConfig() {
     sessionId: { instance: { name: `worker-${WORKER_SLOT}` }, request: activeRuntimeRequest },
     brightDataUsernameOptions: (username) => appendBrightDataUsernameOptions(username),
     incompleteConfigMessage:
-      "SIDECAR_HEADLESS_PROXY_ENABLED=1 but proxy config is incomplete. Set CHROME_PROXY_HOST, CHROME_PROXY_PORT, CHROME_PROXY_USERNAME, and CHROME_PROXY_PASSWORD, or set CHROME_PROXY_PROVIDER=gonzoproxy with GONZOPROXY_API_KEY, or CHROME_PROXY_PROVIDER=decodo with DECODO_PROXY_USERNAME/PASSWORD.",
+      "SIDECAR_HEADLESS_PROXY_ENABLED=1 but proxy config is incomplete. Set CHROME_PROXY_HOST, CHROME_PROXY_PORT, CHROME_PROXY_USERNAME, and CHROME_PROXY_PASSWORD, or set CHROME_PROXY_PROVIDER=gonzoproxy with GONZOPROXY_API_KEY.",
   });
 }
 
@@ -7114,12 +7114,6 @@ async function logProxyStartupPreflight() {
       `proxy preflight FAILED [${result.phase}]: provider=${result.provider ?? "?"} ` +
         `${result.host ?? ""}:${result.port ?? ""} — ${result.error ?? result.statusLine ?? "unknown"}`,
     );
-    if (result.provider === "decodo") {
-      log(
-        "hint: set CHROME_PROXY_PROVIDER=decodo, DECODO_PROXY_USERNAME, DECODO_PROXY_PASSWORD " +
-          "(or CHROME_PROXY_USERNAME/PASSWORD) on rct-sidecar-worker",
-      );
-    }
     return;
   }
 

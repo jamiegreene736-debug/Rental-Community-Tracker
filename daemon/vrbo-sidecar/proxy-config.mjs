@@ -32,18 +32,6 @@ function sanitizeProxyOption(value) {
     .slice(0, 64);
 }
 
-function requiredProxyCountry() {
-  return REQUIRED_PROXY_COUNTRY;
-}
-
-function replaceOrAppendProxyOption(value, option, optionValue) {
-  const safeOptionValue = sanitizeProxyOption(optionValue);
-  if (!safeOptionValue) return value;
-  const pattern = new RegExp(`(^|-)${option}-[a-z0-9_]+(?=-|$)`, "i");
-  if (pattern.test(value)) return value.replace(pattern, `$1${option}-${safeOptionValue}`);
-  return `${value}-${option}-${safeOptionValue}`;
-}
-
 function proxySessionToken(sessionId) {
   const request = sessionId?.request ?? {};
   const instance = sessionId?.instance ?? {};
@@ -183,48 +171,12 @@ function explicitProxyConfig(provider) {
     };
   }
 
-  if (provider === "decodo") {
-    return {
-      host: nonEmptyEnv("DECODO_PROXY_HOST", "CHROME_PROXY_HOST", "PROXY_HOST"),
-      port: Number(nonEmptyEnv("DECODO_PROXY_PORT", "CHROME_PROXY_PORT", "PROXY_PORT")),
-      username: nonEmptyEnv("DECODO_PROXY_USERNAME", "CHROME_PROXY_USERNAME", "PROXY_USERNAME"),
-      password: nonEmptyEnv("DECODO_PROXY_PASSWORD", "CHROME_PROXY_PASSWORD", "PROXY_PASSWORD"),
-    };
-  }
-
   return {
     host: nonEmptyEnv("CHROME_PROXY_HOST", "PROXY_HOST"),
     port: Number(nonEmptyEnv("CHROME_PROXY_PORT", "PROXY_PORT")),
     username: nonEmptyEnv("CHROME_PROXY_USERNAME", "PROXY_USERNAME"),
     password: nonEmptyEnv("CHROME_PROXY_PASSWORD", "PROXY_PASSWORD"),
   };
-}
-
-function appendDecodoUsernameOptions(username, sessionId) {
-  const forcedStaticSession = boolFromEnv("DECODO_PROXY_ALLOW_STATIC_SESSION", false)
-    ? sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_SESSION"))
-    : "";
-  const session = forcedStaticSession || proxySessionToken(sessionId);
-  const parts = [
-    replaceOrAppendProxyOption(
-      replaceOrAppendProxyOption(String(username ?? "").trim(), "country", requiredProxyCountry()),
-      "session",
-      session,
-    ),
-  ];
-  const state = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_STATE", "CHROME_PROXY_STATE", "PROXY_STATE"));
-  const city = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_CITY", "CHROME_PROXY_CITY", "PROXY_CITY"));
-  const zip = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_ZIP", "CHROME_PROXY_ZIP", "PROXY_ZIP"));
-  const sessionDuration = Math.max(1, Math.min(1440, Math.floor(numberFromEnv("DECODO_PROXY_SESSION_DURATION_MINUTES", 20))));
-
-  if (state && !/-state-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`state-${state}`);
-  if (city && !/-city-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`city-${city}`);
-  if (zip && !/-zip-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`zip-${zip}`);
-  if (!/-sessionduration-\d+(?:-|$)/i.test(parts[0])) parts.push(`sessionduration-${sessionDuration}`);
-
-  const needsUserPrefix = boolFromEnv("DECODO_PROXY_USER_PREFIX", true) && !/^user-/i.test(parts[0]);
-  if (needsUserPrefix) parts[0] = `user-${parts[0]}`;
-  return parts.filter(Boolean).join("-");
 }
 
 export async function resolveChromeProxyConfig({
@@ -239,9 +191,11 @@ export async function resolveChromeProxyConfig({
   if (requireServer && !isServer) return null;
 
   const provider = (nonEmptyEnv("CHROME_PROXY_PROVIDER", "PROXY_PROVIDER") || "none").toLowerCase();
+  if (provider === "decodo") {
+    throw new Error("Decodo proxy provider is disabled for this project.");
+  }
   const scheme = nonEmptyEnv("CHROME_PROXY_SCHEME", "PROXY_SCHEME") || "http";
   const isBrightData = provider === "brightdata";
-  const isDecodo = provider === "decodo";
   const explicit = explicitProxyConfig(provider);
   let { host, port, username, password } = explicit;
 
@@ -262,9 +216,6 @@ export async function resolveChromeProxyConfig({
 
   if (isBrightData && typeof brightDataUsernameOptions === "function") {
     username = brightDataUsernameOptions(username, sessionId);
-  }
-  if (isDecodo) {
-    username = appendDecodoUsernameOptions(username, sessionId);
   }
 
   return { provider, scheme, host, port, username, password };
@@ -479,4 +430,4 @@ export async function runChromeProxyStartupPreflight({
   return result;
 }
 
-export { boolFromEnv, nonEmptyEnv, sanitizeProxyOption, proxySessionToken, appendDecodoUsernameOptions };
+export { boolFromEnv, nonEmptyEnv, sanitizeProxyOption, proxySessionToken };
