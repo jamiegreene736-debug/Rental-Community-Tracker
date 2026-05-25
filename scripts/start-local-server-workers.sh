@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Start lightweight local worker processes that consume the Railway
-# queue and drive remote server Chrome/noVNC sidecars.
+# DEPRECATED on Mac — use fully remote deploy instead:
+#   ./scripts/deploy-remote-sidecar-docker.sh 8   # VPS
+#   docs/remote-sidecar-setup.md                   # Railway sidecar-worker
 #
-# This is what turns remote Chrome containers into parallel workers.
-# Keep the normal launchd local worker running too; these workers use
-# CHROME_PRIMARY=server and wait briefly before claiming work, so local
-# Chrome remains the first/default path.
+# This script starts Node workers on the current machine that drive
+# remote Docker chrome-server-* containers. Run it on the VPS after
+# ./scripts/start-server-sidecars.sh, not on your Mac.
 #
-# Usage from the repo root on your Mac:
-#   export SERVER_CHROME_HOST=<SERVER_IP_OR_DNS>
-#   ./scripts/start-local-server-workers.sh 4
+# Usage on the VPS:
+#   export SERVER_CHROME_HOST=<THIS_VPS_PUBLIC_IP>
+#   ./scripts/start-local-server-workers.sh 8
 
 COUNT="${1:-${MAX_SERVER_INSTANCES:-4}}"
 if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then

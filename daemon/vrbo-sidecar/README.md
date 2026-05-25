@@ -1,17 +1,38 @@
 # vrbo-sidecar daemon
 
-Local-Mac daemon that drives the operator's real Chrome via CDP for
-Vrbo / Booking / Google / PM search + photo upload + Guesty channel
-disconnect ops. Runs as a `launchd` LaunchAgent so it stays alive as
-long as the Mac is on.
+Remote queue workers that drive real Chrome (via CDP) for Vrbo /
+Booking / Airbnb / PM search and related ops. Workers poll the Railway
+app over HTTPS and post results back.
+
+## Production deploy (remote — no Mac)
+
+**Recommended:** a second Railway service (`rct-sidecar-worker`) using
+the same Dockerfile with `RAILWAY_SERVICE_ROLE=sidecar-worker`.
+
+```sh
+./scripts/setup-remote-sidecar.sh
+```
+
+See [docs/remote-sidecar-setup.md](../../docs/remote-sidecar-setup.md).
+
+**Optional:** VPS Docker pool (Selenium Chrome + noVNC + supervisor):
+
+```sh
+./scripts/deploy-remote-sidecar-docker.sh 8
+```
+
+## Legacy Mac install (debug only)
+
+```sh
+SIDECAR_ALLOW_LOCAL_MAC=1 ./scripts/install-vrbo-sidecar-launchagent.sh
+./scripts/disable-local-mac-sidecar.sh   # stop Mac workers when moving to remote
+```
 
 ## Why it's not in the server tree
 
-The daemon runs on the operator's Mac (not on Railway). It posts
-results back to Railway over HTTPS. The repo holds the canonical
-copy here so subsequent sessions can edit it; deploy is a manual
-copy to `~/Downloads/vrbo-sidecar/` followed by
-`launchctl kickstart -k gui/$UID/com.vrbosidecar.worker`.
+The main Railway web service only hosts the queue/UI. Browser workers
+run in the dedicated Railway sidecar service or on a VPS — not on the
+operator's Mac by default.
 
 ## Files in this directory
 

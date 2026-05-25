@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# LEGACY: Mac LaunchAgent local sidecar (debug only).
+# Production uses remote workers — see docs/remote-sidecar-setup.md and:
+#   ./scripts/setup-remote-sidecar.sh
+
+if [[ "$(uname -s)" == "Darwin" && "${SIDECAR_ALLOW_LOCAL_MAC:-0}" != "1" ]]; then
+  cat <<'EOF' >&2
+Mac local sidecar install is disabled by default.
+
+Use fully remote sidecar instead:
+  ./scripts/setup-remote-sidecar.sh
+
+See: docs/remote-sidecar-setup.md
+
+To force this legacy Mac installer:
+  SIDECAR_ALLOW_LOCAL_MAC=1 ./scripts/install-vrbo-sidecar-launchagent.sh
+EOF
+  exit 1
+fi
+
 # Install the local Chrome sidecar as a macOS LaunchAgent.
 #
 # This copies the repo's canonical sidecar files into

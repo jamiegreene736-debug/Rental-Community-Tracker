@@ -7,7 +7,10 @@ set -euo pipefail
 #   ./scripts/start-server-sidecars.sh          # starts 4 sidecars
 #   ./scripts/start-server-sidecars.sh 8        # starts 8 sidecars
 #
-# After startup, configure the local daemon with:
+# After startup, run workers on the same VPS (not your Mac):
+#   ./scripts/deploy-remote-sidecar-docker.sh 8
+#
+# Legacy Mac pointer (deprecated):
 #   export SERVER_CHROME_HOST=<SERVER_IP_OR_DNS>
 #   export MAX_SERVER_INSTANCES=<N>
 
