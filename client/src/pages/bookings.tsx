@@ -8412,7 +8412,7 @@ function SidecarStatusBadge() {
     data: null,
     everSeen: false,
   });
-  const [acting, setActing] = useState<"stop" | "start" | null>(null);
+  const [acting, setActing] = useState<"stop" | "start" | "clear" | null>(null);
 
   const refresh = async (): Promise<SidecarHeartbeat | null> => {
     try {
@@ -8474,6 +8474,29 @@ function SidecarStatusBadge() {
       await refresh();
     } catch (e: any) {
       toast({ title: "Start failed", description: e?.message ?? String(e), variant: "destructive" });
+    } finally {
+      setActing(null);
+    }
+  };
+
+  const clearSidecarQueue = async () => {
+    const confirmed = window.confirm(
+      "Clear the sidecar queue? This cancels running/queued work, clears completed/failed queue history, and pauses new sidecar dispatch until you click Start Queue.",
+    );
+    if (!confirmed) return;
+    setActing("clear");
+    try {
+      const r = await apiRequest("POST", "/api/vrbo-sidecar/clear", {
+        reason: "Clear Queue button (Operations UI)",
+      });
+      const j = await r.json();
+      toast({
+        title: "Sidecar queue cleared",
+        description: `Cleared ${j.cleared ?? 0} job${j.cleared === 1 ? "" : "s"}. Queue is paused; click Start Queue to resume dispatch.`,
+      });
+      await refresh();
+    } catch (e: any) {
+      toast({ title: "Clear queue failed", description: e?.message ?? String(e), variant: "destructive" });
     } finally {
       setActing(null);
     }
@@ -8614,6 +8637,17 @@ function SidecarStatusBadge() {
             {acting === "start" ? "Starting…" : "Start Queue"}
           </Button>
         </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 w-full border-red-300 bg-red-50 text-xs text-red-900 hover:bg-red-100"
+          disabled={acting !== null}
+          onClick={clearSidecarQueue}
+          data-testid="button-sidecar-clear-queue"
+        >
+          <XCircle className="h-3 w-3 mr-1" />
+          {acting === "clear" ? "Clearing…" : "Clear Queue"}
+        </Button>
 
         <div className="text-[10px] text-muted-foreground leading-snug space-y-1">
           <div>
@@ -8622,6 +8656,9 @@ function SidecarStatusBadge() {
           </div>
           <div>
             <strong>Start Queue</strong>: unblock new queue work. If the sidecar is offline, restart the {serverRuntime ? "Railway worker" : "sidecar worker"}.
+          </div>
+          <div>
+            <strong>Clear Queue</strong>: cancel running/queued work, clear sidecar history/screens, and pause dispatch.
           </div>
         </div>
       </PopoverContent>

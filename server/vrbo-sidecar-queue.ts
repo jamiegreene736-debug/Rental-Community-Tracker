@@ -1167,6 +1167,44 @@ export function cancelSidecarRunAndRequests(reason = "cancelled by operator"): {
   };
 }
 
+export function clearSidecarQueue(reason = "sidecar queue cleared by operator"): {
+  cleared: number;
+  cancelled: number;
+  pending: number;
+  inProgress: number;
+  completed: number;
+  failed: number;
+  stopGeneration: number;
+} {
+  cleanup();
+  queueStopGeneration++;
+  let pending = 0;
+  let inProgress = 0;
+  let completed = 0;
+  let failed = 0;
+  for (const r of queue.values()) {
+    if (r.status === "pending") pending++;
+    else if (r.status === "in_progress") inProgress++;
+    else if (r.status === "completed") completed++;
+    else if (r.status === "failed") failed++;
+  }
+  const cancelled = pending + inProgress;
+  const cleared = queue.size;
+  queue.clear();
+  requestKeyIndex.clear();
+  sidecarScreens.clear();
+  sidecarScreenCommands.clear();
+  return {
+    cleared,
+    cancelled,
+    pending,
+    inProgress,
+    completed,
+    failed,
+    stopGeneration: queueStopGeneration,
+  };
+}
+
 export function isCancellationRequested(id: string): boolean {
   const r = queue.get(id);
   if (!r) return true;

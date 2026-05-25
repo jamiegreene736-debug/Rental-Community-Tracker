@@ -17393,6 +17393,22 @@ Return ONLY compact JSON with this exact shape:
     });
   });
 
+  app.post("/api/vrbo-sidecar/clear", async (req, res) => {
+    const body = (req.body ?? {}) as { reason?: unknown };
+    const reason = typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 200)
+      : "cleared by operator from Operations UI";
+    const { clearSidecarQueue, pauseQueue } = await import("./vrbo-sidecar-queue");
+    const pauseResult = pauseQueue(reason);
+    const clearResult = clearSidecarQueue(reason);
+    return res.json({
+      ok: true,
+      paused: true,
+      alreadyPaused: pauseResult.alreadyPaused,
+      ...clearResult,
+    });
+  });
+
   app.post("/api/vrbo-sidecar/start", async (_req, res) => {
     const { resumeQueue } = await import("./vrbo-sidecar-queue");
     const result = resumeQueue();
