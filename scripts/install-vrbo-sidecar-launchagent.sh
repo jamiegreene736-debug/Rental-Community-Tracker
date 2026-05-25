@@ -37,6 +37,7 @@ mkdir -p "${INSTALL_DIR}" "${LAUNCH_AGENT_DIR}"
 cp "${SOURCE_DIR}/supervisor.mjs" "${INSTALL_DIR}/supervisor.mjs"
 cp "${SOURCE_DIR}/worker.mjs" "${INSTALL_DIR}/worker.mjs"
 cp "${SOURCE_DIR}/chrome-sidecar-manager.mjs" "${INSTALL_DIR}/chrome-sidecar-manager.mjs"
+cp "${SOURCE_DIR}/proxy-config.mjs" "${INSTALL_DIR}/proxy-config.mjs"
 cp "${SOURCE_DIR}/README.md" "${INSTALL_DIR}/README.md"
 cp "${REPO_ROOT}/package.json" "${INSTALL_DIR}/package.json"
 if [[ -d "${REPO_ROOT}/node_modules" ]]; then
@@ -164,11 +165,28 @@ ADMIN_SECRET_EXPORT="$(quote_for_shell "${ADMIN_SECRET_VALUE}")"
 SERVER_CHROME_HOST_EXPORT="$(quote_for_shell "${SERVER_CHROME_HOST}")"
 BRIGHTDATA_PROXY_USERNAME_EXPORT="$(quote_for_shell "${BRIGHTDATA_PROXY_USERNAME}")"
 BRIGHTDATA_PROXY_PASSWORD_EXPORT="$(quote_for_shell "${BRIGHTDATA_PROXY_PASSWORD}")"
-CAPTCHA_PROVIDER="${CAPTCHA_PROVIDER:-capsolver}"
-CAPTCHA_SOLVING_ENABLED="${CAPTCHA_SOLVING_ENABLED:-0}"
+CAPTCHA_PROVIDER="$(value_from_env_or_railway CAPTCHA_PROVIDER "capsolver")"
+CAPTCHA_SOLVING_ENABLED="$(value_from_env_or_railway CAPTCHA_SOLVING_ENABLED "0")"
+CAPSOLVER_API_KEY_VALUE="$(value_from_env_or_railway CAPSOLVER_API_KEY "")"
+if [[ -z "${CAPSOLVER_API_KEY_VALUE}" && -f "${EXISTING_RUNNER_PATH}" ]]; then
+  CAPSOLVER_API_KEY_RAW="$(
+    awk -F= '$1 == "export CAPSOLVER_API_KEY" { sub(/^[^=]*=/, ""); print; exit }' "${EXISTING_RUNNER_PATH}" \
+      || true
+  )"
+  if [[ -n "${CAPSOLVER_API_KEY_RAW}" && "${CAPSOLVER_API_KEY_RAW}" != "''" ]]; then
+    CAPSOLVER_API_KEY_VALUE="$(/bin/bash -lc "v=${CAPSOLVER_API_KEY_RAW}; printf '%s' \"\$v\"" 2>/dev/null || true)"
+    if [[ -n "${CAPSOLVER_API_KEY_VALUE}" ]]; then
+      echo "Preserved CAPSOLVER_API_KEY from existing sidecar runner."
+    fi
+  fi
+fi
+if [[ -n "${CAPSOLVER_API_KEY_VALUE}" ]]; then
+  echo "CapSolver API key is configured for the local sidecar."
+fi
 SIDECAR_VRBO_CAPTCHA_AUTOMATION="${SIDECAR_VRBO_CAPTCHA_AUTOMATION:-0}"
 SIDECAR_VRBO_CAPTCHA_POLL_SECONDS="${SIDECAR_VRBO_CAPTCHA_POLL_SECONDS:-120}"
 SIDECAR_VRBO_CAPTCHA_MAX_ATTEMPTS="${SIDECAR_VRBO_CAPTCHA_MAX_ATTEMPTS:-2}"
+CAPSOLVER_API_KEY_EXPORT="$(quote_for_shell "${CAPSOLVER_API_KEY_VALUE}")"
 
 RUNNER_PATH="${INSTALL_DIR}/run-vrbo-sidecar.sh"
 cat >"${RUNNER_PATH}" <<RUNNER
@@ -215,6 +233,7 @@ export BRIGHTDATA_PROXY_USERNAME=${BRIGHTDATA_PROXY_USERNAME_EXPORT}
 export BRIGHTDATA_PROXY_PASSWORD=${BRIGHTDATA_PROXY_PASSWORD_EXPORT}
 export CAPTCHA_PROVIDER="${CAPTCHA_PROVIDER}"
 export CAPTCHA_SOLVING_ENABLED="${CAPTCHA_SOLVING_ENABLED}"
+export CAPSOLVER_API_KEY=${CAPSOLVER_API_KEY_EXPORT}
 export SIDECAR_VRBO_CAPTCHA_AUTOMATION="${SIDECAR_VRBO_CAPTCHA_AUTOMATION}"
 export SIDECAR_VRBO_CAPTCHA_POLL_SECONDS="${SIDECAR_VRBO_CAPTCHA_POLL_SECONDS}"
 export SIDECAR_VRBO_CAPTCHA_MAX_ATTEMPTS="${SIDECAR_VRBO_CAPTCHA_MAX_ATTEMPTS}"

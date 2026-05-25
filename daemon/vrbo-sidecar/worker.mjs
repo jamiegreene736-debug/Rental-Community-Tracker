@@ -2085,6 +2085,45 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
   return stateLooksLikeVrboHumanChallenge(state);
 }
 
+async function performHumanLikeSliderDrag(page, distancePx) {
+  const distance = Math.max(0, Math.round(Number(distancePx) || 0));
+  if (!page || distance <= 0) return false;
+
+  const handleSelectors = [
+    '[role="slider"]',
+    '[class*="slider-handle" i]',
+    '[class*="slider" i] [class*="handle" i]',
+    '[class*="captcha" i] button',
+    'button[aria-label*="slide" i]',
+  ];
+
+  let box = null;
+  for (const selector of handleSelectors) {
+    const locator = page.locator(selector).first();
+    const candidate = await locator.boundingBox().catch(() => null);
+    if (candidate && candidate.width > 0 && candidate.height > 0) {
+      box = candidate;
+      break;
+    }
+  }
+  if (!box) return false;
+
+  const startX = box.x + box.width / 2;
+  const startY = box.y + box.height / 2;
+  const steps = Math.min(24, Math.max(8, Math.ceil(distance / 12)));
+  const stepDx = distance / steps;
+
+  await page.mouse.move(startX, startY).catch(() => {});
+  await page.mouse.down().catch(() => {});
+  for (let i = 1; i <= steps; i += 1) {
+    const jitterY = startY + (Math.random() - 0.5) * 2;
+    await page.mouse.move(startX + stepDx * i, jitterY).catch(() => {});
+    await boundedPageDelay(page, 25 + Math.floor(Math.random() * 35));
+  }
+  await page.mouse.up().catch(() => {});
+  return true;
+}
+
 async function trySolveVrboSliderWithCapSolver(page, label = "vrbo", id = "") {
   const solvingEnabled = process.env.CAPTCHA_SOLVING_ENABLED === "1";
   const apiKey = process.env.CAPSOLVER_API_KEY;
@@ -2094,31 +2133,87 @@ async function trySolveVrboSliderWithCapSolver(page, label = "vrbo", id = "") {
   }
 
   try {
-    log(`${label} ${id}: Attempting CapSolver solve for VRBO slider...`);
+    log(`${label} ${id}: Attempting CapSolver VisionEngine solve for VRBO slider...`);
 
-    // =============================================
-    // TODO: Implement actual CapSolver call here
-    // =============================================
-    // Example structure:
-    // const task = await createCapSolverTask({ type: "VisionEngine", ... });
-    // const solution = await pollCapSolverResult(task.taskId);
-    //
-    // if (solution?.distance) {
-    //   await performHumanLikeSliderDrag(page, solution.distance);
-    //   await page.waitForTimeout(1200);
-    //
-    //   const stillChallenged = await stateLooksLikeVrboHumanChallenge(
-    //     await captureVrboChallengeState(page)
-    //   );
-    //   if (!stillChallenged) {
-    //     log(`${label} ${id}: CapSolver successfully solved slider`);
-    //     return { solved: true };
-    //   }
-    // }
+    const captchaState = await captureVrboChallengeState(page);
+    const websiteURL = captchaState?.url ?? (await page.url().catch(() => ""));
 
-    return { solved: false, reason: "not_implemented_yet" };
+    const createTaskPayload = {
+      clientKey: apiKey,
+      task: {
+        type: "VisionEngine",
+        websiteURL,
+      },
+    };
+
+    const createResponse = await fetch("https://api.capsolver.com/createTask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(createTaskPayload),
+    });
+
+    const createResult = await createResponse.json();
+    if (createResult.errorId !== 0) {
+      log(`${label} ${id}: CapSolver createTask error → ${createResult.errorDescription}`);
+      return { solved: false, reason: "create_task_failed" };
+    }
+
+    const taskId = createResult.taskId;
+    let solution = null;
+    const maxAttempts = 30;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      await new Promise((r) => setTimeout(r, 2_000));
+
+      const resultResponse = await fetch("https://api.capsolver.com/getTaskResult", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientKey: apiKey, taskId }),
+      });
+
+      const resultData = await resultResponse.json();
+      if (resultData.errorId !== 0) {
+        log(`${label} ${id}: CapSolver getTaskResult error → ${resultData.errorDescription}`);
+        return { solved: false, reason: "get_result_failed" };
+      }
+
+      if (resultData.status === "ready") {
+        solution = resultData.solution;
+        break;
+      }
+    }
+
+    if (!solution) {
+      log(`${label} ${id}: CapSolver VisionEngine timed out or no solution`);
+      return { solved: false, reason: "timeout_or_no_solution" };
+    }
+
+    if (solution.distance !== undefined) {
+      log(`${label} ${id}: CapSolver returned distance: ${solution.distance}`);
+
+      const dragged = await performHumanLikeSliderDrag(page, solution.distance);
+      if (!dragged) {
+        log(`${label} ${id}: Could not find slider handle to apply CapSolver distance`);
+        return { solved: false, reason: "slider_handle_not_found" };
+      }
+
+      await page.waitForTimeout(1_500).catch(() => {});
+
+      const stillChallenged = await stateLooksLikeVrboHumanChallenge(
+        await captureVrboChallengeState(page),
+      );
+      if (!stillChallenged) {
+        log(`${label} ${id}: CapSolver VisionEngine successfully solved the slider`);
+        return { solved: true };
+      }
+
+      log(`${label} ${id}: Slide applied but challenge still present`);
+      return { solved: false, reason: "verification_failed_after_slide" };
+    }
+
+    log(`${label} ${id}: CapSolver returned solution but no usable distance`);
+    return { solved: false, reason: "unexpected_solution_format" };
   } catch (err) {
-    log(`${label} ${id}: CapSolver attempt failed — ${err?.message || err}`);
+    log(`${label} ${id}: CapSolver VisionEngine attempt crashed — ${err?.message || err}`);
     return { solved: false, reason: "error" };
   }
 }
