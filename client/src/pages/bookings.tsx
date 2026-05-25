@@ -8313,11 +8313,14 @@ function SidecarScreensStrip() {
       if (!r.ok) throw new Error(`Sidecar screens unavailable (${r.status})`);
       return r.json();
     },
-    refetchInterval: 5_000,
+    refetchInterval: 1_000,
     retry: false,
   });
   const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
+  const [controlStatus, setControlStatus] = useState<string | null>(null);
   const draggingRef = useRef(false);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pointerStartRef = useRef<{ clientX: number; clientY: number; startedAt: number } | null>(null);
   const screens = data?.screens ?? [];
   const maxScreens = Math.max(1, data?.maxScreens ?? 8);
   const bySlot = new Map(screens.map((screen) => [screen.slot, screen]));
@@ -8349,11 +8352,22 @@ function SidecarScreensStrip() {
     if (hasCaptchaScreen) setCollapsed(false);
   }, [hasCaptchaScreen]);
 
+  const clearLongPressTimer = () => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  };
+
   const sendScreenCommand = (
     screen: SidecarScreenSnapshot,
-    action: "move" | "down" | "up" | "click" | "surface",
+    action: "move" | "down" | "up" | "click" | "hold" | "surface",
     coords: { x: number; y: number } = { x: 0, y: 0 },
+    durationMs?: number,
   ) => {
+    if (screen.captcha && action !== "move") {
+      setControlStatus(action === "hold"
+        ? "Sending a 9 second hold to the sidecar..."
+        : "Sending pointer input to the sidecar...");
+    }
     void fetch("/api/vrbo-sidecar/screen-control", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -8363,11 +8377,23 @@ function SidecarScreensStrip() {
         action,
         x: Math.round(coords.x),
         y: Math.round(coords.y),
+        durationMs,
       }),
-    }).catch(() => {});
+    })
+      .then((response) => {
+        if (!screen.captcha || action === "move") return;
+        setControlStatus(response.ok
+          ? "Input relayed. The screenshot will refresh after the worker applies it."
+          : "The sidecar did not accept that pointer input; try opening the live browser or retry.");
+      })
+      .catch(() => {
+        if (screen.captcha && action !== "move") {
+          setControlStatus("Pointer relay failed; try again or use the live browser button if available.");
+        }
+      });
   };
 
-  const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
+  const screenCoordsForPointerEvent = (screen: SidecarScreenSnapshot, event: PointerEvent<HTMLElement>) => {
     const target = event.currentTarget as HTMLElement;
     const image = target.querySelector("img");
     const rect = (image ?? target).getBoundingClientRect();
@@ -8375,7 +8401,11 @@ function SidecarScreensStrip() {
     const height = Math.max(1, screen.height ?? 820);
     const x = Math.max(0, Math.min(width, ((event.clientX - rect.left) / Math.max(1, rect.width)) * width));
     const y = Math.max(0, Math.min(height, ((event.clientY - rect.top) / Math.max(1, rect.height)) * height));
-    sendScreenCommand(screen, action, { x, y });
+    return { x, y };
+  };
+
+  const sendPointerCommand = (screen: SidecarScreenSnapshot, action: "move" | "down" | "up" | "click", event: PointerEvent<HTMLElement>) => {
+    sendScreenCommand(screen, action, screenCoordsForPointerEvent(screen, event));
   };
 
   return (
@@ -8464,6 +8494,8 @@ function SidecarScreensStrip() {
         if (!open) {
           setSelectedSlot(null);
           draggingRef.current = false;
+          pointerStartRef.current = null;
+          clearLongPressTimer();
         }
       }}>
         <DialogContent className="max-w-6xl">
@@ -8484,6 +8516,11 @@ function SidecarScreensStrip() {
                     Manual CAPTCHA control is live for this browser session.
                   </span>
                   <span>Click and hold the challenge button, or drag the slider, directly on the screenshot below.</span>
+                </div>
+              )}
+              {selectedScreen.captcha && controlStatus && (
+                <div className="rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs font-medium text-yellow-950">
+                  {controlStatus}
                 </div>
               )}
               <div className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs ${selectedScreen.captcha ? "border-yellow-300 bg-yellow-50" : "bg-muted/40"}`}>
@@ -8535,27 +8572,60 @@ function SidecarScreensStrip() {
               <div
                 role="button"
                 tabIndex={0}
-                className={`overflow-hidden rounded-lg border bg-slate-950 ${selectedScreen.captcha ? "border-yellow-500 ring-4 ring-yellow-300" : ""} ${selectedScreen.phase?.startsWith("finished") ? "cursor-not-allowed opacity-75" : "cursor-crosshair"}`}
+                className={`overflow-hidden rounded-lg border bg-slate-950 touch-none select-none ${selectedScreen.captcha ? "border-yellow-500 ring-4 ring-yellow-300" : ""} ${selectedScreen.phase?.startsWith("finished") ? "cursor-not-allowed opacity-75" : "cursor-crosshair"}`}
                 onPointerDown={(event) => {
                   if (selectedScreen.phase?.startsWith("finished")) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  clearLongPressTimer();
                   draggingRef.current = true;
+                  pointerStartRef.current = { clientX: event.clientX, clientY: event.clientY, startedAt: Date.now() };
                   event.currentTarget.setPointerCapture?.(event.pointerId);
-                  sendPointerCommand(selectedScreen, "down", event);
+                  const coords = screenCoordsForPointerEvent(selectedScreen, event);
+                  sendScreenCommand(selectedScreen, "down", coords);
+                  if (selectedScreen.captcha) {
+                    longPressTimerRef.current = setTimeout(() => {
+                      if (!draggingRef.current) return;
+                      sendScreenCommand(selectedScreen, "hold", coords, 9_000);
+                    }, 700);
+                  }
                 }}
                 onPointerMove={(event) => {
-                  if (draggingRef.current && !selectedScreen.phase?.startsWith("finished")) sendPointerCommand(selectedScreen, "move", event);
+                  if (!draggingRef.current || selectedScreen.phase?.startsWith("finished")) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const start = pointerStartRef.current;
+                  if (start && Math.hypot(event.clientX - start.clientX, event.clientY - start.clientY) > 8) {
+                    clearLongPressTimer();
+                  }
+                  sendPointerCommand(selectedScreen, "move", event);
                 }}
                 onPointerUp={(event) => {
                   if (selectedScreen.phase?.startsWith("finished")) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  clearLongPressTimer();
                   if (draggingRef.current) {
                     sendPointerCommand(selectedScreen, "up", event);
+                    const start = pointerStartRef.current;
+                    const moved = start ? Math.hypot(event.clientX - start.clientX, event.clientY - start.clientY) : Infinity;
+                    const elapsed = start ? Date.now() - start.startedAt : Infinity;
+                    if (moved < 8 && elapsed < 500) {
+                      sendPointerCommand(selectedScreen, "click", event);
+                    }
                     draggingRef.current = false;
+                    pointerStartRef.current = null;
                   } else {
                     sendPointerCommand(selectedScreen, "click", event);
                   }
                 }}
+                onPointerCancel={() => {
+                  clearLongPressTimer();
+                  draggingRef.current = false;
+                  pointerStartRef.current = null;
+                }}
               >
-                <img src={selectedScreen.screenshotDataUrl} alt="" className="max-h-[72vh] w-full object-contain" draggable={false} />
+                <img src={selectedScreen.screenshotDataUrl} alt="" className="max-h-[72vh] w-full select-none object-contain" draggable={false} />
               </div>
             </div>
           ) : (

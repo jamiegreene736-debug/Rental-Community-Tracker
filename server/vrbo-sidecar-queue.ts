@@ -272,9 +272,10 @@ export type SidecarScreenControlCommand = {
   id: string;
   slot: string;
   requestId?: string;
-  action: "move" | "down" | "up" | "click" | "surface";
+  action: "move" | "down" | "up" | "click" | "hold" | "surface";
   x: number;
   y: number;
+  durationMs?: number;
   at: string;
 };
 
@@ -738,8 +739,8 @@ export function enqueueSidecarScreenControlCommand(command: {
   cleanupSidecarScreenCommands();
   const slot = screenCommandKey(String(command.slot || "1"));
   const action = String(command.action || "");
-  if (action !== "move" && action !== "down" && action !== "up" && action !== "click" && action !== "surface") {
-    return { ok: false, error: "action must be move, down, up, click, or surface" };
+  if (action !== "move" && action !== "down" && action !== "up" && action !== "click" && action !== "hold" && action !== "surface") {
+    return { ok: false, error: "action must be move, down, up, click, hold, or surface" };
   }
   const x = Number(command.x);
   const y = Number(command.y);
@@ -756,6 +757,9 @@ export function enqueueSidecarScreenControlCommand(command: {
     action,
     x: Number.isFinite(x) ? Math.round(x) : 0,
     y: Number.isFinite(y) ? Math.round(y) : 0,
+    durationMs: action === "hold"
+      ? Math.max(1_000, Math.min(15_000, Math.round(Number((command as { durationMs?: unknown }).durationMs) || 8_000)))
+      : undefined,
     at: new Date().toISOString(),
   };
   const existing = sidecarScreenCommands.get(slot) ?? [];

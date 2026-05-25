@@ -2715,7 +2715,7 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
         if (e instanceof SidecarCancelledError) throw e;
       });
       await applyScreenControlCommands({ id, opType: label }, targetPage, label).catch(() => 0);
-      await boundedPageDelay(targetPage, pollMs);
+      await boundedPageDelay(targetPage, Math.min(pollMs, 1_000));
       state = await captureVrboChallengeState(targetPage);
       if (state && !stateLooksLikeVrboHumanChallenge(state)) {
         throwIfVrboHardBlock(state, label, id);
@@ -2733,7 +2733,7 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
         return true;
       }
       const now = Date.now();
-      if (now - lastSnapshotAt >= Math.max(SCREENSHOT_HEARTBEAT_MS, 5_000)) {
+      if (now - lastSnapshotAt >= 1_000) {
         lastSnapshotAt = now;
         await postScreenSnapshot(
           { id, opType: label },
@@ -2818,6 +2818,13 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
       } else if (action === "click") {
         await setCaptchaTextSelectionSuppressed(targetPage, true).catch(() => {});
         await targetPage.mouse.click(x, y, { delay: 60 }).catch(() => {});
+      } else if (action === "hold") {
+        const durationMs = Math.max(1_000, Math.min(15_000, Math.round(Number(command?.durationMs) || 8_000)));
+        await setCaptchaTextSelectionSuppressed(targetPage, true).catch(() => {});
+        await targetPage.mouse.move(x, y).catch(() => {});
+        await targetPage.mouse.down().catch(() => {});
+        await boundedPageDelay(targetPage, durationMs);
+        await targetPage.mouse.up().catch(() => {});
       } else if (action === "surface") {
         const surfaced = await setCaptchaWindowVisibility(targetPage, true, label, req?.id ?? "").catch(() => false);
         if (!surfaced) await targetPage.bringToFront().catch(() => {});
