@@ -422,15 +422,22 @@ const SIDECAR_INACTIVE_SCREEN_TTL_MS = Math.max(
 const SIDECAR_SCREENSHOT_MAX_CHARS = 350_000;
 const SIDECAR_SCREEN_COMMAND_TTL_MS = 60 * 1000;
 const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
-  // VRBO block rates get worse when multiple provider visits hit it at
-  // once. Keep VRBO serialized and rely on rate-limited cooldowns,
-  // while Airbnb/Booking/PM jobs can still use the worker pool.
+  // OTA block rates get worse when multiple provider visits hit at once,
+  // especially from the same local Mac/IP. Keep public OTA searches in a
+  // single lane while non-OTA work can still use the worker pool.
+  airbnb_search: 1,
+  booking_search: 1,
   vrbo_search: 1,
   vrbo_photo_scrape: 1,
 };
 
 function opConcurrencyGroup(opType: SidecarOpType): string {
-  if (opType === "vrbo_search" || opType === "vrbo_photo_scrape") return "vrbo";
+  if (
+    opType === "airbnb_search" ||
+    opType === "booking_search" ||
+    opType === "vrbo_search" ||
+    opType === "vrbo_photo_scrape"
+  ) return "ota_provider";
   return opType;
 }
 
@@ -578,9 +585,13 @@ function providerCooldownSearchResult(provider: SidecarProviderKey): {
 }
 
 function opConcurrencyLimit(opType: SidecarOpType): number {
+  const group = opConcurrencyGroup(opType);
+  const groupEnvName = group === "ota_provider" ? "SIDECAR_OTA_CONCURRENCY" : "";
   const envName = `SIDECAR_${opType.toUpperCase()}_CONCURRENCY`;
   const fallback = DEFAULT_OP_CONCURRENCY[opType] ?? Number.POSITIVE_INFINITY;
-  const configured = numberFromEnv(envName, fallback);
+  const configured = groupEnvName && process.env[groupEnvName] !== undefined
+    ? numberFromEnv(groupEnvName, fallback)
+    : numberFromEnv(envName, fallback);
   if (!Number.isFinite(configured)) return Number.POSITIVE_INFINITY;
   return Math.max(1, Math.floor(configured));
 }
@@ -1159,6 +1170,7 @@ export function cancelSidecarRunAndRequests(reason = "cancelled by operator"): {
 export function isCancellationRequested(id: string): boolean {
   const r = queue.get(id);
   if (!r) return true;
+  if (r.status === "completed") return false;
   return r.status !== "in_progress" || Boolean(r.cancelled);
 }
 

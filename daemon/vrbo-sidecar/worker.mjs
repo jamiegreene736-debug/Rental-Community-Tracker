@@ -1774,7 +1774,7 @@ async function ensureBrowser() {
     );
   }
   await installContextGuards();
-  await clearContextStorageForFreshRun("server Chrome startup");
+  await clearContextStorageForFreshRun("local Chrome startup");
   await syncRemoteCookies();
   const cookies = loadCookies();
   const shouldSeedCookies = !needsFreshIdentityForOp(activeRuntimeRequest?.opType);
