@@ -2093,35 +2093,76 @@ async function performHumanLikeSliderDrag(page, distancePx) {
     '[role="slider"]',
     '[class*="slider-handle" i]',
     '[class*="slider" i] [class*="handle" i]',
-    '[class*="captcha" i] button',
+    '[class*="captcha" i] [class*="slider" i]',
     'button[aria-label*="slide" i]',
+    '[class*="verify" i] [draggable="true"]',
+    '[class*="puzzle" i] [class*="piece" i]',
+    'div[style*="cursor: grab"]',
+    'div[style*="cursor: grabbing"]',
   ];
 
+  let handle = null;
   let box = null;
+
   for (const selector of handleSelectors) {
-    const locator = page.locator(selector).first();
-    const candidate = await locator.boundingBox().catch(() => null);
-    if (candidate && candidate.width > 0 && candidate.height > 0) {
-      box = candidate;
-      break;
+    try {
+      const locator = page.locator(selector).first();
+      const isVisible = await locator.isVisible().catch(() => false);
+      if (!isVisible) continue;
+
+      const candidateBox = await locator.boundingBox().catch(() => null);
+      if (candidateBox && candidateBox.width > 10 && candidateBox.height > 10) {
+        handle = locator;
+        box = candidateBox;
+        break;
+      }
+    } catch {
+      continue;
     }
   }
-  if (!box) return false;
+
+  if (!handle || !box) {
+    log("performHumanLikeSliderDrag: Could not find a usable slider handle");
+    return false;
+  }
 
   const startX = box.x + box.width / 2;
   const startY = box.y + box.height / 2;
-  const steps = Math.min(24, Math.max(8, Math.ceil(distance / 12)));
+
+  const steps = Math.min(30, Math.max(12, Math.ceil(distance / 10)));
   const stepDx = distance / steps;
 
-  await page.mouse.move(startX, startY).catch(() => {});
-  await page.mouse.down().catch(() => {});
-  for (let i = 1; i <= steps; i += 1) {
-    const jitterY = startY + (Math.random() - 0.5) * 2;
-    await page.mouse.move(startX + stepDx * i, jitterY).catch(() => {});
-    await boundedPageDelay(page, 25 + Math.floor(Math.random() * 35));
+  try {
+    await page.mouse
+      .move(startX + (Math.random() - 0.5) * 3, startY + (Math.random() - 0.5) * 2)
+      .catch(() => {});
+
+    await page.mouse.down().catch(() => {});
+
+    for (let i = 1; i <= steps; i += 1) {
+      const progress = i / steps;
+      const currentX = startX + stepDx * i;
+      const jitterY = startY + (Math.random() - 0.5) * 4 * (1 - progress);
+
+      await page.mouse.move(currentX, jitterY).catch(() => {});
+      await boundedPageDelay(page, 20 + Math.floor(Math.random() * 25));
+    }
+
+    const overshoot = Math.random() * 8 + 4;
+    await page.mouse.move(startX + distance + overshoot, startY + (Math.random() - 0.5) * 2).catch(() => {});
+    await boundedPageDelay(page, 80 + Math.floor(Math.random() * 60));
+
+    await page.mouse.move(startX + distance, startY + (Math.random() - 0.5) * 2).catch(() => {});
+    await boundedPageDelay(page, 60 + Math.floor(Math.random() * 40));
+
+    await page.mouse.up().catch(() => {});
+
+    return true;
+  } catch (err) {
+    log(`performHumanLikeSliderDrag error: ${err?.message || err}`);
+    await page.mouse.up().catch(() => {});
+    return false;
   }
-  await page.mouse.up().catch(() => {});
-  return true;
 }
 
 async function trySolveVrboSliderWithCapSolver(page, label = "vrbo", id = "") {
