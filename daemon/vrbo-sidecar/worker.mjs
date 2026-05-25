@@ -2717,6 +2717,21 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
       await applyScreenControlCommands({ id, opType: label }, targetPage, label).catch(() => 0);
       await boundedPageDelay(targetPage, Math.min(pollMs, 1_000));
       state = await captureVrboChallengeState(targetPage);
+      if (stateLooksLikeVrboHardBlock(state)) {
+        await postScreenSnapshot(
+          { id, opType: label },
+          targetPage,
+          "VRBO hard-blocked after manual CAPTCHA input",
+          {
+            captcha: true,
+            force: true,
+            error: "VRBO changed this session from CAPTCHA to a hard block. The worker will abandon this browser/IP and retry with a fresh identity if retries remain.",
+          },
+        );
+        await setCaptchaTextSelectionSuppressed(targetPage, false).catch(() => {});
+        await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
+        throwIfVrboHardBlock(state, label, id);
+      }
       if (state && !stateLooksLikeVrboHumanChallenge(state)) {
         throwIfVrboHardBlock(state, label, id);
         await boundedPageDelay(targetPage, 1_000);
