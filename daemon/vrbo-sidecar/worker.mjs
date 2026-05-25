@@ -2085,27 +2085,75 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
   return stateLooksLikeVrboHumanChallenge(state);
 }
 
+async function trySolveVrboSliderWithCapSolver(page, label = "vrbo", id = "") {
+  const solvingEnabled = process.env.CAPTCHA_SOLVING_ENABLED === "1";
+  const apiKey = process.env.CAPSOLVER_API_KEY;
+
+  if (!solvingEnabled || !apiKey) {
+    return { solved: false, reason: "disabled_or_no_key" };
+  }
+
+  try {
+    log(`${label} ${id}: Attempting CapSolver solve for VRBO slider...`);
+
+    // =============================================
+    // TODO: Implement actual CapSolver call here
+    // =============================================
+    // Example structure:
+    // const task = await createCapSolverTask({ type: "VisionEngine", ... });
+    // const solution = await pollCapSolverResult(task.taskId);
+    //
+    // if (solution?.distance) {
+    //   await performHumanLikeSliderDrag(page, solution.distance);
+    //   await page.waitForTimeout(1200);
+    //
+    //   const stillChallenged = await stateLooksLikeVrboHumanChallenge(
+    //     await captureVrboChallengeState(page)
+    //   );
+    //   if (!stillChallenged) {
+    //     log(`${label} ${id}: CapSolver successfully solved slider`);
+    //     return { solved: true };
+    //   }
+    // }
+
+    return { solved: false, reason: "not_implemented_yet" };
+  } catch (err) {
+    log(`${label} ${id}: CapSolver attempt failed — ${err?.message || err}`);
+    return { solved: false, reason: "error" };
+  }
+}
+
 async function stopVrboProviderIfBlocked(targetPage, label, id, initialState = null) {
   let state = initialState ?? await captureVrboChallengeState(targetPage);
+
+  throwIfVrboHardBlock(state, label, id);
+
   const hasChallenge = stateLooksLikeVrboHumanChallenge(state);
-  if (!hasChallenge) {
-    throwIfVrboHardBlock(state, label, id);
+  if (!hasChallenge) return false;
+
+  const solveResult = await trySolveVrboSliderWithCapSolver(targetPage, label, id).catch(() => ({ solved: false }));
+  if (solveResult.solved) {
+    log(`${label} ${id}: CapSolver successfully solved slider — auto-continuing`);
     return false;
   }
 
-  if (VRBO_MANUAL_VERIFICATION_ENABLED) {
-    const timeoutAt = Date.now() + VRBO_MANUAL_VERIFICATION_TIMEOUT_MS;
+  const manualVerificationEnabled = process.env.SIDECAR_VRBO_MANUAL_VERIFICATION !== "0";
+  if (manualVerificationEnabled) {
+    const timeoutMs = parseInt(process.env.SIDECAR_VRBO_MANUAL_VERIFICATION_TIMEOUT_MS, 10) || 8 * 60 * 60_000;
+    const pollMs = parseInt(process.env.SIDECAR_VRBO_MANUAL_VERIFICATION_POLL_MS, 10) || 2_000;
+    const timeoutAt = Date.now() + timeoutMs;
     const sourceUrl = state?.url;
     const instructions =
       "VRBO CAPTCHA/human-verification page detected. This provider run is paused for manual verification in the live server Chrome/noVNC session. Solve it there; once the challenge clears, the worker will continue this exact browser session and cache the resulting VRBO cookies.";
-    log(`${label} ${id}: ${instructions}`);
+
+    log(`${label} ${id}: Falling back to manual noVNC verification (CapSolver did not solve)`);
     await normalizePageDisplay(targetPage).catch(() => {});
     await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
     await postScreenSnapshot(
       { id, opType: label },
       targetPage,
       "VRBO waiting for manual CAPTCHA solve",
-      { captcha: true, error: instructions, force: true },
+      { captcha: true, force: true },
     );
 
     let lastSnapshotAt = 0;
@@ -2115,7 +2163,7 @@ async function stopVrboProviderIfBlocked(targetPage, label, id, initialState = n
         if (e instanceof SidecarCancelledError) throw e;
       });
       await applyScreenControlCommands({ id, opType: label }, targetPage, label).catch(() => 0);
-      await boundedPageDelay(targetPage, VRBO_MANUAL_VERIFICATION_POLL_MS);
+      await boundedPageDelay(targetPage, pollMs);
       state = await captureVrboChallengeState(targetPage);
       if (state && !stateLooksLikeVrboHumanChallenge(state)) {
         throwIfVrboHardBlock(state, label, id);
@@ -2143,48 +2191,42 @@ async function stopVrboProviderIfBlocked(targetPage, label, id, initialState = n
       }
     }
 
-    const timeoutMessage =
-      "VRBO CAPTCHA/human-verification page was not solved before the manual verification timeout. The provider run stopped cleanly, kept the original VRBO URL for manual verification, and will respect retry cooldown.";
     await postScreenSnapshot(
       { id, opType: label },
       targetPage,
       "VRBO manual CAPTCHA timed out",
-      { captcha: true, error: timeoutMessage, force: true },
+      { captcha: true, force: true },
     );
     await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
-    throw new VrboHardBlockError(timeoutMessage, {
+    throw new VrboHardBlockError("VRBO manual verification timed out.", {
       label,
       id,
       url: state?.url || sourceUrl,
       title: state?.title,
       excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
-      retryLater: true,
       manualVerificationTimedOut: true,
+      retryLater: true,
     });
   }
 
+  log(`${label} ${id}: CAPTCHA detected and manual verification is disabled — stopping provider`);
   await normalizePageDisplay(targetPage).catch(() => {});
-  const stopMessage =
-    "VRBO CAPTCHA/human-verification page detected. The compliant provider runner stops this VRBO search cleanly, records provider cooldown/health, preserves the original source URL for manual verification, and lets other providers continue without attempting to bypass the challenge.";
-  log(`${label} ${id}: ${stopMessage}`);
   await postScreenSnapshot(
     { id, opType: label },
     targetPage,
     "VRBO blocked - provider stopped",
-    { captcha: true, error: stopMessage, force: true },
+    { captcha: true, force: true },
   );
   await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
-  throw new VrboHardBlockError(
-    stopMessage,
-    {
-      label,
-      id,
-      url: state?.url,
-      title: state?.title,
-      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
-      retryLater: true,
-    },
-  );
+
+  throw new VrboHardBlockError("VRBO CAPTCHA detected. Manual verification is disabled.", {
+    label,
+    id,
+    url: state?.url,
+    title: state?.title,
+    excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+    retryLater: true,
+  });
 }
 
 async function applyScreenControlCommands(req, targetPage = page, label = "sidecar") {
