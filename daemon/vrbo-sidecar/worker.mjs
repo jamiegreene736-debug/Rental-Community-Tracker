@@ -1979,6 +1979,8 @@ async function dumpPageState(label, requestForLog) {
 
 const VRBO_HUMAN_CHALLENGE_RE =
   /show us your human side|we can.?t tell if you.?re a human|press and hold|slide (?:the )?(?:lock|slider)|captcha|not a robot|bot or not|verify (?:that )?you(?:'re| are) human|human verification|unusual traffic/i;
+const OTA_PRESS_AND_HOLD_CHALLENGE_RE =
+  /press\s+and\s+hold|hold\s+(?:the\s+)?(?:button|slider)|show us your human side|we can.?t tell if you.?re a human/i;
 const VRBO_HARD_BLOCK_RE =
   /you have been blocked|something about the behaviour of the browser|robot on the same network/i;
 const BRIGHTDATA_KYC_BLOCK_RE =
@@ -2046,6 +2048,13 @@ function stateLooksLikeVrboHumanChallenge(state) {
   );
 }
 
+function stateLooksLikePressAndHoldChallenge(state) {
+  if (!state) return false;
+  return OTA_PRESS_AND_HOLD_CHALLENGE_RE.test(
+    `${state.title ?? ""}\n${state.bodyExcerpt ?? ""}\n${state.bodyHtmlSnippet ?? ""}\n${state.url ?? ""}`,
+  );
+}
+
 function stateLooksLikeVrboHardBlock(state) {
   if (!state) return false;
   return VRBO_HARD_BLOCK_RE.test(
@@ -2085,41 +2094,62 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
   return stateLooksLikeVrboHumanChallenge(state);
 }
 
-async function extractSliderCaptchaImagePair(page) {
-  const root = page
-    .locator(
-      '[class*="captcha" i], [id*="captcha" i], [class*="arkose" i], [class*="slider" i], [class*="human" i], [class*="verify" i]',
-    )
-    .first();
+async function screenshotSliderImageCandidates(scope) {
+  const candidates = [];
+  const locators = scope.locator('img, canvas, svg, [style*="background-image"]');
+  const count = await locators.count().catch(() => 0);
+  for (let i = 0; i < Math.min(count, 16); i += 1) {
+    const loc = locators.nth(i);
+    const box = await loc.boundingBox().catch(() => null);
+    if (!box || box.width < 15 || box.height < 15) continue;
+    const image = await loc.screenshot({ type: "jpeg", quality: 85 }).catch(() => null);
+    if (!image) continue;
+    candidates.push({ image: image.toString("base64"), area: box.width * box.height, width: box.width, height: box.height });
+  }
+  return candidates;
+}
 
-  const imgCount = await root.locator("img").count().catch(() => 0);
-  if (imgCount >= 2) {
-    const imgs = root.locator("img");
-    const candidates = [];
-    for (let i = 0; i < Math.min(imgCount, 8); i += 1) {
-      const loc = imgs.nth(i);
-      const box = await loc.boundingBox().catch(() => null);
-      if (box && box.width > 15 && box.height > 15) {
-        candidates.push({ loc, area: box.width * box.height });
-      }
-    }
-    if (candidates.length >= 2) {
-      candidates.sort((a, b) => b.area - a.area);
-      const bgLoc = candidates[0].loc;
-      const pieceLoc = candidates[candidates.length - 1].loc;
-      try {
-        const imageBackground = (await bgLoc.screenshot({ type: "jpeg", quality: 85 })).toString("base64");
-        const image = (await pieceLoc.screenshot({ type: "jpeg", quality: 85 })).toString("base64");
-        if (image && imageBackground) {
-          return { image, imageBackground, mode: "dual_element_screenshot" };
-        }
-      } catch {
-        // fall through to container clip
-      }
+async function extractSliderCaptchaImagePair(page) {
+  const rootSelector = [
+    '[class*="captcha" i]',
+    '[id*="captcha" i]',
+    '[class*="arkose" i]',
+    '[class*="slider" i]',
+    '[class*="puzzle" i]',
+    '[class*="human" i]',
+    '[class*="verify" i]',
+    '[class*="challenge" i]',
+  ].join(",");
+
+  const scopes = [];
+  const roots = page.locator(rootSelector);
+  const rootCount = await roots.count().catch(() => 0);
+  for (let i = 0; i < Math.min(rootCount, 8); i += 1) scopes.push(roots.nth(i));
+  scopes.push(page.locator("body"));
+
+  for (const scope of scopes) {
+    const candidates = await screenshotSliderImageCandidates(scope).catch(() => []);
+    if (candidates.length < 2) continue;
+    candidates.sort((a, b) => b.area - a.area);
+    const background = candidates[0];
+    const piece = candidates
+      .slice(1)
+      .sort((a, b) => a.area - b.area)
+      .find((candidate) => candidate.area < background.area * 0.8);
+    if (piece?.image && background?.image) {
+      return {
+        image: piece.image,
+        imageBackground: background.image,
+        mode: "dual_element_screenshot",
+        candidates: candidates.length,
+        pieceSize: `${Math.round(piece.width)}x${Math.round(piece.height)}`,
+        backgroundSize: `${Math.round(background.width)}x${Math.round(background.height)}`,
+      };
     }
   }
 
-  const box = await root.boundingBox().catch(() => null);
+  const firstRoot = roots.first();
+  const box = await firstRoot.boundingBox().catch(() => null);
   if (box && box.width > 80 && box.height > 50) {
     const clip = {
       x: Math.max(0, box.x),
@@ -2271,6 +2301,98 @@ async function performHumanLikeSliderDrag(page, distancePx) {
   }
 }
 
+async function performHumanLikePressAndHold(page, label = "vrbo", id = "") {
+  if (!page || page.isClosed?.()) return false;
+  const selectors = [
+    'button:has-text("Press and hold")',
+    '[role="button"]:has-text("Press and hold")',
+    'text=/press\\s+and\\s+hold/i',
+    '[aria-label*="press" i]',
+    '[aria-label*="hold" i]',
+    '[title*="press" i]',
+    '[title*="hold" i]',
+    '[class*="captcha" i] button',
+    '[class*="human" i] button',
+    '[class*="verify" i] button',
+    '[class*="challenge" i] button',
+    '[class*="slider" i]',
+    '[class*="captcha" i]',
+    '[id*="captcha" i]',
+    '[class*="human" i]',
+    '[class*="verify" i]',
+    '[class*="challenge" i]',
+    'body',
+  ];
+  const scopes = [page, ...page.frames().filter((frame) => frame !== page.mainFrame())];
+
+  let target = null;
+  let box = null;
+  for (const scope of scopes) {
+    for (const selector of selectors) {
+      try {
+        const locator = scope.locator(selector).first();
+        if (!(await locator.isVisible().catch(() => false))) continue;
+        const candidateBox = await locator.boundingBox().catch(() => null);
+        if (!candidateBox || candidateBox.width < 20 || candidateBox.height < 15) continue;
+        target = locator;
+        box = candidateBox;
+        break;
+      } catch {
+        continue;
+      }
+    }
+    if (target && box) break;
+  }
+
+  if (!target || !box) {
+    log(`${label} ${id}: press-and-hold challenge detected, but no hold target was visible`);
+    return false;
+  }
+
+  await target.scrollIntoViewIfNeeded?.().catch(() => {});
+  const refreshedBox = await target.boundingBox().catch(() => null);
+  if (refreshedBox) box = refreshedBox;
+
+  const startX = box.x + box.width * (0.45 + Math.random() * 0.1);
+  const startY = box.y + box.height * (0.45 + Math.random() * 0.1);
+  const holdMs = 7_000 + Math.floor(Math.random() * 3_000);
+  const startedAt = Date.now();
+
+  try {
+    log(`${label} ${id}: attempting human-like press-and-hold (${Math.round(holdMs / 1000)}s)`);
+    await page.mouse.move(startX + (Math.random() - 0.5) * 4, startY + (Math.random() - 0.5) * 3).catch(() => {});
+    await boundedPageDelay(page, 180 + Math.floor(Math.random() * 220));
+    await page.mouse.down().catch(() => {});
+
+    while (Date.now() - startedAt < holdMs) {
+      const elapsed = Date.now() - startedAt;
+      const progress = Math.min(1, elapsed / holdMs);
+      const jitter = 1.6 * (1 - progress * 0.4);
+      await page.mouse
+        .move(
+          startX + Math.sin(elapsed / 470) * jitter + (Math.random() - 0.5) * 0.8,
+          startY + Math.cos(elapsed / 530) * jitter + (Math.random() - 0.5) * 0.8,
+        )
+        .catch(() => {});
+      await boundedPageDelay(page, 220 + Math.floor(Math.random() * 180));
+    }
+
+    await page.mouse.up().catch(() => {});
+    await boundedPageDelay(page, 2_000);
+    const stillChallenged = stateLooksLikeVrboHumanChallenge(await captureVrboChallengeState(page));
+    if (!stillChallenged) {
+      log(`${label} ${id}: human-like press-and-hold cleared the challenge`);
+      return true;
+    }
+    log(`${label} ${id}: press-and-hold completed, but challenge is still visible`);
+    return false;
+  } catch (err) {
+    log(`${label} ${id}: press-and-hold failed — ${err?.message || err}`);
+    await page.mouse.up().catch(() => {});
+    return false;
+  }
+}
+
 async function trySolveOtaSliderWithCapSolver(page, label = "vrbo", id = "") {
   const solvingEnabled = process.env.CAPTCHA_SOLVING_ENABLED === "1";
   const apiKey = process.env.CAPSOLVER_API_KEY;
@@ -2284,21 +2406,46 @@ async function trySolveOtaSliderWithCapSolver(page, label = "vrbo", id = "") {
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
       log(`${label} ${id}: CapSolver VisionEngine slider_1 (attempt ${attempt}/${maxRetries})...`);
+      const challengeState = await captureVrboChallengeState(page);
+      const pressAndHoldChallenge = stateLooksLikePressAndHoldChallenge(challengeState);
 
       const imagePair = await extractSliderCaptchaImagePair(page);
       if (!imagePair?.image || !imagePair?.imageBackground) {
+        if (pressAndHoldChallenge) {
+          log(`${label} ${id}: no slider images found; challenge appears to be press-and-hold, trying human-like hold`);
+          const held = await performHumanLikePressAndHold(page, label, id);
+          if (held) return { solved: true, method: "press_and_hold" };
+          if (attempt === maxRetries) return { solved: false, reason: "press_hold_failed" };
+          continue;
+        }
         log(`${label} ${id}: Could not extract slider puzzle + background images for CapSolver`);
         if (attempt === maxRetries) return { solved: false, reason: "captcha_images_not_found" };
         continue;
       }
 
       if (imagePair.mode === "container_clip_fallback") {
-        log(`${label} ${id}: Using captcha container clip fallback (single image for both CapSolver inputs)`);
+        log(`${label} ${id}: only captured a single captcha container screenshot; VisionEngine slider_1 requires separate puzzle + background images`);
+        if (pressAndHoldChallenge) {
+          const held = await performHumanLikePressAndHold(page, label, id);
+          if (held) return { solved: true, method: "press_and_hold" };
+          if (attempt === maxRetries) return { solved: false, reason: "press_hold_failed" };
+          continue;
+        }
+        if (attempt === maxRetries) return { solved: false, reason: "captcha_images_not_found" };
+        continue;
       } else {
-        log(`${label} ${id}: CapSolver image capture mode: ${imagePair.mode}`);
+        log(
+          `${label} ${id}: CapSolver image capture mode: ${imagePair.mode}` +
+            (imagePair.candidates ? ` candidates=${imagePair.candidates} piece=${imagePair.pieceSize} background=${imagePair.backgroundSize}` : ""),
+        );
       }
 
-      const websiteURL = await page.url().catch(() => "");
+      let websiteURL = "";
+      try {
+        websiteURL = page.url();
+      } catch {
+        websiteURL = "";
+      }
       const solution = await callCapSolverVisionEngineSlider(
         apiKey,
         websiteURL,
