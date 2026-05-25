@@ -2474,6 +2474,55 @@ function stateMatchesExpectedDestination(state, ...expectedValues) {
   return false;
 }
 
+function buildVrboSearchUrl(destination, checkIn, checkOut) {
+  const params = new URLSearchParams({
+    destination,
+    d1: checkIn,
+    startDate: checkIn,
+    d2: checkOut,
+    endDate: checkOut,
+    flexibility: "0_DAY",
+    adults: "2",
+    isInvalidatedDate: "false",
+    sort: "RECOMMENDED",
+  });
+  return `https://www.vrbo.com/search?${params.toString()}`;
+}
+
+function vrboUrlHasExpectedDates(rawUrl, checkIn, checkOut) {
+  try {
+    const url = new URL(String(rawUrl || ""));
+    if (!/(\.|^)vrbo\.com$/i.test(url.hostname)) return false;
+    const start = url.searchParams.get("d1") || url.searchParams.get("startDate") || "";
+    const end = url.searchParams.get("d2") || url.searchParams.get("endDate") || "";
+    return start === checkIn && end === checkOut;
+  } catch {
+    return false;
+  }
+}
+
+function vrboStateCorrectionReasons(state, checkIn, checkOut, ...expectedValues) {
+  const reasons = [];
+  if (!stateMatchesExpectedDestination(state, ...expectedValues)) reasons.push("destination");
+  if (!vrboUrlHasExpectedDates(state?.url, checkIn, checkOut)) reasons.push("dates");
+  return reasons;
+}
+
+function throwIfVrboDateMismatch(state, label, id, checkIn, checkOut) {
+  if (vrboUrlHasExpectedDates(state?.url, checkIn, checkOut)) return;
+  throw new ProviderBrowserUnavailableError(
+    `${label} landed without the requested VRBO dates; refusing to return default-date provider results for ${checkIn}→${checkOut}.`,
+    {
+      label,
+      id,
+      expected: `${checkIn}→${checkOut}`,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+    },
+  );
+}
+
 function throwIfDestinationMismatch(state, label, id, ...expectedValues) {
   if (stateMatchesExpectedDestination(state, ...expectedValues)) return;
   const expected = expectedValues.filter(Boolean).join(" / ");
@@ -4166,6 +4215,23 @@ async function processVrboSearch(id, params) {
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
   await dismissObstructions(page, "vrbo_search");
+  const quickPostSubmitState = {
+    url: page.url(),
+    title: await page.title().catch(() => ""),
+    bodyExcerpt: "",
+  };
+  let correctionReasons = vrboStateCorrectionReasons(quickPostSubmitState, checkIn, checkOut, effectiveSearchTerm, destination);
+  if (correctionReasons.length > 0) {
+    const correctedUrl = buildVrboSearchUrl(effectiveSearchTerm, checkIn, checkOut);
+    log(
+      `vrbo_search ${id}: homepage submit landed on ${correctionReasons.join("+")} mismatch ` +
+      `(url=${quickPostSubmitState.url.slice(0, 180)}); correcting to intended dated search URL`,
+    );
+    await page.goto(correctedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await page.waitForTimeout(PAGE_SETTLE_MS);
+    await stopVrboProviderIfBlocked(page, "vrbo_search", id);
+    await dismissObstructions(page, "vrbo_search_after_url_correction");
+  }
   // Do not apply VRBO's browser-side bedroom filter here. The same
   // resort/date browser run is shared across all bedroom-combination
   // checks for a booking, and the API curation layer applies the
@@ -4187,7 +4253,36 @@ async function processVrboSearch(id, params) {
       retryLater: true,
     });
   }
+  correctionReasons = vrboStateCorrectionReasons(state, checkIn, checkOut, effectiveSearchTerm, destination);
+  if (correctionReasons.length > 0) {
+    const correctedUrl = buildVrboSearchUrl(effectiveSearchTerm, checkIn, checkOut);
+    log(
+      `vrbo_search ${id}: VRBO state still shows ${correctionReasons.join("+")} mismatch; ` +
+      "retrying once with the intended dated search URL before extraction",
+    );
+    await page.goto(correctedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await page.waitForTimeout(PAGE_SETTLE_MS);
+    await stopVrboProviderIfBlocked(page, "vrbo_search", id);
+    await dismissObstructions(page, "vrbo_search_after_state_correction");
+    state = await dumpPageState("vrbo-corrected", { id, ...params });
+    throwIfBrightDataKycBlock(state, "vrbo_search", id);
+    if (await stopVrboProviderIfBlocked(page, "vrbo_search", id, state)) {
+      state = await dumpPageState("vrbo-corrected-after-manual-solve", { id, ...params });
+    }
+    throwIfVrboHardBlock(state, "vrbo_search", id);
+    if (stateLooksLikeVrboHumanChallenge(state)) {
+      throw new VrboHardBlockError("VRBO human-verification page remained visible after URL correction; provider run stopped and retry is rate-limited until later", {
+        label: "vrbo_search",
+        id,
+        url: state?.url,
+        title: state?.title,
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+        retryLater: true,
+      });
+    }
+  }
   throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, destination);
+  throwIfVrboDateMismatch(state, "vrbo_search", id, checkIn, checkOut);
   // Extract all visible cards and bucket by BR client-side. The
   // downstream minimum-bedroom guard remains the authoritative
   // protection against mismatched 1BR/2BR rows.
