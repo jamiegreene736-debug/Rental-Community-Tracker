@@ -695,6 +695,11 @@ export function updateSidecarScreenSnapshot(snapshot: {
     snapshot.screenshotDataUrl.length <= SIDECAR_SCREENSHOT_MAX_CHARS
     ? snapshot.screenshotDataUrl
     : undefined;
+  const previous = sidecarScreens.get(slot);
+  const reusablePreviousImage =
+    previous?.requestId === requestId && previous.screenshotDataUrl
+      ? previous.screenshotDataUrl
+      : undefined;
   sidecarScreens.set(slot, {
     slot,
     requestId,
@@ -706,9 +711,9 @@ export function updateSidecarScreenSnapshot(snapshot: {
     liveViewUrl: typeof snapshot.liveViewUrl === "string" && /^https?:\/\//i.test(snapshot.liveViewUrl)
       ? snapshot.liveViewUrl.slice(0, 500)
       : undefined,
-    screenshotDataUrl,
-    width: typeof snapshot.width === "number" && Number.isFinite(snapshot.width) ? Math.round(snapshot.width) : undefined,
-    height: typeof snapshot.height === "number" && Number.isFinite(snapshot.height) ? Math.round(snapshot.height) : undefined,
+    screenshotDataUrl: screenshotDataUrl ?? reusablePreviousImage,
+    width: typeof snapshot.width === "number" && Number.isFinite(snapshot.width) ? Math.round(snapshot.width) : previous?.width,
+    height: typeof snapshot.height === "number" && Number.isFinite(snapshot.height) ? Math.round(snapshot.height) : previous?.height,
     captcha: snapshot.captcha === true,
     error: typeof snapshot.error === "string" ? snapshot.error.replace(/\s+/g, " ").trim().slice(0, 240) : undefined,
     at: new Date().toISOString(),
