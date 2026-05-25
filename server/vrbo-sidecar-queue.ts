@@ -391,8 +391,6 @@ const providerHealth = new Map<SidecarProviderKey, {
 // a single missed poll doesn't flicker the indicator).
 let lastWorkerPollAt: number | null = null;
 let lastWorkerRuntime: SidecarWorkerRuntime | null = null;
-let lastWorkerActiveRequestId: string | null = null;
-let lastWorkerActiveStage: string | null = null;
 const HEARTBEAT_ONLINE_WINDOW_MS = 90 * 1000;
 
 // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): operator-
@@ -417,6 +415,10 @@ const PENDING_TTL_MS = 5 * 60 * 1000;
 const IN_PROGRESS_RECLAIM_MS = 90 * 1000;
 const TERMINAL_TTL_MS = 5 * 60 * 1000;
 const SIDECAR_SCREEN_TTL_MS = 10 * 60 * 1000;
+const SIDECAR_INACTIVE_SCREEN_TTL_MS = Math.max(
+  1_000,
+  numberFromEnv("SIDECAR_INACTIVE_SCREEN_TTL_MS", 15_000),
+);
 const SIDECAR_SCREENSHOT_MAX_CHARS = 350_000;
 const SIDECAR_SCREEN_COMMAND_TTL_MS = 60 * 1000;
 const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
@@ -646,12 +648,6 @@ export function stampHeartbeat(id?: string, stage?: string, runtime?: Partial<Si
   lastWorkerPollAt = nowMs();
   const normalizedRuntime = normalizeWorkerRuntime(runtime);
   if (normalizedRuntime) lastWorkerRuntime = normalizedRuntime;
-  if (id) {
-    lastWorkerActiveRequestId = id;
-    lastWorkerActiveStage = stage && typeof stage === "string"
-      ? stage.replace(/\s+/g, " ").trim().slice(0, 140)
-      : null;
-  }
   if (!id) return;
   const r = queue.get(id);
   if (r?.status === "in_progress") {
@@ -663,11 +659,8 @@ export function stampHeartbeat(id?: string, stage?: string, runtime?: Partial<Si
   }
 }
 
-function heartbeatIndicatesActiveRequest(id?: string): boolean {
-  if (!id || lastWorkerActiveRequestId !== id || lastWorkerPollAt === null) return false;
-  if (nowMs() - lastWorkerPollAt > HEARTBEAT_ONLINE_WINDOW_MS) return false;
-  if (lastWorkerActiveStage && /^finish\b/i.test(lastWorkerActiveStage)) return false;
-  return true;
+function requestIsInProgress(id?: string): boolean {
+  return Boolean(id && queue.get(id)?.status === "in_progress");
 }
 
 export function updateSidecarScreenSnapshot(snapshot: {
@@ -692,13 +685,19 @@ export function updateSidecarScreenSnapshot(snapshot: {
     sidecarScreenCommands.delete(slot);
     return { ok: true };
   }
+  const requestId = typeof snapshot.requestId === "string" ? snapshot.requestId.slice(0, 80) : undefined;
+  if (requestId && !requestIsInProgress(requestId)) {
+    sidecarScreens.delete(slot);
+    sidecarScreenCommands.delete(slot);
+    return { ok: true };
+  }
   const screenshotDataUrl = typeof snapshot.screenshotDataUrl === "string" &&
     snapshot.screenshotDataUrl.length <= SIDECAR_SCREENSHOT_MAX_CHARS
     ? snapshot.screenshotDataUrl
     : undefined;
   sidecarScreens.set(slot, {
     slot,
-    requestId: typeof snapshot.requestId === "string" ? snapshot.requestId.slice(0, 80) : undefined,
+    requestId,
     opType: typeof snapshot.opType === "string" ? snapshot.opType.slice(0, 80) : undefined,
     label: typeof snapshot.label === "string" ? snapshot.label.replace(/\s+/g, " ").trim().slice(0, 120) : undefined,
     phase: typeof snapshot.phase === "string" ? snapshot.phase.replace(/\s+/g, " ").trim().slice(0, 140) : undefined,
@@ -721,17 +720,21 @@ export function getSidecarScreenSnapshots(): SidecarScreenSnapshot[] {
   const now = nowMs();
   for (const [slot, snapshot] of sidecarScreens) {
     const at = Date.parse(snapshot.at);
-    if (!Number.isFinite(at) || now - at > SIDECAR_SCREEN_TTL_MS) {
+    const ageMs = Number.isFinite(at) ? now - at : Number.POSITIVE_INFINITY;
+    const active = requestIsInProgress(snapshot.requestId);
+    if (
+      !Number.isFinite(at) ||
+      ageMs > SIDECAR_SCREEN_TTL_MS ||
+      (!active && ageMs > SIDECAR_INACTIVE_SCREEN_TTL_MS)
+    ) {
       sidecarScreens.delete(slot);
+      sidecarScreenCommands.delete(slot);
     }
   }
   return Array.from(sidecarScreens.values())
     .map((snapshot) => {
       const at = Date.parse(snapshot.at);
-      const active = Boolean(
-        snapshot.requestId &&
-        (queue.get(snapshot.requestId)?.status === "in_progress" || heartbeatIndicatesActiveRequest(snapshot.requestId)),
-      );
+      const active = requestIsInProgress(snapshot.requestId);
       return {
         ...snapshot,
         active,
@@ -780,9 +783,7 @@ export function enqueueSidecarScreenControlCommand(command: {
     ? command.requestId.trim().slice(0, 80)
     : undefined;
   if (requestId) {
-    const activeRequest = queue.get(requestId);
-    const requestIsActive = activeRequest?.status === "in_progress" || heartbeatIndicatesActiveRequest(requestId);
-    if (!requestIsActive) {
+    if (!requestIsInProgress(requestId)) {
       return { ok: false, error: "sidecar screen is no longer active; start a fresh search or click the current flashing screen" };
     }
   }
@@ -1152,7 +1153,8 @@ export function cancelSidecarRunAndRequests(reason = "cancelled by operator"): {
 
 export function isCancellationRequested(id: string): boolean {
   const r = queue.get(id);
-  return Boolean(r?.cancelled);
+  if (!r) return true;
+  return r.status !== "in_progress" || Boolean(r.cancelled);
 }
 
 export function getResult(id: string): SidecarRequest | null {
