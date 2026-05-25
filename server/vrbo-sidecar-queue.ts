@@ -454,6 +454,12 @@ function providerFailureIsBlockLike(reason: string | undefined | null): boolean 
   );
 }
 
+function sidecarReasonIsInfrastructureFailure(reason: string | undefined | null): boolean {
+  return /\b(?:no server chrome\/novnc sidecar|local macos chrome fallback is disabled|server chrome.*unavailable)\b/i.test(
+    String(reason ?? ""),
+  );
+}
+
 function providerHealthState(provider: SidecarProviderKey) {
   const existing = providerHealth.get(provider);
   if (existing) return existing;
@@ -534,7 +540,7 @@ function recordProviderOutcome(
   provider: SidecarProviderKey,
   result: { workerOnline: boolean; reason: string; candidates: SidecarPropertyCandidate[] },
 ): SidecarProviderHealth {
-  if (providerFailureIsBlockLike(result.reason)) {
+  if (providerFailureIsBlockLike(result.reason) || sidecarReasonIsInfrastructureFailure(result.reason)) {
     return recordProviderFailure(provider, result.reason);
   }
   if (result.workerOnline) return recordProviderSuccess(provider);

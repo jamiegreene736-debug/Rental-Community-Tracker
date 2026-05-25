@@ -6128,6 +6128,35 @@ async function tick() {
   }
 }
 
+async function logServerChromePoolHealth() {
+  if (!USE_SERVER_BROWSER || WORKER_SLOT !== "1") return;
+  const host = process.env.SERVER_CHROME_HOST;
+  if (!host) {
+    log("warning: SERVER_CHROME_HOST is unset; server Chrome/noVNC pool cannot be used");
+    return;
+  }
+  const scheme = process.env.SERVER_CHROME_SCHEME ?? "http";
+  const port = Number(process.env.SERVER_CHROME_BASE_PORT ?? 9223);
+  const cdpUrl = `${scheme}://${host}:${port}/json/version`;
+  try {
+    const r = await fetch(cdpUrl, { signal: AbortSignal.timeout(3_000) });
+    if (!r.ok) {
+      log(`warning: server Chrome CDP probe failed (${cdpUrl} → HTTP ${r.status})`);
+    } else {
+      log(`server Chrome pool reachable (${cdpUrl})`);
+      return;
+    }
+  } catch (e) {
+    log(`warning: server Chrome pool unreachable (${cdpUrl}): ${e?.message ?? e}`);
+  }
+  if (process.env.SIDECAR_DISABLE_LOCAL_CDP_FALLBACK !== "0") {
+    log(
+      "hint: reinstall sidecar with ./scripts/install-vrbo-sidecar-launchagent.sh (auto-enables local Chrome when server pool is down), " +
+        "or start Docker server Chrome via ./scripts/start-server-sidecars.sh",
+    );
+  }
+}
+
 async function main() {
   log(`starting (server=${SERVER}, admin-secret=${ADMIN_SECRET ? "set" : "none"})`);
   log(`worker slot: ${WORKER_SLOT}; Chrome primary: ${CHROME_PRIMARY}; worker role: ${WORKER_ROLE}; browser mode: ${SIDECAR_BROWSER_MODE}`);
@@ -6137,6 +6166,7 @@ async function main() {
     log("local macOS Chrome warmup skipped; using no-window local headless browser mode");
   } else if (USE_SERVER_BROWSER) {
     log("local macOS Chrome warmup skipped; preferring server Chrome/noVNC with residential proxy");
+    await logServerChromePoolHealth();
   } else if (WORKER_SLOT === "1") {
     try {
       if (process.env.SIDECAR_WARM_ALL_LOCAL_CHROME !== "0") {

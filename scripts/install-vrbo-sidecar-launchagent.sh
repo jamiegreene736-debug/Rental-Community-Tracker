@@ -56,6 +56,16 @@ quote_for_shell() {
   printf "%q" "$1"
 }
 
+server_chrome_cdp_reachable() {
+  local host="$1"
+  local port="$2"
+  local scheme="${3:-http}"
+  [[ -z "${host}" ]] && return 1
+  local code
+  code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 "${scheme}://${host}:${port}/json/version" 2>/dev/null || echo "000")"
+  [[ "${code}" == "200" ]]
+}
+
 RAILWAY_VARS_KV=""
 load_railway_vars() {
   if [[ -n "${RAILWAY_VARS_KV}" || "${RAILWAY_VARS_LOADED:-0}" == "1" ]]; then
@@ -123,12 +133,40 @@ SIDECAR_MACOS_BACKGROUND_LAUNCH="${SIDECAR_MACOS_BACKGROUND_LAUNCH:-0}"
 SERVER_CHROME_FALLBACK_ENABLED="${SERVER_CHROME_FALLBACK_ENABLED:-1}"
 SERVER_CHROME_FALLBACK_VRBO="${SERVER_CHROME_FALLBACK_VRBO:-1}"
 SIDECAR_OPEN_NOVNC_ON_ACQUIRE="${SIDECAR_OPEN_NOVNC_ON_ACQUIRE:-0}"
+EXISTING_RUNNER_PATH="${INSTALL_DIR}/run-vrbo-sidecar.sh"
 SERVER_CHROME_HOST="$(value_from_env_or_railway SERVER_CHROME_HOST "")"
 SERVER_CHROME_SCHEME="$(value_from_env_or_railway SERVER_CHROME_SCHEME "http")"
 SERVER_CHROME_BASE_PORT="$(value_from_env_or_railway SERVER_CHROME_BASE_PORT "9223")"
 SERVER_CHROME_BASE_WEBDRIVER_PORT="$(value_from_env_or_railway SERVER_CHROME_BASE_WEBDRIVER_PORT "4445")"
 SERVER_CHROME_BASE_NOVNC_PORT="$(value_from_env_or_railway SERVER_CHROME_BASE_NOVNC_PORT "7901")"
 MAX_SERVER_INSTANCES="$(value_from_env_or_railway MAX_SERVER_INSTANCES "4")"
+if [[ -z "${SERVER_CHROME_HOST}" && -f "${EXISTING_RUNNER_PATH}" ]]; then
+  SERVER_CHROME_HOST_RAW="$(
+    awk -F= '$1 == "export SERVER_CHROME_HOST" { sub(/^[^=]*=/, ""); print; exit }' "${EXISTING_RUNNER_PATH}" \
+      || true
+  )"
+  if [[ -n "${SERVER_CHROME_HOST_RAW}" && "${SERVER_CHROME_HOST_RAW}" != "''" ]]; then
+    SERVER_CHROME_HOST="$(/bin/bash -lc "v=${SERVER_CHROME_HOST_RAW}; printf '%s' \"\$v\"" 2>/dev/null || true)"
+    if [[ -n "${SERVER_CHROME_HOST}" ]]; then
+      echo "Preserved SERVER_CHROME_HOST from existing sidecar runner."
+    fi
+  fi
+fi
+if [[ "${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK}" == "1" ]]; then
+  if [[ -z "${SERVER_CHROME_HOST}" ]]; then
+    echo "Warning: SERVER_CHROME_HOST is unset; enabling local macOS Chrome fallback (SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=0)."
+    SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="0"
+    SIDECAR_CHROME_VISIBLE="1"
+  elif ! server_chrome_cdp_reachable "${SERVER_CHROME_HOST}" "${SERVER_CHROME_BASE_PORT}" "${SERVER_CHROME_SCHEME}"; then
+    echo "Warning: server Chrome pool is not reachable at ${SERVER_CHROME_SCHEME}://${SERVER_CHROME_HOST}:${SERVER_CHROME_BASE_PORT}."
+    echo "         Enabling local macOS Chrome fallback (SIDECAR_DISABLE_LOCAL_CDP_FALLBACK=0)."
+    echo "         To use remote noVNC instead, install Docker and run: ./scripts/start-server-sidecars.sh ${MAX_SERVER_INSTANCES}"
+    SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="0"
+    SIDECAR_CHROME_VISIBLE="1"
+  else
+    echo "Server Chrome pool reachable at ${SERVER_CHROME_SCHEME}://${SERVER_CHROME_HOST}:${SERVER_CHROME_BASE_PORT}."
+  fi
+fi
 CHROME_PROXY_ENABLED="$(value_from_env_or_railway CHROME_PROXY_ENABLED "1")"
 CHROME_PROXY_PROVIDER="$(value_from_env_or_railway CHROME_PROXY_PROVIDER "brightdata")"
 CHROME_PROXY_SCHEME="$(value_from_env_or_railway CHROME_PROXY_SCHEME "http")"
@@ -148,7 +186,6 @@ if [[ -z "${ADMIN_SECRET_VALUE}" ]] && command -v railway >/dev/null 2>&1; then
     echo "Loaded ADMIN_SECRET from Railway variables for local sidecar auth."
   fi
 fi
-EXISTING_RUNNER_PATH="${INSTALL_DIR}/run-vrbo-sidecar.sh"
 if [[ -z "${ADMIN_SECRET_VALUE}" && -f "${EXISTING_RUNNER_PATH}" ]]; then
   EXISTING_ADMIN_SECRET_RAW="$(
     awk -F= '$1 == "export ADMIN_SECRET" { sub(/^[^=]*=/, ""); print; exit }' "${EXISTING_RUNNER_PATH}" \

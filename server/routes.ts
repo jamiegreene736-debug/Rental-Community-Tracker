@@ -8616,7 +8616,7 @@ export async function registerRoutes(
       sourceErrors.push({ source, message: raw.slice(0, 600) });
     };
     const sidecarReasonIsProviderFailure = (reason: string | undefined): boolean =>
-      /\b(?:blocked|block|cooling down|cooldown|kyc|required|proxy|blank search page|bot wall|captcha|access denied|provider\/browser failure|worker reported failure|request expired|rate.?limit|tunnel)\b/i.test(
+      /\b(?:blocked|block|cooling down|cooldown|kyc|required|proxy|blank search page|bot wall|captcha|access denied|provider\/browser failure|worker reported failure|request expired|rate.?limit|tunnel|no server chrome\/novnc sidecar|local macos chrome fallback is disabled|server chrome.*unavailable)\b/i.test(
         String(reason ?? ""),
       );
 
