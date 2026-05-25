@@ -115,6 +115,7 @@ const VRBO_MANUAL_SESSION_TTL_MS = Math.max(
   5 * 60_000,
   Number(process.env.SIDECAR_VRBO_MANUAL_SESSION_TTL_MS ?? 24 * 60 * 60_000) || 24 * 60 * 60_000,
 );
+const VRBO_REUSE_MANUAL_SESSION = process.env.SIDECAR_VRBO_REUSE_MANUAL_SESSION === "1";
 const VRBO_MANUAL_SESSION_STATE_PATH = process.env.SIDECAR_VRBO_MANUAL_SESSION_STATE_PATH ||
   path.join(os.tmpdir(), `rct-vrbo-manual-session-${WORKER_SLOT}.json`);
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
@@ -160,6 +161,10 @@ function requiresServerChromeForOp(opType) {
 }
 
 function needsFreshChromeForOp(opType) {
+  return /^(airbnb|booking|vrbo)_/i.test(String(opType || ""));
+}
+
+function needsFreshIdentityForOp(opType) {
   return /^(airbnb|booking|vrbo)_/i.test(String(opType || ""));
 }
 
@@ -231,11 +236,11 @@ function headlessProxySessionId() {
 }
 
 function appendBrightDataUsernameOptions(username) {
-  let next = replaceOrAppendProxyOption(username, "country", REQUIRED_PROXY_COUNTRY);
-  if (!/-session-[a-z0-9_]+(?:-|$)/i.test(next)) {
-    next += `-session-${headlessProxySessionId()}`;
-  }
-  return next;
+  return replaceOrAppendProxyOption(
+    replaceOrAppendProxyOption(username, "country", REQUIRED_PROXY_COUNTRY),
+    "session",
+    headlessProxySessionId(),
+  );
 }
 
 async function headlessProxyConfig() {
@@ -1143,6 +1148,7 @@ function vrboCookiesFromStorageState(state) {
 }
 
 function readVrboManualSessionState() {
+  if (!VRBO_REUSE_MANUAL_SESSION) return null;
   try {
     if (!fs.existsSync(VRBO_MANUAL_SESSION_STATE_PATH)) return null;
     const parsed = JSON.parse(fs.readFileSync(VRBO_MANUAL_SESSION_STATE_PATH, "utf8"));
@@ -1161,6 +1167,10 @@ function readVrboManualSessionState() {
 }
 
 async function restoreVrboManualSessionCookies(label = "VRBO manual session restore") {
+  if (!VRBO_REUSE_MANUAL_SESSION) {
+    log(`${label}: skipped; SIDECAR_VRBO_REUSE_MANUAL_SESSION is not enabled`);
+    return false;
+  }
   if (!context) return false;
   const snapshot = readVrboManualSessionState();
   if (!snapshot?.cookies?.length) return false;
@@ -1176,6 +1186,10 @@ async function restoreVrboManualSessionCookies(label = "VRBO manual session rest
 }
 
 async function saveVrboManualSessionState(targetPage = page, label = "vrbo", id = "") {
+  if (!VRBO_REUSE_MANUAL_SESSION) {
+    log(`${label} ${id}: not caching VRBO manual solve cookies; every VRBO search uses a fresh identity`);
+    return false;
+  }
   if (!targetPage || targetPage.isClosed?.()) return false;
   try {
     const state = await targetPage.context().storageState();
@@ -1195,6 +1209,18 @@ async function saveVrboManualSessionState(targetPage = page, label = "vrbo", id 
   } catch (e) {
     log(`${label} ${id}: failed to cache VRBO manual solve state: ${e?.message ?? e}`);
     return false;
+  }
+}
+
+function clearVrboManualSessionState(label = "VRBO fresh identity") {
+  if (VRBO_REUSE_MANUAL_SESSION) return;
+  try {
+    if (fs.existsSync(VRBO_MANUAL_SESSION_STATE_PATH)) {
+      fs.rmSync(VRBO_MANUAL_SESSION_STATE_PATH, { force: true });
+      log(`${label}: removed cached VRBO manual session state`);
+    }
+  } catch (e) {
+    log(`${label}: failed to remove cached VRBO manual session state: ${e?.message ?? e}`);
   }
 }
 
@@ -1605,11 +1631,18 @@ async function ensureBrowser() {
   await clearContextStorageForFreshRun("server Chrome startup");
   await syncRemoteCookies();
   const cookies = loadCookies();
-  const seeded = cookies.length ? await addCookiesBestEffort(cookies, "startup cookie seed") : false;
+  const shouldSeedCookies = !needsFreshIdentityForOp(activeRuntimeRequest?.opType);
+  const seeded = shouldSeedCookies && cookies.length ? await addCookiesBestEffort(cookies, "startup cookie seed") : false;
   if (activeRequestIsVrbo()) {
     await restoreVrboManualSessionCookies("server Chrome VRBO manual session restore");
   }
-  log(seeded ? `seeded ${cookies.length} cookies into Chrome context` : `using existing Chrome profile/server cookies (${cookies.length} cookies available on disk)`);
+  log(
+    shouldSeedCookies
+      ? seeded
+        ? `seeded ${cookies.length} cookies into Chrome context`
+        : `using existing Chrome profile/server cookies (${cookies.length} cookies available on disk)`
+      : "skipped cookie seeding for isolated OTA identity",
+  );
 
   // PR #302 (revised): always create a NEW page rather than reusing
   // pages[0]. The daemon's Chrome accumulates tabs from prior sessions
@@ -1670,14 +1703,15 @@ async function ensureHeadlessBrowser() {
     const probe = await probeHeadlessProxyAuth(proxyConfig);
     if (!probe.ok) {
       const probeStatus = probe.statusLine || `HTTP ${probe.status || "unknown"}`;
+      const directFallbackAllowed = HEADLESS_PROXY_DIRECT_FALLBACK && !needsFreshIdentityForOp(activeRuntimeRequest?.opType);
       const message =
         `headless proxy auth probe failed (${probeStatus}); ` +
-        (HEADLESS_PROXY_DIRECT_FALLBACK
-          ? "launching VRBO headless fallback without proxy"
+        (directFallbackAllowed
+          ? "launching headless fallback without proxy"
           : "direct fallback disabled");
       log(message);
       await sendHeartbeat(`VRBO proxy unavailable: ${probeStatus}`, true, activeRuntimeRequest?.id).catch(() => {});
-      if (!HEADLESS_PROXY_DIRECT_FALLBACK) throw new Error(message);
+      if (!directFallbackAllowed) throw new Error(message);
       proxyConfig = null;
     }
   }
@@ -1742,7 +1776,7 @@ async function ensureHeadlessBrowser() {
   await clearContextStorageForFreshRun("headless startup");
   await syncRemoteCookies();
   const cookies = loadCookies();
-  const shouldSeedCookies = !proxyConfig && !activeRequestIsVrbo();
+  const shouldSeedCookies = !proxyConfig && !needsFreshIdentityForOp(activeRuntimeRequest?.opType);
   const seeded = shouldSeedCookies && cookies.length ? await addCookiesBestEffort(cookies, "headless startup cookie seed") : false;
   if (activeRequestIsVrbo()) {
     await restoreVrboManualSessionCookies("headless VRBO manual session restore");
@@ -6352,6 +6386,12 @@ async function processRequest(req) {
   // no-window local headless fallback.
   try {
     activeRuntimeRequest = runtimeRequest;
+    if (needsFreshIdentityForOp(opType)) {
+      clearVrboManualSessionState(`${opType} ${req.id} fresh identity`);
+      if (browser || context || page || activeChromeAllocation || activeHeadlessProxyBridge) {
+        await teardownBrowser(`fresh identity required for ${opType} ${req.id}`);
+      }
+    }
     if (!USE_HEADLESS_LOCAL_BROWSER) {
       await acquireChromeForRequest(runtimeRequest);
     }
@@ -6392,7 +6432,9 @@ async function processRequest(req) {
     await closeExtraTabs(`after ${opType}`, page).catch(() => {});
     await showCompletePage(opType);
     await clearScreenSnapshot({ ...req, opType }).catch(() => {});
-    if (activeChromeAllocation?.ephemeral) {
+    if (needsFreshIdentityForOp(opType)) {
+      await teardownBrowser(`finished fresh-identity ${opType}`);
+    } else if (activeChromeAllocation?.ephemeral) {
       await teardownBrowser(`finished ${activeChromeAllocation.type}-side ${opType}`);
     } else if (usingHeadlessRuntime() && USE_SERVER_BROWSER) {
       // Server mode should retry the noVNC/residential-proxy pool on

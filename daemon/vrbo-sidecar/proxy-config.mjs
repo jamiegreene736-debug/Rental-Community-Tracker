@@ -203,17 +203,25 @@ function explicitProxyConfig(provider) {
 }
 
 function appendDecodoUsernameOptions(username, sessionId) {
-  const parts = [replaceOrAppendProxyOption(String(username ?? "").trim(), "country", requiredProxyCountry())];
+  const forcedStaticSession = boolFromEnv("DECODO_PROXY_ALLOW_STATIC_SESSION", false)
+    ? sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_SESSION"))
+    : "";
+  const session = forcedStaticSession || proxySessionToken(sessionId);
+  const parts = [
+    replaceOrAppendProxyOption(
+      replaceOrAppendProxyOption(String(username ?? "").trim(), "country", requiredProxyCountry()),
+      "session",
+      session,
+    ),
+  ];
   const state = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_STATE", "CHROME_PROXY_STATE", "PROXY_STATE"));
   const city = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_CITY", "CHROME_PROXY_CITY", "PROXY_CITY"));
   const zip = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_ZIP", "CHROME_PROXY_ZIP", "PROXY_ZIP"));
   const sessionDuration = Math.max(1, Math.min(1440, Math.floor(numberFromEnv("DECODO_PROXY_SESSION_DURATION_MINUTES", 20))));
-  const session = sanitizeProxyOption(nonEmptyEnv("DECODO_PROXY_SESSION")) || proxySessionToken(sessionId);
 
   if (state && !/-state-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`state-${state}`);
   if (city && !/-city-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`city-${city}`);
   if (zip && !/-zip-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`zip-${zip}`);
-  if (!/-session-[a-z0-9_]+(?:-|$)/i.test(parts[0])) parts.push(`session-${session}`);
   if (!/-sessionduration-\d+(?:-|$)/i.test(parts[0])) parts.push(`sessionduration-${sessionDuration}`);
 
   const needsUserPrefix = boolFromEnv("DECODO_PROXY_USER_PREFIX", true) && !/^user-/i.test(parts[0]);

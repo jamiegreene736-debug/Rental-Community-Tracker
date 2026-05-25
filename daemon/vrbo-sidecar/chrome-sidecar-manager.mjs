@@ -328,11 +328,11 @@ function proxySessionId(instance, request) {
 }
 
 function appendBrightDataUsernameOptions(username, instance, request) {
-  let next = replaceOrAppendProxyOption(username, "country", REQUIRED_PROXY_COUNTRY);
-  if (!/-session-[a-z0-9_]+(?:-|$)/i.test(next)) {
-    next += `-session-${proxySessionId(instance, request)}`;
-  }
-  return next;
+  return replaceOrAppendProxyOption(
+    replaceOrAppendProxyOption(username, "country", REQUIRED_PROXY_COUNTRY),
+    "session",
+    proxySessionId(instance, request),
+  );
 }
 
 async function chromeProxyConfig(instance, request, { requireServer = false } = {}) {
@@ -914,6 +914,7 @@ export class ChromeSidecarManager {
   async tryAcquireServerInstance(instance, request = {}) {
     const lockFile = path.join(this.lockDir, `${instance.name}.busy.json`);
     if (lockIsActive(lockFile, this.lockTtlMs)) return null;
+    const opType = String(request?.opType ?? "");
 
     let webdriverSessionId = null;
     let sessionBaseUrl = null;
@@ -926,11 +927,12 @@ export class ChromeSidecarManager {
         const probe = await probeServerChromeProxyAuth(proxyConfig);
         if (!probe.ok) {
           const probeStatus = probe.statusLine || `HTTP ${probe.status || "unknown"}`;
+          const directFallbackAllowed = SERVER_PROXY_DIRECT_FALLBACK && !shouldUseFreshProxiedLocalChrome(opType);
           const message =
             `server Chrome proxy auth probe failed (${probeStatus}); ` +
-            (SERVER_PROXY_DIRECT_FALLBACK ? "launching without proxy" : "direct fallback disabled");
+            (directFallbackAllowed ? "launching without proxy" : "direct fallback disabled");
           this.log(message);
-          if (!SERVER_PROXY_DIRECT_FALLBACK) throw new Error(message);
+          if (!directFallbackAllowed) throw new Error(message);
           proxyConfig = null;
         }
       }

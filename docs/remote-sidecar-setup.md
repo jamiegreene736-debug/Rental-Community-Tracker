@@ -31,7 +31,7 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
    | `DECODO_PROXY_USERNAME` / `DECODO_PROXY_PASSWORD` | Decodo residential credentials (or `CHROME_PROXY_USERNAME` / `CHROME_PROXY_PASSWORD`) |
    | `DECODO_PROXY_HOST` | `gate.decodo.com` (default) |
    | `DECODO_PROXY_PORT` | `7000` (default) |
-   | Optional `DECODO_PROXY_STATE`, `DECODO_PROXY_CITY`, `DECODO_PROXY_SESSION_DURATION_MINUTES` | Geo targeting |
+   | Optional `DECODO_PROXY_STATE`, `DECODO_PROXY_CITY`, `DECODO_PROXY_SESSION_DURATION_MINUTES` | Geo targeting. Do **not** set `DECODO_PROXY_SESSION` unless you intentionally want a static IP session. |
    | `CAPTCHA_SOLVING_ENABLED` | `1` |
    | `CAPSOLVER_API_KEY` | Your CapSolver key (same as production or worker-only) |
    | `SIDECAR_VRBO_MANUAL_VERIFICATION` | `1` (fallback if CapSolver cannot solve a slider) |
@@ -48,7 +48,8 @@ Use a **second Railway service** from the same repo image with `RAILWAY_SERVICE_
 |------|----------|
 | Queue | Railway web app enqueues `vrbo_search` / `booking_search` |
 | Worker | `rct-sidecar-worker` claims job, launches Chromium in-container (Xvfb) |
-| Proxy | **Decodo** residential (default provider) when `CHROME_PROXY_ENABLED=1`; each VRBO job gets a new `-session-…` in the proxy username |
+| Proxy | **Decodo** residential (default provider) when `CHROME_PROXY_ENABLED=1`; each OTA job gets a new `-session-…` in the proxy username |
+| Identity reset | Each OTA job starts from a fresh Chrome profile/fingerprint and skips persisted cookies; VRBO manual-solve cookies are not reused unless `SIDECAR_VRBO_REUSE_MANUAL_SESSION=1` is explicitly set |
 | VRBO CAPTCHA | `stopOtaProviderIfBlocked` → CapSolver VisionEngine `slider_1` (puzzle + background images) → human-like drag → manual wait if still blocked |
 | Booking CAPTCHA | Same `stopOtaProviderIfBlocked` hook before scraping result cards |
 
