@@ -1879,7 +1879,6 @@ async function ensureHeadlessBrowser() {
     deviceScaleFactor: 1,
     args: [
       "--disable-notifications",
-      "--disable-blink-features=AutomationControlled",
       "--ignore-certificate-errors",
       "--no-first-run",
       "--no-default-browser-check",
@@ -2742,19 +2741,23 @@ async function performHumanLikePressAndHold(page, label = "vrbo", id = "") {
 }
 
 async function trySolveOtaSliderWithCapSolver(page, label = "vrbo", id = "") {
+  const challengeState = await captureVrboChallengeState(page).catch(() => null);
+  const challengeType = classifyOtaHumanChallenge(challengeState);
+  if (/^vrbo/i.test(String(label)) && process.env.SIDECAR_VRBO_CAPTCHA_AUTOMATION !== "1") {
+    return { solved: false, reason: "vrbo_manual_only", challengeType };
+  }
+
   const solvingEnabled = process.env.CAPTCHA_SOLVING_ENABLED === "1";
   const apiKey = process.env.CAPSOLVER_API_KEY;
 
   if (!solvingEnabled || !apiKey) {
-    return { solved: false, reason: "disabled_or_no_key" };
+    return { solved: false, reason: "disabled_or_no_key", challengeType };
   }
 
   const maxRetries = 2;
 
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
-      const challengeState = await captureVrboChallengeState(page);
-      const challengeType = classifyOtaHumanChallenge(challengeState);
       if (challengeType === "press_and_hold") {
         if (attempt === 1) {
           log(
@@ -2866,7 +2869,11 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
   }
   const challengeType = solveResult.challengeType || classifyOtaHumanChallenge(state);
   const solverReason = solveResult.reason || "not_solved";
-  log(`${label} ${id}: CAPTCHA automation did not clear challenge (type=${challengeType}, reason=${solverReason})`);
+  if (solverReason === "vrbo_manual_only") {
+    log(`${label} ${id}: VRBO CAPTCHA automation is disabled; waiting for manual solve in the real Chrome window (type=${challengeType})`);
+  } else {
+    log(`${label} ${id}: CAPTCHA automation did not clear challenge (type=${challengeType}, reason=${solverReason})`);
+  }
 
   const manualVerificationEnabled = process.env.SIDECAR_VRBO_MANUAL_VERIFICATION !== "0";
   if (manualVerificationEnabled) {
@@ -2875,11 +2882,10 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
     const timeoutAt = Date.now() + timeoutMs;
     const sourceUrl = state?.url;
     const instructions =
-      "VRBO CAPTCHA/human-verification page detected. This provider run is paused for manual verification in the live server Chrome/noVNC session. Solve it there; once the challenge clears, the worker will continue this exact browser session and cache the resulting VRBO cookies.";
+      "VRBO CAPTCHA/human-verification page detected. This provider run is paused for manual verification in the real Chrome window. No CapSolver, automated slider, or press-and-hold action will be attempted; solve it yourself in Chrome and the worker will continue once the challenge clears.";
 
-    log(`${label} ${id}: Falling back to manual noVNC verification (CapSolver did not solve)`);
+    log(`${label} ${id}: waiting for manual Chrome verification; automated CAPTCHA solving is disabled`);
     await normalizePageDisplay(targetPage).catch(() => {});
-    await setCaptchaTextSelectionSuppressed(targetPage, true).catch(() => {});
     await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
     await postScreenSnapshot(
       { id, opType: label },
@@ -2908,7 +2914,6 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
             error: "VRBO changed this session from CAPTCHA to a hard block. The worker will abandon this browser/IP and retry with a fresh identity if retries remain.",
           },
         );
-        await setCaptchaTextSelectionSuppressed(targetPage, false).catch(() => {});
         await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
         throwIfVrboHardBlock(state, label, id);
       }
@@ -2922,7 +2927,6 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
           "VRBO manual CAPTCHA solved",
           { force: true },
         );
-        await setCaptchaTextSelectionSuppressed(targetPage, false).catch(() => {});
         await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
         log(`${label} ${id}: manual VRBO verification cleared; continuing provider run`);
         return true;
@@ -2945,7 +2949,6 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
       "VRBO manual CAPTCHA timed out",
       { captcha: true, force: true },
     );
-    await setCaptchaTextSelectionSuppressed(targetPage, false).catch(() => {});
     await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
     throw new VrboHardBlockError("VRBO manual verification timed out.", {
       label,

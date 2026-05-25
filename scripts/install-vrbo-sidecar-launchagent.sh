@@ -212,7 +212,10 @@ DECODO_PROXY_PASSWORD_EXPORT="$(quote_for_shell "${DECODO_PROXY_PASSWORD}")"
 BRIGHTDATA_PROXY_USERNAME_EXPORT="$(quote_for_shell "${BRIGHTDATA_PROXY_USERNAME}")"
 BRIGHTDATA_PROXY_PASSWORD_EXPORT="$(quote_for_shell "${BRIGHTDATA_PROXY_PASSWORD}")"
 CAPTCHA_PROVIDER="$(value_from_env_or_railway CAPTCHA_PROVIDER "capsolver")"
-CAPTCHA_SOLVING_ENABLED="$(value_from_env_or_railway CAPTCHA_SOLVING_ENABLED "0")"
+# Keep local Mac CAPTCHA handling manual-only. A preserved CapSolver key may
+# remain available for other tools, but the sidecar runner should not attempt
+# third-party or automated CAPTCHA solves unless explicitly overridden.
+CAPTCHA_SOLVING_ENABLED="${CAPTCHA_SOLVING_ENABLED:-0}"
 CAPSOLVER_API_KEY_VALUE="$(value_from_env_or_railway CAPSOLVER_API_KEY "")"
 if [[ -z "${CAPSOLVER_API_KEY_VALUE}" && -f "${EXISTING_RUNNER_PATH}" ]]; then
   CAPSOLVER_API_KEY_RAW="$(
