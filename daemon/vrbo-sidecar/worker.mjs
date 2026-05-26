@@ -1860,6 +1860,28 @@ async function clearContextStorageForFreshRun(label = "fresh browser run", optio
   }
 }
 
+async function clearOtaClientSearchState(origin, label = "client search state reset") {
+  if (!context || !origin) return false;
+  const pages = typeof context.pages === "function" ? context.pages() : [];
+  const targetPage = pages.find((p) => p && !p.isClosed?.()) ?? page;
+  if (!targetPage || targetPage.isClosed?.()) return false;
+  const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
+  if (!session) return false;
+  try {
+    await withSoftTimeout(session.send("Storage.clearDataForOrigin", {
+      origin,
+      storageTypes: "appcache,file_systems,indexeddb,local_storage,shader_cache,websql,service_workers,cache_storage,storage_buckets",
+    }), 1_500, null);
+    log(`${label}: cleared ${origin} client search/cache state; preserved cookies`);
+    return true;
+  } catch (e) {
+    log(`${label}: client search state reset failed for ${origin}: ${e?.message ?? e}`);
+    return false;
+  } finally {
+    await withSoftTimeout(session.detach(), 500, null);
+  }
+}
+
 async function ensureBrowser() {
   const allocation = await acquireChromeForRequest();
   if (usingHeadlessRuntime()) return ensureHeadlessBrowser();
@@ -2136,7 +2158,20 @@ async function showCompletePage(opType) {
   }
 }
 
+async function markVisibleChromeIdleBeforeDisconnect(reason) {
+  if (usingHeadlessRuntime() || !keepVisibleLocalChromeGrid()) return;
+  if (!page || page.isClosed?.()) return;
+  try {
+    await closeExtraTabs(`${reason}: pre-disconnect idle tab cleanup`, page).catch(() => {});
+    await showCompletePage(reason);
+    await snapSidecarWindowToGrid(page, { focus: false, label: "pre-disconnect idle", id: String(reason).slice(0, 80) }).catch(() => false);
+  } catch (e) {
+    log(`${reason}: visible Chrome idle mark failed before disconnect: ${e?.message ?? e}`);
+  }
+}
+
 async function teardownBrowser(reason) {
+  await markVisibleChromeIdleBeforeDisconnect(reason);
   log(`${usingHeadlessRuntime() ? "closing headless browser" : "disconnecting CDP"}: ${reason}`);
   try {
     if (launchedPersistentContext && context) {
@@ -3894,11 +3929,28 @@ async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label
     : [{ typedQuery, searchTerm: fallbackSearchTerm, suggestionText: fallbackSearchTerm, source: "fallback" }];
 }
 
-async function runOtaSearchVariants(id, label, variants, runVariant) {
+function candidateResultSetSignature(cards) {
+  if (!Array.isArray(cards) || cards.length === 0) return "";
+  const urls = cards
+    .map((card) => String(card?.url || card?.href || card?.listingUrl || "").trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .slice(0, 24);
+  if (urls.length) return `${cards.length}:${urls.join("|")}`;
+  return `${cards.length}:${cards
+    .map((card) => String(card?.title || card?.name || "").trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .slice(0, 24)
+    .join("|")}`;
+}
+
+async function runOtaSearchVariants(id, label, variants, runVariant, options = {}) {
   const allCards = [];
   const failures = [];
   const variationsTried = [];
   let completedVariants = 0;
+  const duplicateResultCounts = new Map();
   for (let i = 0; i < variants.length; i++) {
     throwIfRequestCancelled(id);
     const variant = variants[i];
@@ -3915,6 +3967,32 @@ async function runOtaSearchVariants(id, label, variants, runVariant) {
         candidateCount: Array.isArray(cards) ? cards.length : 0,
       });
       allCards.push(...cards);
+      const signature = options.stopAfterDuplicateResults ? candidateResultSetSignature(cards) : "";
+      if (signature) {
+        const count = (duplicateResultCounts.get(signature) || 0) + 1;
+        duplicateResultCounts.set(signature, count);
+        const maxDuplicateRuns = Math.max(2, Number(options.maxDuplicateResultRuns) || 2);
+        if (count >= maxDuplicateRuns && i < variants.length - 1) {
+          const skipped = variants.slice(i + 1);
+          for (const skippedVariant of skipped) {
+            variationsTried.push({
+              term: skippedVariant.searchTerm,
+              typedQuery: skippedVariant.typedQuery,
+              suggestionText: skippedVariant.suggestionText,
+              source: skippedVariant.source,
+              success: false,
+              candidateCount: 0,
+              skipped: true,
+              error: `skipped after ${count} destination variations returned the same provider result set`,
+            });
+          }
+          log(
+            `${label} ${id}: stopping remaining ${skipped.length} destination variant(s) after ` +
+            `${count} successful runs returned the same provider result set`,
+          );
+          break;
+        }
+      }
     } catch (e) {
       if (e instanceof SidecarCancelledError || e instanceof SidecarHardTimeoutError || e instanceof VrboHardBlockError) throw e;
       failures.push(e);
@@ -4810,19 +4888,24 @@ async function processVrboSearch(id, params) {
   const variants = await discoverOtaSearchVariants("https://www.vrbo.com/", effectiveSearchTerm, destination, "vrbo_search", id, params);
   const result = await runOtaSearchVariants(id, "vrbo_search", variants, (variant) =>
     runVrboSearchVariant(id, params, variant),
+    { stopAfterDuplicateResults: true, maxDuplicateResultRuns: 2 },
   );
   await postResult(id, result);
 }
 
-async function runVrboSearchVariant(id, params, variant = null) {
+async function runVrboSearchVariant(id, params, variant = null, visibleAttempt = 0) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
   const typedQuery = String(variant?.typedQuery || otaBaseSearchQuery(searchTerm, destination) || effectiveSearchTerm).trim();
   log(
     `vrbo_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
-    `${checkIn}→${checkOut} ${bedrooms}BR`,
+    `${checkIn}→${checkOut} ${bedrooms}BR${visibleAttempt ? ` retry=${visibleAttempt}` : ""}`,
   );
   await ensureBrowser();
+  if (visibleAttempt > 0) {
+    await clearOtaClientSearchState("https://www.vrbo.com", `vrbo_search ${id} retry ${visibleAttempt}`);
+    await resetPage();
+  }
   const primedDestination = await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search", id, {
     inputTerm: typedQuery,
     targetSuggestion: variant?.suggestionText || null,
@@ -4898,6 +4981,13 @@ async function runVrboSearchVariant(id, params, variant = null) {
   }
   correctionReasons = vrboStateCorrectionReasons(state, checkIn, checkOut, effectiveSearchTerm, destination);
   if (correctionReasons.length > 0) {
+    if (visibleAttempt < 1 && correctionReasons.includes("destination")) {
+      log(
+        `vrbo_search ${id}: visible submit drifted to the wrong destination; ` +
+        `retrying once from a fresh visible VRBO form without URL injection`,
+      );
+      return runVrboSearchVariant(id, params, variant, visibleAttempt + 1);
+    }
     if (stateLooksLikeVrboHumanChallenge(state)) {
       throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
         label: "vrbo_search",
@@ -5409,8 +5499,29 @@ async function applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label =
               el.getAttribute?.("data-testid"),
             ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
           }
-          const next = Array.from(document.querySelectorAll("button, [role='button']"))
-            .find((el) => el instanceof HTMLElement && isVisible(el) && /\bnext\b/i.test(textOf(el)) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
+          const navCandidates = Array.from(document.querySelectorAll("button, [role='button'], a, [class*='next' i], [class*='paging' i], [class*='chevron' i], [class*='arrow' i]"))
+            .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
+            .map((el) => ({
+              el,
+              label: textOf(el),
+              cls: String(el.className || ""),
+              tag: String(el.tagName || ""),
+              rect: el.getBoundingClientRect(),
+            }))
+            .filter(({ label, cls, rect }) => {
+              if (/^\d{1,2}$/.test(String(label || "").trim())) return false;
+              if (rect.width > 150 || rect.height > 90) return false;
+              return /\bnext\b|›|»|→/i.test(label) || /next|paging|chevron|arrow/i.test(cls);
+            })
+            .sort((a, b) => ((a.rect.left + a.rect.right) / 2) - ((b.rect.left + b.rect.right) / 2));
+          const explicit = navCandidates
+            .filter(({ label, cls }) => /\bnext\b|›|»|→|chevron.*right|arrow.*right/i.test(`${label} ${cls}`))
+            .sort((a, b) => (
+              (/button/i.test(b.tag) ? 4 : 0) + (/paging/i.test(b.cls) ? 3 : 0) + (b.rect.width <= 60 ? 1 : 0)
+            ) - (
+              (/button/i.test(a.tag) ? 4 : 0) + (/paging/i.test(a.cls) ? 3 : 0) + (a.rect.width <= 60 ? 1 : 0)
+            ))[0];
+          const next = explicit?.el || navCandidates[navCandidates.length - 1]?.el || null;
           if (!next) return null;
           next.click();
           return textOf(next).slice(0, 80) || "next";
@@ -5554,18 +5665,40 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
         return (a.year * 12 + a.month) - (b.year * 12 + b.month);
       }
 
-      function nextButton() {
+      function calendarNavButton(direction) {
+        const wantsNext = direction === "next";
         const buttons = Array.from(document.querySelectorAll("button, [role='button'], a, [class*='next' i], [class*='paging' i]"))
           .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
-          .map((el) => ({ el, text: textOf(el), cls: String(el.className || "") }));
-        return buttons.find(({ text, cls }) => /\b(?:next|following)\b|›|»|→/i.test(text) || /paging|next|chevron.*right|arrow.*right/i.test(cls))?.el || null;
+          .map((el) => ({ el, text: textOf(el), cls: String(el.className || ""), tag: String(el.tagName || ""), rect: el.getBoundingClientRect() }))
+          .filter(({ text, cls, rect }) => {
+            if (/^\d{1,2}$/.test(clean(text))) return false;
+            if (rect.width > 140 || rect.height > 80) return false;
+            return /\b(?:next|following|previous|prev|back)\b|[›»→‹«←]/i.test(text) ||
+              /paging|next|prev|chevron|arrow/i.test(cls);
+          });
+        const explicit = buttons.filter(({ text, cls }) => {
+          const hay = `${text} ${cls}`;
+          return wantsNext
+            ? /\b(?:next|following)\b|›|»|→|chevron.*right|arrow.*right/i.test(hay)
+            : /\b(?:previous|prev|back)\b|‹|«|←|chevron.*left|arrow.*left/i.test(hay);
+        }).sort((a, b) => (
+          (/button/i.test(b.tag) ? 4 : 0) + (/paging/i.test(b.cls) ? 3 : 0) + (b.rect.width <= 60 ? 1 : 0)
+        ) - (
+          (/button/i.test(a.tag) ? 4 : 0) + (/paging/i.test(a.cls) ? 3 : 0) + (a.rect.width <= 60 ? 1 : 0)
+        ))[0];
+        if (explicit?.el) return explicit.el;
+        const paging = buttons
+          .filter(({ cls }) => /paging|chevron|arrow/i.test(cls))
+          .sort((a, b) => ((a.rect.left + a.rect.right) / 2) - ((b.rect.left + b.rect.right) / 2));
+        return wantsNext ? paging[paging.length - 1]?.el || null : paging[0]?.el || null;
+      }
+
+      function nextButton() {
+        return calendarNavButton("next");
       }
 
       function prevButton() {
-        const buttons = Array.from(document.querySelectorAll("button, [role='button'], a, [class*='prev' i], [class*='paging' i]"))
-          .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
-          .map((el) => ({ el, text: textOf(el), cls: String(el.className || "") }));
-        return buttons.find(({ text, cls }) => /\b(?:previous|prev|back)\b|‹|«|←/i.test(text) || /paging|prev|chevron.*left|arrow.*left/i.test(cls))?.el || null;
+        return calendarNavButton("prev");
       }
 
       async function bringMonthIntoView(target) {
@@ -5622,7 +5755,7 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
         return calendarIsOpen();
       }
 
-      if (!(await openDatePickerIfNeeded())) return null;
+      if (!(await openDatePickerIfNeeded())) return { filled: [], failureReason: "VRBO visible calendar did not open", controlCount: 0 };
       const clear = Array.from(document.querySelectorAll("button, [role='button'], a"))
         .find((el) => el instanceof HTMLElement && isVisible(el) && /^clear$/i.test(textOf(el)));
       if (clear) {
@@ -5632,11 +5765,19 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
 
       const inMonths = await bringMonthIntoView(targetIn);
       const inDay = findVisibleDay(targetIn, inMonths);
-      if (!inDay || !click(inDay)) return null;
+      if (!inDay || !click(inDay)) {
+        return { filled: [], failureReason: `VRBO visible calendar could not select check-in ${checkIn}`, openedLabel: "VRBO visible calendar", controlCount: 0 };
+      }
       await sleep(550);
       const outMonths = await bringMonthIntoView(targetOut);
       const outDay = findVisibleDay(targetOut, outMonths);
-      if (!outDay || !click(outDay)) return { filled: [{ role: "checkin", label: `${checkIn}`, visible: true }], openedLabel: "VRBO calendar" };
+      if (!outDay || !click(outDay)) {
+        return {
+          filled: [{ role: "checkin", label: `${checkIn}`, visible: true }],
+          failureReason: `VRBO visible calendar could not select checkout ${checkOut}`,
+          openedLabel: "VRBO calendar",
+        };
+      }
       await sleep(550);
       const done = Array.from(document.querySelectorAll("button, [role='button'], a"))
         .find((el) => el instanceof HTMLElement && isVisible(el) && /^(?:done|apply|ok)$/i.test(textOf(el)));
@@ -5658,6 +5799,8 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
 
   if (result?.filled?.length) {
     log(`${label}: VRBO visible calendar selected ${result.filled.map((item) => `${item.role}:${item.label}`).join(", ")}${result.submitLabel ? ` and clicked ${result.submitLabel}` : ""}`);
+  } else if (result?.failureReason) {
+    log(`${label}: ${result.failureReason}`);
   }
   return result;
 }
@@ -6239,12 +6382,27 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
       function clickNextMonth() {
         const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], [class*='next' i], [class*='arrow' i], [class*='chevron' i]"))
           .filter((el) => el instanceof HTMLElement && isVisible(el) && !disabled(el))
-          .map((el) => ({ el, label: textOf(el), ctx: contextOf(el) }))
-          .filter(({ label, ctx }) => {
+          .map((el) => ({ el, label: textOf(el), ctx: contextOf(el), cls: String(el.className || ""), tag: String(el.tagName || ""), rect: el.getBoundingClientRect() }))
+          .filter(({ label, ctx, cls, rect }) => {
             if (badActionRe.test(label)) return false;
-            return nextRe.test(label.trim()) || /\bnext\b/i.test(label) || /\bnext\b/i.test(ctx) || /chevron[-_\s]*right|arrow[-_\s]*right/i.test(ctx);
-          });
-        const target = candidates[0]?.el ?? null;
+            if (/^\d{1,2}$/.test(label.trim())) return false;
+            if (rect.width > 150 || rect.height > 90) return false;
+            return nextRe.test(label.trim()) ||
+              /\bnext\b|›|»|→/i.test(label) ||
+              /\bnext\b/i.test(ctx) ||
+              /paging|chevron|arrow|next/i.test(cls) ||
+              /chevron[-_\s]*right|arrow[-_\s]*right/i.test(ctx);
+          })
+          .sort((a, b) => ((a.rect.left + a.rect.right) / 2) - ((b.rect.left + b.rect.right) / 2));
+        const explicit = candidates.filter(({ label, ctx, cls }) =>
+          nextRe.test(label.trim()) ||
+          /\bnext\b|›|»|→|chevron.*right|arrow.*right/i.test(`${label} ${ctx} ${cls}`),
+        ).sort((a, b) => (
+          (/button/i.test(b.tag) ? 4 : 0) + (/paging/i.test(b.cls) ? 3 : 0) + (b.rect.width <= 60 ? 1 : 0)
+        ) - (
+          (/button/i.test(a.tag) ? 4 : 0) + (/paging/i.test(a.cls) ? 3 : 0) + (a.rect.width <= 60 ? 1 : 0)
+        ))[0];
+        const target = explicit?.el || candidates[candidates.length - 1]?.el || null;
         if (!target) return null;
         return { openedLabel: activate(target) };
       }
