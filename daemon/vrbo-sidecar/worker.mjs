@@ -3804,9 +3804,21 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
       }
       return best;
     }
-    function imageFrom(card) {
-      const img = card.querySelector("img");
-      return img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
+    function imagesFrom(card) {
+      const out = [];
+      const seen = new Set();
+      for (const img of Array.from(card.querySelectorAll("img"))) {
+        const url = img?.currentSrc || img?.src || img?.getAttribute("data-src") || "";
+        if (!/^https?:\/\//i.test(url)) continue;
+        const cleanUrl = url.replace(/&amp;/g, "&").trim();
+        const key = cleanUrl.replace(/[?#].*$/, "");
+        if (!key || seen.has(key)) continue;
+        if (/logo|icon|sprite|avatar|profile|map|placeholder/i.test(cleanUrl)) continue;
+        seen.add(key);
+        out.push(cleanUrl);
+        if (out.length >= 3) break;
+      }
+      return out;
     }
     const out = [];
     const seen = new Set();
@@ -3832,6 +3844,7 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
         clean(a.textContent) ||
         `Airbnb room ${id}`;
       const url = href.startsWith("http") ? href : new URL(href, "https://www.airbnb.com").toString();
+      const images = imagesFrom(card);
       out.push({
         url,
         title: title.slice(0, 100),
@@ -3841,7 +3854,8 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
         priceIncludesFees: price.priceIncludesFees,
         priceBasis: price.priceBasis,
         bedrooms: bedrooms ?? targetBedrooms,
-        image: imageFrom(card),
+        image: images[0],
+        images,
         snippet: fullText.slice(0, 220),
       });
     }

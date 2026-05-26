@@ -230,6 +230,7 @@ export type SidecarPropertyCandidate = {
   bedroomSource?: "search-card" | "search-filter" | "detail-page" | "unknown";
   sourceLabel?: string;
   image?: string;
+  images?: string[];
   snippet?: string;
   // PR #299: when daemon extracted from Vrbo's new "$X total includes
   // taxes & fees" format, the price is already all-in and downstream

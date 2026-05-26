@@ -7525,6 +7525,21 @@ export async function registerRoutes(
     }
     return false;
   };
+  const isLikelyDirectBookingSurface = (args: { domain?: string | null; title?: string | null; url?: string | null }): boolean => {
+    if (isNonDirectBookingSurface(args)) return false;
+    const hay = `${args.domain ?? ""} ${args.title ?? ""} ${args.url ?? ""}`.toLowerCase();
+    if (
+      /\b(?:vacation rentals?|rental homes?|condos?|villas?|resorts?|property management|book direct|booking|availability|reservations?|lodging|accommodations?|places to stay|suite paradise|parrish|poipu 365|kauai|koloa|poipu)\b/i.test(hay)
+    ) {
+      return true;
+    }
+    try {
+      const u = new URL(String(args.url ?? ""));
+      return /\/(?:vacation-rentals?|rentals?|properties|property|accommodations?|lodging|booking|availability|unit|condos?|villas?)(?:\/|$)/i.test(u.pathname);
+    } catch {
+      return false;
+    }
+  };
 
   const uniqueScrapedPhotos = (photos: ScrapedPhoto[]): ScrapedPhoto[] => {
     const seen = new Set<string>();
@@ -8630,6 +8645,7 @@ export async function registerRoutes(
       totalPrice: number;
       bedrooms?: number;
       image?: string;
+      images?: string[];
       snippet?: string;
       inTargetBounds?: boolean;
       // Reverse-image-search matches on this candidate's photo. Used
@@ -9020,7 +9036,19 @@ export async function registerRoutes(
       }
       return mentionsResort(hay) || candidateHasResortPhotoProof(c);
     };
+    const candidateHasUsableAirbnbDirectLink = (c: Candidate): boolean => {
+      if (!c.directBookingUrl) return false;
+      const domain = c.directBookingHost || domainFromUrl(c.directBookingUrl);
+      if (!domain) return false;
+      if (isNonDirectBookingSurface({ domain, title: c.title, url: c.directBookingUrl })) return false;
+      if (!isLikelyDirectBookingSurface({ domain, title: c.title, url: c.directBookingUrl })) return false;
+      return true;
+    };
     const candidateFinalIdentityRejectReason = (c: Candidate): string | null => {
+      if (c.source === "airbnb") return "Airbnb row has no direct booking link; raw Airbnb cannot be attached";
+      if (c.airbnbAnchorUrl && !candidateHasUsableAirbnbDirectLink(c)) {
+        return "Airbnb-backed row has no usable direct booking link";
+      }
       const targetReject = candidateTargetRejectReason(c);
       if (targetReject !== "unknown target-filter rejection") return targetReject;
       const inferredBedrooms = candidateBedroomSignal(c);
@@ -9030,7 +9058,10 @@ export async function registerRoutes(
       return null;
     };
     const candidateIsFinalAutoPickSafe = (c: Candidate): boolean =>
-      candidateFitsTarget(c, { requireBedroomProof: true })
+      c.source !== "airbnb"
+      && (!c.airbnbAnchorUrl || candidateHasUsableAirbnbDirectLink(c))
+      && (!c.directBookingUrl || candidateHasUsableAirbnbDirectLink(c))
+      && candidateFitsTarget(c, { requireBedroomProof: true })
       && candidateBedroomSignal(c) === bedrooms
       && candidateHasFinalResortProof(c);
 
@@ -9218,6 +9249,7 @@ export async function registerRoutes(
             totalPrice: Math.round(total),
             bedrooms: rawCandidateBedroomSignal(c) ?? c.bedrooms,
             image: c.image,
+            images: Array.isArray(c.images) ? c.images.filter((url): url is string => typeof url === "string" && /^https?:\/\//i.test(url)).slice(0, 3) : undefined,
             snippet: c.snippet,
             verified: "yes",
             verifiedNightlyPrice: Math.round(nightly),
@@ -10207,7 +10239,7 @@ export async function registerRoutes(
       // back to direct Airbnb/Booking/Vrbo + known-URL VRP_SITES.
       if (!googleDiscoveryEnabled) return [];
       try {
-        const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey });
+        const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey || "" });
         const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`);
         if (!r.ok) return [];
         const data = await r.json() as any;
@@ -10226,6 +10258,7 @@ export async function registerRoutes(
           const title = String(s?.title || s?.source || domain).slice(0, 80);
           if (OTA_DOMAIN_FILTER.test(domain)) continue;
           if (isNonDirectBookingSurface({ domain, title, url })) continue;
+          if (!isLikelyDirectBookingSurface({ domain, title, url })) continue;
           if (seen.has(domain)) continue;
           seen.add(domain);
           out.push({
@@ -10242,24 +10275,46 @@ export async function registerRoutes(
         return [];
       }
     }
-    // Lens every priced Airbnb card we receive, capped defensively so a
-    // redesigned Airbnb infinite-scroll page cannot create an unbounded
-    // SearchAPI bill. The direct page is link-only: we do not scrape it,
-    // and any direct-link row keeps the Airbnb date-specific rate.
-    const TOP_AIRBNB_FOR_LENS = 50;
+    // Lens multiple visible photos per priced Airbnb card, capped
+    // defensively so a redesigned Airbnb infinite-scroll page cannot
+    // create an unbounded SearchAPI bill. The direct page is link-only:
+    // we do not scrape it, and any direct-link row keeps the Airbnb
+    // date-specific rate.
+    const TOP_AIRBNB_FOR_LENS = 30;
+    const AIRBNB_LENS_IMAGES_PER_CANDIDATE = 3;
+    const AIRBNB_LENS_TOTAL_IMAGE_BUDGET = 75;
     const topAirbnb = airbnb
-      .filter((c) => c.image && c.nightlyPrice > 0)
+      .filter((c) => (c.image || c.images?.length) && c.nightlyPrice > 0)
       .slice(0, TOP_AIRBNB_FOR_LENS);
     const photoMatchesByUrl = new Map<string, Array<{ url: string; title: string; domain: string }>>();
     if (topAirbnb.length > 0) {
       // Each Lens call wrapped in a 8s per-call timeout so a single
       // hung SearchAPI request doesn't block the whole batch.
+      const lensJobs: Array<{ candidate: Candidate; image: string }> = [];
+      for (const c of topAirbnb) {
+        const imageUrls = Array.from(new Set([...(c.images ?? []), c.image].filter((url): url is string => typeof url === "string" && /^https?:\/\//i.test(url))))
+          .slice(0, AIRBNB_LENS_IMAGES_PER_CANDIDATE);
+        for (const image of imageUrls) {
+          if (lensJobs.length >= AIRBNB_LENS_TOTAL_IMAGE_BUDGET) break;
+          lensJobs.push({ candidate: c, image });
+        }
+        if (lensJobs.length >= AIRBNB_LENS_TOTAL_IMAGE_BUDGET) break;
+      }
       const lensResults = await Promise.all(
-        topAirbnb.map((c) =>
-          withTimeout(lensMatches(c.image!), 8_000, [] as Array<{ url: string; title: string; domain: string }>, `lens-${c.url.slice(0, 60)}`),
+        lensJobs.map((job, i) =>
+          withTimeout(lensMatches(job.image), 8_000, [] as Array<{ url: string; title: string; domain: string }>, `lens-${i}-${job.candidate.url.slice(0, 50)}`),
         ),
       );
-      topAirbnb.forEach((c, i) => photoMatchesByUrl.set(c.url, lensResults[i]));
+      lensJobs.forEach((job, i) => {
+        const existing = photoMatchesByUrl.get(job.candidate.url) ?? [];
+        const seen = new Set(existing.map((m) => m.domain));
+        for (const match of lensResults[i]) {
+          if (seen.has(match.domain)) continue;
+          seen.add(match.domain);
+          existing.push(match);
+        }
+        photoMatchesByUrl.set(job.candidate.url, existing.slice(0, 6));
+      });
     }
     const airbnbWithMatches: Candidate[] = airbnb.map((c) => {
       const matches = photoMatchesByUrl.get(c.url) ?? [];
@@ -10340,6 +10395,10 @@ export async function registerRoutes(
       for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
         if (isNonDirectBookingSurface(m)) {
+          photoMatchLandingDropped++;
+          continue;
+        }
+        if (!isLikelyDirectBookingSurface(m)) {
           photoMatchLandingDropped++;
           continue;
         }
@@ -10704,12 +10763,11 @@ export async function registerRoutes(
 
     // Combined priced pool across all bookable sources.
     //
-    // Operator directive 2026-04-28: include Airbnb fully in cheapest,
-    // overriding the previous "Airbnb is auto-fill last resort only"
-    // posture. Airbnb engine results are date-specific by construction
-    // (the engine query carries check_in / check_out and returns only
-    // available units), so they're auto-marked verified=yes upstream
-    // and join the priced pool alongside Booking + PM.
+    // Airbnb rows are date-specific by construction and remain in this
+    // priced staging pool, but the final cheapest/buy-in gate below now
+    // rejects raw Airbnb rows. An Airbnb-backed buy-in must be promoted
+    // through Google Lens to a likely direct booking URL; that promoted
+    // direct-link row keeps the Airbnb date-specific price.
     //
     // Operator directive 2026-04-29 (PR #306): include Vrbo fully in
     // cheapest as well. The TOS-sublet posture is the same as Airbnb's
