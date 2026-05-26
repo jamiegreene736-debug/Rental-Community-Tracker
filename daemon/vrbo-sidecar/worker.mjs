@@ -6057,7 +6057,6 @@ async function applyVisualPmDateFallback(targetPage, checkIn, checkOut) {
 
 async function applyPmDateInputs(targetPage, checkIn, checkOut, label = "pm_url_check") {
   if (!targetPage || targetPage.isClosed?.()) return null;
-  const providerSearchLabel = /^(?:airbnb_search|vrbo_search|booking_search)\b/i.test(label);
   const attempt = async (allowOpenOnly) => withSoftTimeout(
     targetPage.evaluate(({ checkIn, checkOut, allowOpenOnly }) => {
       const [cinY, cinM, cinD] = String(checkIn).split("-").map((p) => parseInt(p, 10));
@@ -6426,7 +6425,7 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut, label = "pm_url_
     const calendar = await clickPmCalendarDates(targetPage, checkIn, checkOut);
     result = mergeDateEntry(result, calendar);
   }
-  if (!hasCompleteDateEntry(result) && !providerSearchLabel) {
+  if (!hasCompleteDateEntry(result)) {
     await dismissObstructions(targetPage, `${label}_date_entry_visual_fallback`);
     const visual = await applyVisualPmDateFallback(targetPage, checkIn, checkOut);
     result = mergeDateEntry(result, visual);
