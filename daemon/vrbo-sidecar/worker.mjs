@@ -3743,18 +3743,28 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
   const afterText = await withSoftTimeout(
     targetPage.evaluate(() => {
       const active = document.activeElement;
+      const inputText = (el) => {
+        if (!(el instanceof HTMLElement)) return "";
+        const isTextControl =
+          el.matches?.("input, textarea, [role='textbox'], [contenteditable='true']") ||
+          el.isContentEditable;
+        if (!isTextControl) return "";
+        return (el.value || el.textContent || "").replace(/\s+/g, " ").trim();
+      };
+      const sane = (text) => text && text.length <= 180 && !/\b(?:copyright|popular with travelers|browse by property type)\b/i.test(text);
       const candidates = Array.from(document.querySelectorAll("input, [role='textbox'], [contenteditable='true']"))
         .filter((el) => el instanceof HTMLElement)
-        .map((el) => (el.value || el.textContent || "").replace(/\s+/g, " ").trim())
-        .filter(Boolean);
-      const activeText = active ? (active.value || active.textContent || "").replace(/\s+/g, " ").trim() : "";
-      return activeText || candidates[0] || "";
+        .map(inputText)
+        .filter(sane);
+      const activeText = inputText(active);
+      return sane(activeText) ? activeText : candidates[0] || "";
     }),
     2_000,
     "",
   );
-  log(`${label}: vision fallback selected destination${afterText ? `; field now "${afterText.slice(0, 120)}"` : ""}`);
-  return afterText || targetSuggestion || searchTerm;
+  const fallbackSuggestion = String(targetSuggestion || searchTerm || "").replace(/\s+/g, " ").trim();
+  log(`${label}: vision fallback selected destination${afterText ? `; field now "${afterText.slice(0, 120)}"` : fallbackSuggestion ? `; assuming "${fallbackSuggestion.slice(0, 120)}"` : ""}`);
+  return afterText || fallbackSuggestion || null;
 }
 
 async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label, requestId = "homepage", params = {}) {
@@ -3801,6 +3811,7 @@ async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label
     }
   } catch (e) {
     if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError || e instanceof ProviderBrowserUnavailableError) throw e;
+    if (transientErrorMessage(e?.message ?? e)) throw e;
     log(`${label}: destination suggestion discovery skipped: ${e?.message ?? e}`);
   }
   const fallbackSearchTerm = fallback || typedQuery;
@@ -3901,6 +3912,7 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     }
   } catch (e) {
     if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError || e instanceof ProviderBrowserUnavailableError) throw e;
+    if (transientErrorMessage(e?.message ?? e)) throw e;
     log(`${label}: homepage search prime skipped: ${e?.message ?? e}`);
   }
   return false;
