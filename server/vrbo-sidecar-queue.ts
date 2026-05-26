@@ -447,7 +447,15 @@ const searchVariationRuns = new Map<string, SidecarSearchVariationSummary>();
 // a single missed poll doesn't flicker the indicator).
 let lastWorkerPollAt: number | null = null;
 let lastWorkerRuntime: SidecarWorkerRuntime | null = null;
+let lastLocalWorkerPollAt: number | null = null;
+let lastLocalWorkerRuntime: SidecarWorkerRuntime | null = null;
+let lastServerWorkerPollAt: number | null = null;
+let lastServerWorkerRuntime: SidecarWorkerRuntime | null = null;
 const HEARTBEAT_ONLINE_WINDOW_MS = 90 * 1000;
+const LOCAL_WORKER_PREFERRED_WINDOW_MS = Math.max(
+  5_000,
+  numberFromEnv("SIDECAR_LOCAL_WORKER_PREFERRED_WINDOW_MS", HEARTBEAT_ONLINE_WINDOW_MS),
+);
 
 // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): operator-
 // controlled paused flag. When true, next() returns null even when
@@ -1060,7 +1068,26 @@ function activeCountForOp(opType: SidecarOpType): number {
   return count;
 }
 
-function canClaimOp(opType: SidecarOpType): boolean {
+function isOtaBrowserOp(opType: SidecarOpType): boolean {
+  return (
+    opType === "airbnb_search" ||
+    opType === "booking_search" ||
+    opType === "vrbo_search" ||
+    opType === "vrbo_photo_scrape"
+  );
+}
+
+function localWorkerIsPreferred(now = nowMs()): boolean {
+  return Boolean(
+    lastLocalWorkerPollAt !== null &&
+    now - lastLocalWorkerPollAt < LOCAL_WORKER_PREFERRED_WINDOW_MS,
+  );
+}
+
+function canClaimOp(opType: SidecarOpType, runtime?: SidecarWorkerRuntime | null): boolean {
+  if (runtime?.source === "server" && isOtaBrowserOp(opType) && localWorkerIsPreferred()) {
+    return false;
+  }
   return activeCountForOp(opType) < opConcurrencyLimit(opType);
 }
 
@@ -1111,16 +1138,26 @@ function normalizeWorkerRuntime(runtime?: Partial<SidecarWorkerRuntime> | null):
 }
 
 export function stampHeartbeat(id?: string, stage?: string, runtime?: Partial<SidecarWorkerRuntime> | null): void {
-  lastWorkerPollAt = nowMs();
+  const stampedAt = nowMs();
+  lastWorkerPollAt = stampedAt;
   const normalizedRuntime = normalizeWorkerRuntime(runtime);
-  if (normalizedRuntime) lastWorkerRuntime = normalizedRuntime;
+  if (normalizedRuntime) {
+    lastWorkerRuntime = normalizedRuntime;
+    if (normalizedRuntime.source === "local") {
+      lastLocalWorkerPollAt = stampedAt;
+      lastLocalWorkerRuntime = normalizedRuntime;
+    } else if (normalizedRuntime.source === "server") {
+      lastServerWorkerPollAt = stampedAt;
+      lastServerWorkerRuntime = normalizedRuntime;
+    }
+  }
   if (!id) return;
   const r = queue.get(id);
   if (r?.status === "in_progress") {
-    r.claimedAt = lastWorkerPollAt;
+    r.claimedAt = stampedAt;
     if (stage && typeof stage === "string") {
       r.stage = stage.replace(/\s+/g, " ").trim().slice(0, 140);
-      r.stageUpdatedAt = lastWorkerPollAt;
+      r.stageUpdatedAt = stampedAt;
     }
   }
 }
@@ -1483,7 +1520,8 @@ export function enqueue(opts: SidecarVrboParams): {
  */
 export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarRequest | null {
   cleanup();
-  stampHeartbeat(undefined, undefined, runtime);
+  const normalizedRuntime = normalizeWorkerRuntime(runtime);
+  stampHeartbeat(undefined, undefined, normalizedRuntime);
   // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): paused
   // queue returns null even when pending work exists. The worker
   // keeps polling (heartbeat stays green so the operator sees
@@ -1492,7 +1530,7 @@ export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarReq
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
     if (r.status !== "pending") continue;
-    if (!canClaimOp(r.opType)) continue;
+    if (!canClaimOp(r.opType, normalizedRuntime)) continue;
     if (!oldest || r.createdAt < oldest.createdAt) oldest = r;
   }
   if (!oldest) return null;
@@ -1825,6 +1863,10 @@ export function getHeartbeat(): {
     activeSec: number;
   } | null;
   workerRuntime: SidecarWorkerRuntime | null;
+  localWorkerRuntime: SidecarWorkerRuntime | null;
+  serverWorkerRuntime: SidecarWorkerRuntime | null;
+  localWorkerAgeMs: number | null;
+  serverWorkerAgeMs: number | null;
 } {
   const pausedState = isQueuePaused();
   // Inline-find the in-progress request without paying for a full
@@ -1858,9 +1900,19 @@ export function getHeartbeat(): {
       pausedReason: pausedState.reason,
       activeJob,
       workerRuntime: lastWorkerRuntime,
+      localWorkerRuntime: lastLocalWorkerRuntime,
+      serverWorkerRuntime: lastServerWorkerRuntime,
+      localWorkerAgeMs: null,
+      serverWorkerAgeMs: null,
     };
   }
   const ageMs = nowMs() - lastWorkerPollAt;
+  const localWorkerAgeMs = lastLocalWorkerPollAt === null ? null : nowMs() - lastLocalWorkerPollAt;
+  const serverWorkerAgeMs = lastServerWorkerPollAt === null ? null : nowMs() - lastServerWorkerPollAt;
+  const preferredRuntime =
+    localWorkerAgeMs !== null && localWorkerAgeMs < HEARTBEAT_ONLINE_WINDOW_MS
+      ? lastLocalWorkerRuntime
+      : lastWorkerRuntime;
   return {
     isOnline: ageMs < HEARTBEAT_ONLINE_WINDOW_MS,
     everSeen: true,
@@ -1873,7 +1925,11 @@ export function getHeartbeat(): {
     pausedAgeMs: pausedState.pausedAgeMs,
     pausedReason: pausedState.reason,
     activeJob,
-    workerRuntime: lastWorkerRuntime,
+    workerRuntime: preferredRuntime,
+    localWorkerRuntime: lastLocalWorkerRuntime,
+    serverWorkerRuntime: lastServerWorkerRuntime,
+    localWorkerAgeMs,
+    serverWorkerAgeMs,
   };
 }
 
