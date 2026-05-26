@@ -3334,14 +3334,20 @@ function otaVisionFallbackEnabled() {
     process.env.USE_OTA_VISION_FALLBACK === "1";
 }
 
-async function askOtaVisionAction(targetPage, label, prompt) {
+async function askOtaVisionAction(targetPage, label, prompt, options = {}) {
   if (!otaVisionFallbackEnabled()) return null;
   const apiKey = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
   if (!apiKey) {
     log(`${label}: vision fallback skipped (ANTHROPIC_API_KEY missing)`);
     return null;
   }
+  const req = options.request ?? activeRuntimeRequest ?? {
+    id: options.requestId ?? `${label}-vision`,
+    opType: options.opType ?? label,
+  };
   try {
+    await postScreenSnapshot(req, targetPage, `${label} vision fallback`, { force: true }).catch(() => {});
+    await applyScreenControlCommands(req, targetPage, label).catch(() => 0);
     const viewport = targetPage.viewportSize?.() ?? { width: 1280, height: 900 };
     const screenshot = await targetPage.screenshot({ type: "jpeg", quality: 65, fullPage: false });
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -3385,11 +3391,13 @@ async function askOtaVisionAction(targetPage, label, prompt) {
     if (action === "click" && Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= viewport.width && y <= viewport.height) {
       log(`${label}: vision fallback clicking ${Math.round(x)},${Math.round(y)}${reason ? ` (${reason})` : ""}`);
       await targetPage.mouse.click(x, y);
+      await postScreenSnapshot(req, targetPage, `${label} vision clicked`, { force: true }).catch(() => {});
       return { action, x, y, reason };
     }
     if (action === "type" && value) {
       log(`${label}: vision fallback typing suggested text "${value.slice(0, 80)}"${reason ? ` (${reason})` : ""}`);
       await targetPage.keyboard.type(value, { delay: 25 });
+      await postScreenSnapshot(req, targetPage, `${label} vision typed`, { force: true }).catch(() => {});
       return { action, text: value, reason };
     }
     log(`${label}: vision fallback returned no action${reason ? ` (${reason})` : ""}`);
@@ -3437,14 +3445,18 @@ function otaQueryTokens(value) {
     .filter((token) => token.length >= 3 && !/^(the|and|resort|resorts)$/.test(token));
 }
 
-async function collectVisibleDestinationSuggestions(targetPage, typedQuery, destination, label = "site_search") {
+async function collectVisibleDestinationSuggestions(targetPage, typedQuery, destination, label = "site_search", options = {}) {
   if (!targetPage || targetPage.isClosed?.() || !typedQuery) return [];
   const queryTokens = otaQueryTokens(typedQuery);
+  const requiredSearchTokens = Array.isArray(options.filterTokens)
+    ? options.filterTokens.map((token) => String(token || "").toLowerCase().trim()).filter((token) => token.length >= 3)
+    : queryTokens;
   const locationTokens = otaLocationTokens(destination);
   const requiredCityTokens = otaRequiredCityTokens(destination);
+  const maxSuggestions = Math.max(1, Math.min(20, Math.floor(Number(options.maxSuggestions ?? OTA_SUGGESTION_MAX) || OTA_SUGGESTION_MAX)));
   await targetPage.waitForTimeout(2_400).catch(() => null);
   const suggestions = await withSoftTimeout(
-    targetPage.evaluate(({ queryTokens, locationTokens, requiredCityTokens, maxSuggestions }) => {
+    targetPage.evaluate(({ queryTokens, requiredSearchTokens, locationTokens, requiredCityTokens, maxSuggestions }) => {
       const clean = (raw) => String(raw || "")
         .replace(/([a-z])([A-Z])/g, "$1 $2")
         .replace(/(\d)([A-Za-z])/g, "$1 $2")
@@ -3501,7 +3513,7 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
             const norm = clean(text);
             if (!norm || norm === rowNorm || text.length >= rowText.length) return false;
             const tokens = tokenSet(norm);
-            return (!queryTokens.length || hasAllTokens(tokens, queryTokens)) &&
+            return (!requiredSearchTokens.length || hasAllTokens(tokens, requiredSearchTokens)) &&
               (!requiredCityTokens.length || hasAllTokens(tokens, requiredCityTokens)) &&
               (!locationTokens.length || hasAnyToken(tokens, locationTokens));
           });
@@ -3544,7 +3556,7 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
         if (/^search for\b/i.test(text) || /\bsearch for\b/i.test(norm)) continue;
         if (hasMatchingDescendant(row, norm, text)) continue;
         const tokens = tokenSet(norm);
-        if (queryTokens.length && !hasAllTokens(tokens, queryTokens)) continue;
+        if (requiredSearchTokens.length && !hasAllTokens(tokens, requiredSearchTokens)) continue;
         if (requiredCityTokens.length && !hasAllTokens(tokens, requiredCityTokens)) continue;
         if (locationTokens.length && !hasAnyToken(tokens, locationTokens)) continue;
         const key = norm;
@@ -3553,21 +3565,78 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
         out.push({ text: text.slice(0, 160), norm });
       }
       return out.slice(0, maxSuggestions);
-    }, { queryTokens, locationTokens, requiredCityTokens, maxSuggestions: OTA_SUGGESTION_MAX }),
+    }, { queryTokens, requiredSearchTokens, locationTokens, requiredCityTokens, maxSuggestions }),
     3_000,
     [],
   );
   if (suggestions.length) {
     log(
       `${label}: discovered ${suggestions.length} in-location destination suggestion(s)` +
-      `${queryTokens.length ? ` requiring resort-prefix token(s) ${queryTokens.join("+")}` : ""}: ` +
+      `${requiredSearchTokens.length ? ` requiring resort-prefix token(s) ${requiredSearchTokens.join("+")}` : ""}: ` +
       suggestions.map((s) => `"${s.text}"`).join("; "),
     );
   }
   return suggestions;
 }
 
-async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search", targetSuggestion = null) {
+async function scrapeAndIterateOtaDropdown(targetPage, baseTerm, filterTokens = [], max = OTA_SUGGESTION_MAX, options = {}) {
+  const typedQuery = otaBaseSearchQuery(baseTerm, options.destination || baseTerm);
+  const label = options.label || "site_search";
+  const destination = options.destination || baseTerm;
+  const tokens = Array.isArray(filterTokens) && filterTokens.length
+    ? filterTokens.map((token) => String(token || "").toLowerCase().trim()).filter((token) => token.length >= 3)
+    : otaQueryTokens(typedQuery || baseTerm);
+  const maxSuggestions = Math.max(1, Math.min(20, Math.floor(Number(max) || OTA_SUGGESTION_MAX)));
+  if (!targetPage || targetPage.isClosed?.() || !typedQuery) {
+    return { variants: [], variationsTried: [] };
+  }
+
+  await dismissObstructions(targetPage, `${label}_dropdown_helper`).catch(() => []);
+  const filled = options.isVrbo
+    ? await fillVrboDestinationField(targetPage, typedQuery, `${label}_dropdown_helper`, { chooseSuggestion: false, requestId: options.requestId }).catch(() => null)
+    : await fillVisibleSearchField(targetPage, typedQuery, `${label}_dropdown_helper`, { chooseSuggestion: false, requestId: options.requestId }).catch(() => null);
+  if (!filled) {
+    const vision = await askOtaVisionAction(
+      targetPage,
+      `${label}_dropdown_focus`,
+      `Focus the visible destination/location input for this OTA search. The intended search text is "${typedQuery}".`,
+      { requestId: options.requestId, opType: label },
+    );
+    if (vision?.action === "click") {
+      await targetPage.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+      await targetPage.keyboard.press("Backspace").catch(() => {});
+      await targetPage.keyboard.type(typedQuery, { delay: 35 }).catch(() => {});
+      await targetPage.waitForTimeout(1_000).catch(() => {});
+    }
+  }
+
+  const suggestions = await collectVisibleDestinationSuggestions(
+    targetPage,
+    typedQuery,
+    destination,
+    `${label}_dropdown_helper`,
+    { filterTokens: tokens, maxSuggestions },
+  );
+  const variants = suggestions.map((suggestion) => ({
+    typedQuery,
+    searchTerm: suggestion.text,
+    suggestionText: suggestion.text,
+    source: "suggestion",
+  }));
+  return {
+    variants,
+    variationsTried: variants.map((variant) => ({
+      term: variant.searchTerm,
+      typedQuery: variant.typedQuery,
+      suggestionText: variant.suggestionText,
+      source: variant.source,
+      success: false,
+      candidateCount: 0,
+    })),
+  };
+}
+
+async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search", targetSuggestion = null, options = {}) {
   if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
   const requiredSearchTokens = otaQueryTokens(searchTerm);
   const targetTokens = otaQueryTokens(targetSuggestion || searchTerm);
@@ -3667,6 +3736,7 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
     targetPage,
     `${label}_vision_dropdown`,
     `The location autocomplete dropdown should be visible. Click the best destination suggestion matching "${targetSuggestion || searchTerm}". It must include the resort-prefix token(s) ${requiredSearchTokens.join(", ")} and must not be a broad unrelated city-only option.`,
+    { requestId: options.requestId, opType: label },
   );
   if (!vision) return null;
   await targetPage.waitForTimeout(900).catch(() => {});
@@ -3707,19 +3777,19 @@ async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label
       }
       throwIfVrboHardBlock(state, label, requestId);
     }
-    await dismissObstructions(page, `${label}_suggestions`);
-    if (isVrbo) {
-      await fillVrboDestinationField(page, typedQuery, `${label}_suggestions`, { chooseSuggestion: false }).catch(() => null);
-    } else {
-      await fillVisibleSearchField(page, typedQuery, `${label}_suggestions`, { chooseSuggestion: false }).catch(() => null);
-    }
-    const suggestions = await collectVisibleDestinationSuggestions(page, typedQuery, destination || searchTerm, `${label}_suggestions`);
-    const variants = suggestions.map((suggestion) => ({
+    const scraped = await scrapeAndIterateOtaDropdown(
+      page,
       typedQuery,
-      searchTerm: suggestion.text,
-      suggestionText: suggestion.text,
-      source: "suggestion",
-    }));
+      Array.isArray(mode.filterTokens) ? mode.filterTokens : otaQueryTokens(typedQuery),
+      Number(mode.maxVariations) || OTA_SUGGESTION_MAX,
+      {
+        destination: destination || searchTerm,
+        label: `${label}_suggestions`,
+        isVrbo,
+        requestId,
+      },
+    );
+    const variants = scraped.variants;
     if (variants.length > 0) {
       const seen = new Set();
       return [...explicitVariants, ...variants].filter((variant) => {
@@ -3807,11 +3877,11 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     await maybeClearVrboChallenge("after-homepage-load");
     await dismissObstructions(page, `${label}_home`);
     const vrboFilled = isVrbo
-      ? await fillVrboDestinationField(page, inputTerm, `${label}_home`, { targetSuggestion }).catch(() => null)
+      ? await fillVrboDestinationField(page, inputTerm, `${label}_home`, { targetSuggestion, requestId }).catch(() => null)
       : null;
     const genericFilled = isVrbo
       ? null
-      : await fillVisibleSearchField(page, inputTerm, `${label}_home`, { targetSuggestion }).catch(() => null);
+      : await fillVisibleSearchField(page, inputTerm, `${label}_home`, { targetSuggestion, requestId }).catch(() => null);
     const filled = vrboFilled?.filled ?? genericFilled?.filled ?? null;
     const suggestion = vrboFilled?.suggestion ?? genericFilled?.suggestion ?? null;
     if (filled && !suggestion) {
@@ -3820,7 +3890,7 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     }
     if (filled) {
       if (submitAfterSearch) {
-        await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`), PAGE_SETTLE_MS + 2_000, null);
+        await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`, { requestId }), PAGE_SETTLE_MS + 2_000, null);
         await boundedPageDelay(page, 1_200);
         await maybeClearVrboChallenge("after-homepage-submit");
         log(`${label}: primed public homepage search with "${inputTerm}" → "${suggestion}"`);
@@ -3859,13 +3929,29 @@ async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_se
       await locator.type(searchTerm, { delay: 35, timeout: 6_000 });
       await targetPage.waitForTimeout(1_000).catch(() => {});
       const suggestion = chooseSuggestion
-        ? await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion).catch(() => null)
+        ? await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion, { requestId: options.requestId }).catch(() => null)
         : null;
       log(`${label}: typed destination into VRBO field "${selector}"${suggestion ? ` and selected "${suggestion}"` : ""}`);
       return { filled: selector, suggestion };
     } catch (e) {
       log(`${label}: VRBO destination field "${selector}" failed: ${e?.message ?? e}`);
     }
+  }
+  const vision = await askOtaVisionAction(
+    targetPage,
+    `${label}_vision_fill`,
+    `Find and focus the VRBO destination input. The intended destination text is "${searchTerm}".`,
+    { requestId: options.requestId, opType: label },
+  );
+  if (vision?.action === "click") {
+    await targetPage.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+    await targetPage.keyboard.press("Backspace").catch(() => {});
+    await targetPage.keyboard.type(searchTerm, { delay: 35 }).catch(() => {});
+    await targetPage.waitForTimeout(1_000).catch(() => {});
+    const suggestion = chooseSuggestion
+      ? await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion, { requestId: options.requestId }).catch(() => null)
+      : null;
+    return { filled: "vision destination input", suggestion };
   }
   return null;
 }
@@ -3925,7 +4011,7 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
     );
   }
   log(`airbnb_search ${id}: entered dates via Airbnb homepage controls (${checkIn}→${checkOut})`);
-  await clickVisibleSearchSubmit(page, "airbnb_search").catch(() => null);
+  await clickVisibleSearchSubmit(page, "airbnb_search", { requestId: id }).catch(() => null);
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "airbnb_search_after_submit");
   const bedroomFiltered = await fillBedroomFilter(page, bedrooms, "airbnb_search").catch(() => null);
@@ -4099,7 +4185,7 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
 }
 
 // ───────────────────────── VRBO search ──────────────────────────────
-async function clickVisibleSearchSubmit(targetPage = page, label = "search") {
+async function clickVisibleSearchSubmit(targetPage = page, label = "search", options = {}) {
   if (!targetPage || targetPage.isClosed?.()) return null;
   const clicked = await withSoftTimeout(
     targetPage.evaluate(() => {
@@ -4140,8 +4226,19 @@ async function clickVisibleSearchSubmit(targetPage = page, label = "search") {
   if (clicked) {
     log(`${label}: clicked visible search submit "${clicked}"`);
     await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+    return clicked;
   }
-  return clicked;
+  const vision = await askOtaVisionAction(
+    targetPage,
+    `${label}_vision_submit`,
+    "Click the primary visible Search button for this OTA search form. Do not click ads, sign-in, app install, or navigation buttons.",
+    { requestId: options.requestId, opType: label },
+  );
+  if (vision?.action === "click") {
+    await targetPage.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+    return "vision search submit";
+  }
+  return null;
 }
 
 function nightsBetween(checkIn, checkOut) {
@@ -4252,15 +4349,32 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
   if (filled) {
     log(`${label}: entered search term in "${filled}"`);
     if (options?.chooseSuggestion !== false) {
-      const suggestion = await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, options?.targetSuggestion || null).catch(() => null);
+      const suggestion = await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, options?.targetSuggestion || null, { requestId: options.requestId }).catch(() => null);
       return { filled, suggestion };
     }
   }
-  return filled ? { filled, suggestion: null } : null;
+  if (filled) return { filled, suggestion: null };
+  const vision = await askOtaVisionAction(
+    targetPage,
+    `${label}_vision_fill`,
+    `Find and focus the visible destination/location/search field. The intended search text is "${searchTerm}".`,
+    { requestId: options.requestId, opType: label },
+  );
+  if (vision?.action === "click") {
+    await targetPage.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+    await targetPage.keyboard.press("Backspace").catch(() => {});
+    await targetPage.keyboard.type(searchTerm, { delay: 35 }).catch(() => {});
+    await targetPage.waitForTimeout(1_000).catch(() => {});
+    const suggestion = options?.chooseSuggestion !== false
+      ? await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, options?.targetSuggestion || null, { requestId: options.requestId }).catch(() => null)
+      : null;
+    return { filled: "vision destination field", suggestion };
+  }
+  return null;
 }
 
-async function chooseVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search", targetSuggestion = null) {
-  return selectVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion);
+async function chooseVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search", targetSuggestion = null, options = {}) {
+  return selectVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion, options);
 }
 
 async function fillPmRentalLocationField(targetPage, searchTerm, label = "pm_rental_location") {
@@ -4647,7 +4761,7 @@ async function runVrboSearchVariant(id, params, variant = null) {
   }
   log(`vrbo_search ${id}: entered dates via VRBO homepage controls (${checkIn}→${checkOut})`);
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
-  await clickVisibleSearchSubmit(page, "vrbo_search").catch(() => null);
+  await clickVisibleSearchSubmit(page, "vrbo_search", { requestId: id }).catch(() => null);
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
   await dismissObstructions(page, "vrbo_search");
@@ -5345,7 +5459,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
     );
   }
   log(`booking_search ${id}: entered dates via Booking.com homepage controls (${checkIn}→${checkOut})`);
-  await clickVisibleSearchSubmit(page, "booking_search").catch(() => null);
+  await clickVisibleSearchSubmit(page, "booking_search", { requestId: id }).catch(() => null);
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopOtaProviderIfBlocked(page, "booking_search", id);
   await dismissBookingPopups(page, "booking_search_after_submit");

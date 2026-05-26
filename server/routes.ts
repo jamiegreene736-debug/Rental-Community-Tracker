@@ -17054,22 +17054,49 @@ Return ONLY compact JSON with this exact shape:
           if (!Number.isFinite(bedrooms) || bedrooms <= 0) {
             return res.status(400).json({ error: `${opType}: bedrooms (positive number) required` });
           }
-          result = enqueueOp({
-            opType,
-            params: {
-              destination: String(params.destination),
-              searchTerm: typeof params.searchTerm === "string" && params.searchTerm.trim()
-                ? params.searchTerm.trim()
-                : undefined,
+          const destination = String(params.destination);
+          const searchTerm = typeof params.searchTerm === "string" && params.searchTerm.trim()
+            ? params.searchTerm.trim()
+            : undefined;
+          const destinationParts = destination.split(",").map((part) => part.trim()).filter(Boolean);
+          const policyCommunity = searchTerm || destinationParts[0] || destination;
+          const explicitSearchVariations = Array.isArray(params.searchVariations)
+            ? params.searchVariations.filter((v): v is string => typeof v === "string" && v.trim()).slice(0, 12)
+            : undefined;
+          let generatedVariationPolicy: any = null;
+          if (!explicitSearchVariations?.length || !params.variationMode) {
+            const { buildSearchVariationPolicy } = await import("./vrbo-sidecar-queue");
+            generatedVariationPolicy = await buildSearchVariationPolicy({
+              provider: opType === "airbnb_search" ? "airbnb" : opType === "vrbo_search" ? "vrbo" : "booking",
+              community: policyCommunity,
+              city: destinationParts.length >= 3 ? destinationParts[1] : null,
+              state: destinationParts.length >= 3 ? destinationParts[2] : destinationParts.length === 2 ? destinationParts[1] : null,
               checkIn: String(params.checkIn),
               checkOut: String(params.checkOut),
               bedrooms,
-              searchVariations: Array.isArray(params.searchVariations)
-                ? params.searchVariations.filter((v): v is string => typeof v === "string" && v.trim()).slice(0, 12)
-                : undefined,
+              explicitTerms: explicitSearchVariations,
+            }).catch(() => null);
+          }
+          result = enqueueOp({
+            opType,
+            params: {
+              destination,
+              searchTerm,
+              checkIn: String(params.checkIn),
+              checkOut: String(params.checkOut),
+              bedrooms,
+              searchVariations: explicitSearchVariations?.length
+                ? explicitSearchVariations
+                : generatedVariationPolicy?.terms,
               variationMode: typeof params.variationMode === "object" && params.variationMode
                 ? params.variationMode as any
-                : undefined,
+                : generatedVariationPolicy
+                  ? {
+                    filterTokens: generatedVariationPolicy.filterTokens,
+                    maxVariations: generatedVariationPolicy.maxVariations,
+                    allowDiscovery: generatedVariationPolicy.allowDiscovery,
+                  }
+                  : undefined,
             },
           });
         } else if (opType === "vrbo_photo_scrape") {

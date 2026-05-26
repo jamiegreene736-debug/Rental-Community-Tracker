@@ -782,6 +782,7 @@ export async function getSearchVariationStatus(input: {
   generatedTerms: string[];
   channels: Record<OtaProvider, {
     preferredTerms: string[];
+    untriedTerms: string[];
     bestTerm: string | null;
     history: Array<{
       term: string;
@@ -801,6 +802,7 @@ export async function getSearchVariationStatus(input: {
   const generatedTerms = generateSearchVariations(communityName);
   const channels = {} as Record<OtaProvider, {
     preferredTerms: string[];
+    untriedTerms: string[];
     bestTerm: string | null;
     history: Array<{
       term: string;
@@ -824,9 +826,14 @@ export async function getSearchVariationStatus(input: {
       bedrooms: input.bedrooms,
     })) ?? null;
     const preferredTerms = rows.filter((row) => row.preferred).map((row) => row.term);
+    const candidateTerms = Array.from(new Set([...preferredTerms, ...generatedTerms]))
+      .filter((term) => matchesSearchVariationTokens(term, searchVariationTokens(communityName)));
+    const triedTerms = new Set((lastRun?.tried ?? []).map((attempt) => attempt.term.toLowerCase()));
+    const untriedTerms = candidateTerms.filter((term) => !triedTerms.has(term.toLowerCase())).slice(0, 12);
     const bestRow = rows.find((row) => row.lastYieldCount > 0);
     channels[provider] = {
       preferredTerms,
+      untriedTerms,
       bestTerm: bestRow?.term ?? lastRun?.bestTerm ?? null,
       history: rows.map((row) => ({
         term: row.term,

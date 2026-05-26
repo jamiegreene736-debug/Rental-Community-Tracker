@@ -59,6 +59,41 @@ and are NOT version-controlled because they're machine-specific:
   (URL, title, body excerpt, HTML snippet) at the moment of
   extraction.
 
+## Variation search
+
+Airbnb, Vrbo, and Booking.com buy-in searches are visible-UI only. The
+worker types the normalized resort/community prefix into the provider
+destination field, waits for the autocomplete dropdown, filters visible
+suggestions by the community token policy and city/location guard, then
+runs each accepted suggestion as a separate provider search. Results are
+deduped before returning to the web app.
+
+The server generates the initial policy with `generateSearchVariations`
+and passes `searchVariations` plus `variationMode.filterTokens` to the
+daemon. For `Poipu Kai`, for example, dropdown options must include the
+required resort-prefix tokens, so broad or neighboring matches such as
+`Pili Mai at Poipu` are rejected while `The Villas at Poipu Kai` is
+eligible.
+
+Each completed provider op returns `variationsTried` with the typed
+query, selected `suggestionText`, success flag, and candidate count. The
+Operations buy-in panel shows the latest summary, saved preferred terms,
+and any currently untried terms. The `Re-run untried` action asks the
+server to send only untried policy terms for that community/date/bedroom
+window.
+
+If the DOM click/fill path misses a critical destination field,
+dropdown option, or submit button, the env-gated vision fallback posts a
+fresh screenshot through the sidecar screen endpoint and asks the
+configured vision model for a bounded click/type action. Enable it with:
+
+```sh
+USE_OTA_VISION_FALLBACK=1
+SIDECAR_USE_VISION_FALLBACK=1
+ANTHROPIC_API_KEY=<key>
+SIDECAR_VISION_MODEL=claude-haiku-4-5-20251001
+```
+
 ## Updating the daemon
 
 When this repo's `worker.mjs` is updated:

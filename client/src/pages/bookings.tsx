@@ -474,6 +474,7 @@ type SidecarSearchVariationStatus = {
   generatedTerms: string[];
   channels: Record<OtaSearchProviderKey, {
     preferredTerms: string[];
+    untriedTerms?: string[];
     bestTerm: string | null;
     history: Array<{
       term: string;
@@ -1946,6 +1947,7 @@ function SidecarSearchVariationPanel({
             : channel?.history?.length
               ? `${channel.history.length} saved/history`
               : "No history yet";
+          const untried = channel?.untriedTerms ?? [];
           return (
             <div key={provider} className="rounded border bg-white p-2">
               <div className="mb-1 flex items-center justify-between gap-2">
@@ -1960,7 +1962,9 @@ function SidecarSearchVariationPanel({
               />
               <div className="mt-1.5 flex items-center justify-between gap-2">
                 <span className="truncate text-[10px] text-muted-foreground">
-                  {channel?.bestTerm ? `best: ${channel.bestTerm}` : "dropdown policy"}
+                  {untried.length
+                    ? `untried: ${untried.slice(0, 2).join(", ")}${untried.length > 2 ? ` +${untried.length - 2}` : ""}`
+                    : channel?.bestTerm ? `best: ${channel.bestTerm}` : "dropdown policy"}
                 </span>
                 <Button
                   type="button"
