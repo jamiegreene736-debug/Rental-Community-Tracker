@@ -4131,6 +4131,29 @@ async function processAirbnbSearch(id, params) {
   await postResult(id, result);
 }
 
+function buildAirbnbDatedSearchUrl(searchTerm, checkIn, checkOut, bedrooms) {
+  const safeSearchTerm = String(searchTerm || "").trim();
+  const url = new URL(`https://www.airbnb.com/s/${encodeURIComponent(safeSearchTerm)}/homes`);
+  url.searchParams.set("query", safeSearchTerm);
+  url.searchParams.set("checkin", checkIn);
+  url.searchParams.set("checkout", checkOut);
+  url.searchParams.set("adults", "2");
+  url.searchParams.set("min_bedrooms", String(bedrooms));
+  url.searchParams.set("room_types[]", "Entire home/apt");
+  url.searchParams.set("currency", "USD");
+  url.searchParams.set("search_type", "filter_change");
+  return url.toString();
+}
+
+function airbnbStateHasRequestedDates(state, checkIn, checkOut) {
+  try {
+    const url = new URL(String(state?.url || ""));
+    return url.searchParams.get("checkin") === checkIn && url.searchParams.get("checkout") === checkOut;
+  } catch {
+    return false;
+  }
+}
+
 async function runAirbnbSearchVariant(id, params, variant = null) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
@@ -4159,31 +4182,32 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
       },
     );
   }
-  await dismissObstructions(page, "airbnb_search_before_dates");
-  const dateEntry = await applyOtaSearchDateInputs(page, checkIn, checkOut, "airbnb_search", "airbnb");
-  if (!pmDateEntryComplete(dateEntry)) {
-    throw new ProviderBrowserUnavailableError(
-      `Airbnb homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
-      {
-        label: "airbnb_search",
-        id,
-        provider: "airbnb",
-        url: page.url(),
-        title: await page.title().catch(() => ""),
-        dateEntry,
-      },
-    );
-  }
-  log(`airbnb_search ${id}: entered dates via Airbnb homepage controls (${checkIn}→${checkOut})`);
-  await clickVisibleSearchSubmit(page, "airbnb_search", { requestId: id }).catch(() => null);
+  // NOTE FOR CODEX: Airbnb's homepage calendar can spin through months in
+  // visible Chrome. We still require a provider dropdown-confirmed
+  // destination above, but dates are applied through Airbnb's stable results
+  // URL params so the worker does not scroll the calendar for every variant.
+  const datedSearchUrl = buildAirbnbDatedSearchUrl(effectiveSearchTerm, checkIn, checkOut, bedrooms);
+  await page.goto(datedSearchUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
-  await dismissObstructions(page, "airbnb_search_after_submit");
+  await dismissObstructions(page, "airbnb_search_after_dated_url");
   const bedroomFiltered = await fillBedroomFilter(page, bedrooms, "airbnb_search").catch(() => null);
   if (!bedroomFiltered) {
     log(`airbnb_search ${id}: bedroom filter was not found in visible UI; continuing with visible results and card-level bedroom filtering only`);
   }
   await page.waitForTimeout(PAGE_SETTLE_MS);
   const state = await dumpPageState("airbnb", { id, ...params });
+  if (!airbnbStateHasRequestedDates(state, checkIn, checkOut)) {
+    throw new ProviderBrowserUnavailableError(
+      `Airbnb results URL did not keep requested dates ${checkIn}→${checkOut}; refusing stale/default-date results.`,
+      {
+        label: "airbnb_search",
+        id,
+        provider: "airbnb",
+        url: state?.url,
+        title: state?.title,
+      },
+    );
+  }
   if (state && /captcha|access denied|not a robot|robot|unusual traffic/i.test(state.bodyExcerpt)) {
     throw new Error("Airbnb bot wall — refresh cookies.json (airbnb.com) and kickstart");
   }
