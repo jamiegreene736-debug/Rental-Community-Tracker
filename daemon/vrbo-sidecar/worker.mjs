@@ -3581,12 +3581,14 @@ async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label
 async function runOtaSearchVariants(id, label, variants, runVariant) {
   const allCards = [];
   const failures = [];
+  let completedVariants = 0;
   for (let i = 0; i < variants.length; i++) {
     throwIfRequestCancelled(id);
     const variant = variants[i];
     log(`${label} ${id}: running destination variant ${i + 1}/${variants.length}: "${variant.searchTerm}"`);
     try {
       const cards = await runVariant(variant);
+      completedVariants += 1;
       allCards.push(...cards);
     } catch (e) {
       if (e instanceof SidecarCancelledError || e instanceof SidecarHardTimeoutError || e instanceof VrboHardBlockError) throw e;
@@ -3595,8 +3597,11 @@ async function runOtaSearchVariants(id, label, variants, runVariant) {
     }
   }
   const deduped = dedupeCandidatesByUrl(allCards);
-  log(`${label} ${id}: ${deduped.length} de-duped cards across ${variants.length} destination variant(s)${failures.length ? `; ${failures.length} variant failure(s)` : ""}`);
-  if (deduped.length === 0 && failures.length > 0) throw failures[0];
+  log(
+    `${label} ${id}: ${deduped.length} de-duped cards across ${variants.length} destination variant(s)` +
+    `; ${completedVariants} completed${failures.length ? `; ${failures.length} variant failure(s)` : ""}`,
+  );
+  if (completedVariants === 0 && failures.length > 0) throw failures[0];
   return deduped;
 }
 
@@ -3726,10 +3731,16 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
     );
   }
   await dismissObstructions(page, "airbnb_search_before_dates");
-  const dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "airbnb_search").catch((e) => {
-    log(`airbnb_search ${id}: homepage date entry failed: ${e?.message ?? e}`);
+  let dateEntry = await applyOtaHomepageDateInputs(page, checkIn, checkOut, "airbnb_search", "airbnb").catch((e) => {
+    log(`airbnb_search ${id}: homepage deterministic date entry failed: ${e?.message ?? e}`);
     return null;
   });
+  if (!pmDateEntryComplete(dateEntry)) {
+    dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "airbnb_search").catch((e) => {
+      log(`airbnb_search ${id}: homepage generic date entry failed: ${e?.message ?? e}`);
+      return null;
+    });
+  }
   if (!pmDateEntryComplete(dateEntry)) {
     throw new ProviderBrowserUnavailableError(
       `Airbnb homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
@@ -4450,10 +4461,16 @@ async function runVrboSearchVariant(id, params, variant = null) {
   // injected /search URL; those URLs appear to raise bot scrutiny and can
   // mask destination drift.
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
-  const dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "vrbo_search").catch((e) => {
-    log(`vrbo_search ${id}: homepage date entry failed: ${e?.message ?? e}`);
+  let dateEntry = await applyOtaHomepageDateInputs(page, checkIn, checkOut, "vrbo_search", "vrbo").catch((e) => {
+    log(`vrbo_search ${id}: homepage deterministic date entry failed: ${e?.message ?? e}`);
     return null;
   });
+  if (!pmDateEntryComplete(dateEntry)) {
+    dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "vrbo_search").catch((e) => {
+      log(`vrbo_search ${id}: homepage generic date entry failed: ${e?.message ?? e}`);
+      return null;
+    });
+  }
   if (!pmDateEntryComplete(dateEntry)) {
     throw new ProviderBrowserUnavailableError(
       `VRBO homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
@@ -4846,11 +4863,11 @@ function bookingStateHasRequestedDates(state, checkIn, checkOut) {
   return false;
 }
 
-async function applyBookingDateInputs(targetPage, checkIn, checkOut, label = "booking_search") {
+async function applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label = "booking_search", provider = "booking") {
   if (!targetPage || targetPage.isClosed?.()) return null;
 
   const openLabel = await withSoftTimeout(
-    targetPage.evaluate(() => {
+    targetPage.evaluate(({ provider }) => {
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
         const rect = el.getBoundingClientRect();
@@ -4869,14 +4886,31 @@ async function applyBookingDateInputs(targetPage, checkIn, checkOut, label = "bo
           el.getAttribute?.("data-testid"),
         ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
       }
+      function contextOf(el) {
+        const parts = [textOf(el)];
+        let cur = el.parentElement;
+        for (let i = 0; cur && i < 2; i++, cur = cur.parentElement) {
+          const txt = (cur.textContent || "").replace(/\s+/g, " ").trim();
+          if (txt.length <= 220) parts.push(txt);
+          parts.push(cur.getAttribute?.("aria-label"));
+          parts.push(cur.getAttribute?.("data-testid"));
+        }
+        return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
       const candidates = Array.from(document.querySelectorAll("button, [role='button'], div[tabindex], span[tabindex]"))
         .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
         .map((el) => {
           const label = textOf(el);
+          const ctx = contextOf(el);
+          const haystack = `${label} ${ctx}`;
           let score = 0;
-          if (/check[\s-]*in|check[\s-]*out/i.test(label)) score += 90;
-          if (/\bdate|calendar\b/i.test(label)) score += 60;
+          if (/check[\s-]*in|check[\s-]*out|arrival|departure/i.test(haystack)) score += 90;
+          if (/\bdate|dates|calendar|when|add dates\b/i.test(haystack)) score += 70;
+          if (provider === "airbnb" && /\bwhen\b|add dates|check[\s-]*in|check[\s-]*out/i.test(haystack)) score += 40;
+          if (provider === "vrbo" && /\bdates?\b|check[\s-]*in|check[\s-]*out/i.test(haystack)) score += 40;
           if (/search|destination|where|guest|currency|account|sign in/i.test(label)) score -= 100;
+          if (/destination|where to|where\?|guest|currency|account|sign in/i.test(ctx)) score -= 35;
+          if (provider !== "booking" && /\bsearch\b/i.test(label)) score -= 80;
           return { el, label, score };
         })
         .filter((x) => x.score > 0)
@@ -4886,7 +4920,7 @@ async function applyBookingDateInputs(targetPage, checkIn, checkOut, label = "bo
       target.scrollIntoView?.({ block: "center", inline: "center" });
       target.click();
       return candidates[0].label.slice(0, 100);
-    }),
+    }, { provider }),
     3_000,
     null,
   );
@@ -5040,12 +5074,16 @@ async function applyBookingDateInputs(targetPage, checkIn, checkOut, label = "bo
   const filled = [checkin, checkout].filter(Boolean);
   if (filled.length > 0 || doneLabel) {
     log(
-      `${label}: booking date picker opened="${openLabel}" filled=${filled.length}` +
+      `${label}: ${provider} date picker opened="${openLabel}" filled=${filled.length}` +
       `${filled.length ? ` roles=${filled.map((f) => f.role).join("+")}` : ""}` +
       `${doneLabel ? ` clicked="${doneLabel}"` : ""}`,
     );
   }
   return { filled, openedLabel: openLabel, submitLabel: doneLabel, controlCount: 0 };
+}
+
+async function applyBookingDateInputs(targetPage, checkIn, checkOut, label = "booking_search") {
+  return applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label, "booking");
 }
 
 async function runBookingSearchVariant(id, params, variant = null) {
@@ -6019,6 +6057,7 @@ async function applyVisualPmDateFallback(targetPage, checkIn, checkOut) {
 
 async function applyPmDateInputs(targetPage, checkIn, checkOut, label = "pm_url_check") {
   if (!targetPage || targetPage.isClosed?.()) return null;
+  const providerSearchLabel = /^(?:airbnb_search|vrbo_search|booking_search)\b/i.test(label);
   const attempt = async (allowOpenOnly) => withSoftTimeout(
     targetPage.evaluate(({ checkIn, checkOut, allowOpenOnly }) => {
       const [cinY, cinM, cinD] = String(checkIn).split("-").map((p) => parseInt(p, 10));
@@ -6383,14 +6422,14 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut, label = "pm_url_
     result = mergeDateEntry(result, knownPairRetry);
   }
   if (!hasCompleteDateEntry(result)) {
-    await dismissObstructions(targetPage, `${label}_date_entry_visual_fallback`);
-    const visual = await applyVisualPmDateFallback(targetPage, checkIn, checkOut);
-    result = mergeDateEntry(result, visual);
-  }
-  if (!hasCompleteDateEntry(result)) {
     await dismissObstructions(targetPage, `${label}_date_entry_calendar_fallback`);
     const calendar = await clickPmCalendarDates(targetPage, checkIn, checkOut);
     result = mergeDateEntry(result, calendar);
+  }
+  if (!hasCompleteDateEntry(result) && !providerSearchLabel) {
+    await dismissObstructions(targetPage, `${label}_date_entry_visual_fallback`);
+    const visual = await applyVisualPmDateFallback(targetPage, checkIn, checkOut);
+    result = mergeDateEntry(result, visual);
   }
   if (hasCompleteDateEntry(result) && !result?.submitLabel) {
     await targetPage.waitForTimeout(700).catch(() => {});
