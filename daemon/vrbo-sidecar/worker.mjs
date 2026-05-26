@@ -2480,21 +2480,6 @@ function stateMatchesExpectedDestination(state, ...expectedValues) {
   return false;
 }
 
-function buildVrboSearchUrl(destination, checkIn, checkOut) {
-  const params = new URLSearchParams({
-    destination,
-    d1: checkIn,
-    startDate: checkIn,
-    d2: checkOut,
-    endDate: checkOut,
-    flexibility: "0_DAY",
-    adults: "2",
-    isInvalidatedDate: "false",
-    sort: "RECOMMENDED",
-  });
-  return `https://www.vrbo.com/search?${params.toString()}`;
-}
-
 function vrboUrlHasExpectedDates(rawUrl, checkIn, checkOut) {
   try {
     const url = new URL(String(rawUrl || ""));
@@ -3545,18 +3530,23 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     const vrboFilled = isVrbo
       ? await fillVrboDestinationField(page, inputTerm, `${label}_home`, { targetSuggestion }).catch(() => null)
       : null;
-    const filled = vrboFilled?.filled ?? (await fillVisibleSearchField(page, inputTerm, `${label}_home`, { targetSuggestion }).catch(() => null));
-    if (isVrbo && filled && !vrboFilled?.suggestion) {
-      log(`${label}: destination suggestion was not confirmed for "${searchTerm}"; final VRBO page will be destination-checked before accepting results`);
+    const genericFilled = isVrbo
+      ? null
+      : await fillVisibleSearchField(page, inputTerm, `${label}_home`, { targetSuggestion }).catch(() => null);
+    const filled = vrboFilled?.filled ?? genericFilled?.filled ?? null;
+    const suggestion = vrboFilled?.suggestion ?? genericFilled?.suggestion ?? null;
+    if (filled && !suggestion) {
+      log(`${label}: destination suggestion was not confirmed for "${searchTerm}"; refusing to submit a provider default/geolocated search`);
+      return false;
     }
     if (filled) {
       if (submitAfterSearch) {
         await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`), PAGE_SETTLE_MS + 2_000, null);
         await boundedPageDelay(page, 1_200);
         await maybeClearVrboChallenge("after-homepage-submit");
-        log(`${label}: primed public homepage search with "${inputTerm}"${targetSuggestion ? ` → "${targetSuggestion}"` : ""}`);
+        log(`${label}: primed public homepage search with "${inputTerm}" → "${suggestion}"`);
       } else {
-        log(`${label}: entered public homepage search term "${inputTerm}"${targetSuggestion ? ` → "${targetSuggestion}"` : ""}`);
+        log(`${label}: entered public homepage search term "${inputTerm}" → "${suggestion}"`);
       }
       return true;
     }
@@ -3621,34 +3611,50 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
-  await primeOtaHomepageSearch("https://www.airbnb.com/", effectiveSearchTerm, "airbnb_search", id, {
+  const primedDestination = await primeOtaHomepageSearch("https://www.airbnb.com/", effectiveSearchTerm, "airbnb_search", id, {
     inputTerm: typedQuery,
     targetSuggestion: variant?.suggestionText || null,
+    submitAfterSearch: false,
   });
-  const url =
-    `https://www.airbnb.com/s/${encodeURIComponent(effectiveSearchTerm)}/homes` +
-    `?query=${encodeURIComponent(effectiveSearchTerm)}` +
-    `&checkin=${checkIn}&checkout=${checkOut}` +
-    `&adults=2&min_bedrooms=${encodeURIComponent(String(bedrooms))}` +
-    `&room_types%5B%5D=Entire%20home%2Fapt&currency=USD&search_type=filter_change`;
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-  await page.waitForTimeout(PAGE_SETTLE_MS);
-  await dismissObstructions(page, "airbnb_search");
-  await fillVisibleSearchField(page, typedQuery, "airbnb_search", { targetSuggestion: variant?.suggestionText || null }).catch(() => null);
+  if (!primedDestination) {
+    const state = await dumpPageState("airbnb-unprimed-destination", { id, ...params }).catch(() => null);
+    throw new ProviderBrowserUnavailableError(
+      `Airbnb homepage did not confirm destination "${effectiveSearchTerm}" from the visible dropdown; refusing to submit the provider's default/geolocated search.`,
+      {
+        label: "airbnb_search",
+        id,
+        provider: "airbnb",
+        url: page.url(),
+        title: await page.title().catch(() => state?.title ?? ""),
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      },
+    );
+  }
+  await dismissObstructions(page, "airbnb_search_before_dates");
+  const dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "airbnb_search").catch((e) => {
+    log(`airbnb_search ${id}: homepage date entry failed: ${e?.message ?? e}`);
+    return null;
+  });
+  if (!pmDateEntryComplete(dateEntry)) {
+    throw new ProviderBrowserUnavailableError(
+      `Airbnb homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
+      {
+        label: "airbnb_search",
+        id,
+        provider: "airbnb",
+        url: page.url(),
+        title: await page.title().catch(() => ""),
+        dateEntry,
+      },
+    );
+  }
+  log(`airbnb_search ${id}: entered dates via Airbnb homepage controls (${checkIn}→${checkOut})`);
   await clickVisibleSearchSubmit(page, "airbnb_search").catch(() => null);
+  await page.waitForTimeout(PAGE_SETTLE_MS);
+  await dismissObstructions(page, "airbnb_search_after_submit");
   const bedroomFiltered = await fillBedroomFilter(page, bedrooms, "airbnb_search").catch(() => null);
   if (!bedroomFiltered) {
-    try {
-      const current = new URL(page.url());
-      current.searchParams.set("min_bedrooms", String(bedrooms));
-      current.searchParams.set("room_types[]", "Entire home/apt");
-      current.searchParams.set("search_type", "filter_change");
-      await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-      await page.waitForTimeout(PAGE_SETTLE_MS);
-      log(`airbnb_search: applied URL bedroom filter (min_bedrooms=${bedrooms})`);
-    } catch (e) {
-      log(`airbnb_search: URL bedroom fallback failed: ${e?.message ?? e}`);
-    }
+    log(`airbnb_search ${id}: bedroom filter was not found in visible UI; continuing with visible results and card-level bedroom filtering only`);
   }
   await page.waitForTimeout(PAGE_SETTLE_MS);
   const state = await dumpPageState("airbnb", { id, ...params });
@@ -3781,12 +3787,9 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
         clean(card.querySelector("[data-testid*='listing-card-title' i], [id*='title' i], h3, h2")?.textContent) ||
         clean(a.textContent) ||
         `Airbnb room ${id}`;
-      const url = new URL(`/rooms/${id}`, "https://www.airbnb.com");
-      url.searchParams.set("check_in", checkIn);
-      url.searchParams.set("check_out", checkOut);
-      url.searchParams.set("adults", "2");
+      const url = href.startsWith("http") ? href : new URL(href, "https://www.airbnb.com").toString();
       out.push({
-        url: url.toString(),
+        url,
         title: title.slice(0, 100),
         totalPrice: price.totalPrice,
         nightlyPrice: price.nightlyPrice,
@@ -3806,48 +3809,6 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
 }
 
 // ───────────────────────── VRBO search ──────────────────────────────
-function bookingUrlMissingExpectedSearch(current, expected) {
-  if (!expected) return false;
-  const currentSearch = normalizeBookingSearchText(current.searchParams.get("ss") || current.searchParams.get("ssne") || "");
-  const expectedSearch = normalizeBookingSearchText(expected.searchParams.get("ss") || expected.searchParams.get("ssne") || "");
-  return Boolean(
-    (expectedSearch && currentSearch !== expectedSearch) ||
-      current.searchParams.get("checkin") !== expected.searchParams.get("checkin") ||
-      current.searchParams.get("checkout") !== expected.searchParams.get("checkout"),
-  );
-}
-
-async function applyBookingBedroomFilter(bedrooms, expectedUrl = null) {
-  const targetBedrooms = Number.parseInt(String(bedrooms ?? ""), 10);
-  if (!Number.isFinite(targetBedrooms) || targetBedrooms <= 0) return false;
-  try {
-    const expected = expectedUrl ? new URL(expectedUrl) : null;
-    let current = new URL(page.url());
-    if (bookingUrlMissingExpectedSearch(current, expected)) {
-      current = expected;
-      log(`booking_search: bedroom filter restored intended search URL before applying ${targetBedrooms}BR filter`);
-    }
-    const filters = current.searchParams
-      .getAll("nflt")
-      .join(";")
-      .split(";")
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .filter((part) => !/^entire_place_bedroom_count=/i.test(part));
-    filters.push(`entire_place_bedroom_count=${targetBedrooms}`);
-    current.searchParams.delete("nflt");
-    current.searchParams.set("nflt", filters.join(";"));
-    await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-    await page.waitForTimeout(PAGE_SETTLE_MS);
-    await dismissBookingPopups(page, "booking_search_after_bedroom_filter");
-    log(`booking_search: applied bedroom filter (${targetBedrooms}BR) with intended dates/search preserved`);
-    return true;
-  } catch (e) {
-    log(`booking bedroom filter failed: ${e.message ?? e}`);
-    return false;
-  }
-}
-
 async function clickVisibleSearchSubmit(targetPage = page, label = "search") {
   if (!targetPage || targetPage.isClosed?.()) return null;
   const clicked = await withSoftTimeout(
@@ -4001,10 +3962,11 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
   if (filled) {
     log(`${label}: entered search term in "${filled}"`);
     if (options?.chooseSuggestion !== false) {
-      await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, options?.targetSuggestion || null).catch(() => null);
+      const suggestion = await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, options?.targetSuggestion || null).catch(() => null);
+      return { filled, suggestion };
     }
   }
-  return filled;
+  return filled ? { filled, suggestion: null } : null;
 }
 
 async function chooseVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search", targetSuggestion = null) {
@@ -4336,71 +4298,6 @@ async function fillBedroomFilter(targetPage, bedrooms, label = "bedroom_filter")
   return filled;
 }
 
-function normalizeBookingSearchText(value) {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/&amp;/g, "&")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function restoreBookingSearchUrlIfRewritten(expectedUrl, expectedSearchTerm, expectedCheckIn = null, expectedCheckOut = null) {
-  try {
-    const current = new URL(page.url());
-    const actualSearchTerm = current.searchParams.get("ss") || current.searchParams.get("ssne") || "";
-    const expected = normalizeBookingSearchText(expectedSearchTerm);
-    const actual = normalizeBookingSearchText(actualSearchTerm);
-    const searchMismatch = expected && actual !== expected;
-    const checkInMismatch = expectedCheckIn && current.searchParams.get("checkin") !== expectedCheckIn;
-    const checkOutMismatch = expectedCheckOut && current.searchParams.get("checkout") !== expectedCheckOut;
-    if (searchMismatch || checkInMismatch || checkOutMismatch) {
-      const reasons = [
-        searchMismatch ? `search="${actualSearchTerm.slice(0, 90) || "missing"}"` : "",
-        checkInMismatch ? `checkin="${current.searchParams.get("checkin") || "missing"}"` : "",
-        checkOutMismatch ? `checkout="${current.searchParams.get("checkout") || "missing"}"` : "",
-      ].filter(Boolean).join(", ");
-      log(`booking_search: restored intended URL after Booking rewrote ${reasons}`);
-      await page.goto(expectedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-      await page.waitForTimeout(PAGE_SETTLE_MS);
-      await dismissObstructions(page, "booking_search_after_query_restore");
-      return true;
-    }
-  } catch (e) {
-    log(`booking search-term restore skipped: ${e?.message ?? e}`);
-  }
-  return false;
-}
-
-async function enforceBookingSearchUrl(expectedUrl, expectedSearchTerm, expectedCheckIn, expectedCheckOut, label) {
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const restored = await restoreBookingSearchUrlIfRewritten(expectedUrl, expectedSearchTerm, expectedCheckIn, expectedCheckOut);
-    const current = new URL(page.url());
-    const expected = new URL(expectedUrl);
-    if (!bookingUrlMissingExpectedSearch(current, expected)) return true;
-    log(
-      `booking_search: ${label} still missing intended dates/search after ${restored ? "restore" : "check"} ` +
-      `${attempt}/3 (url=${current.toString().slice(0, 180)})`,
-    );
-    await page.goto(expectedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-    await page.waitForTimeout(PAGE_SETTLE_MS);
-    await dismissObstructions(page, `booking_search_${label}_${attempt}`).catch(() => null);
-  }
-  const finalUrl = page.url();
-  const finalState = await dumpPageState("booking-invalid-dates", {
-    expectedUrl,
-    expectedSearchTerm,
-    expectedCheckIn,
-    expectedCheckOut,
-    finalUrl,
-  }).catch(() => null);
-  const excerpt = finalState?.bodyExcerpt ? ` Body starts: ${finalState.bodyExcerpt.slice(0, 180)}` : "";
-  throw new Error(
-    `Booking.com rewrote the search away from ${expectedCheckIn}→${expectedCheckOut}; refusing to use default-date results. ` +
-    `Final URL: ${finalUrl.slice(0, 220)}.${excerpt}`,
-  );
-}
-
 async function processVrboSearch(id, params) {
   const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
@@ -4440,8 +4337,9 @@ async function runVrboSearchVariant(id, params, variant = null) {
       },
     );
   }
-  // Drive VRBO like a user from the public homepage. Do not jump to a
-  // preformatted /search URL; those URLs appear to raise bot scrutiny.
+  // Drive VRBO like a user from the public homepage. Do not jump to an
+  // injected /search URL; those URLs appear to raise bot scrutiny and can
+  // mask destination drift.
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
   const dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "vrbo_search").catch((e) => {
     log(`vrbo_search ${id}: homepage date entry failed: ${e?.message ?? e}`);
@@ -4449,7 +4347,7 @@ async function runVrboSearchVariant(id, params, variant = null) {
   });
   if (!pmDateEntryComplete(dateEntry)) {
     throw new ProviderBrowserUnavailableError(
-      `VRBO homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to use a preformatted search URL.`,
+      `VRBO homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
       {
         label: "vrbo_search",
         id,
@@ -4473,15 +4371,17 @@ async function runVrboSearchVariant(id, params, variant = null) {
   };
   let correctionReasons = vrboStateCorrectionReasons(quickPostSubmitState, checkIn, checkOut, effectiveSearchTerm, destination);
   if (correctionReasons.length > 0) {
-    const correctedUrl = buildVrboSearchUrl(effectiveSearchTerm, checkIn, checkOut);
-    log(
-      `vrbo_search ${id}: homepage submit landed on ${correctionReasons.join("+")} mismatch ` +
-      `(url=${quickPostSubmitState.url.slice(0, 180)}); correcting to intended dated search URL`,
+    throw new ProviderBrowserUnavailableError(
+      `VRBO homepage submit landed on ${correctionReasons.join("+")} mismatch; refusing to correct with an injected search URL.`,
+      {
+        label: "vrbo_search",
+        id,
+        provider: "vrbo",
+        url: quickPostSubmitState.url,
+        title: quickPostSubmitState.title,
+        reasons: correctionReasons,
+      },
     );
-    await page.goto(correctedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-    await page.waitForTimeout(PAGE_SETTLE_MS);
-    await stopVrboProviderIfBlocked(page, "vrbo_search", id);
-    await dismissObstructions(page, "vrbo_search_after_url_correction");
   }
   // Do not apply VRBO's browser-side bedroom filter here. The same
   // resort/date browser run is shared across all bedroom-combination
@@ -4506,23 +4406,8 @@ async function runVrboSearchVariant(id, params, variant = null) {
   }
   correctionReasons = vrboStateCorrectionReasons(state, checkIn, checkOut, effectiveSearchTerm, destination);
   if (correctionReasons.length > 0) {
-    const correctedUrl = buildVrboSearchUrl(effectiveSearchTerm, checkIn, checkOut);
-    log(
-      `vrbo_search ${id}: VRBO state still shows ${correctionReasons.join("+")} mismatch; ` +
-      "retrying once with the intended dated search URL before extraction",
-    );
-    await page.goto(correctedUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-    await page.waitForTimeout(PAGE_SETTLE_MS);
-    await stopVrboProviderIfBlocked(page, "vrbo_search", id);
-    await dismissObstructions(page, "vrbo_search_after_state_correction");
-    state = await dumpPageState("vrbo-corrected", { id, ...params });
-    throwIfBrightDataKycBlock(state, "vrbo_search", id);
-    if (await stopVrboProviderIfBlocked(page, "vrbo_search", id, state)) {
-      state = await dumpPageState("vrbo-corrected-after-manual-solve", { id, ...params });
-    }
-    throwIfVrboHardBlock(state, "vrbo_search", id);
     if (stateLooksLikeVrboHumanChallenge(state)) {
-      throw new VrboHardBlockError("VRBO human-verification page remained visible after URL correction; provider run stopped and retry is rate-limited until later", {
+      throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
         label: "vrbo_search",
         id,
         url: state?.url,
@@ -4531,6 +4416,18 @@ async function runVrboSearchVariant(id, params, variant = null) {
         retryLater: true,
       });
     }
+    throw new ProviderBrowserUnavailableError(
+      `VRBO visible search state shows ${correctionReasons.join("+")} mismatch; refusing to correct with an injected search URL.`,
+      {
+        label: "vrbo_search",
+        id,
+        provider: "vrbo",
+        url: state?.url,
+        title: state?.title,
+        reasons: correctionReasons,
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      },
+    );
   }
   throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, destination);
   throwIfVrboDateMismatch(state, "vrbo_search", id, checkIn, checkOut);
@@ -4781,37 +4678,59 @@ async function processBookingSearch(id, params) {
 async function runBookingSearchVariant(id, params, variant = null) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
+  const typedQuery = String(variant?.typedQuery || otaBaseSearchQuery(searchTerm, destination) || effectiveSearchTerm).trim();
   log(
     `booking_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
-  // Booking.com supports `nflt=entire_place_bedroom_count%3D${bedrooms}`
-  // for the bedroom filter (URL-encoded "entire_place_bedroom_count=N"),
-  // sorted by price: `&order=price`. Do not click the Booking homepage
-  // form first: its visible calendar defaults to today/tomorrow and can
-  // asynchronously rewrite this URL back to the wrong dates.
-  const urlParams = new URLSearchParams({
-    ss: effectiveSearchTerm,
-    ssne: effectiveSearchTerm,
-    ssne_untouched: effectiveSearchTerm,
-    checkin: checkIn,
-    checkout: checkOut,
-    group_adults: "2",
-    no_rooms: "1",
-    group_children: "0",
-    order: "price",
-    selected_currency: "USD",
-    nflt: `entire_place_bedroom_count=${bedrooms}`,
+  const primedDestination = await primeOtaHomepageSearch("https://www.booking.com/", effectiveSearchTerm, "booking_search", id, {
+    inputTerm: typedQuery,
+    targetSuggestion: variant?.suggestionText || null,
+    submitAfterSearch: false,
   });
-  const url = `https://www.booking.com/searchresults.html?${urlParams.toString()}`;
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  if (!primedDestination) {
+    const state = await dumpPageState("booking-unprimed-destination", { id, ...params }).catch(() => null);
+    throw new ProviderBrowserUnavailableError(
+      `Booking.com homepage did not confirm destination "${effectiveSearchTerm}" from the visible dropdown; refusing to submit the provider's default/geolocated search.`,
+      {
+        label: "booking_search",
+        id,
+        provider: "booking",
+        url: page.url(),
+        title: await page.title().catch(() => state?.title ?? ""),
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      },
+    );
+  }
+  await dismissBookingPopups(page, "booking_search_before_dates");
+  const dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "booking_search").catch((e) => {
+    log(`booking_search ${id}: homepage date entry failed: ${e?.message ?? e}`);
+    return null;
+  });
+  if (!pmDateEntryComplete(dateEntry)) {
+    throw new ProviderBrowserUnavailableError(
+      `Booking.com homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
+      {
+        label: "booking_search",
+        id,
+        provider: "booking",
+        url: page.url(),
+        title: await page.title().catch(() => ""),
+        dateEntry,
+      },
+    );
+  }
+  log(`booking_search ${id}: entered dates via Booking.com homepage controls (${checkIn}→${checkOut})`);
+  await clickVisibleSearchSubmit(page, "booking_search").catch(() => null);
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopOtaProviderIfBlocked(page, "booking_search", id);
-  await dismissBookingPopups(page, "booking_search");
-  await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_initial_goto");
-  await applyBookingBedroomFilter(bedrooms, url).catch(() => false);
-  await enforceBookingSearchUrl(url, effectiveSearchTerm, checkIn, checkOut, "after_bedroom_filter");
+  await dismissBookingPopups(page, "booking_search_after_submit");
+  const bedroomFiltered = await fillBedroomFilter(page, bedrooms, "booking_search").catch(() => null);
+  if (!bedroomFiltered) {
+    log(`booking_search ${id}: bedroom filter was not found in visible UI; continuing with visible results and card-level bedroom filtering only`);
+  }
+  await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissBookingPopups(page, "booking_search_before_scrape");
   let state = await dumpPageState("booking", { id, ...params });
   throwIfBrightDataKycBlock(state, "booking_search", id);
