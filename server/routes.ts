@@ -52,7 +52,13 @@ import { discoverPmDomains } from "./pm-discovery";
 import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
-import { acquireSidecarLane, getSidecarLaneStatus, isSidecarLaneOwner } from "./sidecar-lane";
+import {
+  acquireSidecarLane,
+  cancelActiveSidecarLane,
+  getSidecarLaneStatus,
+  isSidecarLaneCancellationRequested,
+  isSidecarLaneOwner,
+} from "./sidecar-lane";
 import { findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
@@ -8315,6 +8321,9 @@ export async function registerRoutes(
     const noCache = req.query.nocache === "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+    let findBuyInLaneHeartbeat: ReturnType<typeof setInterval> | null = null;
+    let findBuyInLaneCancelPoll: ReturnType<typeof setInterval> | null = null;
+    let findBuyInLaneRelease: (() => void) | null = null;
     let responseSettled = false;
     const startResponseKeepAlive = () => {
       if (keepAliveTimer || nodeRes.writableEnded || nodeRes.destroyed) return;
@@ -8336,6 +8345,16 @@ export async function registerRoutes(
     const sendFindBuyInJson = (body: any) => {
       responseSettled = true;
       stopResponseKeepAlive();
+      if (findBuyInLaneHeartbeat) {
+        clearInterval(findBuyInLaneHeartbeat);
+        findBuyInLaneHeartbeat = null;
+      }
+      if (findBuyInLaneCancelPoll) {
+        clearInterval(findBuyInLaneCancelPoll);
+        findBuyInLaneCancelPoll = null;
+      }
+      findBuyInLaneRelease?.();
+      findBuyInLaneRelease = null;
       if (nodeRes.headersSent) {
         return nodeRes.end(JSON.stringify(body));
       }
@@ -8344,6 +8363,10 @@ export async function registerRoutes(
     const requestAbort = new AbortController();
     nodeRes.on("close", () => {
       stopResponseKeepAlive();
+      if (findBuyInLaneHeartbeat) clearInterval(findBuyInLaneHeartbeat);
+      if (findBuyInLaneCancelPoll) clearInterval(findBuyInLaneCancelPoll);
+      findBuyInLaneRelease?.();
+      findBuyInLaneRelease = null;
       if (responseSettled) return;
       requestAbort.abort(`find-buy-in client disconnected before completion ${cacheKey}`);
     });
@@ -8604,6 +8627,34 @@ export async function registerRoutes(
     const { getSidecarStopGeneration } = await import("./vrbo-sidecar-queue");
     const sidecarStopGeneration = getSidecarStopGeneration();
     const routeRemainingMs = () => Math.max(0, FIND_BUY_IN_ROUTE_BUDGET_MS - (Date.now() - scanStartedAt));
+    const findBuyInLaneOwnerId = cacheKey;
+    const findBuyInLaneLabel = `Find buy-in ${community} ${bedrooms}BR ${checkIn}→${checkOut}`;
+    // NOTE FOR CODEX: normal find-buy-in searches are sidecar producers,
+    // not just individual queue items. This lane prevents a stale Kaha Lani
+    // producer from enqueueing new Airbnb/VRBO/Booking work while Jamie is
+    // trying to run a Poipu Kai search. Stop/Clear marks the lane cancelled;
+    // the low-level queue cancellation still happens in vrbo-sidecar-queue.
+    const findBuyInLane = await acquireSidecarLane({
+      ownerType: "find-buy-in",
+      ownerId: findBuyInLaneOwnerId,
+      label: findBuyInLaneLabel,
+      waitTimeoutMs: FIND_BUY_IN_ROUTE_BUDGET_MS,
+      pollMs: 1_000,
+      shouldCancel: async () =>
+        requestAbort.signal.aborted ||
+        isSidecarLaneCancellationRequested("find-buy-in", findBuyInLaneOwnerId),
+      onWait: async (owner) => {
+        console.log(`[find-buy-in] ${findBuyInLaneLabel} waiting for Chrome sidecar lane held by ${owner.label}`);
+      },
+    });
+    findBuyInLaneRelease = findBuyInLane.release;
+    findBuyInLaneHeartbeat = setInterval(() => findBuyInLane.heartbeat(), 30_000);
+    findBuyInLaneHeartbeat.unref?.();
+    findBuyInLaneCancelPoll = setInterval(() => {
+      if (!isSidecarLaneCancellationRequested("find-buy-in", findBuyInLaneOwnerId)) return;
+      requestAbort.abort(`find-buy-in cancelled by sidecar lane stop/clear: ${findBuyInLaneLabel}`);
+    }, 1_000);
+    findBuyInLaneCancelPoll.unref?.();
     const sourceErrors: Array<{ source: string; message: string }> = [];
     const sourceTimeouts: Array<{ source: string; ms: number }> = [];
     const makeSidecarAbort = (label: string) => {
@@ -17463,6 +17514,7 @@ Return ONLY compact JSON with this exact shape:
     const reason = typeof body.reason === "string" && body.reason.trim()
       ? body.reason.trim().slice(0, 200)
       : "stopped by operator from Operations UI";
+    const laneCancelResult = cancelActiveSidecarLane(reason);
     const { cancelActiveAndPendingRequests, pauseQueue } = await import("./vrbo-sidecar-queue");
     const cancelResult = cancelActiveAndPendingRequests(reason);
     const pauseResult = pauseQueue(reason);
@@ -17470,6 +17522,8 @@ Return ONLY compact JSON with this exact shape:
       ok: true,
       paused: true,
       alreadyPaused: pauseResult.alreadyPaused,
+      laneCancelled: laneCancelResult.cancelled,
+      laneOwner: laneCancelResult.owner,
       ...cancelResult,
     });
   });
@@ -17479,6 +17533,7 @@ Return ONLY compact JSON with this exact shape:
     const reason = typeof body.reason === "string" && body.reason.trim()
       ? body.reason.trim().slice(0, 200)
       : "cleared by operator from Operations UI";
+    const laneCancelResult = cancelActiveSidecarLane(reason);
     const { clearSidecarQueue, pauseQueue } = await import("./vrbo-sidecar-queue");
     const pauseResult = pauseQueue(reason);
     const clearResult = clearSidecarQueue(reason);
@@ -17486,6 +17541,8 @@ Return ONLY compact JSON with this exact shape:
       ok: true,
       paused: true,
       alreadyPaused: pauseResult.alreadyPaused,
+      laneCancelled: laneCancelResult.cancelled,
+      laneOwner: laneCancelResult.owner,
       ...clearResult,
     });
   });
