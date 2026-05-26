@@ -6000,8 +6000,19 @@ async function applyVisualPmDateFallback(targetPage, checkIn, checkOut) {
         return valueNeedles(value, iso).some((needle) => needle && current.includes(needle));
       }
 
+      function isFillableDateControl(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const tag = el.tagName.toLowerCase();
+        const type = (el.getAttribute?.("type") || "").toLowerCase();
+        if (tag === "textarea" || tag === "select") return true;
+        if (el.isContentEditable || el.getAttribute?.("role") === "textbox") return true;
+        if (tag !== "input") return false;
+        return !["button", "submit", "reset", "checkbox", "radio", "file", "image"].includes(type);
+      }
+
       function setValue(el, value, iso) {
         if (!el || !(el instanceof HTMLElement)) return false;
+        if (!isFillableDateControl(el)) return false;
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute?.("type") || "").toLowerCase();
         const nextValue = tag === "input" && type === "date" ? iso : value;
@@ -6044,11 +6055,15 @@ async function applyVisualPmDateFallback(targetPage, checkIn, checkOut) {
       }
 
       const filled = [];
+      let openedLabel = null;
       const addFill = (role, id, value, iso) => {
         const el = find(id);
         if (!el) return;
         if (setValue(el, value, iso)) {
           filled.push({ role, label: `visual ${contextOf(el)}`, visible: isVisible(el) });
+        } else if (!isFillableDateControl(el)) {
+          const label = activate(el);
+          if (label) openedLabel = label;
         }
       };
 
@@ -6066,7 +6081,7 @@ async function applyVisualPmDateFallback(targetPage, checkIn, checkOut) {
       return {
         filled,
         submitLabel,
-        openedLabel: null,
+        openedLabel,
         controlCount: Number(plan.candidateCount || 0),
         visualReason: clean(plan.reason).slice(0, 160),
       };

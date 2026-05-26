@@ -16816,8 +16816,8 @@ The screenshot shows the current viewport. The candidate list below contains cli
 Rules:
 - Prefer actual visible input boxes labeled Arrival, Check in, Check-in, Departure, Check out, or Check-out.
 - If separate arrival and departure boxes are visible, return checkInId and checkOutId and leave rangeId null.
-- If only one combined date range box is visible, return rangeId and leave checkInId/checkOutId null.
-- For submitId, choose the visible Search, Search Availability, Check Availability, Check Rates, Apply, or Update button near the date fields.
+- If only one combined date range box is visible, return rangeId and leave checkInId/checkOutId null. If that range control is a button rather than a fillable input, it is only an opener; do not treat its current text as proof that the requested dates are already set.
+- For submitId, choose the visible Search, Search Availability, Check Availability, Check Rates, Apply, or Update button near the date fields only when the chosen date controls can actually receive the requested dates. If the only date control is a button opener currently showing stale/wrong dates, return submitId null.
 - Do not choose phone numbers, Contact, Share, favorites, map/list view, filters, newsletter, or nav links.
 - Return null for any ID you cannot confidently identify.
 
