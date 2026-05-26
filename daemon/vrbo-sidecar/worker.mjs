@@ -1137,6 +1137,24 @@ function pmDateEntryComplete(dateEntry) {
   );
 }
 
+function mergeDateEntries(prev, next) {
+  const filled = [];
+  const seen = new Set();
+  for (const item of [...(prev?.filled ?? []), ...(next?.filled ?? [])]) {
+    const key = `${item.role}|${item.label}|${item.visible}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    filled.push(item);
+  }
+  return {
+    controlCount: next?.controlCount ?? prev?.controlCount ?? 0,
+    filled,
+    submitLabel: next?.submitLabel ?? prev?.submitLabel ?? null,
+    openedLabel: prev?.openedLabel ?? next?.openedLabel ?? null,
+    visualReason: next?.visualReason ?? prev?.visualReason ?? null,
+  };
+}
+
 function attachDetectedBedrooms(result, bedrooms) {
   if (!result) return result;
   if (typeof result.bedrooms === "number" && Number.isFinite(result.bedrooms)) return result;
@@ -3731,16 +3749,7 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
     );
   }
   await dismissObstructions(page, "airbnb_search_before_dates");
-  let dateEntry = await applyOtaHomepageDateInputs(page, checkIn, checkOut, "airbnb_search", "airbnb").catch((e) => {
-    log(`airbnb_search ${id}: homepage deterministic date entry failed: ${e?.message ?? e}`);
-    return null;
-  });
-  if (!pmDateEntryComplete(dateEntry)) {
-    dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "airbnb_search").catch((e) => {
-      log(`airbnb_search ${id}: homepage generic date entry failed: ${e?.message ?? e}`);
-      return null;
-    });
-  }
+  const dateEntry = await applyOtaSearchDateInputs(page, checkIn, checkOut, "airbnb_search", "airbnb");
   if (!pmDateEntryComplete(dateEntry)) {
     throw new ProviderBrowserUnavailableError(
       `Airbnb homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
@@ -4461,16 +4470,7 @@ async function runVrboSearchVariant(id, params, variant = null) {
   // injected /search URL; those URLs appear to raise bot scrutiny and can
   // mask destination drift.
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
-  let dateEntry = await applyOtaHomepageDateInputs(page, checkIn, checkOut, "vrbo_search", "vrbo").catch((e) => {
-    log(`vrbo_search ${id}: homepage deterministic date entry failed: ${e?.message ?? e}`);
-    return null;
-  });
-  if (!pmDateEntryComplete(dateEntry)) {
-    dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "vrbo_search").catch((e) => {
-      log(`vrbo_search ${id}: homepage generic date entry failed: ${e?.message ?? e}`);
-      return null;
-    });
-  }
+  const dateEntry = await applyOtaSearchDateInputs(page, checkIn, checkOut, "vrbo_search", "vrbo");
   if (!pmDateEntryComplete(dateEntry)) {
     throw new ProviderBrowserUnavailableError(
       `VRBO homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
@@ -5086,6 +5086,36 @@ async function applyBookingDateInputs(targetPage, checkIn, checkOut, label = "bo
   return applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label, "booking");
 }
 
+async function applyOtaSearchDateInputs(targetPage, checkIn, checkOut, label, provider) {
+  let dateEntry = await applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label, provider).catch((e) => {
+    log(`${label}: homepage deterministic date entry failed: ${e?.message ?? e}`);
+    return null;
+  });
+  if (!pmDateEntryComplete(dateEntry)) {
+    await dismissObstructions(targetPage, `${label}_date_entry_visual_assist`);
+    const visualEntry = await applyVisualPmDateFallback(targetPage, checkIn, checkOut).catch((e) => {
+      log(`${label}: visual date assist failed: ${e?.message ?? e}`);
+      return null;
+    });
+    dateEntry = mergeDateEntries(dateEntry, visualEntry);
+    if (visualEntry?.visualReason || visualEntry?.filled?.length) {
+      log(
+        `${label}: visual date assist ` +
+        `${pmDateEntryComplete(dateEntry) ? "completed" : "did not complete"} date entry` +
+        `${visualEntry?.visualReason ? ` (${visualEntry.visualReason})` : ""}`,
+      );
+    }
+  }
+  if (!pmDateEntryComplete(dateEntry)) {
+    const genericEntry = await applyPmDateInputs(targetPage, checkIn, checkOut, label, { skipVisualFallback: true }).catch((e) => {
+      log(`${label}: homepage generic date entry failed: ${e?.message ?? e}`);
+      return null;
+    });
+    dateEntry = mergeDateEntries(dateEntry, genericEntry);
+  }
+  return dateEntry;
+}
+
 async function runBookingSearchVariant(id, params, variant = null) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
@@ -5115,16 +5145,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
     );
   }
   await dismissBookingPopups(page, "booking_search_before_dates");
-  let dateEntry = await applyBookingDateInputs(page, checkIn, checkOut, "booking_search").catch((e) => {
-    log(`booking_search ${id}: homepage date entry failed: ${e?.message ?? e}`);
-    return null;
-  });
-  if (!pmDateEntryComplete(dateEntry)) {
-    dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "booking_search").catch((e) => {
-      log(`booking_search ${id}: homepage generic date entry failed: ${e?.message ?? e}`);
-      return null;
-    });
-  }
+  const dateEntry = await applyOtaSearchDateInputs(page, checkIn, checkOut, "booking_search", "booking");
   if (!pmDateEntryComplete(dateEntry)) {
     throw new ProviderBrowserUnavailableError(
       `Booking.com homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
@@ -6055,8 +6076,9 @@ async function applyVisualPmDateFallback(targetPage, checkIn, checkOut) {
   ).catch(() => null);
 }
 
-async function applyPmDateInputs(targetPage, checkIn, checkOut, label = "pm_url_check") {
+async function applyPmDateInputs(targetPage, checkIn, checkOut, label = "pm_url_check", options = {}) {
   if (!targetPage || targetPage.isClosed?.()) return null;
+  const skipVisualFallback = options?.skipVisualFallback === true;
   const attempt = async (allowOpenOnly) => withSoftTimeout(
     targetPage.evaluate(({ checkIn, checkOut, allowOpenOnly }) => {
       const [cinY, cinM, cinD] = String(checkIn).split("-").map((p) => parseInt(p, 10));
@@ -6379,61 +6401,44 @@ async function applyPmDateInputs(targetPage, checkIn, checkOut, label = "pm_url_
   const hasCompleteDateEntry = (entry) =>
     entry?.filled?.some((f) => f.role === "range" && f.visible) ||
     (entry?.filled?.some((f) => f.role === "checkin" && f.visible) && entry?.filled?.some((f) => f.role === "checkout" && f.visible));
-  const mergeDateEntry = (prev, next) => {
-    const filled = [];
-    const seen = new Set();
-    for (const item of [...(prev?.filled ?? []), ...(next?.filled ?? [])]) {
-      const key = `${item.role}|${item.label}|${item.visible}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      filled.push(item);
-    }
-    return {
-      controlCount: next?.controlCount ?? prev?.controlCount ?? 0,
-      filled,
-      submitLabel: next?.submitLabel ?? prev?.submitLabel ?? null,
-      openedLabel: prev?.openedLabel ?? next?.openedLabel ?? null,
-      visualReason: next?.visualReason ?? prev?.visualReason ?? null,
-    };
-  };
   const knownPair = await fillKnownPmDatePairs(targetPage, checkIn, checkOut);
   await targetPage.waitForTimeout(hasCompleteDateEntry(knownPair) ? 500 : 0).catch(() => {});
   const first = hasCompleteDateEntry(knownPair)
     ? knownPair
-    : mergeDateEntry(knownPair, await attempt(true));
+    : mergeDateEntries(knownPair, await attempt(true));
   let result = first;
   if (first?.openedLabel && (!first.filled || first.filled.length === 0)) {
     await targetPage.waitForTimeout(1_000).catch(() => {});
     await dismissObstructions(targetPage, `${label}_date_entry_after_open`);
     const second = await attempt(false);
-    result = mergeDateEntry(first, second);
+    result = mergeDateEntries(first, second);
   }
   for (let i = 0; result?.filled?.length > 0 && !hasCompleteDateEntry(result) && i < 2; i++) {
     await targetPage.waitForTimeout(PM_PARTIAL_DATE_RETRY_MS).catch(() => {});
     await dismissObstructions(targetPage, `${label}_date_entry_after_partial`);
     const next = await attempt(false);
-    result = mergeDateEntry(result, next);
+    result = mergeDateEntries(result, next);
     if (!next?.filled?.length && !next?.openedLabel && !next?.submitLabel) break;
   }
   if (!hasCompleteDateEntry(result)) {
     await targetPage.waitForTimeout(500).catch(() => {});
     const knownPairRetry = await fillKnownPmDatePairs(targetPage, checkIn, checkOut);
-    result = mergeDateEntry(result, knownPairRetry);
+    result = mergeDateEntries(result, knownPairRetry);
   }
   if (!hasCompleteDateEntry(result)) {
     await dismissObstructions(targetPage, `${label}_date_entry_calendar_fallback`);
     const calendar = await clickPmCalendarDates(targetPage, checkIn, checkOut);
-    result = mergeDateEntry(result, calendar);
+    result = mergeDateEntries(result, calendar);
   }
-  if (!hasCompleteDateEntry(result)) {
+  if (!hasCompleteDateEntry(result) && !skipVisualFallback) {
     await dismissObstructions(targetPage, `${label}_date_entry_visual_fallback`);
     const visual = await applyVisualPmDateFallback(targetPage, checkIn, checkOut);
-    result = mergeDateEntry(result, visual);
+    result = mergeDateEntries(result, visual);
   }
   if (hasCompleteDateEntry(result) && !result?.submitLabel) {
     await targetPage.waitForTimeout(700).catch(() => {});
     const submitRetry = await attempt(false);
-    if (submitRetry?.submitLabel) result = mergeDateEntry(result, submitRetry);
+    if (submitRetry?.submitLabel) result = mergeDateEntries(result, submitRetry);
   }
   const filledCount = result?.filled?.length ?? 0;
   const entryComplete = hasCompleteDateEntry(result);
