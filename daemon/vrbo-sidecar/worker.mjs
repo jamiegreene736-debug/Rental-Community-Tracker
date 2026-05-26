@@ -3354,39 +3354,73 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
           Number(style.opacity || "1") > 0.05;
       }
 
+      function displayText(el) {
+        return String([
+          el.innerText,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" ")).replace(/\s+/g, " ").trim();
+      }
+
+      function looksLikePageChrome(text, norm) {
+        if (text.length > 150) return true;
+        if (/(?:homes|experiences|services).{0,60}(?:where|when|add dates|add guests|search)/i.test(text)) return true;
+        if (/\bwhere\b.*\bwhen\b.*\badd dates\b.*\badd guests\b/i.test(text)) return true;
+        const queryHits = queryTokens.reduce((sum, token) => sum + (norm.match(new RegExp(`\\b${token}\\b`, "g"))?.length ?? 0), 0);
+        return queryTokens.length > 0 && queryHits > queryTokens.length * 2;
+      }
+
+      function hasMatchingDescendant(row, rowNorm, rowText) {
+        return Array.from(row.querySelectorAll("[role='option'], [role='menuitem'], li, button, a, [data-testid*='option' i], [data-testid*='suggest' i]"))
+          .some((child) => {
+            if (!(child instanceof HTMLElement) || child === row || !isVisible(child)) return false;
+            const text = displayText(child);
+            const norm = clean(text);
+            if (!norm || norm === rowNorm || text.length >= rowText.length) return false;
+            const tokens = tokenSet(norm);
+            return (!queryTokens.length || hasAllTokens(tokens, queryTokens)) &&
+              (!requiredCityTokens.length || hasAllTokens(tokens, requiredCityTokens)) &&
+              (!locationTokens.length || hasAnyToken(tokens, locationTokens));
+          });
+      }
+
       const out = [];
       const seen = new Set();
       const nodes = Array.from(document.querySelectorAll([
         "[role='option']",
-        "[role='listbox'] *",
-        "[data-testid*='autocomplete' i] *",
+        "[role='menuitem']",
+        "[data-testid*='autocomplete' i] [role='option']",
+        "[data-testid*='autocomplete' i] li",
+        "[data-testid*='autocomplete' i] button",
         "[aria-selected]",
         "[data-testid*='option' i]",
         "[data-testid*='suggest' i]",
-        "[class*='autocomplete' i] *",
-        "[class*='autosuggest' i] *",
-        "[class*='suggest' i] *",
-        "[class*='typeahead' i] *",
-        "[class*='destination' i] *",
+        "[class*='autocomplete' i] [role='option']",
+        "[class*='autocomplete' i] li",
+        "[class*='autocomplete' i] button",
+        "[class*='autosuggest' i] [role='option']",
+        "[class*='autosuggest' i] li",
+        "[class*='autosuggest' i] button",
+        "[class*='suggest' i] [role='option']",
+        "[class*='suggest' i] li",
+        "[class*='suggest' i] button",
+        "[class*='typeahead' i] [role='option']",
+        "[class*='typeahead' i] li",
+        "[class*='typeahead' i] button",
         "li",
         "button",
         "a",
-        "div",
-        "span",
       ].join(",")));
       for (const el of nodes) {
         if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
-        const row = el.closest("[role='option'], li, button, a, [data-testid*='option' i], [data-testid*='suggest' i]") || el;
+        const row = el.closest("[role='option'], [role='menuitem'], li, button, a, [data-testid*='option' i], [data-testid*='suggest' i]") || el;
         if (!(row instanceof HTMLElement) || !isVisible(row)) continue;
-        const text = String([
-          row.textContent,
-          row.getAttribute?.("aria-label"),
-          row.getAttribute?.("title"),
-          row.getAttribute?.("value"),
-        ].filter(Boolean).join(" ")).replace(/\s+/g, " ").trim();
+        const text = displayText(row);
         const norm = clean(text);
-        if (!norm || text.length > 240) continue;
+        if (!norm || looksLikePageChrome(text, norm)) continue;
         if (/^search for\b/i.test(text) || /\bsearch for\b/i.test(norm)) continue;
+        if (hasMatchingDescendant(row, norm, text)) continue;
         const tokens = tokenSet(norm);
         if (queryTokens.length && !hasAllTokens(tokens, queryTokens)) continue;
         if (requiredCityTokens.length && !hasAllTokens(tokens, requiredCityTokens)) continue;
@@ -3443,9 +3477,26 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
           Number(style.opacity || "1") > 0.05;
       }
 
+      function displayText(el) {
+        return String([
+          el.innerText,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+        ].filter(Boolean).join(" ")).replace(/\s+/g, " ").trim();
+      }
+
+      function looksLikePageChrome(text, norm) {
+        if (text.length > 150) return true;
+        if (/(?:homes|experiences|services).{0,60}(?:where|when|add dates|add guests|search)/i.test(text)) return true;
+        if (/\bwhere\b.*\bwhen\b.*\badd dates\b.*\badd guests\b/i.test(text)) return true;
+        const queryHits = requiredSearchTokens.reduce((sum, token) => sum + (norm.match(new RegExp(`\\b${token}\\b`, "g"))?.length ?? 0), 0);
+        return requiredSearchTokens.length > 0 && queryHits > requiredSearchTokens.length * 2;
+      }
+
       const candidates = Array.from(document.querySelectorAll([
         "[role='option']",
-        "[role='listbox'] *",
+        "[role='menuitem']",
         "[aria-selected]",
         "[data-testid*='option' i]",
         "[data-testid*='suggest' i]",
@@ -3455,9 +3506,9 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
       ].join(",")))
         .filter((el) => el instanceof HTMLElement && isVisible(el))
         .map((el) => {
-          const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+          const text = displayText(el);
           const norm = clean(text);
-          if (!norm || text.length > 220) return null;
+          if (!norm || looksLikePageChrome(text, norm)) return null;
           if (/^search for\b/i.test(text) || /\bsearch for\b/i.test(norm)) return null;
           const tokens = tokenSet(norm);
           if (!hasAllTokens(tokens, requiredSearchTokens)) return null;
