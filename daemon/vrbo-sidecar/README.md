@@ -171,6 +171,14 @@ SIDECAR_WARM_ALL_LOCAL_CHROME=1
 # SIDECAR_CHROME_VISIBLE_POSITIONS=1440,60;1820,60;2200,60;2580,60;1440,470;1820,470;2200,470;2580,470
 ```
 
+The visible grid size is an operator thumbnail, not the scrape
+viewport. The worker reasserts its emulated desktop viewport before
+navigation snapshots and vision fallback screenshots, so a `500x375`
+visible tile can still expose a `1280x820` page viewport to OTA sites.
+If logs ever show `warning: scrape viewport stayed small`, increase
+`SIDECAR_CHROME_VISIBLE_SIZE` or switch that run to headless/server
+mode before trusting provider card extraction.
+
 ## Local concurrency
 
 Server Chrome is enabled by default for the installed LaunchAgent. The

@@ -139,6 +139,7 @@ let activeBrowserFingerprint = null;
 let lastObservedQueueControlGeneration = null;
 let pendingIdleChromeReset = false;
 let lastObservedWindowState = null;
+let lastViewportWarningAt = 0;
 
 function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
@@ -1782,6 +1783,40 @@ async function normalizePageDisplay(targetPage = page) {
   // Chrome profile zoom can persist per-origin. Reset the visible tab
   // so the sidecar window doesn't stay accidentally zoomed out.
   await withSoftTimeout(targetPage.keyboard.press(process.platform === "darwin" ? "Meta+0" : "Control+0"), 1_000);
+  const metrics = await withSoftTimeout(targetPage.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    outerWidth: window.outerWidth,
+    outerHeight: window.outerHeight,
+    visualWidth: window.visualViewport?.width ?? window.innerWidth,
+    visualHeight: window.visualViewport?.height ?? window.innerHeight,
+    devicePixelRatio: window.devicePixelRatio,
+  })), 1_500, null);
+  const minWidth = Math.min(1000, viewport.width - 80);
+  const minHeight = Math.min(700, viewport.height - 80);
+  const tooSmall = metrics && (metrics.innerWidth < minWidth || metrics.innerHeight < minHeight);
+  if (tooSmall) {
+    await withSoftTimeout(targetPage.setViewportSize(viewport), 1_500);
+    await applyFingerprintToPage(targetPage).catch(() => {});
+    const retry = await withSoftTimeout(targetPage.evaluate(() => ({
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      outerWidth: window.outerWidth,
+      outerHeight: window.outerHeight,
+      visualWidth: window.visualViewport?.width ?? window.innerWidth,
+      visualHeight: window.visualViewport?.height ?? window.innerHeight,
+    })), 1_500, null);
+    const stillTooSmall = retry && (retry.innerWidth < minWidth || retry.innerHeight < minHeight);
+    const now = Date.now();
+    if (stillTooSmall && now - lastViewportWarningAt > 30_000) {
+      lastViewportWarningAt = now;
+      log(
+        `warning: scrape viewport stayed small after normalization ` +
+        `inner=${retry.innerWidth}x${retry.innerHeight} visual=${retry.visualWidth}x${retry.visualHeight} ` +
+        `outer=${retry.outerWidth}x${retry.outerHeight}; expected ${viewport.width}x${viewport.height}`,
+      );
+    }
+  }
   scheduleSidecarMinimize(targetPage);
 }
 
@@ -1828,7 +1863,10 @@ async function clearContextStorageForFreshRun(label = "fresh browser run", optio
 async function ensureBrowser() {
   const allocation = await acquireChromeForRequest();
   if (usingHeadlessRuntime()) return ensureHeadlessBrowser();
-  if (browser && context && page && !page.isClosed()) return;
+  if (browser && context && page && !page.isClosed()) {
+    await normalizePageDisplay(page);
+    return;
+  }
   log(`connecting to Chrome via CDP (${allocation.label})…`);
   await verifyActiveChromeHealth("before connect");
   browser = await chromium.connectOverCDP(allocation.cdpUrl);
@@ -2290,6 +2328,7 @@ async function postScreenSnapshot(req, targetPage = page, phase = "working", ext
     let width = VIEWPORT.width;
     let height = VIEWPORT.height;
     if (snapshotPage && !snapshotPage.isClosed?.()) {
+      await normalizePageDisplay(snapshotPage).catch(() => {});
       try { url = snapshotPage.url?.() ?? ""; } catch {}
       title = await snapshotPage.title?.().catch(() => "") ?? "";
       const viewport = snapshotPage.viewportSize?.() ?? null;
@@ -3346,8 +3385,10 @@ async function askOtaVisionAction(targetPage, label, prompt, options = {}) {
     opType: options.opType ?? label,
   };
   try {
+    await normalizePageDisplay(targetPage).catch(() => {});
     await postScreenSnapshot(req, targetPage, `${label} vision fallback`, { force: true }).catch(() => {});
     await applyScreenControlCommands(req, targetPage, label).catch(() => 0);
+    await normalizePageDisplay(targetPage).catch(() => {});
     const viewport = targetPage.viewportSize?.() ?? { width: 1280, height: 900 };
     const screenshot = await targetPage.screenshot({ type: "jpeg", quality: 65, fullPage: false });
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
