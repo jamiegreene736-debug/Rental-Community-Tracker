@@ -13287,7 +13287,7 @@ export async function registerRoutes(
     }
   });
 
-  // ========== AIRBNB SEARCH VIA SEARCHAPI.IO ==========
+  // ========== BUY-IN TRACKER SEARCH VIA MULTICHANNEL SIDECAR ==========
 
   // CONDO / TOWNHOME ONLY — mirrors shared/property-units.ts.
   // Removed villa/single-family entries (7, 10, 12, 14, 21, 26, 28, 31) on
@@ -13340,24 +13340,180 @@ export async function registerRoutes(
   // Coordinates here are operator-validated against satellite imagery
   // and the addresses in `client/src/data/unit-builder-data.ts`. The
   // `streetAddress` field is kept for legibility / future debugging
-  // (also used in the SearchAPI `q=` parameter as additional context)
   // but is no longer the primary input to bbox computation.
   const COMMUNITY_LOCATION_BY_KEY: Record<string, { searchName: string; city: string; state: string; streetAddress?: string; lat: number; lng: number }> = {
     ...BUY_IN_MARKET_LOCATIONS,
     "Makahuena at Poipu":{ searchName: "Makahuena at Poipu",           city: "Koloa",       state: "Hawaii", streetAddress: "1661 Pe'e Rd",                lat: 21.8728, lng: -159.4448 },
   };
 
-  // Bounding boxes (SW lat/lng → NE lat/lng) for each community.
-  // SearchAPI Airbnb accepts these as a single bounding_box query param.
-  // We also post-filter by GPS coordinates in the returned listings for extra precision.
+  // Bounding boxes (SW lat/lng → NE lat/lng) for each community. Kept for
+  // older availability helpers; the buy-in tracker now uses the sidecar
+  // location tuple above rather than provider URL/query construction.
   const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = BUY_IN_MARKET_BOUNDS;
 
-  app.get("/api/airbnb/search", async (req, res) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
-    }
+  type BuyInTrackerChannel = "airbnb" | "vrbo" | "booking" | "suite-paradise";
 
+  function nightsBetweenDates(checkIn: string, checkOut: string): number {
+    const start = new Date(`${checkIn}T12:00:00`);
+    const end = new Date(`${checkOut}T12:00:00`);
+    return Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000));
+  }
+
+  function buildBedroomCounts(units: { bedrooms: number }[]): Record<number, number> {
+    const bedroomCounts: Record<number, number> = {};
+    for (const unit of units) {
+      bedroomCounts[unit.bedrooms] = (bedroomCounts[unit.bedrooms] || 0) + 1;
+    }
+    return bedroomCounts;
+  }
+
+  function channelLabel(channel: BuyInTrackerChannel): string {
+    if (channel === "airbnb") return "Airbnb";
+    if (channel === "vrbo") return "VRBO";
+    if (channel === "booking") return "Booking.com";
+    return "Suite Paradise";
+  }
+
+  function trackerBucketFromSidecarScan(
+    scan: any,
+    channel: BuyInTrackerChannel,
+    bedrooms: number,
+    needed: number,
+    nights: number,
+  ) {
+    if (channel === "suite-paradise") {
+      return {
+        count: needed,
+        totalResults: 0,
+        properties: [],
+        note: "Suite Paradise direct PM search is handled by the Operations/find-buy-in multichannel flow; this tracker page now uses live OTA sidecar results for Airbnb, VRBO, and Booking.com.",
+      };
+    }
+    const channelCheapest = scan?.channelCheapestByBR?.[bedrooms]?.[channel];
+    const rawCheapest = scan?.rawChannelCheapestByBR?.[bedrooms]?.[channel];
+    const nightly = Number(channelCheapest || rawCheapest || 0);
+    const availableCount = Number(scan?.channelAvailableCountsByBR?.[bedrooms]?.[channel] || 0);
+    const warnings = Array.isArray(scan?.warnings)
+      ? scan.warnings.filter((w: any) => String(w?.channel || "").toLowerCase() === channel)
+      : [];
+    if (!(nightly > 0)) {
+      return {
+        count: needed,
+        totalResults: availableCount,
+        properties: [],
+        error: warnings[0]?.message || undefined,
+        note: warnings.length > 0
+          ? warnings.map((w: any) => w?.message).filter(Boolean).join(" · ")
+          : `${channelLabel(channel)} returned no dated, priced sidecar cards for ${bedrooms}BR.`,
+      };
+    }
+    const totalPrice = Math.round(nightly * nights);
+    return {
+      count: needed,
+      totalResults: Math.max(availableCount, 1),
+      properties: [{
+        id: `sidecar-${channel}-${bedrooms}br-${scan?.snapshotCheckIn || ""}-${scan?.snapshotCheckOut || ""}`,
+        title: `${channelLabel(channel)} sidecar cheapest ${bedrooms}BR`,
+        description: `${availableCount || 1} visible, dated ${channelLabel(channel)} card${availableCount === 1 ? "" : "s"} matched the resort/date/bedroom rules. Open Operations/find-buy-in for listing-level evidence and screenshots.`,
+        link: "",
+        bookingLink: "",
+        rating: null,
+        reviews: null,
+        price: {
+          total_price: `$${totalPrice.toLocaleString()}`,
+          extracted_total_price: totalPrice,
+          qualifier: "sidecar_all_in",
+          extracted_qualifier: nights,
+          price_per_qualifier: `$${Math.round(nightly).toLocaleString()}/night`,
+          extracted_price_per_qualifier: Math.round(nightly),
+        },
+        accommodations: [
+          `${bedrooms} bedroom${bedrooms === 1 ? "" : "s"}`,
+          `${nights} night${nights === 1 ? "" : "s"}`,
+          scan?.daemonOnline ? "Sidecar live" : "Sidecar offline/degraded",
+        ],
+        images: [],
+        badges: [
+          "Live sidecar",
+          channelLabel(channel),
+          `${availableCount || 1} priced`,
+        ],
+        source: channel,
+      }],
+      note: warnings.length > 0
+        ? warnings.map((w: any) => w?.message).filter(Boolean).join(" · ")
+        : undefined,
+    };
+  }
+
+  async function buildBuyInTrackerSidecarSearch(propertyId: number, checkIn: string, checkOut: string) {
+    const propertyConfig = PROPERTY_UNIT_NEEDS[propertyId];
+    if (!propertyConfig) {
+      const err: any = new Error("Property not found in multi-unit config");
+      err.status = 404;
+      throw err;
+    }
+    const bedroomCounts = buildBedroomCounts(propertyConfig.units);
+    const marketKey = resolveBuyInMarket({ name: propertyConfig.community }) || propertyConfig.community;
+    const market = COMMUNITY_LOCATION_BY_KEY[propertyConfig.community] || COMMUNITY_LOCATION_BY_KEY[marketKey] || BUY_IN_MARKET_LOCATIONS[marketKey];
+    const searchLocation = searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, ${market?.state || "Hawaii"}`;
+    const nights = nightsBetweenDates(checkIn, checkOut);
+    const { fetchMultiChannelBuyInByBR } = await import("./multichannel-buy-in");
+    const scan = await fetchMultiChannelBuyInByBR({
+      community: marketKey,
+      city: market?.city || "",
+      state: market?.state || "",
+      streetAddress: market?.streetAddress,
+      bboxCenterOverride: market ? { lat: market.lat, lng: market.lng } : undefined,
+      searchName: market?.searchName || propertyConfig.community,
+      bedroomCounts: Object.keys(bedroomCounts).map((br) => Number(br)),
+      propertyId,
+      dateOverride: { checkIn, checkOut },
+      skipPm: true,
+      reuseSharedOtaSearch: true,
+      sidecarQueueBudgetMs: 285_000,
+    });
+    const searches: Record<BuyInTrackerChannel, Record<string, any>> = {
+      airbnb: {},
+      vrbo: {},
+      booking: {},
+      "suite-paradise": {},
+    };
+    for (const [bedroomStr, needed] of Object.entries(bedroomCounts)) {
+      const bedrooms = Number(bedroomStr);
+      const key = `${bedrooms}BR`;
+      searches.airbnb[key] = trackerBucketFromSidecarScan(scan, "airbnb", bedrooms, needed, nights);
+      searches.vrbo[key] = trackerBucketFromSidecarScan(scan, "vrbo", bedrooms, needed, nights);
+      searches.booking[key] = trackerBucketFromSidecarScan(scan, "booking", bedrooms, needed, nights);
+      searches["suite-paradise"][key] = trackerBucketFromSidecarScan(scan, "suite-paradise", bedrooms, needed, nights);
+    }
+    return {
+      community: propertyConfig.community,
+      searchLocation,
+      checkIn,
+      checkOut,
+      totalNights: nights,
+      unitsNeeded: Object.entries(bedroomCounts).map(([br, count]) => ({
+        bedrooms: parseInt(br, 10),
+        count,
+      })),
+      searches,
+      diagnostics: {
+        daemonOnline: scan.daemonOnline,
+        durationMs: scan.durationMs,
+        snapshotCheckIn: scan.snapshotCheckIn,
+        snapshotCheckOut: scan.snapshotCheckOut,
+        channelAvailableCountsByBR: scan.channelAvailableCountsByBR,
+        channelCheapestByBR: scan.channelCheapestByBR,
+        rawChannelCheapestByBR: scan.rawChannelCheapestByBR,
+        consensusCheapestByBR: scan.consensusCheapestByBR,
+        cheapestConfidence: scan.cheapestConfidence,
+        warnings: scan.warnings || [],
+      },
+    };
+  }
+
+  app.get("/api/buy-in-tracker/search", async (req, res) => {
     try {
       const propertyId = parseInt(req.query.propertyId as string, 10);
       const checkIn = req.query.checkIn as string;
@@ -13370,161 +13526,48 @@ export async function registerRoutes(
         return res.status(400).json({ error: "checkIn and checkOut required in YYYY-MM-DD format" });
       }
 
-      const propertyConfig = PROPERTY_UNIT_NEEDS[propertyId];
-      if (!propertyConfig) {
-        return res.status(404).json({ error: "Property not found in multi-unit config" });
+      res.json(await buildBuyInTrackerSidecarSearch(propertyId, checkIn, checkOut));
+    } catch (err: any) {
+      console.error("Buy-in tracker sidecar search error:", err);
+      res.status(err?.status || 500).json({ error: "Failed to search buy-in tracker channels", message: err.message });
+    }
+  });
+
+  app.get("/api/airbnb/search", async (req, res) => {
+    try {
+      const propertyId = parseInt(req.query.propertyId as string, 10);
+      const checkIn = req.query.checkIn as string;
+      const checkOut = req.query.checkOut as string;
+
+      if (!propertyId || isNaN(propertyId)) {
+        return res.status(400).json({ error: "propertyId is required" });
+      }
+      if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ error: "checkIn and checkOut required in YYYY-MM-DD format" });
       }
 
-      const searchLocation = searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, Hawaii`;
-
-      const bedroomCounts: Record<number, number> = {};
-      for (const unit of propertyConfig.units) {
-        bedroomCounts[unit.bedrooms] = (bedroomCounts[unit.bedrooms] || 0) + 1;
-      }
-
-      const results: Record<string, any> = {
-        community: propertyConfig.community,
-        searchLocation,
+      const unified = await buildBuyInTrackerSidecarSearch(propertyId, checkIn, checkOut);
+      res.json({
+        community: unified.community,
+        searchLocation: unified.searchLocation,
         checkIn,
         checkOut,
-        unitsNeeded: Object.entries(bedroomCounts).map(([br, count]) => ({
-          bedrooms: parseInt(br),
-          count,
-        })),
-        searches: {},
-      };
-
-      const communityBounds = COMMUNITY_BOUNDS[propertyConfig.community];
-
-      for (const [bedroomStr, count] of Object.entries(bedroomCounts)) {
-        const bedrooms = parseInt(bedroomStr);
-        const searchParams: Record<string, string> = {
-          engine: "airbnb",
-          check_in_date: checkIn,
-          check_out_date: checkOut,
-          adults: "2",
-          bedrooms: String(bedrooms),
-          type_of_place: "entire_home",
-          currency: "USD",
-          api_key: apiKey,
-        };
-
-        // q is kept as a human-readable location hint; bounding_box is the
-        // actual geo constraint SearchAPI's Airbnb engine honors.
-        searchParams.q = searchLocation;
-        if (communityBounds) {
-          searchParams.bounding_box = `[[${communityBounds.ne_lat},${communityBounds.ne_lng}],[${communityBounds.sw_lat},${communityBounds.sw_lng}]]`;
-        }
-
-        const params = new URLSearchParams(searchParams);
-
-        const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-        if (!response.ok) {
-          const errText = await response.text();
-          console.error(`SearchAPI error for ${bedrooms}BR:`, errText);
-          results.searches[`${bedrooms}BR`] = { error: `SearchAPI returned ${response.status}`, count, properties: [] };
-          continue;
-        }
-
-        const data = await response.json();
-        let properties = (data.properties || []).map((p: any) => ({
-          id: p.id,
-          title: p.title,
-          description: p.description,
-          link: p.link,
-          bookingLink: p.booking_link,
-          rating: p.rating,
-          reviews: p.reviews,
-          price: p.price,
-          accommodations: p.accommodations,
-          images: (p.images || []).slice(0, 3),
-          badges: p.badges,
-          gpsCoordinates: p.gps_coordinates,
-          source: "airbnb",
-        }));
-
-        // Post-filter by GPS coordinates if bounding box is defined and listings have coordinates
-        if (communityBounds) {
-          const geoFiltered = properties.filter((p: any) => {
-            const lat = p.gpsCoordinates?.latitude;
-            const lng = p.gpsCoordinates?.longitude;
-            if (!lat || !lng) return true; // keep if no coords (don't drop unknowns)
-            return (
-              lat >= communityBounds.sw_lat && lat <= communityBounds.ne_lat &&
-              lng >= communityBounds.sw_lng && lng <= communityBounds.ne_lng
-            );
-          });
-          // Only apply GPS filter if it retains at least some results
-          if (geoFiltered.length > 0) properties = geoFiltered;
-        }
-
-        properties.sort((a: any, b: any) => {
-          const priceA = a.price?.extracted_total_price ?? Infinity;
-          const priceB = b.price?.extracted_total_price ?? Infinity;
-          return priceA - priceB;
-        });
-
-        results.searches[`${bedrooms}BR`] = {
-          count,
-          totalResults: properties.length,
-          properties: properties.slice(0, 10),
-          geoFiltered: !!communityBounds,
-        };
-      }
-
-      res.json(results);
+        unitsNeeded: unified.unitsNeeded,
+        searches: unified.searches.airbnb,
+        diagnostics: unified.diagnostics,
+      });
     } catch (err: any) {
       console.error("Airbnb search error:", err);
       res.status(500).json({ error: "Failed to search Airbnb", message: err.message });
     }
   });
 
-  // ========== VRBO DIRECT SCRAPER ==========
-
-  // PR #321: aligned with COMMUNITY_SEARCH_LOCATIONS (Booking's map)
-  // — added "Kauai" island anchor on the four Kauai entries that
-  // were missing it, and used the broader "Poipu, Koloa, Kauai,
-  // Hawaii" form for resorts inside the Poipu area so Vrbo's
-  // autocomplete matches an area covering all units in that
-  // community rather than the narrower resort-specific token (which
-  // for "Poipu Kai" was returning 0 of 19 cards as 3BR — daemon log
-  // 2026-04-30). Operator directive: "encompass all the potential
-  // units in that community."
-  const COMMUNITY_VRBO_DESTINATIONS: Record<string, string> = {
-    "Poipu Kai": "Poipu, Koloa, Kauai, Hawaii",
-    "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
-    "Keauhou": "Keauhou, Kailua-Kona, Big Island, Hawaii",
-    "Princeville": "Princeville, Kauai, Hawaii",
-    "Kapaa Beachfront": "Kapaa, Kauai, Hawaii",
-    "Poipu Oceanfront": "Poipu, Koloa, Kauai, Hawaii",
-    "Poipu Brenneckes": "Poipu, Koloa, Kauai, Hawaii",
-    "Pili Mai": "Poipu, Koloa, Kauai, Hawaii",
-  };
-
-  const COMMUNITY_SP_SLUGS: Record<string, string> = {
-    "Poipu Kai": "poipu-vacation-rentals",
-    "Poipu Oceanfront": "poipu-vacation-rentals",
-    "Poipu Brenneckes": "poipu-vacation-rentals",
-    "Pili Mai": "poipu-vacation-rentals",
-    "Kapaa Beachfront": "kapaa-vacation-rentals",
-    "Princeville": "princeville-vacation-rentals",
-  };
-
-  function detectPlatform(name: string, link: string, source: string): string {
-    const combined = `${name} ${link} ${source}`.toLowerCase();
-    if (combined.includes("vrbo") || combined.includes("homeaway")) return "vrbo";
-    if (combined.includes("suite-paradise") || combined.includes("suite paradise") || combined.includes("suiteparadise")) return "suite-paradise";
-    if (combined.includes("airbnb")) return "airbnb";
-    if (combined.includes("booking.com")) return "booking";
-    return "other";
-  }
+  // ========== VRBO / BOOKING TRACKER COMPATIBILITY WRAPPER ==========
+  // Kept for older buy-in-tracker callers; real behavior is delegated to
+  // buildBuyInTrackerSidecarSearch so no tracker path uses SearchAPI or
+  // constructed provider search URLs.
 
   app.get("/api/vrbo/search", async (req, res) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
-    }
-
     try {
       const propertyId = parseInt(req.query.propertyId as string, 10);
       const checkIn = req.query.checkIn as string;
@@ -13542,133 +13585,17 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Property not found in multi-unit config" });
       }
 
-      const destination = COMMUNITY_VRBO_DESTINATIONS[propertyConfig.community] || searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, Hawaii`;
-      const spSlug = COMMUNITY_SP_SLUGS[propertyConfig.community];
-
-      const bedroomCounts: Record<number, number> = {};
-      for (const unit of propertyConfig.units) {
-        bedroomCounts[unit.bedrooms] = (bedroomCounts[unit.bedrooms] || 0) + 1;
-      }
-
-      const checkInDate = new Date(checkIn + "T12:00:00");
-      const checkOutDate = new Date(checkOut + "T12:00:00");
-      const totalNights = Math.max(1, Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24)));
-
-      const vrboResults: Record<string, any> = {};
-      const suiteParadiseResults: Record<string, any> = {};
-
-      const searchPromises = Object.entries(bedroomCounts).map(async ([bedroomStr, count]) => {
-        const bedrooms = parseInt(bedroomStr);
-
-        const searchParams: Record<string, string> = {
-          engine: "google_hotels",
-          q: destination,
-          check_in_date: checkIn,
-          check_out_date: checkOut,
-          adults: "2",
-          property_type: "vacation_rental",
-          bedrooms: String(bedrooms),
-          sort_by: "lowest_price",
-          currency: "USD",
-          api_key: apiKey,
-        };
-
-        try {
-          const params = new URLSearchParams(searchParams);
-          const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-
-          if (!response.ok) {
-            const errText = await response.text();
-            console.error(`Google Hotels search error for ${bedrooms}BR:`, errText);
-            vrboResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [], error: `Search returned ${response.status}` };
-            return;
-          }
-
-          const data = await response.json();
-          const allProperties = (data.properties || []).map((p: any, idx: number) => {
-            const pricePerNight = p.price_per_night?.extracted_price || p.extracted_price || null;
-            const totalPrice = pricePerNight ? pricePerNight * totalNights : null;
-            const source = detectPlatform(p.name || "", p.link || "", p.source || "");
-
-            return {
-              id: `gh-${bedrooms}br-${idx}`,
-              title: p.name || "Vacation Rental",
-              description: p.description || `${bedrooms} bedroom vacation rental`,
-              link: p.link && p.link.startsWith("/") ? `https://www.google.com${p.link}` : (p.link || ""),
-              bookingLink: p.link && p.link.startsWith("/") ? `https://www.google.com${p.link}` : (p.link || ""),
-              source,
-              price: totalPrice ? {
-                total_price: `$${totalPrice.toLocaleString()}`,
-                extracted_total_price: totalPrice,
-                price_per_night: pricePerNight,
-              } : null,
-              rating: p.overall_rating || null,
-              reviews: p.reviews || null,
-              images: p.images?.slice(0, 3).map((img: any) => img.thumbnail || img.original_image || img) || [],
-              badges: [],
-              accommodations: [
-                p.type || "Vacation Rental",
-                ...(p.amenities?.slice(0, 3) || []),
-              ].filter(Boolean),
-            };
-          });
-
-          const vrboListings = allProperties.filter((p: any) => p.source === "vrbo" || p.source === "other" || p.source === "booking");
-          const spListings = allProperties.filter((p: any) => p.source === "suite-paradise");
-
-          const vrboSearchUrl = `https://www.vrbo.com/search?` + new URLSearchParams({
-            destination,
-            startDate: checkIn,
-            endDate: checkOut,
-            adults: "2",
-            bedrooms: String(bedrooms),
-            sort: "PRICE_RELEVANT",
-          }).toString();
-
-          vrboResults[`${bedrooms}BR`] = {
-            count,
-            totalResults: vrboListings.length,
-            properties: vrboListings.slice(0, 15),
-            vrboSearchUrl,
-          };
-
-          const formatSpDate = (dateStr: string) => {
-            const [y, m, d] = dateStr.split("-");
-            return `${m}/${d}/${y}`;
-          };
-          const spSearchUrl = spSlug
-            ? `https://www.suite-paradise.com/${spSlug}?check_in=${formatSpDate(checkIn)}&check_out=${formatSpDate(checkOut)}`
-            : null;
-
-          suiteParadiseResults[`${bedrooms}BR`] = {
-            count,
-            totalResults: spListings.length,
-            properties: spListings.slice(0, 10),
-            searchUrl: spSearchUrl,
-            note: spListings.length === 0
-              ? (spSlug ? "Suite Paradise listings can't be searched automatically. Use the link below to search their site directly — they often have great deals for booking direct." : "Suite Paradise may not have listings in this community.")
-              : undefined,
-          };
-        } catch (fetchErr: any) {
-          console.error(`Search error for ${bedrooms}BR:`, fetchErr.message);
-          vrboResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [], error: fetchErr.message };
-          suiteParadiseResults[`${bedrooms}BR`] = { count, totalResults: 0, properties: [] };
-        }
-      });
-
-      await Promise.all(searchPromises);
-
+      const unified = await buildBuyInTrackerSidecarSearch(propertyId, checkIn, checkOut);
       res.json({
-        community: propertyConfig.community,
+        community: unified.community,
         checkIn,
         checkOut,
-        totalNights,
-        unitsNeeded: Object.entries(bedroomCounts).map(([br, count]) => ({
-          bedrooms: parseInt(br),
-          count,
-        })),
-        vrbo: vrboResults,
-        suiteParadise: suiteParadiseResults,
+        totalNights: unified.totalNights,
+        unitsNeeded: unified.unitsNeeded,
+        vrbo: unified.searches.vrbo,
+        booking: unified.searches.booking,
+        suiteParadise: unified.searches["suite-paradise"],
+        diagnostics: unified.diagnostics,
       });
     } catch (err: any) {
       console.error("VRBO/SP search error:", err);
@@ -19618,9 +19545,6 @@ Return ONLY compact JSON with this exact shape:
   // ========== BUILDER AVAILABILITY WINDOW SCANNER ==========
 
   app.get("/api/builder/scan-window", async (req, res) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-
     const propertyId = parseInt(req.query.propertyId as string, 10);
     const checkIn = req.query.checkIn as string;
     const checkOut = req.query.checkOut as string;
@@ -19631,78 +19555,52 @@ Return ONLY compact JSON with this exact shape:
     const propertyConfig = PROPERTY_UNIT_NEEDS[propertyId];
     if (!propertyConfig) return res.status(404).json({ error: "Property not in config" });
 
-    const communityBounds = COMMUNITY_BOUNDS[propertyConfig.community];
-    const searchLocation = searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, Hawaii`;
-
     // Count how many of each bedroom type we need
-    const bedroomCounts: Record<number, number> = {};
-    for (const unit of propertyConfig.units) {
-      bedroomCounts[unit.bedrooms] = (bedroomCounts[unit.bedrooms] || 0) + 1;
-    }
+    const bedroomCounts = buildBedroomCounts(propertyConfig.units);
     const neededCount = propertyConfig.units.length;
 
     try {
       let totalFound = 0;
-      const unitResults: { bedrooms: number; needed: number; found: number }[] = [];
+      const unitResults: { bedrooms: number; needed: number; found: number; channelCounts?: Record<string, number> }[] = [];
       const cheapestByBedroom: Record<number, { price: number; title: string; link: string }> = {};
+      const marketKey = resolveBuyInMarket({ name: propertyConfig.community }) || propertyConfig.community;
+      const market = COMMUNITY_LOCATION_BY_KEY[propertyConfig.community] || COMMUNITY_LOCATION_BY_KEY[marketKey] || BUY_IN_MARKET_LOCATIONS[marketKey];
+      const { fetchMultiChannelBuyInByBR } = await import("./multichannel-buy-in");
+      const scan = await fetchMultiChannelBuyInByBR({
+        community: marketKey,
+        city: market?.city || "",
+        state: market?.state || "",
+        streetAddress: market?.streetAddress,
+        bboxCenterOverride: market ? { lat: market.lat, lng: market.lng } : undefined,
+        searchName: market?.searchName || propertyConfig.community,
+        bedroomCounts: Object.keys(bedroomCounts).map((br) => Number(br)),
+        propertyId,
+        dateOverride: { checkIn, checkOut },
+        skipPm: true,
+        reuseSharedOtaSearch: true,
+        sidecarQueueBudgetMs: 285_000,
+      });
 
+      const nights = nightsBetweenDates(checkIn, checkOut);
       for (const [bedroomStr, needed] of Object.entries(bedroomCounts)) {
-        const bedrooms = parseInt(bedroomStr);
-        const searchParams: Record<string, string> = {
-          engine: "airbnb",
-          check_in_date: checkIn,
-          check_out_date: checkOut,
-          adults: "2",
-          bedrooms: String(bedrooms),
-          type_of_place: "entire_home",
-          currency: "USD",
-          api_key: apiKey,
-        };
-
-        // q is kept as a human-readable location hint; bounding_box is the
-        // actual geo constraint SearchAPI's Airbnb engine honors.
-        searchParams.q = searchLocation;
-        if (communityBounds) {
-          searchParams.bounding_box = `[[${communityBounds.ne_lat},${communityBounds.ne_lng}],[${communityBounds.sw_lat},${communityBounds.sw_lng}]]`;
-        }
-
-        const params = new URLSearchParams(searchParams);
-        const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
-        if (!response.ok) {
-          const errText = await response.text();
-          console.error(`[scan-window] SearchAPI error for ${bedrooms}BR:`, errText);
-          unitResults.push({ bedrooms, needed, found: 0 });
-          continue;
-        }
-
-        const data = await response.json();
-        let properties = data.properties || [];
-
-        // GPS post-filter
-        if (communityBounds) {
-          const geoFiltered = properties.filter((p: any) => {
-            const lat = p.gps_coordinates?.latitude;
-            const lng = p.gps_coordinates?.longitude;
-            if (!lat || !lng) return true;
-            return lat >= communityBounds.sw_lat && lat <= communityBounds.ne_lat &&
-                   lng >= communityBounds.sw_lng && lng <= communityBounds.ne_lng;
-          });
-          if (geoFiltered.length > 0) properties = geoFiltered;
-        }
-
-        const found = Math.min(properties.length, needed);
+        const bedrooms = parseInt(bedroomStr, 10);
+        const channelCounts = scan.channelAvailableCountsByBR?.[bedrooms] || { airbnb: 0, vrbo: 0, booking: 0, pm: 0, total: 0 };
+        const conservativeAvailable = Math.max(channelCounts.airbnb || 0, channelCounts.vrbo || 0, channelCounts.booking || 0, channelCounts.pm || 0);
+        const found = Math.min(conservativeAvailable, needed);
         totalFound += found;
-        unitResults.push({ bedrooms, needed, found });
+        unitResults.push({ bedrooms, needed, found, channelCounts });
 
-        // Track cheapest listing for pricing estimate
-        const withPrice = (properties as any[]).filter(p => p.price?.extracted_total_price);
-        withPrice.sort((a, b) => a.price.extracted_total_price - b.price.extracted_total_price);
-        const cheapest = withPrice[0];
-        if (cheapest) {
+        const cheapestNightly = [
+          scan.consensusCheapestByBR?.[bedrooms],
+          scan.channelCheapestByBR?.[bedrooms]?.airbnb,
+          scan.channelCheapestByBR?.[bedrooms]?.vrbo,
+          scan.channelCheapestByBR?.[bedrooms]?.booking,
+        ].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0).sort((a, b) => a - b)[0];
+        if (cheapestNightly) {
           cheapestByBedroom[bedrooms] = {
-            price: cheapest.price.extracted_total_price,
-            title: cheapest.name || cheapest.title || "Unknown",
-            link: cheapest.link || cheapest.url || "",
+            price: Math.round(cheapestNightly * nights),
+            title: `${bedrooms}BR sidecar cheapest`,
+            link: "",
           };
         }
       }
@@ -19718,7 +19616,24 @@ Return ONLY compact JSON with this exact shape:
       const status = totalFound >= neededCount ? "available" :
                      totalFound > 0            ? "low"       : "none";
 
-      res.json({ status, availableCount: totalFound, neededCount, unitResults, checkIn, checkOut, cheapestByBedroom, estimatedBuyInCost: estimatedBuyInCost > 0 ? estimatedBuyInCost : undefined });
+      res.json({
+        status,
+        availableCount: totalFound,
+        neededCount,
+        unitResults,
+        checkIn,
+        checkOut,
+        cheapestByBedroom,
+        estimatedBuyInCost: estimatedBuyInCost > 0 ? estimatedBuyInCost : undefined,
+        diagnostics: {
+          source: "multichannel-sidecar",
+          daemonOnline: scan.daemonOnline,
+          durationMs: scan.durationMs,
+          channelAvailableCountsByBR: scan.channelAvailableCountsByBR,
+          channelCheapestByBR: scan.channelCheapestByBR,
+          warnings: scan.warnings || [],
+        },
+      });
     } catch (err: any) {
       res.status(500).json({ error: "Scan failed", message: err.message });
     }

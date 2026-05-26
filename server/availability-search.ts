@@ -18,6 +18,11 @@
 // daily re-scan + manual force-block override is the safety net.
 
 import type { PropertyUnitConfig } from "@shared/property-units";
+import {
+  BUY_IN_MARKET_LOCATIONS,
+  resolveBuyInMarket,
+  searchLocationForBuyInMarket,
+} from "@shared/buy-in-market";
 
 export type CandidateListing = {
   id: string;          // Airbnb listing id (extracted from /rooms/<id> URL)
@@ -122,9 +127,9 @@ export function verdictFor(maxSets: number, minSets: number): "open" | "tight" |
 
 // ── Price-side helpers (Phase 3) ────────────────────────────────────────
 // The cheap site-search counts inventory but doesn't carry prices. For
-// pricing we sample the SearchAPI airbnb engine sparingly — once per
-// season per bedroom count — and reuse those numbers across all weeks
-// in that season. ~6 priced calls per scan per property.
+// pricing, legacy availability callers now delegate to the multichannel
+// sidecar scan so "cheapest" means the same Airbnb/VRBO/Booking visible-UI
+// evidence used by Operations/find-buy-in.
 
 export type SeasonKey = "LOW" | "HIGH" | "HOLIDAY";
 
@@ -138,62 +143,56 @@ export type FindCheapestOptions = {
   checkIn: string;
   checkOut: string;
   q: string;
+  city?: string;
+  state?: string;
+  propertyId?: number;
+  searchName?: string;
   bounds?: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
   apiKey: string;
 };
 
-// Single airbnb-engine call. Returns the cheapest available listing's
-// per-night rate for the given window — null if nothing comes back with
-// a usable price. Tolerates the engine's missing-price cases silently
-// (some short-notice or far-future windows have no priced inventory).
+// Returns the cheapest visible OTA sidecar nightly for the given window. This
+// used to be a single SearchAPI Airbnb call; keep the function name for older
+// availability callers, but route through the same multichannel sidecar layer
+// used by Operations/find-buy-in so all "cheapest" surfaces follow the same
+// visible-dropdown/no-URL-injection policy.
 export async function findCheapestPricedNightly(opts: FindCheapestOptions): Promise<number | null> {
-  const nights = Math.max(1, Math.round(
-    (new Date(opts.checkOut + "T12:00:00").getTime() - new Date(opts.checkIn + "T12:00:00").getTime()) / 86_400_000,
-  ));
-  const sp: Record<string, string> = {
-    engine: "airbnb",
-    check_in_date: opts.checkIn,
-    check_out_date: opts.checkOut,
-    adults: "2",
-    bedrooms: String(opts.bedrooms),
-    type_of_place: "entire_home",
-    currency: "USD",
-    api_key: opts.apiKey,
-    q: opts.q,
-  };
-  if (opts.bounds) {
-    sp.bounding_box = `[[${opts.bounds.ne_lat},${opts.bounds.ne_lng}],[${opts.bounds.sw_lat},${opts.bounds.sw_lng}]]`;
-  }
   try {
-    const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
-    if (!r.ok) return null;
-    const data = await r.json() as any;
-    let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
-    if (opts.resortName) {
-      const tokens = opts.resortName.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter((t) => t.length >= 3);
-      properties = properties.filter((p: any) => {
-        const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`.toLowerCase();
-        const lat = Number(p?.gps_coordinates?.latitude);
-        const lng = Number(p?.gps_coordinates?.longitude);
-        const inBounds = opts.bounds
-          ? Number.isFinite(lat) && Number.isFinite(lng)
-            && lat >= opts.bounds.sw_lat - 0.01 && lat <= opts.bounds.ne_lat + 0.01
-            && lng >= opts.bounds.sw_lng - 0.01 && lng <= opts.bounds.ne_lng + 0.01
-          : false;
-        return tokens.every((t) => hay.includes(t)) || inBounds;
-      });
-    }
-    properties = properties.filter((p: any) => {
-      const pb = typeof p?.bedrooms === "number" ? p.bedrooms : null;
-      return pb == null || pb === opts.bedrooms;
+    const { fetchMultiChannelBuyInByBR } = await import("./multichannel-buy-in");
+    const marketKey =
+      resolveBuyInMarket({ name: opts.searchName ?? opts.resortName ?? opts.community, city: opts.city, state: opts.state }) ||
+      resolveBuyInMarket({ name: opts.community, city: opts.city, state: opts.state }) ||
+      opts.community;
+    const market = BUY_IN_MARKET_LOCATIONS[marketKey] || BUY_IN_MARKET_LOCATIONS[opts.community];
+    const searchName = opts.searchName || opts.resortName || market?.searchName || opts.community;
+    const scan = await fetchMultiChannelBuyInByBR({
+      community: marketKey,
+      city: opts.city || market?.city || "",
+      state: opts.state || market?.state || "",
+      streetAddress: market?.streetAddress,
+      bboxCenterOverride: market ? { lat: market.lat, lng: market.lng } : undefined,
+      searchName,
+      bedroomCounts: [opts.bedrooms],
+      propertyId: opts.propertyId,
+      dateOverride: { checkIn: opts.checkIn, checkOut: opts.checkOut },
+      skipPm: true,
+      reuseSharedOtaSearch: true,
+      sidecarQueueBudgetMs: 180_000,
     });
-    const prices = properties
-      .map((p: any) => Number(p?.price?.extracted_total_price ?? 0))
-      .filter((n) => n > 0);
-    if (prices.length === 0) return null;
-    const cheapestTotal = Math.min(...prices);
-    return Math.round(cheapestTotal / nights);
-  } catch {
+    const byChannel = scan.channelCheapestByBR?.[opts.bedrooms] || {};
+    const candidates = [
+      scan.consensusCheapestByBR?.[opts.bedrooms],
+      byChannel.airbnb,
+      byChannel.vrbo,
+      byChannel.booking,
+      byChannel.pm,
+    ].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);
+    return candidates.length ? Math.round(Math.min(...candidates)) : null;
+  } catch (e: any) {
+    console.error(
+      `[availability-search] sidecar cheapest error ${opts.resortName ?? searchLocationForBuyInMarket(opts.community) ?? opts.community} ` +
+      `${opts.bedrooms}BR ${opts.checkIn}→${opts.checkOut}: ${e?.message ?? e}`,
+    );
     return null;
   }
 }

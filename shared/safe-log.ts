@@ -263,16 +263,18 @@ export function buildBuyInTrackerSearchDebugLog(input: {
     checkOut?: string;
     unitsNeeded?: unknown[];
     vrbo?: Record<string, SearchBucketLogShape>;
+    booking?: Record<string, SearchBucketLogShape>;
     suiteParadise?: Record<string, SearchBucketLogShape>;
   } | null;
   selectedCounts?: Record<string, number>;
+  diagnostics?: unknown;
   error?: unknown;
 }): string {
   const payload = {
     kind: "safe-buy-in-tracker-search-log",
     generatedAt: new Date().toISOString(),
     status: input.status,
-    routes: ["/api/airbnb/search", "/api/vrbo/search"],
+    routes: ["/api/buy-in-tracker/search", "/api/airbnb/search", "/api/vrbo/search"],
     request: input.request,
     airbnb: input.airbnb ? {
       community: input.airbnb.community,
@@ -288,9 +290,11 @@ export function buildBuyInTrackerSearchDebugLog(input: {
       checkOut: input.other.checkOut,
       unitsNeeded: input.other.unitsNeeded,
       vrbo: summarizeBuckets(input.other.vrbo),
+      booking: summarizeBuckets(input.other.booking),
       suiteParadise: summarizeBuckets(input.other.suiteParadise),
     } : undefined,
     selectedCounts: input.selectedCounts,
+    diagnostics: input.diagnostics ? sanitizeForChatValue(input.diagnostics) : undefined,
     error: input.error ? sanitizeForChatValue(input.error) : undefined,
     redaction: "Raw URLs, query strings, tokens, cookies, emails, phones, and long credential-like values are redacted.",
   };

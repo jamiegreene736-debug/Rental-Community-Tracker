@@ -4304,10 +4304,18 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
           el.getAttribute?.("id"),
           el.getAttribute?.("placeholder"),
           el.getAttribute?.("aria-label"),
+          el.getAttribute?.("role"),
           el.getAttribute?.("title"),
           el.getAttribute?.("data-testid"),
           el.getAttribute?.("data-test"),
         ];
+        for (const attr of ["aria-labelledby", "aria-describedby"]) {
+          const ids = String(el.getAttribute?.(attr) || "").split(/\s+/).filter(Boolean);
+          for (const refId of ids) {
+            const ref = document.getElementById(refId);
+            if (ref) parts.push(ref.textContent);
+          }
+        }
         const id = el.getAttribute?.("id");
         if (id) {
           const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
@@ -4315,6 +4323,11 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
         }
         const wrappingLabel = el.closest?.("label");
         if (wrappingLabel) parts.push(wrappingLabel.textContent);
+        const searchRegion = el.closest?.("form, [role='search'], [data-testid*='search' i], [class*='search' i], [aria-label*='search' i]");
+        if (searchRegion) {
+          const txt = (searchRegion.textContent || "").replace(/\s+/g, " ").trim();
+          if (txt.length <= 220) parts.push(txt);
+        }
         return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
       }
 
@@ -4322,12 +4335,12 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
         try { el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
         try { el.focus?.(); } catch {}
         const tag = el.tagName.toLowerCase();
-        if (el.isContentEditable || el.getAttribute?.("role") === "textbox") {
-          el.textContent = searchTerm;
-        } else if (tag === "input" || tag === "textarea") {
+        if (tag === "input" || tag === "textarea") {
           const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
           if (setter) setter.call(el, searchTerm);
           else el.value = searchTerm;
+        } else if (el.isContentEditable || el.getAttribute?.("role") === "textbox" || el.getAttribute?.("role") === "combobox") {
+          el.textContent = searchTerm;
         } else {
           return false;
         }
@@ -4337,7 +4350,7 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
         return true;
       }
 
-      const controls = Array.from(document.querySelectorAll("input:not([type='hidden']), textarea, [contenteditable='true'], [role='textbox']"))
+      const controls = Array.from(document.querySelectorAll("input:not([type='hidden']), textarea, [contenteditable='true'], [role='textbox'], [role='combobox'], [aria-autocomplete], [aria-haspopup='listbox'], [aria-controls]"))
         .filter((el) => el instanceof HTMLElement && isVisible(el))
         .map((el) => {
           const ctx = contextOf(el);
@@ -5542,6 +5555,11 @@ async function runBookingSearchVariant(id, params, variant = null) {
       '[data-testid="property-card"]',
       '[data-testid="property-card-container"]',
       '[data-testid*="property-card" i]',
+      'article:has(a[href*="/hotel/"])',
+      '[role="listitem"]:has(a[href*="/hotel/"])',
+      '[aria-label*="property" i]:has(a[href*="/hotel/"])',
+      '[class*="property-card" i]',
+      '[class*="sr_property_block" i]',
     ]) {
       document.querySelectorAll(selector).forEach((el) => cardSet.add(el));
     }
@@ -5586,15 +5604,35 @@ async function runBookingSearchVariant(id, params, variant = null) {
       return wordMatch ? words[wordMatch[1]] : 0;
     }
     for (const card of cards) {
-      const titleEl = card.querySelector('[data-testid="title"], [data-testid*="title" i]') ?? card.querySelector("h3, h2, a[href*='/hotel/']");
-      const title = titleEl ? titleEl.textContent.trim() : "";
+      const titleEl = card.querySelector([
+        '[data-testid="title"]',
+        '[data-testid*="title" i]',
+        '[data-testid*="name" i]',
+        '[itemprop="name"]',
+        '[aria-label*="property" i]',
+        '[class*="title" i]',
+        '[class*="name" i]',
+        "h3",
+        "h2",
+        'a[href*="/hotel/"]',
+      ].join(", ")) ?? card.querySelector("h3, h2, a[href*='/hotel/']");
+      const title = titleEl
+        ? (titleEl.textContent || titleEl.getAttribute?.("aria-label") || titleEl.getAttribute?.("title") || "").trim()
+        : "";
       const link = card.matches?.('a[href*="/hotel/"]') ? card : card.querySelector('a[href*="/hotel/"]');
       const href = link ? link.getAttribute("href") || "" : "";
       const img = card.querySelector("img");
       const image = img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
       // Strip query string for the canonical URL but keep the .html path.
       const url = href.startsWith("http") ? href.split("?")[0] : href ? "https://www.booking.com" + href.split("?")[0] : "";
-      const fullText = (card.textContent || "").replace(/\s+/g, " ");
+      const fullText = [
+        card.textContent || "",
+        card.getAttribute?.("aria-label") || "",
+        card.getAttribute?.("title") || "",
+        Array.from(card.querySelectorAll("[aria-label], [title]")).slice(0, 20)
+          .map((el) => `${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`)
+          .join(" "),
+      ].join(" ").replace(/\s+/g, " ");
       const targetHaystack = `${title} ${url} ${fullText}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
       const hasRequiredTarget = !Array.isArray(requiredTargetTokens) ||
         requiredTargetTokens.length === 0 ||
@@ -5605,7 +5643,13 @@ async function runBookingSearchVariant(id, params, variant = null) {
       // "Per night $1,028 $7,196 Price"). Prefer the largest plausible
       // full-card amount for the requested stay; only fall back to the
       // price element when the full card has no total-like amount.
-      const priceEl = card.querySelector('[data-testid="price-and-discounted-price"]');
+      const priceEl = card.querySelector([
+        '[data-testid="price-and-discounted-price"]',
+        '[data-testid*="price" i]',
+        '[aria-label*="$"]',
+        '[class*="price" i]',
+        '[class*="rate" i]',
+      ].join(", "));
       const priceText = priceEl ? priceEl.textContent.replace(/\s+/g, " ") : "";
       const priceElAmounts = moneyAmounts(priceText);
       const fullAmounts = moneyAmounts(fullText);
