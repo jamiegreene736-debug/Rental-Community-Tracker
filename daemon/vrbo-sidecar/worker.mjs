@@ -5360,6 +5360,23 @@ function bookingStateHasTargetSearchQuery(state, requiredTargetTokens = []) {
   return true;
 }
 
+function buildBookingDatedSearchUrl(searchTerm, checkIn, checkOut, bedrooms) {
+  const safeSearchTerm = String(searchTerm || "").replace(/\s+/g, " ").trim();
+  const url = new URL("https://www.booking.com/searchresults.html");
+  url.searchParams.set("ss", safeSearchTerm);
+  url.searchParams.set("ssne", safeSearchTerm);
+  url.searchParams.set("ssne_untouched", safeSearchTerm);
+  url.searchParams.set("checkin", checkIn);
+  url.searchParams.set("checkout", checkOut);
+  url.searchParams.set("group_adults", "2");
+  url.searchParams.set("group_children", "0");
+  url.searchParams.set("no_rooms", "1");
+  url.searchParams.set("selected_currency", "USD");
+  url.searchParams.set("order", "price");
+  if (bedrooms) url.searchParams.set("nflt", `entire_place_bedroom_count=${bedrooms}`);
+  return url.toString();
+}
+
 async function applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label = "booking_search", provider = "booking") {
   if (!targetPage || targetPage.isClosed?.()) return null;
 
@@ -5922,30 +5939,16 @@ async function runBookingSearchVariant(id, params, variant = null) {
       },
     );
   }
-  await dismissBookingPopups(page, "booking_search_before_dates");
-  const dateEntry = await applyOtaSearchDateInputs(page, checkIn, checkOut, "booking_search", "booking");
-  if (!pmDateEntryComplete(dateEntry)) {
-    throw new ProviderBrowserUnavailableError(
-      `Booking.com homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
-      {
-        label: "booking_search",
-        id,
-        provider: "booking",
-        url: page.url(),
-        title: await page.title().catch(() => ""),
-        dateEntry,
-      },
-    );
-  }
-  log(`booking_search ${id}: entered dates via Booking.com homepage controls (${checkIn}→${checkOut})`);
-  await clickVisibleSearchSubmit(page, "booking_search", { requestId: id }).catch(() => null);
+  // NOTE FOR CODEX: Booking.com turns resort/property suggestions into
+  // broad city searches on form submit (for Poipu Kai it rewrites to
+  // ss=Koloa). Keep the dropdown-confirmed destination gate above, then
+  // apply the exact resort text, dates, and bedroom filter through the
+  // results URL so we do not loop through broad Koloa variants.
+  const datedSearchUrl = buildBookingDatedSearchUrl(effectiveSearchTerm, checkIn, checkOut, bedrooms);
+  await page.goto(datedSearchUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopOtaProviderIfBlocked(page, "booking_search", id);
-  await dismissBookingPopups(page, "booking_search_after_submit");
-  const bedroomFiltered = await fillBedroomFilter(page, bedrooms, "booking_search").catch(() => null);
-  if (!bedroomFiltered) {
-    log(`booking_search ${id}: bedroom filter was not found in visible UI; continuing with visible results and card-level bedroom filtering only`);
-  }
+  await dismissBookingPopups(page, "booking_search_after_dated_url");
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissBookingPopups(page, "booking_search_before_scrape");
   const resultsSurface = await waitForBookingResultsSurface(page, id, effectiveSearchTerm);
