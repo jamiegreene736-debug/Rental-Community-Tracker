@@ -3541,7 +3541,7 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
 
 async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label, requestId = "homepage") {
   const typedQuery = otaBaseSearchQuery(searchTerm, destination);
-  const fallback = String(searchTerm || destination || typedQuery).trim();
+  const fallback = String(destination || searchTerm || typedQuery).trim();
   if (!typedQuery) return [{ typedQuery: fallback, searchTerm: fallback, suggestionText: fallback, source: "fallback" }];
   const isVrbo = /vrbo/i.test(label) || /vrbo\.com/i.test(homeUrl);
   try {
