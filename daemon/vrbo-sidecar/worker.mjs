@@ -3331,6 +3331,18 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
         .replace(/[^a-z0-9]+/g, " ")
         .trim();
 
+      function tokenSet(norm) {
+        return new Set(String(norm || "").split(/\s+/).filter(Boolean));
+      }
+
+      function hasAllTokens(tokens, required) {
+        return required.every((token) => tokens.has(token));
+      }
+
+      function hasAnyToken(tokens, required) {
+        return required.some((token) => tokens.has(token));
+      }
+
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
         const rect = el.getBoundingClientRect();
@@ -3375,9 +3387,10 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
         const norm = clean(text);
         if (!norm || text.length > 240) continue;
         if (/^search for\b/i.test(text) || /\bsearch for\b/i.test(norm)) continue;
-        if (queryTokens.length && !queryTokens.every((token) => norm.includes(token))) continue;
-        if (requiredCityTokens.length && !requiredCityTokens.every((token) => norm.includes(token))) continue;
-        if (locationTokens.length && !locationTokens.some((token) => norm.includes(token))) continue;
+        const tokens = tokenSet(norm);
+        if (queryTokens.length && !hasAllTokens(tokens, queryTokens)) continue;
+        if (requiredCityTokens.length && !hasAllTokens(tokens, requiredCityTokens)) continue;
+        if (locationTokens.length && !hasAnyToken(tokens, locationTokens)) continue;
         const key = norm;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -3396,20 +3409,28 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
 
 async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search", targetSuggestion = null) {
   if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
+  const requiredSearchTokens = otaQueryTokens(searchTerm);
+  const targetTokens = otaQueryTokens(targetSuggestion || searchTerm);
   await targetPage.waitForTimeout(900).catch(() => null);
   const clicked = await withSoftTimeout(
-    targetPage.evaluate(({ searchTerm, targetSuggestion }) => {
+    targetPage.evaluate(({ searchTerm, targetSuggestion, requiredSearchTokens, targetTokens }) => {
       const clean = (raw) => String(raw || "")
         .replace(/([a-z])([A-Z])/g, "$1 $2")
         .replace(/(\d)([A-Za-z])/g, "$1 $2")
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, " ")
         .trim();
-      const wanted = clean(targetSuggestion || searchTerm).split(" ").filter((token) => token.length >= 3);
-      if (wanted.length === 0) return null;
       const searchNorm = clean(searchTerm);
       const targetNorm = clean(targetSuggestion || "");
-      const requirePoipuKai = /\bpoipu\s+kai\b/.test(searchNorm) || /\bpoipu\s+kai\b/.test(targetNorm);
+      if (requiredSearchTokens.length === 0) return null;
+
+      function tokenSet(norm) {
+        return new Set(String(norm || "").split(/\s+/).filter(Boolean));
+      }
+
+      function hasAllTokens(tokens, required) {
+        return required.every((token) => tokens.has(token));
+      }
 
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -3438,15 +3459,14 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
           const norm = clean(text);
           if (!norm || text.length > 220) return null;
           if (/^search for\b/i.test(text) || /\bsearch for\b/i.test(norm)) return null;
-          const matched = wanted.filter((token) => norm.includes(token)).length;
-          const hasPoipuKai = /\bpoipu\b/.test(norm) && /\bkai\b/.test(norm);
-          if (requirePoipuKai && !hasPoipuKai) return null;
-          if (!requirePoipuKai && matched === 0) return null;
+          const tokens = tokenSet(norm);
+          if (!hasAllTokens(tokens, requiredSearchTokens)) return null;
+          const matched = targetTokens.filter((token) => tokens.has(token)).length;
           let score = matched * 20;
           if (targetNorm && norm === targetNorm) score += 500;
           else if (targetNorm && norm.includes(targetNorm)) score += 300;
           else if (targetNorm && targetNorm.includes(norm)) score += 120;
-          if (hasPoipuKai) score += 80;
+          score += requiredSearchTokens.length * 80;
           if (norm.includes(searchNorm)) score += 40;
           if (/\b(resort|koloa|hi|hawaii|kauai)\b/.test(norm)) score += 10;
           return { el, text, score };
@@ -3460,7 +3480,7 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
       best.el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
       best.el.click();
       return best.text.slice(0, 120);
-    }, { searchTerm, targetSuggestion }),
+    }, { searchTerm, targetSuggestion, requiredSearchTokens, targetTokens }),
     3_000,
     null,
   );
