@@ -3248,7 +3248,13 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
 // search every matching in-city dropdown suggestion instead of trusting a
 // provider default/geolocated destination.
 function normalizeOtaText(value) {
-  return String(value || "").toLowerCase().replace(/&amp;/g, "&").replace(/[^a-z0-9]+/g, " ").trim();
+  return String(value || "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/(\d)([A-Za-z])/g, "$1 $2")
+    .toLowerCase()
+    .replace(/&amp;/g, "&")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 const US_STATE_NAMES = {
@@ -3317,7 +3323,13 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
   await targetPage.waitForTimeout(2_400).catch(() => null);
   const suggestions = await withSoftTimeout(
     targetPage.evaluate(({ queryTokens, locationTokens, requiredCityTokens, maxSuggestions }) => {
-      const clean = (raw) => String(raw || "").toLowerCase().replace(/&amp;/g, "&").replace(/[^a-z0-9]+/g, " ").trim();
+      const clean = (raw) => String(raw || "")
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/(\d)([A-Za-z])/g, "$1 $2")
+        .toLowerCase()
+        .replace(/&amp;/g, "&")
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
 
       function isVisible(el) {
         if (!el || !(el instanceof HTMLElement)) return false;
@@ -3387,7 +3399,12 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
   await targetPage.waitForTimeout(900).catch(() => null);
   const clicked = await withSoftTimeout(
     targetPage.evaluate(({ searchTerm, targetSuggestion }) => {
-      const clean = (raw) => String(raw || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const clean = (raw) => String(raw || "")
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/(\d)([A-Za-z])/g, "$1 $2")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
       const wanted = clean(targetSuggestion || searchTerm).split(" ").filter((token) => token.length >= 3);
       if (wanted.length === 0) return null;
       const searchNorm = clean(searchTerm);
@@ -3939,7 +3956,7 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
         } else {
           return false;
         }
-        for (const name of ["input", "change", "blur"]) {
+        for (const name of ["input", "change"]) {
           el.dispatchEvent(new Event(name, { bubbles: true }));
         }
         return true;
