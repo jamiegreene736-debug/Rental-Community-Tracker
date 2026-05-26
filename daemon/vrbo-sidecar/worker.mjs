@@ -3322,7 +3322,7 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
   const queryTokens = otaQueryTokens(typedQuery);
   const locationTokens = otaLocationTokens(destination);
   const requiredCityTokens = otaRequiredCityTokens(destination);
-  await targetPage.waitForTimeout(900).catch(() => null);
+  await targetPage.waitForTimeout(2_400).catch(() => null);
   const suggestions = await withSoftTimeout(
     targetPage.evaluate(({ queryTokens, locationTokens, requiredCityTokens, maxSuggestions }) => {
       const clean = (raw) => String(raw || "").toLowerCase().replace(/&amp;/g, "&").replace(/[^a-z0-9]+/g, " ").trim();
@@ -3355,6 +3355,8 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
         "li",
         "button",
         "a",
+        "div",
+        "span",
       ].join(",")));
       for (const el of nodes) {
         if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
