@@ -4825,6 +4825,229 @@ async function waitForBookingResultsSurface(targetPage, id, effectiveSearchTerm)
   return diagnostics;
 }
 
+function bookingStateHasRequestedDates(state, checkIn, checkOut) {
+  try {
+    const url = new URL(String(state?.url || ""));
+    const checkin = url.searchParams.get("checkin");
+    const checkout = url.searchParams.get("checkout");
+    if (checkin === checkIn && checkout === checkOut) return true;
+    const inYear = url.searchParams.get("checkin_year");
+    const inMonth = url.searchParams.get("checkin_month");
+    const inDay = url.searchParams.get("checkin_monthday");
+    const outYear = url.searchParams.get("checkout_year");
+    const outMonth = url.searchParams.get("checkout_month");
+    const outDay = url.searchParams.get("checkout_monthday");
+    if (inYear && inMonth && inDay && outYear && outMonth && outDay) {
+      const pad = (value) => String(value).padStart(2, "0");
+      return `${inYear}-${pad(inMonth)}-${pad(inDay)}` === checkIn &&
+        `${outYear}-${pad(outMonth)}-${pad(outDay)}` === checkOut;
+    }
+  } catch {}
+  return false;
+}
+
+async function applyBookingDateInputs(targetPage, checkIn, checkOut, label = "booking_search") {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+
+  const openLabel = await withSoftTimeout(
+    targetPage.evaluate(() => {
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 6 && rect.height > 6 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+      function textOf(el) {
+        return [
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("data-testid"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+      const candidates = Array.from(document.querySelectorAll("button, [role='button'], div[tabindex], span[tabindex]"))
+        .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true")
+        .map((el) => {
+          const label = textOf(el);
+          let score = 0;
+          if (/check[\s-]*in|check[\s-]*out/i.test(label)) score += 90;
+          if (/\bdate|calendar\b/i.test(label)) score += 60;
+          if (/search|destination|where|guest|currency|account|sign in/i.test(label)) score -= 100;
+          return { el, label, score };
+        })
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score);
+      const target = candidates[0]?.el ?? null;
+      if (!target) return null;
+      target.scrollIntoView?.({ block: "center", inline: "center" });
+      target.click();
+      return candidates[0].label.slice(0, 100);
+    }),
+    3_000,
+    null,
+  );
+  if (!openLabel) return null;
+
+  await targetPage.waitForTimeout(700).catch(() => {});
+
+  const clickDate = async (iso, role) => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const clicked = await withSoftTimeout(
+        targetPage.evaluate(({ iso }) => {
+          const date = new Date(`${iso}T12:00:00Z`);
+          const month = date.toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+          const monthShort = date.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+          const weekday = date.toLocaleString("en-US", { weekday: "long", timeZone: "UTC" });
+          const day = String(date.getUTCDate());
+          const year = String(date.getUTCFullYear());
+          const labels = [
+            iso,
+            `${weekday}, ${month} ${day}, ${year}`,
+            `${month} ${day}, ${year}`,
+            `${monthShort} ${day}, ${year}`,
+          ].map((s) => s.toLowerCase());
+
+          function isVisible(el) {
+            if (!el || !(el instanceof HTMLElement)) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 6 && rect.height > 6 &&
+              rect.bottom >= 0 && rect.right >= 0 &&
+              rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+              style.display !== "none" && style.visibility !== "hidden" &&
+              Number(style.opacity || "1") > 0.05;
+          }
+          function textOf(el) {
+            return [
+              el.textContent,
+              el.getAttribute?.("aria-label"),
+              el.getAttribute?.("title"),
+              el.getAttribute?.("data-date"),
+              el.getAttribute?.("datetime"),
+            ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+          }
+          function clickable(el) {
+            const button = el.closest?.("button, [role='button']");
+            return button instanceof HTMLElement ? button : el;
+          }
+
+          const exact = Array.from(document.querySelectorAll(`[data-date="${CSS.escape(iso)}"], [datetime="${CSS.escape(iso)}"]`))
+            .find((el) => isVisible(el) && !clickable(el).disabled && clickable(el).getAttribute?.("aria-disabled") !== "true");
+          if (exact) {
+            const target = clickable(exact);
+            target.scrollIntoView?.({ block: "center", inline: "center" });
+            target.click();
+            return textOf(target).slice(0, 100) || iso;
+          }
+
+          const candidates = Array.from(document.querySelectorAll("button, [role='button'], td, span, div"))
+            .filter((el) => el instanceof HTMLElement && isVisible(el))
+            .map((el) => {
+              const label = textOf(el);
+              const lower = label.toLowerCase();
+              const target = clickable(el);
+              if (target.disabled || target.getAttribute?.("aria-disabled") === "true") return null;
+              const matched = labels.some((needle) => needle && lower.includes(needle));
+              if (!matched) return null;
+              let score = 0;
+              if (lower.includes(iso)) score += 100;
+              if (lower.includes(month.toLowerCase()) && lower.includes(day) && lower.includes(year)) score += 80;
+              if (el.tagName.toLowerCase() === "button" || el.getAttribute?.("role") === "button") score += 20;
+              return { el: target, label, score };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score);
+          const target = candidates[0]?.el ?? null;
+          if (!target) return null;
+          target.scrollIntoView?.({ block: "center", inline: "center" });
+          target.click();
+          return candidates[0].label.slice(0, 100) || iso;
+        }, { iso }),
+        3_000,
+        null,
+      );
+      if (clicked) return { role, label: clicked, visible: true };
+
+      const advanced = await withSoftTimeout(
+        targetPage.evaluate(() => {
+          function isVisible(el) {
+            if (!el || !(el instanceof HTMLElement)) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 6 && rect.height > 6 &&
+              rect.bottom >= 0 && rect.right >= 0 &&
+              rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+              style.display !== "none" && style.visibility !== "hidden" &&
+              Number(style.opacity || "1") > 0.05;
+          }
+          function textOf(el) {
+            return [
+              el.textContent,
+              el.getAttribute?.("aria-label"),
+              el.getAttribute?.("title"),
+              el.getAttribute?.("data-testid"),
+            ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+          }
+          const next = Array.from(document.querySelectorAll("button, [role='button']"))
+            .find((el) => el instanceof HTMLElement && isVisible(el) && /\bnext\b/i.test(textOf(el)) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
+          if (!next) return null;
+          next.click();
+          return textOf(next).slice(0, 80) || "next";
+        }),
+        2_000,
+        null,
+      );
+      if (!advanced) break;
+      await targetPage.waitForTimeout(500).catch(() => {});
+    }
+    return null;
+  };
+
+  const checkin = await clickDate(checkIn, "checkin");
+  await targetPage.waitForTimeout(500).catch(() => {});
+  const checkout = await clickDate(checkOut, "checkout");
+  await targetPage.waitForTimeout(500).catch(() => {});
+  const doneLabel = await withSoftTimeout(
+    targetPage.evaluate(() => {
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 6 && rect.height > 6 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+      function textOf(el) {
+        return [el.textContent, el.getAttribute?.("aria-label"), el.getAttribute?.("title")]
+          .filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+      const done = Array.from(document.querySelectorAll("button, [role='button']"))
+        .find((el) => el instanceof HTMLElement && isVisible(el) && /^(?:done|apply|ok)$/i.test(textOf(el)) && !el.disabled && el.getAttribute?.("aria-disabled") !== "true");
+      if (!done) return null;
+      done.click();
+      return textOf(done).slice(0, 80) || "Done";
+    }),
+    2_000,
+    null,
+  );
+
+  const filled = [checkin, checkout].filter(Boolean);
+  if (filled.length > 0 || doneLabel) {
+    log(
+      `${label}: booking date picker opened="${openLabel}" filled=${filled.length}` +
+      `${filled.length ? ` roles=${filled.map((f) => f.role).join("+")}` : ""}` +
+      `${doneLabel ? ` clicked="${doneLabel}"` : ""}`,
+    );
+  }
+  return { filled, openedLabel: openLabel, submitLabel: doneLabel, controlCount: 0 };
+}
+
 async function runBookingSearchVariant(id, params, variant = null) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
@@ -4854,10 +5077,16 @@ async function runBookingSearchVariant(id, params, variant = null) {
     );
   }
   await dismissBookingPopups(page, "booking_search_before_dates");
-  const dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "booking_search").catch((e) => {
+  let dateEntry = await applyBookingDateInputs(page, checkIn, checkOut, "booking_search").catch((e) => {
     log(`booking_search ${id}: homepage date entry failed: ${e?.message ?? e}`);
     return null;
   });
+  if (!pmDateEntryComplete(dateEntry)) {
+    dateEntry = await applyPmDateInputs(page, checkIn, checkOut, "booking_search").catch((e) => {
+      log(`booking_search ${id}: homepage generic date entry failed: ${e?.message ?? e}`);
+      return null;
+    });
+  }
   if (!pmDateEntryComplete(dateEntry)) {
     throw new ProviderBrowserUnavailableError(
       `Booking.com homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
@@ -4902,6 +5131,19 @@ async function runBookingSearchVariant(id, params, variant = null) {
   }
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
     throw new Error("Booking.com bot wall — refresh cookies or retry after proxy rotation");
+  }
+  if (!bookingStateHasRequestedDates(state, checkIn, checkOut) && resultsSurface.propertyCards > 0 && resultsSurface.priceMentions === 0) {
+    throw new ProviderBrowserUnavailableError(
+      `Booking.com visible search reached an unpriced Koloa/property results page without preserving ${checkIn}→${checkOut}; refusing to treat that as a completed dated search.`,
+      {
+        label: "booking_search",
+        id,
+        provider: "booking",
+        url: state?.url,
+        title: state?.title,
+        resultsSurface,
+      },
+    );
   }
 
   const expectedNights = nightsBetween(checkIn, checkOut);
