@@ -4784,6 +4784,47 @@ async function processBookingSearch(id, params) {
   await postResult(id, deduped);
 }
 
+async function waitForBookingResultsSurface(targetPage, id, effectiveSearchTerm) {
+  if (!targetPage || targetPage.isClosed?.()) {
+    return { propertyCards: 0, hotelLinks: 0, noResults: false, priceMentions: 0, excerpt: "" };
+  }
+
+  await targetPage.waitForFunction(() => {
+    const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ");
+    const hasResultCard = Boolean(
+      document.querySelector('[data-testid="property-card"], [data-testid="property-card-container"], [data-testid*="property-card" i], a[href*="/hotel/"]'),
+    );
+    const hasTerminalEmptyState = /\b(?:no properties|no results|couldn'?t find|no availability|sold out|not available)\b/i.test(bodyText);
+    return hasResultCard || hasTerminalEmptyState;
+  }, null, { timeout: 10_000 }).catch(() => null);
+
+  await targetPage.evaluate(async () => {
+    window.scrollBy({ top: Math.round(window.innerHeight * 0.65), left: 0, behavior: "instant" });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    window.scrollBy({ top: Math.round(window.innerHeight * 0.65), left: 0, behavior: "instant" });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+  }).catch(() => null);
+  await targetPage.waitForTimeout(600).catch(() => {});
+
+  const diagnostics = await targetPage.evaluate(() => {
+    const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+    return {
+      propertyCards: document.querySelectorAll('[data-testid="property-card"], [data-testid="property-card-container"], [data-testid*="property-card" i]').length,
+      hotelLinks: document.querySelectorAll('a[href*="/hotel/"]').length,
+      noResults: /\b(?:no properties|no results|couldn'?t find|no availability|sold out|not available)\b/i.test(bodyText),
+      priceMentions: (bodyText.match(/(?:US\$|\$)\s*[\d,]+/g) || []).length,
+      excerpt: bodyText.slice(0, 260),
+    };
+  }).catch(() => ({ propertyCards: 0, hotelLinks: 0, noResults: false, priceMentions: 0, excerpt: "" }));
+
+  log(
+    `booking_search ${id}: results surface for "${effectiveSearchTerm}" ` +
+    `propertyCards=${diagnostics.propertyCards} hotelLinks=${diagnostics.hotelLinks} ` +
+    `prices=${diagnostics.priceMentions} noResults=${diagnostics.noResults}`,
+  );
+  return diagnostics;
+}
+
 async function runBookingSearchVariant(id, params, variant = null) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
@@ -4841,6 +4882,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
   }
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissBookingPopups(page, "booking_search_before_scrape");
+  const resultsSurface = await waitForBookingResultsSurface(page, id, effectiveSearchTerm);
   let state = await dumpPageState("booking", { id, ...params });
   throwIfBrightDataKycBlock(state, "booking_search", id);
   if (await stopOtaProviderIfBlocked(page, "booking_search", id, state)) {
@@ -4864,17 +4906,58 @@ async function runBookingSearchVariant(id, params, variant = null) {
 
   const expectedNights = nightsBetween(checkIn, checkOut);
   const cards = await page.evaluate(({ minBd, expectedNights }) => {
-    const cards = Array.from(document.querySelectorAll('[data-testid="property-card"]'));
+    const cardSet = new Set();
+    for (const selector of [
+      '[data-testid="property-card"]',
+      '[data-testid="property-card-container"]',
+      '[data-testid*="property-card" i]',
+    ]) {
+      document.querySelectorAll(selector).forEach((el) => cardSet.add(el));
+    }
+    for (const link of document.querySelectorAll('a[href*="/hotel/"]')) {
+      let el = link;
+      let picked = null;
+      for (let depth = 0; depth < 7 && el; depth++, el = el.parentElement) {
+        if (!(el instanceof HTMLElement)) continue;
+        const text = (el.textContent || "").replace(/\s+/g, " ");
+        if (text.length >= 80 && (/(?:US\$|\$)\s*[\d,]+/.test(text) || /\bbed(?:room)?s?\b|\bbr\b/i.test(text))) {
+          picked = el;
+        }
+      }
+      if (picked) cardSet.add(picked);
+    }
+    const cards = Array.from(cardSet);
     const out = [];
+    const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0 };
+    let firstCardSample = null;
     function moneyAmounts(text) {
-      return Array.from(String(text || "").matchAll(/\$\s*([\d,]+(?:\.\d+)?)/g))
+      return Array.from(String(text || "").matchAll(/(?:US\$|\$)\s*([\d,]+(?:\.\d+)?)/g))
         .map((m) => Math.round(parseFloat(m[1].replace(/,/g, ""))))
         .filter((n) => Number.isFinite(n) && n > 0);
     }
+    function bedroomNumber(text) {
+      const raw = String(text || "");
+      const digitMatch = raw.match(/(\d+)\s*(?:bedrooms?|beds?|br|bd)\b/i);
+      if (digitMatch) return parseInt(digitMatch[1], 10);
+      const words = {
+        one: 1,
+        two: 2,
+        three: 3,
+        four: 4,
+        five: 5,
+        six: 6,
+        seven: 7,
+        eight: 8,
+        nine: 9,
+        ten: 10,
+      };
+      const wordMatch = raw.toLowerCase().match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)[-\s]*(?:bedrooms?|beds?|br|bd)\b/i);
+      return wordMatch ? words[wordMatch[1]] : 0;
+    }
     for (const card of cards) {
-      const titleEl = card.querySelector('[data-testid="title"]') ?? card.querySelector("h3, h2");
+      const titleEl = card.querySelector('[data-testid="title"], [data-testid*="title" i]') ?? card.querySelector("h3, h2, a[href*='/hotel/']");
       const title = titleEl ? titleEl.textContent.trim() : "";
-      const link = card.querySelector('a[href*="/hotel/"]');
+      const link = card.matches?.('a[href*="/hotel/"]') ? card : card.querySelector('a[href*="/hotel/"]');
       const href = link ? link.getAttribute("href") || "" : "";
       const img = card.querySelector("img");
       const image = img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
@@ -4905,11 +4988,19 @@ async function runBookingSearchVariant(id, params, variant = null) {
       if (minBd >= 3 && totalPrice > 0 && totalPrice < minStayTotal) {
         totalPrice = 0;
       }
-      const bdMatch = fullText.match(/(\d+)\s*bedroom/i);
-      const bedrooms = bdMatch ? parseInt(bdMatch[1], 10) : 0;
-      if (!url) continue;
-      if (!(totalPrice > 0)) continue;
-      if (bedrooms < minBd) continue;
+      const bedrooms = bedroomNumber(fullText);
+      if (firstCardSample === null) {
+        firstCardSample = {
+          title: title.slice(0, 80),
+          url: url.slice(0, 120),
+          bedrooms,
+          price: totalPrice,
+          textExcerpt: fullText.slice(0, 240),
+        };
+      }
+      if (!url) { drops.noUrl++; continue; }
+      if (!(totalPrice > 0)) { drops.noPrice++; continue; }
+      if (bedrooms < minBd) { drops.noBedrooms++; continue; }
       out.push({
         url,
         title: title.slice(0, 80),
@@ -4927,10 +5018,24 @@ async function runBookingSearchVariant(id, params, variant = null) {
         snippet: fullText.slice(0, 220),
       });
     }
-    return out;
+    return { out, drops, totalSeen: cards.length, firstCardSample };
   }, { minBd: bedrooms, expectedNights });
-  log(`booking_search ${id}: ${cards.length} cards for "${effectiveSearchTerm}"`);
-  return cards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
+  const resultCards = cards.out || [];
+  log(
+    `booking_search ${id}: ${resultCards.length} cards for "${effectiveSearchTerm}" ` +
+    `[seen=${cards.totalSeen ?? 0}, surface=${resultsSurface.propertyCards}/${resultsSurface.hotelLinks}, ` +
+    `drops=noUrl:${cards.drops?.noUrl ?? 0}/noPrice:${cards.drops?.noPrice ?? 0}/noBR:${cards.drops?.noBedrooms ?? 0}]`,
+  );
+  if (resultCards.length === 0 && cards.firstCardSample) {
+    log(
+      `booking_search ${id}: empty-result diagnostic — first card title="${cards.firstCardSample.title}" ` +
+      `url="${cards.firstCardSample.url}" br=${cards.firstCardSample.bedrooms} ` +
+      `price=${cards.firstCardSample.price} text="${cards.firstCardSample.textExcerpt}"`,
+    );
+  } else if (resultCards.length === 0 && resultsSurface.excerpt) {
+    log(`booking_search ${id}: empty-result page excerpt="${resultsSurface.excerpt}"`);
+  }
+  return resultCards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
 }
 
 // ─────────────────────── Google SERP scrape ─────────────────────────
