@@ -6041,6 +6041,9 @@ async function runBookingSearchVariant(id, params, variant = null) {
         .map((m) => Math.round(parseFloat(m[1].replace(/,/g, ""))))
         .filter((n) => Number.isFinite(n) && n > 0);
     }
+    function plausibleBookingStayTotals(amounts, minStayTotal, maxStayTotal) {
+      return amounts.filter((n) => n >= minStayTotal && n <= maxStayTotal);
+    }
     function bedroomNumber(text) {
       const raw = String(text || "");
       const digitMatch = raw.match(/(\d+)\s*(?:bedrooms?|beds?|br|bd)\b/i);
@@ -6090,6 +6093,10 @@ async function runBookingSearchVariant(id, params, variant = null) {
           .map((el) => `${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`)
           .join(" "),
       ].join(" ").replace(/\s+/g, " ");
+      if (/^browse the results\b/i.test(title) || /\bbrowse the results for\b/i.test(fullText.slice(0, 180))) {
+        drops.noPrice++;
+        continue;
+      }
       const targetHaystack = `${title} ${url} ${fullText}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
       const hasRequiredTarget = !Array.isArray(requiredTargetTokens) ||
         requiredTargetTokens.length === 0 ||
@@ -6111,11 +6118,16 @@ async function runBookingSearchVariant(id, params, variant = null) {
       const priceElAmounts = moneyAmounts(priceText);
       const fullAmounts = moneyAmounts(fullText);
       const minStayTotal = Math.max(250, expectedNights * 175);
-      const fullStayTotals = fullAmounts.filter((n) => n >= minStayTotal);
+      // NOTE FOR CODEX: Booking sometimes concatenates search/header numbers
+      // into impossible card totals (for example "$241,891"). Cap parsed stay
+      // totals so those artifacts cannot win auto-fill pricing.
+      const maxStayTotal = Math.max(30_000, expectedNights * Math.max(minBd, 1) * 2_500);
+      const fullStayTotals = plausibleBookingStayTotals(fullAmounts, minStayTotal, maxStayTotal);
+      const priceElStayTotals = plausibleBookingStayTotals(priceElAmounts, 1, maxStayTotal);
       let totalPrice = fullStayTotals.length > 0
         ? Math.max(...fullStayTotals)
-        : priceElAmounts.length > 0
-        ? Math.max(...priceElAmounts)
+        : priceElStayTotals.length > 0
+        ? Math.max(...priceElStayTotals)
         : 0;
       // If we only found an implausibly-low "total" on a 3BR card, it is
       // almost certainly a nightly/partial-price fragment, not the full
