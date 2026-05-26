@@ -8310,7 +8310,8 @@ export async function registerRoutes(
     const pmGoogleDiscoveryEnabled = includePm && googleDiscoveryEnabled;
     const looseResortPhotoProof = propertyUnitConfig?.looseResortPhotoProof === true;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v2|${groundFloorOnly ? "ground" : "any-floor"}`;
+    const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v2|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     const noCache = req.query.nocache === "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -9195,6 +9196,7 @@ export async function registerRoutes(
     let airbnbSidecarMs = 0;
     let airbnbSidecarReason = "";
     let airbnbProviderHealth: ProviderHealthSnapshot | null = null;
+    let airbnbVariationSummary: any = null;
     const airbnbSidecarAbort = makeSidecarAbort("airbnb-sidecar");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       try {
@@ -9207,6 +9209,7 @@ export async function registerRoutes(
           bedrooms,
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
+          rerunOnlyUntried: rerunOnlyUntriedVariations,
           signal: airbnbSidecarAbort.signal,
           stopGeneration: sidecarStopGeneration,
         });
@@ -9214,6 +9217,7 @@ export async function registerRoutes(
         airbnbSidecarMs = r.durationMs;
         airbnbSidecarReason = r.reason;
         airbnbProviderHealth = r.providerHealth ?? null;
+        airbnbVariationSummary = r.searchVariationSummary ?? null;
         if (sidecarReasonIsProviderFailure(r.reason)) {
           noteSourceError("Airbnb sidecar search", r.reason);
         }
@@ -9276,6 +9280,7 @@ export async function registerRoutes(
     let bookingSidecarMs = 0;
     let bookingSidecarReason = "";
     let bookingProviderHealth: ProviderHealthSnapshot | null = null;
+    let bookingVariationSummary: any = null;
     const bookingSidecarAbort = makeSidecarAbort("booking-sidecar");
     const bookingPromise: Promise<Candidate[]> = (async () => {
       try {
@@ -9288,6 +9293,7 @@ export async function registerRoutes(
           bedrooms,
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
+          rerunOnlyUntried: rerunOnlyUntriedVariations,
           signal: bookingSidecarAbort.signal,
           stopGeneration: sidecarStopGeneration,
         });
@@ -9297,6 +9303,7 @@ export async function registerRoutes(
         bookingSidecarMs = r.durationMs;
         bookingSidecarReason = r.reason;
         bookingProviderHealth = r.providerHealth ?? null;
+        bookingVariationSummary = r.searchVariationSummary ?? null;
         if (sidecarReasonIsProviderFailure(r.reason)) {
           noteSourceError("Booking.com sidecar search", r.reason);
         }
@@ -9357,6 +9364,7 @@ export async function registerRoutes(
     let vrboSidecarMs = 0;
     let vrboSidecarReason = "";
     let vrboProviderHealth: ProviderHealthSnapshot | null = null;
+    let vrboVariationSummary: any = null;
     const vrboSidecarAbort = makeSidecarAbort("vrbo");
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const targetSearchTerm = vrboWebsiteSearchTerm;
@@ -9370,6 +9378,7 @@ export async function registerRoutes(
           bedrooms,
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
+          rerunOnlyUntried: rerunOnlyUntriedVariations,
           signal: vrboSidecarAbort.signal,
           stopGeneration: sidecarStopGeneration,
         });
@@ -9388,6 +9397,7 @@ export async function registerRoutes(
         vrboSidecarMs = r.durationMs;
         vrboSidecarReason = r.reason;
         vrboProviderHealth = r.providerHealth ?? null;
+        vrboVariationSummary = r.searchVariationSummary ?? null;
         if (sidecarReasonIsProviderFailure(r.reason)) {
           noteSourceError("Vrbo sidecar search", r.reason);
         }
@@ -11142,6 +11152,7 @@ export async function registerRoutes(
       accessPattern?: string;
       bedroomFilterApplied?: boolean;
       bedroomFilterMode?: string;
+      searchVariationSummary?: any;
     }) => ({
       ...input,
       failureReason: providerFailureReason(input.status, input.reason, input.health ?? null),
@@ -11163,6 +11174,7 @@ export async function registerRoutes(
         verified: input.verified,
       },
       searchTerm: input.searchTerm ?? null,
+      searchVariationSummary: input.searchVariationSummary ?? null,
       accessPattern: input.accessPattern ?? "authorized website search via sidecar",
     });
     const diagnosticSources = [
@@ -11178,6 +11190,7 @@ export async function registerRoutes(
         reason: airbnbSidecarReason,
         health: airbnbProviderHealth,
         searchTerm: airbnbWebsiteSearchTerm,
+        searchVariationSummary: airbnbVariationSummary,
         message: `sidecarOnline=${airbnbSidecarOnline}; websitePriced=${airbnbPricedCount}; ${airbnbTarget.length} kept after target filters${airbnbSidecarReason ? `; ${airbnbSidecarReason}` : ""}.`,
       }),
       enrichProviderDiagnostic({
@@ -11192,6 +11205,7 @@ export async function registerRoutes(
         reason: vrboSidecarReason,
         health: vrboProviderHealth,
         searchTerm: vrboWebsiteSearchTerm,
+        searchVariationSummary: vrboVariationSummary,
         accessPattern: "authorized website search via sidecar; one shared all-bedroom VRBO search per resort/date, then server-side bedroom curation",
         bedroomFilterApplied: false,
         bedroomFilterMode: "server-side bedroom curation after shared VRBO search",
@@ -11209,6 +11223,7 @@ export async function registerRoutes(
         reason: bookingSidecarReason,
         health: bookingProviderHealth,
         searchTerm: bookingWebsiteSearchTerm,
+        searchVariationSummary: bookingVariationSummary,
         message: `sidecarOnline=${bookingSidecarOnline}; sidecarPriced=${bookingSidecarCount}; ${bookingSidecarCount} Booking.com website sidecar search card(s). Sidecar-priced search cards are trusted when Booking.com returned them after date and bedroom filtering${bookingSidecarReason ? `; ${bookingSidecarReason}` : ""}.`,
       }),
       {
@@ -11265,7 +11280,7 @@ export async function registerRoutes(
       "",
       "Sources:",
       ...diagnosticSources.map((s) =>
-        `- ${s.source}: status=${s.status}; confidence=${(s as any).confidence ?? "unknown"}; raw=${s.raw}; kept=${s.kept}; priced=${s.priced}; verified=${s.verified}${s.durationMs ? `; durationMs=${s.durationMs}` : ""}${(s as any).providerHealth ? `; providerHealth=${(s as any).providerHealth}` : ""}${(s as any).cooldownUntil ? `; cooldownUntil=${(s as any).cooldownUntil}` : ""}${(s as any).failureReason ? `; failureReason=${(s as any).failureReason}` : ""}; ${s.message}`,
+        `- ${s.source}: status=${s.status}; confidence=${(s as any).confidence ?? "unknown"}; raw=${s.raw}; kept=${s.kept}; priced=${s.priced}; verified=${s.verified}${s.durationMs ? `; durationMs=${s.durationMs}` : ""}${(s as any).providerHealth ? `; providerHealth=${(s as any).providerHealth}` : ""}${(s as any).cooldownUntil ? `; cooldownUntil=${(s as any).cooldownUntil}` : ""}${(s as any).failureReason ? `; failureReason=${(s as any).failureReason}` : ""}${(s as any).searchVariationSummary?.tried?.length ? `; variationsTried=${(s as any).searchVariationSummary.tried.length}; bestVariation=${(s as any).searchVariationSummary.bestTerm ?? "none"}` : ""}; ${s.message}`,
       ),
       "",
       "Issues:",
@@ -17049,6 +17064,12 @@ Return ONLY compact JSON with this exact shape:
               checkIn: String(params.checkIn),
               checkOut: String(params.checkOut),
               bedrooms,
+              searchVariations: Array.isArray(params.searchVariations)
+                ? params.searchVariations.filter((v): v is string => typeof v === "string" && v.trim()).slice(0, 12)
+                : undefined,
+              variationMode: typeof params.variationMode === "object" && params.variationMode
+                ? params.variationMode as any
+                : undefined,
             },
           });
         } else if (opType === "vrbo_photo_scrape") {
@@ -17367,6 +17388,7 @@ Return ONLY compact JSON with this exact shape:
       id: r.id,
       status: r.status,
       results: r.results ?? null,
+      searchVariationSummary: r.searchVariationSummary ?? null,
       error: r.error ?? null,
       createdAt: new Date(r.createdAt).toISOString(),
       completedAt: r.completedAt ? new Date(r.completedAt).toISOString() : null,
@@ -17386,6 +17408,46 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/vrbo-sidecar/status", async (_req, res) => {
     const { getStatus } = await import("./vrbo-sidecar-queue");
     return res.json(getStatus());
+  });
+
+  app.get("/api/vrbo-sidecar/search-variations", async (req, res) => {
+    const community = typeof req.query.community === "string" ? req.query.community.trim() : "";
+    if (!community) return res.status(400).json({ error: "community query param required" });
+    const city = typeof req.query.city === "string" && req.query.city.trim() ? req.query.city.trim() : null;
+    const state = typeof req.query.state === "string" && req.query.state.trim() ? req.query.state.trim() : null;
+    const checkIn = typeof req.query.checkIn === "string" ? req.query.checkIn : undefined;
+    const checkOut = typeof req.query.checkOut === "string" ? req.query.checkOut : undefined;
+    const bedrooms = Number(req.query.bedrooms);
+    const { getSearchVariationStatus } = await import("./vrbo-sidecar-queue");
+    return res.json(await getSearchVariationStatus({
+      community,
+      city,
+      state,
+      checkIn,
+      checkOut,
+      bedrooms: Number.isFinite(bedrooms) ? bedrooms : undefined,
+    }));
+  });
+
+  app.post("/api/vrbo-sidecar/search-variations", async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const community = typeof body.community === "string" ? body.community.trim() : "";
+    const channel = typeof body.channel === "string" ? body.channel.trim().toLowerCase() : "";
+    if (!community) return res.status(400).json({ error: "community required" });
+    if (channel !== "airbnb" && channel !== "vrbo" && channel !== "booking") {
+      return res.status(400).json({ error: "channel must be airbnb, vrbo, or booking" });
+    }
+    const terms = Array.isArray(body.terms)
+      ? body.terms.filter((term): term is string => typeof term === "string" && term.trim())
+      : [];
+    const { savePreferredSearchVariations } = await import("./vrbo-sidecar-queue");
+    return res.json(await savePreferredSearchVariations({
+      community,
+      city: typeof body.city === "string" && body.city.trim() ? body.city.trim() : null,
+      state: typeof body.state === "string" && body.state.trim() ? body.state.trim() : null,
+      channel: channel as "airbnb" | "vrbo" | "booking",
+      terms,
+    }));
   });
 
   // GET /api/vrbo-sidecar/screens — public dashboard view of the local

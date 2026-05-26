@@ -53,6 +53,35 @@ export const insertBuyInSchema = createInsertSchema(buyIns).omit({
 export type InsertBuyIn = z.infer<typeof insertBuyInSchema>;
 export type BuyIn = typeof buyIns.$inferSelect;
 
+export const sidecarSearchVariations = pgTable("sidecar_search_variations", {
+  id: serial("id").primaryKey(),
+  communityKey: text("community_key").notNull(),
+  communityName: text("community_name").notNull(),
+  city: text("city"),
+  state: text("state"),
+  channel: text("channel").notNull(),
+  term: text("term").notNull(),
+  source: text("source").notNull().default("operator"),
+  preferred: boolean("preferred").notNull().default(false),
+  timesTried: integer("times_tried").notNull().default(0),
+  lastYieldCount: integer("last_yield_count").notNull().default(0),
+  totalYieldCount: integer("total_yield_count").notNull().default(0),
+  lastError: text("last_error"),
+  lastSearchedAt: timestamp("last_searched_at"),
+  lastSuccessAt: timestamp("last_success_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertSidecarSearchVariationSchema = createInsertSchema(sidecarSearchVariations).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertSidecarSearchVariation = z.infer<typeof insertSidecarSearchVariationSchema>;
+export type SidecarSearchVariation = typeof sidecarSearchVariations.$inferSelect;
+
 export const reservationCancellationAudits = pgTable("reservation_cancellation_audits", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull(),

@@ -1,3 +1,15 @@
+import { and, desc, eq, sql } from "drizzle-orm";
+import { db } from "./db";
+import { sidecarSearchVariations } from "@shared/schema";
+import {
+  generateSearchVariations,
+  matchesSearchVariationTokens,
+  normalizeResortSearchTerm,
+  searchVariationKey,
+  searchVariationTokens,
+  type OtaProvider,
+} from "./search-variations";
+
 // Chrome sidecar queue.
 //
 // Bridges find-buy-in (running on Railway) to a polling sidecar worker.
@@ -57,6 +69,8 @@ export type SidecarAirbnbParams = {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  searchVariations?: string[];
+  variationMode?: SidecarSearchVariationMode;
 };
 
 export type SidecarVrboParams = {
@@ -65,6 +79,8 @@ export type SidecarVrboParams = {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  searchVariations?: string[];
+  variationMode?: SidecarSearchVariationMode;
 };
 
 export type SidecarVrboPhotoScrapeParams = {
@@ -103,6 +119,8 @@ export type SidecarBookingParams = {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  searchVariations?: string[];
+  variationMode?: SidecarSearchVariationMode;
 };
 
 export type SidecarGoogleSerpParams = {
@@ -249,6 +267,41 @@ export type SidecarPropertyCandidate = {
   directBookingConfidence?: "high" | "medium" | "low";
   directBookingSource?: "airbnb_image_reverse_search";
   directBookingReason?: string;
+  searchVariant?: string;
+};
+
+export type SidecarSearchVariationMode =
+  | boolean
+  | {
+      filterTokens?: string[];
+      maxVariations?: number;
+      allowDiscovery?: boolean;
+      rerunOnlyUntried?: boolean;
+    };
+
+export type SidecarSearchVariationAttempt = {
+  term: string;
+  typedQuery?: string;
+  suggestionText?: string;
+  source?: string;
+  success: boolean;
+  candidateCount: number;
+  error?: string;
+};
+
+export type SidecarSearchVariationSummary = {
+  provider: OtaProvider;
+  communityKey: string;
+  communityName: string;
+  city: string | null;
+  state: string | null;
+  checkIn?: string;
+  checkOut?: string;
+  bedrooms?: number;
+  tried: SidecarSearchVariationAttempt[];
+  bestTerm: string | null;
+  bestYieldCount: number;
+  generatedTerms: string[];
 };
 
 export type SidecarScreenSnapshot = {
@@ -326,6 +379,7 @@ export type SidecarRequest = {
     | SidecarPhotoUploadResult
     | SidecarGuestyDisconnectResult
     | null;
+  searchVariationSummary?: SidecarSearchVariationSummary;
   error?: string;
   createdAt: number;
   claimedAt?: number;
@@ -384,6 +438,7 @@ const providerHealth = new Map<SidecarProviderKey, {
   cooldownUntil: number | null;
   updatedAt: number | null;
 }>();
+const searchVariationRuns = new Map<string, SidecarSearchVariationSummary>();
 
 // Worker liveness: every time the worker calls `next()`, we stamp this.
 // The UI polls `getHeartbeat()` to decide whether to show "Local sidecar
@@ -444,6 +499,398 @@ function opConcurrencyGroup(opType: SidecarOpType): string {
 
 function nowMs(): number {
   return Date.now();
+}
+
+function cleanText(value: unknown, max = 160): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function providerForOp(opType: SidecarOpType): OtaProvider | null {
+  if (opType === "airbnb_search") return "airbnb";
+  if (opType === "vrbo_search") return "vrbo";
+  if (opType === "booking_search") return "booking";
+  return null;
+}
+
+function parseSearchLocation(params: Partial<SidecarAirbnbParams & SidecarVrboParams & SidecarBookingParams>): {
+  communityName: string;
+  city: string | null;
+  state: string | null;
+  communityKey: string;
+} {
+  const searchTerm = cleanText(params.searchTerm || params.destination);
+  const destination = cleanText(params.destination);
+  const parts = destination.split(",").map((part) => part.trim()).filter(Boolean);
+  const communityName = normalizeResortSearchTerm(searchTerm || parts[0] || destination);
+  const city = parts.length >= 3 ? parts[1] : null;
+  const state = parts.length >= 3 ? parts[2] : parts.length === 2 ? parts[1] : null;
+  return {
+    communityName,
+    city,
+    state,
+    communityKey: searchVariationKey({ community: communityName, city, state }),
+  };
+}
+
+function variationRunKey(input: {
+  provider: OtaProvider;
+  communityKey: string;
+  checkIn?: string;
+  checkOut?: string;
+  bedrooms?: number;
+}): string {
+  return [
+    input.provider,
+    input.communityKey,
+    input.checkIn ?? "",
+    input.checkOut ?? "",
+    input.bedrooms ?? "",
+  ].join("|");
+}
+
+function normalizeVariationAttempt(raw: unknown): SidecarSearchVariationAttempt | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const term = cleanText(item.term || item.searchTerm || item.suggestionText);
+  if (!term) return null;
+  const candidateCount = Number(item.candidateCount);
+  return {
+    term,
+    typedQuery: cleanText(item.typedQuery) || undefined,
+    suggestionText: cleanText(item.suggestionText) || undefined,
+    source: cleanText(item.source, 80) || undefined,
+    success: item.success === true,
+    candidateCount: Number.isFinite(candidateCount) && candidateCount > 0 ? Math.round(candidateCount) : 0,
+    error: cleanText(item.error, 240) || undefined,
+  };
+}
+
+function normalizeWorkerResultsPayload(
+  raw: unknown,
+): { results: SidecarRequest["results"]; variationsTried: SidecarSearchVariationAttempt[] } {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const obj = raw as Record<string, unknown>;
+    const candidates = Array.isArray(obj.candidates) ? obj.candidates : undefined;
+    const variationsTried = Array.isArray(obj.variationsTried)
+      ? obj.variationsTried.map(normalizeVariationAttempt).filter((x): x is SidecarSearchVariationAttempt => Boolean(x))
+      : [];
+    if (candidates) {
+      return { results: candidates as SidecarPropertyCandidate[], variationsTried };
+    }
+  }
+  return { results: raw as SidecarRequest["results"], variationsTried: [] };
+}
+
+async function preferredVariationRows(input: {
+  communityKey: string;
+  channel: OtaProvider;
+  preferredOnly?: boolean;
+  limit?: number;
+}) {
+  const rows = await db
+    .select()
+    .from(sidecarSearchVariations)
+    .where(and(
+      eq(sidecarSearchVariations.communityKey, input.communityKey),
+      eq(sidecarSearchVariations.channel, input.channel),
+      ...(input.preferredOnly ? [eq(sidecarSearchVariations.preferred, true)] : []),
+    ))
+    .orderBy(
+      desc(sidecarSearchVariations.preferred),
+      desc(sidecarSearchVariations.lastYieldCount),
+      desc(sidecarSearchVariations.lastSuccessAt),
+      desc(sidecarSearchVariations.updatedAt),
+    )
+    .limit(input.limit ?? 20);
+  return rows;
+}
+
+export async function buildSearchVariationPolicy(input: {
+  provider: OtaProvider;
+  community: string;
+  city?: string | null;
+  state?: string | null;
+  checkIn?: string;
+  checkOut?: string;
+  bedrooms?: number;
+  rerunOnlyUntried?: boolean;
+  explicitTerms?: string[];
+}): Promise<{
+  communityKey: string;
+  generatedTerms: string[];
+  preferredTerms: string[];
+  terms: string[];
+  filterTokens: string[];
+  maxVariations: number;
+  allowDiscovery: boolean;
+}> {
+  const communityName = normalizeResortSearchTerm(input.community);
+  const communityKey = searchVariationKey({ community: communityName, city: input.city, state: input.state });
+  const filterTokens = searchVariationTokens(communityName);
+  const generatedTerms = generateSearchVariations(communityName, filterTokens);
+  let preferredTerms: string[] = [];
+  try {
+    preferredTerms = (await preferredVariationRows({ communityKey, channel: input.provider, limit: 8 }))
+      .map((row) => cleanText(row.term))
+      .filter(Boolean);
+  } catch (e: any) {
+    console.warn(`[sidecar-variations] preferred lookup failed: ${e?.message ?? e}`);
+  }
+  const terms = Array.from(new Set([
+    ...(input.explicitTerms ?? []).map((term) => cleanText(term)).filter(Boolean),
+    ...preferredTerms,
+    ...generatedTerms,
+  ])).filter((term) => matchesSearchVariationTokens(term, filterTokens));
+  const runKey = variationRunKey({
+    provider: input.provider,
+    communityKey,
+    checkIn: input.checkIn,
+    checkOut: input.checkOut,
+    bedrooms: input.bedrooms,
+  });
+  const triedTerms = new Set((searchVariationRuns.get(runKey)?.tried ?? []).map((attempt) => attempt.term.toLowerCase()));
+  const maybeUntried = input.rerunOnlyUntried
+    ? terms.filter((term) => !triedTerms.has(term.toLowerCase()))
+    : terms;
+  return {
+    communityKey,
+    generatedTerms,
+    preferredTerms,
+    terms: maybeUntried.length ? maybeUntried.slice(0, 12) : terms.slice(0, 12),
+    filterTokens,
+    maxVariations: 12,
+    allowDiscovery: !input.rerunOnlyUntried,
+  };
+}
+
+async function upsertVariationAttempt(input: {
+  provider: OtaProvider;
+  communityKey: string;
+  communityName: string;
+  city: string | null;
+  state: string | null;
+  attempt: SidecarSearchVariationAttempt;
+}) {
+  const existing = await db
+    .select()
+    .from(sidecarSearchVariations)
+    .where(and(
+      eq(sidecarSearchVariations.communityKey, input.communityKey),
+      eq(sidecarSearchVariations.channel, input.provider),
+      eq(sidecarSearchVariations.term, input.attempt.term),
+    ))
+    .limit(1);
+  const patch = {
+    communityName: input.communityName,
+    city: input.city,
+    state: input.state,
+    source: input.attempt.source ?? "sidecar",
+    timesTried: sql`${sidecarSearchVariations.timesTried} + 1`,
+    lastYieldCount: input.attempt.candidateCount,
+    totalYieldCount: sql`${sidecarSearchVariations.totalYieldCount} + ${input.attempt.candidateCount}`,
+    lastError: input.attempt.success ? null : (input.attempt.error ?? "variation failed"),
+    lastSearchedAt: new Date(),
+    lastSuccessAt: input.attempt.success ? new Date() : existing[0]?.lastSuccessAt ?? null,
+    updatedAt: new Date(),
+  };
+  if (existing[0]) {
+    await db
+      .update(sidecarSearchVariations)
+      .set(patch)
+      .where(eq(sidecarSearchVariations.id, existing[0].id));
+    return;
+  }
+  await db.insert(sidecarSearchVariations).values({
+    communityKey: input.communityKey,
+    communityName: input.communityName,
+    city: input.city,
+    state: input.state,
+    channel: input.provider,
+    term: input.attempt.term,
+    source: input.attempt.source ?? "sidecar",
+    preferred: false,
+    timesTried: 1,
+    lastYieldCount: input.attempt.candidateCount,
+    totalYieldCount: input.attempt.candidateCount,
+    lastError: input.attempt.success ? null : (input.attempt.error ?? "variation failed"),
+    lastSearchedAt: new Date(),
+    lastSuccessAt: input.attempt.success ? new Date() : null,
+    updatedAt: new Date(),
+  });
+}
+
+async function persistVariationSummary(summary: SidecarSearchVariationSummary) {
+  for (const attempt of summary.tried) {
+    await upsertVariationAttempt({
+      provider: summary.provider,
+      communityKey: summary.communityKey,
+      communityName: summary.communityName,
+      city: summary.city,
+      state: summary.state,
+      attempt,
+    });
+  }
+}
+
+function recordSearchVariationSummary(
+  r: SidecarRequest,
+  variationsTried: SidecarSearchVariationAttempt[],
+): SidecarSearchVariationSummary | undefined {
+  const provider = providerForOp(r.opType);
+  if (!provider || variationsTried.length === 0) return undefined;
+  const params = r.params as Partial<SidecarAirbnbParams & SidecarVrboParams & SidecarBookingParams>;
+  const location = parseSearchLocation(params);
+  const generatedTerms = generateSearchVariations(location.communityName, searchVariationTokens(location.communityName));
+  const best = [...variationsTried].sort((a, b) => b.candidateCount - a.candidateCount)[0] ?? null;
+  const summary: SidecarSearchVariationSummary = {
+    provider,
+    communityKey: location.communityKey,
+    communityName: location.communityName,
+    city: location.city,
+    state: location.state,
+    checkIn: params.checkIn,
+    checkOut: params.checkOut,
+    bedrooms: params.bedrooms,
+    tried: variationsTried,
+    bestTerm: best && best.candidateCount > 0 ? best.term : null,
+    bestYieldCount: best?.candidateCount ?? 0,
+    generatedTerms,
+  };
+  searchVariationRuns.set(variationRunKey({
+    provider,
+    communityKey: location.communityKey,
+    checkIn: params.checkIn,
+    checkOut: params.checkOut,
+    bedrooms: params.bedrooms,
+  }), summary);
+  void persistVariationSummary(summary).catch((e: any) => {
+    console.warn(`[sidecar-variations] persistence failed: ${e?.message ?? e}`);
+  });
+  return summary;
+}
+
+export async function getSearchVariationStatus(input: {
+  community: string;
+  city?: string | null;
+  state?: string | null;
+  checkIn?: string;
+  checkOut?: string;
+  bedrooms?: number;
+}): Promise<{
+  communityKey: string;
+  communityName: string;
+  generatedTerms: string[];
+  channels: Record<OtaProvider, {
+    preferredTerms: string[];
+    bestTerm: string | null;
+    history: Array<{
+      term: string;
+      preferred: boolean;
+      timesTried: number;
+      lastYieldCount: number;
+      totalYieldCount: number;
+      lastError: string | null;
+      lastSearchedAt: string | null;
+      lastSuccessAt: string | null;
+    }>;
+    lastRun: SidecarSearchVariationSummary | null;
+  }>;
+}> {
+  const communityName = normalizeResortSearchTerm(input.community);
+  const communityKey = searchVariationKey({ community: communityName, city: input.city, state: input.state });
+  const generatedTerms = generateSearchVariations(communityName);
+  const channels = {} as Record<OtaProvider, {
+    preferredTerms: string[];
+    bestTerm: string | null;
+    history: Array<{
+      term: string;
+      preferred: boolean;
+      timesTried: number;
+      lastYieldCount: number;
+      totalYieldCount: number;
+      lastError: string | null;
+      lastSearchedAt: string | null;
+      lastSuccessAt: string | null;
+    }>;
+    lastRun: SidecarSearchVariationSummary | null;
+  }>;
+  for (const provider of ["airbnb", "vrbo", "booking"] as OtaProvider[]) {
+    const rows = await preferredVariationRows({ communityKey, channel: provider, limit: 30 }).catch(() => []);
+    const lastRun = searchVariationRuns.get(variationRunKey({
+      provider,
+      communityKey,
+      checkIn: input.checkIn,
+      checkOut: input.checkOut,
+      bedrooms: input.bedrooms,
+    })) ?? null;
+    const preferredTerms = rows.filter((row) => row.preferred).map((row) => row.term);
+    const bestRow = rows.find((row) => row.lastYieldCount > 0);
+    channels[provider] = {
+      preferredTerms,
+      bestTerm: bestRow?.term ?? lastRun?.bestTerm ?? null,
+      history: rows.map((row) => ({
+        term: row.term,
+        preferred: row.preferred,
+        timesTried: row.timesTried,
+        lastYieldCount: row.lastYieldCount,
+        totalYieldCount: row.totalYieldCount,
+        lastError: row.lastError,
+        lastSearchedAt: row.lastSearchedAt ? row.lastSearchedAt.toISOString() : null,
+        lastSuccessAt: row.lastSuccessAt ? row.lastSuccessAt.toISOString() : null,
+      })),
+      lastRun,
+    };
+  }
+  return { communityKey, communityName, generatedTerms, channels };
+}
+
+export async function savePreferredSearchVariations(input: {
+  community: string;
+  city?: string | null;
+  state?: string | null;
+  channel: OtaProvider;
+  terms: string[];
+}) {
+  const communityName = normalizeResortSearchTerm(input.community);
+  const communityKey = searchVariationKey({ community: communityName, city: input.city, state: input.state });
+  const terms = Array.from(new Set(input.terms.map((term) => cleanText(term)).filter(Boolean))).slice(0, 12);
+  await db
+    .update(sidecarSearchVariations)
+    .set({ preferred: false, updatedAt: new Date() })
+    .where(and(
+      eq(sidecarSearchVariations.communityKey, communityKey),
+      eq(sidecarSearchVariations.channel, input.channel),
+    ));
+  for (const term of terms) {
+    const existing = await db
+      .select()
+      .from(sidecarSearchVariations)
+      .where(and(
+        eq(sidecarSearchVariations.communityKey, communityKey),
+        eq(sidecarSearchVariations.channel, input.channel),
+        eq(sidecarSearchVariations.term, term),
+      ))
+      .limit(1);
+    if (existing[0]) {
+      await db
+        .update(sidecarSearchVariations)
+        .set({ preferred: true, source: "operator", updatedAt: new Date() })
+        .where(eq(sidecarSearchVariations.id, existing[0].id));
+    } else {
+      await db.insert(sidecarSearchVariations).values({
+        communityKey,
+        communityName,
+        city: input.city ?? null,
+        state: input.state ?? null,
+        channel: input.channel,
+        term,
+        source: "operator",
+        preferred: true,
+        updatedAt: new Date(),
+      });
+    }
+  }
+  return getSearchVariationStatus({ community: communityName, city: input.city, state: input.state });
 }
 
 function numberFromEnv(name: string, fallback: number): number {
@@ -1105,7 +1552,7 @@ export function isQueuePaused(): {
  */
 export function complete(opts: {
   id: string;
-  results?: SidecarRequest["results"];
+  results?: unknown;
   error?: string;
 }): { ok: boolean; reason?: string } {
   const r = queue.get(opts.id);
@@ -1114,8 +1561,10 @@ export function complete(opts: {
     return { ok: false, reason: `request already in terminal state ${r.status}` };
   }
   if (opts.results !== undefined) {
+    const normalized = normalizeWorkerResultsPayload(opts.results);
     r.status = "completed";
-    r.results = opts.results;
+    r.results = normalized.results;
+    r.searchVariationSummary = recordSearchVariationSummary(r, normalized.variationsTried);
   } else {
     r.status = "failed";
     r.error = opts.error || "worker reported failure with no message";
@@ -1342,6 +1791,7 @@ export function getStatus(): {
     activeRequests: activeRequests.sort((a, b) => (b.activeSec ?? 0) - (a.activeSec ?? 0)).slice(0, 5),
     pendingRequests: pendingRequests.sort((a, b) => b.ageSec - a.ageSec).slice(0, 8),
     providerHealth: getProviderHealth(),
+    searchVariations: Array.from(searchVariationRuns.values()).slice(-12),
   };
 }
 
@@ -1452,6 +1902,8 @@ export async function searchVrboViaSidecar(opts: {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  rerunOnlyUntried?: boolean;
+  searchVariations?: string[];
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
@@ -1463,6 +1915,7 @@ export async function searchVrboViaSidecar(opts: {
   durationMs: number;
   reason: string;
   providerHealth?: SidecarProviderHealth;
+  searchVariationSummary?: SidecarSearchVariationSummary;
 } | null> {
   const cooldown = activeProviderCooldown("vrbo");
   if (cooldown) return providerCooldownSearchResult("vrbo");
@@ -1474,6 +1927,18 @@ export async function searchVrboViaSidecar(opts: {
     opts.queueBudgetMs ?? 0,
     numberFromEnv("SIDECAR_VRBO_SEARCH_QUEUE_BUDGET_MS", vrboWalletMs + 60_000),
   );
+  const location = parseSearchLocation(opts);
+  const policy = await buildSearchVariationPolicy({
+    provider: "vrbo",
+    community: location.communityName,
+    city: location.city,
+    state: location.state,
+    checkIn: opts.checkIn,
+    checkOut: opts.checkOut,
+    bedrooms: opts.bedrooms,
+    rerunOnlyUntried: opts.rerunOnlyUntried,
+    explicitTerms: opts.searchVariations,
+  });
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "vrbo_search",
@@ -1483,6 +1948,13 @@ export async function searchVrboViaSidecar(opts: {
         checkIn: opts.checkIn,
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
+        searchVariations: policy.terms,
+        variationMode: {
+          filterTokens: policy.filterTokens,
+          maxVariations: policy.maxVariations,
+          allowDiscovery: policy.allowDiscovery,
+          rerunOnlyUntried: Boolean(opts.rerunOnlyUntried),
+        },
       },
     },
     pollIntervalMs: opts.pollIntervalMs,
@@ -1500,6 +1972,7 @@ export async function searchVrboViaSidecar(opts: {
   return {
     ...result,
     providerHealth: recordProviderOutcome("vrbo", result),
+    searchVariationSummary: r.searchVariationSummary,
   };
 }
 
@@ -1603,6 +2076,8 @@ export async function searchBookingViaSidecar(opts: {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  rerunOnlyUntried?: boolean;
+  searchVariations?: string[];
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
@@ -1614,9 +2089,22 @@ export async function searchBookingViaSidecar(opts: {
   durationMs: number;
   reason: string;
   providerHealth?: SidecarProviderHealth;
+  searchVariationSummary?: SidecarSearchVariationSummary;
 }> {
   const cooldown = activeProviderCooldown("booking");
   if (cooldown) return providerCooldownSearchResult("booking");
+  const location = parseSearchLocation(opts);
+  const policy = await buildSearchVariationPolicy({
+    provider: "booking",
+    community: location.communityName,
+    city: location.city,
+    state: location.state,
+    checkIn: opts.checkIn,
+    checkOut: opts.checkOut,
+    bedrooms: opts.bedrooms,
+    rerunOnlyUntried: opts.rerunOnlyUntried,
+    explicitTerms: opts.searchVariations,
+  });
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "booking_search",
@@ -1626,6 +2114,13 @@ export async function searchBookingViaSidecar(opts: {
         checkIn: opts.checkIn,
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
+        searchVariations: policy.terms,
+        variationMode: {
+          filterTokens: policy.filterTokens,
+          maxVariations: policy.maxVariations,
+          allowDiscovery: policy.allowDiscovery,
+          rerunOnlyUntried: Boolean(opts.rerunOnlyUntried),
+        },
       },
     },
     pollIntervalMs: opts.pollIntervalMs,
@@ -1643,6 +2138,7 @@ export async function searchBookingViaSidecar(opts: {
   return {
     ...result,
     providerHealth: recordProviderOutcome("booking", result),
+    searchVariationSummary: r.searchVariationSummary,
   };
 }
 
@@ -1652,6 +2148,8 @@ export async function searchAirbnbViaSidecar(opts: {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  rerunOnlyUntried?: boolean;
+  searchVariations?: string[];
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
@@ -1663,9 +2161,22 @@ export async function searchAirbnbViaSidecar(opts: {
   durationMs: number;
   reason: string;
   providerHealth?: SidecarProviderHealth;
+  searchVariationSummary?: SidecarSearchVariationSummary;
 }> {
   const cooldown = activeProviderCooldown("airbnb");
   if (cooldown) return providerCooldownSearchResult("airbnb");
+  const location = parseSearchLocation(opts);
+  const policy = await buildSearchVariationPolicy({
+    provider: "airbnb",
+    community: location.communityName,
+    city: location.city,
+    state: location.state,
+    checkIn: opts.checkIn,
+    checkOut: opts.checkOut,
+    bedrooms: opts.bedrooms,
+    rerunOnlyUntried: opts.rerunOnlyUntried,
+    explicitTerms: opts.searchVariations,
+  });
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "airbnb_search",
@@ -1675,6 +2186,13 @@ export async function searchAirbnbViaSidecar(opts: {
         checkIn: opts.checkIn,
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
+        searchVariations: policy.terms,
+        variationMode: {
+          filterTokens: policy.filterTokens,
+          maxVariations: policy.maxVariations,
+          allowDiscovery: policy.allowDiscovery,
+          rerunOnlyUntried: Boolean(opts.rerunOnlyUntried),
+        },
       },
     },
     pollIntervalMs: opts.pollIntervalMs,
@@ -1692,6 +2210,7 @@ export async function searchAirbnbViaSidecar(opts: {
   return {
     ...result,
     providerHealth: recordProviderOutcome("airbnb", result),
+    searchVariationSummary: r.searchVariationSummary,
   };
 }
 
@@ -1976,6 +2495,7 @@ async function awaitOpResult(opts: {
   stopGeneration?: number;
 }): Promise<{
   results: SidecarRequest["results"];
+  searchVariationSummary?: SidecarSearchVariationSummary;
   workerOnline: boolean;
   durationMs: number;
   reason: string;
@@ -2053,11 +2573,12 @@ async function awaitOpResult(opts: {
       if (r.status === "completed") {
         return {
           results: r.results ?? null,
+          searchVariationSummary: r.searchVariationSummary,
           workerOnline: true,
           durationMs: nowMs() - startedAt,
           reason: `worker returned ${
             Array.isArray(r.results) ? r.results.length : r.results ? "1" : "0"
-          } result(s)`,
+          } result(s)${r.searchVariationSummary?.tried?.length ? ` across ${r.searchVariationSummary.tried.length} location variation(s)` : ""}`,
         };
       }
       if (r.status === "failed") {

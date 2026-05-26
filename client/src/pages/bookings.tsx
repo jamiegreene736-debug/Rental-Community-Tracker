@@ -438,6 +438,55 @@ type SidecarQueueStatus = {
     retryAfterMs?: number | null;
     updatedAt?: string | null;
   }>;
+  searchVariations?: SidecarSearchVariationSummary[];
+};
+
+type OtaSearchProviderKey = "airbnb" | "vrbo" | "booking";
+
+type SidecarSearchVariationAttempt = {
+  term: string;
+  typedQuery?: string;
+  suggestionText?: string;
+  source?: string;
+  success: boolean;
+  candidateCount: number;
+  error?: string;
+};
+
+type SidecarSearchVariationSummary = {
+  provider: OtaSearchProviderKey;
+  communityKey: string;
+  communityName: string;
+  city: string | null;
+  state: string | null;
+  checkIn?: string;
+  checkOut?: string;
+  bedrooms?: number;
+  tried: SidecarSearchVariationAttempt[];
+  bestTerm: string | null;
+  bestYieldCount: number;
+  generatedTerms: string[];
+};
+
+type SidecarSearchVariationStatus = {
+  communityKey: string;
+  communityName: string;
+  generatedTerms: string[];
+  channels: Record<OtaSearchProviderKey, {
+    preferredTerms: string[];
+    bestTerm: string | null;
+    history: Array<{
+      term: string;
+      preferred: boolean;
+      timesTried: number;
+      lastYieldCount: number;
+      totalYieldCount: number;
+      lastError: string | null;
+      lastSearchedAt: string | null;
+      lastSuccessAt: string | null;
+    }>;
+    lastRun: SidecarSearchVariationSummary | null;
+  }>;
 };
 
 type UnitProximityResponse =
@@ -1187,6 +1236,14 @@ function ProviderSearchStatusStrip({ audit }: { audit: AutoFillSearchAudit }) {
                     .join(" · ")}
                 </p>
               )}
+              {status.stats.diagnostic?.searchVariationSummary?.tried?.length ? (
+                <p className="mt-0.5 line-clamp-2 text-[10px] opacity-75">
+                  variations {status.stats.diagnostic.searchVariationSummary.tried.length}
+                  {status.stats.diagnostic.searchVariationSummary.bestTerm
+                    ? ` · best ${status.stats.diagnostic.searchVariationSummary.bestTerm} (${status.stats.diagnostic.searchVariationSummary.bestYieldCount})`
+                    : ""}
+                </p>
+              ) : null}
               {status.accessPattern && (
                 <p className="mt-0.5 line-clamp-2 text-[10px] opacity-75">{status.accessPattern}</p>
               )}
@@ -1229,6 +1286,13 @@ function BuyInSearchConfirmationDialog({
         priced: status.stats.priced,
         verified: status.stats.verified,
       };
+      const variationSummary = diagnostic?.searchVariationSummary ?? null;
+      const variationLabel = variationSummary?.tried?.length
+        ? variationSummary.tried
+          .slice(0, 5)
+          .map((attempt) => `${attempt.term}${attempt.candidateCount ? ` (${attempt.candidateCount})` : ""}`)
+          .join(" · ")
+        : null;
       return {
         key: `${audit.generatedAt}-${audit.bedrooms}-${auditIndex}-${key}`,
         audit,
@@ -1236,6 +1300,7 @@ function BuyInSearchConfirmationDialog({
         datesLabel,
         locationLabel,
         resultCounts,
+        variationLabel,
       };
     })
   ));
@@ -1316,6 +1381,11 @@ function BuyInSearchConfirmationDialog({
                   {(row.status.reason || row.status.failureReason) && (
                     <div className="col-span-2 text-[11px] text-muted-foreground sm:col-start-2 sm:col-span-4">
                       {row.status.failureReason || row.status.reason}
+                    </div>
+                  )}
+                  {row.variationLabel && (
+                    <div className="col-span-2 text-[11px] text-muted-foreground sm:col-start-2 sm:col-span-4">
+                      Dropdown variations: {row.variationLabel}
                     </div>
                   )}
                 </div>
@@ -1744,6 +1814,169 @@ function SidecarQueueProgress({
         )}
       </div>
       <Progress value={sidecarQueueProgressValue(status)} className="h-1.5" />
+    </div>
+  );
+}
+
+function otaSearchProviderLabel(provider: OtaSearchProviderKey): string {
+  switch (provider) {
+    case "airbnb": return "Airbnb";
+    case "vrbo": return "Vrbo";
+    case "booking": return "Booking.com";
+  }
+}
+
+function variationTextareaValue(terms: string[]): string {
+  return terms.join("\n");
+}
+
+function parseVariationTextarea(value: string): string[] {
+  return Array.from(new Set(
+    value
+      .split(/[\n,]+/)
+      .map((term) => term.replace(/\s+/g, " ").trim())
+      .filter(Boolean),
+  )).slice(0, 12);
+}
+
+function SidecarSearchVariationPanel({
+  community,
+  city,
+  state,
+  status,
+  loading,
+  onSaved,
+  onRerunUntried,
+  rerunUntriedOnly,
+  disabled = false,
+}: {
+  community: string;
+  city?: string | null;
+  state?: string | null;
+  status: SidecarSearchVariationStatus | undefined;
+  loading: boolean;
+  onSaved: () => void;
+  onRerunUntried: () => void;
+  rerunUntriedOnly: boolean;
+  disabled?: boolean;
+}) {
+  const { toast } = useToast();
+  const [drafts, setDrafts] = useState<Record<OtaSearchProviderKey, string>>({
+    airbnb: "",
+    vrbo: "",
+    booking: "",
+  });
+  const [savingProvider, setSavingProvider] = useState<OtaSearchProviderKey | null>(null);
+
+  useEffect(() => {
+    if (!status) return;
+    setDrafts((previous) => {
+      const next = { ...previous };
+      for (const provider of ["airbnb", "vrbo", "booking"] as OtaSearchProviderKey[]) {
+        const channel = status.channels[provider];
+        const terms = channel.preferredTerms.length
+          ? channel.preferredTerms
+          : Array.from(new Set([
+            channel.bestTerm,
+            ...status.generatedTerms,
+          ].filter(Boolean) as string[])).slice(0, 6);
+        next[provider] = variationTextareaValue(terms);
+      }
+      return next;
+    });
+  }, [status?.communityKey]);
+
+  const saveProvider = async (provider: OtaSearchProviderKey) => {
+    const terms = parseVariationTextarea(drafts[provider] ?? "");
+    setSavingProvider(provider);
+    try {
+      const response = await apiRequest("POST", "/api/vrbo-sidecar/search-variations", {
+        community,
+        city,
+        state,
+        channel: provider,
+        terms,
+      });
+      if (!response.ok) throw new Error(await response.text());
+      onSaved();
+      toast({
+        title: `${otaSearchProviderLabel(provider)} variations saved`,
+        description: terms.length ? `${terms.length} preferred term${terms.length === 1 ? "" : "s"}` : "Preferred terms cleared",
+      });
+    } catch (e) {
+      toast({
+        title: "Could not save variations",
+        description: e instanceof Error ? e.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setSavingProvider(null);
+    }
+  };
+
+  const generated = status?.generatedTerms ?? [];
+
+  return (
+    <div className="rounded-md border bg-slate-50/70 p-3 text-xs">
+      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="font-semibold text-slate-800">Search dropdown variations</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            {loading ? "Loading saved variation policy." : `${status?.communityName || community}${generated.length ? ` · generated ${generated.slice(0, 4).join(", ")}` : ""}`}
+          </p>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant={rerunUntriedOnly ? "default" : "outline"}
+          className="h-7 text-[11px]"
+          onClick={onRerunUntried}
+          disabled={disabled}
+        >
+          <RefreshCw className="mr-1 h-3.5 w-3.5" />
+          Re-run untried
+        </Button>
+      </div>
+      <div className="grid gap-2 md:grid-cols-3">
+        {(["airbnb", "vrbo", "booking"] as OtaSearchProviderKey[]).map((provider) => {
+          const channel = status?.channels?.[provider];
+          const lastRun = channel?.lastRun;
+          const summary = lastRun?.tried?.length
+            ? `${lastRun.tried.length} tried${lastRun.bestTerm ? ` · best ${lastRun.bestTerm} (${lastRun.bestYieldCount})` : ""}`
+            : channel?.history?.length
+              ? `${channel.history.length} saved/history`
+              : "No history yet";
+          return (
+            <div key={provider} className="rounded border bg-white p-2">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <Label className="text-[11px] font-semibold">{otaSearchProviderLabel(provider)}</Label>
+                <span className="truncate text-[10px] text-muted-foreground">{summary}</span>
+              </div>
+              <Textarea
+                className="min-h-[76px] resize-y text-[11px]"
+                value={drafts[provider] ?? ""}
+                onChange={(event) => setDrafts((previous) => ({ ...previous, [provider]: event.target.value }))}
+                disabled={disabled || savingProvider === provider}
+              />
+              <div className="mt-1.5 flex items-center justify-between gap-2">
+                <span className="truncate text-[10px] text-muted-foreground">
+                  {channel?.bestTerm ? `best: ${channel.bestTerm}` : "dropdown policy"}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-[10px]"
+                  onClick={() => saveProvider(provider)}
+                  disabled={disabled || savingProvider === provider}
+                >
+                  {savingProvider === provider ? "Saving" : "Save"}
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -8380,6 +8613,7 @@ type FindBuyInDiagnostics = {
     datesSearched?: { checkIn?: string; checkOut?: string; nights?: number };
     bedroomFilter?: { bedrooms?: number; applied?: boolean; mode?: string };
     resultCounts?: { raw?: number; kept?: number; priced?: number; verified?: number };
+    searchVariationSummary?: SidecarSearchVariationSummary | null;
   }>;
   providerStatuses?: Array<{
     source: string;
@@ -8953,6 +9187,7 @@ function LiveSearchSection({
   const confirmationKeyRef = useRef<string>("");
   const [searchStartedAtMs, setSearchStartedAtMs] = useState(() => Date.now());
   const [searchEnabled, setSearchEnabled] = useState(() => !slot.buyIn);
+  const [rerunUntriedOnly, setRerunUntriedOnly] = useState(false);
   const [directScanRows, setDirectScanRows] = useState<DirectBookingScanRow[]>([]);
   const [directScanRunning, setDirectScanRunning] = useState(false);
 
@@ -8966,6 +9201,28 @@ function LiveSearchSection({
   };
   const checkInYmd = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
   const checkOutYmd = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+  const variationCommunity = (slot.community || "").trim();
+  const variationQueryKey = [
+    "/api/vrbo-sidecar/search-variations",
+    variationCommunity,
+    checkInYmd,
+    checkOutYmd,
+    slot.bedrooms,
+  ] as const;
+  const { data: variationStatus, isLoading: variationStatusLoading } = useQuery<SidecarSearchVariationStatus>({
+    queryKey: variationQueryKey,
+    queryFn: ({ signal }) => {
+      const params = new URLSearchParams({
+        community: variationCommunity,
+        checkIn: checkInYmd,
+        checkOut: checkOutYmd,
+        bedrooms: String(slot.bedrooms),
+      });
+      return apiGetJson<SidecarSearchVariationStatus>(`/api/vrbo-sidecar/search-variations?${params.toString()}`, signal);
+    },
+    enabled: !!variationCommunity && !!checkInYmd && !!checkOutYmd,
+    staleTime: 5_000,
+  });
   const { data: groundRequirement, isLoading: groundRequirementLoading } = useQuery<GroundFloorRequirement & { conversationId?: string | null }>({
     queryKey: ["/api/bookings", reservation._id, "ground-floor-requirement", propertyId, reservation.slots.length],
     queryFn: () => apiGetJson<GroundFloorRequirement & { conversationId?: string | null }>(
@@ -8990,16 +9247,17 @@ function LiveSearchSection({
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
   const { data, isLoading, isFetching, isError, error, dataUpdatedAt, isPlaceholderData } = useQuery<FindBuyInResponse>({
-    queryKey: ["/api/operations/find-buy-in", propertyId, listingId, slot.community, slot.bedrooms, checkInYmd, checkOutYmd, groundFloorNeededForThisSlot, refreshNonce],
+    queryKey: ["/api/operations/find-buy-in", propertyId, listingId, slot.community, slot.bedrooms, checkInYmd, checkOutYmd, groundFloorNeededForThisSlot, rerunUntriedOnly, refreshNonce],
     queryFn: ({ signal }) => {
       const noCache = refreshNonce > 0 ? "&nocache=1" : "";
       const groundFloorParam = groundFloorNeededForThisSlot ? "&groundFloor=required" : "";
+      const rerunParam = rerunUntriedOnly ? "&rerunUntried=1" : "";
       const context = new URLSearchParams();
       if (listingId) context.set("listingId", listingId);
       if (slot.community) context.set("community", slot.community);
       const contextSuffix = context.toString() ? `&${context.toString()}` : "";
       return apiGetJson<FindBuyInResponse>(
-        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${groundFloorParam}${noCache}${contextSuffix}`,
+        `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${groundFloorParam}${rerunParam}${noCache}${contextSuffix}`,
         signal,
       );
     },
@@ -9011,8 +9269,15 @@ function LiveSearchSection({
   const sidecarQueue = useSidecarQueueStatus(isLoading || isFetching || !!data);
   const liveSearchSidecarActive = isSidecarStatusForSearch(sidecarQueue.status, searchStartedAtMs);
   const refreshLiveSearch = () => {
+    setRerunUntriedOnly(false);
     setSearchStartedAtMs(Date.now());
     setRefreshNonce((n) => n + 1);
+  };
+  const rerunUntriedVariations = () => {
+    setRerunUntriedOnly(true);
+    setSearchStartedAtMs(Date.now());
+    setRefreshNonce((n) => n + 1);
+    setSearchEnabled(true);
   };
 
   const hardErrorDiagnostics = useMemo<FindBuyInDiagnostics | null>(() => {
@@ -9104,6 +9369,10 @@ function LiveSearchSection({
     checkOutYmd,
     dataUpdatedAt,
   ]);
+  useEffect(() => {
+    if (!searchDiagnostics?.generatedAt || !variationCommunity) return;
+    void queryClient.invalidateQueries({ queryKey: variationQueryKey });
+  }, [searchDiagnostics?.generatedAt, variationCommunity]);
 
   const attachedElsewhereKeys = useMemo(() => new Set(
     reservation.slots
@@ -9203,6 +9472,17 @@ function LiveSearchSection({
           <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
           Searching Airbnb (for photo matches), Booking.com, Vrbo, and property management companies for the cheapest {slot.bedrooms}BR+ rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
         </div>
+        {variationCommunity && (
+          <SidecarSearchVariationPanel
+            community={variationCommunity}
+            status={variationStatus}
+            loading={variationStatusLoading}
+            onSaved={() => queryClient.invalidateQueries({ queryKey: variationQueryKey })}
+            onRerunUntried={rerunUntriedVariations}
+            rerunUntriedOnly={rerunUntriedOnly}
+            disabled={isFetching}
+          />
+        )}
         <SidecarQueueProgress
           status={sidecarQueue.status}
           label="Chrome sidecar verification"
@@ -9441,6 +9721,17 @@ function LiveSearchSection({
           status={sidecarQueue.status}
           label={isFetching ? "Refreshing live rates" : "Chrome sidecar verification"}
           forceVisible={isFetching}
+        />
+      )}
+      {variationCommunity && (
+        <SidecarSearchVariationPanel
+          community={variationCommunity}
+          status={variationStatus}
+          loading={variationStatusLoading}
+          onSaved={() => queryClient.invalidateQueries({ queryKey: variationQueryKey })}
+          onRerunUntried={rerunUntriedVariations}
+          rerunUntriedOnly={rerunUntriedOnly}
+          disabled={isFetching}
         />
       )}
       {isError && data && (

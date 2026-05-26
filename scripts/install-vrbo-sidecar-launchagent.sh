@@ -90,6 +90,25 @@ railway_var() {
   awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' <<<"${RAILWAY_VARS_KV}"
 }
 
+railway_service_var() {
+  local service="$1"
+  local key="$2"
+  if ! command -v railway >/dev/null 2>&1; then
+    return
+  fi
+  railway variables --service "${service}" --json 2>/dev/null | "${NODE_BIN}" -e '
+const key = process.argv[1];
+let raw = "";
+process.stdin.on("data", (chunk) => raw += chunk);
+process.stdin.on("end", () => {
+  try {
+    const vars = JSON.parse(raw || "{}");
+    if (vars && typeof vars[key] === "string") process.stdout.write(vars[key]);
+  } catch {}
+});
+' "${key}"
+}
+
 value_from_env_or_railway() {
   local key="$1"
   local fallback="${2:-}"
@@ -228,7 +247,31 @@ SIDECAR_VRBO_MANUAL_SESSION_TTL_MS="${SIDECAR_VRBO_MANUAL_SESSION_TTL_MS:-172800
 SIDECAR_OTA_SEARCH_HARD_TIMEOUT_MS="${SIDECAR_OTA_SEARCH_HARD_TIMEOUT_MS:-1200000}"
 SIDECAR_OTA_SUGGESTION_MAX="${SIDECAR_OTA_SUGGESTION_MAX:-8}"
 SIDECAR_BROWSER_FINGERPRINT_RANDOMIZATION="${SIDECAR_BROWSER_FINGERPRINT_RANDOMIZATION:-0}"
+USE_OTA_VISION_FALLBACK="${USE_OTA_VISION_FALLBACK:-1}"
+SIDECAR_USE_VISION_FALLBACK="${SIDECAR_USE_VISION_FALLBACK:-${USE_OTA_VISION_FALLBACK}}"
+USE_HIKU_VISION="${USE_HIKU_VISION:-0}"
+SIDECAR_VISION_MODEL="$(value_from_env_or_railway SIDECAR_VISION_MODEL "claude-haiku-4-5-20251001")"
+ANTHROPIC_API_KEY_VALUE="$(value_from_env_or_railway ANTHROPIC_API_KEY "")"
+if [[ -z "${ANTHROPIC_API_KEY_VALUE}" ]]; then
+  ANTHROPIC_API_KEY_VALUE="$(railway_service_var Rental-Community-Tracker ANTHROPIC_API_KEY || true)"
+  if [[ -n "${ANTHROPIC_API_KEY_VALUE}" ]]; then
+    echo "Loaded ANTHROPIC_API_KEY from Railway web service variables for local sidecar vision fallback."
+  fi
+fi
+if [[ -z "${ANTHROPIC_API_KEY_VALUE}" && -f "${EXISTING_RUNNER_PATH}" ]]; then
+  ANTHROPIC_API_KEY_RAW="$(
+    awk -F= '$1 == "export ANTHROPIC_API_KEY" { sub(/^[^=]*=/, ""); print; exit }' "${EXISTING_RUNNER_PATH}" \
+      || true
+  )"
+  if [[ -n "${ANTHROPIC_API_KEY_RAW}" && "${ANTHROPIC_API_KEY_RAW}" != "''" ]]; then
+    ANTHROPIC_API_KEY_VALUE="$(/bin/bash -lc "v=${ANTHROPIC_API_KEY_RAW}; printf '%s' \"\$v\"" 2>/dev/null || true)"
+    if [[ -n "${ANTHROPIC_API_KEY_VALUE}" ]]; then
+      echo "Preserved ANTHROPIC_API_KEY from existing sidecar runner."
+    fi
+  fi
+fi
 CAPSOLVER_API_KEY_EXPORT="$(quote_for_shell "${CAPSOLVER_API_KEY_VALUE}")"
+ANTHROPIC_API_KEY_EXPORT="$(quote_for_shell "${ANTHROPIC_API_KEY_VALUE}")"
 
 RUNNER_PATH="${INSTALL_DIR}/run-vrbo-sidecar.sh"
 cat >"${RUNNER_PATH}" <<RUNNER
@@ -284,6 +327,11 @@ export SIDECAR_VRBO_MANUAL_SESSION_TTL_MS="${SIDECAR_VRBO_MANUAL_SESSION_TTL_MS}
 export SIDECAR_OTA_SEARCH_HARD_TIMEOUT_MS="${SIDECAR_OTA_SEARCH_HARD_TIMEOUT_MS}"
 export SIDECAR_OTA_SUGGESTION_MAX="${SIDECAR_OTA_SUGGESTION_MAX}"
 export SIDECAR_BROWSER_FINGERPRINT_RANDOMIZATION="${SIDECAR_BROWSER_FINGERPRINT_RANDOMIZATION}"
+export USE_OTA_VISION_FALLBACK="${USE_OTA_VISION_FALLBACK}"
+export SIDECAR_USE_VISION_FALLBACK="${SIDECAR_USE_VISION_FALLBACK}"
+export USE_HIKU_VISION="${USE_HIKU_VISION}"
+export SIDECAR_VISION_MODEL="${SIDECAR_VISION_MODEL}"
+export ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY_EXPORT}
 echo "[\$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [vrbo-sidecar-launchagent] starting supervisor via ${NODE_BIN}"
 exec "${NODE_BIN}" "${INSTALL_DIR}/supervisor.mjs"
 RUNNER

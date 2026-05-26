@@ -3296,6 +3296,110 @@ function otaBaseSearchQuery(searchTerm, destination) {
     .trim() || String(searchTerm || destination || "").replace(/\s+/g, " ").trim();
 }
 
+function otaExplicitSearchVariants(params, typedQuery, fallbackSearchTerm, label = "site_search") {
+  const rawTerms = Array.isArray(params?.searchVariations) ? params.searchVariations : [];
+  const mode = params?.variationMode && typeof params.variationMode === "object" ? params.variationMode : {};
+  const filterTokens = Array.isArray(mode.filterTokens)
+    ? mode.filterTokens.map((token) => String(token || "").toLowerCase().trim()).filter((token) => token.length >= 3)
+    : otaQueryTokens(typedQuery || fallbackSearchTerm);
+  const maxVariations = Math.max(1, Math.min(20, Number(mode.maxVariations) || OTA_SUGGESTION_MAX));
+  const seen = new Set();
+  const out = [];
+  const add = (term, source = "server-policy") => {
+    const cleanTerm = String(term || "").replace(/\s+/g, " ").trim();
+    if (!cleanTerm) return;
+    const haystack = cleanTerm.toLowerCase();
+    if (filterTokens.length) {
+      const hits = filterTokens.filter((token) => haystack.includes(token)).length;
+      const requiredHits = filterTokens.length <= 2 ? filterTokens.length : 2;
+      if (hits < requiredHits) return;
+    }
+    const key = haystack;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ typedQuery, searchTerm: cleanTerm, suggestionText: cleanTerm, source });
+  };
+  for (const term of rawTerms) add(term);
+  add(fallbackSearchTerm || typedQuery, "fallback");
+  const sliced = out.slice(0, maxVariations);
+  if (sliced.length && rawTerms.length) {
+    log(`${label}: server policy supplied ${sliced.length} destination variation(s): ${sliced.map((v) => `"${v.searchTerm}"`).join("; ")}`);
+  }
+  return sliced;
+}
+
+function otaVisionFallbackEnabled() {
+  return process.env.USE_HIKU_VISION === "1" ||
+    process.env.SIDECAR_USE_VISION_FALLBACK === "1" ||
+    process.env.USE_OTA_VISION_FALLBACK === "1";
+}
+
+async function askOtaVisionAction(targetPage, label, prompt) {
+  if (!otaVisionFallbackEnabled()) return null;
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
+  if (!apiKey) {
+    log(`${label}: vision fallback skipped (ANTHROPIC_API_KEY missing)`);
+    return null;
+  }
+  try {
+    const viewport = targetPage.viewportSize?.() ?? { width: 1280, height: 900 };
+    const screenshot = await targetPage.screenshot({ type: "jpeg", quality: 65, fullPage: false });
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: process.env.SIDECAR_VISION_MODEL || "claude-haiku-4-5-20251001",
+        max_tokens: 300,
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `${prompt}\n\nReturn ONLY compact JSON: {"action":"click"|"type"|"none","x":number,"y":number,"text":string,"reason":string}. Coordinates must be viewport CSS pixels within ${viewport.width}x${viewport.height}. Do not solve or bypass CAPTCHAs.`,
+            },
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/jpeg", data: screenshot.toString("base64") },
+            },
+          ],
+        }],
+      }),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      log(`${label}: vision fallback HTTP ${resp.status}: ${String(data?.error?.message ?? data?.error?.type ?? "").slice(0, 180)}`);
+      return null;
+    }
+    const text = String(data?.content?.find?.((part) => part?.type === "text")?.text ?? data?.content?.[0]?.text ?? "").trim();
+    const jsonText = text.match(/\{[\s\S]*\}/)?.[0] ?? text;
+    const parsed = JSON.parse(jsonText);
+    const action = String(parsed?.action || "none").toLowerCase();
+    const x = Number(parsed?.x);
+    const y = Number(parsed?.y);
+    const value = String(parsed?.text || "").trim();
+    const reason = String(parsed?.reason || "").replace(/\s+/g, " ").trim().slice(0, 180);
+    if (action === "click" && Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= viewport.width && y <= viewport.height) {
+      log(`${label}: vision fallback clicking ${Math.round(x)},${Math.round(y)}${reason ? ` (${reason})` : ""}`);
+      await targetPage.mouse.click(x, y);
+      return { action, x, y, reason };
+    }
+    if (action === "type" && value) {
+      log(`${label}: vision fallback typing suggested text "${value.slice(0, 80)}"${reason ? ` (${reason})` : ""}`);
+      await targetPage.keyboard.type(value, { delay: 25 });
+      return { action, text: value, reason };
+    }
+    log(`${label}: vision fallback returned no action${reason ? ` (${reason})` : ""}`);
+    return null;
+  } catch (e) {
+    log(`${label}: vision fallback failed: ${e?.message ?? e}`);
+    return null;
+  }
+}
+
 function otaLocationTokens(...values) {
   const tokens = [];
   for (const value of values) {
@@ -3558,13 +3662,38 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
     null,
   );
   if (clicked) log(`${label}: selected destination suggestion "${clicked}"`);
-  return clicked;
+  if (clicked) return clicked;
+  const vision = await askOtaVisionAction(
+    targetPage,
+    `${label}_vision_dropdown`,
+    `The location autocomplete dropdown should be visible. Click the best destination suggestion matching "${targetSuggestion || searchTerm}". It must include the resort-prefix token(s) ${requiredSearchTokens.join(", ")} and must not be a broad unrelated city-only option.`,
+  );
+  if (!vision) return null;
+  await targetPage.waitForTimeout(900).catch(() => {});
+  const afterText = await withSoftTimeout(
+    targetPage.evaluate(() => {
+      const active = document.activeElement;
+      const candidates = Array.from(document.querySelectorAll("input, [role='textbox'], [contenteditable='true']"))
+        .filter((el) => el instanceof HTMLElement)
+        .map((el) => (el.value || el.textContent || "").replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      const activeText = active ? (active.value || active.textContent || "").replace(/\s+/g, " ").trim() : "";
+      return activeText || candidates[0] || "";
+    }),
+    2_000,
+    "",
+  );
+  log(`${label}: vision fallback selected destination${afterText ? `; field now "${afterText.slice(0, 120)}"` : ""}`);
+  return afterText || targetSuggestion || searchTerm;
 }
 
-async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label, requestId = "homepage") {
+async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label, requestId = "homepage", params = {}) {
   const typedQuery = otaBaseSearchQuery(searchTerm, destination);
   const fallback = String(destination || searchTerm || typedQuery).trim();
   if (!typedQuery) return [{ typedQuery: fallback, searchTerm: fallback, suggestionText: fallback, source: "fallback" }];
+  const explicitVariants = otaExplicitSearchVariants(params, typedQuery, fallback || typedQuery, label);
+  const mode = params?.variationMode && typeof params.variationMode === "object" ? params.variationMode : {};
+  if (mode.allowDiscovery === false && explicitVariants.length > 0) return explicitVariants;
   const isVrbo = /vrbo/i.test(label) || /vrbo\.com/i.test(homeUrl);
   try {
     await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
@@ -3591,18 +3720,29 @@ async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label
       suggestionText: suggestion.text,
       source: "suggestion",
     }));
-    if (variants.length > 0) return variants;
+    if (variants.length > 0) {
+      const seen = new Set();
+      return [...explicitVariants, ...variants].filter((variant) => {
+        const key = String(variant.searchTerm || "").toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, Number(mode.maxVariations) || OTA_SUGGESTION_MAX);
+    }
   } catch (e) {
     if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError || e instanceof ProviderBrowserUnavailableError) throw e;
     log(`${label}: destination suggestion discovery skipped: ${e?.message ?? e}`);
   }
   const fallbackSearchTerm = fallback || typedQuery;
-  return [{ typedQuery, searchTerm: fallbackSearchTerm, suggestionText: fallbackSearchTerm, source: "fallback" }];
+  return explicitVariants.length > 0
+    ? explicitVariants
+    : [{ typedQuery, searchTerm: fallbackSearchTerm, suggestionText: fallbackSearchTerm, source: "fallback" }];
 }
 
 async function runOtaSearchVariants(id, label, variants, runVariant) {
   const allCards = [];
   const failures = [];
+  const variationsTried = [];
   let completedVariants = 0;
   for (let i = 0; i < variants.length; i++) {
     throwIfRequestCancelled(id);
@@ -3611,10 +3751,27 @@ async function runOtaSearchVariants(id, label, variants, runVariant) {
     try {
       const cards = await runVariant(variant);
       completedVariants += 1;
+      variationsTried.push({
+        term: variant.searchTerm,
+        typedQuery: variant.typedQuery,
+        suggestionText: variant.suggestionText,
+        source: variant.source,
+        success: true,
+        candidateCount: Array.isArray(cards) ? cards.length : 0,
+      });
       allCards.push(...cards);
     } catch (e) {
       if (e instanceof SidecarCancelledError || e instanceof SidecarHardTimeoutError || e instanceof VrboHardBlockError) throw e;
       failures.push(e);
+      variationsTried.push({
+        term: variant.searchTerm,
+        typedQuery: variant.typedQuery,
+        suggestionText: variant.suggestionText,
+        source: variant.source,
+        success: false,
+        candidateCount: 0,
+        error: String(e?.message ?? e).replace(/\s+/g, " ").slice(0, 240),
+      });
       log(`${label} ${id}: destination variant "${variant.searchTerm}" failed; continuing with remaining variants: ${e?.message ?? e}`);
     }
   }
@@ -3624,7 +3781,7 @@ async function runOtaSearchVariants(id, label, variants, runVariant) {
     `; ${completedVariants} completed${failures.length ? `; ${failures.length} variant failure(s)` : ""}`,
   );
   if (completedVariants === 0 && failures.length > 0) throw failures[0];
-  return deduped;
+  return { candidates: deduped, variationsTried };
 }
 
 async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "homepage", options = {}) {
@@ -3717,11 +3874,11 @@ async function processAirbnbSearch(id, params) {
   const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
   await ensureBrowser();
-  const variants = await discoverOtaSearchVariants("https://www.airbnb.com/", effectiveSearchTerm, destination, "airbnb_search", id);
-  const deduped = await runOtaSearchVariants(id, "airbnb_search", variants, (variant) =>
+  const variants = await discoverOtaSearchVariants("https://www.airbnb.com/", effectiveSearchTerm, destination, "airbnb_search", id, params);
+  const result = await runOtaSearchVariants(id, "airbnb_search", variants, (variant) =>
     runAirbnbSearchVariant(id, params, variant),
   );
-  await postResult(id, deduped);
+  await postResult(id, result);
 }
 
 async function runAirbnbSearchVariant(id, params, variant = null) {
@@ -4435,11 +4592,11 @@ async function processVrboSearch(id, params) {
   const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
   await ensureBrowser();
-  const variants = await discoverOtaSearchVariants("https://www.vrbo.com/", effectiveSearchTerm, destination, "vrbo_search", id);
-  const deduped = await runOtaSearchVariants(id, "vrbo_search", variants, (variant) =>
+  const variants = await discoverOtaSearchVariants("https://www.vrbo.com/", effectiveSearchTerm, destination, "vrbo_search", id, params);
+  const result = await runOtaSearchVariants(id, "vrbo_search", variants, (variant) =>
     runVrboSearchVariant(id, params, variant),
   );
-  await postResult(id, deduped);
+  await postResult(id, result);
 }
 
 async function runVrboSearchVariant(id, params, variant = null) {
@@ -4798,11 +4955,11 @@ async function processBookingSearch(id, params) {
   const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
   await ensureBrowser();
-  const variants = await discoverOtaSearchVariants("https://www.booking.com/", effectiveSearchTerm, destination, "booking_search", id);
-  const deduped = await runOtaSearchVariants(id, "booking_search", variants, (variant) =>
+  const variants = await discoverOtaSearchVariants("https://www.booking.com/", effectiveSearchTerm, destination, "booking_search", id, params);
+  const result = await runOtaSearchVariants(id, "booking_search", variants, (variant) =>
     runBookingSearchVariant(id, params, variant),
   );
-  await postResult(id, deduped);
+  await postResult(id, result);
 }
 
 async function waitForBookingResultsSurface(targetPage, id, effectiveSearchTerm) {
