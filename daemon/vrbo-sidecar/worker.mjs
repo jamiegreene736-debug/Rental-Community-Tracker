@@ -3454,7 +3454,11 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
     [],
   );
   if (suggestions.length) {
-    log(`${label}: discovered ${suggestions.length} in-location destination suggestion(s): ${suggestions.map((s) => `"${s.text}"`).join("; ")}`);
+    log(
+      `${label}: discovered ${suggestions.length} in-location destination suggestion(s)` +
+      `${queryTokens.length ? ` requiring resort-prefix token(s) ${queryTokens.join("+")}` : ""}: ` +
+      suggestions.map((s) => `"${s.text}"`).join("; "),
+    );
   }
   return suggestions;
 }
@@ -4863,6 +4867,23 @@ function bookingStateHasRequestedDates(state, checkIn, checkOut) {
   return false;
 }
 
+function bookingStateHasTargetSearchQuery(state, requiredTargetTokens = []) {
+  if (!Array.isArray(requiredTargetTokens) || requiredTargetTokens.length === 0) return true;
+  try {
+    const url = new URL(String(state?.url || ""));
+    if (!/\/searchresults/i.test(url.pathname)) return true;
+    const searchText = [
+      url.searchParams.get("ss"),
+      url.searchParams.get("ssne"),
+      url.searchParams.get("dest_id"),
+      url.searchParams.get("dest_type"),
+    ].filter(Boolean).join(" ").toLowerCase().replace(/[^a-z0-9]+/g, " ");
+    if (!searchText.trim()) return true;
+    return requiredTargetTokens.every((token) => searchText.includes(token));
+  } catch {}
+  return true;
+}
+
 async function applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label = "booking_search", provider = "booking") {
   if (!targetPage || targetPage.isClosed?.()) return null;
 
@@ -5106,6 +5127,13 @@ async function applyOtaSearchDateInputs(targetPage, checkIn, checkOut, label, pr
       );
     }
   }
+  if (!pmDateEntryComplete(dateEntry) && dateEntry?.openedLabel) {
+    const calendarEntry = await clickPmCalendarDates(targetPage, checkIn, checkOut).catch((e) => {
+      log(`${label}: calendar date selection after visual open failed: ${e?.message ?? e}`);
+      return null;
+    });
+    dateEntry = mergeDateEntries(dateEntry, calendarEntry);
+  }
   if (!pmDateEntryComplete(dateEntry)) {
     const genericEntry = await applyPmDateInputs(targetPage, checkIn, checkOut, label, { skipVisualFallback: true }).catch((e) => {
       log(`${label}: homepage generic date entry failed: ${e?.message ?? e}`);
@@ -5191,6 +5219,26 @@ async function runBookingSearchVariant(id, params, variant = null) {
   if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
     throw new Error("Booking.com bot wall — refresh cookies or retry after proxy rotation");
   }
+  const expectedNights = nightsBetween(checkIn, checkOut);
+  const requiredTargetTokens = String(typedQuery || effectiveSearchTerm || "")
+    .toLowerCase()
+    .replace(/\bresorts?\b/g, " ")
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !new Set(["the", "and", "for", "near", "with", "at"]).has(token))
+    .slice(0, 4);
+  if (!bookingStateHasTargetSearchQuery(state, requiredTargetTokens)) {
+    throw new ProviderBrowserUnavailableError(
+      `Booking.com results URL no longer includes required resort-prefix token(s) ${requiredTargetTokens.join("+")}; refusing broad city-only results.`,
+      {
+        label: "booking_search",
+        id,
+        provider: "booking",
+        url: state?.url,
+        title: state?.title,
+        requiredTargetTokens,
+      },
+    );
+  }
   if (!bookingStateHasRequestedDates(state, checkIn, checkOut) && resultsSurface.propertyCards > 0 && resultsSurface.priceMentions === 0) {
     throw new ProviderBrowserUnavailableError(
       `Booking.com visible search reached an unpriced Koloa/property results page without preserving ${checkIn}→${checkOut}; refusing to treat that as a completed dated search.`,
@@ -5205,13 +5253,6 @@ async function runBookingSearchVariant(id, params, variant = null) {
     );
   }
 
-  const expectedNights = nightsBetween(checkIn, checkOut);
-  const requiredTargetTokens = String(typedQuery || effectiveSearchTerm || "")
-    .toLowerCase()
-    .replace(/\bresorts?\b/g, " ")
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 3 && !new Set(["the", "and", "for", "near", "with", "at"]).has(token))
-    .slice(0, 4);
   const cards = await page.evaluate(({ minBd, expectedNights, requiredTargetTokens }) => {
     const cardSet = new Set();
     for (const selector of [
@@ -5523,7 +5564,9 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
         if (label.includes(p.iso)) return 100;
         if (label.includes(p.padded.toLowerCase()) || label.includes(p.mdyyyy.toLowerCase())) return 96;
         if (label.includes(`${p.monthLong.toLowerCase()} ${p.d}, ${p.y}`) || label.includes(`${p.monthShort.toLowerCase()} ${p.d}, ${p.y}`)) return 94;
+        if (label.includes(`${p.d} ${p.monthLong.toLowerCase()} ${p.y}`) || label.includes(`${p.d} ${p.monthShort.toLowerCase()} ${p.y}`)) return 94;
         if (label.includes(`${p.monthLong.toLowerCase()} ${p.d}`) || label.includes(`${p.monthShort.toLowerCase()} ${p.d}`)) return 86;
+        if (label.includes(`${p.d} ${p.monthLong.toLowerCase()}`) || label.includes(`${p.d} ${p.monthShort.toLowerCase()}`)) return 84;
         const text = (el.textContent || "").replace(/\s+/g, " ").trim();
         if (text === String(p.d) && monthYear.test(ancestor)) return 78;
         if (new RegExp(`\\b${p.d}\\b`).test(text) && monthYear.test(ancestor)) return 66;
@@ -5651,7 +5694,10 @@ async function clickPmCalendarDates(targetPage, checkIn, checkOut) {
     }
   }
 
-  if (filled.length > 0) {
+  const complete =
+    filled.some((f) => f.role === "range") ||
+    (filled.some((f) => f.role === "checkin") && filled.some((f) => f.role === "checkout"));
+  if (complete) {
     const submit = await runCalendarAction("submit");
     if (submit?.submitLabel) {
       submitLabel = submit.submitLabel;
