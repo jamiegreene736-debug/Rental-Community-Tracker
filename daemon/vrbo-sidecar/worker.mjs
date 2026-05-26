@@ -100,6 +100,7 @@ const PM_PARTIAL_DATE_RETRY_MS = Number(process.env.SIDECAR_PM_PARTIAL_DATE_RETR
 const PM_POST_DATE_SETTLE_MS = Number(process.env.SIDECAR_PM_POST_DATE_SETTLE_MS ?? 2_500);
 const PM_SITE_SEARCH_BUDGET_MS = Number(process.env.SIDECAR_PM_SITE_SEARCH_BUDGET_MS ?? 150_000);
 const REQUEST_HARD_TIMEOUT_MS = Number(process.env.SIDECAR_REQUEST_HARD_TIMEOUT_MS ?? 10 * 60_000);
+const OTA_SEARCH_HARD_TIMEOUT_MS = Number(process.env.SIDECAR_OTA_SEARCH_HARD_TIMEOUT_MS ?? 20 * 60_000);
 const REQUEST_MAX_ATTEMPTS = Math.max(1, Math.floor(Number(process.env.SIDECAR_REQUEST_MAX_ATTEMPTS ?? 2) || 2));
 const REQUEST_RETRY_BASE_MS = Math.max(250, Number(process.env.SIDECAR_REQUEST_RETRY_BASE_MS ?? 1_500) || 1_500);
 const VRBO_MANUAL_VERIFICATION_ENABLED = process.env.SIDECAR_VRBO_MANUAL_VERIFICATION !== "0";
@@ -113,11 +114,12 @@ const VRBO_MANUAL_VERIFICATION_POLL_MS = Math.max(
 );
 const VRBO_MANUAL_SESSION_TTL_MS = Math.max(
   5 * 60_000,
-  Number(process.env.SIDECAR_VRBO_MANUAL_SESSION_TTL_MS ?? 24 * 60 * 60_000) || 24 * 60 * 60_000,
+  Number(process.env.SIDECAR_VRBO_MANUAL_SESSION_TTL_MS ?? 48 * 60 * 60_000) || 48 * 60 * 60_000,
 );
-const VRBO_REUSE_MANUAL_SESSION = process.env.SIDECAR_VRBO_REUSE_MANUAL_SESSION === "1";
+const VRBO_REUSE_MANUAL_SESSION = process.env.SIDECAR_VRBO_REUSE_MANUAL_SESSION !== "0";
 const VRBO_MANUAL_SESSION_STATE_PATH = process.env.SIDECAR_VRBO_MANUAL_SESSION_STATE_PATH ||
   path.join(os.tmpdir(), `rct-vrbo-manual-session-${WORKER_SLOT}.json`);
+const OTA_SUGGESTION_MAX = Math.max(1, Math.min(12, Math.floor(Number(process.env.SIDECAR_OTA_SUGGESTION_MAX ?? 8) || 8)));
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
 const BLOCKED_NAV_HOST_RE = /(^|\.)((facebook|instagram|threads|pinterest)\.com|facebook\.net|fbcdn\.net|x\.com|twitter\.com|t\.co)$/i;
@@ -479,6 +481,10 @@ function hardTimeoutMsForOp(opType) {
       return Math.max(REQUEST_HARD_TIMEOUT_MS, PM_SITE_SEARCH_BUDGET_MS + 90_000);
     case "pm_url_check_batch":
       return Math.max(REQUEST_HARD_TIMEOUT_MS, 4 * 60_000);
+    case "airbnb_search":
+    case "vrbo_search":
+    case "booking_search":
+      return Math.max(REQUEST_HARD_TIMEOUT_MS, OTA_SEARCH_HARD_TIMEOUT_MS);
     default:
       return REQUEST_HARD_TIMEOUT_MS;
   }
@@ -3246,8 +3252,244 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
 }
 
 // ─────────────────────── Airbnb search ──────────────────────────────
+// OTA destination policy: type the community name without "resort", then
+// search every matching in-city dropdown suggestion instead of trusting a
+// provider default/geolocated destination.
+function normalizeOtaText(value) {
+  return String(value || "").toLowerCase().replace(/&amp;/g, "&").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+const US_STATE_NAMES = {
+  al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california", co: "colorado",
+  ct: "connecticut", de: "delaware", fl: "florida", ga: "georgia", hi: "hawaii", id: "idaho",
+  il: "illinois", in: "indiana", ia: "iowa", ks: "kansas", ky: "kentucky", la: "louisiana",
+  me: "maine", md: "maryland", ma: "massachusetts", mi: "michigan", mn: "minnesota",
+  ms: "mississippi", mo: "missouri", mt: "montana", ne: "nebraska", nv: "nevada",
+  nh: "new hampshire", nj: "new jersey", nm: "new mexico", ny: "new york",
+  nc: "north carolina", nd: "north dakota", oh: "ohio", ok: "oklahoma", or: "oregon",
+  pa: "pennsylvania", ri: "rhode island", sc: "south carolina", sd: "south dakota",
+  tn: "tennessee", tx: "texas", ut: "utah", vt: "vermont", va: "virginia",
+  wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming", dc: "district columbia",
+};
+
+function otaBaseSearchQuery(searchTerm, destination) {
+  const firstPart = String(searchTerm || destination || "").split(",")[0] || "";
+  return firstPart
+    .replace(/\b(?:resort|resorts)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim() || String(searchTerm || destination || "").replace(/\s+/g, " ").trim();
+}
+
+function otaLocationTokens(...values) {
+  const tokens = [];
+  for (const value of values) {
+    const parts = String(value || "").split(",").map((part) => part.trim()).filter(Boolean);
+    for (const part of parts.slice(1)) {
+      const norm = normalizeOtaText(part);
+      if (!norm) continue;
+      for (const token of norm.split(/\s+/)) {
+        if (token.length >= 3) tokens.push(token);
+        const stateName = US_STATE_NAMES[token];
+        if (stateName) tokens.push(...stateName.split(/\s+/).filter((t) => t.length >= 3));
+      }
+    }
+  }
+  return Array.from(new Set(tokens));
+}
+
+function otaQueryTokens(value) {
+  return normalizeOtaText(value)
+    .split(/\s+/)
+    .filter((token) => token.length >= 3 && !/^(the|and|resort|resorts)$/.test(token));
+}
+
+async function collectVisibleDestinationSuggestions(targetPage, typedQuery, destination, label = "site_search") {
+  if (!targetPage || targetPage.isClosed?.() || !typedQuery) return [];
+  const queryTokens = otaQueryTokens(typedQuery);
+  const locationTokens = otaLocationTokens(destination);
+  await targetPage.waitForTimeout(900).catch(() => null);
+  const suggestions = await withSoftTimeout(
+    targetPage.evaluate(({ queryTokens, locationTokens, maxSuggestions }) => {
+      const clean = (raw) => String(raw || "").toLowerCase().replace(/&amp;/g, "&").replace(/[^a-z0-9]+/g, " ").trim();
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 8 && rect.height > 8 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+
+      const out = [];
+      const seen = new Set();
+      const nodes = Array.from(document.querySelectorAll([
+        "[role='option']",
+        "[role='listbox'] *",
+        "[aria-selected]",
+        "[data-testid*='option' i]",
+        "[data-testid*='suggest' i]",
+        "li",
+        "button",
+        "a",
+      ].join(",")));
+      for (const el of nodes) {
+        if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
+        const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+        const norm = clean(text);
+        if (!norm || text.length > 240) continue;
+        if (/^search for\b/i.test(text) || /\bsearch for\b/i.test(norm)) continue;
+        if (queryTokens.length && !queryTokens.every((token) => norm.includes(token))) continue;
+        if (locationTokens.length && !locationTokens.some((token) => norm.includes(token))) continue;
+        const key = norm;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ text: text.slice(0, 160), norm });
+      }
+      return out.slice(0, maxSuggestions);
+    }, { queryTokens, locationTokens, maxSuggestions: OTA_SUGGESTION_MAX }),
+    3_000,
+    [],
+  );
+  if (suggestions.length) {
+    log(`${label}: discovered ${suggestions.length} in-location destination suggestion(s): ${suggestions.map((s) => `"${s.text}"`).join("; ")}`);
+  }
+  return suggestions;
+}
+
+async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search", targetSuggestion = null) {
+  if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
+  await targetPage.waitForTimeout(900).catch(() => null);
+  const clicked = await withSoftTimeout(
+    targetPage.evaluate(({ searchTerm, targetSuggestion }) => {
+      const clean = (raw) => String(raw || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const wanted = clean(targetSuggestion || searchTerm).split(" ").filter((token) => token.length >= 3);
+      if (wanted.length === 0) return null;
+      const searchNorm = clean(searchTerm);
+      const targetNorm = clean(targetSuggestion || "");
+      const requirePoipuKai = /\bpoipu\s+kai\b/.test(searchNorm) || /\bpoipu\s+kai\b/.test(targetNorm);
+
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 8 && rect.height > 8 &&
+          rect.bottom >= 0 && rect.right >= 0 &&
+          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+
+      const candidates = Array.from(document.querySelectorAll([
+        "[role='option']",
+        "[role='listbox'] *",
+        "[aria-selected]",
+        "[data-testid*='option' i]",
+        "[data-testid*='suggest' i]",
+        "li",
+        "button",
+        "a",
+      ].join(",")))
+        .filter((el) => el instanceof HTMLElement && isVisible(el))
+        .map((el) => {
+          const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+          const norm = clean(text);
+          if (!norm || text.length > 220) return null;
+          if (/^search for\b/i.test(text) || /\bsearch for\b/i.test(norm)) return null;
+          const matched = wanted.filter((token) => norm.includes(token)).length;
+          const hasPoipuKai = /\bpoipu\b/.test(norm) && /\bkai\b/.test(norm);
+          if (requirePoipuKai && !hasPoipuKai) return null;
+          if (!requirePoipuKai && matched === 0) return null;
+          let score = matched * 20;
+          if (targetNorm && (norm === targetNorm || norm.includes(targetNorm) || targetNorm.includes(norm))) score += 200;
+          if (hasPoipuKai) score += 80;
+          if (norm.includes(searchNorm)) score += 40;
+          if (/\b(resort|koloa|hi|hawaii|kauai)\b/.test(norm)) score += 10;
+          return { el, text, score };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
+      const best = candidates[0];
+      if (!best || best.score < 40) return null;
+      try { best.el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
+      best.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      best.el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      best.el.click();
+      return best.text.slice(0, 120);
+    }, { searchTerm, targetSuggestion }),
+    3_000,
+    null,
+  );
+  if (clicked) log(`${label}: selected destination suggestion "${clicked}"`);
+  return clicked;
+}
+
+async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label, requestId = "homepage") {
+  const typedQuery = otaBaseSearchQuery(searchTerm, destination);
+  const fallback = String(searchTerm || destination || typedQuery).trim();
+  if (!typedQuery) return [{ typedQuery: fallback, searchTerm: fallback, suggestionText: fallback, source: "fallback" }];
+  const isVrbo = /vrbo/i.test(label) || /vrbo\.com/i.test(homeUrl);
+  try {
+    await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await boundedPageDelay(page, 1_200);
+    if (isVrbo) {
+      const state = await withSoftTimeout(captureVrboChallengeState(page), 2_000, null);
+      throwIfBrightDataKycBlock(state, label, requestId);
+      if (stateLooksLikeVrboHumanChallenge(state) || (await pageLooksLikeVrboHumanChallenge(page))) {
+        log(`${label} ${requestId}: VRBO challenge detected during suggestion discovery`);
+        await stopVrboProviderIfBlocked(page, label, requestId, state);
+      }
+      throwIfVrboHardBlock(state, label, requestId);
+    }
+    await dismissObstructions(page, `${label}_suggestions`);
+    if (isVrbo) {
+      await fillVrboDestinationField(page, typedQuery, `${label}_suggestions`, { chooseSuggestion: false }).catch(() => null);
+    } else {
+      await fillVisibleSearchField(page, typedQuery, `${label}_suggestions`, { chooseSuggestion: false }).catch(() => null);
+    }
+    const suggestions = await collectVisibleDestinationSuggestions(page, typedQuery, destination || searchTerm, `${label}_suggestions`);
+    const variants = suggestions.map((suggestion) => ({
+      typedQuery,
+      searchTerm: suggestion.text,
+      suggestionText: suggestion.text,
+      source: "suggestion",
+    }));
+    if (variants.length > 0) return variants;
+  } catch (e) {
+    if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError || e instanceof ProviderBrowserUnavailableError) throw e;
+    log(`${label}: destination suggestion discovery skipped: ${e?.message ?? e}`);
+  }
+  return [{ typedQuery, searchTerm: fallback || typedQuery, suggestionText: null, source: "fallback" }];
+}
+
+async function runOtaSearchVariants(id, label, variants, runVariant) {
+  const allCards = [];
+  const failures = [];
+  for (let i = 0; i < variants.length; i++) {
+    throwIfRequestCancelled(id);
+    const variant = variants[i];
+    log(`${label} ${id}: running destination variant ${i + 1}/${variants.length}: "${variant.searchTerm}"`);
+    try {
+      const cards = await runVariant(variant);
+      allCards.push(...cards);
+    } catch (e) {
+      if (e instanceof SidecarCancelledError || e instanceof SidecarHardTimeoutError || e instanceof VrboHardBlockError) throw e;
+      failures.push(e);
+      log(`${label} ${id}: destination variant "${variant.searchTerm}" failed; continuing with remaining variants: ${e?.message ?? e}`);
+    }
+  }
+  const deduped = dedupeCandidatesByUrl(allCards);
+  log(`${label} ${id}: ${deduped.length} de-duped cards across ${variants.length} destination variant(s)${failures.length ? `; ${failures.length} variant failure(s)` : ""}`);
+  if (deduped.length === 0 && failures.length > 0) throw failures[0];
+  return deduped;
+}
+
 async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "homepage", options = {}) {
   if (!searchTerm) return false;
+  const inputTerm = String(options?.inputTerm || searchTerm || "").trim();
+  const targetSuggestion = options?.targetSuggestion || null;
   const submitAfterSearch = options?.submitAfterSearch !== false;
   const isVrbo = /vrbo/i.test(label) || /vrbo\.com/i.test(homeUrl);
   const maybeClearVrboChallenge = async (stage) => {
@@ -3267,9 +3509,9 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     await maybeClearVrboChallenge("after-homepage-load");
     await dismissObstructions(page, `${label}_home`);
     const vrboFilled = isVrbo
-      ? await fillVrboDestinationField(page, searchTerm, `${label}_home`).catch(() => null)
+      ? await fillVrboDestinationField(page, inputTerm, `${label}_home`, { targetSuggestion }).catch(() => null)
       : null;
-    const filled = vrboFilled?.filled ?? (await fillVisibleSearchField(page, searchTerm, `${label}_home`).catch(() => null));
+    const filled = vrboFilled?.filled ?? (await fillVisibleSearchField(page, inputTerm, `${label}_home`, { targetSuggestion }).catch(() => null));
     if (isVrbo && filled && !vrboFilled?.suggestion) {
       log(`${label}: destination suggestion was not confirmed for "${searchTerm}"; final VRBO page will be destination-checked before accepting results`);
     }
@@ -3278,9 +3520,9 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
         await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`), PAGE_SETTLE_MS + 2_000, null);
         await boundedPageDelay(page, 1_200);
         await maybeClearVrboChallenge("after-homepage-submit");
-        log(`${label}: primed public homepage search with "${searchTerm}"`);
+        log(`${label}: primed public homepage search with "${inputTerm}"${targetSuggestion ? ` → "${targetSuggestion}"` : ""}`);
       } else {
-        log(`${label}: entered public homepage search term "${searchTerm}"`);
+        log(`${label}: entered public homepage search term "${inputTerm}"${targetSuggestion ? ` → "${targetSuggestion}"` : ""}`);
       }
       return true;
     }
@@ -3291,8 +3533,10 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
   return false;
 }
 
-async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_search") {
+async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_search", options = {}) {
   if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
+  const chooseSuggestion = options?.chooseSuggestion !== false;
+  const targetSuggestion = options?.targetSuggestion || null;
   const selectors = [
     'input[name="destination"]',
     '#destination_form_field',
@@ -3311,7 +3555,9 @@ async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_se
       await locator.press("Backspace").catch(() => {});
       await locator.type(searchTerm, { delay: 35, timeout: 6_000 });
       await targetPage.waitForTimeout(1_000).catch(() => {});
-      const suggestion = await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label).catch(() => null);
+      const suggestion = chooseSuggestion
+        ? await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion).catch(() => null)
+        : null;
       log(`${label}: typed destination into VRBO field "${selector}"${suggestion ? ` and selected "${suggestion}"` : ""}`);
       return { filled: selector, suggestion };
     } catch (e) {
@@ -3322,14 +3568,29 @@ async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_se
 }
 
 async function processAirbnbSearch(id, params) {
-  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
+  await ensureBrowser();
+  const variants = await discoverOtaSearchVariants("https://www.airbnb.com/", effectiveSearchTerm, destination, "airbnb_search", id);
+  const deduped = await runOtaSearchVariants(id, "airbnb_search", variants, (variant) =>
+    runAirbnbSearchVariant(id, params, variant),
+  );
+  await postResult(id, deduped);
+}
+
+async function runAirbnbSearchVariant(id, params, variant = null) {
+  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
+  const typedQuery = String(variant?.typedQuery || otaBaseSearchQuery(searchTerm, destination) || effectiveSearchTerm).trim();
   log(
     `airbnb_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
-  await primeOtaHomepageSearch("https://www.airbnb.com/", effectiveSearchTerm, "airbnb_search");
+  await primeOtaHomepageSearch("https://www.airbnb.com/", effectiveSearchTerm, "airbnb_search", id, {
+    inputTerm: typedQuery,
+    targetSuggestion: variant?.suggestionText || null,
+  });
   const url =
     `https://www.airbnb.com/s/${encodeURIComponent(effectiveSearchTerm)}/homes` +
     `?query=${encodeURIComponent(effectiveSearchTerm)}` +
@@ -3339,7 +3600,7 @@ async function processAirbnbSearch(id, params) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "airbnb_search");
-  await fillVisibleSearchField(page, effectiveSearchTerm, "airbnb_search").catch(() => null);
+  await fillVisibleSearchField(page, typedQuery, "airbnb_search", { targetSuggestion: variant?.suggestionText || null }).catch(() => null);
   await clickVisibleSearchSubmit(page, "airbnb_search").catch(() => null);
   const bedroomFiltered = await fillBedroomFilter(page, bedrooms, "airbnb_search").catch(() => null);
   if (!bedroomFiltered) {
@@ -3506,8 +3767,8 @@ async function processAirbnbSearch(id, params) {
     return out;
   }, { expectedNights, targetBedrooms: Number.parseInt(String(bedrooms ?? ""), 10), checkIn, checkOut });
 
-  log(`airbnb_search ${id}: ${cards.length} priced room cards`);
-  await postResult(id, dedupeCandidatesByUrl(cards));
+  log(`airbnb_search ${id}: ${cards.length} priced room cards for "${effectiveSearchTerm}"`);
+  return dedupeCandidatesByUrl(cards).map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
 }
 
 // ───────────────────────── VRBO search ──────────────────────────────
@@ -3625,7 +3886,7 @@ function dedupeCandidatesByUrl(candidates) {
   return out;
 }
 
-async function fillVisibleSearchField(targetPage, searchTerm, label = "site_search") {
+async function fillVisibleSearchField(targetPage, searchTerm, label = "site_search", options = {}) {
   if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
   const filled = await withSoftTimeout(
     targetPage.evaluate(({ searchTerm }) => {
@@ -3705,73 +3966,15 @@ async function fillVisibleSearchField(targetPage, searchTerm, label = "site_sear
   );
   if (filled) {
     log(`${label}: entered search term in "${filled}"`);
-    await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label).catch(() => null);
+    if (options?.chooseSuggestion !== false) {
+      await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, options?.targetSuggestion || null).catch(() => null);
+    }
   }
   return filled;
 }
 
-async function chooseVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search") {
-  if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
-  await targetPage.waitForTimeout(900).catch(() => null);
-  const clicked = await withSoftTimeout(
-    targetPage.evaluate(({ searchTerm }) => {
-      const clean = (raw) => String(raw || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-      const wanted = clean(searchTerm).split(" ").filter((token) => token.length >= 3);
-      if (wanted.length === 0) return null;
-      const searchNorm = clean(searchTerm);
-      const requirePoipuKai = /\bpoipu\s+kai\b/.test(searchNorm);
-
-      function isVisible(el) {
-        if (!el || !(el instanceof HTMLElement)) return false;
-        const rect = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-        return rect.width > 8 && rect.height > 8 &&
-          rect.bottom >= 0 && rect.right >= 0 &&
-          rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
-          style.display !== "none" && style.visibility !== "hidden" &&
-          Number(style.opacity || "1") > 0.05;
-      }
-
-      const candidates = Array.from(document.querySelectorAll([
-        "[role='option']",
-        "[role='listbox'] *",
-        "[aria-selected]",
-        "[data-testid*='option' i]",
-        "[data-testid*='suggest' i]",
-        "li",
-        "button",
-        "a",
-      ].join(",")))
-        .filter((el) => el instanceof HTMLElement && isVisible(el))
-        .map((el) => {
-          const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
-          const norm = clean(text);
-          if (!norm || text.length > 220) return null;
-          const matched = wanted.filter((token) => norm.includes(token)).length;
-          const hasPoipuKai = /\bpoipu\b/.test(norm) && /\bkai\b/.test(norm);
-          if (requirePoipuKai && !hasPoipuKai) return null;
-          if (!requirePoipuKai && matched === 0) return null;
-          let score = matched * 20;
-          if (hasPoipuKai) score += 80;
-          if (norm.includes(searchNorm)) score += 40;
-          if (/\b(resort|koloa|hi|hawaii|kauai)\b/.test(norm)) score += 10;
-          return { el, text, score };
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.score - a.score);
-      const best = candidates[0];
-      if (!best || best.score < 40) return null;
-      try { best.el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
-      best.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-      best.el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-      best.el.click();
-      return best.text.slice(0, 120);
-    }, { searchTerm }),
-    3_000,
-    null,
-  );
-  if (clicked) log(`${label}: selected destination suggestion "${clicked}"`);
-  return clicked;
+async function chooseVisibleDestinationSuggestion(targetPage, searchTerm, label = "site_search", targetSuggestion = null) {
+  return selectVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion);
 }
 
 async function fillPmRentalLocationField(targetPage, searchTerm, label = "pm_rental_location") {
@@ -4165,14 +4368,28 @@ async function enforceBookingSearchUrl(expectedUrl, expectedSearchTerm, expected
 }
 
 async function processVrboSearch(id, params) {
-  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
+  await ensureBrowser();
+  const variants = await discoverOtaSearchVariants("https://www.vrbo.com/", effectiveSearchTerm, destination, "vrbo_search", id);
+  const deduped = await runOtaSearchVariants(id, "vrbo_search", variants, (variant) =>
+    runVrboSearchVariant(id, params, variant),
+  );
+  await postResult(id, deduped);
+}
+
+async function runVrboSearchVariant(id, params, variant = null) {
+  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
+  const typedQuery = String(variant?.typedQuery || otaBaseSearchQuery(searchTerm, destination) || effectiveSearchTerm).trim();
   log(
     `vrbo_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
   const primedDestination = await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search", id, {
+    inputTerm: typedQuery,
+    targetSuggestion: variant?.suggestionText || null,
     submitAfterSearch: false,
   });
   if (!primedDestination) {
@@ -4427,7 +4644,7 @@ async function processVrboSearch(id, params) {
       .join(", ");
     log(`vrbo_search ${id}: by-BR: ${summary}`);
   }
-  await postResult(id, cards);
+  return cards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
 }
 
 // ─────────────────────── VRBO listing photo scrape ─────────────────
@@ -4517,8 +4734,19 @@ async function processVrboPhotoScrape(id, params) {
 
 // ─────────────────────── Booking.com search ─────────────────────────
 async function processBookingSearch(id, params) {
-  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
+  await ensureBrowser();
+  const variants = await discoverOtaSearchVariants("https://www.booking.com/", effectiveSearchTerm, destination, "booking_search", id);
+  const deduped = await runOtaSearchVariants(id, "booking_search", variants, (variant) =>
+    runBookingSearchVariant(id, params, variant),
+  );
+  await postResult(id, deduped);
+}
+
+async function runBookingSearchVariant(id, params, variant = null) {
+  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
   log(
     `booking_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
     `${checkIn}→${checkOut} ${bedrooms}BR`,
@@ -4639,8 +4867,8 @@ async function processBookingSearch(id, params) {
     }
     return out;
   }, { minBd: bedrooms, expectedNights });
-  log(`booking_search ${id}: ${cards.length} cards`);
-  await postResult(id, cards);
+  log(`booking_search ${id}: ${cards.length} cards for "${effectiveSearchTerm}"`);
+  return cards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
 }
 
 // ─────────────────────── Google SERP scrape ─────────────────────────
