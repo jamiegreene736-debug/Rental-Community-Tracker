@@ -119,6 +119,8 @@ const VRBO_MANUAL_SESSION_TTL_MS = Math.max(
 const VRBO_REUSE_MANUAL_SESSION = process.env.SIDECAR_VRBO_REUSE_MANUAL_SESSION !== "0";
 const VRBO_MANUAL_SESSION_STATE_PATH = process.env.SIDECAR_VRBO_MANUAL_SESSION_STATE_PATH ||
   path.join(os.tmpdir(), `rct-vrbo-manual-session-${WORKER_SLOT}.json`);
+const CLEAR_OTA_STORAGE_BETWEEN_RUNS = process.env.SIDECAR_CLEAR_OTA_STORAGE_BETWEEN_RUNS === "1";
+const FORCE_FRESH_OTA_IDENTITY = process.env.SIDECAR_FORCE_FRESH_OTA_IDENTITY === "1";
 const OTA_SUGGESTION_MAX = Math.max(1, Math.min(12, Math.floor(Number(process.env.SIDECAR_OTA_SUGGESTION_MAX ?? 8) || 8)));
 const PM_SITE_SEARCH_TAB_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_SITE_TAB_CONCURRENCY ?? 3) || 3));
 const PM_URL_CHECK_BATCH_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.SIDECAR_PM_URL_BATCH_CONCURRENCY ?? 8) || 8));
@@ -170,7 +172,7 @@ function needsFreshChromeForOp(opType) {
 }
 
 function needsFreshIdentityForOp(opType) {
-  return /^(airbnb|booking|vrbo)_/i.test(String(opType || ""));
+  return FORCE_FRESH_OTA_IDENTITY && /^(airbnb|booking|vrbo)_/i.test(String(opType || ""));
 }
 
 function keepVisibleLocalChromeGrid() {
@@ -1765,8 +1767,13 @@ async function normalizePageDisplay(targetPage = page) {
   scheduleSidecarMinimize(targetPage);
 }
 
-async function clearContextStorageForFreshRun(label = "fresh browser run") {
+async function clearContextStorageForFreshRun(label = "fresh browser run", options = {}) {
   if (!context) return;
+  const force = options?.force === true;
+  if (!force && !CLEAR_OTA_STORAGE_BETWEEN_RUNS) {
+    log(`${label}: preserved cookies, cache, and OTA origin storage for 48h session reuse`);
+    return;
+  }
   await withSoftTimeout(context.clearCookies?.(), 2_000, null);
   const pages = typeof context.pages === "function" ? context.pages() : [];
   const targetPage = pages.find((p) => p && !p.isClosed?.()) ?? page;
@@ -7042,7 +7049,9 @@ async function processRequest(req) {
     // avoid an extra navigation on the daemon-owned page that the
     // batch isn't going to use.
     if (opType !== "pm_url_check_batch") {
-      await clearContextStorageForFreshRun(`${opType} ${req.id} fresh cache`);
+      await clearContextStorageForFreshRun(`${opType} ${req.id} fresh cache`, {
+        force: needsFreshIdentityForOp(opType),
+      });
       await resetPage();
     }
     await postScreenSnapshot({ ...req, opType }, page, `ready ${opType}`, { force: true });
