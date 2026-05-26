@@ -5211,6 +5211,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
       const image = img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
       // Strip query string for the canonical URL but keep the .html path.
       const url = href.startsWith("http") ? href.split("?")[0] : href ? "https://www.booking.com" + href.split("?")[0] : "";
+      const fullText = (card.textContent || "").replace(/\s+/g, " ");
       const targetHaystack = `${title} ${url} ${fullText}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
       const hasRequiredTarget = !Array.isArray(requiredTargetTokens) ||
         requiredTargetTokens.length === 0 ||
@@ -5223,7 +5224,6 @@ async function runBookingSearchVariant(id, params, variant = null) {
       // price element when the full card has no total-like amount.
       const priceEl = card.querySelector('[data-testid="price-and-discounted-price"]');
       const priceText = priceEl ? priceEl.textContent.replace(/\s+/g, " ") : "";
-      const fullText = (card.textContent || "").replace(/\s+/g, " ");
       const priceElAmounts = moneyAmounts(priceText);
       const fullAmounts = moneyAmounts(fullText);
       const minStayTotal = Math.max(250, expectedNights * 175);
