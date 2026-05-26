@@ -732,6 +732,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
   }
 
   const targetDest = args.searchName ?? args.community;
+  const sidecarDestination = [targetDest, args.city, args.state]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(", ");
   const nights = nightsBetween(checkIn, checkOut);
   const region = inferRegion(args.city, args.state);
   const sidecarQueueBudgetMs = args.sidecarQueueBudgetMs ?? 285_000;
@@ -859,7 +863,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
           assertSidecarRunCurrent();
           const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchAirbnbViaSidecar({
-            destination: targetDest,
+            destination: sidecarDestination,
             searchTerm: targetDest,
             checkIn,
             checkOut,
@@ -922,7 +926,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
           assertSidecarRunCurrent();
           const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchVrboViaSidecar({
-            destination: targetDest,
+            destination: sidecarDestination,
             searchTerm: targetDest,
             checkIn,
             checkOut,
@@ -1005,7 +1009,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
           assertSidecarRunCurrent();
           const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
           const r = await searchBookingViaSidecar({
-            destination: targetDest,
+            destination: sidecarDestination,
             searchTerm: targetDest,
             checkIn,
             checkOut,

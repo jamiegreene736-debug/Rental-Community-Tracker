@@ -3297,6 +3297,20 @@ function otaLocationTokens(...values) {
   return Array.from(new Set(tokens));
 }
 
+function otaRequiredCityTokens(...values) {
+  const tokens = [];
+  for (const value of values) {
+    const parts = String(value || "").split(",").map((part) => part.trim()).filter(Boolean);
+    const city = parts.length >= 3 ? parts[1] : "";
+    const norm = normalizeOtaText(city);
+    if (!norm) continue;
+    for (const token of norm.split(/\s+/)) {
+      if (token.length >= 3) tokens.push(token);
+    }
+  }
+  return Array.from(new Set(tokens));
+}
+
 function otaQueryTokens(value) {
   return normalizeOtaText(value)
     .split(/\s+/)
@@ -3307,9 +3321,10 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
   if (!targetPage || targetPage.isClosed?.() || !typedQuery) return [];
   const queryTokens = otaQueryTokens(typedQuery);
   const locationTokens = otaLocationTokens(destination);
+  const requiredCityTokens = otaRequiredCityTokens(destination);
   await targetPage.waitForTimeout(900).catch(() => null);
   const suggestions = await withSoftTimeout(
-    targetPage.evaluate(({ queryTokens, locationTokens, maxSuggestions }) => {
+    targetPage.evaluate(({ queryTokens, locationTokens, requiredCityTokens, maxSuggestions }) => {
       const clean = (raw) => String(raw || "").toLowerCase().replace(/&amp;/g, "&").replace(/[^a-z0-9]+/g, " ").trim();
 
       function isVisible(el) {
@@ -3328,20 +3343,34 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
       const nodes = Array.from(document.querySelectorAll([
         "[role='option']",
         "[role='listbox'] *",
+        "[data-testid*='autocomplete' i] *",
         "[aria-selected]",
         "[data-testid*='option' i]",
         "[data-testid*='suggest' i]",
+        "[class*='autocomplete' i] *",
+        "[class*='autosuggest' i] *",
+        "[class*='suggest' i] *",
+        "[class*='typeahead' i] *",
+        "[class*='destination' i] *",
         "li",
         "button",
         "a",
       ].join(",")));
       for (const el of nodes) {
         if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
-        const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+        const row = el.closest("[role='option'], li, button, a, [data-testid*='option' i], [data-testid*='suggest' i]") || el;
+        if (!(row instanceof HTMLElement) || !isVisible(row)) continue;
+        const text = String([
+          row.textContent,
+          row.getAttribute?.("aria-label"),
+          row.getAttribute?.("title"),
+          row.getAttribute?.("value"),
+        ].filter(Boolean).join(" ")).replace(/\s+/g, " ").trim();
         const norm = clean(text);
         if (!norm || text.length > 240) continue;
         if (/^search for\b/i.test(text) || /\bsearch for\b/i.test(norm)) continue;
         if (queryTokens.length && !queryTokens.every((token) => norm.includes(token))) continue;
+        if (requiredCityTokens.length && !requiredCityTokens.every((token) => norm.includes(token))) continue;
         if (locationTokens.length && !locationTokens.some((token) => norm.includes(token))) continue;
         const key = norm;
         if (seen.has(key)) continue;
@@ -3349,7 +3378,7 @@ async function collectVisibleDestinationSuggestions(targetPage, typedQuery, dest
         out.push({ text: text.slice(0, 160), norm });
       }
       return out.slice(0, maxSuggestions);
-    }, { queryTokens, locationTokens, maxSuggestions: OTA_SUGGESTION_MAX }),
+    }, { queryTokens, locationTokens, requiredCityTokens, maxSuggestions: OTA_SUGGESTION_MAX }),
     3_000,
     [],
   );
@@ -3403,7 +3432,9 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
           if (requirePoipuKai && !hasPoipuKai) return null;
           if (!requirePoipuKai && matched === 0) return null;
           let score = matched * 20;
-          if (targetNorm && (norm === targetNorm || norm.includes(targetNorm) || targetNorm.includes(norm))) score += 200;
+          if (targetNorm && norm === targetNorm) score += 500;
+          else if (targetNorm && norm.includes(targetNorm)) score += 300;
+          else if (targetNorm && targetNorm.includes(norm)) score += 120;
           if (hasPoipuKai) score += 80;
           if (norm.includes(searchNorm)) score += 40;
           if (/\b(resort|koloa|hi|hawaii|kauai)\b/.test(norm)) score += 10;
@@ -3461,7 +3492,8 @@ async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label
     if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError || e instanceof ProviderBrowserUnavailableError) throw e;
     log(`${label}: destination suggestion discovery skipped: ${e?.message ?? e}`);
   }
-  return [{ typedQuery, searchTerm: fallback || typedQuery, suggestionText: null, source: "fallback" }];
+  const fallbackSearchTerm = fallback || typedQuery;
+  return [{ typedQuery, searchTerm: fallbackSearchTerm, suggestionText: fallbackSearchTerm, source: "fallback" }];
 }
 
 async function runOtaSearchVariants(id, label, variants, runVariant) {
