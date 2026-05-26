@@ -5147,7 +5147,13 @@ async function runBookingSearchVariant(id, params, variant = null) {
   }
 
   const expectedNights = nightsBetween(checkIn, checkOut);
-  const cards = await page.evaluate(({ minBd, expectedNights }) => {
+  const requiredTargetTokens = String(typedQuery || effectiveSearchTerm || "")
+    .toLowerCase()
+    .replace(/\bresorts?\b/g, " ")
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !new Set(["the", "and", "for", "near", "with", "at"]).has(token))
+    .slice(0, 4);
+  const cards = await page.evaluate(({ minBd, expectedNights, requiredTargetTokens }) => {
     const cardSet = new Set();
     for (const selector of [
       '[data-testid="property-card"]',
@@ -5170,7 +5176,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
     }
     const cards = Array.from(cardSet);
     const out = [];
-    const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0 };
+    const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0, wrongTarget: 0 };
     let firstCardSample = null;
     function moneyAmounts(text) {
       return Array.from(String(text || "").matchAll(/(?:US\$|\$)\s*([\d,]+(?:\.\d+)?)/g))
@@ -5205,6 +5211,10 @@ async function runBookingSearchVariant(id, params, variant = null) {
       const image = img?.currentSrc || img?.src || img?.getAttribute("data-src") || undefined;
       // Strip query string for the canonical URL but keep the .html path.
       const url = href.startsWith("http") ? href.split("?")[0] : href ? "https://www.booking.com" + href.split("?")[0] : "";
+      const targetHaystack = `${title} ${url} ${fullText}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      const hasRequiredTarget = !Array.isArray(requiredTargetTokens) ||
+        requiredTargetTokens.length === 0 ||
+        requiredTargetTokens.every((token) => targetHaystack.includes(token));
       // Booking renders price fragments in two different places. On some
       // cards [price-and-discounted-price] is only the nightly rate while
       // the full card text also contains the stay total (e.g.
@@ -5241,6 +5251,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
         };
       }
       if (!url) { drops.noUrl++; continue; }
+      if (!hasRequiredTarget) { drops.wrongTarget++; continue; }
       if (!(totalPrice > 0)) { drops.noPrice++; continue; }
       if (bedrooms < minBd) { drops.noBedrooms++; continue; }
       out.push({
@@ -5261,12 +5272,12 @@ async function runBookingSearchVariant(id, params, variant = null) {
       });
     }
     return { out, drops, totalSeen: cards.length, firstCardSample };
-  }, { minBd: bedrooms, expectedNights });
+  }, { minBd: bedrooms, expectedNights, requiredTargetTokens });
   const resultCards = cards.out || [];
   log(
     `booking_search ${id}: ${resultCards.length} cards for "${effectiveSearchTerm}" ` +
     `[seen=${cards.totalSeen ?? 0}, surface=${resultsSurface.propertyCards}/${resultsSurface.hotelLinks}, ` +
-    `drops=noUrl:${cards.drops?.noUrl ?? 0}/noPrice:${cards.drops?.noPrice ?? 0}/noBR:${cards.drops?.noBedrooms ?? 0}]`,
+    `drops=noUrl:${cards.drops?.noUrl ?? 0}/wrongTarget:${cards.drops?.wrongTarget ?? 0}/noPrice:${cards.drops?.noPrice ?? 0}/noBR:${cards.drops?.noBedrooms ?? 0}]`,
   );
   if (resultCards.length === 0 && cards.firstCardSample) {
     log(
