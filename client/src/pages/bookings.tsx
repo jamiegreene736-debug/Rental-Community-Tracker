@@ -356,6 +356,12 @@ type AutoFillSearchAudit = {
   diagnostics?: FindBuyInDiagnostics;
 };
 
+type BuyInSearchConfirmationPayload = {
+  title: string;
+  description?: string;
+  audits: AutoFillSearchAudit[];
+};
+
 type BulkBuyInQueueStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
 
 type BulkBuyInQueueItem = {
@@ -1195,6 +1201,156 @@ function ProviderSearchStatusStrip({ audit }: { audit: AutoFillSearchAudit }) {
   );
 }
 
+function BuyInSearchConfirmationDialog({
+  open,
+  onOpenChange,
+  payload,
+  onViewDiagnostics,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  payload: BuyInSearchConfirmationPayload | null;
+  onViewDiagnostics?: (diagnostics: FindBuyInDiagnostics) => void;
+}) {
+  if (!payload) return null;
+  const providerRows = payload.audits.flatMap((audit, auditIndex) => (
+    BUY_IN_OTA_PROVIDER_KEYS.map((key) => {
+      const status = buyInProviderSearchStatus(audit.counts, audit.diagnostics, key);
+      const diagnostic = status.stats.diagnostic;
+      const request = audit.diagnostics?.request;
+      const dates = diagnostic?.datesSearched ?? request;
+      const datesLabel = dates?.checkIn && dates?.checkOut
+        ? `${dates.checkIn} -> ${dates.checkOut}`
+        : "Not reported";
+      const locationLabel = status.searchTerm || request?.resortName || request?.community || "Not reported";
+      const resultCounts = diagnostic?.resultCounts ?? {
+        raw: status.stats.raw,
+        kept: status.stats.kept,
+        priced: status.stats.priced,
+        verified: status.stats.verified,
+      };
+      return {
+        key: `${audit.generatedAt}-${audit.bedrooms}-${auditIndex}-${key}`,
+        audit,
+        status,
+        datesLabel,
+        locationLabel,
+        resultCounts,
+      };
+    })
+  ));
+  const totalIssues = payload.audits.reduce((sum, audit) => sum + (audit.diagnostics?.issues?.length ?? 0), 0);
+  const generatedTimes = payload.audits
+    .map((audit) => audit.diagnostics?.generatedAt ?? audit.generatedAt)
+    .filter(Boolean)
+    .sort();
+  const latestGeneratedAt = generatedTimes[generatedTimes.length - 1];
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>{payload.title}</DialogTitle>
+          <DialogDescription>
+            {payload.description ?? "Provider search confirmation for the completed buy-in run."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="grid gap-2 text-xs sm:grid-cols-3">
+            <div className="rounded border bg-muted/30 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Search groups</p>
+              <p className="mt-0.5 font-semibold">{payload.audits.length}</p>
+            </div>
+            <div className="rounded border bg-muted/30 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Provider checks</p>
+              <p className="mt-0.5 font-semibold">{providerRows.length}</p>
+            </div>
+            <div className="rounded border bg-muted/30 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Completed</p>
+              <p className="mt-0.5 font-semibold">{latestGeneratedAt ? new Date(latestGeneratedAt).toLocaleString() : "Now"}</p>
+            </div>
+          </div>
+          <div className="max-h-[60vh] overflow-y-auto rounded-md border">
+            <div className="grid grid-cols-[110px_1fr] gap-0 border-b bg-slate-50 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:grid-cols-[110px_150px_1.2fr_1fr_1fr]">
+              <span>Website</span>
+              <span className="hidden sm:block">Status</span>
+              <span>Dates searched</span>
+              <span className="hidden sm:block">Location name search</span>
+              <span className="hidden sm:block">Counts</span>
+            </div>
+            {providerRows.map((row) => {
+              const boxClass = row.status.passed
+                ? "text-emerald-700"
+                : row.status.warned
+                ? "text-amber-700"
+                : "text-red-700";
+              return (
+                <div
+                  key={row.key}
+                  className="grid grid-cols-[110px_1fr] gap-x-3 gap-y-1 border-b px-3 py-2 text-xs last:border-b-0 sm:grid-cols-[110px_150px_1.2fr_1fr_1fr]"
+                >
+                  <div className="font-semibold">{row.status.config.label}</div>
+                  <div className={`hidden font-medium sm:flex sm:items-center sm:gap-1.5 ${boxClass}`}>
+                    {row.status.passed ? (
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                    ) : row.status.warned ? (
+                      <AlertCircle className="h-3.5 w-3.5" />
+                    ) : (
+                      <XCircle className="h-3.5 w-3.5" />
+                    )}
+                    {row.status.passed ? "Confirmed" : row.status.warned ? "Warning" : "Failed"}
+                  </div>
+                  <div>
+                    <span className="font-medium sm:hidden">Dates searched: </span>
+                    {row.datesLabel}
+                  </div>
+                  <div className="col-span-2 min-w-0 break-words sm:col-span-1">
+                    <span className="font-medium sm:hidden">Location name search: </span>
+                    {row.locationLabel}
+                  </div>
+                  <div className="col-span-2 text-[11px] text-muted-foreground sm:col-span-1">
+                    raw {row.resultCounts.raw ?? 0} · kept {row.resultCounts.kept ?? 0} · priced {row.resultCounts.priced ?? 0} · verified {row.resultCounts.verified ?? 0}
+                    {typeof row.status.stats.diagnostic?.durationMs === "number"
+                      ? ` · ${Math.round(row.status.stats.diagnostic.durationMs / 1000)}s`
+                      : ""}
+                  </div>
+                  {(row.status.reason || row.status.failureReason) && (
+                    <div className="col-span-2 text-[11px] text-muted-foreground sm:col-start-2 sm:col-span-4">
+                      {row.status.failureReason || row.status.reason}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {totalIssues > 0 && (
+            <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+              {totalIssues} diagnostic item{totalIssues === 1 ? "" : "s"} were recorded. Use the detailed log for the full reason trail.
+            </div>
+          )}
+        </div>
+        <DialogFooter className="gap-2 sm:justify-between">
+          <div className="text-[11px] text-muted-foreground">
+            Confirmation is based on the completed `/api/operations/find-buy-in` diagnostics.
+          </div>
+          <div className="flex gap-2">
+            {payload.audits[0]?.diagnostics && onViewDiagnostics && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onViewDiagnostics(payload.audits[0].diagnostics!)}
+              >
+                <FileText className="mr-1 h-3.5 w-3.5" />
+                Detailed log
+              </Button>
+            )}
+            <Button type="button" onClick={() => onOpenChange(false)}>Done</Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function formatBuyInProviderAvailability(
   summary: AutoFillSearchSummary,
   diagnostics: FindBuyInDiagnostics | undefined,
@@ -1218,6 +1374,48 @@ function formatBuyInProviderAvailability(
     lead = `${config.label}: no ${bedrooms}BR rows were visible to this search.`;
   }
   return `${lead} (${stats.status}; ${countSuffix})${message ? ` ${message}` : ""}`;
+}
+
+function liveSearchSummaryFor(data: FindBuyInResponse, searchedBedrooms: number): AutoFillSearchSummary {
+  const rawCounts = data.debug?.rawCounts ?? {};
+  const rawSourceCounts = {
+    airbnb: Number(rawCounts.airbnbWebsiteSidecar ?? rawCounts.airbnb ?? 0) || 0,
+    vrbo: Number(rawCounts.vrbo ?? 0) || 0,
+    booking: Number(rawCounts.bookingWebsiteSidecar ?? rawCounts.booking ?? 0) || 0,
+    pm: Number(rawCounts.pmFromWebsiteSidecar ?? rawCounts.pmWebsiteSidecarRaw ?? rawCounts.pm ?? 0) || 0,
+  };
+  const sourceCounts = {
+    airbnb: data.sources?.airbnb?.length ?? 0,
+    vrbo: data.sources?.vrbo?.length ?? 0,
+    booking: data.sources?.booking?.length ?? 0,
+    pm: data.sources?.pm?.length ?? 0,
+  };
+  const allSourceCandidates = [
+    ...(data.sources?.airbnb ?? []),
+    ...(data.sources?.vrbo ?? []),
+    ...(data.sources?.booking ?? []),
+    ...(data.sources?.pm ?? []),
+  ];
+  const targetFilter = data.debug?.dropped?.targetFilter ?? {};
+  const targetFiltered = Object.values(targetFilter).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  const scannedSourceCounts = {
+    airbnb: Math.max(sourceCounts.airbnb, rawSourceCounts.airbnb),
+    vrbo: Math.max(sourceCounts.vrbo, rawSourceCounts.vrbo),
+    booking: Math.max(sourceCounts.booking, rawSourceCounts.booking),
+    pm: Math.max(sourceCounts.pm, rawSourceCounts.pm),
+  };
+  const scanned = Object.values(scannedSourceCounts).reduce((sum, value) => sum + value, 0);
+  return {
+    bedrooms: searchedBedrooms,
+    scanned: Math.max(scanned, allSourceCandidates.length),
+    priced: typeof data.totalPricedResults === "number"
+      ? data.totalPricedResults
+      : allSourceCandidates.filter((c) => c.totalPrice > 0).length,
+    sourceCounts: scannedSourceCounts,
+    kept: allSourceCandidates.length,
+    targetFiltered,
+    groundFloorOnly: !!data.groundFloorOnly,
+  };
 }
 
 function buyInSearchAvailabilityDetails(
@@ -3488,6 +3686,10 @@ export default function Bookings() {
   // Collapses the 6-click flow (expand → Find → scroll → Record → Save → ...)
   // into a single button per booking.
   const [autoFillStartedByReservation, setAutoFillStartedByReservation] = useState<Record<string, number>>({});
+  const [autoFillConfirmation, setAutoFillConfirmation] = useState<BuyInSearchConfirmationPayload | null>(null);
+  const [autoFillConfirmationOpen, setAutoFillConfirmationOpen] = useState(false);
+  const [autoFillConfirmationDiagnostics, setAutoFillConfirmationDiagnostics] = useState<FindBuyInDiagnostics | null>(null);
+  const [autoFillConfirmationDiagnosticsOpen, setAutoFillConfirmationDiagnosticsOpen] = useState(false);
   const autoFillRunRef = useRef<Set<string>>(new Set());
   const clearAutoFillDiagnostics = (reservationId: string) => {
     setLastAutoFillCombos((prev) => {
@@ -4562,6 +4764,17 @@ export default function Bookings() {
             .map((option) => `${option.label}: ${option.totalCost == null ? option.unavailableReason ?? "unavailable" : fmtMoney(option.totalCost)}`)
             .join("; ")}${selectedCombo ? ` · Selected ${selectedCombo.label}` : ""}`
         : "";
+      if (!variables?.silent && searchAudits.length > 0) {
+        const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+        const checkInLabel = checkInOf(reservation) ?? "unknown check-in";
+        const checkOutLabel = checkOutOf(reservation) ?? "unknown check-out";
+        setAutoFillConfirmation({
+          title: `Buy-in search confirmation: ${guestName}`,
+          description: `Auto-fill searched ${searchAudits.length} bedroom group${searchAudits.length === 1 ? "" : "s"} for ${checkInLabel} -> ${checkOutLabel}.`,
+          audits: searchAudits,
+        });
+        setAutoFillConfirmationOpen(true);
+      }
       if (variables?.silent) return;
       if (filled.length === 0) {
         const uniqueSummaries = Array.from(
@@ -5219,6 +5432,24 @@ export default function Bookings() {
 
   return (
     <div className="min-h-screen bg-background">
+      <BuyInSearchConfirmationDialog
+        payload={autoFillConfirmation}
+        open={autoFillConfirmationOpen}
+        onOpenChange={setAutoFillConfirmationOpen}
+        onViewDiagnostics={(diagnostics) => {
+          setAutoFillConfirmationOpen(false);
+          setAutoFillConfirmationDiagnostics(diagnostics);
+          setAutoFillConfirmationDiagnosticsOpen(true);
+        }}
+      />
+      {autoFillConfirmationDiagnostics && (
+        <SearchDiagnosticsDialog
+          diagnostics={autoFillConfirmationDiagnostics}
+          open={autoFillConfirmationDiagnosticsOpen}
+          onOpenChange={setAutoFillConfirmationDiagnosticsOpen}
+          onCopySuccess={() => toast({ title: "Search log copied" })}
+        />
+      )}
       {/* Header */}
       <div className="sticky top-[65px] z-40 flex flex-wrap items-center gap-3 border-b bg-card/95 px-4 py-3 shadow-sm backdrop-blur sm:gap-4 sm:px-6 sm:py-4">
         <Link href="/">
@@ -8718,6 +8949,8 @@ function LiveSearchSection({
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const confirmationKeyRef = useRef<string>("");
   const [searchStartedAtMs, setSearchStartedAtMs] = useState(() => Date.now());
   const [searchEnabled, setSearchEnabled] = useState(() => !slot.buyIn);
   const [directScanRows, setDirectScanRows] = useState<DirectBookingScanRow[]>([]);
@@ -8808,6 +9041,25 @@ function LiveSearchSection({
     };
   }, [isError, data, error, propertyId, reservation._id, slot.unitId, slot.bedrooms, checkInYmd, checkOutYmd]);
   const searchDiagnostics = data?.diagnostics ?? hardErrorDiagnostics;
+  const confirmationAudit = useMemo<AutoFillSearchAudit | null>(() => {
+    if (!data || !searchDiagnostics) return null;
+    return {
+      bedrooms: slot.bedrooms,
+      generatedAt: searchDiagnostics.generatedAt ?? new Date().toISOString(),
+      counts: liveSearchSummaryFor(data, slot.bedrooms),
+      candidates: [],
+      diagnostics: searchDiagnostics,
+    };
+  }, [data, searchDiagnostics, slot.bedrooms]);
+  const confirmationPayload = useMemo<BuyInSearchConfirmationPayload | null>(() => {
+    if (!confirmationAudit) return null;
+    const request = confirmationAudit.diagnostics?.request;
+    return {
+      title: `Buy-in search confirmation: ${slot.unitLabel}`,
+      description: `Completed search for ${request?.resortName || request?.community || data?.resortName || data?.community || "selected location"} · ${slot.bedrooms}BR · ${checkInYmd} -> ${checkOutYmd}.`,
+      audits: [confirmationAudit],
+    };
+  }, [confirmationAudit, slot.unitLabel, slot.bedrooms, checkInYmd, checkOutYmd, data?.resortName, data?.community]);
   const diagnosticKey = searchDiagnostics
     ? [
       propertyId,
@@ -8820,10 +9072,38 @@ function LiveSearchSection({
     : "";
   useEffect(() => {
     if (!searchDiagnostics || searchDiagnostics.severity === "ok" || !diagnosticKey) return;
+    if (confirmationPayload) return;
     if (autoOpenedSearchDiagnosticKeys.has(diagnosticKey)) return;
     autoOpenedSearchDiagnosticKeys.add(diagnosticKey);
     setDiagnosticsOpen(true);
-  }, [searchDiagnostics, diagnosticKey]);
+  }, [searchDiagnostics, diagnosticKey, confirmationPayload]);
+  useEffect(() => {
+    if (!confirmationPayload || !searchDiagnostics || !data || isFetching || isPlaceholderData) return;
+    const key = [
+      propertyId,
+      slot.unitId,
+      slot.bedrooms,
+      checkInYmd,
+      checkOutYmd,
+      searchDiagnostics.generatedAt,
+      dataUpdatedAt,
+    ].join("|");
+    if (confirmationKeyRef.current === key) return;
+    confirmationKeyRef.current = key;
+    setConfirmationOpen(true);
+  }, [
+    confirmationPayload,
+    searchDiagnostics,
+    data,
+    isFetching,
+    isPlaceholderData,
+    propertyId,
+    slot.unitId,
+    slot.bedrooms,
+    checkInYmd,
+    checkOutYmd,
+    dataUpdatedAt,
+  ]);
 
   const attachedElsewhereKeys = useMemo(() => new Set(
     reservation.slots
@@ -9424,6 +9704,15 @@ function LiveSearchSection({
           onCopySuccess={() => toast({ title: "Search log copied" })}
         />
       )}
+      <BuyInSearchConfirmationDialog
+        payload={confirmationPayload}
+        open={confirmationOpen}
+        onOpenChange={setConfirmationOpen}
+        onViewDiagnostics={() => {
+          setConfirmationOpen(false);
+          setDiagnosticsOpen(true);
+        }}
+      />
 
       {recordTarget && (
         <RecordBuyInDialog
