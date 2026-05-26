@@ -335,7 +335,7 @@ async function fetchEgressViaProxy(proxyConfig) {
 
 /**
  * Startup check: resolve proxy config, verify CONNECT auth, log egress IP, optionally
- * verify that two Decodo/Bright Data session tokens yield different IPs.
+ * verify that two provider session tokens yield different IPs.
  */
 export async function runChromeProxyStartupPreflight({
   enabled = false,

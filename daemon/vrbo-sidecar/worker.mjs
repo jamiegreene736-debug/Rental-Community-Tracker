@@ -7252,7 +7252,7 @@ async function tick() {
         if (e instanceof VrboHardBlockError && isVrboOp) {
           lastError = new VrboHardBlockError(
             vrboBlockFreshRetry
-              ? "VRBO CAPTCHA/block page detected; retrying with a fresh Decodo session and browser fingerprint."
+              ? "VRBO CAPTCHA/block page detected; retrying with a fresh proxy session and browser fingerprint."
               : "VRBO CAPTCHA/block page detected; provider run stopped cleanly and retry is rate-limited until later. Original VRBO URL remains available in the search diagnostics/manual verification links.",
             {
               ...(e.details ?? {}),
@@ -7371,7 +7371,7 @@ async function logProxyStartupPreflight() {
   } else if (rotation) {
     log(
       `proxy rotation check: session-a=${rotation.ipA} session-b=${rotation.ipB} ` +
-        `distinct_ips=${rotation.distinctIps ? "yes" : "no (same IP — verify Decodo sticky session)"}`,
+        `distinct_ips=${rotation.distinctIps ? "yes" : "no (same IP; verify proxy sticky-session settings)"}`,
     );
   }
 }
