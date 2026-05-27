@@ -14,13 +14,13 @@
 // so the operator can see when one channel's cheapest is materially
 // below the median basis ("VRBO has $580/n today; basis is $620").
 //
-// Operator directive 2026-05-22: OTA pricing stays Playwright/local
-// Chrome only: no Airbnb/VRBO/Booking APIs, and no PM website scraping
-// for market buy-in. The upgraded daemon can use up to 8 Chrome
-// windows/tabs, and the dashboard receives live thumbnail screenshots
-// so those searches can be watched in-app instead of on a second
-// monitor. Direct-booking discovery is handled separately from Airbnb
-// listing images; the direct site is linked, not scraped for price.
+// Operator directive 2026-05-22/27: OTA pricing stays sidecar/browser
+// backed: no Airbnb/VRBO/Booking APIs, and no PM website scraping for
+// market buy-in. VRBO must never use constructed search URL injection;
+// Airbnb and Booking.com may use result URL parameters only after the
+// visible provider dropdown has confirmed the intended destination.
+// Direct-booking discovery is handled separately from Airbnb listing
+// images; the direct site is linked, not scraped for price.
 
 import { fetchAmortizedNightlyByBR } from "./community-research";
 import { STREAMLINE_SITES } from "./pm-scraper-streamline";

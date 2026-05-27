@@ -2,9 +2,12 @@ import { storage } from "./storage";
 import { log } from "./index";
 import { syncAllPropertiesToGuesty } from "./guesty-sync";
 import {
+  BUY_IN_MARKET_LOCATIONS,
+  resolveBuyInMarket,
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
 import { acquireSidecarLane, isSidecarLaneCancellationRequested } from "./sidecar-lane";
+import { fetchMultiChannelBuyInByBR } from "./multichannel-buy-in";
 
 const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; units: { bedrooms: number }[] }> = {
   1: { name: "Poipu Kai Sunset", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
@@ -43,14 +46,6 @@ const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; uni
 // drop to 2 if we want the operator to take more risk on tight
 // windows.
 const AVAILABILITY_THRESHOLD = 3;
-
-// Defer to the sidecar deep-scan only when Airbnb returns BORDERLINE
-// inventory (< this number of listings). When Airbnb already shows
-// plenty (>= 2× threshold), the window is plainly available and
-// running sidecar VRBO+Booking would just waste the daemon budget.
-// 2× the threshold keeps the deep-scan honest — if Airbnb shows
-// anywhere near the edge, we want VRBO+Booking signal too.
-const SIDECAR_DEEP_SCAN_BORDERLINE = AVAILABILITY_THRESHOLD * 2;
 
 type CacheEntry = {
   airbnb: number;
@@ -184,19 +179,37 @@ async function searchAirbnb(
   return (data.properties || []).length;
 }
 
-// Multi-channel availability check.
-//
-// Step 1 — always: Airbnb engine (fast, ~5s, no daemon needed).
-// Step 2 — only when borderline: sidecar VRBO + sidecar Booking in
-//          parallel via the local Chrome daemon. "Borderline" =
-//          Airbnb listings count < SIDECAR_DEEP_SCAN_BORDERLINE.
-//          Plenty-of-Airbnb windows skip the deep scan to keep the
-//          weekly cron's wall time bounded (~2h instead of ~7h).
-//
-// Returns: a per-channel breakdown + a `total` count that callers
-// compare against AVAILABILITY_THRESHOLD. Total is the sum across
-// channels — cross-channel duplicates inflate it slightly, but the
-// threshold is calibrated for that.
+function resolveLegacyAvailabilityLocation(community: string): {
+  community: string;
+  searchName: string;
+  city: string;
+  state: string;
+  streetAddress?: string;
+  bboxCenterOverride?: { lat: number; lng: number };
+} {
+  const marketKey =
+    resolveBuyInMarket({ name: community, city: "Koloa", state: "Hawaii" }) ||
+    resolveBuyInMarket({ name: community }) ||
+    community;
+  const market = BUY_IN_MARKET_LOCATIONS[marketKey] || BUY_IN_MARKET_LOCATIONS[community];
+  const fallbackSearchName = searchLocationForBuyInMarket(community) || community;
+  return {
+    community: marketKey,
+    searchName: market?.searchName || fallbackSearchName,
+    city: market?.city || "Koloa",
+    state: market?.state || "Hawaii",
+    streetAddress: market?.streetAddress,
+    bboxCenterOverride: market && Number.isFinite(market.lat) && Number.isFinite(market.lng)
+      ? { lat: market.lat, lng: market.lng }
+      : undefined,
+  };
+}
+
+// Multi-channel availability check. Every provider count now comes from the
+// shared sidecar scan layer so the legacy availability scanner follows the
+// same visible provider evidence as Operations/find-buy-in. The in-run cache
+// dedupes repeated property/BR/window requests, and the queue layer adds the
+// longer successful-result cache for repeat runs.
 async function searchCommunityBedroom(
   cache: SearchCache,
   community: string,
@@ -209,82 +222,44 @@ async function searchCommunityBedroom(
   if (cache.has(cacheKey)) {
     return cache.get(cacheKey)!;
   }
-
-  const airbnbCount = await searchAirbnb(community, bedrooms, checkIn, checkOut);
-  const error = airbnbCount === -1;
-  const airbnbSafe = Math.max(0, airbnbCount);
-
-  // Plenty-of-Airbnb fast path: don't burn the sidecar budget. Most
-  // windows hit this branch and finish in ~5s.
-  if (!error && airbnbSafe >= SIDECAR_DEEP_SCAN_BORDERLINE) {
-    const entry: CacheEntry = {
-      airbnb: airbnbSafe,
+  const loc = resolveLegacyAvailabilityLocation(community);
+  let entry: CacheEntry;
+  try {
+    const scan = await fetchMultiChannelBuyInByBR({
+      community: loc.community,
+      city: loc.city,
+      state: loc.state,
+      streetAddress: loc.streetAddress,
+      bboxCenterOverride: loc.bboxCenterOverride,
+      searchName: loc.searchName,
+      bedroomCounts: [bedrooms],
+      dateOverride: { checkIn, checkOut },
+      skipPm: true,
+      reuseSharedOtaSearch: true,
+      sidecarQueueBudgetMs: 285_000,
+    });
+    const counts = scan.channelAvailableCountsByBR[bedrooms] ?? { airbnb: 0, vrbo: 0, booking: 0, total: 0 };
+    entry = {
+      airbnb: counts.airbnb,
+      vrbo: counts.vrbo,
+      booking: counts.booking,
+      total: counts.total,
+      sidecarRan: true,
+      daemonOnline: scan.daemonOnline,
+      error: !scan.daemonOnline,
+    };
+  } catch (e: any) {
+    log(`sidecar availability scan error (${community} ${bedrooms}BR ${checkIn}): ${e?.message ?? e}`, "scanner");
+    entry = {
+      airbnb: 0,
       vrbo: 0,
       booking: 0,
-      total: airbnbSafe,
-      sidecarRan: false,
+      total: 0,
+      sidecarRan: true,
       daemonOnline: false,
-      error: false,
+      error: true,
     };
-    cache.set(cacheKey, entry);
-    await sleep(3000);
-    return entry;
   }
-
-  // Borderline OR Airbnb error → bring in sidecar. Wide error catches
-  // because sidecar is best-effort: if the daemon is offline / VRBO
-  // queries time out, we just count what we have and let the
-  // threshold decide.
-  let vrboCount = 0;
-  let bookingCount = 0;
-  let daemonOnline = false;
-  let sidecarRan = false;
-  try {
-    const { searchVrboViaSidecar, searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
-    sidecarRan = true;
-    const [vrboRes, bookingRes] = await Promise.all([
-      searchVrboViaSidecar({
-        destination: community,
-        checkIn,
-        checkOut,
-        bedrooms,
-        walletBudgetMs: 60_000,
-      }).catch(() => null),
-      searchBookingViaSidecar({
-        destination: community,
-        checkIn,
-        checkOut,
-        bedrooms,
-        walletBudgetMs: 60_000,
-      }).catch(() => null),
-    ]);
-    if (vrboRes) {
-      daemonOnline = daemonOnline || vrboRes.workerOnline;
-      // Count priced cards that match the requested bedroom count
-      // (sidecar VRBO scrape sets `bedrooms` from the card text when
-      // available; null bedrooms is permissive — count it as a match).
-      vrboCount = vrboRes.candidates.filter(
-        (c) => c.nightlyPrice > 0 && (c.bedrooms == null || c.bedrooms === bedrooms),
-      ).length;
-    }
-    if (bookingRes) {
-      daemonOnline = daemonOnline || bookingRes.workerOnline;
-      bookingCount = bookingRes.candidates.filter((c) => c.totalPrice > 0).length;
-    }
-  } catch (e: any) {
-    log(`sidecar deep-scan error (${community} ${bedrooms}BR ${checkIn}): ${e?.message ?? e}`, "scanner");
-  }
-
-  const total = airbnbSafe + vrboCount + bookingCount;
-  const entry: CacheEntry = {
-    airbnb: airbnbSafe,
-    vrbo: vrboCount,
-    booking: bookingCount,
-    total,
-    sidecarRan,
-    daemonOnline,
-    error,
-  };
   cache.set(cacheKey, entry);
   await sleep(3000);
   return entry;

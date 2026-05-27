@@ -453,6 +453,12 @@ export type SidecarVrboCandidate = SidecarPropertyCandidate;
 
 const queue = new Map<string, SidecarRequest>();
 const requestKeyIndex = new Map<string, string>(); // requestKey → id
+type CachedSidecarResult = {
+  results: SidecarRequest["results"];
+  searchVariationSummary?: SidecarSearchVariationSummary;
+  cachedAt: number;
+};
+const successfulResultCache = new Map<string, CachedSidecarResult>();
 const providerHealth = new Map<SidecarProviderKey, {
   consecutiveFailures: number;
   lastSuccessAt: number | null;
@@ -501,6 +507,10 @@ const sidecarScreenCommands = new Map<string, SidecarScreenControlCommand[]>();
 const PENDING_TTL_MS = 5 * 60 * 1000;
 const IN_PROGRESS_RECLAIM_MS = 90 * 1000;
 const TERMINAL_TTL_MS = 5 * 60 * 1000;
+const SUCCESS_RESULT_CACHE_TTL_MS = Math.max(
+  0,
+  numberFromEnv("SIDECAR_SUCCESS_RESULT_CACHE_TTL_MS", 48 * 60 * 60 * 1000),
+);
 const SIDECAR_SCREEN_TTL_MS = 10 * 60 * 1000;
 const SIDECAR_INACTIVE_SCREEN_TTL_MS = Math.max(
   1_000,
@@ -1357,6 +1367,11 @@ export function takeSidecarScreenControlCommands(slotRaw: unknown, requestIdRaw?
 
 function cleanup(): void {
   const now = nowMs();
+  for (const [key, cached] of Array.from(successfulResultCache.entries())) {
+    if (SUCCESS_RESULT_CACHE_TTL_MS <= 0 || now - cached.cachedAt > SUCCESS_RESULT_CACHE_TTL_MS) {
+      successfulResultCache.delete(key);
+    }
+  }
   for (const [id, r] of queue) {
     if (r.status === "pending" && now - r.createdAt > PENDING_TTL_MS) {
       r.status = "failed";
@@ -1386,6 +1401,47 @@ function cleanup(): void {
       sidecarScreens.delete(slot);
     }
   }
+}
+
+function cloneSidecarResult<T>(value: T): T {
+  if (value == null) return value;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function canCacheSuccessfulResult(r: SidecarRequest): boolean {
+  if (SUCCESS_RESULT_CACHE_TTL_MS <= 0) return false;
+  if (!isOtaBrowserOp(r.opType)) return false;
+  if (!Array.isArray(r.results)) return false;
+  // Empty result sets are sometimes legitimate, but they can also come from a
+  // transient provider UI miss. Cache only priced, useful result sets.
+  return r.results.some((candidate) => {
+    const c = candidate as Partial<SidecarPropertyCandidate>;
+    return Number(c.totalPrice ?? 0) > 0 || Number(c.nightlyPrice ?? 0) > 0;
+  });
+}
+
+function cacheSuccessfulResult(r: SidecarRequest): void {
+  if (!canCacheSuccessfulResult(r)) return;
+  successfulResultCache.set(r.requestKey, {
+    results: cloneSidecarResult(r.results),
+    searchVariationSummary: cloneSidecarResult(r.searchVariationSummary),
+    cachedAt: nowMs(),
+  });
+}
+
+function cachedSuccessfulResult(requestKey: string): CachedSidecarResult | null {
+  cleanup();
+  const cached = successfulResultCache.get(requestKey);
+  if (!cached) return null;
+  if (SUCCESS_RESULT_CACHE_TTL_MS <= 0 || nowMs() - cached.cachedAt > SUCCESS_RESULT_CACHE_TTL_MS) {
+    successfulResultCache.delete(requestKey);
+    return null;
+  }
+  return {
+    results: cloneSidecarResult(cached.results),
+    searchVariationSummary: cloneSidecarResult(cached.searchVariationSummary),
+    cachedAt: cached.cachedAt,
+  };
 }
 
 // Build a stable, opType-aware dedup key. Two enqueues with the same
@@ -1634,6 +1690,7 @@ export function complete(opts: {
     r.status = "completed";
     r.results = normalized.results;
     r.searchVariationSummary = recordSearchVariationSummary(r, normalized.variationsTried);
+    cacheSuccessfulResult(r);
   } else {
     r.status = "failed";
     r.error = opts.error || "worker reported failure with no message";
@@ -1767,6 +1824,7 @@ export function clearSidecarQueue(reason = "sidecar queue cleared by operator"):
   const cleared = queue.size;
   queue.clear();
   requestKeyIndex.clear();
+  successfulResultCache.clear();
   sidecarScreens.clear();
   sidecarScreenCommands.clear();
   return {
@@ -2747,6 +2805,18 @@ async function awaitOpResult(opts: {
       workerOnline: false,
       durationMs: nowMs() - startedAt,
       reason: pausedState.reason ? `sidecar queue stopped: ${pausedState.reason}` : "sidecar queue stopped by operator",
+    };
+  }
+  const requestKey = makeRequestKey(opts.enqueueArgs.opType, opts.enqueueArgs.params);
+  const cached = cachedSuccessfulResult(requestKey);
+  if (cached) {
+    const ageMs = nowMs() - cached.cachedAt;
+    return {
+      results: cached.results,
+      searchVariationSummary: cached.searchVariationSummary,
+      workerOnline: true,
+      durationMs: nowMs() - startedAt,
+      reason: `served from successful sidecar result cache (${Math.round(ageMs / 60000)}m old)`,
     };
   }
   const { id, deduped } = enqueueOp(opts.enqueueArgs);

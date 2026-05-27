@@ -61,12 +61,29 @@ and are NOT version-controlled because they're machine-specific:
 
 ## Variation search
 
-Airbnb, Vrbo, and Booking.com buy-in searches are visible-UI only. The
-worker types the normalized resort/community prefix into the provider
-destination field, waits for the autocomplete dropdown, filters visible
-suggestions by the community token policy and city/location guard, then
-runs each accepted suggestion as a separate provider search. Results are
-deduped before returning to the web app.
+Airbnb, Vrbo, and Booking.com buy-in searches start from the visible
+provider UI. The worker types the normalized resort/community prefix
+into the provider destination field, waits for the autocomplete
+dropdown, filters visible suggestions by the community token policy and
+city/location guard, then runs each accepted suggestion as a separate
+provider search. Results are deduped before returning to the web app.
+
+Provider URL policy:
+
+- **VRBO:** no constructed `/search` URL injection. VRBO must use the
+  visible dropdown, visible date controls, and visible Search button.
+  Constructed VRBO result URLs trigger CAPTCHA too aggressively.
+- **Airbnb and Booking.com:** after the destination has been confirmed
+  from the visible provider dropdown, the worker may use provider
+  results URLs with query parameters for dates, bedrooms, and the
+  confirmed destination text. This avoids slow calendar/dropdown loops
+  while preserving the provider-selected location guard.
+
+Successful priced OTA result sets are cached by the server queue for
+`SIDECAR_SUCCESS_RESULT_CACHE_TTL_MS` (default 48 hours). The key
+includes provider, destination/search term, date window, and bedroom
+request (VRBO intentionally shares a full resort/date result set across
+bedroom passes). Clear Queue flushes this cache.
 
 The server generates the initial policy with `generateSearchVariations`
 and passes `searchVariations` plus `variationMode.filterTokens` to the
