@@ -230,6 +230,60 @@ export async function ensureRuntimeSchema(): Promise<void> {
   console.log("[schema] ensured quo_sms_messages table");
 
   await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS quo_call_events (
+      id serial PRIMARY KEY,
+      provider_call_id text NOT NULL UNIQUE,
+      conversation_id text,
+      reservation_id text,
+      guest_name text,
+      guest_phone text NOT NULL,
+      from_number text NOT NULL,
+      to_number text NOT NULL,
+      direction text NOT NULL,
+      status text,
+      disposition text NOT NULL DEFAULT 'unknown',
+      duration_seconds integer,
+      match_strategy text,
+      match_confidence text,
+      voicemail_id text,
+      voicemail_status text,
+      voicemail_recording_url text,
+      voicemail_transcript text,
+      voicemail_duration_seconds integer,
+      raw_payload text,
+      call_started_at timestamp,
+      call_completed_at timestamp,
+      acknowledged_at timestamp,
+      created_at timestamp NOT NULL DEFAULT now(),
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    ALTER TABLE quo_call_events
+      ADD COLUMN IF NOT EXISTS match_strategy text,
+      ADD COLUMN IF NOT EXISTS match_confidence text,
+      ADD COLUMN IF NOT EXISTS voicemail_id text,
+      ADD COLUMN IF NOT EXISTS voicemail_status text,
+      ADD COLUMN IF NOT EXISTS voicemail_recording_url text,
+      ADD COLUMN IF NOT EXISTS voicemail_transcript text,
+      ADD COLUMN IF NOT EXISTS voicemail_duration_seconds integer,
+      ADD COLUMN IF NOT EXISTS acknowledged_at timestamp
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS quo_call_events_provider_call_id_idx
+      ON quo_call_events (provider_call_id)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS quo_call_events_conversation_created_idx
+      ON quo_call_events (conversation_id, created_at DESC)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS quo_call_events_unacknowledged_idx
+      ON quo_call_events (acknowledged_at, created_at DESC)
+  `);
+  console.log("[schema] ensured quo_call_events table");
+
+  await db.execute(sql`
     CREATE TABLE IF NOT EXISTS guest_phone_overrides (
       id serial PRIMARY KEY,
       conversation_id text NOT NULL UNIQUE,

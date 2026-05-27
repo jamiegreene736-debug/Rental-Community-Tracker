@@ -819,6 +819,43 @@ export const insertQuoSmsMessageSchema = createInsertSchema(quoSmsMessages).omit
 export type InsertQuoSmsMessage = z.infer<typeof insertQuoSmsMessageSchema>;
 export type QuoSmsMessage = typeof quoSmsMessages.$inferSelect;
 
+export const quoCallEvents = pgTable("quo_call_events", {
+  id: serial("id").primaryKey(),
+  providerCallId: text("provider_call_id").notNull(),
+  conversationId: text("conversation_id"),
+  reservationId: text("reservation_id"),
+  guestName: text("guest_name"),
+  guestPhone: text("guest_phone").notNull(),
+  fromNumber: text("from_number").notNull(),
+  toNumber: text("to_number").notNull(),
+  direction: text("direction").notNull(), // inbound | outbound
+  status: text("status"),
+  disposition: text("disposition").notNull().default("unknown"), // answered | missed | voicemail | unknown
+  durationSeconds: integer("duration_seconds"),
+  matchStrategy: text("match_strategy"),
+  matchConfidence: text("match_confidence"),
+  voicemailId: text("voicemail_id"),
+  voicemailStatus: text("voicemail_status"),
+  voicemailRecordingUrl: text("voicemail_recording_url"),
+  voicemailTranscript: text("voicemail_transcript"),
+  voicemailDurationSeconds: integer("voicemail_duration_seconds"),
+  rawPayload: text("raw_payload"),
+  callStartedAt: timestamp("call_started_at"),
+  callCompletedAt: timestamp("call_completed_at"),
+  acknowledgedAt: timestamp("acknowledged_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertQuoCallEventSchema = createInsertSchema(quoCallEvents).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertQuoCallEvent = z.infer<typeof insertQuoCallEventSchema>;
+export type QuoCallEvent = typeof quoCallEvents.$inferSelect;
+
 export const guestPhoneOverrides = pgTable("guest_phone_overrides", {
   id: serial("id").primaryKey(),
   conversationId: text("conversation_id").notNull(),

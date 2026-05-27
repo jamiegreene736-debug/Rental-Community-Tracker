@@ -14,6 +14,7 @@ import {
   type AutoReplyLog, type InsertAutoReplyLog,
   type BookingConfirmation, type InsertBookingConfirmation,
   type QuoSmsMessage, type InsertQuoSmsMessage,
+  type QuoCallEvent, type InsertQuoCallEvent,
   type GuestPhoneOverride, type InsertGuestPhoneOverride,
   type PhotoLabel, type InsertPhotoLabel,
   type PhotoListingCheck, type InsertPhotoListingCheck,
@@ -24,7 +25,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, quoCallEvents, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
   type PropertyMarketRate, type InsertPropertyMarketRate,
 } from "@shared/schema";
 import { db } from "./db";
@@ -203,8 +204,14 @@ export interface IStorage {
   createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
   getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
   getQuoSmsMessageByProviderId(providerMessageId: string): Promise<QuoSmsMessage | undefined>;
+  upsertQuoCallEvent(c: InsertQuoCallEvent): Promise<QuoCallEvent>;
+  getQuoCallEventsByConversation(conversationId: string, limit?: number): Promise<QuoCallEvent[]>;
+  getUnacknowledgedQuoCallEvents(limit?: number): Promise<QuoCallEvent[]>;
+  acknowledgeQuoCallEvent(id: number): Promise<QuoCallEvent | undefined>;
+  acknowledgeQuoCallEventsByConversation(conversationId: string): Promise<number>;
   upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride>;
   getGuestPhoneOverride(conversationId: string): Promise<GuestPhoneOverride | undefined>;
+  getGuestPhoneOverrideByPhone(phone: string): Promise<GuestPhoneOverride | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -850,6 +857,101 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
+  async upsertQuoCallEvent(c: InsertQuoCallEvent): Promise<QuoCallEvent> {
+    const [row] = await db.insert(quoCallEvents)
+      .values({
+        providerCallId: c.providerCallId,
+        conversationId: c.conversationId ?? null,
+        reservationId: c.reservationId ?? null,
+        guestName: c.guestName ?? null,
+        guestPhone: c.guestPhone,
+        fromNumber: c.fromNumber,
+        toNumber: c.toNumber,
+        direction: c.direction,
+        status: c.status ?? null,
+        disposition: c.disposition ?? "unknown",
+        durationSeconds: c.durationSeconds ?? null,
+        matchStrategy: c.matchStrategy ?? null,
+        matchConfidence: c.matchConfidence ?? null,
+        voicemailId: c.voicemailId ?? null,
+        voicemailStatus: c.voicemailStatus ?? null,
+        voicemailRecordingUrl: c.voicemailRecordingUrl ?? null,
+        voicemailTranscript: c.voicemailTranscript ?? null,
+        voicemailDurationSeconds: c.voicemailDurationSeconds ?? null,
+        rawPayload: c.rawPayload ?? null,
+        callStartedAt: c.callStartedAt ?? null,
+        callCompletedAt: c.callCompletedAt ?? null,
+        acknowledgedAt: c.acknowledgedAt ?? null,
+      })
+      .onConflictDoUpdate({
+        target: quoCallEvents.providerCallId,
+        set: {
+          conversationId: c.conversationId ?? null,
+          reservationId: c.reservationId ?? null,
+          guestName: c.guestName ?? null,
+          guestPhone: c.guestPhone,
+          fromNumber: c.fromNumber,
+          toNumber: c.toNumber,
+          direction: c.direction,
+          status: c.status ?? null,
+          disposition: c.disposition ?? "unknown",
+          durationSeconds: c.durationSeconds ?? null,
+          matchStrategy: c.matchStrategy ?? null,
+          matchConfidence: c.matchConfidence ?? null,
+          voicemailId: c.voicemailId ?? null,
+          voicemailStatus: c.voicemailStatus ?? null,
+          voicemailRecordingUrl: c.voicemailRecordingUrl ?? null,
+          voicemailTranscript: c.voicemailTranscript ?? null,
+          voicemailDurationSeconds: c.voicemailDurationSeconds ?? null,
+          rawPayload: c.rawPayload ?? null,
+          callStartedAt: c.callStartedAt ?? null,
+          callCompletedAt: c.callCompletedAt ?? null,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getQuoCallEventsByConversation(conversationId: string, limit = 50): Promise<QuoCallEvent[]> {
+    return db.select()
+      .from(quoCallEvents)
+      .where(eq(quoCallEvents.conversationId, conversationId))
+      .orderBy(desc(quoCallEvents.callCompletedAt), desc(quoCallEvents.createdAt))
+      .limit(limit);
+  }
+
+  async getUnacknowledgedQuoCallEvents(limit = 50): Promise<QuoCallEvent[]> {
+    return db.select()
+      .from(quoCallEvents)
+      .where(and(
+        sql`${quoCallEvents.acknowledgedAt} IS NULL`,
+        or(eq(quoCallEvents.disposition, "missed"), eq(quoCallEvents.disposition, "voicemail")),
+      ))
+      .orderBy(desc(quoCallEvents.callCompletedAt), desc(quoCallEvents.createdAt))
+      .limit(limit);
+  }
+
+  async acknowledgeQuoCallEvent(id: number): Promise<QuoCallEvent | undefined> {
+    const [row] = await db.update(quoCallEvents)
+      .set({ acknowledgedAt: new Date(), updatedAt: new Date() })
+      .where(eq(quoCallEvents.id, id))
+      .returning();
+    return row;
+  }
+
+  async acknowledgeQuoCallEventsByConversation(conversationId: string): Promise<number> {
+    const rows = await db.update(quoCallEvents)
+      .set({ acknowledgedAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(quoCallEvents.conversationId, conversationId),
+        sql`${quoCallEvents.acknowledgedAt} IS NULL`,
+        or(eq(quoCallEvents.disposition, "missed"), eq(quoCallEvents.disposition, "voicemail")),
+      ))
+      .returning({ id: quoCallEvents.id });
+    return rows.length;
+  }
+
   async upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride> {
     const [row] = await db.insert(guestPhoneOverrides)
       .values(input)
@@ -873,6 +975,16 @@ export class DatabaseStorage implements IStorage {
     const [row] = await db.select()
       .from(guestPhoneOverrides)
       .where(eq(guestPhoneOverrides.conversationId, conversationId))
+      .limit(1);
+    return row;
+  }
+
+  async getGuestPhoneOverrideByPhone(phone: string): Promise<GuestPhoneOverride | undefined> {
+    const wanted = String(phone ?? "").replace(/\D/g, "").slice(-10);
+    if (!wanted) return undefined;
+    const [row] = await db.select()
+      .from(guestPhoneOverrides)
+      .where(sql`right(regexp_replace(${guestPhoneOverrides.phone}, '\\D', '', 'g'), 10) = ${wanted}`)
       .limit(1);
     return row;
   }

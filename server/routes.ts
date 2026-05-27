@@ -68,7 +68,7 @@ import {
   isSidecarLaneCancellationRequested,
   isSidecarLaneOwner,
 } from "./sidecar-lane";
-import { findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoWebhook, sendQuoSms } from "./quo-sms";
+import { findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply, redoDraftedReply } from "./auto-reply";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
@@ -32382,6 +32382,50 @@ CONSTRAINTS
     }
   });
 
+  app.get("/api/inbox/calls/unacknowledged", async (req, res) => {
+    try {
+      const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
+      const calls = await storage.getUnacknowledgedQuoCallEvents(limit);
+      return res.json({ calls, count: calls.length });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load missed calls", message: err.message });
+    }
+  });
+
+  app.get("/api/inbox/calls/conversations/:conversationId", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const calls = await storage.getQuoCallEventsByConversation(conversationId, 50);
+      return res.json({ calls });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load calls", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/calls/:id/acknowledge", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid call id" });
+      const call = await storage.acknowledgeQuoCallEvent(id);
+      if (!call) return res.status(404).json({ error: "Call not found" });
+      return res.json({ ok: true, call });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to clear missed call", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/calls/conversations/:conversationId/acknowledge", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const cleared = await storage.acknowledgeQuoCallEventsByConversation(conversationId);
+      return res.json({ ok: true, cleared });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to clear missed calls", message: err.message });
+    }
+  });
+
   app.get("/api/inbox/sms/conversations/:conversationId/phone", async (req, res) => {
     try {
       const conversationId = req.params.conversationId;
@@ -32521,6 +32565,34 @@ CONSTRAINTS
     } catch (err: any) {
       console.error(`[quo-webhook] ${err.message}`);
       return res.status(400).json({ error: "Failed to process Quo webhook", message: err.message });
+    }
+  });
+
+  app.post("/api/quo/webhooks/calls", async (req, res) => {
+    try {
+      const secret = process.env.QUO_WEBHOOK_SECRET ?? "";
+      if (!secret && process.env.NODE_ENV === "production") {
+        return res.status(500).json({ error: "QUO_WEBHOOK_SECRET is required in production" });
+      }
+      if (secret) {
+        const supplied =
+          req.headers["x-quo-webhook-secret"] ??
+          req.headers["x-webhook-secret"] ??
+          req.query.secret;
+        if (supplied !== secret) {
+          return res.status(401).json({ error: "Invalid webhook secret" });
+        }
+      }
+      const result = await recordQuoCallWebhook(req.body);
+      return res.json({
+        ok: true,
+        matched: result.matched,
+        conversationId: result.call.conversationId,
+        disposition: result.call.disposition,
+      });
+    } catch (err: any) {
+      console.error(`[quo-call-webhook] ${err.message}`);
+      return res.status(400).json({ error: "Failed to process Quo call webhook", message: err.message });
     }
   });
 

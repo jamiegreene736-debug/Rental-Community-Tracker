@@ -53,6 +53,7 @@ import {
   CreditCard,
   AlertTriangle,
   MessageSquare,
+  PhoneMissed,
   Home as HomeIcon,
   Loader2,
   RefreshCw,
@@ -630,6 +631,18 @@ export default function Home() {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
+
+  const { data: missedCallData } = useQuery<{ calls?: unknown[]; count?: number }>({
+    queryKey: ["/api/inbox/calls/unacknowledged"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/inbox/calls/unacknowledged?limit=100");
+      if (!r.ok) return { calls: [], count: 0 };
+      return r.json();
+    },
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const missedCallCount = Number(missedCallData?.count ?? missedCallData?.calls?.length ?? 0) || 0;
 
   const communityMinimumStayData = useMemo(() => {
     const buckets = new Map<string, {
@@ -1631,15 +1644,30 @@ export default function Home() {
           <Link href="/inbox">
             <Button
               variant="outline"
-              className="h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg border-[hsl(var(--brand-teal)/0.35)] px-4 py-3 text-left hover:bg-[hsl(var(--brand-teal)/0.06)]"
+              className={`h-auto min-h-[74px] w-full justify-start gap-3 rounded-lg px-4 py-3 text-left ${
+                missedCallCount > 0
+                  ? "border-red-300 bg-red-50 hover:bg-red-100"
+                  : "border-[hsl(var(--brand-teal)/0.35)] hover:bg-[hsl(var(--brand-teal)/0.06)]"
+              }`}
               data-testid="button-inbox"
             >
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[hsl(var(--brand-teal)/0.10)] text-primary">
-                <MessageSquare className="h-5 w-5" />
+              <span className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded-md ${
+                missedCallCount > 0 ? "bg-red-100 text-red-700" : "bg-[hsl(var(--brand-teal)/0.10)] text-primary"
+              }`}>
+                {missedCallCount > 0 ? <PhoneMissed className="h-5 w-5" /> : <MessageSquare className="h-5 w-5" />}
+                {missedCallCount > 0 && (
+                  <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold leading-none text-white">
+                    {missedCallCount > 99 ? "99+" : missedCallCount}
+                  </span>
+                )}
               </span>
               <span className="min-w-0">
                 <span className="block text-sm font-semibold leading-tight">Guest Inbox</span>
-                <span className="block text-[11px] font-normal text-muted-foreground leading-snug mt-1">Messages, templates, and agreement follow-ups</span>
+                <span className={`block text-[11px] font-normal leading-snug mt-1 ${missedCallCount > 0 ? "text-red-700" : "text-muted-foreground"}`}>
+                  {missedCallCount > 0
+                    ? `${missedCallCount} missed call${missedCallCount === 1 ? "" : "s"} to clear`
+                    : "Messages, templates, and agreement follow-ups"}
+                </span>
               </span>
             </Button>
           </Link>

@@ -1,6 +1,5 @@
 import { storage } from "./storage";
-import { guestyRequest } from "./guesty-sync";
-import type { InsertQuoSmsMessage, QuoSmsMessage } from "@shared/schema";
+import type { InsertQuoCallEvent, InsertQuoSmsMessage, QuoCallEvent, QuoSmsMessage } from "@shared/schema";
 
 const QUO_API_BASE = "https://api.openphone.com/v1";
 
@@ -14,7 +13,7 @@ export function normalizePhone(value: unknown): string {
   return digits ? `+${digits}` : "";
 }
 
-function phoneLast10(value: unknown): string {
+export function phoneLast10(value: unknown): string {
   const digits = String(value ?? "").replace(/\D/g, "");
   return digits.length >= 10 ? digits.slice(-10) : "";
 }
@@ -82,6 +81,19 @@ function unwrapList<T>(raw: unknown, hints: string[] = []): T[] {
   return visit(raw, 0) ?? [];
 }
 
+async function callGuesty(method: string, path: string): Promise<unknown> {
+  const { guestyRequest } = await import("./guesty-sync");
+  return guestyRequest(method, path);
+}
+
+function firstName(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .split(/\s+/)[0]
+    ?.replace(/[^a-z]/gi, "")
+    .toLowerCase() ?? "";
+}
+
 function conversationGuestName(c: any): string | null {
   const guest = c?.guest ?? c?.meta?.guest ?? {};
   return c?.guestName ?? guest.fullName ?? guest.name ?? [guest.firstName, guest.lastName].filter(Boolean).join(" ") ?? null;
@@ -103,7 +115,7 @@ export async function findGuestyConversationByPhone(phone: string): Promise<{
   const wanted = phoneLast10(phone);
   if (!wanted) return null;
 
-  const raw = await guestyRequest("GET", "/communication/conversations?limit=100&fields=") as any;
+  const raw = await callGuesty("GET", "/communication/conversations?limit=100&fields=") as any;
   const conversations = unwrapList<any>(raw, ["conversations", "results", "data"]);
   for (const c of conversations) {
     const phones = collectPhoneNumbers(c);
@@ -118,6 +130,196 @@ export async function findGuestyConversationByPhone(phone: string): Promise<{
     }
   }
   return null;
+}
+
+export async function findGuestyConversationByPhoneOrName(input: {
+  phone?: string | null;
+  callerName?: string | null;
+}): Promise<{
+  conversationId: string;
+  reservationId: string | null;
+  guestName: string | null;
+  matchStrategy: "saved-phone" | "guesty-phone" | "first-name-unique";
+  matchConfidence: "high" | "medium";
+} | null> {
+  const normalizedPhone = normalizePhone(input.phone);
+  if (phoneLast10(normalizedPhone)) {
+    const override = await storage.getGuestPhoneOverrideByPhone(normalizedPhone);
+    if (override) {
+      return {
+        conversationId: override.conversationId,
+        reservationId: override.reservationId ?? null,
+        guestName: override.guestName ?? null,
+        matchStrategy: "saved-phone",
+        matchConfidence: "high",
+      };
+    }
+
+    const phoneMatch = await findGuestyConversationByPhone(normalizedPhone);
+    if (phoneMatch) {
+      return {
+        ...phoneMatch,
+        matchStrategy: "guesty-phone",
+        matchConfidence: "high",
+      };
+    }
+  }
+
+  const wantedFirstName = firstName(input.callerName);
+  if (!wantedFirstName || wantedFirstName.length < 2) return null;
+
+  const raw = await callGuesty("GET", "/communication/conversations?limit=100&fields=") as any;
+  const conversations = unwrapList<any>(raw, ["conversations", "results", "data"]);
+  const matches = conversations.filter((c) => firstName(conversationGuestName(c)) === wantedFirstName);
+  if (matches.length !== 1) return null;
+  const c = matches[0];
+  return {
+    conversationId: c._id ?? c.id,
+    reservationId: conversationReservationId(c),
+    guestName: conversationGuestName(c),
+    matchStrategy: "first-name-unique",
+    matchConfidence: "medium",
+  };
+}
+
+function parseDate(value: unknown): Date | null {
+  if (!value) return null;
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function extractCallerName(object: any, payload: any): string | null {
+  const contact = object?.contact ?? object?.participant ?? object?.participants?.[0] ?? payload?.contact;
+  const name = object?.callerName ?? object?.name ?? contact?.name ?? contact?.fullName ?? [contact?.firstName, contact?.lastName].filter(Boolean).join(" ");
+  const clean = String(name ?? "").trim();
+  return clean || null;
+}
+
+function normalizeQuoParticipant(value: unknown): string {
+  if (Array.isArray(value)) return normalizePhone(value[0]);
+  return normalizePhone(value);
+}
+
+export function parseQuoCallWebhook(payload: any): {
+  providerCallId: string;
+  direction: "inbound" | "outbound";
+  fromNumber: string;
+  toNumber: string;
+  guestPhone: string;
+  status: string;
+  disposition: "answered" | "missed" | "voicemail" | "unknown";
+  durationSeconds: number | null;
+  callerName: string | null;
+  callStartedAt: Date | null;
+  callCompletedAt: Date | null;
+} {
+  const object = payload?.data?.object ?? payload?.object ?? payload?.call ?? payload;
+  const eventType = String(payload?.type ?? payload?.event ?? object?.eventType ?? "").toLowerCase();
+  const rawDirection = String(object?.direction ?? object?.type ?? eventType).toLowerCase();
+  const direction: "inbound" | "outbound" = rawDirection.includes("out") ? "outbound" : "inbound";
+  const participants = Array.isArray(object?.participants) ? object.participants : [];
+  const fromNumber = normalizePhone(object?.from ?? object?.caller ?? object?.source ?? (direction === "inbound" ? participants[0] : getQuoFromNumber()));
+  const toNumber = normalizePhone(object?.to ?? object?.recipient ?? object?.callee ?? (direction === "outbound" ? participants[0] : getQuoFromNumber()));
+  const guestPhone = direction === "inbound"
+    ? normalizePhone(fromNumber || normalizeQuoParticipant(participants))
+    : normalizePhone(toNumber || normalizeQuoParticipant(participants));
+  const providerCallId = String(object?.id ?? object?.callId ?? payload?.id ?? `quo-call-${Date.now()}`);
+  const status = String(object?.status ?? eventType ?? "completed");
+  const durationRaw = object?.duration ?? object?.durationSeconds ?? object?.callDuration;
+  const durationSeconds = Number.isFinite(Number(durationRaw)) ? Math.max(0, Math.round(Number(durationRaw))) : null;
+  const hasVoicemail =
+    Boolean(object?.voicemail ?? object?.voicemailId ?? object?.voicemailUrl ?? object?.voicemailRecordingUrl) ||
+    /voicemail/.test(`${eventType} ${status}`.toLowerCase());
+  const answered = Boolean(object?.answeredAt ?? object?.answeredBy) || durationSeconds !== null && durationSeconds > 0;
+  const missed =
+    direction === "inbound" &&
+    !answered &&
+    (/miss|no[-_ ]?answer|unanswered|completed/.test(`${eventType} ${status}`.toLowerCase()) || object?.answeredAt === null);
+  const disposition = hasVoicemail ? "voicemail" : missed ? "missed" : answered ? "answered" : "unknown";
+  return {
+    providerCallId,
+    direction,
+    fromNumber: fromNumber || getQuoFromNumber(),
+    toNumber: toNumber || getQuoFromNumber(),
+    guestPhone,
+    status,
+    disposition,
+    durationSeconds,
+    callerName: extractCallerName(object, payload),
+    callStartedAt: parseDate(object?.startedAt ?? object?.createdAt ?? payload?.createdAt),
+    callCompletedAt: parseDate(object?.completedAt ?? object?.endedAt ?? object?.updatedAt ?? payload?.createdAt),
+  };
+}
+
+async function getQuoVoicemailForCall(callId: string): Promise<{
+  id?: string | null;
+  status?: string | null;
+  recordingUrl?: string | null;
+  transcript?: string | null;
+  duration?: number | null;
+} | null> {
+  const apiKey = process.env.QUO_API_KEY;
+  if (!apiKey || !callId || !callId.startsWith("AC")) return null;
+  const resp = await fetch(`${QUO_API_BASE}/call-voicemails/${encodeURIComponent(callId)}`, {
+    headers: { Authorization: apiKey },
+  });
+  if (resp.status === 404) return null;
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) return null;
+  return data?.data ?? null;
+}
+
+export async function recordQuoCallWebhook(payload: any): Promise<{ call: QuoCallEvent; matched: boolean }> {
+  const parsed = parseQuoCallWebhook(payload);
+  if (!phoneLast10(parsed.guestPhone)) throw new Error("Webhook payload did not include a valid caller phone");
+
+  const match = await findGuestyConversationByPhoneOrName({
+    phone: parsed.guestPhone,
+    callerName: parsed.callerName,
+  });
+  const voicemail = parsed.disposition === "voicemail" || /call\.completed|recording/.test(String(payload?.type ?? payload?.event ?? "").toLowerCase())
+    ? await getQuoVoicemailForCall(parsed.providerCallId)
+    : null;
+  const voicemailRecordingUrl =
+    voicemail?.recordingUrl ??
+    payload?.data?.object?.voicemailRecordingUrl ??
+    payload?.object?.voicemailRecordingUrl ??
+    payload?.recordingUrl ??
+    null;
+  const voicemailTranscript =
+    voicemail?.transcript ??
+    payload?.data?.object?.voicemailTranscript ??
+    payload?.object?.voicemailTranscript ??
+    payload?.transcript ??
+    null;
+  const disposition = voicemailRecordingUrl || voicemailTranscript ? "voicemail" : parsed.disposition;
+
+  const row: InsertQuoCallEvent = {
+    providerCallId: parsed.providerCallId,
+    conversationId: match?.conversationId ?? null,
+    reservationId: match?.reservationId ?? null,
+    guestName: match?.guestName ?? parsed.callerName,
+    guestPhone: parsed.guestPhone,
+    fromNumber: parsed.fromNumber,
+    toNumber: parsed.toNumber,
+    direction: parsed.direction,
+    status: parsed.status,
+    disposition,
+    durationSeconds: parsed.durationSeconds,
+    matchStrategy: match?.matchStrategy ?? null,
+    matchConfidence: match?.matchConfidence ?? null,
+    voicemailId: voicemail?.id ?? null,
+    voicemailStatus: voicemail?.status ?? (voicemailRecordingUrl ? "completed" : null),
+    voicemailRecordingUrl,
+    voicemailTranscript,
+    voicemailDurationSeconds: Number.isFinite(Number(voicemail?.duration)) ? Number(voicemail?.duration) : null,
+    rawPayload: JSON.stringify(payload),
+    callStartedAt: parsed.callStartedAt,
+    callCompletedAt: parsed.callCompletedAt ?? new Date(),
+    acknowledgedAt: disposition === "answered" ? new Date() : null,
+  };
+  const call = await storage.upsertQuoCallEvent(row);
+  return { call, matched: !!match };
 }
 
 export async function sendQuoSms(input: {

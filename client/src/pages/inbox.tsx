@@ -28,7 +28,7 @@ import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
-  FileText, Mail, ShieldCheck, Paperclip,
+  FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -94,6 +94,30 @@ type InboxRentalAgreement = {
     signedName?: string | null;
     signedAt?: string | null;
   } | null;
+};
+
+type QuoCallEvent = {
+  id: number;
+  providerCallId: string;
+  conversationId?: string | null;
+  reservationId?: string | null;
+  guestName?: string | null;
+  guestPhone: string;
+  fromNumber: string;
+  toNumber: string;
+  direction: "inbound" | "outbound" | string;
+  status?: string | null;
+  disposition: "answered" | "missed" | "voicemail" | "unknown" | string;
+  durationSeconds?: number | null;
+  matchStrategy?: string | null;
+  matchConfidence?: string | null;
+  voicemailRecordingUrl?: string | null;
+  voicemailTranscript?: string | null;
+  voicemailDurationSeconds?: number | null;
+  callStartedAt?: string | null;
+  callCompletedAt?: string | null;
+  acknowledgedAt?: string | null;
+  createdAt?: string | null;
 };
 
 // ─── AI draft property-context builder ────────────────────────────────────────
@@ -1358,6 +1382,22 @@ function normalizePhone(value: unknown): string {
   return digits ? `+${digits}` : "";
 }
 
+function formatPhone(value: unknown): string {
+  const normalized = normalizePhone(value);
+  const digits = normalized.replace(/\D/g, "");
+  const last10 = digits.slice(-10);
+  if (last10.length !== 10) return normalized || "Unknown phone";
+  return `(${last10.slice(0, 3)}) ${last10.slice(3, 6)}-${last10.slice(6)}`;
+}
+
+function formatDuration(seconds?: number | null): string {
+  const n = Math.max(0, Math.round(Number(seconds ?? 0)));
+  if (!n) return "0:00";
+  const m = Math.floor(n / 60);
+  const s = n % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function normalizeDeepLinkText(value: string | null | undefined): string {
   return String(value ?? "")
     .toLowerCase()
@@ -2196,6 +2236,27 @@ export default function InboxPage() {
     "conversations", "results", "data",
   ]);
 
+  const { data: missedCallData } = useQuery<{ calls: QuoCallEvent[]; count: number }>({
+    queryKey: ["/api/inbox/calls/unacknowledged"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/inbox/calls/unacknowledged?limit=100");
+      if (!r.ok) throw new Error(`Missed calls returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+  const missedCalls = missedCallData?.calls ?? [];
+  const missedCallCount = missedCallData?.count ?? missedCalls.length;
+  const missedCallsByConversation = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const call of missedCalls) {
+      if (!call.conversationId) continue;
+      counts[call.conversationId] = (counts[call.conversationId] ?? 0) + 1;
+    }
+    return counts;
+  }, [missedCalls]);
+
   const markConversationReplied = (conversationId: string | null) => {
     if (!conversationId) return;
     setLocallyRepliedAtByConversation((prev) => ({
@@ -2369,6 +2430,17 @@ export default function InboxPage() {
     refetchInterval: 15_000,
   });
 
+  const { data: callData, isLoading: callsLoading } = useQuery<{ calls: QuoCallEvent[] }>({
+    queryKey: ["/api/inbox/calls/conversations", selectedConvId],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/inbox/calls/conversations/${selectedConvId}`);
+      if (!r.ok) throw new Error(`Calls returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+  });
+
   const { data: smsStatus } = useQuery<any>({
     queryKey: ["/api/inbox/sms/status"],
     queryFn: async () => {
@@ -2408,7 +2480,32 @@ export default function InboxPage() {
     module: { type: "sms", provider: "quo" },
   }));
 
-  const threadPosts = [...posts, ...smsPosts];
+  const callEvents = callData?.calls ?? [];
+  const callPosts: GuestyPost[] = callEvents.map((call) => {
+    const when = call.callCompletedAt ?? call.callStartedAt ?? call.createdAt ?? "";
+    const kind = call.disposition === "voicemail"
+      ? "Voicemail"
+      : call.disposition === "missed"
+        ? "Missed call"
+        : call.direction === "outbound"
+          ? "Outgoing call"
+          : "Incoming call";
+    const details = [
+      `${kind} ${call.direction === "outbound" ? "to" : "from"} ${formatPhone(call.guestPhone)}`,
+      call.durationSeconds ? `Duration ${formatDuration(call.durationSeconds)}` : "",
+      call.matchStrategy ? `Matched by ${call.matchStrategy.replace(/-/g, " ")}` : "",
+    ].filter(Boolean);
+    return {
+      _id: `quo-call-${call.id}`,
+      body: details.join("\n"),
+      sentAt: when,
+      sentBy: call.direction === "outbound" ? "host" : "guest",
+      direction: call.direction === "outbound" ? "outbound" : "inbound",
+      module: { type: "call", provider: "quo", callEvent: call },
+    };
+  });
+
+  const threadPosts = [...posts, ...smsPosts, ...callPosts];
   const savedGuestPhone = normalizePhone(phoneData?.override?.phone);
   const effectiveGuestPhone = savedGuestPhone || selectedConv?.displayGuestPhone || "";
   const detectedPreArrivalFormUrl = findRelevantThreadUrl(threadPosts, "prearrival");
@@ -2808,6 +2905,41 @@ export default function InboxPage() {
       toast({ title: "Guest phone saved", description: phone });
     },
     onError: (e: any) => toast({ title: "Phone not saved", description: e.message, variant: "destructive" }),
+  });
+
+  const clearMissedCall = useMutation({
+    mutationFn: async (id: number) => {
+      const r = await apiRequest("POST", `/api/inbox/calls/${id}/acknowledge`, {});
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/unacknowledged"] });
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/conversations", selectedConvId] });
+      toast({ title: "Missed call cleared" });
+    },
+    onError: (e: any) => toast({ title: "Could not clear missed call", description: e.message, variant: "destructive" }),
+  });
+
+  const clearConversationMissedCalls = useMutation({
+    mutationFn: async () => {
+      if (!selectedConvId) throw new Error("No conversation selected");
+      const r = await apiRequest("POST", `/api/inbox/calls/conversations/${selectedConvId}/acknowledge`, {});
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/unacknowledged"] });
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/conversations", selectedConvId] });
+      toast({ title: "Missed calls cleared", description: `${data?.cleared ?? 0} notification${data?.cleared === 1 ? "" : "s"} cleared` });
+    },
+    onError: (e: any) => toast({ title: "Could not clear missed calls", description: e.message, variant: "destructive" }),
   });
 
   // Regenerate the receipt body whenever any input changes — but only
@@ -3280,6 +3412,11 @@ export default function InboxPage() {
             {pendingRes.length} pending request{pendingRes.length > 1 ? "s" : ""}
           </Badge>
         )}
+        {missedCallCount > 0 && (
+          <Badge className="bg-red-600 text-white" data-testid="badge-missed-call-count">
+            {missedCallCount} missed call{missedCallCount === 1 ? "" : "s"}
+          </Badge>
+        )}
       </div>
 
       <div className="max-w-7xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
@@ -3311,6 +3448,62 @@ export default function InboxPage() {
 
           {/* ── MESSAGES TAB ── */}
           <TabsContent value="messages">
+            {missedCalls.length > 0 && (
+              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-red-950" data-testid="panel-missed-calls">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      <PhoneMissed className="h-4 w-4" />
+                      Missed calls need review
+                    </div>
+                    <div className="mt-1 text-xs text-red-800">
+                      Clear notifications from this inbox after calling or messaging the guest back.
+                    </div>
+                  </div>
+                  <div className="grid gap-2 sm:min-w-[360px]">
+                    {missedCalls.slice(0, 3).map((call) => (
+                      <div key={call.id} className="rounded-md border border-red-200 bg-white/80 px-3 py-2 text-xs">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-medium text-red-950">
+                              {call.guestName || "Unknown caller"} · {formatPhone(call.guestPhone)}
+                            </div>
+                            <div className="mt-0.5 text-red-800">
+                              {call.disposition === "voicemail" ? "Voicemail" : "Missed call"}
+                              {call.callCompletedAt && ` · ${new Date(call.callCompletedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                              {call.matchConfidence && ` · ${call.matchConfidence} confidence`}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 gap-1">
+                            {call.conversationId && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-[11px]"
+                                onClick={() => setSelectedConvId(call.conversationId!)}
+                                data-testid={`button-open-missed-call-${call.id}`}
+                              >
+                                Open
+                              </Button>
+                            )}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={() => clearMissedCall.mutate(call.id)}
+                              disabled={clearMissedCall.isPending}
+                              data-testid={`button-clear-missed-call-${call.id}`}
+                            >
+                              Clear
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px] lg:h-[calc(100vh-220px)] lg:min-h-[600px]">
               {/* Conversation List */}
               <div className="border rounded-lg bg-card max-h-[42vh] overflow-y-auto lg:max-h-none">
@@ -3384,6 +3577,7 @@ export default function InboxPage() {
                 {filteredConversations.map(rawC => {
                   const c = applyLocalReplyOverride(rawC);
                   const active = c._id === selectedConvId;
+                  const conversationMissedCalls = missedCallsByConversation[c._id] ?? 0;
                   return (
                     <button
                       key={c._id}
@@ -3434,6 +3628,19 @@ export default function InboxPage() {
                                     </span>
                                   </TooltipTrigger>
                                   <TooltipContent side="right">Pre-approval needed (Airbnb)</TooltipContent>
+                                </Tooltip>
+                              )}
+                              {conversationMissedCalls > 0 && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span
+                                      className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[9px] font-semibold leading-none text-white"
+                                      data-testid={`indicator-missed-calls-${c._id}`}
+                                    >
+                                      {conversationMissedCalls}
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right">Missed call notification</TooltipContent>
                                 </Tooltip>
                               )}
                             </div>
@@ -3508,7 +3715,7 @@ export default function InboxPage() {
 
                     {/* Messages — sorted oldest → newest, each with channel badge + full timestamp */}
                     <div ref={threadRef} className="flex-1 overflow-y-auto px-3 py-4 sm:px-5 space-y-3">
-                      {(threadLoading || postsLoading || smsLoading) && threadPosts.length === 0 && (
+                      {(threadLoading || postsLoading || smsLoading || callsLoading) && threadPosts.length === 0 && (
                         <div className="text-center text-xs text-muted-foreground py-4">Loading messages…</div>
                       )}
                       {[...threadPosts]
@@ -3554,17 +3761,62 @@ export default function InboxPage() {
                             p.direction === "out" ||
                             p.isIncoming === false;
                           const channel = p.module?.type ?? p.type ?? p.integration?.platform ?? "";
+                          const callEvent = (p.module as any)?.callEvent as QuoCallEvent | undefined;
+                          const isCall = channel === "call" && callEvent;
                           return (
                             <div key={p._id} className={`flex flex-col ${isHost ? "items-end" : "items-start"}`}>
                               <div
                                 className={`max-w-[92%] [overflow-wrap:anywhere] rounded-2xl px-3 py-2.5 text-sm whitespace-pre-wrap sm:max-w-[78%] sm:px-4 ${
-                                  isHost
+                                  isCall
+                                    ? "border border-red-200 bg-red-50 text-red-950 rounded-bl-sm"
+                                    : isHost
                                     ? "bg-primary text-primary-foreground rounded-br-sm"
                                     : "bg-muted text-foreground rounded-bl-sm"
                                 }`}
                                 data-testid={`message-${p._id}`}
                               >
-                                {bodyText}
+                                {isCall ? (
+                                  <div className="space-y-2">
+                                    <div className="flex items-center gap-2 font-medium">
+                                      {callEvent.disposition === "voicemail" ? (
+                                        <Voicemail className="h-4 w-4" />
+                                      ) : callEvent.disposition === "missed" ? (
+                                        <PhoneMissed className="h-4 w-4" />
+                                      ) : (
+                                        <PhoneCall className="h-4 w-4" />
+                                      )}
+                                      <span>{callEvent.disposition === "voicemail" ? "Voicemail" : callEvent.disposition === "missed" ? "Missed call" : "Call"}</span>
+                                    </div>
+                                    <div className="text-xs leading-relaxed">
+                                      {bodyText}
+                                    </div>
+                                    {callEvent.voicemailRecordingUrl && (
+                                      <audio
+                                        controls
+                                        src={callEvent.voicemailRecordingUrl}
+                                        className="mt-1 w-full max-w-[320px]"
+                                        data-testid={`audio-voicemail-${callEvent.id}`}
+                                      />
+                                    )}
+                                    {callEvent.voicemailTranscript && (
+                                      <div className="rounded-md border border-red-200 bg-white/80 p-2 text-xs text-red-950">
+                                        {callEvent.voicemailTranscript}
+                                      </div>
+                                    )}
+                                    {!callEvent.acknowledgedAt && (callEvent.disposition === "missed" || callEvent.disposition === "voicemail") && (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 px-2 text-[11px]"
+                                        onClick={() => clearMissedCall.mutate(callEvent.id)}
+                                        disabled={clearMissedCall.isPending}
+                                        data-testid={`button-clear-thread-missed-call-${callEvent.id}`}
+                                      >
+                                        Clear missed call
+                                      </Button>
+                                    )}
+                                  </div>
+                                ) : bodyText}
                               </div>
                               {/* Timestamp + channel row, mirrors Guesty's portal */}
                               <div className="flex items-center gap-1.5 mt-1 text-[10px] text-muted-foreground px-1">
@@ -3582,7 +3834,7 @@ export default function InboxPage() {
                           );
                         })}
                       {/* Thread debug: only shown when both queries settled and still no posts */}
-                      {!threadLoading && !postsLoading && !smsLoading && threadPosts.length === 0 && (threadData || postsData || smsData) && (
+                      {!threadLoading && !postsLoading && !smsLoading && !callsLoading && threadPosts.length === 0 && (threadData || postsData || smsData || callData) && (
                         <details className="text-[11px] font-mono bg-amber-50 border border-amber-200 rounded p-2" open>
                           <summary className="cursor-pointer font-semibold text-amber-800">🐞 No posts parsed — debug</summary>
                           <div className="mt-1 space-y-1 text-amber-900">
@@ -3946,6 +4198,52 @@ export default function InboxPage() {
                         </div>
                         {guest.isReturning && <Badge variant="secondary" className="text-[10px] mt-1">Returning guest</Badge>}
                       </div>
+
+                      {callEvents.length > 0 && (
+                        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-red-950" data-testid="card-conversation-calls">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-red-800 font-medium">
+                                <PhoneCall className="h-3.5 w-3.5" />
+                                Quo calls
+                              </div>
+                              <div className="mt-1 text-xs text-red-900">
+                                {callEvents.filter((c) => !c.acknowledgedAt && (c.disposition === "missed" || c.disposition === "voicemail")).length} uncleared · {callEvents.length} total
+                              </div>
+                            </div>
+                            {callEvents.some((c) => !c.acknowledgedAt && (c.disposition === "missed" || c.disposition === "voicemail")) && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-[11px]"
+                                onClick={() => clearConversationMissedCalls.mutate()}
+                                disabled={clearConversationMissedCalls.isPending}
+                                data-testid="button-clear-conversation-missed-calls"
+                              >
+                                Clear all
+                              </Button>
+                            )}
+                          </div>
+                          <div className="mt-2 space-y-2">
+                            {callEvents.slice(0, 4).map((call) => (
+                              <div key={call.id} className="rounded-md bg-white/80 p-2 text-xs">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-medium">
+                                    {call.disposition === "voicemail" ? "Voicemail" : call.disposition === "missed" ? "Missed call" : "Call"}
+                                  </span>
+                                  <span className="text-[10px] text-red-700">
+                                    {call.callCompletedAt ? new Date(call.callCompletedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}
+                                  </span>
+                                </div>
+                                <div className="mt-0.5 text-red-800">
+                                  {formatPhone(call.guestPhone)}
+                                  {call.matchStrategy && ` · ${call.matchStrategy.replace(/-/g, " ")}`}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Listing */}
                       <div>

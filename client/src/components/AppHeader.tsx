@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarSearch, Home, MessageSquare } from "lucide-react";
+import { CalendarSearch, Home, MessageSquare, PhoneMissed } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 
 type GuestyConversationSummary = {
@@ -117,7 +117,19 @@ export default function AppHeader() {
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
-  const unreadBadgeLabel = unreadThreadCount > 99 ? "99+" : String(unreadThreadCount);
+  const { data: missedCallCount = 0 } = useQuery<number>({
+    queryKey: ["/api/inbox/calls/unacknowledged", "count"],
+    queryFn: async () => {
+      const response = await apiRequest("GET", "/api/inbox/calls/unacknowledged?limit=100");
+      if (!response.ok) return 0;
+      const data = await response.json();
+      return Number(data?.count ?? data?.calls?.length ?? 0) || 0;
+    },
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const inboxAlertCount = unreadThreadCount + missedCallCount;
+  const unreadBadgeLabel = inboxAlertCount > 99 ? "99+" : String(inboxAlertCount);
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-[hsl(var(--brand-blue)/0.12)] bg-[linear-gradient(180deg,hsl(var(--brand-teal)/0.06),hsl(var(--background)))] shadow-sm backdrop-blur">
@@ -162,10 +174,10 @@ export default function AppHeader() {
             >
               <span className="relative inline-flex h-5 w-5 items-center justify-center">
                 <MessageSquare className="h-4 w-4 text-primary" />
-                {unreadThreadCount > 0 && (
+                {inboxAlertCount > 0 && (
                   <span
                     className="absolute right-0 top-0 flex h-3 min-w-3 translate-x-1/4 -translate-y-1/4 items-center justify-center rounded-full border border-background bg-red-500 px-[2px] text-[8px] font-bold leading-none text-white shadow-sm"
-                    aria-label={`${unreadThreadCount} unread conversation thread${unreadThreadCount === 1 ? "" : "s"}`}
+                    aria-label={`${inboxAlertCount} inbox alert${inboxAlertCount === 1 ? "" : "s"}`}
                     data-testid="badge-header-inbox-unread"
                   >
                     {unreadBadgeLabel}
@@ -173,6 +185,7 @@ export default function AppHeader() {
                 )}
               </span>
               <span className="hidden md:inline">Inbox</span>
+              {missedCallCount > 0 && <PhoneMissed className="hidden h-3.5 w-3.5 text-red-600 sm:block" />}
             </Link>
             <Link
               href="/bookings"
