@@ -4,6 +4,7 @@ import { syncAllPropertiesToGuesty } from "./guesty-sync";
 import {
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
+import { acquireSidecarLane, isSidecarLaneCancellationRequested } from "./sidecar-lane";
 
 const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; units: { bedrooms: number }[] }> = {
   1: { name: "Poipu Kai Sunset", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
@@ -468,6 +469,9 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
   scannerRunning = true;
   currentScanPropertyId = targetPropertyId || null;
   let runId = -1;
+  const laneOwnerId = `legacy-availability:${targetPropertyId ?? "all"}:${Date.now()}`;
+  let lane: Awaited<ReturnType<typeof acquireSidecarLane>> | null = null;
+  let laneHeartbeat: NodeJS.Timeout | null = null;
 
   try {
     const propertyIds = targetPropertyId
@@ -485,6 +489,21 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
 
     const periodsAhead = Math.ceil(weeksAhead / 2);
     log(`Starting availability scan: ${label}, ${periodsAhead} periods (14-day blocks)`, "scanner");
+
+    lane = await acquireSidecarLane({
+      ownerType: "availability-scan",
+      ownerId: laneOwnerId,
+      label: `Legacy availability queue scan for ${label}`,
+      pollMs: 1_000,
+      shouldCancel: async () =>
+        scanAborted ||
+        isSidecarLaneCancellationRequested("availability-scan", laneOwnerId),
+      onWait: async (owner) => {
+        log(`Availability scan waiting for Chrome sidecar lane held by ${owner.label}`, "scanner");
+      },
+    });
+    laneHeartbeat = setInterval(() => lane?.heartbeat(), 30_000);
+    log(`Availability scan acquired Chrome sidecar lane for ${label}`, "scanner");
 
     const run = await storage.createScannerRun({
       status: "running",
@@ -507,12 +526,22 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
     consecutiveRateLimits = 0;
 
     for (const window of windows) {
+      if (isSidecarLaneCancellationRequested("availability-scan", laneOwnerId)) {
+        scanAborted = true;
+        log("Scan aborted because the Chrome sidecar lane was cancelled", "scanner");
+        break;
+      }
       if (scanAborted) {
         log(`Scan aborted due to API quota exhaustion after ${totalScanned} weeks`, "scanner");
         break;
       }
 
       for (const propertyId of propertyIds) {
+        if (isSidecarLaneCancellationRequested("availability-scan", laneOwnerId)) {
+          scanAborted = true;
+          log("Scan aborted because the Chrome sidecar lane was cancelled", "scanner");
+          break;
+        }
         const config = PROPERTY_UNIT_NEEDS[propertyId];
         const uniqueBedrooms = Array.from(new Set(config.units.map(u => u.bedrooms)));
 
@@ -713,6 +742,8 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
     }
     return runId;
   } finally {
+    if (laneHeartbeat) clearInterval(laneHeartbeat);
+    lane?.release();
     scannerRunning = false;
     currentScanPropertyId = null;
   }

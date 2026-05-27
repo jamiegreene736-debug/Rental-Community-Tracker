@@ -8,6 +8,7 @@ import {
   type SeasonKey,
 } from "./multichannel-buy-in";
 import { getSidecarStopGeneration, hasSidecarStopGenerationChanged } from "./vrbo-sidecar-queue";
+import { acquireSidecarLane, isSidecarLaneCancellationRequested } from "./sidecar-lane";
 
 export type AvailabilityChannelCounts = {
   airbnb: number;
@@ -167,6 +168,8 @@ function enqueueSeasonalScan<T>(
 
   let waitHeartbeat: NodeJS.Timeout | null = null;
   const queuedAt = Date.now();
+  const laneOwnerId = `seasonal-availability:${args.propertyId}:${queuedAt}`;
+  const laneLabel = `Availability sidecar scan for property ${args.propertyId}`;
   if (queuedAhead > 0) {
     args.onPhase?.(`Waiting for sidecar scan slot (${queuedAhead} ahead)`);
     waitHeartbeat = setInterval(() => {
@@ -179,9 +182,25 @@ function enqueueSeasonalScan<T>(
     seasonalScanQueued = Math.max(0, seasonalScanQueued - 1);
     throwIfAborted(args.signal);
     seasonalScanActive = { propertyId: args.propertyId, startedAt: Date.now() };
+    const lane = await acquireSidecarLane({
+      ownerType: "availability-scan",
+      ownerId: laneOwnerId,
+      label: laneLabel,
+      pollMs: 1_000,
+      shouldCancel: async () =>
+        Boolean(args.signal?.aborted) ||
+        isSidecarLaneCancellationRequested("availability-scan", laneOwnerId),
+      onWait: async (owner) => {
+        args.onPhase?.(`Waiting for Chrome sidecar lane held by ${owner.label}`);
+      },
+    });
+    const laneHeartbeat = setInterval(() => lane.heartbeat(), 30_000);
     try {
+      args.onPhase?.("Chrome sidecar lane acquired for availability scan");
       return await run();
     } finally {
+      clearInterval(laneHeartbeat);
+      lane.release();
       seasonalScanActive = null;
     }
   });
