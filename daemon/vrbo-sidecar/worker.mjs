@@ -2724,6 +2724,12 @@ function stateMatchesExpectedDestination(state, ...expectedValues) {
   const tokens = destinationGuardTokens(...expectedValues);
   if (tokens.length === 0) return true;
   if (tokens.every((token) => haystack.includes(token))) return true;
+  const prefixTokens = destinationGuardTokens(String(expectedValues.find(Boolean) ?? "").split(",")[0]);
+  if (prefixTokens.length > 0 && prefixTokens.every((token) => haystack.includes(token))) {
+    if (!/\b(kissimmee|orlando|florida)\b/.test(haystack) || /\bflorida\b/.test(expectedText)) {
+      return true;
+    }
+  }
   if (/\bpoipu\s+kai\b/.test(expectedText)) {
     return /\bpoipu\b/.test(haystack) &&
       /\b(kai|koloa|kauai)\b/.test(haystack) &&
@@ -3703,6 +3709,14 @@ function otaQueryTokens(value) {
     .filter((token) => token.length >= 3 && !/^(the|and|resort|resorts)$/.test(token));
 }
 
+function otaTextHasRequiredTokens(text, requiredTokens = []) {
+  const tokens = new Set(normalizeOtaText(text).split(/\s+/).filter(Boolean));
+  const required = Array.isArray(requiredTokens)
+    ? requiredTokens.map((token) => String(token || "").toLowerCase().trim()).filter((token) => token.length >= 3)
+    : [];
+  return required.length === 0 || required.every((token) => tokens.has(token));
+}
+
 async function collectVisibleDestinationSuggestions(targetPage, typedQuery, destination, label = "site_search", options = {}) {
   if (!targetPage || targetPage.isClosed?.() || !typedQuery) return [];
   const queryTokens = otaQueryTokens(typedQuery);
@@ -4021,8 +4035,17 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
     "",
   );
   const fallbackSuggestion = String(targetSuggestion || searchTerm || "").replace(/\s+/g, " ").trim();
-  log(`${label}: vision fallback selected destination${afterText ? `; field now "${afterText.slice(0, 120)}"` : fallbackSuggestion ? `; assuming "${fallbackSuggestion.slice(0, 120)}"` : ""}`);
-  return afterText || fallbackSuggestion || null;
+  const validatedText = afterText || "";
+  if (!validatedText || !otaTextHasRequiredTokens(validatedText, requiredSearchTokens)) {
+    log(
+      `${label}: vision fallback did not confirm a matching destination` +
+      `${validatedText ? `; field now "${validatedText.slice(0, 120)}"` : ""}` +
+      `${fallbackSuggestion ? `; expected "${fallbackSuggestion.slice(0, 120)}"` : ""}`,
+    );
+    return null;
+  }
+  log(`${label}: vision fallback selected destination; field now "${validatedText.slice(0, 120)}"`);
+  return validatedText;
 }
 
 async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label, requestId = "homepage", params = {}) {
@@ -5081,10 +5104,11 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     `${checkIn}→${checkOut} ${bedrooms}BR${visibleAttempt ? ` retry=${visibleAttempt}` : ""}`,
   );
   await ensureBrowser();
-  if (visibleAttempt > 0) {
-    await clearOtaClientSearchState("https://www.vrbo.com", `vrbo_search ${id} retry ${visibleAttempt}`);
-    await resetPage();
-  }
+  await clearOtaClientSearchState(
+    "https://www.vrbo.com",
+    visibleAttempt > 0 ? `vrbo_search ${id} retry ${visibleAttempt}` : `vrbo_search ${id} preflight`,
+  );
+  if (visibleAttempt > 0) await resetPage();
   const primedDestination = await primeOtaHomepageSearch("https://www.vrbo.com/", effectiveSearchTerm, "vrbo_search", id, {
     inputTerm: typedQuery,
     targetSuggestion: variant?.suggestionText || null,
@@ -5123,6 +5147,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     );
   }
   log(`vrbo_search ${id}: entered dates via VRBO homepage controls (${checkIn}→${checkOut})`);
+  const visibleSearchWasAuthoritative = Boolean(primedDestination && pmDateEntryComplete(dateEntry));
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
   await clickVisibleSearchSubmit(page, "vrbo_search", { requestId: id }).catch(() => null);
   await page.waitForTimeout(PAGE_SETTLE_MS);
@@ -5160,6 +5185,19 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   }
   correctionReasons = vrboStateCorrectionReasons(state, checkIn, checkOut, effectiveSearchTerm, destination);
   if (correctionReasons.length > 0) {
+    const haystack = normalizeDestinationGuardText(`${state?.url ?? ""} ${state?.title ?? ""} ${state?.bodyExcerpt ?? ""}`);
+    const expectedText = normalizeDestinationGuardText(`${effectiveSearchTerm} ${destination}`);
+    const clearlyWrongFloridaDefault =
+      /\b(?:orlando|kissimmee|florida)\b/.test(haystack) && !/\bflorida\b/.test(expectedText);
+    if (visibleSearchWasAuthoritative && !clearlyWrongFloridaDefault) {
+      log(
+        `vrbo_search ${id}: accepting visible dropdown/date search despite ` +
+        `${correctionReasons.join("+")} not being echoed in the post-submit page state`,
+      );
+      correctionReasons = [];
+    }
+  }
+  if (correctionReasons.length > 0) {
     if (visibleAttempt < 1 && correctionReasons.includes("destination")) {
       log(
         `vrbo_search ${id}: visible submit drifted to the wrong destination; ` +
@@ -5190,8 +5228,10 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
       },
     );
   }
-  throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, destination);
-  throwIfVrboDateMismatch(state, "vrbo_search", id, checkIn, checkOut);
+  if (!visibleSearchWasAuthoritative) {
+    throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, destination);
+    throwIfVrboDateMismatch(state, "vrbo_search", id, checkIn, checkOut);
+  }
   // Extract all visible cards and bucket by BR client-side. The
   // downstream minimum-bedroom guard remains the authoritative
   // protection against mismatched 1BR/2BR rows.
@@ -5854,7 +5894,18 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
       function dayButtons() {
         return Array.from(document.querySelectorAll(".uitk-day-button, [class*='day-button' i], [data-day], [role='button']"))
           .filter((el) => el instanceof HTMLElement && isVisible(el))
-          .filter((el) => /^\d{1,2}$/.test(clean(el.textContent || el.getAttribute?.("aria-label") || el.getAttribute?.("data-day") || "")));
+          .filter((el) => {
+            const text = clean(el.textContent);
+            const aria = clean(el.getAttribute?.("aria-label"));
+            const dataDay = clean(el.getAttribute?.("data-day"));
+            const dataDate = clean(el.getAttribute?.("data-date"));
+            const datetime = clean(el.getAttribute?.("datetime"));
+            return /^\d{1,2}$/.test(text) ||
+              /^\d{1,2}$/.test(dataDay) ||
+              /^\d{4}-\d{2}-\d{2}$/.test(dataDate) ||
+              /^\d{4}-\d{2}-\d{2}$/.test(datetime) ||
+              /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b/i.test(aria);
+          });
       }
 
       function compareMonth(a, b) {
@@ -5914,6 +5965,33 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
 
       function findVisibleDay(target, months) {
         const buttons = dayButtons();
+        const monthName = monthNames[target.month - 1];
+        const monthShort = monthName.slice(0, 3);
+        const yyyy = String(target.year);
+        const mm = String(target.month).padStart(2, "0");
+        const dd = String(target.day).padStart(2, "0");
+        const iso = `${yyyy}-${mm}-${dd}`;
+        const dayNeedle = new RegExp(`\\b${target.day}\\b`);
+        const explicit = buttons
+          .map((el) => {
+            const hay = [
+              textOf(el),
+              el.getAttribute?.("data-day"),
+              el.getAttribute?.("data-date"),
+              el.getAttribute?.("datetime"),
+            ].filter(Boolean).join(" ").toLowerCase();
+            let score = 0;
+            if (hay.includes(iso)) score += 500;
+            if (hay.includes(monthName) && hay.includes(yyyy) && dayNeedle.test(hay)) score += 350;
+            if (hay.includes(monthShort) && hay.includes(yyyy) && dayNeedle.test(hay)) score += 260;
+            if (clean(el.textContent) === String(target.day)) score += 30;
+            if (el.tagName.toLowerCase() === "button" || el.getAttribute?.("role") === "button") score += 20;
+            if (el.disabled || el.getAttribute?.("aria-disabled") === "true") score -= 1_000;
+            return score > 0 ? { el, score } : null;
+          })
+          .filter(Boolean)
+          .sort((a, b) => b.score - a.score)[0]?.el;
+        if (explicit) return explicit;
         let offset = 0;
         for (const month of months) {
           const count = daysInMonth(month.year, month.month);
@@ -5923,7 +6001,6 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
           }
           offset += count;
         }
-        const monthName = monthNames[target.month - 1];
         return buttons.find((el) => {
           const hay = textOf(el).toLowerCase();
           return hay.includes(monthName) && hay.includes(String(target.year)) && new RegExp(`\\b${target.day}\\b`).test(hay);

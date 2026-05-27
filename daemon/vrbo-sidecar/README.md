@@ -179,22 +179,22 @@ stealing focus from Safari, and visible mode does not pass
 ```sh
 SIDECAR_CHROME_VISIBLE=1
 SIDECAR_CHROME_VISIBLE_GRID_ORIGIN=1440,60
-SIDECAR_CHROME_VISIBLE_SIZE=500,375
-SIDECAR_CHROME_VISIBLE_GRID_COLUMNS=4
-SIDECAR_CHROME_VISIBLE_GRID_GAP_X=0
+SIDECAR_CHROME_VISIBLE_SIZE=1280,900
+SIDECAR_CHROME_VISIBLE_GRID_COLUMNS=2
+SIDECAR_CHROME_VISIBLE_GRID_GAP_X=24
 SIDECAR_CHROME_VISIBLE_GRID_GAP_Y=35
 SIDECAR_WARM_ALL_LOCAL_CHROME=1
 # Optional exact per-instance override for matching Rectangle slots:
-# SIDECAR_CHROME_VISIBLE_POSITIONS=1440,60;1820,60;2200,60;2580,60;1440,470;1820,470;2200,470;2580,470
+# SIDECAR_CHROME_VISIBLE_POSITIONS=1440,60;2744,60;1440,995;2744,995;1440,1930;2744,1930;1440,2865;2744,2865
 ```
 
-The visible grid size is an operator thumbnail, not the scrape
-viewport. The worker reasserts its emulated desktop viewport before
-navigation snapshots and vision fallback screenshots, so a `500x375`
-visible tile can still expose a `1280x820` page viewport to OTA sites.
-If logs ever show `warning: scrape viewport stayed small`, increase
-`SIDECAR_CHROME_VISIBLE_SIZE` or switch that run to headless/server
-mode before trusting provider card extraction.
+The visible grid should stay at a real desktop size. Several OTA date
+pickers collapse or hide calendar controls in thumbnail-sized windows,
+which can make visible-field searches look idle or fail date entry. The
+worker still reasserts its emulated desktop viewport before navigation
+snapshots and vision fallback screenshots; if logs ever show
+`warning: scrape viewport stayed small`, increase
+`SIDECAR_CHROME_VISIBLE_SIZE` before trusting provider card extraction.
 
 ## Local concurrency
 
@@ -324,11 +324,11 @@ debugging, override these before running the installer:
 ```sh
 SIDECAR_CHROME_VISIBLE=1
 SIDECAR_CHROME_VISIBLE_GRID_ORIGIN=1440,60
-SIDECAR_CHROME_VISIBLE_SIZE=500,375
-SIDECAR_CHROME_VISIBLE_GRID_COLUMNS=4
-SIDECAR_CHROME_VISIBLE_GRID_GAP_X=0
+SIDECAR_CHROME_VISIBLE_SIZE=1280,900
+SIDECAR_CHROME_VISIBLE_GRID_COLUMNS=2
+SIDECAR_CHROME_VISIBLE_GRID_GAP_X=24
 SIDECAR_CHROME_VISIBLE_GRID_GAP_Y=35
-SIDECAR_CHROME_VISIBLE_POSITIONS=1440,60;1820,60;2200,60;2580,60;1440,470;1820,470;2200,470;2580,470
+SIDECAR_CHROME_VISIBLE_POSITIONS=1440,60;2744,60;1440,995;2744,995;1440,1930;2744,1930;1440,2865;2744,2865
 SIDECAR_WARM_ALL_LOCAL_CHROME=1
 SIDECAR_ALLOW_FOCUS=0
 ```
