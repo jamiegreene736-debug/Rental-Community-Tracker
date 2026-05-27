@@ -1690,11 +1690,25 @@ function AdminDashboard() {
     if (!text.includes("searchapi")) return false;
     return (
       text.includes("http 429") ||
+      text.includes("throttled or rejected") ||
       text.includes("used all of the searches") ||
       text.includes("timed out") ||
       text.includes("request failed") ||
       text.includes("not configured")
     );
+  };
+  const photoCheckErrorPreview = (message?: string | null) => {
+    if (!message) return "";
+    const text = message.toLowerCase();
+    const cleaned = (text.includes("google lens/searchapi http 429") ||
+      text.includes("used all of the searches") ||
+      text.includes("upgrade your plan on searchapi.io"))
+      ? message.replace(
+        /Google Lens\/SearchAPI HTTP 429(?::.*?)(?=(?:;|$|\s+\(kept previous status))/i,
+        "Google Lens/SearchAPI HTTP 429: SearchAPI throttled or rejected the Lens request; this is not proof that the monthly search balance is exhausted. Retry the scan.",
+      )
+      : message;
+    return cleaned.replace(/\s+/g, " ").slice(0, 180);
   };
   const { data: photoCheckData } = useQuery<{ checks: PhotoCheckRow[] }>({
     queryKey: ["/api/photo-listing-check"],
@@ -3422,7 +3436,7 @@ function AdminDashboard() {
                       ];
                       const folders = agg?.folders ?? [];
                       const stamp = agg?.lastCheckedAt ? new Date(agg.lastCheckedAt).toLocaleDateString() : "never";
-                      const errorPreview = agg?.errorMessages?.[0]?.replace(/\s+/g, " ").slice(0, 180);
+                      const errorPreview = photoCheckErrorPreview(agg?.errorMessages?.[0]);
                       return (
                         <div className="flex gap-0.5 justify-center items-center" data-testid={`photo-match-${property.id}`}>
                           {items.map((it) => {

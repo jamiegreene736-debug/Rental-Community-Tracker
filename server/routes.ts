@@ -123,7 +123,7 @@ import {
   scanSeasonalAvailabilityCapacity,
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
-import { runPhotoListingCheckForFolders, listScanableFolders } from "./photo-listing-scanner";
+import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage } from "./photo-listing-scanner";
 import {
   MIN_DISTINCT_STRONG_PHOTO_MATCHES,
   isCommunityOrSharedPhotoCandidate,
@@ -30244,7 +30244,7 @@ Return ONLY compact JSON with this exact shape:
           bookingMatches: r.bookingMatches ? tryParseJson(r.bookingMatches) : [],
           photosChecked: r.photosChecked,
           checkedAt: r.checkedAt,
-          errorMessage: r.errorMessage,
+          errorMessage: normalizeSearchApiErrorMessage(r.errorMessage),
         })),
       });
     } catch (e: any) {

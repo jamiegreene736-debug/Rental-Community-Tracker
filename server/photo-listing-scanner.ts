@@ -157,6 +157,36 @@ function compactErrorDetail(text: string): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
+export function describeSearchApiHttpError(status: number, text: string): string {
+  const detail = compactErrorDetail(text);
+  if (status === 429) {
+    return "Google Lens/SearchAPI HTTP 429: SearchAPI throttled or rejected the Lens request. This is not proof that the monthly search balance is exhausted; verify Railway SEARCHAPI_API_KEY matches the active key and retry the scan.";
+  }
+  if (status === 401 || status === 403) {
+    return `Google Lens/SearchAPI HTTP ${status}: SearchAPI rejected the configured API key${detail ? ` (${detail})` : ""}`;
+  }
+  if (status >= 500) {
+    return `Google Lens/SearchAPI HTTP ${status}: SearchAPI provider error${detail ? ` (${detail})` : ""}`;
+  }
+  return `Google Lens/SearchAPI HTTP ${status}${detail ? `: ${detail}` : ""}`;
+}
+
+export function normalizeSearchApiErrorMessage(message?: string | null): string | null {
+  if (!message) return message ?? null;
+  const text = message.toLowerCase();
+  if (
+    text.includes("google lens/searchapi http 429") ||
+    text.includes("you have used all of the searches") ||
+    text.includes("upgrade your plan on searchapi.io")
+  ) {
+    return message.replace(
+      /Google Lens\/SearchAPI HTTP 429(?::.*?)(?=(?:;|$|\s+\(kept previous status))/i,
+      "Google Lens/SearchAPI HTTP 429: SearchAPI throttled or rejected the Lens request. This is not proof that the monthly search balance is exhausted; verify Railway SEARCHAPI_API_KEY matches the active key and retry the scan.",
+    );
+  }
+  return message;
+}
+
 function parseStoredMatches(raw?: string | null): Match[] {
   if (!raw) return [];
   try {
@@ -190,8 +220,7 @@ async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
     );
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      const detail = compactErrorDetail(body);
-      const msg = `Google Lens/SearchAPI HTTP ${resp.status}${detail ? `: ${detail}` : ""}`;
+      const msg = describeSearchApiHttpError(resp.status, body);
       console.error(`[photo-listing-scanner] ${msg} for ${imageUrl}`);
       return { ok: false, error: msg };
     }
