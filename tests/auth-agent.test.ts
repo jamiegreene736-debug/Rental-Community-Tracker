@@ -19,6 +19,7 @@ console.log("  ✓ classifies admin and agent credentials");
 
 assert.equal(isAgentAllowedPath(req("GET", "/api/auth/session")), true);
 assert.equal(isAgentAllowedPath(req("GET", "/api/guesty-property-map")), true);
+assert.equal(isAgentAllowedPath(req("GET", "/api/agent/properties/12/bookings")), true);
 assert.equal(isAgentAllowedPath(req("GET", "/api/guesty-proxy/communication/conversations/abc/posts")), true);
 assert.equal(isAgentAllowedPath(req("POST", "/api/guesty-proxy/communication/conversations/abc/send-message")), true);
 assert.equal(isAgentAllowedPath(req("POST", "/api/inbox/sms/conversations/abc/send")), true);

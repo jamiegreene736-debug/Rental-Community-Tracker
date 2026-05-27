@@ -6263,6 +6263,116 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/agent/properties/:propertyId/bookings", async (req, res) => {
+    try {
+      const propertyId = parseInt(req.params.propertyId, 10);
+      if (!Number.isFinite(propertyId) || propertyId === 0) {
+        return res.status(400).json({ error: "Valid propertyId required" });
+      }
+
+      const includePast = req.query.includePast === "true";
+      const today = new Date().toISOString().slice(0, 10);
+      const mappings = (await storage.getGuestyPropertyMap()).filter((row) => row.propertyId === propertyId);
+      const fields = encodeURIComponent("_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest source integration confirmationCode listing listingId");
+      const listingBookings: any[] = [];
+
+      for (const mapping of mappings) {
+        const listingId = mapping.guestyListingId;
+        const filterArr: Array<Record<string, unknown>> = [
+          { field: "listingId", operator: "$eq", value: listingId },
+        ];
+        if (!includePast) {
+          filterArr.push({ field: "checkOut", operator: "$gte", value: today });
+        }
+        const filtersParam = encodeURIComponent(JSON.stringify(filterArr));
+        const seen = new Map<string, any>();
+        for (let skip = 0; skip < 500; skip += 100) {
+          const data = await guestyRequest("GET", `/reservations?filters=${filtersParam}&limit=100&skip=${skip}&sort=checkIn&fields=${fields}`) as any;
+          const rows = unwrapGuestyListResponse(data);
+          for (const row of rows) {
+            if (!isCommittedGuestyReservation(row)) continue;
+            const id = String(row?._id ?? row?.id ?? "").trim();
+            if (id) seen.set(id, row);
+          }
+          const total = guestyListTotal(data);
+          if (rows.length < 100 || (total && skip + rows.length >= total)) break;
+        }
+        listingBookings.push(...Array.from(seen.values()));
+      }
+
+      const manualRows = await storage.getManualReservations({ propertyId, includePast });
+      const bookings = await Promise.all([
+        ...listingBookings.map(async (reservation) => {
+          const reservationId = String(reservation?._id ?? reservation?.id ?? "");
+          const listing = reservation?.listing ?? {};
+          const guest = reservation?.guest ?? {};
+          const attached = await storage.getBuyInsByReservation(reservationId);
+          return {
+            id: reservationId,
+            status: reservation?.status ?? "",
+            guestName: firstNonEmptyString(guest?.fullName, guest?.name, guest?.firstName, "Guest"),
+            checkIn: reservation?.checkInDateLocalized ?? reservation?.checkIn ?? null,
+            checkOut: reservation?.checkOutDateLocalized ?? reservation?.checkOut ?? null,
+            nightsCount: numberFromUnknown(reservation?.nightsCount),
+            listingName: guestyListingName(listing, firstNonEmptyString(reservation?.listingId, "Guesty listing")),
+            source: firstNonEmptyString(reservation?.integration?.platform, reservation?.source),
+            confirmationCode: firstNonEmptyString(reservation?.confirmationCode, reservationId),
+            arrivalUnits: attached
+              .slice()
+              .sort((a, b) => String(a.unitLabel ?? "").localeCompare(String(b.unitLabel ?? "")))
+              .map((b) => ({
+                id: b.id,
+                unitLabel: b.unitLabel ?? "",
+                address: b.unitAddress ?? "",
+                arrivalCode: b.accessCode ?? "",
+                parking: b.parkingInfo ?? "",
+                wifiName: b.wifiName ?? "",
+                wifiPassword: b.wifiPassword ?? "",
+                pmCompany: b.managementCompany ?? "",
+                pmContact: b.managementContact ?? "",
+                arrivalNotes: b.arrivalNotes ?? "",
+              })),
+          };
+        }),
+        ...manualRows.map(async (row) => {
+          const reservationId = `manual:${row.id}`;
+          const attached = await storage.getBuyInsByReservation(reservationId);
+          return {
+            id: reservationId,
+            status: row.status ?? "manual",
+            guestName: row.guestName,
+            checkIn: row.checkIn,
+            checkOut: row.checkOut,
+            nightsCount: Math.max(1, Math.round((+new Date(row.checkOut) - +new Date(row.checkIn)) / 86400000)),
+            listingName: "Manual booking",
+            source: "Manual",
+            confirmationCode: reservationId,
+            arrivalUnits: attached
+              .slice()
+              .sort((a, b) => String(a.unitLabel ?? "").localeCompare(String(b.unitLabel ?? "")))
+              .map((b) => ({
+                id: b.id,
+                unitLabel: b.unitLabel ?? "",
+                address: b.unitAddress ?? "",
+                arrivalCode: b.accessCode ?? "",
+                parking: b.parkingInfo ?? "",
+                wifiName: b.wifiName ?? "",
+                wifiPassword: b.wifiPassword ?? "",
+                pmCompany: b.managementCompany ?? "",
+                pmContact: b.managementContact ?? "",
+                arrivalNotes: b.arrivalNotes ?? "",
+              })),
+          };
+        }),
+      ]);
+
+      bookings.sort((a, b) => String(a.checkIn ?? "").localeCompare(String(b.checkIn ?? "")));
+      res.json({ propertyId, bookings });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch agent property bookings", message: err.message });
+    }
+  });
+
   // Automatic proximity check for attached buy-ins on a multi-unit booking.
   // The UI calls this after at least two slots are filled. It prefers
   // exact saved/scraped addresses, then uses listing titles + known resort

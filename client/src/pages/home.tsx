@@ -581,6 +581,120 @@ function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "mini
 }
 type SortDir = "asc" | "desc";
 
+type AgentArrivalUnit = {
+  id: number;
+  unitLabel: string;
+  address: string;
+  arrivalCode: string;
+  parking: string;
+  wifiName: string;
+  wifiPassword: string;
+  pmCompany: string;
+  pmContact: string;
+  arrivalNotes: string;
+};
+
+type AgentPropertyBooking = {
+  id: string;
+  status: string;
+  guestName: string;
+  checkIn: string | null;
+  checkOut: string | null;
+  nightsCount: number | null;
+  listingName: string;
+  source: string;
+  confirmationCode: string;
+  arrivalUnits: AgentArrivalUnit[];
+};
+
+function formatAgentDate(value: string | null): string {
+  if (!value) return "TBD";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
+function AgentArrivalField({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-0.5 break-words text-xs font-medium">{value || "None"}</div>
+    </div>
+  );
+}
+
+function AgentPropertyBookings({ propertyId }: { propertyId: number }) {
+  const { data, isLoading } = useQuery<{ bookings: AgentPropertyBooking[] }>({
+    queryKey: ["/api/agent/properties", propertyId, "bookings"],
+    queryFn: async () => {
+      const response = await apiRequest("GET", `/api/agent/properties/${propertyId}/bookings`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    },
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+  });
+
+  const bookings = data?.bookings ?? [];
+
+  return (
+    <div className="mt-3 rounded-md border bg-background p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Bookings</div>
+        {isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+      </div>
+      {!isLoading && bookings.length === 0 && (
+        <div className="mt-2 text-xs text-muted-foreground">None</div>
+      )}
+      <div className="mt-2 space-y-3">
+        {bookings.map((booking) => (
+          <div key={booking.id} className="rounded-md border bg-muted/20 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-semibold text-sm">{booking.guestName || "Guest"}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {formatAgentDate(booking.checkIn)} - {formatAgentDate(booking.checkOut)}
+                  {booking.nightsCount ? ` · ${booking.nightsCount} night${booking.nightsCount === 1 ? "" : "s"}` : ""}
+                </div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  {booking.listingName || "Listing"} · {booking.confirmationCode || booking.id}
+                </div>
+              </div>
+              <Badge variant="outline" className="shrink-0 text-[10px]">
+                {booking.status || booking.source || "Booked"}
+              </Badge>
+            </div>
+
+            {booking.arrivalUnits.length === 0 ? (
+              <div className="mt-3 rounded-md border border-dashed bg-background p-2 text-xs text-muted-foreground">
+                Arrival information: None
+              </div>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {booking.arrivalUnits.map((unit) => (
+                  <div key={unit.id} className="rounded-md bg-background p-2">
+                    <div className="mb-2 text-xs font-semibold">{unit.unitLabel || "Assigned unit"}</div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <AgentArrivalField label="Address" value={unit.address} />
+                      <AgentArrivalField label="Arrival Code" value={unit.arrivalCode} />
+                      <AgentArrivalField label="Parking" value={unit.parking} />
+                      <AgentArrivalField label="Wi-Fi Name" value={unit.wifiName} />
+                      <AgentArrivalField label="Wi-Fi Password" value={unit.wifiPassword} />
+                      <AgentArrivalField label="PM Company" value={unit.pmCompany} />
+                      <AgentArrivalField label="PM Email / Phone" value={unit.pmContact} />
+                      <AgentArrivalField label="Arrival Notes" value={unit.arrivalNotes} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AgentPropertyPortal() {
   const properties = getAllUnitBuilders();
 
@@ -608,7 +722,6 @@ function AgentPropertyPortal() {
           {properties.map((property) => {
             const totalBedrooms = property.units.reduce((sum, unit) => sum + unit.bedrooms, 0);
             const totalGuests = property.units.reduce((sum, unit) => sum + unit.maxGuests, 0);
-            const unitLabels = property.units.map((unit) => `${unit.unitNumber}: ${unit.bedrooms}BR, ${unit.bathrooms}BA, sleeps ${unit.maxGuests}`);
             return (
               <Card key={property.propertyId} className="p-4" data-testid={`card-agent-property-${property.propertyId}`}>
                 <div className="flex items-start justify-between gap-3">
@@ -642,14 +755,7 @@ function AgentPropertyPortal() {
                   </div>
                 </div>
 
-                <div className="mt-3 rounded-md border bg-background p-3">
-                  <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Unit details</div>
-                  <ul className="mt-2 space-y-1 text-xs">
-                    {unitLabels.map((label) => (
-                      <li key={label}>{label}</li>
-                    ))}
-                  </ul>
-                </div>
+                <AgentPropertyBookings propertyId={property.propertyId} />
 
                 {(property.neighborhood || property.transit || property.accessibilityNote) && (
                   <div className="mt-3 space-y-2 text-xs leading-relaxed text-muted-foreground">

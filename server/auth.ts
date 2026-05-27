@@ -195,6 +195,7 @@ function agentApiMethodAllowed(req: Request): boolean {
 
   if (method === "GET" && path === "/api/auth/session") return true;
   if (method === "GET" && path === "/api/guesty-property-map") return true;
+  if (method === "GET" && /^\/api\/agent\/properties\/-?\d+\/bookings$/.test(path)) return true;
 
   if (method === "GET" && path.startsWith("/api/guesty-proxy/communication/conversations")) return true;
   if (method === "POST" && /^\/api\/guesty-proxy\/communication\/conversations\/[^/]+\/send-message$/.test(path)) return true;
