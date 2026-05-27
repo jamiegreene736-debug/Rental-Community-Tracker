@@ -123,6 +123,7 @@ function classifyOutput(text: string): { risky: boolean; reason: string | null }
 interface GuestyPost {
   _id?: string;
   body?: string;
+  text?: string;
   message?: string;
   createdAt?: string;
   module?: { type?: string };
@@ -186,6 +187,23 @@ function unwrapConversations(raw: any): GuestyConversation[] {
   return [];
 }
 
+function unwrapPosts(raw: any): GuestyPost[] {
+  if (Array.isArray(raw)) return raw as GuestyPost[];
+  if (!raw || typeof raw !== "object") return [];
+  for (const k of ["posts", "messages", "results", "data"] as const) {
+    const v = (raw as any)[k];
+    if (Array.isArray(v)) return v as GuestyPost[];
+  }
+  for (const k of ["data", "result"] as const) {
+    const v = (raw as any)[k];
+    if (v && typeof v === "object") {
+      const inner = unwrapPosts(v);
+      if (inner.length > 0) return inner;
+    }
+  }
+  return [];
+}
+
 // Pull conversations that COULD have a guest message awaiting our
 // response. The narrower "is it unread" question used to be:
 //
@@ -234,6 +252,16 @@ async function fetchConversationThread(id: string): Promise<GuestyConversation |
   } catch (err) {
     console.error(`[auto-reply] Failed to fetch thread ${id}:`, (err as Error).message);
     return null;
+  }
+}
+
+async function fetchConversationPosts(id: string): Promise<GuestyPost[]> {
+  try {
+    const data = await guestyRequest("GET", `/communication/conversations/${id}/posts?limit=100`) as any;
+    return unwrapPosts(data);
+  } catch (err) {
+    console.error(`[auto-reply] Failed to fetch posts for ${id}:`, (err as Error).message);
+    return [];
   }
 }
 
@@ -739,7 +767,11 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
     for (const conv of open) {
       try {
         const thread = await fetchConversationThread(conv._id);
-        const posts = thread?.posts ?? conv.posts ?? [];
+        // Inbox-v2 stores posts on a separate endpoint. Inline posts are only
+        // a legacy fallback; the /posts endpoint is authoritative and is also
+        // what the inbox UI uses.
+        const fetchedPosts = await fetchConversationPosts(conv._id);
+        const posts = fetchedPosts.length > 0 ? fetchedPosts : (thread?.posts ?? conv.posts ?? []);
         const latest = pickPostToReplyTo(posts);
         if (!latest || !latest._id) continue;
         const conversationalPosts = posts.filter((p) => !isSystemPost(p));
@@ -749,7 +781,7 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
         const existing = await storage.getAutoReplyLogByTriggerPostId(latest._id);
         if (existing) continue;
 
-        const guestMessage = latest.body ?? latest.message ?? "";
+        const guestMessage = latest.body ?? latest.text ?? latest.message ?? "";
         if (!guestMessage.trim()) continue;
 
         processed++;
