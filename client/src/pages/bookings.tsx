@@ -270,6 +270,25 @@ type AutoFillSearchSummary = {
   groundFloorOnly: boolean;
 };
 
+type BuyInCancellationTier = "do_not_cancel" | "watch" | "consider_cancel" | "strong_cancel" | "cancel";
+
+type BuyInCancellationAdvice = {
+  score: number;
+  tier: BuyInCancellationTier;
+  confidence: "high" | "medium" | "low";
+  title: string;
+  summary: string;
+  evidence: string[];
+  methodology: string[];
+  projectedProfit: number | null;
+  remainingBudget: number;
+  proposedCost: number | null;
+  providersSearched: number;
+  providersHardFailed: number;
+  verifiedCount: number;
+  pricedCount: number;
+};
+
 type AutoFillComboOption = {
   label: string;
   bedrooms: number[];
@@ -1531,6 +1550,200 @@ function buyInPoolUnavailableReason(
     return `No live-priced ${bedrooms}BR option on Airbnb, VRBO, Booking.com, or direct/Lens`;
   }
   return `No unused distinct ${bedrooms}BR option remained after duplicate-unit filtering`;
+}
+
+function buyInCancellationTier(score: number): BuyInCancellationTier {
+  if (score >= 95) return "cancel";
+  if (score >= 85) return "strong_cancel";
+  if (score >= 70) return "consider_cancel";
+  if (score >= 50) return "watch";
+  return "do_not_cancel";
+}
+
+function buyInCancellationTitle(tier: BuyInCancellationTier): string {
+  switch (tier) {
+    case "cancel": return "Cancel recommended";
+    case "strong_cancel": return "Strong cancel signal";
+    case "consider_cancel": return "Consider canceling";
+    case "watch": return "Manual review needed";
+    default: return "Do not cancel from this scan";
+  }
+}
+
+function buyInCancellationAdviceClass(tier: BuyInCancellationTier): string {
+  switch (tier) {
+    case "cancel":
+    case "strong_cancel":
+      return "border-red-300 bg-red-50 text-red-950";
+    case "consider_cancel":
+      return "border-orange-300 bg-orange-50 text-orange-950";
+    case "watch":
+      return "border-amber-300 bg-amber-50 text-amber-950";
+    default:
+      return "border-emerald-200 bg-emerald-50 text-emerald-950";
+  }
+}
+
+function buyInCancellationScoreFromLoss(projectedProfit: number, remainingBudget: number): number {
+  if (projectedProfit >= 500) return 20;
+  if (projectedProfit >= 200) return 30;
+  if (projectedProfit >= 0) return 45;
+  const loss = Math.abs(projectedProfit);
+  const lossRatio = remainingBudget > 0 ? loss / remainingBudget : 1;
+  if (loss >= 1500 || lossRatio >= 0.35) return 98;
+  if (loss >= 750 || lossRatio >= 0.2) return 92;
+  if (loss >= 250 || lossRatio >= 0.08) return 82;
+  return 68;
+}
+
+function buildBuyInCancellationAdvice(args: {
+  reservation: GuestyReservation;
+  audits: AutoFillSearchAudit[];
+  proposedCost?: number | null;
+  currentSlotId?: string;
+}): BuyInCancellationAdvice | null {
+  const audits = args.audits.filter(Boolean);
+  if (audits.length === 0) return null;
+
+  const providerStatuses = audits.flatMap((audit) =>
+    BUY_IN_OTA_PROVIDER_KEYS.map((key) => ({ key, status: buyInProviderSearchStatus(audit.counts, audit.diagnostics, key) })),
+  );
+  const providerWasSearched = (key: BuyInSearchProviderKey) => providerStatuses.some(({ key: providerKey, status }) =>
+    providerKey === key && (status.stats.searched || status.stats.raw > 0 || status.stats.status === "ok" || status.stats.status === "warning"),
+  );
+  const providerHardFailed = (key: BuyInSearchProviderKey) => providerStatuses.some(({ key: providerKey, status }) =>
+    providerKey === key && status.hardFailed,
+  );
+  const providersSearched = BUY_IN_OTA_PROVIDER_KEYS.filter(providerWasSearched).length;
+  const providersHardFailed = BUY_IN_OTA_PROVIDER_KEYS.filter(providerHardFailed).length;
+  const verifiedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.verified, 0);
+  const pricedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.priced, 0);
+  const diagnosticsHardError = audits.some((audit) => audit.diagnostics?.severity === "error");
+  const completedEnough = providersSearched >= 2 && providersHardFailed === 0 && !diagnosticsHardError;
+  const confidence: BuyInCancellationAdvice["confidence"] = completedEnough && providersSearched >= 3
+    ? "high"
+    : completedEnough
+      ? "medium"
+      : "low";
+
+  const candidateCost = args.proposedCost && args.proposedCost > 0
+    ? args.proposedCost
+    : audits
+      .flatMap((audit) => audit.candidates)
+      .map((candidate) => candidate.totalPrice)
+      .filter((price) => Number.isFinite(price) && price > 0)
+      .sort((a, b) => a - b)[0] ?? null;
+
+  const existingCost = args.reservation.slots.reduce((sum, slot) => {
+    if (args.currentSlotId && slot.unitId === args.currentSlotId) return sum;
+    return sum + parseFloat(String(slot.buyIn?.costPaid ?? 0));
+  }, 0);
+  const remainingBudget = getNetRevenue(args.reservation) - existingCost;
+  const projectedProfit = candidateCost != null ? remainingBudget - candidateCost : null;
+
+  let score: number;
+  let summary: string;
+  const evidence: string[] = [];
+
+  if (candidateCost == null || verifiedCount === 0) {
+    score = completedEnough ? (providersSearched >= 3 ? 98 : 88) : 55;
+    summary = completedEnough
+      ? "The search found no verified bookable inventory for the requested dates and bedroom count."
+      : "No verified bookable inventory was kept, but provider coverage was not strong enough for a hard cancel call.";
+    evidence.push(`${verifiedCount} verified bookable rows across ${providersSearched}/3 OTA provider checks.`);
+    if (pricedCount > 0) {
+      evidence.push(`${pricedCount} priced row${pricedCount === 1 ? "" : "s"} appeared, but none survived verification/identity/availability checks.`);
+    }
+  } else {
+    score = buyInCancellationScoreFromLoss(projectedProfit ?? 0, remainingBudget);
+    if (confidence === "low" && score > 70) score = 70;
+    summary = projectedProfit != null && projectedProfit < 0
+      ? `Cheapest verified buy-in is ${fmtMoney(candidateCost)}, leaving a projected loss of ${fmtMoney(Math.abs(projectedProfit))}.`
+      : projectedProfit != null && projectedProfit < 200
+        ? `Cheapest verified buy-in is ${fmtMoney(candidateCost)}, leaving only ${fmtMoney(projectedProfit)} projected margin.`
+        : `Cheapest verified buy-in is ${fmtMoney(candidateCost)}, leaving ${fmtMoney(projectedProfit ?? 0)} projected margin.`;
+    evidence.push(`Remaining booking budget after attached buy-ins: ${fmtMoney(remainingBudget)}.`);
+    evidence.push(`Cheapest verified buy-in found: ${fmtMoney(candidateCost)}.`);
+  }
+
+  if (providersHardFailed > 0) {
+    evidence.push(`${providersHardFailed} provider check${providersHardFailed === 1 ? "" : "s"} failed or timed out, so the score is capped.`);
+  }
+  if (remainingBudget <= 0) {
+    evidence.push("This booking already has no remaining net budget after existing attached buy-ins.");
+    score = Math.max(score, 90);
+  }
+
+  const tier = buyInCancellationTier(score);
+  return {
+    score,
+    tier,
+    confidence,
+    title: buyInCancellationTitle(tier),
+    summary,
+    evidence,
+    methodology: [
+      "Use only completed live search diagnostics for the same resort, dates, and bedroom count.",
+      "Treat no-inventory as high confidence only when at least two OTA providers completed without hard failure.",
+      "Compare the cheapest verified buy-in against net booking payout minus already-attached buy-ins.",
+      "Cap the recommendation when providers failed, timed out, or returned unclear coverage.",
+    ],
+    projectedProfit,
+    remainingBudget,
+    proposedCost: candidateCost,
+    providersSearched,
+    providersHardFailed,
+    verifiedCount,
+    pricedCount,
+  };
+}
+
+function BuyInCancellationAdviceCard({ advice }: { advice: BuyInCancellationAdvice | null }) {
+  if (!advice) return null;
+  return (
+    <div className={`rounded-md border px-3 py-2 text-xs ${buyInCancellationAdviceClass(advice.tier)}`}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="font-semibold uppercase tracking-wide">
+            {advice.title} · {advice.score}/100
+          </p>
+          <p className="mt-0.5">{advice.summary}</p>
+        </div>
+        <Badge variant="outline" className="shrink-0 bg-white/70 text-[10px]">
+          {advice.confidence} confidence
+        </Badge>
+      </div>
+      <div className="mt-2 grid gap-1.5 sm:grid-cols-3">
+        <div className="rounded border border-current/15 bg-white/50 px-2 py-1">
+          <p className="text-[10px] uppercase tracking-wide opacity-70">Remaining budget</p>
+          <p className="font-semibold">{fmtMoney(advice.remainingBudget)}</p>
+        </div>
+        <div className="rounded border border-current/15 bg-white/50 px-2 py-1">
+          <p className="text-[10px] uppercase tracking-wide opacity-70">Cheapest verified</p>
+          <p className="font-semibold">{advice.proposedCost != null ? fmtMoney(advice.proposedCost) : "None found"}</p>
+        </div>
+        <div className="rounded border border-current/15 bg-white/50 px-2 py-1">
+          <p className="text-[10px] uppercase tracking-wide opacity-70">Projected profit</p>
+          <p className="font-semibold">{advice.projectedProfit != null ? fmtMoney(advice.projectedProfit) : "Unavailable"}</p>
+        </div>
+      </div>
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[11px] font-medium">Evidence and scoring method</summary>
+        <ul className="mt-1 list-disc space-y-0.5 pl-4">
+          {advice.evidence.map((line, index) => (
+            <li key={`cancel-evidence-${index}`}>{line}</li>
+          ))}
+          <li>{advice.providersSearched}/3 OTA provider checks searched; {advice.providersHardFailed} hard failure{advice.providersHardFailed === 1 ? "" : "s"}.</li>
+          <li>{advice.verifiedCount} verified row{advice.verifiedCount === 1 ? "" : "s"}; {advice.pricedCount} priced row{advice.pricedCount === 1 ? "" : "s"}.</li>
+        </ul>
+        <ul className="mt-1 list-disc space-y-0.5 pl-4 opacity-80">
+          {advice.methodology.map((line, index) => (
+            <li key={`cancel-method-${index}`}>{line}</li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
 }
 
 function directBookingTargetResortName(community: string): string {
@@ -6899,6 +7112,22 @@ export default function Bookings() {
                             </Button>
                           </div>
                         )}
+                        {searchAudits.length > 0 && (() => {
+                          const selectedCombo = comboOptions.find((option) => option.selected && option.totalCost != null);
+                          const fallbackCost = comboOptions
+                            .map((option) => option.totalCost)
+                            .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
+                            .sort((a, b) => a - b)[0] ?? null;
+                          return (
+                            <BuyInCancellationAdviceCard
+                              advice={buildBuyInCancellationAdvice({
+                                reservation: r,
+                                audits: searchAudits,
+                                proposedCost: selectedCombo?.totalCost ?? fallbackCost,
+                              })}
+                            />
+                          );
+                        })()}
                         {searchAudits.length > 0 && <AutoFillSearchAuditPanel audits={searchAudits} />}
                         {comboOptions.length > 0 && (
                           <ComboComparisonPanel
@@ -9312,11 +9541,49 @@ function LiveSearchSection({
   const searchDiagnostics = data?.diagnostics ?? hardErrorDiagnostics;
   const confirmationAudit = useMemo<AutoFillSearchAudit | null>(() => {
     if (!data || !searchDiagnostics) return null;
+    const groupedCandidates = (data.cheapestUnits ?? []).flatMap((unit) =>
+      (unit.listings ?? []).map((listing): AutoFillAuditCandidate => ({
+        source: listing.channel,
+        sourceLabel: listing.channelLabel,
+        title: unit.unitTitle,
+        url: listing.url,
+        originalSourceUrl: listing.originalSourceUrl,
+        totalPrice: listing.totalPrice,
+        nightlyPrice: listing.nightlyPrice,
+        image: unit.image,
+        verified: listing.verified,
+        verifiedReason: listing.verifiedReason,
+        groundFloorStatus: listing.groundFloorStatus ?? unit.groundFloorStatus,
+        groundFloorEvidence: listing.groundFloorEvidence ?? unit.groundFloorEvidence,
+      })),
+    );
+    const flatCandidates = (groupedCandidates.length > 0
+      ? groupedCandidates
+      : (data.cheapest?.length ? data.cheapest : [
+          ...(data.sources?.airbnb ?? []),
+          ...(data.sources?.vrbo ?? []),
+          ...(data.sources?.booking ?? []),
+          ...(data.sources?.pm ?? []),
+        ]).map((candidate): AutoFillAuditCandidate => ({
+          source: candidate.source,
+          sourceLabel: candidate.sourceLabel,
+          title: candidate.title,
+          url: candidate.url,
+          originalSourceUrl: candidate.originalSourceUrl,
+          totalPrice: candidate.totalPrice,
+          nightlyPrice: candidate.nightlyPrice,
+          image: candidate.image,
+          verified: candidate.verified,
+          verifiedReason: candidate.verifiedReason,
+          groundFloorStatus: candidate.groundFloorStatus,
+          groundFloorEvidence: candidate.groundFloorEvidence,
+        })))
+      .filter((candidate) => candidate.url);
     return {
       bedrooms: slot.bedrooms,
       generatedAt: searchDiagnostics.generatedAt ?? new Date().toISOString(),
       counts: liveSearchSummaryFor(data, slot.bedrooms),
-      candidates: [],
+      candidates: flatCandidates,
       diagnostics: searchDiagnostics,
     };
   }, [data, searchDiagnostics, slot.bedrooms]);
@@ -9569,6 +9836,18 @@ function LiveSearchSection({
   // PM scraper attempted, regardless of result count.
   const pmSourceBreakdown: Array<{ label: string; count: number }> =
     (data as any)?.pmSourceBreakdown ?? [];
+  const focusedUnitCheapestPrice = availableCheapestUnits[0]
+    ? availableCheapestUnits[0].listings
+      .map((listing) => listing.totalPrice)
+      .filter((price) => Number.isFinite(price) && price > 0)
+      .sort((a, b) => a - b)[0] ?? null
+    : null;
+  const singleSearchCancellationAdvice = buildBuyInCancellationAdvice({
+    reservation,
+    audits: confirmationAudit ? [confirmationAudit] : [],
+    proposedCost: focusedUnitCheapestPrice ?? availableCheapest[0]?.totalPrice ?? null,
+    currentSlotId: slot.unitId,
+  });
 
   // Map a unit's primary listing back to a LiveCandidate so the existing
   // record-buy-in dialog can keep its current contract. PRs #275+ will
@@ -9800,6 +10079,8 @@ function LiveSearchSection({
           )}
         </div>
       )}
+
+      <BuyInCancellationAdviceCard advice={singleSearchCancellationAdvice} />
 
       {/* Cheapest callout — gated server-side on verified=yes (real
           availability + real per-night rate confirmed for these dates).
