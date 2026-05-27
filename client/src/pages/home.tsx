@@ -168,6 +168,42 @@ type QueueJobEventPayload = {
   createdAt: string;
 };
 
+type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error";
+type BulkAvailabilityQueue = {
+  id: string;
+  status: "running" | "completed" | "failed";
+  weeksAhead: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  totals: {
+    pending: number;
+    running: number;
+    success: number;
+    error: number;
+  };
+  items: Array<{
+    propertyId: number;
+    name: string;
+    community: string;
+    bedrooms: number[];
+    totalBedrooms: number;
+    status: BulkAvailabilityQueueItemStatus;
+    runId: number | null;
+    message: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+  }>;
+};
+
+type ScannableAvailabilityProperty = {
+  id: number;
+  name: string;
+  community: string;
+  bedrooms: number[];
+  totalBedrooms: number;
+};
+
 type DashboardCancellationResponse = {
   windowDays: number;
   audits: ReservationCancellationAudit[];
@@ -563,6 +599,9 @@ export default function Home() {
   const [bulkPricingStarting, setBulkPricingStarting] = useState(false);
   const [bulkPricingCancelling, setBulkPricingCancelling] = useState(false);
   const [bulkPricingRetrying, setBulkPricingRetrying] = useState(false);
+  const [bulkAvailabilityOpen, setBulkAvailabilityOpen] = useState(false);
+  const [bulkAvailabilityStarting, setBulkAvailabilityStarting] = useState(false);
+  const [bulkAvailabilityQueue, setBulkAvailabilityQueue] = useState<BulkAvailabilityQueue | null>(null);
   const [selectedCancellationId, setSelectedCancellationId] = useState<number | null>(null);
 
   // Pull community drafts up here (early in the render) because
@@ -582,6 +621,12 @@ export default function Home() {
   type DashboardMinimumStayMap = Record<number, DashboardMinimumStay>;
   const { data: minimumStayData } = useQuery<DashboardMinimumStayMap>({
     queryKey: ["/api/dashboard/minimum-stays"],
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const { data: scannableAvailabilityProperties = [] } = useQuery<ScannableAvailabilityProperty[]>({
+    queryKey: ["/api/scanner/properties"],
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
@@ -1261,6 +1306,10 @@ export default function Home() {
   const selectedBulkPricingProperties = allProperties
     .filter((property) => selectedPricingIds.has(property.id) && isBulkPricingSelectable(property));
   const selectedBulkPricingCount = selectedBulkPricingProperties.length;
+  const scannableAvailabilityIds = new Set(scannableAvailabilityProperties.map((property) => property.id));
+  const selectedBulkAvailabilityProperties = selectedBulkPricingProperties
+    .filter((property) => scannableAvailabilityIds.has(property.id));
+  const selectedBulkAvailabilityCount = selectedBulkAvailabilityProperties.length;
   const allVisibleBulkPricingSelected =
     visibleBulkPricingIds.length > 0 && visibleBulkPricingIds.every((id) => selectedPricingIds.has(id));
   const bulkPricingTerminal =
@@ -1276,6 +1325,7 @@ export default function Home() {
     bulkPricingLastHeartbeat &&
     Date.now() - bulkPricingLastHeartbeat > 5 * 60 * 1000
   );
+  const bulkAvailabilityRunning = bulkAvailabilityQueue?.status === "running";
   const formatBulkPricingTime = (value?: string | null) => {
     if (!value) return "—";
     const ms = Date.parse(value);
@@ -1323,6 +1373,26 @@ export default function Home() {
       window.clearInterval(timer);
     };
   }, [bulkPricingJob?.id, bulkPricingTerminal, queryClient]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/scanner/bulk-status", { credentials: "include" });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!cancelled) setBulkAvailabilityQueue(data.queue ?? null);
+      } catch {
+        // Availability queue polling is best-effort; the next tick can recover.
+      }
+    };
+    void poll();
+    const timer = window.setInterval(poll, bulkAvailabilityRunning ? 5_000 : 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bulkAvailabilityRunning]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1391,6 +1461,27 @@ export default function Home() {
       toast({ title: "Bulk pricing failed to start", description: e.message, variant: "destructive" });
     } finally {
       setBulkPricingStarting(false);
+    }
+  };
+
+  const startBulkAvailabilityScan = async () => {
+    if (selectedBulkAvailabilityProperties.length === 0) return;
+    setBulkAvailabilityStarting(true);
+    try {
+      const response = await apiRequest("POST", "/api/scanner/bulk-run", {
+        propertyIds: selectedBulkAvailabilityProperties.map((property) => property.id),
+        weeksAhead: 52,
+      });
+      const data = await response.json();
+      setBulkAvailabilityQueue(data);
+      toast({
+        title: "Bulk availability queued",
+        description: `${selectedBulkAvailabilityProperties.length} propert${selectedBulkAvailabilityProperties.length === 1 ? "y" : "ies"} will scan one at a time.`,
+      });
+    } catch (e: any) {
+      toast({ title: "Bulk availability failed to start", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkAvailabilityStarting(false);
     }
   };
 
@@ -2301,6 +2392,128 @@ export default function Home() {
                   </div>
                 </DialogContent>
               </Dialog>
+              <Dialog open={bulkAvailabilityOpen} onOpenChange={setBulkAvailabilityOpen}>
+                <DialogTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 gap-1.5"
+                    disabled={selectedBulkAvailabilityCount === 0}
+                    data-testid="button-bulk-availability-scan"
+                  >
+                    <CalendarSearch className="h-3.5 w-3.5" />
+                    Update availability
+                    {selectedBulkAvailabilityCount > 0 && (
+                      <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-[10px]">
+                        {selectedBulkAvailabilityCount}
+                      </Badge>
+                    )}
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-3xl">
+                  <DialogHeader>
+                    <DialogTitle>Bulk availability queue</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-4">
+                    <div className="rounded-md border bg-muted/20 p-3 text-sm">
+                      <p className="font-medium">Runs one selected property at a time.</p>
+                      <p className="mt-1 text-muted-foreground">
+                        This uses the availability scanner for the selected dashboard rows and records each run in the Availability Scanner history. Select the rows you want, then start the queue here.
+                      </p>
+                      {selectedBulkPricingCount !== selectedBulkAvailabilityCount && (
+                        <p className="mt-2 text-xs text-amber-700">
+                          {selectedBulkPricingCount - selectedBulkAvailabilityCount} selected row{selectedBulkPricingCount - selectedBulkAvailabilityCount === 1 ? "" : "s"} cannot run availability yet because they are not in the scanner configuration.
+                        </p>
+                      )}
+                    </div>
+
+                    {!bulkAvailabilityQueue ? (
+                      <div className="space-y-3">
+                        <div className="max-h-64 overflow-y-auto rounded-md border">
+                          {selectedBulkAvailabilityProperties.map((property) => (
+                            <div key={property.id} className="flex items-center justify-between gap-3 border-b px-3 py-2 last:border-b-0">
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-medium">{property.name}</p>
+                                <p className="truncate text-xs text-muted-foreground">{property.community} · {property.bedrooms}BR</p>
+                              </div>
+                              <Badge variant="outline" className="shrink-0">Queued</Badge>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <Button
+                            type="button"
+                            onClick={startBulkAvailabilityScan}
+                            disabled={bulkAvailabilityStarting || selectedBulkAvailabilityCount === 0}
+                            data-testid="button-start-bulk-availability-scan"
+                          >
+                            {bulkAvailabilityStarting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CalendarSearch className="mr-2 h-4 w-4" />}
+                            Start queue
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Status</p>
+                            <p className="text-sm font-semibold capitalize">{bulkAvailabilityQueue.status}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Complete</p>
+                            <p className="text-sm font-semibold">{bulkAvailabilityQueue.totals.success} / {bulkAvailabilityQueue.items.length}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Running</p>
+                            <p className="text-sm font-semibold">{bulkAvailabilityQueue.totals.running}</p>
+                          </div>
+                          <div className="rounded-md border p-2">
+                            <p className="text-xs text-muted-foreground">Errors</p>
+                            <p className="text-sm font-semibold">{bulkAvailabilityQueue.totals.error}</p>
+                          </div>
+                        </div>
+                        <div className="max-h-80 overflow-y-auto rounded-md border">
+                          {bulkAvailabilityQueue.items.map((item) => {
+                            const statusTone =
+                              item.status === "success" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : item.status === "error" ? "bg-red-50 text-red-700 border-red-200"
+                              : item.status === "running" ? "bg-blue-50 text-blue-700 border-blue-200"
+                              : "bg-amber-50 text-amber-700 border-amber-200";
+                            return (
+                              <div key={item.propertyId} className="flex items-start justify-between gap-3 border-b px-3 py-3 last:border-b-0">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-medium">{item.name}</p>
+                                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                    {item.message || `${item.community} · ${item.totalBedrooms} total BR`}
+                                  </p>
+                                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                    {item.runId ? `Run #${item.runId}` : "No run yet"} · updated {formatBulkPricingTime(item.completedAt || item.startedAt)}
+                                  </p>
+                                </div>
+                                <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>
+                                  {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                                  {item.status}
+                                </Badge>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setBulkAvailabilityQueue(null)}
+                            disabled={bulkAvailabilityQueue.status === "running"}
+                          >
+                            Clear completed queue
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
               <Badge variant="outline" className="text-xs">
                 <BedDouble className="h-3 w-3 mr-1" />
                 Avg {avgBedrooms} BR
@@ -2319,8 +2532,8 @@ export default function Home() {
                     className="h-7 w-7"
                     disabled={visibleBulkPricingIds.length === 0}
                     onClick={toggleVisibleBulkPricingRows}
-                    title={allVisibleBulkPricingSelected ? "Clear visible pricing selections" : "Select visible properties for bulk market pricing"}
-                    aria-label={allVisibleBulkPricingSelected ? "Clear visible pricing selections" : "Select visible properties for bulk market pricing"}
+                    title={allVisibleBulkPricingSelected ? "Clear visible bulk selections" : "Select visible properties for bulk pricing or availability"}
+                    aria-label={allVisibleBulkPricingSelected ? "Clear visible bulk selections" : "Select visible properties for bulk pricing or availability"}
                     data-testid="button-select-visible-pricing"
                   >
                     {allVisibleBulkPricingSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
@@ -2486,8 +2699,8 @@ export default function Home() {
                       className="h-7 w-7"
                       disabled={!isBulkPricingSelectable(property)}
                       onClick={() => toggleBulkPricingRow(property.id)}
-                      title={isBulkPricingSelectable(property) ? "Select for bulk market pricing" : "Publish this draft before bulk pricing"}
-                      aria-label={`Select ${property.name} for bulk market pricing`}
+                      title={isBulkPricingSelectable(property) ? "Select for bulk pricing or availability" : "Publish this draft before bulk actions"}
+                      aria-label={`Select ${property.name} for bulk pricing or availability`}
                       data-testid={`button-select-pricing-${property.id}`}
                     >
                       {selectedPricingIds.has(property.id) ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
