@@ -140,6 +140,7 @@ let lastObservedQueueControlGeneration = null;
 let pendingIdleChromeReset = false;
 let lastObservedWindowState = null;
 let lastViewportWarningAt = 0;
+let lastVrboChallengeAlertAt = 0;
 
 function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
@@ -547,6 +548,145 @@ function gridWindowPositionForWorker() {
   };
 }
 
+async function nearFullscreenWindowBounds(targetPage = page) {
+  const fallback = {
+    left: 40,
+    top: 40,
+    width: Math.max(VIEWPORT.width, 1320),
+    height: Math.max(VIEWPORT.height + 80, 880),
+  };
+  if (process.env.SIDECAR_CAPTCHA_WINDOW_BOUNDS) {
+    const [leftRaw, topRaw, widthRaw, heightRaw] = String(process.env.SIDECAR_CAPTCHA_WINDOW_BOUNDS).split(",").map((part) => Number(part.trim()));
+    if ([leftRaw, topRaw, widthRaw, heightRaw].every(Number.isFinite) && widthRaw > 0 && heightRaw > 0) {
+      return {
+        left: Math.round(leftRaw),
+        top: Math.round(topRaw),
+        width: Math.round(widthRaw),
+        height: Math.round(heightRaw),
+      };
+    }
+  }
+  const screenBounds = await targetPage?.evaluate?.(() => ({
+    left: Math.max(0, Math.round(window.screen?.availLeft ?? 0)),
+    top: Math.max(0, Math.round(window.screen?.availTop ?? 0)),
+    width: Math.round(window.screen?.availWidth ?? 0),
+    height: Math.round(window.screen?.availHeight ?? 0),
+  })).catch(() => null);
+  if (screenBounds?.width > 600 && screenBounds?.height > 500) {
+    const margin = Math.max(0, Math.floor(Number(process.env.SIDECAR_CAPTCHA_WINDOW_MARGIN ?? 36) || 36));
+    return {
+      left: screenBounds.left + margin,
+      top: screenBounds.top + margin,
+      width: Math.max(600, screenBounds.width - margin * 2),
+      height: Math.max(500, screenBounds.height - margin * 2),
+    };
+  }
+  return fallback;
+}
+
+function playVrboChallengeAlertSound(label = "vrbo", id = "") {
+  if (process.env.SIDECAR_VRBO_ALERT_SOUND === "0") return;
+  if (!/^vrbo/i.test(String(label || ""))) return;
+  const now = Date.now();
+  const minGapMs = Math.max(1_000, Number(process.env.SIDECAR_VRBO_ALERT_SOUND_MIN_GAP_MS ?? 10_000) || 10_000);
+  if (now - lastVrboChallengeAlertAt < minGapMs) return;
+  lastVrboChallengeAlertAt = now;
+
+  try {
+    const soundPath = process.env.SIDECAR_VRBO_ALERT_SOUND_PATH || "/System/Library/Sounds/Submarine.aiff";
+    const child = fs.existsSync(soundPath)
+      ? spawn("afplay", [soundPath], { detached: true, stdio: "ignore" })
+      : spawn("osascript", ["-e", "beep 2"], { detached: true, stdio: "ignore" });
+    child.unref?.();
+    log(`${label} ${id}: played VRBO challenge alert sound`);
+  } catch (e) {
+    log(`${label} ${id}: VRBO challenge alert sound skipped: ${e?.message ?? e}`);
+  }
+}
+
+async function setVrboChallengeHighlight(targetPage = page, enabled = true, label = "vrbo", id = "") {
+  if (!targetPage || targetPage.isClosed?.()) return;
+  await targetPage.evaluate(({ enabled }) => {
+    const styleId = "rct-vrbo-challenge-alert-style";
+    const bannerId = "rct-vrbo-challenge-alert-banner";
+    if (!enabled) {
+      document.getElementById(bannerId)?.remove();
+      document.getElementById(styleId)?.remove();
+      return;
+    }
+    let style = document.getElementById(styleId);
+    if (!style) {
+      style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = `
+        #${bannerId} {
+          position: fixed;
+          z-index: 2147483647;
+          top: 0;
+          left: 0;
+          right: 0;
+          padding: 14px 18px;
+          background: #fde047;
+          color: #111827;
+          border-bottom: 4px solid #f59e0b;
+          font: 700 18px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+          text-align: center;
+        }
+        html { outline: 8px solid #facc15 !important; outline-offset: -8px !important; }
+        body { padding-top: 58px !important; }
+      `;
+      document.documentElement.appendChild(style);
+    }
+    let banner = document.getElementById(bannerId);
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = bannerId;
+      banner.setAttribute("role", "alert");
+      banner.textContent = "VRBO BOT / NOT verification needs manual clearing";
+      document.documentElement.appendChild(banner);
+    }
+  }, { enabled }).catch((e) => {
+    log(`${label} ${id}: VRBO challenge highlight ${enabled ? "apply" : "remove"} skipped: ${e?.message ?? e}`);
+  });
+}
+
+async function surfaceVrboChallengeWindow(targetPage = page, label = "vrbo", id = "") {
+  if (usingHeadlessRuntime()) return false;
+  if (!context || !targetPage || targetPage.isClosed?.()) return false;
+  if (!SIDECAR_CAPTCHA_SURFACE_WINDOW) {
+    log(`${label} ${id}: CAPTCHA manual surfacing disabled by SIDECAR_CAPTCHA_SURFACE_WINDOW=0`);
+    return false;
+  }
+
+  const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
+  if (!session) return false;
+  try {
+    const info = await withSoftTimeout(session.send("Browser.getWindowForTarget"), 1_500, null);
+    const windowId = info?.windowId;
+    if (typeof windowId !== "number") return false;
+
+    const bounds = await nearFullscreenWindowBounds(targetPage);
+    captchaWindowVisible = true;
+    lastObservedWindowState = "normal";
+    playVrboChallengeAlertSound(label, id);
+    await setVrboChallengeHighlight(targetPage, true, label, id).catch(() => {});
+    await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }), 1_500);
+    await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds }), 1_500);
+    if (SIDECAR_CAPTCHA_ALLOW_FOCUS || SIDECAR_ALLOW_FOCUS || SIDE_CAR_CHROME_VISIBLE) {
+      await targetPage.bringToFront().catch(() => {});
+    }
+    log(`${label} ${id}: surfaced Chrome near fullscreen for manual VRBO BOT/NOT verification`);
+    await postScreenSnapshot({ id, opType: label }, targetPage, "manual VRBO BOT/NOT verification", { captcha: true, force: true });
+    return true;
+  } catch (e) {
+    log(`${label} ${id}: VRBO challenge window surfacing failed: ${e?.message ?? e}`);
+    return false;
+  } finally {
+    await withSoftTimeout(session.detach(), 500, null);
+  }
+}
+
 async function snapSidecarWindowToGrid(targetPage = page, { focus = false, label = "sidecar", id = "" } = {}) {
   if (usingHeadlessRuntime()) return false;
   if (!context || !targetPage || targetPage.isClosed?.()) return false;
@@ -688,15 +828,25 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
   }
   if (SIDE_CAR_CHROME_VISIBLE) {
     if (visible) {
-      lastObservedWindowState = "normal";
-      await snapSidecarWindowToGrid(targetPage, { focus: false, label, id }).catch(() => false);
+      if (/^vrbo/i.test(String(label || ""))) {
+        await surfaceVrboChallengeWindow(targetPage, label, id).catch(() => false);
+      } else {
+        lastObservedWindowState = "normal";
+        await snapSidecarWindowToGrid(targetPage, { focus: false, label, id }).catch(() => false);
+      }
     } else {
       lastObservedWindowState = null;
+      if (/^vrbo/i.test(String(label || ""))) {
+        await setVrboChallengeHighlight(targetPage, false, label, id).catch(() => {});
+      }
     }
     captchaWindowVisible = visible;
     return true;
   }
   if (!context || !targetPage || targetPage.isClosed?.()) return false;
+  if (visible && /^vrbo/i.test(String(label || ""))) {
+    return surfaceVrboChallengeWindow(targetPage, label, id);
+  }
   if (visible && !SIDECAR_CAPTCHA_SURFACE_WINDOW) {
     log(`${label} ${id}: CAPTCHA manual surfacing disabled by SIDECAR_CAPTCHA_SURFACE_WINDOW=0`);
     return false;
@@ -734,6 +884,9 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
     } else {
       captchaWindowVisible = false;
       lastObservedWindowState = null;
+      if (/^vrbo/i.test(String(label || ""))) {
+        await setVrboChallengeHighlight(targetPage, false, label, id).catch(() => {});
+      }
       const hidden = parseWindowPosition(process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? HIDDEN_WINDOW_POSITION, { left: -32000, top: -32000 });
       await withSoftTimeout(
         session.send("Browser.setWindowBounds", {
@@ -3338,9 +3491,11 @@ async function applyScreenControlCommands(req, targetPage = page, label = "sidec
         await boundedPageDelay(targetPage, durationMs);
         await targetPage.mouse.up().catch(() => {});
       } else if (action === "surface") {
-        const surfaced = SIDE_CAR_CHROME_VISIBLE
-          ? await snapSidecarWindowToGrid(targetPage, { focus: true, label, id: req?.id ?? "" }).catch(() => false)
-          : await setCaptchaWindowVisibility(targetPage, true, label, req?.id ?? "").catch(() => false);
+        const surfaced = /^vrbo/i.test(String(label || ""))
+          ? await surfaceVrboChallengeWindow(targetPage, label, req?.id ?? "").catch(() => false)
+          : SIDE_CAR_CHROME_VISIBLE
+            ? await snapSidecarWindowToGrid(targetPage, { focus: true, label, id: req?.id ?? "" }).catch(() => false)
+            : await setCaptchaWindowVisibility(targetPage, true, label, req?.id ?? "").catch(() => false);
         lastObservedWindowState = "normal";
         if (!surfaced) await targetPage.bringToFront().catch(() => {});
       } else if (action === "restore") {
