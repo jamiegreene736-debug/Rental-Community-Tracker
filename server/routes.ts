@@ -112,7 +112,7 @@ import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommu
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
-import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
+import { runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
   availabilityWindowCountForWeeks,
@@ -19535,13 +19535,31 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const unsupportedReason = getAvailabilitySchedulerUnsupportedReason(propertyId);
+    if (unsupportedReason) {
+      return res.json({
+        schedule: null,
+        supported: false,
+        unsupportedReason,
+        tick: getScannerSchedulerStatus(),
+      });
+    }
     const row = await storage.getScannerSchedule(propertyId);
-    res.json({ schedule: row ?? null, tick: getScannerSchedulerStatus() });
+    res.json({ schedule: row ?? null, supported: true, unsupportedReason: null, tick: getScannerSchedulerStatus() });
   });
 
   app.post("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const unsupportedReason = getAvailabilitySchedulerUnsupportedReason(propertyId);
+    if (unsupportedReason) {
+      return res.status(409).json({
+        error: unsupportedReason,
+        supported: false,
+        unsupportedReason,
+        schedule: null,
+      });
+    }
     const body = req.body as Partial<{
       enabled: boolean; intervalHours: number; runInventory: boolean; runPricing: boolean;
       runSyncBlocks: boolean; targetMargin: number; minSets: number;

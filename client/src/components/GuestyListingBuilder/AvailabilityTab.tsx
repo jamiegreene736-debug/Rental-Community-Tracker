@@ -133,6 +133,7 @@ function parseScanSummary(summary: string | null | undefined): RunBadges {
 }
 
 export default function AvailabilityTab({ propertyId, listingId }: { propertyId: number | undefined; listingId: string | null }) {
+  const isSyntheticDraftProperty = typeof propertyId === "number" && propertyId <= 0;
   // Default to 24 months — matches how Guesty's calendar horizon is typically
   // set, and gives the scanner enough lookahead to catch high-season buy-in
   // spikes when rates start publishing.
@@ -174,7 +175,13 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     lastRunAt: string | null; lastRunStatus: string | null; lastRunSummary: string | null;
   };
   const [schedule, setSchedule] = useState<Schedule | null>(null);
+  const [scheduleSupported, setScheduleSupported] = useState(true);
+  const [scheduleUnsupportedReason, setScheduleUnsupportedReason] = useState<string | null>(null);
   const [runNowBusy, setRunNowBusy] = useState(false);
+  const schedulerUnavailable = isSyntheticDraftProperty || scheduleSupported === false;
+  const schedulerUnavailableMessage = isSyntheticDraftProperty
+    ? "Availability auto-scan is available after this draft is promoted to a configured property."
+    : scheduleUnsupportedReason ?? "Availability auto-scan is not configured for this property yet.";
 
   // Recent scanner runs — scheduled + manual, newest first. Rendered as
   // a compact table under the scheduler card so the operator can spot
@@ -189,7 +196,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   };
   const [runHistory, setRunHistory] = useState<RunHistoryRow[]>([]);
   useEffect(() => {
-    if (!propertyId) return;
+    if (!propertyId || schedulerUnavailable) {
+      setRunHistory([]);
+      return;
+    }
     let cancelled = false;
     const fetchHistory = async () => {
       try {
@@ -204,7 +214,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     // that's the cheapest signal we have without polling on a timer.
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [propertyId, schedule?.lastRunAt]);
+  }, [propertyId, schedule?.lastRunAt, schedulerUnavailable]);
 
   // Active blocks the scheduler has pushed to Guesty for this property.
   // The summary badge on the scheduler card shows aggregate counts
@@ -221,7 +231,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   };
   const [activeBlocks, setActiveBlocks] = useState<ActiveBlock[]>([]);
   useEffect(() => {
-    if (!propertyId) return;
+    if (!propertyId || schedulerUnavailable) {
+      setActiveBlocks([]);
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
@@ -234,7 +247,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     return () => { cancelled = true; };
     // Re-fetch after each run so new blocks appear without a page refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [propertyId, schedule?.lastRunAt]);
+  }, [propertyId, schedule?.lastRunAt, schedulerUnavailable]);
 
   // Tracks whether the initial GET for the schedule has completed. Uses
   // state (not a ref) so the auto-enable useEffect below re-runs after
@@ -244,13 +257,28 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [scheduleFetched, setScheduleFetched] = useState(false);
   const fetchSchedule = useCallback(async () => {
     if (!propertyId) return;
+    if (isSyntheticDraftProperty) {
+      setSchedule(null);
+      setScheduleSupported(false);
+      setScheduleUnsupportedReason("draft property id");
+      setScheduleFetched(true);
+      return;
+    }
     try {
       const r = await fetch(`/api/availability/schedule/${propertyId}`);
       const d = await r.json();
-      setSchedule(d.schedule);
+      if (d.supported === false) {
+        setSchedule(null);
+        setScheduleSupported(false);
+        setScheduleUnsupportedReason(d.unsupportedReason ?? null);
+      } else {
+        setScheduleSupported(true);
+        setScheduleUnsupportedReason(null);
+        setSchedule(d.schedule);
+      }
       setScheduleFetched(true);
     } catch { /* ignore */ }
-  }, [propertyId]);
+  }, [propertyId, isSyntheticDraftProperty]);
 
   useEffect(() => {
     fetchSchedule();
@@ -260,7 +288,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   }, [fetchSchedule]);
 
   const updateSchedule = useCallback(async (patch: Partial<Schedule>) => {
-    if (!propertyId) return;
+    if (!propertyId || schedulerUnavailable) return;
     try {
       const r = await fetch(`/api/availability/schedule/${propertyId}`, {
         method: "POST",
@@ -268,9 +296,15 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         body: JSON.stringify(patch),
       });
       const d = await r.json();
-      setSchedule(d.schedule);
+      if (d.supported === false) {
+        setSchedule(null);
+        setScheduleSupported(false);
+        setScheduleUnsupportedReason(d.unsupportedReason ?? d.error ?? null);
+      } else {
+        setSchedule(d.schedule);
+      }
     } catch { /* ignore */ }
-  }, [propertyId]);
+  }, [propertyId, schedulerUnavailable]);
 
   // Auto-enable the scheduler for any property the user is viewing. Covers
   // two cases: (a) a schedule row exists but enabled=false, (b) no schedule
@@ -283,21 +317,22 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   // itself validates the Guesty mapping at run-time and no-ops on unmapped
   // properties, so enabling pre-mapping is harmless.
   //
-  // Guards on `scheduleFetchedRef` so we only auto-enable AFTER the initial
+  // Guards on `scheduleFetched` so we only auto-enable AFTER the initial
   // GET completes — otherwise we'd race the fetch and potentially flip a
   // user's explicitly-disabled schedule back on.
   const autoEnableCheckedRef = useRef(false);
   useEffect(() => {
     if (autoEnableCheckedRef.current) return;
     if (!propertyId) return;
+    if (schedulerUnavailable) return;
     if (!scheduleFetched) return;
     if (schedule?.enabled) { autoEnableCheckedRef.current = true; return; }
     autoEnableCheckedRef.current = true;
     updateSchedule({ enabled: true });
-  }, [schedule, scheduleFetched, propertyId, updateSchedule]);
+  }, [schedule, scheduleFetched, propertyId, schedulerUnavailable, updateSchedule]);
 
   const runNow = useCallback(async () => {
-    if (!propertyId || runNowBusy) return;
+    if (!propertyId || runNowBusy || schedulerUnavailable) return;
     setRunNowBusy(true);
     try {
       await fetch(`/api/availability/run-now/${propertyId}`, { method: "POST" });
@@ -317,7 +352,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     } finally {
       setRunNowBusy(false);
     }
-  }, [propertyId, runNowBusy, schedule?.lastRunAt]);
+  }, [propertyId, runNowBusy, schedule?.lastRunAt, schedulerUnavailable]);
 
   const summary = useMemo(() => {
     const open = results.filter((r) => r.verdict === "open").length;
@@ -338,6 +373,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
 
   const runScan = useCallback(async () => {
     if (!propertyId) return;
+    if (schedulerUnavailable) {
+      setError(schedulerUnavailableMessage);
+      return;
+    }
     setScanning(true);
     setResults([]);
     setCtx(null);
@@ -418,7 +457,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       setScanPhase(null);
       abortRef.current = null;
     }
-  }, [propertyId, weeks, minSets]);
+  }, [propertyId, weeks, minSets, schedulerUnavailable, schedulerUnavailableMessage]);
 
   const stopScan = () => abortRef.current?.abort();
 
@@ -552,6 +591,26 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     return (
       <div style={{ padding: 20, fontSize: 13, color: "#6b7280" }}>
         Select a property to scan availability.
+      </div>
+    );
+  }
+
+  if (schedulerUnavailable) {
+    return (
+      <div>
+        <div style={{
+          marginBottom: 16, padding: "12px 14px",
+          background: "#fffbeb",
+          border: "1px solid #fde68a",
+          borderRadius: 8,
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#92400e" }}>
+            Auto-scan scheduler unavailable
+          </div>
+          <div style={{ fontSize: 11, color: "#92400e", marginTop: 4 }}>
+            {schedulerUnavailableMessage}
+          </div>
+        </div>
       </div>
     );
   }

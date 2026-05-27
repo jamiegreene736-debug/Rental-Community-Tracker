@@ -34,6 +34,15 @@ export function getScannerSchedulerStatus() {
   return { lastTickAt: _lastTickAt, running: _tickRunning, seasonalQueue: getSeasonalAvailabilityQueueStatus() };
 }
 
+export function getAvailabilitySchedulerUnsupportedReason(propertyId: number): string | null {
+  if (!Number.isFinite(propertyId)) return "invalid property id";
+  if (propertyId <= 0) {
+    return "draft property id; promote the draft before enabling availability scans";
+  }
+  if (!PROPERTY_UNIT_CONFIGS[propertyId]) return "property not in availability config";
+  return null;
+}
+
 // Main pipeline — identical to what the UI buttons do, all in one pass.
 // Sentinel prefix the scheduler uses to distinguish "this was a no-op
 // because the preconditions aren't met" from "this crashed". The tick
@@ -50,11 +59,14 @@ export async function runFullScanForProperty(
   propertyId: number,
   opts: { minSets: number; targetMargin: number; runInventory: boolean; runPricing: boolean; runSyncBlocks: boolean },
 ): Promise<string> {
-  const apiKey = process.env.SEARCHAPI_API_KEY;
-  if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
+  const unsupportedReason = getAvailabilitySchedulerUnsupportedReason(propertyId);
+  if (unsupportedReason) return `${SKIP_PREFIX} ${unsupportedReason}`;
 
   const config = PROPERTY_UNIT_CONFIGS[propertyId];
-  if (!config) throw new Error(`Property ${propertyId} not in config`);
+  if (!config) return `${SKIP_PREFIX} property not in availability config`;
+
+  const apiKey = process.env.SEARCHAPI_API_KEY;
+  if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
 
   const guestyListingId = await storage.getGuestyListingId(propertyId);
   if (!guestyListingId) {
