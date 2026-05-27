@@ -2891,7 +2891,7 @@ export default function Home() {
                       // the scanner could not classify the folder, not
                       // that a possible OTA photo match exists.
                       const agg = photoByProperty.get(property.id);
-                      type Tone = "ok" | "unknown" | "bad" | "na";
+                      type Tone = "ok" | "unknown" | "bad" | "warn" | "na";
                       // "na" = the property has no scannable folders
                       // (all unit photoFolders are placeholders or
                       // community-*). The scanner won't write rows for
@@ -2904,12 +2904,14 @@ export default function Home() {
                         if (noFolders) return "na";
                         if (s === "clean") return "ok";
                         if (s === "found") return "bad";
+                        if ((agg?.errorMessages?.length ?? 0) > 0) return "warn";
                         return "unknown"; // unknown or null: inconclusive, not a match
                       };
                       const PAL: Record<Tone, { bg: string; glyph: string }> = {
                         ok:      { bg: "#16a34a", glyph: "✓" },
                         unknown: { bg: "#9ca3af", glyph: "?" },
                         bad:     { bg: "#dc2626", glyph: "✗" },
+                        warn:    { bg: "#f59e0b", glyph: "!" },
                         na:      { bg: "#9ca3af", glyph: "–" },
                       };
                       const items: Array<{ letter: string; name: string; status: PhotoAggStatus; matches: number }> = [

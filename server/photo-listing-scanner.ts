@@ -157,6 +157,28 @@ function compactErrorDetail(text: string): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
+function parseStoredMatches(raw?: string | null): Match[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function isProviderUnavailableError(message?: string): boolean {
+  const text = (message ?? "").toLowerCase();
+  if (!text.includes("searchapi")) return false;
+  return (
+    text.includes("http 429") ||
+    text.includes("used all of the searches") ||
+    text.includes("timed out") ||
+    text.includes("request failed") ||
+    text.includes("not configured")
+  );
+}
+
 async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
   if (!SEARCHAPI_KEY) return { ok: false, error: "SEARCHAPI_API_KEY not configured" };
   const controller = new AbortController();
@@ -331,7 +353,7 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
 
   if (!SEARCHAPI_KEY) {
     result.errorMessage = "SEARCHAPI_API_KEY not configured";
-    await persist(result);
+    await persist(result, priorRow);
     return result;
   }
   if (!PUBLIC_HOST) {
@@ -497,12 +519,32 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
   result.vrboMatches    = tally.vrbo.matches.slice(0, 20);
   result.bookingMatches = tally.booking.matches.slice(0, 20);
 
-  await persist(result);
+  await persist(result, priorRow);
   await alertOnStateWorsen(prior, result);
   return result;
 }
 
-async function persist(r: ScanResult): Promise<PhotoListingCheck> {
+async function persist(r: ScanResult, prior?: PhotoListingCheck | null): Promise<PhotoListingCheck> {
+  // Provider outages/quota errors are inconclusive, not evidence that
+  // previous matches disappeared. Preserve the last known platform
+  // statuses so one exhausted SearchAPI run cannot repaint the
+  // dashboard from red/green to gray.
+  if (prior && isProviderUnavailableError(r.errorMessage)) {
+    if (r.airbnbStatus === "unknown") {
+      r.airbnbStatus = prior.airbnbStatus as PlatformStatus;
+      r.airbnbMatches = parseStoredMatches(prior.airbnbMatches);
+    }
+    if (r.vrboStatus === "unknown") {
+      r.vrboStatus = prior.vrboStatus as PlatformStatus;
+      r.vrboMatches = parseStoredMatches(prior.vrboMatches);
+    }
+    if (r.bookingStatus === "unknown") {
+      r.bookingStatus = prior.bookingStatus as PlatformStatus;
+      r.bookingMatches = parseStoredMatches(prior.bookingMatches);
+    }
+    r.errorMessage = `${r.errorMessage} (kept previous status because the provider failure was inconclusive)`;
+  }
+
   return storage.upsertPhotoListingCheck({
     photoFolder: r.folder,
     airbnbStatus:  r.airbnbStatus,
