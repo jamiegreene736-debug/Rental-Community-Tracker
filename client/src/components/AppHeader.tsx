@@ -1,11 +1,123 @@
 import { Link, useLocation } from "wouter";
+import { useQuery } from "@tanstack/react-query";
 import { CalendarSearch, Home, MessageSquare } from "lucide-react";
+import { apiRequest } from "@/lib/queryClient";
+
+type GuestyConversationSummary = {
+  unread?: boolean;
+  unreadCount?: number;
+  state?: unknown;
+  lastPost?: unknown;
+  lastMessage?: unknown;
+  lastMessageFrom?: unknown;
+  isLastPostFromGuest?: unknown;
+  meta?: {
+    unreadCount?: number;
+    lastMessage?: unknown;
+    lastPost?: unknown;
+  };
+};
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function unwrapConversationList(raw: unknown): GuestyConversationSummary[] {
+  const seen = new Set<unknown>();
+  const hints = ["conversations", "results", "data"];
+
+  const visit = (node: unknown, depth: number): GuestyConversationSummary[] | null => {
+    if (Array.isArray(node)) return node as GuestyConversationSummary[];
+    if (!node || typeof node !== "object" || depth > 3 || seen.has(node)) return null;
+    seen.add(node);
+
+    const obj = node as Record<string, unknown>;
+    for (const hint of hints) {
+      if (Array.isArray(obj[hint])) return obj[hint] as GuestyConversationSummary[];
+    }
+    for (const value of Object.values(obj)) {
+      const found = visit(value, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  return visit(raw, 0) ?? [];
+}
+
+function latestMessageIsFromGuest(conversation: GuestyConversationSummary): boolean | null {
+  const state = objectValue(conversation.state);
+  const meta = objectValue(conversation.meta);
+  const lastMessage = objectValue(
+    conversation.lastMessage ??
+    conversation.lastPost ??
+    meta.lastMessage ??
+    meta.lastPost ??
+    state.lastMessage,
+  );
+
+  const explicit =
+    conversation.isLastPostFromGuest ??
+    state.isLastPostFromGuest ??
+    state.lastMessageFromGuest;
+  if (typeof explicit === "boolean") return explicit;
+
+  const rawAuthor =
+    conversation.lastMessageFrom ??
+    lastMessage.authorType ??
+    lastMessage.authorRole ??
+    lastMessage.senderType ??
+    lastMessage.from;
+  if (typeof rawAuthor !== "string") return null;
+
+  const author = rawAuthor.toLowerCase();
+  if (/\b(guest|nonuser|non-user|traveler)\b/.test(author)) return true;
+  if (/\b(host|owner|user|staff|admin)\b/.test(author)) return false;
+  return null;
+}
+
+function isUnreadConversationThread(conversation: GuestyConversationSummary): boolean {
+  const state = objectValue(conversation.state);
+  const meta = objectValue(conversation.meta);
+  const unreadSignal =
+    (typeof conversation.unreadCount === "number" && conversation.unreadCount > 0) ||
+    conversation.unread === true ||
+    (typeof meta.unreadCount === "number" && meta.unreadCount > 0) ||
+    state.read === false ||
+    state.readByUser === false ||
+    state.readByNonUser === false ||
+    state.status === "UNREAD" ||
+    state.status === "NEW" ||
+    conversation.state === "UNREAD" ||
+    conversation.state === "NEW" ||
+    conversation.state === "UNANSWERED";
+
+  if (!unreadSignal) return false;
+  return latestMessageIsFromGuest(conversation) !== false;
+}
+
+function countUnreadConversationThreads(raw: unknown): number {
+  return unwrapConversationList(raw).filter(isUnreadConversationThread).length;
+}
 
 export default function AppHeader() {
   const [location] = useLocation();
   const isHome = location === "/";
   const isInbox = location.startsWith("/inbox");
   const isOperations = location.startsWith("/bookings");
+  const { data: unreadThreadCount = 0 } = useQuery<number>({
+    queryKey: ["/api/guesty-proxy/communication/conversations", "unread-thread-count"],
+    queryFn: async () => {
+      const response = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=100&fields=");
+      if (!response.ok) return 0;
+      return countUnreadConversationThreads(await response.json());
+    },
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const unreadBadgeLabel = unreadThreadCount > 99 ? "99+" : String(unreadThreadCount);
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-[hsl(var(--brand-blue)/0.12)] bg-[linear-gradient(180deg,hsl(var(--brand-teal)/0.06),hsl(var(--background)))] shadow-sm backdrop-blur">
@@ -48,7 +160,18 @@ export default function AppHeader() {
                 }`}
               data-testid="link-header-inbox"
             >
-              <MessageSquare className="h-4 w-4 text-primary" />
+              <span className="relative inline-flex h-5 w-5 items-center justify-center">
+                <MessageSquare className="h-4 w-4 text-primary" />
+                {unreadThreadCount > 0 && (
+                  <span
+                    className="absolute right-0 top-0 flex h-3 min-w-3 translate-x-1/4 -translate-y-1/4 items-center justify-center rounded-full border border-background bg-red-500 px-[2px] text-[8px] font-bold leading-none text-white shadow-sm"
+                    aria-label={`${unreadThreadCount} unread conversation thread${unreadThreadCount === 1 ? "" : "s"}`}
+                    data-testid="badge-header-inbox-unread"
+                  >
+                    {unreadBadgeLabel}
+                  </span>
+                )}
+              </span>
               <span className="hidden md:inline">Inbox</span>
             </Link>
             <Link
