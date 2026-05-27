@@ -7,7 +7,11 @@ import {
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
 import { acquireSidecarLane, cancelActiveSidecarLane, isSidecarLaneCancellationRequested } from "./sidecar-lane";
-import { fetchMultiChannelBuyInByBR } from "./multichannel-buy-in";
+import { fetchMultiChannelBuyInByBR, inferRegion } from "./multichannel-buy-in";
+import {
+  availabilityAutoBlockAllowed,
+  seasonForWindow,
+} from "./seasonal-availability";
 
 const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; units: { bedrooms: number }[] }> = {
   1: { name: "Poipu Kai Sunset", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
@@ -34,18 +38,11 @@ const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; uni
   34: { name: "Poipu Kai Palms", community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
 };
 
-// Block a window when verified-bookable inventory across channels is
-// below this threshold. Counts include same-unit cross-channel
-// duplicates (we don't run photo-match here for speed), so 3 here
-// is roughly equivalent to ~2 unique physical units. The legacy
-// Airbnb-only threshold was 10 raw listings; multi-channel "verified
-// + priced" counts much smaller numbers, hence the drop.
-//
 // Tuning: this is intentionally loose. Scanner blocks are high-impact
-// calendar writes, so require a near-empty multi-channel result before
-// blacking out a window; leave thin-but-nonzero inventory as available/tight
-// for human review instead of auto-blocking most of the calendar.
-const AVAILABILITY_THRESHOLD = 2;
+// calendar writes, so require a true zero for at least one required bedroom
+// size before blacking out a window. Thin-but-nonzero inventory stays
+// available/review-only and will clear prior scanner-owned Guesty blocks.
+const AVAILABILITY_THRESHOLD = 1;
 
 type CacheEntry = {
   airbnb: number;
@@ -75,6 +72,18 @@ type AvailabilityScanOptions = {
   shouldPause?: () => boolean;
   shouldCancel?: () => boolean;
 };
+
+function legacyBulkAutoBlockAllowed(community: string, checkIn: string, checkOut: string): boolean {
+  const loc = resolveLegacyAvailabilityLocation(community);
+  const region = inferRegion(loc.city, loc.state);
+  const start = new Date(`${checkIn}T12:00:00Z`);
+  const end = new Date(`${checkOut}T12:00:00Z`);
+  const nights = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000));
+  return availabilityAutoBlockAllowed({
+    season: seasonForWindow(region, start, nights),
+    checkIn,
+  });
+}
 
 function formatDate(date: Date): string {
   return date.toISOString().split("T")[0];
@@ -736,6 +745,7 @@ export async function runAvailabilityScan(
         let totalAcrossChannels = 0;
         let hasError = false;
         let belowThreshold = false;
+        const autoBlockAllowed = legacyBulkAutoBlockAllowed(config.community, window.checkIn, window.checkOut);
         let sidecarRanForThisWindow = false;
 
         for (const bedrooms of uniqueBedrooms) {
@@ -767,7 +777,7 @@ export async function runAvailabilityScan(
           }
         }
 
-        const shouldBlock = belowThreshold && !hasError;
+        const shouldBlock = belowThreshold && !hasError && autoBlockAllowed;
         let status: string;
 
         if (hasError && totalAcrossChannels === 0) {
@@ -805,6 +815,7 @@ export async function runAvailabilityScan(
             `${config.community} ${window.checkIn}→${window.checkOut}: ` +
             `airbnb=${totalAirbnb} vrbo=${totalVrbo} booking=${totalBooking} ` +
             `total=${totalAcrossChannels} threshold=${AVAILABILITY_THRESHOLD} ` +
+            `autoBlock=${autoBlockAllowed ? "yes" : "no"} ` +
             `→ ${status}`,
             "scanner",
           );
@@ -911,7 +922,7 @@ export async function runAvailabilityScan(
             endDate: s.checkOut,
             verdict: (s.status === "blocked" ? "blocked" : "available") as "blocked" | "available",
             reason: s.status === "blocked"
-              ? `multi-channel total ${s.totalResults} < threshold ${AVAILABILITY_THRESHOLD}`
+              ? `multi-channel total ${s.totalResults} < threshold ${AVAILABILITY_THRESHOLD} inside auto-block horizon`
               : undefined,
           }));
           try {

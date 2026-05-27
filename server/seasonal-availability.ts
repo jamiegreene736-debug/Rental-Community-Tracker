@@ -478,7 +478,7 @@ function holidayDate(d: Date): boolean {
     || (month === 2 && day >= 14 && day <= 17);
 }
 
-function seasonForWindow(region: RegionKey, start: Date, nights: number): SeasonKey {
+export function seasonForWindow(region: RegionKey, start: Date, nights: number): SeasonKey {
   for (let i = 0; i < nights; i++) {
     const d = new Date(start);
     d.setUTCDate(d.getUTCDate() + i);
