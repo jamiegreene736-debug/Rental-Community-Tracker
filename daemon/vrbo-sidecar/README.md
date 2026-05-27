@@ -179,13 +179,13 @@ stealing focus from Safari, and visible mode does not pass
 ```sh
 SIDECAR_CHROME_VISIBLE=1
 SIDECAR_CHROME_VISIBLE_GRID_ORIGIN=1440,60
-SIDECAR_CHROME_VISIBLE_SIZE=400,420
-SIDECAR_CHROME_VISIBLE_GRID_COLUMNS=4
-SIDECAR_CHROME_VISIBLE_GRID_GAP_X=0
-SIDECAR_CHROME_VISIBLE_GRID_GAP_Y=0
+SIDECAR_CHROME_VISIBLE_SIZE=1280,900
+SIDECAR_CHROME_VISIBLE_GRID_COLUMNS=2
+SIDECAR_CHROME_VISIBLE_GRID_GAP_X=24
+SIDECAR_CHROME_VISIBLE_GRID_GAP_Y=35
 SIDECAR_WARM_ALL_LOCAL_CHROME=1
-# Optional exact per-instance override for matching Rectangle slots:
-# SIDECAR_CHROME_VISIBLE_POSITIONS=1440,60;1840,60;2240,60;2640,60;1440,480;1840,480;2240,480;2640,480
+# Default exact per-instance override: two overlapping 1280x900 piles.
+# SIDECAR_CHROME_VISIBLE_POSITIONS=1440,60;2744,60;1440,60;2744,60;1440,60;2744,60;1440,60;2744,60
 ```
 
 The visible grid should stay at a real desktop size. Several OTA date
@@ -318,8 +318,8 @@ SIDECAR_CAPTCHA_SURFACE_WINDOW=1
 SIDECAR_CAPTCHA_ALLOW_FOCUS=1
 ```
 
-To intentionally bring back a large two-column monitor grid for local
-debugging, override these before running the installer:
+To intentionally spread the large windows into a non-overlapping two-column
+debugging grid, override these before running the installer:
 
 ```sh
 SIDECAR_CHROME_VISIBLE=1
