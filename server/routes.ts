@@ -17423,7 +17423,7 @@ Return ONLY compact JSON with this exact shape:
   // GET /api/admin/vrbo-sidecar/status — diagnostic snapshot of queue.
   app.get("/api/admin/vrbo-sidecar/status", async (_req, res) => {
     const { getStatus } = await import("./vrbo-sidecar-queue");
-    return res.json(getStatus());
+    return res.json({ ...getStatus(), sidecarLane: getSidecarLaneStatus() });
   });
 
   // GET /api/vrbo-sidecar/status — public queue counters for the
@@ -17432,7 +17432,7 @@ Return ONLY compact JSON with this exact shape:
   // Chrome sidecar drains work after the main find-buy-in request returns.
   app.get("/api/vrbo-sidecar/status", async (_req, res) => {
     const { getStatus } = await import("./vrbo-sidecar-queue");
-    return res.json(getStatus());
+    return res.json({ ...getStatus(), sidecarLane: getSidecarLaneStatus() });
   });
 
   app.get("/api/vrbo-sidecar/search-variations", async (req, res) => {
