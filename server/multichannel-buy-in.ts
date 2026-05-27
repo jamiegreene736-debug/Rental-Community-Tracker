@@ -852,6 +852,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // captured at scan start so a later operator Stop cancels the whole
   // scan, even if Start Queue is clicked again.
   sidecarStopGeneration?: number;
+  sidecarConcurrencyMode?: "availability_bulk";
   signal?: AbortSignal;
   onProgress?: (event: MultiChannelProgressEvent) => void;
 }): Promise<MultiChannelBuyInResult> {
@@ -907,6 +908,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     dateLabel,
     listingTitle,
     propertyId: args.propertyId,
+    concurrencyMode: args.sidecarConcurrencyMode,
     detail: `${providerLabel}: scanning ${br}BR unit · ${dateLabel} · ${targetDest}`,
   });
   if (!args.skipSidecar) assertSidecarRunCurrent();

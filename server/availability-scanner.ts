@@ -57,6 +57,11 @@ type CacheEntry = {
   error: boolean;
 };
 type SearchCache = Map<string, CacheEntry>;
+type AvailabilitySidecarConcurrencyMode = "availability_bulk";
+type AvailabilityScanOptions = {
+  sidecarConcurrencyMode?: AvailabilitySidecarConcurrencyMode;
+  windowConcurrency?: number;
+};
 
 function formatDate(date: Date): string {
   return date.toISOString().split("T")[0];
@@ -215,7 +220,8 @@ async function searchCommunityBedroom(
   community: string,
   bedrooms: number,
   checkIn: string,
-  checkOut: string
+  checkOut: string,
+  options: Pick<AvailabilityScanOptions, "sidecarConcurrencyMode"> = {},
 ): Promise<CacheEntry> {
   const cacheKey = `${community}|${bedrooms}|${checkIn}|${checkOut}`;
 
@@ -237,6 +243,7 @@ async function searchCommunityBedroom(
       skipPm: true,
       reuseSharedOtaSearch: true,
       sidecarQueueBudgetMs: 285_000,
+      sidecarConcurrencyMode: options.sidecarConcurrencyMode,
     });
     const counts = scan.channelAvailableCountsByBR[bedrooms] ?? { airbnb: 0, vrbo: 0, booking: 0, total: 0 };
     entry = {
@@ -409,7 +416,10 @@ async function processBulkAvailabilityQueue(queue: BulkAvailabilityQueueStatus) 
       refreshBulkAvailabilityTotals(queue);
 
       try {
-        const runId = await runAvailabilityScan(queue.weeksAhead, item.propertyId);
+        const runId = await runAvailabilityScan(queue.weeksAhead, item.propertyId, {
+          sidecarConcurrencyMode: "availability_bulk",
+          windowConcurrency: 4,
+        });
         item.runId = runId > 0 ? runId : null;
         item.status = runId > 0 ? "success" : "error";
         item.message = runId > 0 ? `Completed as run #${runId}` : "Scan did not start";
@@ -435,7 +445,27 @@ async function processBulkAvailabilityQueue(queue: BulkAvailabilityQueueStatus) 
   }
 }
 
-export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: number): Promise<number> {
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  const limit = Math.max(1, Math.floor(concurrency));
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex++];
+      await worker(item);
+    }
+  });
+  await Promise.all(runners);
+}
+
+export async function runAvailabilityScan(
+  weeksAhead = 52,
+  targetPropertyId?: number,
+  options: AvailabilityScanOptions = {},
+): Promise<number> {
   if (scannerRunning) {
     log("Scanner already running, skipping", "scanner");
     return -1;
@@ -500,15 +530,15 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
     scanAborted = false;
     consecutiveRateLimits = 0;
 
-    for (const window of windows) {
+    const scanWindow = async (window: { checkIn: string; checkOut: string }, clearCacheAfterWindow: boolean) => {
       if (isSidecarLaneCancellationRequested("availability-scan", laneOwnerId)) {
         scanAborted = true;
         log("Scan aborted because the Chrome sidecar lane was cancelled", "scanner");
-        break;
+        return;
       }
       if (scanAborted) {
         log(`Scan aborted due to API quota exhaustion after ${totalScanned} weeks`, "scanner");
-        break;
+        return;
       }
 
       for (const propertyId of propertyIds) {
@@ -536,7 +566,8 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
             config.community,
             bedrooms,
             window.checkIn,
-            window.checkOut
+            window.checkOut,
+            { sidecarConcurrencyMode: options.sidecarConcurrencyMode },
           );
 
           if (result.error) hasError = true;
@@ -613,7 +644,22 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
         }
       }
 
+      if (clearCacheAfterWindow) searchCache.clear();
+    };
+
+    const shouldRunWindowsConcurrently = options.sidecarConcurrencyMode === "availability_bulk" && targetPropertyId;
+    if (shouldRunWindowsConcurrently) {
+      const windowConcurrency = options.windowConcurrency ?? 4;
+      log(`Bulk availability sidecar concurrency enabled: ${windowConcurrency} date windows queued ahead for ${label}`, "scanner");
+      await runWithConcurrency(windows, windowConcurrency, async (window) => {
+        await scanWindow(window, false);
+      });
       searchCache.clear();
+    } else {
+      for (const window of windows) {
+        await scanWindow(window, true);
+        if (scanAborted) break;
+      }
     }
 
     const finalStatus = scanAborted ? "aborted" : "completed";

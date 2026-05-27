@@ -290,6 +290,7 @@ export type SidecarQueueContext = {
   dateLabel?: string;
   listingTitle?: string;
   propertyId?: number;
+  concurrencyMode?: "availability_bulk";
 };
 
 export type SidecarSearchVariationAttempt = {
@@ -529,7 +530,21 @@ const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
   vrbo_photo_scrape: 1,
 };
 
-function opConcurrencyGroup(opType: SidecarOpType): string {
+function isAvailabilityBulkSearch(
+  opType: SidecarOpType,
+  params?: SidecarRequest["params"] | null,
+): boolean {
+  if (opType !== "booking_search" && opType !== "vrbo_search") return false;
+  const queueContext = (params as Partial<SidecarBookingParams & SidecarVrboParams> | undefined)?.queueContext;
+  return queueContext?.concurrencyMode === "availability_bulk";
+}
+
+function opConcurrencyGroup(opType: SidecarOpType, params?: SidecarRequest["params"] | null): string {
+  if (isAvailabilityBulkSearch(opType, params)) {
+    return opType === "booking_search"
+      ? "availability_bulk_booking_search"
+      : "availability_bulk_vrbo_search";
+  }
   if (opType === "booking_search") return "booking_search";
   if (opType === "vrbo_search" || opType === "vrbo_photo_scrape") return "vrbo_search";
   if (opType === "airbnb_search") return "airbnb_search";
@@ -1078,8 +1093,15 @@ function providerCooldownSearchResult(provider: SidecarProviderKey): {
   };
 }
 
-function opConcurrencyLimit(opType: SidecarOpType): number {
-  const group = opConcurrencyGroup(opType);
+function opConcurrencyLimit(opType: SidecarOpType, params?: SidecarRequest["params"] | null): number {
+  const group = opConcurrencyGroup(opType, params);
+  if (isAvailabilityBulkSearch(opType, params)) {
+    const envName = opType === "booking_search"
+      ? "SIDECAR_AVAILABILITY_BOOKING_CONCURRENCY"
+      : "SIDECAR_AVAILABILITY_VRBO_CONCURRENCY";
+    const configured = numberFromEnv(envName, 4);
+    return Math.max(1, Math.floor(configured));
+  }
   const groupEnvName = group === "ota_provider" ? "SIDECAR_OTA_CONCURRENCY" : "";
   const envName = `SIDECAR_${opType.toUpperCase()}_CONCURRENCY`;
   const fallback = DEFAULT_OP_CONCURRENCY[opType] ?? Number.POSITIVE_INFINITY;
@@ -1090,11 +1112,11 @@ function opConcurrencyLimit(opType: SidecarOpType): number {
   return Math.max(1, Math.floor(configured));
 }
 
-function activeCountForOp(opType: SidecarOpType): number {
-  const group = opConcurrencyGroup(opType);
+function activeCountForOp(opType: SidecarOpType, params?: SidecarRequest["params"] | null): number {
+  const group = opConcurrencyGroup(opType, params);
   let count = 0;
   for (const r of queue.values()) {
-    if (r.status === "in_progress" && opConcurrencyGroup(r.opType) === group) count++;
+    if (r.status === "in_progress" && opConcurrencyGroup(r.opType, r.params) === group) count++;
   }
   return count;
 }
@@ -1115,11 +1137,11 @@ function localWorkerIsPreferred(now = nowMs()): boolean {
   );
 }
 
-function canClaimOp(opType: SidecarOpType, runtime?: SidecarWorkerRuntime | null): boolean {
-  if (runtime?.source === "server" && isOtaBrowserOp(opType) && localWorkerIsPreferred()) {
+function canClaimOp(request: SidecarRequest, runtime?: SidecarWorkerRuntime | null): boolean {
+  if (runtime?.source === "server" && isOtaBrowserOp(request.opType) && localWorkerIsPreferred()) {
     return false;
   }
-  return activeCountForOp(opType) < opConcurrencyLimit(opType);
+  return activeCountForOp(request.opType, request.params) < opConcurrencyLimit(request.opType, request.params);
 }
 
 function sidecarRunCancelledError(reason = "sidecar run cancelled by operator stop"): Error {
@@ -1608,7 +1630,7 @@ export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarReq
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
     if (r.status !== "pending") continue;
-    if (!canClaimOp(r.opType, normalizedRuntime)) continue;
+    if (!canClaimOp(r, normalizedRuntime)) continue;
     if (!oldest || r.createdAt < oldest.createdAt) oldest = r;
   }
   if (!oldest) return null;
