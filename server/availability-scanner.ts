@@ -293,6 +293,40 @@ let scannerRunning = false;
 let currentScanPropertyId: number | null = null;
 let scanAborted = false;
 
+type BulkQueueItemStatus = "pending" | "running" | "success" | "error";
+
+export type BulkAvailabilityQueueItem = {
+  propertyId: number;
+  name: string;
+  community: string;
+  bedrooms: number[];
+  totalBedrooms: number;
+  status: BulkQueueItemStatus;
+  runId: number | null;
+  message: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+export type BulkAvailabilityQueueStatus = {
+  id: string;
+  status: "running" | "completed" | "failed";
+  weeksAhead: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  totals: {
+    pending: number;
+    running: number;
+    success: number;
+    error: number;
+  };
+  items: BulkAvailabilityQueueItem[];
+};
+
+let bulkAvailabilityQueue: BulkAvailabilityQueueStatus | null = null;
+let bulkAvailabilityQueueProcessing = false;
+
 export function isScannerRunning(): boolean {
   return scannerRunning;
 }
@@ -308,13 +342,121 @@ export function getScannableProperties(): { id: number; name: string; community:
       id: Number(id),
       name: config.name,
       community: config.community,
-      bedrooms: [...new Set(config.units.map(u => u.bedrooms))].sort(),
+      bedrooms: Array.from(new Set(config.units.map(u => u.bedrooms))).sort(),
       totalBedrooms: config.units.reduce((sum, u) => sum + u.bedrooms, 0),
     }));
 }
 
 export function getPropertyName(propertyId: number): string {
   return PROPERTY_UNIT_NEEDS[propertyId]?.name || `Property #${propertyId}`;
+}
+
+function refreshBulkAvailabilityTotals(queue: BulkAvailabilityQueueStatus) {
+  queue.totals = {
+    pending: queue.items.filter(item => item.status === "pending").length,
+    running: queue.items.filter(item => item.status === "running").length,
+    success: queue.items.filter(item => item.status === "success").length,
+    error: queue.items.filter(item => item.status === "error").length,
+  };
+}
+
+export function getBulkAvailabilityQueueStatus(): BulkAvailabilityQueueStatus | null {
+  if (!bulkAvailabilityQueue) return null;
+  refreshBulkAvailabilityTotals(bulkAvailabilityQueue);
+  return bulkAvailabilityQueue;
+}
+
+export function isBulkAvailabilityQueueRunning(): boolean {
+  return bulkAvailabilityQueueProcessing;
+}
+
+export function startBulkAvailabilityQueue(propertyIds?: number[], weeksAhead = 52): BulkAvailabilityQueueStatus {
+  if (bulkAvailabilityQueueProcessing) {
+    throw new Error("A bulk availability queue is already running");
+  }
+  if (scannerRunning) {
+    throw new Error("An availability scan is already running");
+  }
+
+  const scannableProperties = getScannableProperties();
+  const propertyMap = new Map(scannableProperties.map(property => [property.id, property]));
+  const targetIds = propertyIds?.length ? propertyIds : scannableProperties.map(property => property.id);
+  const uniqueTargetIds = Array.from(new Set(targetIds));
+  const invalidIds = uniqueTargetIds.filter(propertyId => !propertyMap.has(propertyId));
+
+  if (invalidIds.length > 0) {
+    throw new Error(`Invalid scannable property id(s): ${invalidIds.join(", ")}`);
+  }
+  if (uniqueTargetIds.length === 0) {
+    throw new Error("No scannable properties were selected");
+  }
+
+  const now = new Date().toISOString();
+  bulkAvailabilityQueue = {
+    id: `availability-bulk-${Date.now()}`,
+    status: "running",
+    weeksAhead,
+    createdAt: now,
+    startedAt: null,
+    completedAt: null,
+    totals: { pending: uniqueTargetIds.length, running: 0, success: 0, error: 0 },
+    items: uniqueTargetIds.map(propertyId => {
+      const property = propertyMap.get(propertyId)!;
+      return {
+        propertyId,
+        name: property.name,
+        community: property.community,
+        bedrooms: property.bedrooms,
+        totalBedrooms: property.totalBedrooms,
+        status: "pending",
+        runId: null,
+        message: null,
+        startedAt: null,
+        completedAt: null,
+      };
+    }),
+  };
+
+  void processBulkAvailabilityQueue(bulkAvailabilityQueue);
+  return bulkAvailabilityQueue;
+}
+
+async function processBulkAvailabilityQueue(queue: BulkAvailabilityQueueStatus) {
+  bulkAvailabilityQueueProcessing = true;
+  queue.startedAt = new Date().toISOString();
+
+  try {
+    for (const item of queue.items) {
+      item.status = "running";
+      item.startedAt = new Date().toISOString();
+      item.message = "Scanning availability";
+      refreshBulkAvailabilityTotals(queue);
+
+      try {
+        const runId = await runAvailabilityScan(queue.weeksAhead, item.propertyId);
+        item.runId = runId > 0 ? runId : null;
+        item.status = runId > 0 ? "success" : "error";
+        item.message = runId > 0 ? `Completed as run #${runId}` : "Scan did not start";
+      } catch (err: any) {
+        item.status = "error";
+        item.message = err?.message ?? String(err);
+        log(`Bulk availability scan failed for property ${item.propertyId}: ${item.message}`, "scanner");
+      } finally {
+        item.completedAt = new Date().toISOString();
+        refreshBulkAvailabilityTotals(queue);
+      }
+    }
+
+    queue.status = queue.totals.error > 0 ? "failed" : "completed";
+  } finally {
+    queue.completedAt = new Date().toISOString();
+    refreshBulkAvailabilityTotals(queue);
+    bulkAvailabilityQueueProcessing = false;
+    log(
+      `Bulk availability queue ${queue.status}: ${queue.totals.success} completed, ${queue.totals.error} failed`,
+      "scanner",
+    );
+  }
 }
 
 export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: number): Promise<number> {
@@ -372,7 +514,7 @@ export async function runAvailabilityScan(weeksAhead = 52, targetPropertyId?: nu
 
       for (const propertyId of propertyIds) {
         const config = PROPERTY_UNIT_NEEDS[propertyId];
-        const uniqueBedrooms = [...new Set(config.units.map(u => u.bedrooms))];
+        const uniqueBedrooms = Array.from(new Set(config.units.map(u => u.bedrooms)));
 
         let totalAirbnb = 0;
         let totalVrbo = 0;

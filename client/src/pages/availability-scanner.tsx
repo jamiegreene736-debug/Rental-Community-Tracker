@@ -32,6 +32,7 @@ import {
   Shield,
   BarChart3,
   RefreshCw,
+  ListChecks,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -49,6 +50,35 @@ type ScannableProperty = {
   community: string;
   bedrooms: number[];
   totalBedrooms: number;
+};
+
+type BulkAvailabilityQueueItem = {
+  propertyId: number;
+  name: string;
+  community: string;
+  bedrooms: number[];
+  totalBedrooms: number;
+  status: "pending" | "running" | "success" | "error";
+  runId: number | null;
+  message: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+type BulkAvailabilityQueue = {
+  id: string;
+  status: "running" | "completed" | "failed";
+  weeksAhead: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  totals: {
+    pending: number;
+    running: number;
+    success: number;
+    error: number;
+  };
+  items: BulkAvailabilityQueueItem[];
 };
 
 function formatDateTime(dateStr: string | Date | null): string {
@@ -91,6 +121,11 @@ export default function AvailabilityScanner() {
 
   const statusQuery = useQuery<ScannerStatus>({
     queryKey: ["/api/scanner/status"],
+    refetchInterval: 5000,
+  });
+
+  const bulkQueueQuery = useQuery<{ queue: BulkAvailabilityQueue | null }>({
+    queryKey: ["/api/scanner/bulk-status"],
     refetchInterval: 5000,
   });
 
@@ -142,12 +177,33 @@ export default function AvailabilityScanner() {
     },
   });
 
+  const triggerBulkScan = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/scanner/bulk-run", { weeksAhead: 52 });
+      return res.json();
+    },
+    onSuccess: (queue: BulkAvailabilityQueue) => {
+      toast({
+        title: "Bulk availability queue started",
+        description: `${queue.items.length} listings are queued for sequential availability scans.`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/scanner/bulk-status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scanner/status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scanner/runs"] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Could not start bulk queue", description: err.message, variant: "destructive" });
+    },
+  });
+
   const status = statusQuery.data;
+  const bulkQueue = bulkQueueQuery.data?.queue || null;
+  const bulkQueueRunning = bulkQueue?.status === "running";
   const runs = runsQuery.data || [];
   const results = resultsQuery.data || [];
   const properties = propertiesQuery.data || [];
 
-  const communities = [...new Set(results.map(r => r.community))].sort();
+  const communities = Array.from(new Set(results.map(r => r.community))).sort();
   const blockedResults = results.filter(r => r.status === "blocked");
   const availableResults = results.filter(r => r.status === "available");
   const errorResults = results.filter(r => r.status === "error");
@@ -155,6 +211,19 @@ export default function AvailabilityScanner() {
   const currentScanProperty = status?.currentPropertyId
     ? properties.find(p => p.id === status.currentPropertyId)
     : null;
+
+  const queueStatusBadge = (item: BulkAvailabilityQueueItem) => {
+    if (item.status === "running") {
+      return <Badge variant="secondary"><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Running</Badge>;
+    }
+    if (item.status === "success") {
+      return <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Complete</Badge>;
+    }
+    if (item.status === "error") {
+      return <Badge variant="destructive">Error</Badge>;
+    }
+    return <Badge variant="outline">Pending</Badge>;
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -196,13 +265,25 @@ export default function AvailabilityScanner() {
             </div>
             <Button
               onClick={() => triggerScan.mutate()}
-              disabled={triggerScan.isPending || status?.running || !selectedPropertyId}
+              disabled={triggerScan.isPending || status?.running || bulkQueueRunning || !selectedPropertyId}
               data-testid="button-run-scan"
             >
               {status?.running ? (
                 <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Scanning...</>
               ) : (
                 <><Play className="h-4 w-4 mr-2" /> Scan This Listing</>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => triggerBulkScan.mutate()}
+              disabled={triggerBulkScan.isPending || status?.running || bulkQueueRunning || properties.length === 0}
+              data-testid="button-run-bulk-availability-scan"
+            >
+              {triggerBulkScan.isPending || bulkQueueRunning ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Queue Running</>
+              ) : (
+                <><ListChecks className="h-4 w-4 mr-2" /> Bulk Scan All</>
               )}
             </Button>
           </div>
@@ -213,7 +294,76 @@ export default function AvailabilityScanner() {
           )}
         </Card>
 
-        {status?.running && (
+        {bulkQueue && (
+          <Card className="p-4 mb-6" data-testid="card-bulk-availability-queue">
+            <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <ListChecks className="h-5 w-5 text-muted-foreground" />
+                  <h2 className="text-lg font-semibold">Bulk Availability Queue</h2>
+                  {bulkQueue.status === "running" ? (
+                    <Badge variant="secondary"><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Running</Badge>
+                  ) : bulkQueue.status === "completed" ? (
+                    <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Completed</Badge>
+                  ) : (
+                    <Badge variant="destructive">Completed with errors</Badge>
+                  )}
+                </div>
+                <p className="text-sm text-muted-foreground mt-1">
+                  {bulkQueue.totals.success} complete, {bulkQueue.totals.running} running, {bulkQueue.totals.pending} pending, {bulkQueue.totals.error} errors.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  queryClient.invalidateQueries({ queryKey: ["/api/scanner/bulk-status"] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/scanner/status"] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/scanner/runs"] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/scanner/results"] });
+                }}
+                data-testid="button-refresh-bulk-queue"
+              >
+                <RefreshCw className="h-4 w-4 mr-1" /> Refresh
+              </Button>
+            </div>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Listing</TableHead>
+                    <TableHead>Bedrooms</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Run</TableHead>
+                    <TableHead>Updated</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {bulkQueue.items.map(item => (
+                    <TableRow key={item.propertyId} data-testid={`row-bulk-availability-${item.propertyId}`}>
+                      <TableCell>
+                        <div className="font-medium text-sm">{item.name}</div>
+                        <div className="text-xs text-muted-foreground">{item.community}</div>
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {item.totalBedrooms} total ({item.bedrooms.map(b => `${b}BR`).join(" + ")})
+                      </TableCell>
+                      <TableCell>{queueStatusBadge(item)}</TableCell>
+                      <TableCell className="text-sm">
+                        {item.runId ? `#${item.runId}` : item.message || "—"}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatDateTime(item.completedAt || item.startedAt)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </Card>
+        )}
+
+        {(status?.running || bulkQueueRunning) && (
           <Card className="p-4 mb-6 border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30" data-testid="card-scan-progress">
             <div className="flex items-center gap-3">
               <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
@@ -222,9 +372,9 @@ export default function AvailabilityScanner() {
                   Scan in progress{currentScanProperty ? `: ${currentScanProperty.community} ${currentScanProperty.totalBedrooms}BR` : ""}...
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {status.latestRun?.totalWeeksScanned || 0} periods scanned so far.
-                  {(status.latestRun?.totalBlocked || 0) > 0 && ` ${status.latestRun!.totalBlocked} blocked.`}
-                  {(status.latestRun?.totalAvailable || 0) > 0 && ` ${status.latestRun!.totalAvailable} available.`}
+                  {status?.latestRun?.totalWeeksScanned || 0} periods scanned so far.
+                  {(status?.latestRun?.totalBlocked || 0) > 0 && ` ${status?.latestRun?.totalBlocked} blocked.`}
+                  {(status?.latestRun?.totalAvailable || 0) > 0 && ` ${status?.latestRun?.totalAvailable} available.`}
                 </p>
               </div>
             </div>

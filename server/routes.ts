@@ -49,7 +49,16 @@ import { consultGrokAboutCitywideCandidates } from "./grok-citywide-candidate-co
 import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
 import { probeOutscraperVrbo } from "./outscraper-probe";
 import { discoverPmDomains } from "./pm-discovery";
-import { runAvailabilityScan, isScannerRunning, getScannableProperties, getCurrentScanPropertyId, getPropertyName } from "./availability-scanner";
+import {
+  runAvailabilityScan,
+  isScannerRunning,
+  getScannableProperties,
+  getCurrentScanPropertyId,
+  getPropertyName,
+  getBulkAvailabilityQueueStatus,
+  isBulkAvailabilityQueueRunning,
+  startBulkAvailabilityQueue,
+} from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import {
@@ -20037,7 +20046,7 @@ Return ONLY compact JSON with this exact shape:
   });
 
   app.post("/api/scanner/run", async (req, res) => {
-    if (isScannerRunning()) {
+    if (isScannerRunning() || isBulkAvailabilityQueueRunning()) {
       return res.status(409).json({ error: "A scan is already running" });
     }
     let propertyId: number | undefined;
@@ -20057,6 +20066,26 @@ Return ONLY compact JSON with this exact shape:
     });
     const label = propertyId ? getPropertyName(propertyId) : "all properties";
     res.json({ message: `Scan started for ${label}`, weeksAhead, propertyId });
+  });
+
+  app.post("/api/scanner/bulk-run", async (req, res) => {
+    try {
+      const rawPropertyIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : undefined;
+      const propertyIds = rawPropertyIds
+        ?.map((value: unknown) => Number(value))
+        .filter((value: number) => Number.isInteger(value));
+      const weeksAhead = Math.min(Math.max(Number(req.body?.weeksAhead) || 52, 4), 104);
+      const queue = startBulkAvailabilityQueue(propertyIds, weeksAhead);
+      res.json(queue);
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      const status = message.includes("already running") ? 409 : 400;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.get("/api/scanner/bulk-status", async (_req, res) => {
+    res.json({ queue: getBulkAvailabilityQueueStatus() });
   });
 
   app.get("/api/scanner/status", async (_req, res) => {
