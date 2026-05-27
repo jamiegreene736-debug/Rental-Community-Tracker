@@ -651,19 +651,26 @@ export async function listScanableFolders(): Promise<string[]> {
     if (draft) set.add(`draft-${draft[1]}-unit-${draft[2]}`);
   }
 
-  // Imported single-listing drafts can have a valid local photo folder
-  // without any photo-label rows and without a unit-swap row. Santa
-  // Maria hit exactly this path after it was linked to an existing
-  // Guesty listing whose pictures[] was empty: the photos existed on
-  // disk, but the normal scan universe never discovered the folder.
+  // Published drafts can have valid local photo folders without any
+  // photo-label rows and without a unit-swap row. Santa Maria hit this
+  // path as a single listing; Caribe Cove hit the same shape as a
+  // published combo draft with draft-1-unit-a / draft-1-unit-b photos.
+  // Seed these folders from drafts so the scheduler and dashboard use
+  // the same scan universe.
   try {
     const drafts = await storage.getCommunityDrafts();
     for (const draft of drafts) {
-      if ((draft as any)?.singleListing !== true) continue;
+      if ((draft as any)?.singleListing !== true && (draft as any)?.status !== "published") continue;
       const folder = typeof (draft as any)?.unit1PhotoFolder === "string" && (draft as any).unit1PhotoFolder.trim()
         ? (draft as any).unit1PhotoFolder.trim()
         : `draft-${draft.id}-unit-a`;
       if (isScannableFolder(folder)) set.add(folder);
+      if ((draft as any)?.singleListing !== true) {
+        const unit2Folder = typeof (draft as any)?.unit2PhotoFolder === "string" && (draft as any).unit2PhotoFolder.trim()
+          ? (draft as any).unit2PhotoFolder.trim()
+          : `draft-${draft.id}-unit-b`;
+        if (isScannableFolder(unit2Folder)) set.add(unit2Folder);
+      }
     }
   } catch (e: any) {
     console.error(`[photo-listing-scanner] failed to enumerate imported draft folders: ${e?.message ?? e}`);
