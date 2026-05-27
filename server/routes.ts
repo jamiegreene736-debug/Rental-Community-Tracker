@@ -101,6 +101,7 @@ import {
   BUY_IN_MARKET_LOCATIONS,
   BUY_IN_MARKET_PLATFORM_SEARCH_TERMS,
   BUY_IN_MARKET_SEARCH_LOCATIONS,
+  SIMILAR_BUY_IN_MARKETS,
   resolveBuyInMarket,
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
@@ -263,6 +264,15 @@ function publicPhotoBaseUrl(req: any): string {
     return withProtocol.replace(/\/+$/, "");
   }
   return agreementBaseUrl(req);
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 type PricingRefreshLock = {
@@ -6235,6 +6245,224 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/alternatives/:token", async (req, res) => {
+    try {
+      const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+      if (!token) return res.status(404).send("Not found");
+      const file = path.join(process.cwd(), "tmp", "booking-alternatives", `${token}.json`);
+      const raw = await fs.promises.readFile(file, "utf8").catch(() => null);
+      if (!raw) return res.status(404).send("Alternative page not found");
+      const payload = JSON.parse(raw);
+      if (payload.expiresAt && Date.parse(payload.expiresAt) < Date.now()) {
+        return res.status(410).send("This alternative page has expired.");
+      }
+      const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
+      const photoBlocks = alternatives.map((item: any, index: number) => {
+        const photos = [item.image, ...(Array.isArray(item.communityPhotos) ? item.communityPhotos : [])]
+          .filter(Boolean)
+          .slice(0, 5);
+        return `
+          <section class="option">
+            <div>
+              <p class="eyebrow">Option ${index + 1}</p>
+              <h2>${escapeHtml(item.title || item.community || "Alternative stay")}</h2>
+              <p>${escapeHtml(item.community || "")}${item.totalPrice ? ` · ${escapeHtml(`Estimated ${item.totalPrice}`)}` : ""}</p>
+              ${item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
+            </div>
+            <div class="photos">
+              ${photos.map((url: string) => `<img src="${escapeHtml(url)}" alt="${escapeHtml(item.title || item.community || "Alternative")}" loading="lazy" />`).join("")}
+            </div>
+          </section>`;
+      }).join("");
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.send(`<!doctype html>
+        <html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Alternative Stay Options</title>
+        <style>
+          body{font-family:Inter,Arial,sans-serif;margin:0;background:#f7fafc;color:#172033}
+          header{padding:32px 20px;background:#0f766e;color:white}
+          main{max-width:980px;margin:0 auto;padding:24px 16px 48px}
+          .option{background:white;border:1px solid #dbe4ea;border-radius:10px;padding:18px;margin:0 0 18px;box-shadow:0 8px 20px rgba(15,23,42,.06)}
+          .eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;margin:0 0 4px}
+          h1,h2{margin:.2rem 0}.photos{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:14px}
+          img{width:100%;height:150px;object-fit:cover;border-radius:8px;background:#eef2f7}
+          a{color:#0f766e;font-weight:700}
+        </style></head><body>
+        <header><h1>Alternative stay options</h1><p>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(payload.checkIn || "")} to ${escapeHtml(payload.checkOut || "")}</p></header>
+        <main>
+          <p>We prepared these nearby options so you can review a comparable stay in the same general area.</p>
+          ${photoBlocks || "<p>No alternative options were attached to this page yet.</p>"}
+        </main></body></html>`);
+    } catch (err: any) {
+      return res.status(500).send(`Failed to render alternative page: ${escapeHtml(err?.message ?? err)}`);
+    }
+  });
+
+  app.post("/api/booking-alternatives", async (req, res) => {
+    try {
+      const alternatives = Array.isArray(req.body?.alternatives) ? req.body.alternatives.slice(0, 6) : [];
+      if (alternatives.length === 0) return res.status(400).json({ error: "alternatives array required" });
+      const token = randomBytes(12).toString("hex");
+      const dir = path.join(process.cwd(), "tmp", "booking-alternatives");
+      await fs.promises.mkdir(dir, { recursive: true });
+      const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+      const publicBase = publicPhotoBaseUrl(req);
+      const communityPhotosFor = async (community: string): Promise<string[]> => {
+        const match = Object.entries(COMMUNITY_FOLDER_TO_NAME)
+          .find(([, name]) => name.toLowerCase() === community.toLowerCase() || community.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(community.toLowerCase()));
+        if (!match) return [];
+        const folder = match[0];
+        const dirPath = path.join(process.cwd(), "client", "public", "photos", folder);
+        const files = await fs.promises.readdir(dirPath).catch(() => []);
+        return files
+          .filter((file) => /\.(?:jpe?g|png|webp)$/i.test(file))
+          .slice(0, 4)
+          .map((file) => `${publicBase}/photos/${folder}/${encodeURIComponent(file)}`);
+      };
+      const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any) => ({
+        title: String(item?.title ?? item?.community ?? "Alternative stay").slice(0, 160),
+        community: String(item?.community ?? "").slice(0, 80),
+        url: String(item?.url ?? "").slice(0, 800),
+        image: String(item?.image ?? "").slice(0, 800),
+        totalPrice: item?.totalPrice ? `$${Math.round(Number(item.totalPrice)).toLocaleString()}` : null,
+        sourceLabel: String(item?.sourceLabel ?? "").slice(0, 80),
+        communityPhotos: await communityPhotosFor(String(item?.community ?? "")),
+      })));
+      const payload = {
+        reservationId: String(req.body?.reservationId ?? ""),
+        guestName: String(req.body?.guestName ?? "Guest"),
+        checkIn: String(req.body?.checkIn ?? ""),
+        checkOut: String(req.body?.checkOut ?? ""),
+        alternatives: hydratedAlternatives,
+        createdAt: new Date().toISOString(),
+        expiresAt,
+      };
+      await fs.promises.writeFile(path.join(dir, `${token}.json`), JSON.stringify(payload, null, 2));
+      return res.json({ url: `${agreementBaseUrl(req)}/alternatives/${token}`, expiresAt, alternatives: hydratedAlternatives });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to create alternative page", message: err?.message ?? String(err) });
+    }
+  });
+
+  app.post("/api/operations/alternative-buy-in-scout", async (req, res) => {
+    try {
+      const apiKey = process.env.SEARCHAPI_API_KEY;
+      if (!apiKey) return res.status(503).json({ error: "SEARCHAPI_API_KEY not configured" });
+      const propertyId = parseInt(String(req.body?.propertyId ?? ""), 10);
+      const bedrooms = parseInt(String(req.body?.bedrooms ?? ""), 10);
+      const checkIn = String(req.body?.checkIn ?? "");
+      const checkOut = String(req.body?.checkOut ?? "");
+      const requestedCommunity = String(req.body?.community ?? "").trim();
+      if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "propertyId required" });
+      if (!Number.isFinite(bedrooms) || bedrooms <= 0) return res.status(400).json({ error: "bedrooms required" });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+      }
+      const baseCommunity = requestedCommunity || PROPERTY_UNIT_NEEDS[propertyId]?.community || "Poipu Kai";
+      const similar = (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
+        .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
+        .slice(0, 5);
+      const minAirbnbResults = Math.max(2, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "4"), 10) || 4));
+      const results = await Promise.all(similar.map(async (community) => {
+        const loc = BUY_IN_MARKET_LOCATIONS[community];
+        const terms = BUY_IN_MARKET_PLATFORM_SEARCH_TERMS[community] ?? {};
+        const q = terms.airbnb ?? loc?.searchName ?? searchLocationForBuyInMarket(community) ?? community;
+        const params: Record<string, string> = {
+          engine: "airbnb",
+          q,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults: "2",
+          bedrooms: String(bedrooms),
+          type_of_place: "entire_home",
+          currency: "USD",
+          api_key: apiKey,
+        };
+        if (loc) {
+          params.lat = String(loc.lat);
+          params.lng = String(loc.lng);
+        }
+        const startedAt = Date.now();
+        try {
+          const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
+          if (!response.ok) {
+            return { community, searchTerm: q, status: "error", count: 0, raw: 0, recommended: false, reason: `SearchAPI HTTP ${response.status}`, durationMs: Date.now() - startedAt, samples: [] };
+          }
+          const data = await response.json() as any;
+          const rows = Array.isArray(data?.properties) ? data.properties : [];
+          const samples = rows.slice(0, 5).map((p: any) => ({
+            title: String(p?.name ?? p?.title ?? `${community} Airbnb`).slice(0, 140),
+            url: String(p?.link ?? p?.url ?? (p?.id ? `https://www.airbnb.com/rooms/${p.id}` : "")),
+            image: String(p?.images?.[0] ?? p?.thumbnail ?? p?.picture_url ?? ""),
+            totalPrice: Number(p?.price?.total?.extracted_value ?? p?.total_price?.extracted_value ?? p?.price?.extracted_value ?? 0) || null,
+            sourceLabel: "Airbnb scout",
+          }));
+          return {
+            community,
+            searchTerm: q,
+            status: "ok",
+            count: rows.length,
+            raw: rows.length,
+            recommended: rows.length >= minAirbnbResults,
+            reason: rows.length >= minAirbnbResults
+              ? `${rows.length} Airbnb result(s) visible; full sidecar search recommended.`
+              : `${rows.length} Airbnb result(s), below ${minAirbnbResults} threshold.`,
+            durationMs: Date.now() - startedAt,
+            samples,
+          };
+        } catch (err: any) {
+          return { community, searchTerm: q, status: "error", count: 0, raw: 0, recommended: false, reason: err?.message ?? String(err), durationMs: Date.now() - startedAt, samples: [] };
+        }
+      }));
+      results.sort((a, b) => Number(b.recommended) - Number(a.recommended) || b.count - a.count);
+      return res.json({
+        propertyId,
+        baseCommunity,
+        bedrooms,
+        checkIn,
+        checkOut,
+        threshold: minAirbnbResults,
+        results,
+        recommended: results.filter((r) => r.recommended),
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to scout alternative communities", message: err?.message ?? String(err) });
+    }
+  });
+
+  app.post("/api/bookings/:reservationId/alternative-message-draft", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      const guestName = String(req.body?.guestName ?? "there").trim() || "there";
+      const checkIn = String(req.body?.checkIn ?? "");
+      const checkOut = String(req.body?.checkOut ?? "");
+      const alternativeUrl = String(req.body?.alternativeUrl ?? "");
+      const alternatives = Array.isArray(req.body?.alternatives) ? req.body.alternatives : [];
+      const first = alternatives[0] ?? {};
+      const community = String(first.community ?? "a nearby community");
+      const title = String(first.title ?? "a comparable nearby option");
+      const priceLine = first.totalPrice ? ` The currently visible buy-in estimate is ${first.totalPrice}, but we will confirm the final details before making any change.` : "";
+      const body = [
+        `Hi ${guestName},`,
+        "",
+        `I am very sorry, but we are running into an availability issue with the original unit setup for your ${checkIn} to ${checkOut} stay. Rather than leave you waiting, we checked comparable nearby options and found ${title} in ${community} as a possible alternative.${priceLine}`,
+        "",
+        alternativeUrl
+          ? `You can review the photos and details here: ${alternativeUrl}`
+          : "We can send over photos and details for you to review.",
+        "",
+        "Would you be open to this alternative if we can confirm it for your dates? We will not make any change to your reservation without your approval.",
+        "",
+        "Mahalo,",
+        "Vacation Rental Expertz",
+      ].join("\n");
+      return res.json({ reservationId, subject: "Alternative stay option for your reservation", body });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to draft alternative message", message: err?.message ?? String(err) });
+    }
+  });
+
   app.get("/api/bookings/:reservationId/arrival-details", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
@@ -8409,10 +8637,10 @@ export async function registerRoutes(
         }
       }
     }
-    if (!config) {
-      if (!resolvedGuestyListingId) {
-        resolvedGuestyListingId = await storage.getGuestyListingId(propertyId).catch(() => null);
-      }
+	    if (!config) {
+	      if (!resolvedGuestyListingId) {
+	        resolvedGuestyListingId = await storage.getGuestyListingId(propertyId).catch(() => null);
+	      }
       if (resolvedGuestyListingId) {
         try {
           const fields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street");
@@ -8432,11 +8660,14 @@ export async function registerRoutes(
         return res.status(404).json({
           error: "Property not in config and no supported community could be inferred from the Guesty listing",
         });
-      }
-      config = { community: inferredCommunity, units: [{ bedrooms }] };
-    }
+	      }
+	      config = { community: inferredCommunity, units: [{ bedrooms }] };
+	    }
+	    if (requestedCommunity && BUY_IN_MARKET_SEARCH_LOCATIONS[requestedCommunity]) {
+	      config = { ...config, community: requestedCommunity };
+	    }
 
-    // Result-cache fast path. Honors a `?nocache=1` query for the
+	    // Result-cache fast path. Honors a `?nocache=1` query for the
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
     // 2026-05-22 buy-in methodology: Airbnb, VRBO, and Booking.com

@@ -25,6 +25,7 @@ assert.equal(isAgentAllowedPath(req("POST", "/api/guesty-proxy/communication/con
 assert.equal(isAgentAllowedPath(req("POST", "/api/inbox/sms/conversations/abc/send")), true);
 assert.equal(isAgentAllowedPath(req("POST", "/api/inbox/calls/123/acknowledge")), true);
 assert.equal(isAgentAllowedPath(req("GET", "/api/bookings/res123/arrival-details")), true);
+assert.equal(isAgentAllowedPath(req("GET", "/alternatives/abc123")), true);
 console.log("  ✓ allows inbox, call, message, and arrival-detail routes");
 
 assert.equal(isAgentAllowedPath(req("GET", "/api/property/market-rates")), false);

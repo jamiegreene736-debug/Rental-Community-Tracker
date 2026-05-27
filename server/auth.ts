@@ -40,6 +40,9 @@
 //     alias exists only for older/shared guest links that included
 //     "admin" in the path; it does not unlock the admin portal. Admin
 //     creation routes stay protected under /api/bookings/*/rental-agreement.
+//   - /alternatives/* — tokenized guest-facing alternative-stay photo pages.
+//     Creation/drafting APIs stay protected; only the random-token rendered
+//     page is public so it can be sent to a guest.
 //   - /api/buy-in-emails/inbound — server-to-server email webhook only
 //     when BUY_IN_EMAIL_WEBHOOK_SECRET matches. This records PM/vendor
 //     replies from alias email threads without giving guests/vendors the
@@ -74,6 +77,7 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/admin/vrbo-sidecar/",
   "/api/quo/webhooks/",
   "/agreement/",
+  "/alternatives/",
   "/admin/agreement/",
   "/api/rental-agreements/",
 ];

@@ -291,6 +291,46 @@ type BuyInCancellationAdvice = {
   pricedCount: number;
 };
 
+type AlternativeScoutSample = {
+  title: string;
+  url: string;
+  image?: string;
+  totalPrice?: number | null;
+  sourceLabel?: string;
+};
+
+type AlternativeScoutResult = {
+  community: string;
+  searchTerm: string;
+  status: "ok" | "error" | string;
+  count: number;
+  raw: number;
+  recommended: boolean;
+  reason: string;
+  durationMs?: number;
+  samples: AlternativeScoutSample[];
+};
+
+type AlternativeScoutResponse = {
+  propertyId: number;
+  baseCommunity: string;
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  threshold: number;
+  results: AlternativeScoutResult[];
+  recommended: AlternativeScoutResult[];
+  generatedAt: string;
+};
+
+type AlternativeWorkflowState = {
+  scout?: AlternativeScoutResponse;
+  activeCommunity?: string | null;
+  sidecarResults?: Record<string, FindBuyInResponse>;
+  pageUrl?: string | null;
+  draft?: { subject: string; body: string } | null;
+};
+
 type AutoFillComboOption = {
   label: string;
   bedrooms: number[];
@@ -1776,6 +1816,93 @@ function BuyInCancellationAdviceCard({ advice }: { advice: BuyInCancellationAdvi
           ))}
         </ul>
       </details>
+    </div>
+  );
+}
+
+function AlternativeBuyInWorkflowPanel({
+  workflow,
+  onScout,
+  onRunCommunity,
+  onDraftMessage,
+}: {
+  workflow: AlternativeWorkflowState | undefined;
+  onScout: () => void;
+  onRunCommunity: (community: string) => void;
+  onDraftMessage: () => void;
+}) {
+  const active = workflow?.activeCommunity ?? null;
+  const sidecarResults = workflow?.sidecarResults ?? {};
+  const communities = workflow?.scout?.results ?? [];
+  const hasSidecarCandidate = Object.values(sidecarResults).some((result) => (result.cheapest?.length ?? 0) > 0);
+  return (
+    <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-950">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="font-semibold">Alternative buy-in workflow</p>
+          <p className="text-[11px] opacity-80">
+            Scout nearby communities with SearchAPI Airbnb first, then run the full sidecar search for promising options.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" className="h-7 bg-white" onClick={onScout} disabled={active === "scouting"}>
+          {active === "scouting" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
+          Scout similar areas
+        </Button>
+      </div>
+      {communities.length > 0 && (
+        <div className="mt-2 grid gap-2 md:grid-cols-2">
+          {communities.map((result) => {
+            const running = active === result.community;
+            const sidecar = sidecarResults[result.community];
+            return (
+              <div key={result.community} className="rounded border bg-white/80 px-2 py-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="font-semibold">{result.community}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Airbnb scout: {result.count} result{result.count === 1 ? "" : "s"} · {result.recommended ? "recommended" : "below threshold"}
+                    </p>
+                    <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.reason}</p>
+                  </div>
+                  <Button size="sm" className="h-7 shrink-0" onClick={() => onRunCommunity(result.community)} disabled={running}>
+                    {running ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <MonitorPlay className="mr-1 h-3.5 w-3.5" />}
+                    Sidecar
+                  </Button>
+                </div>
+                {sidecar && (
+                  <p className="mt-1 rounded bg-slate-50 px-2 py-1 text-[11px]">
+                    Full search: {sidecar.cheapest?.length ?? 0} verified candidate{(sidecar.cheapest?.length ?? 0) === 1 ? "" : "s"}
+                    {sidecar.cheapest?.[0]?.totalPrice ? ` · best ${fmtMoney(sidecar.cheapest[0].totalPrice)}` : ""}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {hasSidecarCandidate && (
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded border bg-white/80 px-2 py-2">
+          <div>
+            <p className="font-medium">Guest alternative message</p>
+            <p className="text-[11px] text-muted-foreground">Creates a temporary hosted photo/details page and drafts the guest note for manual send.</p>
+          </div>
+          <Button size="sm" className="h-7" onClick={onDraftMessage}>
+            <Mail className="mr-1 h-3.5 w-3.5" />
+            Draft guest alternative
+          </Button>
+        </div>
+      )}
+      {workflow?.pageUrl && (
+        <a className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-sky-800 underline" href={workflow.pageUrl} target="_blank" rel="noreferrer">
+          View hosted alternative page <ExternalLink className="h-3 w-3" />
+        </a>
+      )}
+      {workflow?.draft && (
+        <div className="mt-2 rounded border bg-white/80 p-2">
+          <p className="mb-1 text-[11px] font-semibold">Draft copied to clipboard</p>
+          <Textarea value={workflow.draft.body} readOnly rows={6} className="text-xs" />
+        </div>
+      )}
     </div>
   );
 }
@@ -3663,6 +3790,7 @@ export default function Bookings() {
   };
   const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
   const [lastAutoFillAudits, setLastAutoFillAudits] = useState<Record<string, AutoFillSearchAudit[]>>({});
+  const [alternativeWorkflows, setAlternativeWorkflows] = useState<Record<string, AlternativeWorkflowState>>({});
   const [bulkSelectedReservations, setBulkSelectedReservations] = useState<Record<string, boolean>>({});
   const [bulkBuyInQueueOpen, setBulkBuyInQueueOpen] = useState(false);
   const [bulkBuyInQueueItems, setBulkBuyInQueueItems] = useState<BulkBuyInQueueItem[]>([]);
@@ -5362,6 +5490,121 @@ export default function Bookings() {
   const autoFillSidecarQueue = useSidecarQueueStatus(activeAutoFillCount > 0);
   const autoFillSidecarActive = activeAutoFillCount > 0
     && isSidecarStatusForSearch(autoFillSidecarQueue.status, earliestAutoFillStartedAtMs);
+
+  const updateAlternativeWorkflow = (reservationId: string, patch: Partial<AlternativeWorkflowState>) => {
+    setAlternativeWorkflows((prev) => ({
+      ...prev,
+      [reservationId]: { ...(prev[reservationId] ?? {}), ...patch },
+    }));
+  };
+
+  const scoutAlternativeCommunities = async (reservation: GuestyReservation, advice: BuyInCancellationAdvice) => {
+    const meta = reservationPropertyMeta.get(reservation._id);
+    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
+    const bedrooms = reservation.slots.find((slot) => !slot.buyIn)?.bedrooms ?? reservation.slots[0]?.bedrooms;
+    const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
+    const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
+    if (!propertyId || !bedrooms || !checkIn || !checkOut) {
+      toast({ title: "Cannot scout alternatives", description: "Missing property, bedroom, or stay dates.", variant: "destructive" });
+      return;
+    }
+    updateAlternativeWorkflow(reservation._id, { activeCommunity: "scouting" });
+    try {
+      const response = await apiRequest("POST", "/api/operations/alternative-buy-in-scout", {
+        propertyId,
+        bedrooms,
+        checkIn,
+        checkOut,
+        community: PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? reservation.slots.find((slot) => slot.community)?.community ?? undefined,
+        minAirbnbResults: advice.score >= 85 ? 3 : 4,
+      }).then((r) => r.json()) as AlternativeScoutResponse;
+      updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
+      toast({
+        title: response.recommended.length ? "Alternative communities found" : "No strong alternative community yet",
+        description: response.recommended.length
+          ? `${response.recommended.length} community option${response.recommended.length === 1 ? "" : "s"} passed the Airbnb scout threshold.`
+          : "SearchAPI did not find enough Airbnb inventory in the curated nearby communities.",
+      });
+    } catch (error: any) {
+      updateAlternativeWorkflow(reservation._id, { activeCommunity: null });
+      toast({ title: "Alternative scout failed", description: error?.message ?? String(error), variant: "destructive" });
+    }
+  };
+
+  const runAlternativeSidecarSearch = async (reservation: GuestyReservation, community: string) => {
+    const meta = reservationPropertyMeta.get(reservation._id);
+    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
+    const bedrooms = reservation.slots.find((slot) => !slot.buyIn)?.bedrooms ?? reservation.slots[0]?.bedrooms;
+    const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
+    const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
+    if (!propertyId || !bedrooms || !checkIn || !checkOut) return;
+    updateAlternativeWorkflow(reservation._id, { activeCommunity: community });
+    try {
+      const params = new URLSearchParams({
+        propertyId: String(propertyId),
+        bedrooms: String(bedrooms),
+        checkIn,
+        checkOut,
+        community,
+        nocache: "1",
+      });
+      if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
+      const data = await fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
+      updateAlternativeWorkflow(reservation._id, {
+        activeCommunity: null,
+        sidecarResults: {
+          ...(alternativeWorkflows[reservation._id]?.sidecarResults ?? {}),
+          [community]: data,
+        },
+      });
+      toast({
+        title: `Sidecar search finished for ${community}`,
+        description: data.cheapest?.length
+          ? `${data.cheapest.length} verified candidate${data.cheapest.length === 1 ? "" : "s"} returned.`
+          : data.diagnostics?.summary ?? "No verified candidate returned.",
+      });
+    } catch (error: any) {
+      updateAlternativeWorkflow(reservation._id, { activeCommunity: null });
+      toast({ title: `Sidecar search failed for ${community}`, description: error?.message ?? String(error), variant: "destructive" });
+    }
+  };
+
+  const draftAlternativeGuestMessage = async (reservation: GuestyReservation) => {
+    const workflow = alternativeWorkflows[reservation._id];
+    const sidecarEntries = Object.entries(workflow?.sidecarResults ?? {});
+    const best = sidecarEntries
+      .flatMap(([community, data]) => (data.cheapest ?? []).slice(0, 2).map((candidate) => ({ ...candidate, community })))
+      .sort((a, b) => (a.totalPrice || 999999) - (b.totalPrice || 999999))
+      .slice(0, 3);
+    if (best.length === 0) {
+      toast({ title: "No alternative candidates yet", description: "Run a sidecar search for one suggested community first.", variant: "destructive" });
+      return;
+    }
+    try {
+      const guestName = reservation.guest?.firstName ?? reservation.guest?.fullName ?? "there";
+      const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
+      const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
+      const page = await apiRequest("POST", "/api/booking-alternatives", {
+        reservationId: reservation._id,
+        guestName,
+        checkIn,
+        checkOut,
+        alternatives: best,
+      }).then((r) => r.json()) as { url: string };
+      const draft = await apiRequest("POST", `/api/bookings/${reservation._id}/alternative-message-draft`, {
+        guestName,
+        checkIn,
+        checkOut,
+        alternativeUrl: page.url,
+        alternatives: best.map((candidate) => ({ ...candidate, totalPrice: candidate.totalPrice ? `$${Math.round(candidate.totalPrice).toLocaleString()}` : null })),
+      }).then((r) => r.json()) as { subject: string; body: string };
+      updateAlternativeWorkflow(reservation._id, { pageUrl: page.url, draft });
+      await navigator.clipboard?.writeText(draft.body).catch(() => undefined);
+      toast({ title: "Guest alternative draft ready", description: "Draft copied to clipboard and saved below the scorecard." });
+    } catch (error: any) {
+      toast({ title: "Alternative draft failed", description: error?.message ?? String(error), variant: "destructive" });
+    }
+  };
 
   const bulkQueueItemsByReservationId = useMemo(() => {
     return new Map(bulkBuyInQueueItems.map((item) => [item.reservationId, item]));
@@ -7174,20 +7417,29 @@ export default function Bookings() {
                         )}
                         {searchAudits.length > 0 && (() => {
                           const selectedCombo = comboOptions.find((option) => option.selected && option.totalCost != null);
-                          const fallbackCost = comboOptions
-                            .map((option) => option.totalCost)
-                            .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
-                            .sort((a, b) => a - b)[0] ?? null;
-                          return (
-                            <BuyInCancellationAdviceCard
-                              advice={buildBuyInCancellationAdvice({
-                                reservation: r,
-                                audits: searchAudits,
-                                proposedCost: selectedCombo?.totalCost ?? fallbackCost,
-                              })}
-                            />
-                          );
-                        })()}
+	                          const fallbackCost = comboOptions
+	                            .map((option) => option.totalCost)
+	                            .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
+	                            .sort((a, b) => a - b)[0] ?? null;
+	                          const advice = buildBuyInCancellationAdvice({
+	                            reservation: r,
+	                            audits: searchAudits,
+	                            proposedCost: selectedCombo?.totalCost ?? fallbackCost,
+	                          });
+	                          return (
+	                            <div className="space-y-2">
+	                              <BuyInCancellationAdviceCard advice={advice} />
+	                              {advice && advice.score >= 70 && (
+	                                <AlternativeBuyInWorkflowPanel
+	                                  workflow={alternativeWorkflows[r._id]}
+	                                  onScout={() => scoutAlternativeCommunities(r, advice)}
+	                                  onRunCommunity={(community) => runAlternativeSidecarSearch(r, community)}
+	                                  onDraftMessage={() => draftAlternativeGuestMessage(r)}
+	                                />
+	                              )}
+	                            </div>
+	                          );
+	                        })()}
                         {searchAudits.length > 0 && <AutoFillSearchAuditPanel audits={searchAudits} />}
                         {r.slots.map((slot) => {
                           const slotIsExpanded = expandedSlots.has(slotKey(r._id, slot.unitId));

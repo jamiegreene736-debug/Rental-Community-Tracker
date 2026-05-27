@@ -140,6 +140,22 @@ export const BUY_IN_MARKET_SEARCH_LOCATIONS: Record<string, string> = Object.fro
   Object.values(BUY_IN_MARKETS).map((market) => [market.key, market.searchLocation]),
 );
 
+// Nearby substitute markets for guest-save workflows. These are intentionally
+// curated by market cluster rather than inferred from broad city search:
+// an alternative buy-in should be plausibly explainable to a guest as the
+// same area, not just any cheaper inventory in the state.
+export const SIMILAR_BUY_IN_MARKETS: Record<string, string[]> = {
+  "Poipu Kai": ["Pili Mai", "Poipu Brenneckes", "Poipu Oceanfront"],
+  "Pili Mai": ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront"],
+  "Poipu Brenneckes": ["Poipu Oceanfront", "Poipu Kai", "Pili Mai"],
+  "Poipu Oceanfront": ["Poipu Brenneckes", "Poipu Kai", "Pili Mai"],
+  "Kapaa Beachfront": ["Princeville"],
+  "Princeville": ["Kapaa Beachfront"],
+  "Windsor Hills": ["Caribe Cove", "Southern Dunes"],
+  "Caribe Cove": ["Windsor Hills", "Southern Dunes"],
+  "Southern Dunes": ["Windsor Hills", "Caribe Cove"],
+};
+
 export const BUY_IN_MARKET_PLATFORM_SEARCH_TERMS: Record<string, BuyInPlatformSearchTerms> = Object.fromEntries(
   Object.values(BUY_IN_MARKETS)
     .filter((market) => market.platformSearch)
