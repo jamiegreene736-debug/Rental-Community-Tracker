@@ -3089,6 +3089,9 @@ export default function InboxPage() {
     queryKey: ["/api/inbox/auto-reply/logs"],
     refetchInterval: 60_000,
   });
+  const pendingAutoReplyLogs = autoReplyLogs.filter((log: any) =>
+    !log.replySent && log.status !== "dismissed" && (log.status === "drafted" || log.status === "flagged" || log.status === "error")
+  );
 
   const toggleAutoReply = useMutation({
     mutationFn: (enabled: boolean) =>
@@ -3298,9 +3301,9 @@ export default function InboxPage() {
             </TabsTrigger>
             <TabsTrigger value="auto-reply" data-testid="tab-auto-reply">
               <Bot className="h-4 w-4 mr-1.5" /> AI Draft Approval
-              {autoReplyLogs.filter((l: any) => l.status === "flagged" || (l.status === "drafted" && !l.replySent)).length > 0 && (
+              {pendingAutoReplyLogs.length > 0 && (
                 <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
-                  {autoReplyLogs.filter((l: any) => l.status === "flagged" || (l.status === "drafted" && !l.replySent)).length}
+                  {pendingAutoReplyLogs.length}
                 </span>
               )}
             </TabsTrigger>
@@ -4717,7 +4720,7 @@ export default function InboxPage() {
             <div>
               <h3 className="font-semibold mb-3">Drafts Awaiting Approval</h3>
               {logsLoading && <p className="text-sm text-muted-foreground">Loading logs…</p>}
-              {!logsLoading && autoReplyLogs.length === 0 && (
+              {!logsLoading && pendingAutoReplyLogs.length === 0 && (
                 <div className="border rounded-lg p-8 text-center bg-card">
                   <Bot className="h-10 w-10 mx-auto mb-3 opacity-20" />
                   <p className="font-medium mb-1">No drafts yet</p>
@@ -4727,7 +4730,7 @@ export default function InboxPage() {
                 </div>
               )}
               <div className="space-y-3">
-                {autoReplyLogs.map((log: any) => (
+                {pendingAutoReplyLogs.map((log: any) => (
                   <Card key={log.id} data-testid={`auto-reply-log-${log.id}`}>
                     <CardContent className="py-4">
                       <div className="flex items-start justify-between gap-3 mb-2">
@@ -4795,16 +4798,18 @@ export default function InboxPage() {
                         )}
                       </div>
 
-                      {!log.replySent && log.replyDraft && log.status !== "dismissed" && (
+                      {!log.replySent && log.status !== "dismissed" && (
                         <div className="flex gap-2 mt-3 pt-3 border-t">
-                          <Button
-                            size="sm"
-                            onClick={() => sendDraftReply.mutate(log.id)}
-                            disabled={sendDraftReply.isPending}
-                            data-testid={`button-send-draft-${log.id}`}
-                          >
-                            <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> Approve
-                          </Button>
+                          {log.replyDraft && (
+                            <Button
+                              size="sm"
+                              onClick={() => sendDraftReply.mutate(log.id)}
+                              disabled={sendDraftReply.isPending}
+                              data-testid={`button-send-draft-${log.id}`}
+                            >
+                              <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> Approve
+                            </Button>
+                          )}
                           <Button
                             size="sm"
                             variant="outline"
