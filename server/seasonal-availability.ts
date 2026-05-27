@@ -69,6 +69,8 @@ export const AVAILABILITY_SCAN_MONTHS = 24;
 export const AVAILABILITY_WINDOWS_PER_MONTH = 2;
 export const AVAILABILITY_WINDOW_NIGHTS = 14;
 export const AVAILABILITY_RELIABILITY_FACTOR = 0.75;
+export const AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS = 60;
+export const AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS = 120;
 
 let seasonalScanQueue: Promise<unknown> = Promise.resolve();
 let seasonalScanActive: { propertyId: number; startedAt: number } | null = null;
@@ -322,8 +324,9 @@ export function computeAvailabilityThresholds(
   return { requiredByBR, openCandidatesByBR, blockCandidatesByBR, openMinSets, blockMinSets };
 }
 
-function effectiveAvailabilityCount(counts: Omit<AvailabilityChannelCounts, "effective">): number {
-  return Math.floor(counts.total * AVAILABILITY_RELIABILITY_FACTOR);
+export function effectiveAvailabilityCount(counts: Omit<AvailabilityChannelCounts, "effective">): number {
+  if (counts.total <= 0) return 0;
+  return Math.max(1, Math.floor(counts.total * AVAILABILITY_RELIABILITY_FACTOR));
 }
 
 const BLOCKING_QUALITY_WARNING_KINDS = new Set<ScanWarning["kind"]>([
@@ -348,6 +351,11 @@ export function availabilityVerdictForScan(
   maxSets: number,
   thresholds: AvailabilityThresholds,
   scan: Pick<MultiChannelBuyInResult, "daemonOnline" | "warnings">,
+  context?: {
+    season: SeasonKey;
+    checkIn: string;
+    now?: Date;
+  },
 ): SeasonalAvailabilityWindow["verdict"] {
   const verdict =
     maxSets < thresholds.blockMinSets ? "blocked"
@@ -358,7 +366,21 @@ export function availabilityVerdictForScan(
   // states can all look like "0 inventory"; keep those visible as tight
   // instead of writing a calendar blackout from incomplete evidence.
   if (verdict === "blocked" && availabilityBlockingQualityIssue(scan)) return "tight";
+  if (verdict === "blocked" && context && !availabilityAutoBlockAllowed(context)) return "tight";
   return verdict;
+}
+
+export function availabilityAutoBlockAllowed(context: {
+  season: SeasonKey;
+  checkIn: string;
+  now?: Date;
+}): boolean {
+  const now = context.now ? new Date(context.now) : new Date();
+  now.setUTCHours(12, 0, 0, 0);
+  const checkIn = new Date(`${context.checkIn}T12:00:00Z`);
+  const daysUntilArrival = Math.floor((checkIn.getTime() - now.getTime()) / 86_400_000);
+  if (daysUntilArrival <= AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS) return true;
+  return context.season === "HOLIDAY" && daysUntilArrival <= AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS;
 }
 
 function buildWindowFromScan(args: {
@@ -367,6 +389,7 @@ function buildWindowFromScan(args: {
   scan: MultiChannelBuyInResult;
   units: PropertyUnitConfig["units"];
   thresholds: AvailabilityThresholds;
+  now?: Date;
 }): SeasonalAvailabilityWindow {
   const channelCounts: SeasonalAvailabilityWindow["channelCounts"] = {};
   const effectiveCountsByBR: Record<number, number> = {};
@@ -378,9 +401,20 @@ function buildWindowFromScan(args: {
   }
   const maxSets = computeSetsFromCounts(args.units, effectiveCountsByBR);
   const qualityIssue = availabilityBlockingQualityIssue(args.scan);
-  const verdict = availabilityVerdictForScan(maxSets, args.thresholds, args.scan);
+  const autoBlockAllowed = availabilityAutoBlockAllowed({
+    season: args.season,
+    checkIn: args.window.checkIn,
+    now: args.now,
+  });
+  const verdict = availabilityVerdictForScan(maxSets, args.thresholds, args.scan, {
+    season: args.season,
+    checkIn: args.window.checkIn,
+    now: args.now,
+  });
   const reason = qualityIssue && maxSets < args.thresholds.blockMinSets
     ? `${args.season} sample found ${maxSets} effective set(s), but ${qualityIssue}; not auto-blocking from incomplete provider evidence.`
+    : !autoBlockAllowed && maxSets < args.thresholds.blockMinSets
+    ? `${args.season} ${args.window.nights}-night window found ${maxSets} effective set(s), but check-in is outside the auto-block horizon (${AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS} days, or ${AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS} days for holidays); leaving tight for review instead of blacking out.`
     : args.scan.daemonOnline
     ? `${args.season} ${args.window.nights}-night window found ${maxSets} effective set(s) after ${Math.round(AVAILABILITY_RELIABILITY_FACTOR * 100)}% reliability haircut; block below ${args.thresholds.blockMinSets}, open at ${args.thresholds.openMinSets}.`
     : `${args.season} sample only partially verified because the sidecar was offline; not auto-blocking from incomplete data.`;
@@ -554,7 +588,7 @@ async function runSeasonalAvailabilityCapacity(args: {
         sidecarStopGeneration,
       });
       assertSidecarRunCurrent();
-      const result = buildWindowFromScan({ season, window, scan, units: args.config.units, thresholds });
+      const result = buildWindowFromScan({ season, window, scan, units: args.config.units, thresholds, now: args.now });
       sampleResults.push(result);
       args.onWindow?.(result);
     } catch (error) {

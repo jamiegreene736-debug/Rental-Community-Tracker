@@ -75,6 +75,8 @@ type ScanContext = {
   windowNights?: number;
   windowsPerMonth?: number;
   reliabilityFactor?: number;
+  autoBlockNearTermDays?: number;
+  autoBlockHolidayDays?: number;
 };
 
 function verdictColor(v: Verdict): { bg: string; fg: string; border: string } {
@@ -431,6 +433,8 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               windowNights: evt.windowNights,
               windowsPerMonth: evt.windowsPerMonth,
               reliabilityFactor: evt.reliabilityFactor,
+              autoBlockNearTermDays: evt.autoBlockNearTermDays,
+              autoBlockHolidayDays: evt.autoBlockHolidayDays,
             });
             setProgress({ done: 0, total });
           } else if (evt.type === "candidates") {
@@ -976,7 +980,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           Scanning <b>{ctx.resortName ?? ctx.community}</b> —{" "}
           needed units: {ctx.units.map((u) => `${u.bedrooms}BR`).join(" + ")}.
           {" "}A "set" = one listing per unit slot (no reuse). Each scan window is <b>{ctx.windowNights ?? 14} nights</b>, sampled <b>{ctx.windowsPerMonth ?? 2}</b>x/month for <b>{ctx.months ?? 24}</b> months.
-          {" "}Windows are <b>blocked</b> only below <b>{ctx.blockMinSets ?? 1}</b> effective set(s) after the <b>{Math.round((ctx.reliabilityFactor ?? 0.75) * 100)}%</b> haircut and <b>open</b> at <b>{ctx.openMinSets ?? ctx.minSets}</b>.
+          {" "}Windows are <b>blocked</b> only below <b>{ctx.blockMinSets ?? 1}</b> effective set(s) after the <b>{Math.round((ctx.reliabilityFactor ?? 0.75) * 100)}%</b> haircut, and only within <b>{ctx.autoBlockNearTermDays ?? 60}</b> days of arrival or <b>{ctx.autoBlockHolidayDays ?? 120}</b> days for holiday windows. Open starts at <b>{ctx.openMinSets ?? ctx.minSets}</b>.
         </div>
       )}
       {candidates && (

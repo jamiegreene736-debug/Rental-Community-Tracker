@@ -123,6 +123,8 @@ import {
   availabilityWindowCountForWeeks,
   computeAvailabilityThresholds,
   AVAILABILITY_RELIABILITY_FACTOR,
+  AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS,
+  AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS,
   AVAILABILITY_WINDOW_NIGHTS,
   AVAILABILITY_WINDOWS_PER_MONTH,
   scanSeasonalAvailabilityCapacity,
@@ -15980,6 +15982,8 @@ export async function registerRoutes(
         windowNights: AVAILABILITY_WINDOW_NIGHTS,
         windowsPerMonth: AVAILABILITY_WINDOWS_PER_MONTH,
         reliabilityFactor: AVAILABILITY_RELIABILITY_FACTOR,
+        autoBlockNearTermDays: AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS,
+        autoBlockHolidayDays: AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS,
       });
 
       const applyOverride = (window: SeasonalAvailabilityWindow): SeasonalAvailabilityWindow & Record<string, unknown> => {

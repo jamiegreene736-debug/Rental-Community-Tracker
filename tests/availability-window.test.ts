@@ -4,11 +4,15 @@ process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 
 const {
   AVAILABILITY_RELIABILITY_FACTOR,
+  AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS,
+  AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS,
   AVAILABILITY_WINDOW_NIGHTS,
+  availabilityAutoBlockAllowed,
   availabilityBlockingQualityIssue,
   availabilityVerdictForScan,
   availabilityWindowCountForWeeks,
   computeAvailabilityThresholds,
+  effectiveAvailabilityCount,
   generateTwiceMonthlyAvailabilityWindows,
 } = await import("../server/seasonal-availability");
 
@@ -25,6 +29,8 @@ assert.equal(windows[0].checkOut, "2026-06-15", "windows should run 14 nights");
 assert.equal(windows[0].nights, AVAILABILITY_WINDOW_NIGHTS);
 assert.equal(availabilityWindowCountForWeeks(104), 48);
 assert.equal(AVAILABILITY_RELIABILITY_FACTOR, 0.75, "false-positive haircut should be a 25% reserve");
+assert.equal(AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS, 60, "normal auto-block horizon should stay near-term only");
+assert.equal(AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS, 120, "holiday auto-block horizon should be bounded");
 console.log("  ✓ generates 48 future 14-night windows");
 
 const thresholds = computeAvailabilityThresholds([
@@ -39,9 +45,52 @@ assert.equal(thresholds.openCandidatesByBR[3], 4, "3BR + 3BR opens at two comple
 console.log("  ✓ keeps a loose block floor for combo inventory");
 
 assert.equal(
-  availabilityVerdictForScan(0, thresholds, { daemonOnline: true, warnings: [] }),
+  effectiveAvailabilityCount({ airbnb: 1, vrbo: 0, booking: 0, pm: 0, total: 1 }),
+  1,
+  "one proved replacement should not be rounded down to zero by the reliability haircut",
+);
+assert.equal(
+  effectiveAvailabilityCount({ airbnb: 0, vrbo: 0, booking: 0, pm: 0, total: 0 }),
+  0,
+  "zero found replacements should remain zero",
+);
+console.log("  ✓ preserves a single proven replacement candidate");
+
+assert.equal(
+  availabilityVerdictForScan(0, thresholds, { daemonOnline: true, warnings: [] }, {
+    season: "HIGH",
+    checkIn: "2026-06-15",
+    now: new Date("2026-05-27T12:00:00Z"),
+  }),
   "blocked",
-  "clean zero inventory should remain blockable",
+  "clean near-term zero inventory should remain blockable",
+);
+assert.equal(
+  availabilityVerdictForScan(0, thresholds, { daemonOnline: true, warnings: [] }, {
+    season: "LOW",
+    checkIn: "2026-11-15",
+    now: new Date("2026-05-27T12:00:00Z"),
+  }),
+  "tight",
+  "far-future low-season zero inventory should not auto-blackout",
+);
+assert.equal(
+  availabilityVerdictForScan(0, thresholds, { daemonOnline: true, warnings: [] }, {
+    season: "HOLIDAY",
+    checkIn: "2026-11-22",
+    now: new Date("2026-05-27T12:00:00Z"),
+  }),
+  "tight",
+  "holiday scarcity outside the bounded holiday horizon should stay review-only",
+);
+assert.equal(
+  availabilityAutoBlockAllowed({
+    season: "HOLIDAY",
+    checkIn: "2026-07-01",
+    now: new Date("2026-05-27T12:00:00Z"),
+  }),
+  true,
+  "near holiday scarcity should still be eligible for auto-blocking",
 );
 assert.equal(
   availabilityVerdictForScan(0, thresholds, {
@@ -53,6 +102,10 @@ assert.equal(
       message: "VRBO timed out during the HIGH scan",
       reason: "provider search timed out",
     }],
+  }, {
+    season: "HIGH",
+    checkIn: "2026-06-15",
+    now: new Date("2026-05-27T12:00:00Z"),
   }),
   "tight",
   "provider failures should not create automatic blocks",
