@@ -30465,13 +30465,16 @@ Return ONLY compact JSON with this exact shape:
       const requested = Array.isArray((req.body as any)?.folders) ? (req.body as any).folders as string[] : null;
       const known = await listScanableFolders();
       // For explicit dashboard row scans, accept dynamic draft/replacement
-      // folders even if they are not in the current "known" universe yet.
+      // folders and static unit-builder folders even if they are not in the
+      // current "known" universe yet. Static folders may have disk photos but
+      // no photo_labels rows yet; rejecting them here made the row-level
+      // refresh button a no-op and left the dashboard stuck at A?/V?/B?.
       // The scanner will persist an UNKNOWN row with a clear reason when it
       // cannot derive verification tokens, which is much better UX than a
       // no-op 400 that leaves the row looking permanently disabled/grey.
       const acceptableRequestedFolder = (folder: string) =>
         known.includes(folder) ||
-        (isScannableFolder(folder) && (draftPhotoFolderRef(folder) !== null || replacementPhotoFolderRef(folder) !== null));
+        isScannableFolder(folder);
       const folders = requested && requested.length > 0
         ? requested.filter(acceptableRequestedFolder)
         : known;

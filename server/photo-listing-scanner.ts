@@ -55,6 +55,7 @@ import {
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch } from "./photo-match-guardrails";
+import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
 const SEARCHAPI_KEY = process.env.SEARCHAPI_API_KEY;
 const PUBLIC_HOST = (() => {
@@ -528,6 +529,21 @@ export async function listScanableFolders(): Promise<string[]> {
   for (const r of rows) {
     foldersWithLabels.add(r.folder);
     if (isScannableFolder(r.folder)) set.add(r.folder);
+  }
+
+  // The dashboard Photo Match column is keyed from unit-builder-data,
+  // not from photo_labels. Some long-lived static folders have photos
+  // on disk but no DB label rows yet, which made the dashboard show
+  // permanent A?/V?/B? badges because the scheduler never discovered
+  // them. Seed the scan universe from the same unit folders the
+  // dashboard aggregates, then let folderHasDiskPhotos decide whether
+  // there is anything to scan.
+  for (const builder of unitBuilderData) {
+    for (const unit of builder.units) {
+      if (unit.photoFolder && isScannableFolder(unit.photoFolder)) {
+        set.add(unit.photoFolder);
+      }
+    }
   }
 
   const swaps = await storage.getAllUnitSwaps();
