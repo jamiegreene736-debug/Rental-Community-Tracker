@@ -750,13 +750,32 @@ export const autoReplyLog = pgTable("auto_reply_log", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const autoReplyStyleExamples = pgTable("auto_reply_style_examples", {
+  id: serial("id").primaryKey(),
+  autoReplyLogId: integer("auto_reply_log_id"),
+  guestMessage: text("guest_message").notNull(),
+  originalDraft: text("original_draft"),
+  editedDraft: text("edited_draft").notNull(),
+  analysis: text("analysis").notNull(),
+  listingId: text("listing_id"),
+  channel: text("channel"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const insertAutoReplyLogSchema = createInsertSchema(autoReplyLog).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertAutoReplyStyleExampleSchema = createInsertSchema(autoReplyStyleExamples).omit({
   id: true,
   createdAt: true,
 });
 
 export type InsertAutoReplyLog = z.infer<typeof insertAutoReplyLogSchema>;
 export type AutoReplyLog = typeof autoReplyLog.$inferSelect;
+export type InsertAutoReplyStyleExample = z.infer<typeof insertAutoReplyStyleExampleSchema>;
+export type AutoReplyStyleExample = typeof autoReplyStyleExamples.$inferSelect;
 
 // ── Booking-confirmation auto-send dedup ──
 // One row per reservation we've sent the auto-confirmation message to.

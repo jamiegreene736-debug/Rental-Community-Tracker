@@ -133,6 +133,68 @@ function classifyOutput(text: string): { risky: boolean; reason: string | null }
   return { risky: false, reason: null };
 }
 
+async function getAutoReplyStyleGuidance(): Promise<string> {
+  try {
+    const examples = await storage.getRecentAutoReplyStyleExamples(6);
+    const guidance = examples
+      .map((example) => example.analysis?.trim())
+      .filter(Boolean)
+      .slice(0, 6);
+    if (guidance.length === 0) return "";
+    return `\n\nOPERATOR STYLE COACHING FROM PRIOR EDITS:
+${guidance.map((item, index) => `${index + 1}. ${item}`).join("\n")}`;
+  } catch (err) {
+    console.warn("[auto-reply] style guidance unavailable:", (err as Error).message);
+    return "";
+  }
+}
+
+function localEditAnalysis(originalDraft: string | null | undefined, editedDraft: string): string {
+  const original = (originalDraft ?? "").trim();
+  const edited = editedDraft.trim();
+  if (!original) return "Operator wrote the draft manually. Match this direct, guest-ready phrasing for similar messages.";
+  if (edited.length < original.length * 0.75) return "Operator shortened the AI draft. Prefer tighter replies that answer directly without extra caveats.";
+  if (edited.length > original.length * 1.25) return "Operator added detail. Include the concrete context the guest needs instead of staying too generic.";
+  return "Operator adjusted wording. Prefer the edited draft's more natural host phrasing, concise structure, and specific answer-first tone.";
+}
+
+async function analyzeDraftEdit(params: {
+  guestMessage: string;
+  originalDraft?: string | null;
+  editedDraft: string;
+}): Promise<string> {
+  const fallback = localEditAnalysis(params.originalDraft, params.editedDraft);
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return fallback;
+
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 180,
+        system: "You extract reusable writing guidance from a hospitality operator's edit. Return one concise coaching note for future drafts. Do not include private guest facts unless needed as a generic pattern.",
+        messages: [{
+          role: "user",
+          content: `Guest message:\n${params.guestMessage}\n\nOriginal AI draft:\n${params.originalDraft ?? ""}\n\nOperator edited draft:\n${params.editedDraft}\n\nWrite one reusable instruction for future AI drafts.`,
+        }],
+      }),
+    });
+    if (!resp.ok) return fallback;
+    const data = await resp.json() as any;
+    const text = (data?.content ?? [])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("\n")
+      .trim();
+    return text || fallback;
+  } catch (err) {
+    console.warn("[auto-reply] edit analysis failed:", (err as Error).message);
+    return fallback;
+  }
+}
+
 // --- Guesty helpers -------------------------------------------------------
 
 interface GuestyPost {
@@ -657,6 +719,7 @@ The guest raised an accessibility, ground-floor, stairs, mobility, or seniors co
 Do not skip this question. Do not roll it into a generic "let me know if you have questions" closer.`
     : "";
 
+  const styleGuidance = await getAutoReplyStyleGuidance();
   const userPrompt = `Guest name: ${params.guestName ?? "Guest"}
 Channel: ${params.channel ?? "unknown"}
 ${params.listingId ? `Listing ID: ${params.listingId}` : ""}
@@ -667,6 +730,7 @@ Guest message:
 ${params.guestMessage}
 """
 ${accessibilityMandate}
+${styleGuidance}
 
 Use tools to gather any needed context, then reply. Return only the guest-facing reply text.
 ${params.forceDraftForReview
@@ -997,15 +1061,64 @@ export async function redoDraftedReply(logId: number): Promise<{ ok: boolean; er
   return { ok: status !== "error", error: errorMessage ?? undefined, status };
 }
 
-export async function sendDraftedReply(logId: number): Promise<{ ok: boolean; error?: string }> {
+export async function saveDraftedReply(logId: number, replyDraft: string): Promise<{ ok: boolean; error?: string }> {
   const log = await storage.getAutoReplyLog(logId);
   if (!log) return { ok: false, error: "Log not found" };
   if (log.replySent) return { ok: false, error: "Reply already sent" };
-  if (!log.replyDraft) return { ok: false, error: "No draft to send" };
+  const draft = replyDraft.trim();
+  if (!draft) return { ok: false, error: "Draft cannot be blank" };
+
+  await storage.updateAutoReplyLog(logId, {
+    replyDraft: draft,
+    replySent: false,
+    status: log.status === "error" ? "drafted" : log.status,
+    errorMessage: null,
+  });
+  return { ok: true };
+}
+
+export async function analyzeAndSaveDraftedReply(logId: number, replyDraft: string): Promise<{ ok: boolean; error?: string; analysis?: string }> {
+  const log = await storage.getAutoReplyLog(logId);
+  if (!log) return { ok: false, error: "Log not found" };
+  if (log.replySent) return { ok: false, error: "Reply already sent" };
+  const draft = replyDraft.trim();
+  if (!draft) return { ok: false, error: "Draft cannot be blank" };
+
+  const analysis = await analyzeDraftEdit({
+    guestMessage: log.guestMessage,
+    originalDraft: log.replyDraft,
+    editedDraft: draft,
+  });
+
+  await storage.updateAutoReplyLog(logId, {
+    replyDraft: draft,
+    replySent: false,
+    status: log.status === "error" ? "drafted" : log.status,
+    errorMessage: null,
+  });
+  await storage.createAutoReplyStyleExample({
+    autoReplyLogId: logId,
+    guestMessage: log.guestMessage,
+    originalDraft: log.replyDraft ?? null,
+    editedDraft: draft,
+    analysis,
+    listingId: log.listingId ?? null,
+    channel: log.channel ?? null,
+  });
+
+  return { ok: true, analysis };
+}
+
+export async function sendDraftedReply(logId: number, replyDraft?: string): Promise<{ ok: boolean; error?: string }> {
+  const log = await storage.getAutoReplyLog(logId);
+  if (!log) return { ok: false, error: "Log not found" };
+  if (log.replySent) return { ok: false, error: "Reply already sent" };
+  const draft = (replyDraft ?? log.replyDraft ?? "").trim();
+  if (!draft) return { ok: false, error: "No draft to send" };
 
   try {
-    await sendReply(log.conversationId, log.replyDraft, log.channel ? { type: log.channel } : undefined);
-    await storage.updateAutoReplyLog(logId, { replySent: true, status: "sent" });
+    await sendReply(log.conversationId, draft, log.channel ? { type: log.channel } : undefined);
+    await storage.updateAutoReplyLog(logId, { replyDraft: draft, replySent: true, status: "sent", errorMessage: null });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: (err as Error).message };

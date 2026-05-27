@@ -12,6 +12,7 @@ import {
   type GuestyPropertyMap, type InsertGuestyPropertyMap,
   type MessageTemplate, type InsertMessageTemplate,
   type AutoReplyLog, type InsertAutoReplyLog,
+  type AutoReplyStyleExample, type InsertAutoReplyStyleExample,
   type BookingConfirmation, type InsertBookingConfirmation,
   type QuoSmsMessage, type InsertQuoSmsMessage,
   type QuoCallEvent, type InsertQuoCallEvent,
@@ -26,7 +27,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, autoReplyStyleExamples, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
   type PropertyMarketRate, type InsertPropertyMarketRate,
 } from "@shared/schema";
 import { db } from "./db";
@@ -197,6 +198,8 @@ export interface IStorage {
   getAutoReplyLog(id: number): Promise<AutoReplyLog | undefined>;
   updateAutoReplyLog(id: number, data: Partial<InsertAutoReplyLog>): Promise<AutoReplyLog | undefined>;
   getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined>;
+  createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample>;
+  getRecentAutoReplyStyleExamples(limit?: number): Promise<AutoReplyStyleExample[]>;
 
   createBookingConfirmation(b: InsertBookingConfirmation): Promise<BookingConfirmation>;
   getBookingConfirmationByReservationId(reservationId: string): Promise<BookingConfirmation | undefined>;
@@ -797,6 +800,15 @@ export class DatabaseStorage implements IStorage {
   async getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined> {
     const [row] = await db.select().from(autoReplyLog).where(eq(autoReplyLog.triggerPostId, postId)).limit(1);
     return row;
+  }
+
+  async createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample> {
+    const [row] = await db.insert(autoReplyStyleExamples).values(example).returning();
+    return row;
+  }
+
+  async getRecentAutoReplyStyleExamples(limit = 8): Promise<AutoReplyStyleExample[]> {
+    return db.select().from(autoReplyStyleExamples).orderBy(desc(autoReplyStyleExamples.createdAt)).limit(limit);
   }
 
   // ── Booking confirmations ──

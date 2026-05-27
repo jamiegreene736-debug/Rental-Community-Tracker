@@ -70,7 +70,7 @@ import {
 } from "./sidecar-lane";
 import { findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
-import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply, redoDraftedReply } from "./auto-reply";
+import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply } from "./auto-reply";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import {
@@ -32352,11 +32352,36 @@ CONSTRAINTS
   app.post("/api/inbox/auto-reply/logs/:id/send", async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
-      const result = await sendDraftedReply(id);
+      const draft = typeof req.body?.replyDraft === "string" ? req.body.replyDraft : undefined;
+      const result = await sendDraftedReply(id, draft);
       if (!result.ok) return res.status(400).json(result);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to send draft", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/auto-reply/logs/:id/draft", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const draft = typeof req.body?.replyDraft === "string" ? req.body.replyDraft : "";
+      const result = await saveDraftedReply(id, draft);
+      if (!result.ok) return res.status(400).json(result);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to save draft", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/auto-reply/logs/:id/analyze", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const draft = typeof req.body?.replyDraft === "string" ? req.body.replyDraft : "";
+      const result = await analyzeAndSaveDraftedReply(id, draft);
+      if (!result.ok) return res.status(400).json(result);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to analyze draft edit", message: err.message });
     }
   });
 

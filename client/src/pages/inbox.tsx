@@ -3286,9 +3286,14 @@ export default function InboxPage() {
     enabled: isAdmin,
     refetchInterval: 60_000,
   });
+  const [editedAutoReplyDrafts, setEditedAutoReplyDrafts] = useState<Record<number, string>>({});
   const pendingAutoReplyLogs = autoReplyLogs.filter((log: any) =>
     !log.replySent && log.status !== "dismissed" && (log.status === "drafted" || log.status === "flagged" || log.status === "error")
   );
+  const autoReplyDraftValue = (log: any) =>
+    Object.prototype.hasOwnProperty.call(editedAutoReplyDrafts, log.id)
+      ? editedAutoReplyDrafts[log.id]
+      : (log.replyDraft ?? "");
 
   const toggleAutoReply = useMutation({
     mutationFn: (enabled: boolean) =>
@@ -3307,12 +3312,49 @@ export default function InboxPage() {
   });
 
   const sendDraftReply = useMutation({
-    mutationFn: (id: number) =>
-      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/send`).then(r => r.json()),
-    onSuccess: (data: any) => {
+    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/send`, { replyDraft }).then(r => r.json()),
+    onSuccess: (data: any, vars) => {
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      setEditedAutoReplyDrafts(prev => {
+        const next = { ...prev };
+        delete next[vars.id];
+        return next;
+      });
       if (data.ok) toast({ title: "Reply sent to guest" });
       else toast({ title: "Send failed", description: data.error, variant: "destructive" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const saveDraftReply = useMutation({
+    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/draft`, { replyDraft }).then(r => r.json()),
+    onSuccess: (data: any, vars) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      setEditedAutoReplyDrafts(prev => {
+        const next = { ...prev };
+        delete next[vars.id];
+        return next;
+      });
+      if (data.ok) toast({ title: "Draft saved" });
+      else toast({ title: "Save failed", description: data.error, variant: "destructive" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const analyzeDraftReply = useMutation({
+    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/analyze`, { replyDraft }).then(r => r.json()),
+    onSuccess: (data: any, vars) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      setEditedAutoReplyDrafts(prev => {
+        const next = { ...prev };
+        delete next[vars.id];
+        return next;
+      });
+      if (data.ok) toast({ title: "Saved and analyzed", description: data.analysis });
+      else toast({ title: "Analyze failed", description: data.error, variant: "destructive" });
     },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
@@ -3320,8 +3362,13 @@ export default function InboxPage() {
   const redoDraftReply = useMutation({
     mutationFn: (id: number) =>
       apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/redo`).then(r => r.json()),
-    onSuccess: (data: any) => {
+    onSuccess: (data: any, id) => {
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      setEditedAutoReplyDrafts(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       if (data.ok) toast({ title: "AI draft refreshed" });
       else toast({ title: "Redo failed", description: data.error, variant: "destructive" });
     },
@@ -5223,9 +5270,16 @@ export default function InboxPage() {
                         {log.replyDraft && (
                           <div>
                             <p className="text-[11px] font-medium text-muted-foreground mb-0.5">
-                              {log.replySent ? "APPROVED REPLY" : "AI DRAFT"}
+                              {log.replySent ? "APPROVED REPLY" : "AI DRAFT - EDIT BEFORE SENDING"}
                             </p>
-                            <p className="bg-primary/5 border border-primary/20 rounded px-3 py-2 whitespace-pre-wrap text-[13px]">{log.replyDraft}</p>
+                            <Textarea
+                              value={autoReplyDraftValue(log)}
+                              onChange={(e) => setEditedAutoReplyDrafts(prev => ({ ...prev, [log.id]: e.target.value }))}
+                              rows={Math.max(5, Math.min(12, autoReplyDraftValue(log).split("\n").length + 3))}
+                              disabled={log.replySent}
+                              className="bg-primary/5 border-primary/20 text-[13px] leading-relaxed resize-y"
+                              data-testid={`textarea-ai-draft-${log.id}`}
+                            />
                           </div>
                         )}
 
@@ -5242,16 +5296,36 @@ export default function InboxPage() {
                       </div>
 
                       {!log.replySent && log.status !== "dismissed" && (
-                        <div className="flex gap-2 mt-3 pt-3 border-t">
+                        <div className="flex gap-2 mt-3 pt-3 border-t flex-wrap">
                           {log.replyDraft && (
-                            <Button
-                              size="sm"
-                              onClick={() => sendDraftReply.mutate(log.id)}
-                              disabled={sendDraftReply.isPending}
-                              data-testid={`button-send-draft-${log.id}`}
-                            >
-                              <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> Approve
-                            </Button>
+                            <>
+                              <Button
+                                size="sm"
+                                onClick={() => sendDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
+                                disabled={sendDraftReply.isPending || !autoReplyDraftValue(log).trim()}
+                                data-testid={`button-send-draft-${log.id}`}
+                              >
+                                <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> Send
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => saveDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
+                                disabled={saveDraftReply.isPending || !autoReplyDraftValue(log).trim()}
+                                data-testid={`button-save-draft-${log.id}`}
+                              >
+                                <FileText className="h-3.5 w-3.5 mr-1.5" /> Save
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => analyzeDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
+                                disabled={analyzeDraftReply.isPending || !autoReplyDraftValue(log).trim()}
+                                data-testid={`button-save-analyze-draft-${log.id}`}
+                              >
+                                <Sparkles className={`h-3.5 w-3.5 mr-1.5 ${analyzeDraftReply.isPending ? "animate-spin" : ""}`} /> Save & Analyze
+                              </Button>
+                            </>
                           )}
                           <Button
                             size="sm"
