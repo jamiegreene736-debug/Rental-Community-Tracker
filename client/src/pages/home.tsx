@@ -1868,6 +1868,7 @@ function AdminDashboard() {
     Date.now() - bulkPricingLastHeartbeat > 5 * 60 * 1000
   );
   const bulkAvailabilityRunning = bulkAvailabilityQueue?.status === "running";
+  const bulkAvailabilityActive = bulkAvailabilityQueue?.status === "running" || bulkAvailabilityQueue?.status === "paused";
   const formatBulkPricingTime = (value?: string | null) => {
     if (!value) return "—";
     const ms = Date.parse(value);
@@ -3057,6 +3058,66 @@ function AdminDashboard() {
                             <p className="text-sm font-semibold">{bulkAvailabilityQueue.totals.error}</p>
                           </div>
                         </div>
+                        <div className="rounded-md border border-blue-100 bg-blue-50/60 p-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-xs text-blue-900">
+                              This queue runs on the server, so it keeps going if you close this modal, change tabs, or leave the screen.
+                            </p>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {bulkAvailabilityQueue.status === "running" && (
+                                <>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => runBulkAvailabilityAction("pause")}
+                                    disabled={bulkAvailabilityAction !== null}
+                                    data-testid="button-pause-bulk-availability"
+                                  >
+                                    {bulkAvailabilityAction === "pause" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Pause className="mr-2 h-4 w-4" />}
+                                    Pause
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="destructive"
+                                    onClick={() => runBulkAvailabilityAction("cancel")}
+                                    disabled={bulkAvailabilityAction !== null}
+                                    data-testid="button-cancel-bulk-availability"
+                                  >
+                                    {bulkAvailabilityAction === "cancel" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+                                    Cancel
+                                  </Button>
+                                </>
+                              )}
+                              {bulkAvailabilityQueue.status === "paused" && (
+                                <>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    onClick={() => runBulkAvailabilityAction("resume")}
+                                    disabled={bulkAvailabilityAction !== null}
+                                    data-testid="button-resume-bulk-availability"
+                                  >
+                                    {bulkAvailabilityAction === "resume" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                                    Resume
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="destructive"
+                                    onClick={() => runBulkAvailabilityAction("cancel")}
+                                    disabled={bulkAvailabilityAction !== null}
+                                    data-testid="button-cancel-paused-bulk-availability"
+                                  >
+                                    {bulkAvailabilityAction === "cancel" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+                                    Cancel
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
                         <div className="max-h-80 overflow-y-auto rounded-md border">
                           {bulkAvailabilityQueue.items.map((item) => {
                             const statusTone =
@@ -3081,10 +3142,26 @@ function AdminDashboard() {
                                       {" · "}updated {formatBulkPricingTime(item.progress?.updatedAt || item.completedAt || item.startedAt)}
                                     </p>
                                   </div>
-                                  <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>
-                                    {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-                                    {item.status}
-                                  </Badge>
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    <Badge variant="outline" className={`capitalize ${statusTone}`}>
+                                      {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                                      {item.status}
+                                    </Badge>
+                                    {item.status === "running" && (
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-7 px-2 text-xs"
+                                        onClick={() => runBulkAvailabilityAction("cancel")}
+                                        disabled={bulkAvailabilityAction !== null}
+                                        title="Cancel the running availability queue"
+                                      >
+                                        <StopCircle className="mr-1 h-3.5 w-3.5" />
+                                        Cancel
+                                      </Button>
+                                    )}
+                                  </div>
                                 </div>
                                 {showProgress && (
                                   <div className="mt-2">
@@ -3159,7 +3236,7 @@ function AdminDashboard() {
                             type="button"
                             variant="outline"
                             onClick={() => runBulkAvailabilityAction("clear")}
-                            disabled={bulkAvailabilityAction !== null || bulkAvailabilityQueue.status === "running" || bulkAvailabilityQueue.status === "paused"}
+                            disabled={bulkAvailabilityAction !== null || bulkAvailabilityActive}
                           >
                             {bulkAvailabilityAction === "clear" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                             Clear queue

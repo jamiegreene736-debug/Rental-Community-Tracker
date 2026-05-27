@@ -380,7 +380,7 @@ export function clearBulkAvailabilityQueue(): { ok: boolean; queue: BulkAvailabi
 }
 
 export function pauseBulkAvailabilityQueue(reason = "paused by operator"): { ok: boolean; queue: BulkAvailabilityQueueStatus | null; error?: string } {
-  if (!bulkAvailabilityQueue || bulkAvailabilityQueue.status !== "running") {
+  if (!bulkAvailabilityQueue || (!bulkAvailabilityQueueProcessing && bulkAvailabilityQueue.status !== "running")) {
     return { ok: false, queue: bulkAvailabilityQueue, error: "No running availability queue to pause" };
   }
   bulkAvailabilityQueuePaused = true;
@@ -412,6 +412,9 @@ export async function cancelBulkAvailabilityQueue(reason = "cancelled by operato
   queue: BulkAvailabilityQueueStatus | null;
   cancelled: number;
 }> {
+  if (!bulkAvailabilityQueue && !bulkAvailabilityQueueProcessing && !scannerRunning) {
+    return { ok: false, queue: null, cancelled: 0 };
+  }
   bulkAvailabilityQueueCancelRequested = true;
   bulkAvailabilityQueuePaused = false;
   scanAborted = true;
