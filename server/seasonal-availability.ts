@@ -63,6 +63,10 @@ export type AvailabilityThresholds = {
 
 const SEASONS: SeasonKey[] = ["LOW", "HIGH", "HOLIDAY"];
 const SEASON_SCAN_HEARTBEAT_MS = 12_000;
+export const AVAILABILITY_SCAN_MONTHS = 24;
+export const AVAILABILITY_WINDOWS_PER_MONTH = 2;
+export const AVAILABILITY_WINDOW_NIGHTS = 14;
+export const AVAILABILITY_RELIABILITY_FACTOR = 0.5;
 
 let seasonalScanQueue: Promise<unknown> = Promise.resolve();
 let seasonalScanActive: { propertyId: number; startedAt: number } | null = null;
@@ -99,10 +103,40 @@ function ymd(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+export function availabilityWindowCountForWeeks(weeks = 104): number {
+  const months = Math.min(Math.max(Math.round((weeks / 52) * 12), 1), AVAILABILITY_SCAN_MONTHS);
+  return months * AVAILABILITY_WINDOWS_PER_MONTH;
+}
+
 function nightsBetween(checkIn: string, checkOut: string): number {
   const start = new Date(`${checkIn}T12:00:00Z`).getTime();
   const end = new Date(`${checkOut}T12:00:00Z`).getTime();
   return Math.max(1, Math.round((end - start) / 86_400_000));
+}
+
+export function generateTwiceMonthlyAvailabilityWindows(args: {
+  weeks?: number;
+  now?: Date;
+}): Array<{ checkIn: string; checkOut: string; nights: number }> {
+  const targetCount = availabilityWindowCountForWeeks(args.weeks ?? 104);
+  const windows: Array<{ checkIn: string; checkOut: string; nights: number }> = [];
+  const now = args.now ? new Date(args.now) : new Date();
+  now.setUTCHours(12, 0, 0, 0);
+  const cursor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 12, 0, 0));
+
+  while (windows.length < targetCount) {
+    for (const day of [1, 15]) {
+      const checkIn = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), day, 12, 0, 0));
+      if (checkIn < now) continue;
+      const checkOut = new Date(checkIn);
+      checkOut.setUTCDate(checkOut.getUTCDate() + AVAILABILITY_WINDOW_NIGHTS);
+      windows.push({ checkIn: ymd(checkIn), checkOut: ymd(checkOut), nights: AVAILABILITY_WINDOW_NIGHTS });
+      if (windows.length >= targetCount) break;
+    }
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+
+  return windows;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -251,11 +285,11 @@ export function computeAvailabilityThresholds(
   const openCandidatesByBR: Record<number, number> = {};
   const blockCandidatesByBR: Record<number, number> = {};
   // Default rule: block only when we cannot verify at least 3 full
-  // independent buy-in sets (configurable from the UI/scheduler), mark
+  // independent buy-in sets, mark
   // tight until 2 extra cushion sets are visible, then open. This keeps
   // the net wide enough to catch unlabeled-but-valid resort listings
   // while still avoiding the "last pair available" oversell risk.
-  const blockMinSets = Math.max(2, manualMinSets);
+  const blockMinSets = Math.max(3, manualMinSets);
   const openMinSets = blockMinSets + 2;
   for (const [brRaw, required] of Object.entries(requiredByBR)) {
     const br = Number(brRaw);
@@ -269,11 +303,7 @@ export function computeAvailabilityThresholds(
 }
 
 function effectiveAvailabilityCount(counts: Omit<AvailabilityChannelCounts, "effective">): number {
-  const values = [counts.airbnb, counts.vrbo, counts.booking, counts.pm].filter((n) => n > 0);
-  if (values.length === 0) return 0;
-  const maxChannel = Math.max(...values);
-  const extra = Math.max(0, counts.total - maxChannel);
-  return Math.floor(maxChannel + extra * 0.35);
+  return Math.floor(counts.total * AVAILABILITY_RELIABILITY_FACTOR);
 }
 
 function verdictForSeason(
@@ -309,7 +339,7 @@ function buildWindowFromScan(args: {
   const maxSets = computeSetsFromCounts(args.units, effectiveCountsByBR);
   const verdict = verdictForSeason(maxSets, args.thresholds, args.scan.daemonOnline);
   const reason = args.scan.daemonOnline
-    ? `${args.season} sample found ${maxSets} de-duped set(s); block below ${args.thresholds.blockMinSets}, open at ${args.thresholds.openMinSets}.`
+    ? `${args.season} ${args.window.nights}-night window found ${maxSets} effective set(s) after ${Math.round(AVAILABILITY_RELIABILITY_FACTOR * 100)}% reliability haircut; block below ${args.thresholds.blockMinSets}, open at ${args.thresholds.openMinSets}.`
     : `${args.season} sample only partially verified because the sidecar was offline; not auto-blocking from incomplete data.`;
   return {
     season: args.season,
@@ -371,8 +401,8 @@ function holidayDate(d: Date): boolean {
     || (month === 2 && day >= 14 && day <= 17);
 }
 
-function seasonForSevenNightWindow(region: RegionKey, start: Date): SeasonKey {
-  for (let i = 0; i < 7; i++) {
+function seasonForWindow(region: RegionKey, start: Date, nights: number): SeasonKey {
+  for (let i = 0; i < nights; i++) {
     const d = new Date(start);
     d.setUTCDate(d.getUTCDate() + i);
     if (holidayDate(d)) return "HOLIDAY";
@@ -399,7 +429,7 @@ function expandSeasonSamplesToWeekly(args: {
     checkIn.setUTCDate(checkIn.getUTCDate() + i * 7);
     const checkOut = new Date(checkIn);
     checkOut.setUTCDate(checkOut.getUTCDate() + 7);
-    const season = seasonForSevenNightWindow(args.region, checkIn);
+    const season = seasonForWindow(args.region, checkIn, 7);
     const template = bySeason.get(season);
     if (!template) continue;
     windows.push({
@@ -420,6 +450,7 @@ export async function scanSeasonalAvailabilityCapacity(args: {
   resortName?: string | null;
   manualMinSets?: number;
   weeks?: number;
+  now?: Date;
   signal?: AbortSignal;
   onPhase?: (label: string) => void;
   onWindow?: (window: SeasonalAvailabilityWindow) => void;
@@ -433,6 +464,7 @@ async function runSeasonalAvailabilityCapacity(args: {
   resortName?: string | null;
   manualMinSets?: number;
   weeks?: number;
+  now?: Date;
   signal?: AbortSignal;
   onPhase?: (label: string) => void;
   onWindow?: (window: SeasonalAvailabilityWindow) => void;
@@ -451,19 +483,20 @@ async function runSeasonalAvailabilityCapacity(args: {
       throw err;
     }
   };
-  const windows = SEASONS.map((season) => ({
-    season,
-    window: pickAvailabilitySeasonWindow({ propertyId: args.propertyId, region, season }),
+  const windows = generateTwiceMonthlyAvailabilityWindows({ weeks, now: args.now }).map((window) => ({
+    season: seasonForWindow(region, new Date(`${window.checkIn}T12:00:00Z`), window.nights),
+    window,
   }));
 
   const sampleResults: SeasonalAvailabilityWindow[] = [];
-  for (const { season, window } of windows) {
+  for (let idx = 0; idx < windows.length; idx++) {
+    const { season, window } = windows[idx];
     throwIfAborted(args.signal);
     assertSidecarRunCurrent();
-    args.onPhase?.(`Scanning ${season} sample (${window.checkIn} to ${window.checkOut})`);
+    args.onPhase?.(`Scanning ${season} 14-night window ${idx + 1}/${windows.length} (${window.checkIn} to ${window.checkOut})`);
     const seasonStartedAt = Date.now();
     const heartbeat = setInterval(() => {
-      args.onPhase?.(`Still scanning ${season} sample (${formatElapsed(Date.now() - seasonStartedAt)})`);
+      args.onPhase?.(`Still scanning ${season} window ${idx + 1}/${windows.length} (${formatElapsed(Date.now() - seasonStartedAt)})`);
     }, SEASON_SCAN_HEARTBEAT_MS);
     try {
       const scan = await fetchMultiChannelBuyInByBR({
@@ -480,24 +513,23 @@ async function runSeasonalAvailabilityCapacity(args: {
       assertSidecarRunCurrent();
       const result = buildWindowFromScan({ season, window, scan, units: args.config.units, thresholds });
       sampleResults.push(result);
+      args.onWindow?.(result);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       const result = buildErrorWindow({ season, window, units: args.config.units, thresholds, error });
       sampleResults.push(result);
+      args.onWindow?.(result);
     } finally {
       clearInterval(heartbeat);
     }
   }
 
-  sampleResults.sort((a, b) => SEASONS.indexOf(a.season) - SEASONS.indexOf(b.season));
-  const results = expandSeasonSamplesToWeekly({ samples: sampleResults, region, weeks });
-  for (const result of results) args.onWindow?.(result);
   return {
     propertyId: args.propertyId,
     community: args.config.community,
     searchName: loc.searchName,
     region,
-    windows: results,
+    windows: sampleResults,
     thresholds,
     durationMs: Date.now() - startedAt,
   };

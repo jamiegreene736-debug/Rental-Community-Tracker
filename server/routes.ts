@@ -115,7 +115,11 @@ import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type Candidat
 import { runFullScanNow, getScannerSchedulerStatus } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
+  availabilityWindowCountForWeeks,
   computeAvailabilityThresholds,
+  AVAILABILITY_RELIABILITY_FACTOR,
+  AVAILABILITY_WINDOW_NIGHTS,
+  AVAILABILITY_WINDOWS_PER_MONTH,
   scanSeasonalAvailabilityCapacity,
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
@@ -15467,6 +15471,7 @@ export async function registerRoutes(
 
     if (mode !== "legacy-static-airbnb") {
       const thresholds = computeAvailabilityThresholds(config.units, minSets);
+      const windowCount = availabilityWindowCountForWeeks(weeks);
       emit({
         type: "start",
         mode: "seasonal-sidecar",
@@ -15478,7 +15483,11 @@ export async function registerRoutes(
         minSets: thresholds.blockMinSets,
         openMinSets: thresholds.openMinSets,
         blockMinSets: thresholds.blockMinSets,
-        weeks,
+        weeks: windowCount,
+        months: Math.round(windowCount / AVAILABILITY_WINDOWS_PER_MONTH),
+        windowNights: AVAILABILITY_WINDOW_NIGHTS,
+        windowsPerMonth: AVAILABILITY_WINDOWS_PER_MONTH,
+        reliabilityFactor: AVAILABILITY_RELIABILITY_FACTOR,
       });
 
       const applyOverride = (window: SeasonalAvailabilityWindow): SeasonalAvailabilityWindow & Record<string, unknown> => {
@@ -15493,8 +15502,8 @@ export async function registerRoutes(
           overrideMode: ov.mode,
           overrideNote: ov.note ?? null,
           reason: ov.mode === "force-open"
-            ? `Manual override forced this ${window.season} sample open.`
-            : `Manual override forced this ${window.season} sample blocked.`,
+            ? `Manual override forced this ${window.season} window open.`
+            : `Manual override forced this ${window.season} window blocked.`,
         };
       };
 
@@ -15535,6 +15544,7 @@ export async function registerRoutes(
           thresholds: result.thresholds,
           region: result.region,
           searchName: result.searchName,
+          reliabilityFactor: AVAILABILITY_RELIABILITY_FACTOR,
         });
         emit({
           type: "done",
@@ -15542,6 +15552,7 @@ export async function registerRoutes(
           weeks: result.windows.length,
           baselineSets: aggregate.baselineSets,
           baselineVerdict: aggregate.baselineVerdict,
+          reliabilityFactor: AVAILABILITY_RELIABILITY_FACTOR,
           durationMs: result.durationMs,
         });
       } catch (e: any) {

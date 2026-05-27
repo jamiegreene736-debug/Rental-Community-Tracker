@@ -98,7 +98,7 @@ export async function runFullScanForProperty(
     const tight = seasonalWindows.filter((w) => w.verdict === "tight").length;
     const blocked = seasonalWindows.filter((w) => w.verdict === "blocked").length;
     summaries.push(`inventory ${worst?.maxSets ?? 0} sets (${worst?.verdict ?? "blocked"})`);
-    summaries.push(`weekly-windows ${open} open/${tight} tight/${blocked} blocked`);
+    summaries.push(`windows ${open} open/${tight} tight/${blocked} blocked`);
   }
 
   if (opts.runSyncBlocks && opts.runInventory && seasonalWindows.length > 0) {

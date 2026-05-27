@@ -62,6 +62,11 @@ export async function syncScannerBlocksForProperty(
   const desiredBlocks = new Set(
     windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`),
   );
+  const clearableWindows = new Set(
+    windows
+      .filter((w) => w.verdict === "available" || w.verdict === "tight")
+      .map((w) => `${w.startDate}:${w.endDate}`),
+  );
 
   let created = 0;
   let removed = 0;
@@ -106,6 +111,7 @@ export async function syncScannerBlocksForProperty(
   for (const b of active) {
     const key = `${b.startDate}:${b.endDate}`;
     if (desiredBlocks.has(key)) continue;
+    if (!clearableWindows.has(key)) continue;
     try {
       await guestyRequest("PUT", calPath, {
         startDate: b.startDate,
