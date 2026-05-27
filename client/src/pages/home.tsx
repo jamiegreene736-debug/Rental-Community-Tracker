@@ -62,6 +62,8 @@ import {
   Square,
   CheckSquare,
   StopCircle,
+  Pause,
+  Play,
 } from "lucide-react";
 import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
@@ -172,7 +174,7 @@ type QueueJobEventPayload = {
   createdAt: string;
 };
 
-type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error";
+type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error" | "cancelled";
 type BulkAvailabilityProgress = {
   scanned: number;
   total: number;
@@ -185,7 +187,7 @@ type BulkAvailabilityProgress = {
 };
 type BulkAvailabilityQueue = {
   id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "paused" | "completed" | "failed" | "cancelled";
   weeksAhead: number;
   createdAt: string;
   startedAt: string | null;
@@ -1098,6 +1100,7 @@ function AdminDashboard() {
   const [bulkPricingRetrying, setBulkPricingRetrying] = useState(false);
   const [bulkAvailabilityOpen, setBulkAvailabilityOpen] = useState(false);
   const [bulkAvailabilityStarting, setBulkAvailabilityStarting] = useState(false);
+  const [bulkAvailabilityAction, setBulkAvailabilityAction] = useState<"clear" | "pause" | "resume" | "cancel" | null>(null);
   const [bulkAvailabilityQueue, setBulkAvailabilityQueue] = useState<BulkAvailabilityQueue | null>(null);
   const [selectedCancellationId, setSelectedCancellationId] = useState<number | null>(null);
 
@@ -2021,6 +2024,33 @@ function AdminDashboard() {
       toast({ title: "Bulk availability failed to start", description: e.message, variant: "destructive" });
     } finally {
       setBulkAvailabilityStarting(false);
+    }
+  };
+
+  const runBulkAvailabilityAction = async (action: "clear" | "pause" | "resume" | "cancel") => {
+    setBulkAvailabilityAction(action);
+    try {
+      const endpoint =
+        action === "clear" ? "/api/scanner/bulk-clear"
+        : action === "pause" ? "/api/scanner/bulk-pause"
+        : action === "resume" ? "/api/scanner/bulk-resume"
+        : "/api/scanner/bulk-cancel";
+      const response = await apiRequest("POST", endpoint, {
+        reason: action === "cancel" ? "cancelled from dashboard bulk availability modal" : `${action} from dashboard bulk availability modal`,
+      });
+      const data = await response.json();
+      setBulkAvailabilityQueue(data.queue ?? null);
+      toast({
+        title:
+          action === "clear" ? "Availability queue cleared"
+          : action === "pause" ? "Availability queue paused"
+          : action === "resume" ? "Availability queue resumed"
+          : "Availability queue cancelled",
+      });
+    } catch (e: any) {
+      toast({ title: "Availability queue action failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkAvailabilityAction(null);
     }
   };
 
@@ -3032,6 +3062,7 @@ function AdminDashboard() {
                             const statusTone =
                               item.status === "success" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                               : item.status === "error" ? "bg-red-50 text-red-700 border-red-200"
+                              : item.status === "cancelled" ? "bg-slate-50 text-slate-600 border-slate-200"
                               : item.status === "running" ? "bg-blue-50 text-blue-700 border-blue-200"
                               : "bg-amber-50 text-amber-700 border-amber-200";
                             const percent = typeof item.progress?.percent === "number" ? Math.max(0, Math.min(100, item.progress.percent)) : 0;
@@ -3070,14 +3101,68 @@ function AdminDashboard() {
                             );
                           })}
                         </div>
-                        <div className="flex items-center justify-end gap-2">
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          {bulkAvailabilityQueue.status === "running" && (
+                            <>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => runBulkAvailabilityAction("pause")}
+                                disabled={bulkAvailabilityAction !== null}
+                              >
+                                {bulkAvailabilityAction === "pause" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Pause className="mr-2 h-4 w-4" />}
+                                Pause queue
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="destructive"
+                                onClick={() => runBulkAvailabilityAction("cancel")}
+                                disabled={bulkAvailabilityAction !== null}
+                              >
+                                {bulkAvailabilityAction === "cancel" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+                                Cancel queue
+                              </Button>
+                            </>
+                          )}
+                          {bulkAvailabilityQueue.status === "paused" && (
+                            <>
+                              <Button
+                                type="button"
+                                onClick={() => runBulkAvailabilityAction("resume")}
+                                disabled={bulkAvailabilityAction !== null}
+                              >
+                                {bulkAvailabilityAction === "resume" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                                Resume queue
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="destructive"
+                                onClick={() => runBulkAvailabilityAction("cancel")}
+                                disabled={bulkAvailabilityAction !== null}
+                              >
+                                {bulkAvailabilityAction === "cancel" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+                                Cancel queue
+                              </Button>
+                            </>
+                          )}
+                          {bulkAvailabilityQueue.status !== "running" && bulkAvailabilityQueue.status !== "paused" && (
+                            <Button
+                              type="button"
+                              onClick={startBulkAvailabilityScan}
+                              disabled={bulkAvailabilityStarting || selectedBulkAvailabilityCount === 0}
+                            >
+                              {bulkAvailabilityStarting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CalendarSearch className="mr-2 h-4 w-4" />}
+                              Start selected queue
+                            </Button>
+                          )}
                           <Button
                             type="button"
                             variant="outline"
-                            onClick={() => setBulkAvailabilityQueue(null)}
-                            disabled={bulkAvailabilityQueue.status === "running"}
+                            onClick={() => runBulkAvailabilityAction("clear")}
+                            disabled={bulkAvailabilityAction !== null || bulkAvailabilityQueue.status === "running" || bulkAvailabilityQueue.status === "paused"}
                           >
-                            Clear completed queue
+                            {bulkAvailabilityAction === "clear" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                            Clear queue
                           </Button>
                         </div>
                       </div>

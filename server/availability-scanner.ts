@@ -6,7 +6,7 @@ import {
   resolveBuyInMarket,
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
-import { acquireSidecarLane, isSidecarLaneCancellationRequested } from "./sidecar-lane";
+import { acquireSidecarLane, cancelActiveSidecarLane, isSidecarLaneCancellationRequested } from "./sidecar-lane";
 import { fetchMultiChannelBuyInByBR } from "./multichannel-buy-in";
 
 const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; units: { bedrooms: number }[] }> = {
@@ -72,6 +72,8 @@ type AvailabilityScanOptions = {
   sidecarConcurrencyMode?: AvailabilitySidecarConcurrencyMode;
   windowConcurrency?: number;
   onProgress?: (progress: AvailabilityScanProgress) => void;
+  shouldPause?: () => boolean;
+  shouldCancel?: () => boolean;
 };
 
 function formatDate(date: Date): string {
@@ -287,7 +289,7 @@ let scannerRunning = false;
 let currentScanPropertyId: number | null = null;
 let scanAborted = false;
 
-type BulkQueueItemStatus = "pending" | "running" | "success" | "error";
+type BulkQueueItemStatus = "pending" | "running" | "success" | "error" | "cancelled";
 
 export type BulkAvailabilityQueueItem = {
   propertyId: number;
@@ -305,7 +307,7 @@ export type BulkAvailabilityQueueItem = {
 
 export type BulkAvailabilityQueueStatus = {
   id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "paused" | "completed" | "failed" | "cancelled";
   weeksAhead: number;
   createdAt: string;
   startedAt: string | null;
@@ -321,6 +323,8 @@ export type BulkAvailabilityQueueStatus = {
 
 let bulkAvailabilityQueue: BulkAvailabilityQueueStatus | null = null;
 let bulkAvailabilityQueueProcessing = false;
+let bulkAvailabilityQueuePaused = false;
+let bulkAvailabilityQueueCancelRequested = false;
 
 export function isScannerRunning(): boolean {
   return scannerRunning;
@@ -363,6 +367,84 @@ export function getBulkAvailabilityQueueStatus(): BulkAvailabilityQueueStatus | 
 
 export function isBulkAvailabilityQueueRunning(): boolean {
   return bulkAvailabilityQueueProcessing;
+}
+
+export function clearBulkAvailabilityQueue(): { ok: boolean; queue: BulkAvailabilityQueueStatus | null; error?: string } {
+  if (bulkAvailabilityQueueProcessing || scannerRunning) {
+    return { ok: false, queue: bulkAvailabilityQueue, error: "Cannot clear while the availability queue is running. Pause or cancel it first." };
+  }
+  bulkAvailabilityQueue = null;
+  bulkAvailabilityQueuePaused = false;
+  bulkAvailabilityQueueCancelRequested = false;
+  return { ok: true, queue: null };
+}
+
+export function pauseBulkAvailabilityQueue(reason = "paused by operator"): { ok: boolean; queue: BulkAvailabilityQueueStatus | null; error?: string } {
+  if (!bulkAvailabilityQueue || bulkAvailabilityQueue.status !== "running") {
+    return { ok: false, queue: bulkAvailabilityQueue, error: "No running availability queue to pause" };
+  }
+  bulkAvailabilityQueuePaused = true;
+  bulkAvailabilityQueue.status = "paused";
+  for (const item of bulkAvailabilityQueue.items) {
+    if (item.status === "pending") item.message = "Paused";
+    if (item.status === "running") item.message = "Pausing after current window";
+  }
+  log(`Bulk availability queue paused: ${reason}`, "scanner");
+  return { ok: true, queue: getBulkAvailabilityQueueStatus() };
+}
+
+export function resumeBulkAvailabilityQueue(): { ok: boolean; queue: BulkAvailabilityQueueStatus | null; error?: string } {
+  if (!bulkAvailabilityQueue || bulkAvailabilityQueue.status !== "paused") {
+    return { ok: false, queue: bulkAvailabilityQueue, error: "No paused availability queue to resume" };
+  }
+  bulkAvailabilityQueuePaused = false;
+  bulkAvailabilityQueue.status = "running";
+  for (const item of bulkAvailabilityQueue.items) {
+    if (item.status === "pending") item.message = "Waiting for its turn";
+    if (item.status === "running") item.message = "Scanning availability";
+  }
+  log("Bulk availability queue resumed", "scanner");
+  return { ok: true, queue: getBulkAvailabilityQueueStatus() };
+}
+
+export async function cancelBulkAvailabilityQueue(reason = "cancelled by operator"): Promise<{
+  ok: boolean;
+  queue: BulkAvailabilityQueueStatus | null;
+  cancelled: number;
+}> {
+  bulkAvailabilityQueueCancelRequested = true;
+  bulkAvailabilityQueuePaused = false;
+  scanAborted = true;
+  cancelActiveSidecarLane(reason);
+  let cancelled = 0;
+  if (bulkAvailabilityQueue) {
+    bulkAvailabilityQueue.status = "cancelled";
+    bulkAvailabilityQueue.completedAt = new Date().toISOString();
+    for (const item of bulkAvailabilityQueue.items) {
+      if (item.status === "pending" || item.status === "running") {
+        item.status = "cancelled";
+        item.message = reason;
+        item.completedAt = new Date().toISOString();
+        if (item.progress) {
+          item.progress = {
+            ...item.progress,
+            label: reason,
+            updatedAt: item.completedAt,
+          };
+        }
+        cancelled++;
+      }
+    }
+    refreshBulkAvailabilityTotals(bulkAvailabilityQueue);
+  }
+  try {
+    const { cancelSidecarRunAndRequests } = await import("./vrbo-sidecar-queue");
+    cancelSidecarRunAndRequests(reason);
+  } catch (e: any) {
+    log(`Bulk availability sidecar cancellation warning: ${e?.message ?? e}`, "scanner");
+  }
+  log(`Bulk availability queue cancelled: ${reason}`, "scanner");
+  return { ok: true, queue: getBulkAvailabilityQueueStatus(), cancelled };
 }
 
 export function startBulkAvailabilityQueue(propertyIds?: number[], weeksAhead = 52): BulkAvailabilityQueueStatus {
@@ -412,6 +494,8 @@ export function startBulkAvailabilityQueue(propertyIds?: number[], weeksAhead = 
       };
     }),
   };
+  bulkAvailabilityQueuePaused = false;
+  bulkAvailabilityQueueCancelRequested = false;
 
   void processBulkAvailabilityQueue(bulkAvailabilityQueue);
   return bulkAvailabilityQueue;
@@ -423,6 +507,21 @@ async function processBulkAvailabilityQueue(queue: BulkAvailabilityQueueStatus) 
 
   try {
     for (const item of queue.items) {
+      while (bulkAvailabilityQueuePaused && !bulkAvailabilityQueueCancelRequested) {
+        queue.status = "paused";
+        item.message = "Paused";
+        refreshBulkAvailabilityTotals(queue);
+        await sleep(1_000);
+      }
+      if (bulkAvailabilityQueueCancelRequested) {
+        if (item.status === "pending") {
+          item.status = "cancelled";
+          item.message = "Cancelled";
+          item.completedAt = new Date().toISOString();
+        }
+        continue;
+      }
+      queue.status = "running";
       item.status = "running";
       item.startedAt = new Date().toISOString();
       item.message = "Scanning availability";
@@ -446,14 +545,17 @@ async function processBulkAvailabilityQueue(queue: BulkAvailabilityQueueStatus) 
             item.progress = progress;
             item.message = progress.label;
           },
+          shouldPause: () => bulkAvailabilityQueuePaused,
+          shouldCancel: () => bulkAvailabilityQueueCancelRequested,
         });
         item.runId = runId > 0 ? runId : null;
-        item.status = runId > 0 ? "success" : "error";
-        item.message = runId > 0 ? `Completed as run #${runId}` : "Scan did not start";
+        const cancelled = bulkAvailabilityQueueCancelRequested || scanAborted;
+        item.status = cancelled ? "cancelled" : runId > 0 ? "success" : "error";
+        item.message = cancelled ? "Cancelled" : runId > 0 ? `Completed as run #${runId}` : "Scan did not start";
         if (item.progress) {
           item.progress = {
             ...item.progress,
-            percent: runId > 0 ? 100 : item.progress.percent,
+            percent: runId > 0 && !cancelled ? 100 : item.progress.percent,
             label: item.message,
             updatedAt: new Date().toISOString(),
           };
@@ -475,11 +577,17 @@ async function processBulkAvailabilityQueue(queue: BulkAvailabilityQueueStatus) 
       }
     }
 
-    queue.status = queue.totals.error > 0 ? "failed" : "completed";
+    queue.status = bulkAvailabilityQueueCancelRequested
+      ? "cancelled"
+      : queue.totals.error > 0
+        ? "failed"
+        : "completed";
   } finally {
     queue.completedAt = new Date().toISOString();
     refreshBulkAvailabilityTotals(queue);
     bulkAvailabilityQueueProcessing = false;
+    bulkAvailabilityQueuePaused = false;
+    bulkAvailabilityQueueCancelRequested = false;
     log(
       `Bulk availability queue ${queue.status}: ${queue.totals.success} completed, ${queue.totals.error} failed`,
       "scanner",
@@ -584,6 +692,22 @@ export async function runAvailabilityScan(
     });
 
     const scanWindow = async (window: { checkIn: string; checkOut: string }, clearCacheAfterWindow: boolean) => {
+      while (options.shouldPause?.() && !scanAborted) {
+        options.onProgress?.({
+          scanned: totalScanned,
+          total: totalPeriods,
+          percent: totalPeriods > 0 ? Math.round((totalScanned / totalPeriods) * 100) : 0,
+          blocked: totalBlocked,
+          available: totalAvailable,
+          errors: totalErrors,
+          label: "Paused",
+          updatedAt: new Date().toISOString(),
+        });
+        await sleep(1_000);
+      }
+      if (options.shouldCancel?.()) {
+        scanAborted = true;
+      }
       if (isSidecarLaneCancellationRequested("availability-scan", laneOwnerId)) {
         scanAborted = true;
         log("Scan aborted because the Chrome sidecar lane was cancelled", "scanner");

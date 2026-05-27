@@ -58,6 +58,10 @@ import {
   getBulkAvailabilityQueueStatus,
   isBulkAvailabilityQueueRunning,
   startBulkAvailabilityQueue,
+  clearBulkAvailabilityQueue,
+  pauseBulkAvailabilityQueue,
+  resumeBulkAvailabilityQueue,
+  cancelBulkAvailabilityQueue,
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -20409,6 +20413,35 @@ Return ONLY compact JSON with this exact shape:
 
   app.get("/api/scanner/bulk-status", async (_req, res) => {
     res.json({ queue: getBulkAvailabilityQueueStatus() });
+  });
+
+  app.post("/api/scanner/bulk-clear", async (_req, res) => {
+    const result = clearBulkAvailabilityQueue();
+    if (!result.ok) return res.status(409).json(result);
+    res.json(result);
+  });
+
+  app.post("/api/scanner/bulk-pause", async (req, res) => {
+    const reason = typeof req.body?.reason === "string" && req.body.reason.trim()
+      ? req.body.reason.trim().slice(0, 200)
+      : "paused by operator";
+    const result = pauseBulkAvailabilityQueue(reason);
+    if (!result.ok) return res.status(409).json(result);
+    res.json(result);
+  });
+
+  app.post("/api/scanner/bulk-resume", async (_req, res) => {
+    const result = resumeBulkAvailabilityQueue();
+    if (!result.ok) return res.status(409).json(result);
+    res.json(result);
+  });
+
+  app.post("/api/scanner/bulk-cancel", async (req, res) => {
+    const reason = typeof req.body?.reason === "string" && req.body.reason.trim()
+      ? req.body.reason.trim().slice(0, 200)
+      : "cancelled by operator";
+    const result = await cancelBulkAvailabilityQueue(reason);
+    res.json(result);
   });
 
   app.get("/api/scanner/status", async (_req, res) => {

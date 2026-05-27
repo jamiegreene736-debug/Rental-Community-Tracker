@@ -58,7 +58,7 @@ type BulkAvailabilityQueueItem = {
   community: string;
   bedrooms: number[];
   totalBedrooms: number;
-  status: "pending" | "running" | "success" | "error";
+  status: "pending" | "running" | "success" | "error" | "cancelled";
   runId: number | null;
   message: string | null;
   startedAt: string | null;
@@ -77,7 +77,7 @@ type BulkAvailabilityQueueItem = {
 
 type BulkAvailabilityQueue = {
   id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "paused" | "completed" | "failed" | "cancelled";
   weeksAhead: number;
   createdAt: string;
   startedAt: string | null;
@@ -232,6 +232,9 @@ export default function AvailabilityScanner() {
     if (item.status === "error") {
       return <Badge variant="destructive">Error</Badge>;
     }
+    if (item.status === "cancelled") {
+      return <Badge variant="outline">Cancelled</Badge>;
+    }
     return <Badge variant="outline">Pending</Badge>;
   };
 
@@ -313,8 +316,12 @@ export default function AvailabilityScanner() {
                   <h2 className="text-lg font-semibold">Bulk Availability Queue</h2>
                   {bulkQueue.status === "running" ? (
                     <Badge variant="secondary"><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Running</Badge>
+                  ) : bulkQueue.status === "paused" ? (
+                    <Badge variant="outline">Paused</Badge>
                   ) : bulkQueue.status === "completed" ? (
                     <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Completed</Badge>
+                  ) : bulkQueue.status === "cancelled" ? (
+                    <Badge variant="outline">Cancelled</Badge>
                   ) : (
                     <Badge variant="destructive">Completed with errors</Badge>
                   )}
