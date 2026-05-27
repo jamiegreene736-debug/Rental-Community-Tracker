@@ -982,7 +982,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             </span>
           )}
           <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>
-            Counts are dated sidecar searches from Airbnb, VRBO, and Booking.com, with false-positive risk discounted by the reliability haircut.
+            Counts combine SearchAPI Airbnb, supplemental Google Hotels, and dated VRBO / Booking.com sidecar searches, with false-positive risk discounted by the reliability haircut.
           </div>
         </div>
       )}
@@ -1354,7 +1354,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                     <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Airbnb</th>
                     <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>VRBO</th>
                     <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Booking</th>
-                    <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>PM sites</th>
+                    <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Google Hotels</th>
                     <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Raw</th>
                     <th style={{ textAlign: "right", padding: "5px 10px", fontWeight: 600 }}>Effective</th>
                   </tr>
@@ -1374,7 +1374,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 </tbody>
               </table>
               <div style={{ padding: "6px 10px", fontSize: 10, color: "#9ca3af", borderTop: "1px solid #f3f4f6" }}>
-                Effective count discounts likely cross-listed homes so the blocker does not assume every channel result is a unique buy-in option.
+                Effective count discounts likely cross-listed homes so the blocker does not assume every SearchAPI or sidecar result is a unique buy-in option.
               </div>
             </div>
           )}

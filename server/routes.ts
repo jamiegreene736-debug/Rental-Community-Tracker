@@ -9373,11 +9373,11 @@ export async function registerRoutes(
       }
     };
 
-    // ── Airbnb: website search through the local Chrome sidecar ───────
-    // Operator directive 2026-05-01: do not use SearchAPI's Airbnb
-    // engine or Google site search for buy-in candidate pricing. Drive
-    // airbnb.com itself with the resort name, stay dates, and bedroom
-    // filter, then scrape the priced result cards returned by Airbnb.
+    // ── Airbnb: SearchAPI native Airbnb engine ────────────────────────
+    // Operator directive 2026-05-27: Airbnb market / availability scans
+    // should use SearchAPI for speed. VRBO and Booking.com remain on the
+    // real-browser sidecar because SearchAPI has no native engines for
+    // those providers.
     let airbnbRawCount = 0;
     let airbnbDropped = { noResort: 0, wrongBedrooms: 0 };
     let airbnbPricedCount = 0;
@@ -9397,73 +9397,88 @@ export async function registerRoutes(
       propertyId,
       detail: `${providerLabel}: scanning ${bedrooms}BR unit · ${sidecarQueueDateLabel} · ${(resortName || community).trim()}`,
     });
-    const airbnbSidecarAbort = makeSidecarAbort("airbnb-sidecar");
+    const airbnbSidecarAbort = makeSidecarAbort("airbnb-searchapi");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       try {
-        const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
-        const r = await searchAirbnbViaSidecar({
-          destination: airbnbWebsiteSearchTerm,
-          searchTerm: airbnbWebsiteSearchTerm,
-          checkIn,
-          checkOut,
-          bedrooms,
-          walletBudgetMs: 180_000,
-          queueBudgetMs: 285_000,
-          rerunOnlyUntried: rerunOnlyUntriedVariations,
+        const sp: Record<string, string> = {
+          engine: "airbnb",
+          q: airbnbWebsiteSearchTerm,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults: "2",
+          bedrooms: String(bedrooms),
+          type_of_place: "entire_home",
+          currency: "USD",
+          api_key: apiKey,
+        };
+        addAirbnbBoundingBox(sp, bounds);
+        const started = Date.now();
+        const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`, {
           signal: airbnbSidecarAbort.signal,
-          stopGeneration: sidecarStopGeneration,
-          queueContext: sidecarQueueContextFor("Airbnb"),
         });
-        airbnbSidecarOnline = r.workerOnline;
-        airbnbSidecarMs = r.durationMs;
-        airbnbSidecarReason = r.reason;
-        airbnbProviderHealth = r.providerHealth ?? null;
-        airbnbVariationSummary = r.searchVariationSummary ?? null;
-        if (sidecarReasonIsProviderFailure(r.reason)) {
-          noteSourceError("Airbnb sidecar search", r.reason);
+        airbnbSidecarOnline = true;
+        airbnbSidecarMs = Date.now() - started;
+        if (!r.ok) {
+          airbnbSidecarReason = `SearchAPI Airbnb HTTP ${r.status}`;
+          noteSourceError("Airbnb SearchAPI search", airbnbSidecarReason);
+          return [];
         }
-        airbnbRawCount = r.candidates.length;
-        airbnbPricedCount = r.candidates.length;
+        const data = await r.json() as any;
+        if (data?.error) {
+          airbnbSidecarReason = `SearchAPI Airbnb: ${data.error}`;
+          noteSourceError("Airbnb SearchAPI search", airbnbSidecarReason);
+          return [];
+        }
+        const properties = Array.isArray(data?.properties) ? data.properties : [];
+        airbnbSidecarReason = `SearchAPI Airbnb returned ${properties.length} listing(s)`;
+        airbnbRawCount = properties.length;
+        airbnbPricedCount = properties.length;
         let noResort = 0;
         let wrongBedrooms = 0;
-        const accepted = r.candidates.filter((c) => {
-          const hay = `${c.title} ${c.snippet ?? ""} ${c.url}`;
-          const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
-            .map((m) => parseInt(m[1], 10))
-            .filter((n) => Number.isFinite(n) && n > 0);
-          if (stayNightCounts.some((n) => n !== nights)) return false;
-          const inferred = rawCandidateBedroomSignal(c);
+        const seen = new Set<string>();
+        const accepted = properties.filter((p: any) => {
+          const id = String(p?.id ?? p?.listing_id ?? "").trim();
+          if (id && seen.has(id)) return false;
+          if (id) seen.add(id);
+          const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""} ${p?.link ?? ""}`;
+          if (!mentionsResort(hay) && !airbnbCoordsInBounds(p, bounds, 0.01)) {
+            noResort++;
+            return false;
+          }
+          const inferred = bedroomFromText(hay);
           if (inferred !== null && inferred < bedrooms) {
             wrongBedrooms++;
             return false;
           }
-          return c.totalPrice > 0 || c.nightlyPrice > 0;
+          return Number(p?.price?.extracted_total_price ?? 0) > 0;
         });
         airbnbDropped = { noResort, wrongBedrooms };
         airbnbPricedDropped = { noResort };
-        return accepted.map((c): Candidate => {
-          const total = c.totalPrice > 0 ? c.totalPrice : c.nightlyPrice * nights;
-          const nightly = c.nightlyPrice > 0 ? c.nightlyPrice : Math.round(total / Math.max(1, nights));
+        return accepted.map((p: any): Candidate => {
+          const total = Number(p?.price?.extracted_total_price ?? 0);
+          const nightly = Math.round(total / Math.max(1, nights));
+          const link = String(p?.link ?? "");
+          const image = Array.isArray(p?.images) ? p.images[0] : undefined;
           return {
             source: "airbnb",
             sourceLabel: "Airbnb",
-            title: c.title,
-            originalSourceUrl: c.url,
-            url: withStayDates("airbnb", c.url),
+            title: String(p?.name ?? p?.title ?? "Airbnb listing"),
+            originalSourceUrl: link,
+            url: withStayDates("airbnb", link),
             nightlyPrice: Math.round(nightly),
             totalPrice: Math.round(total),
-            bedrooms: rawCandidateBedroomSignal(c) ?? c.bedrooms,
-            image: c.image,
-            images: Array.isArray(c.images) ? c.images.filter((url): url is string => typeof url === "string" && /^https?:\/\//i.test(url)).slice(0, 3) : undefined,
-            snippet: c.snippet,
+            bedrooms: bedroomFromText(`${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`) ?? undefined,
+            image,
+            images: Array.isArray(p?.images) ? p.images.filter((url: unknown): url is string => typeof url === "string" && /^https?:\/\//i.test(url)).slice(0, 3) : undefined,
+            snippet: String(p?.description ?? "").slice(0, 160),
             verified: "yes",
             verifiedNightlyPrice: Math.round(nightly),
-            verifiedReason: "Airbnb sidecar searched airbnb.com with the resort, dates, and bedroom filter and scraped this priced result card",
+            verifiedReason: "SearchAPI Airbnb engine returned this date-specific priced result for the resort, dates, and bedroom filter",
           };
         });
       } catch (e: any) {
-        console.error(`[find-buy-in] airbnb sidecar error:`, e?.message ?? e);
-        noteSourceError("Airbnb sidecar search", e);
+        console.error(`[find-buy-in] airbnb SearchAPI error:`, e?.message ?? e);
+        noteSourceError("Airbnb SearchAPI search", e);
         return [];
       }
     })();
@@ -10388,7 +10403,7 @@ export async function registerRoutes(
       Math.max(25_000, routeRemainingMs() - 10_000),
     );
     const [airbnb, booking, vrbo] = await Promise.all([
-      withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-sidecar", airbnbSidecarAbort.abort),
+      withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-searchapi", airbnbSidecarAbort.abort),
       withTimeout(bookingPromise, sidecarSourceBudgetMs, [] as Candidate[], "booking-sidecar", bookingSidecarAbort.abort),
       withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo", vrboSidecarAbort.abort),
     ]);
@@ -11245,7 +11260,7 @@ export async function registerRoutes(
     // by nightlyPrice (verified > unverified, then price ASC). Sort
     // units by minNightlyPrice across the verified subset of listings.
     const units: CheapestUnit[] = [];
-    for (const { anchor, members } of clusters.values()) {
+    for (const { anchor, members } of Array.from(clusters.values())) {
       const finalSafeVerifiedMembers = members.filter((c) => c.verified === "yes" && candidateIsFinalAutoPickSafe(c));
       if (finalSafeVerifiedMembers.length === 0) continue; // skip clusters that cannot be auto-attached safely
       const listingChannels: ListingChannel[] = members
@@ -11458,10 +11473,10 @@ export async function registerRoutes(
       searchVariationSummary: input.searchVariationSummary ?? null,
       accessPattern: input.accessPattern ?? "authorized website search via sidecar",
     });
-    const diagnosticSources = [
+    const diagnosticSources: Array<ReturnType<typeof enrichProviderDiagnostic>> = [
       enrichProviderDiagnostic({
         source: "Airbnb",
-        status: sourceStatus(["airbnb-sidecar"], ["airbnb", "Airbnb"], airbnbRawCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived website sidecar filters", airbnbSidecarOnline, airbnbSidecarReason),
+        status: sourceStatus(["airbnb-searchapi"], ["airbnb", "Airbnb"], airbnbRawCount, airbnbTarget.length, pricedCount(airbnbTarget), verifiedYesCount(airbnbTarget), "No Airbnb rows survived SearchAPI filters", airbnbSidecarOnline, airbnbSidecarReason),
         searched: airbnbSidecarOnline,
         raw: airbnbRawCount,
         kept: airbnbTarget.length,
@@ -11472,7 +11487,7 @@ export async function registerRoutes(
         health: airbnbProviderHealth,
         searchTerm: airbnbWebsiteSearchTerm,
         searchVariationSummary: airbnbVariationSummary,
-        message: `sidecarOnline=${airbnbSidecarOnline}; websitePriced=${airbnbPricedCount}; ${airbnbTarget.length} kept after target filters${airbnbSidecarReason ? `; ${airbnbSidecarReason}` : ""}.`,
+        message: `searchApiOk=${airbnbSidecarOnline}; priced=${airbnbPricedCount}; ${airbnbTarget.length} kept after target filters${airbnbSidecarReason ? `; ${airbnbSidecarReason}` : ""}.`,
       }),
       enrichProviderDiagnostic({
         source: "Vrbo",
@@ -11507,41 +11522,28 @@ export async function registerRoutes(
         searchVariationSummary: bookingVariationSummary,
         message: `sidecarOnline=${bookingSidecarOnline}; sidecarPriced=${bookingSidecarCount}; ${bookingSidecarCount} Booking.com website sidecar search card(s). Sidecar-priced search cards are trusted when Booking.com returned them after date and bedroom filtering${bookingSidecarReason ? `; ${bookingSidecarReason}` : ""}.`,
       }),
-      {
+      enrichProviderDiagnostic({
         source: "Airbnb Lens direct links",
         status: sourceStatus([], ["Google Lens"], totalPhotoMatches, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), ""),
         raw: totalPhotoMatches,
         kept: pmTarget.length,
         priced: pricedCount(pmTarget),
         verified: verifiedYesCount(pmTarget),
-        confidence: totalPhotoMatches > 0 ? "medium" : "low",
-        datesSearched: { checkIn, checkOut, nights },
-        bedroomFilter: { bedrooms, applied: true },
-        resultCounts: { raw: totalPhotoMatches, kept: pmTarget.length, priced: pricedCount(pmTarget), verified: verifiedYesCount(pmTarget) },
         accessPattern: "authorized SearchAPI Google Lens lookup; PM/direct pages are preserved as links only",
         message: `${photoMatchPmCandidates.length} direct link candidate(s) came only from Airbnb photo Lens matches. Direct sites were not scraped; rates remain Airbnb proof.`,
-      },
-      {
+      }),
+      enrichProviderDiagnostic({
         source: "Sidecar rate verifier",
         status: sidecarVerifyTargets.length === 0 ? "skipped" : sidecarBatchVerifiedUrls.size > 0 ? "ok" : "warning",
         raw: sidecarVerifyTargets.length,
         kept: sidecarBatchVerifiedUrls.size,
         priced: sidecarVerifyTargets.filter((c) => c.verified === "yes" && c.totalPrice > 0).length,
         verified: preVerifyYes,
-        confidence: sidecarVerifyTargets.length === 0 ? "none" : sidecarBatchVerifiedUrls.size > 0 ? "medium" : "low",
-        datesSearched: { checkIn, checkOut, nights },
-        bedroomFilter: { bedrooms, applied: true },
-        resultCounts: {
-          raw: sidecarVerifyTargets.length,
-          kept: sidecarBatchVerifiedUrls.size,
-          priced: sidecarVerifyTargets.filter((c) => c.verified === "yes" && c.totalPrice > 0).length,
-          verified: preVerifyYes,
-        },
         accessPattern: "disabled for auto-buy-in; search-result pages and authorized PM APIs are source of truth",
         message: sidecarVerifyTargets.length === 0
           ? "Skipped by design: search-result pages are the source of truth for rates and availability."
           : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}${sidecarReasonSummary ? `; top outcomes: ${sidecarReasonSummary}` : ""}.`,
-      },
+      }),
     ];
     const diagnosticsSeverity: "ok" | "warning" | "error" = issueList.some((i) => i.severity === "error")
       ? "error"
@@ -11621,7 +11623,7 @@ export async function registerRoutes(
 
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
-      + `airbnb=${airbnb.length}/${airbnbRawCount} (websiteSidecar=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
+      + `airbnb=${airbnb.length}/${airbnbRawCount} (searchApi=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (website sidecar search cards) `
       + `directLens=${photoMatchPmCandidates.length}/${totalPhotoMatches} (PM SearchAPI/site scraping disabled; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
@@ -11713,7 +11715,10 @@ export async function registerRoutes(
     }
     if (!inFlightSettled) {
       inFlightSettled = true;
-      resolveInFlight?.(responseBody);
+      if (resolveInFlight) {
+        const finishInFlight = resolveInFlight as (value: typeof responseBody) => void;
+        finishInFlight(responseBody);
+      }
       findBuyInInFlight.delete(cacheKey);
     }
     console.log(`[find-buy-in] ${cacheTtlMs > 0 ? "cached" : "not caching"} ${cacheKey} (TTL ${cacheTtlMs / 1000}s; cache size now ${findBuyInCache.size})`);

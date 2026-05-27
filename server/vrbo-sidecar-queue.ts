@@ -519,9 +519,10 @@ const SIDECAR_INACTIVE_SCREEN_TTL_MS = Math.max(
 const SIDECAR_SCREENSHOT_MAX_CHARS = 350_000;
 const SIDECAR_SCREEN_COMMAND_TTL_MS = 60 * 1000;
 const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
-  // OTA block rates get worse when multiple provider visits hit at once,
-  // especially from the same local Mac/IP. Keep public OTA searches in a
-  // single lane while non-OTA work can still use the worker pool.
+  // Keep same-provider public OTA searches single-file by default, but do
+  // allow one VRBO and one Booking.com search to run at the same time. This
+  // uses the visible Chrome slot pool without doubling up on the same provider
+  // from the same Mac/IP.
   airbnb_search: 1,
   booking_search: 1,
   vrbo_search: 1,
@@ -529,12 +530,9 @@ const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
 };
 
 function opConcurrencyGroup(opType: SidecarOpType): string {
-  if (
-    opType === "airbnb_search" ||
-    opType === "booking_search" ||
-    opType === "vrbo_search" ||
-    opType === "vrbo_photo_scrape"
-  ) return "ota_provider";
+  if (opType === "booking_search") return "booking_search";
+  if (opType === "vrbo_search" || opType === "vrbo_photo_scrape") return "vrbo_search";
+  if (opType === "airbnb_search") return "airbnb_search";
   return opType;
 }
 

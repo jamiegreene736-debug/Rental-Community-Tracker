@@ -8,21 +8,23 @@
 // sell-price floor doesn't lurch around with one-off cheap deals) AND
 // adds a parallel "live channel snapshot": the cheapest verified
 // nightly across Airbnb / VRBO / Booking.com for the SAME 7-night
-// window, pulled through the local-Chrome sidecar daemon.
+// window. Airbnb and the supplemental Google Hotels inventory come
+// from SearchAPI; VRBO + Booking.com come through the Chrome sidecar.
 // The snapshot is ephemeral — returned in the
 // refresh response, surfaced in the Pricing tab, never persisted —
 // so the operator can see when one channel's cheapest is materially
 // below the median basis ("VRBO has $580/n today; basis is $620").
 //
-// Operator directive 2026-05-22/27: OTA pricing stays sidecar/browser
-// backed: no Airbnb/VRBO/Booking APIs, and no PM website scraping for
-// market buy-in. VRBO must never use constructed search URL injection;
-// Airbnb and Booking.com may use result URL parameters only after the
-// visible provider dropdown has confirmed the intended destination.
-// Direct-booking discovery is handled separately from Airbnb listing
-// images; the direct site is linked, not scraped for price.
+// Operator directive 2026-05-27: use SearchAPI for fast Airbnb market /
+// availability signals, supplement with Google Hotels vacation-rental
+// inventory, and keep VRBO + Booking.com on the real-browser sidecar.
+// VRBO must never use constructed search URL injection; Booking.com may
+// use result URL parameters only after the visible provider dropdown has
+// confirmed the intended destination. Direct-booking discovery is handled
+// separately from Airbnb listing images; the direct site is linked, not
+// scraped for price.
 
-import { fetchAmortizedNightlyByBR } from "./community-research";
+import { extractBedroomsFromListing } from "./community-research";
 import { STREAMLINE_SITES } from "./pm-scraper-streamline";
 import { VRP_SITES } from "./pm-scraper-vrp";
 import { getSidecarStopGeneration, hasSidecarStopGenerationChanged } from "./vrbo-sidecar-queue";
@@ -215,6 +217,75 @@ function formatSidecarQueueDateRange(checkIn: string, checkOut: string): string 
   if (start.year === end.year && start.month === end.month) return `${start.month} ${start.day}-${end.day}, ${start.year}`;
   if (start.year === end.year) return `${start.month} ${start.day}-${end.month} ${end.day}, ${start.year}`;
   return `${start.month} ${start.day}, ${start.year}-${end.month} ${end.day}, ${end.year}`;
+}
+
+function searchApiBoundingBoxFromCenter(center?: { lat: number; lng: number }): {
+  airbnb: string;
+  googleHotels: string;
+} | null {
+  if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng)) return null;
+  const halfDeg = 0.015;
+  const swLat = center.lat - halfDeg;
+  const swLng = center.lng - halfDeg;
+  const neLat = center.lat + halfDeg;
+  const neLng = center.lng + halfDeg;
+  return {
+    airbnb: `[[${neLat},${neLng}],[${swLat},${swLng}]]`,
+    // Google Hotels uses west,south,east,north.
+    googleHotels: `[${swLng},${swLat},${neLng},${neLat}]`,
+  };
+}
+
+function priceNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const n = Number(value.replace(/[^\d.]/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function candidateIdFromAirbnbLink(link: unknown): string | null {
+  const m = String(link ?? "").match(/airbnb\.com\/(?:[a-z]{2}-[a-z]{2}\/)?rooms\/(?:plus\/)?(\d+)/i);
+  return m?.[1] ?? null;
+}
+
+function googleHotelCandidateKey(candidate: any): string {
+  const link = String(candidate?.link ?? "").trim();
+  if (link) {
+    try {
+      const u = new URL(link);
+      u.search = "";
+      u.hash = "";
+      return u.toString().toLowerCase();
+    } catch {
+      return link.toLowerCase();
+    }
+  }
+  return [
+    candidate?.name ?? "",
+    candidate?.gps_coordinates?.latitude ?? "",
+    candidate?.gps_coordinates?.longitude ?? "",
+  ].join("|").toLowerCase();
+}
+
+function targetTokens(value: string): string[] {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter((token) => token.length >= 3);
+}
+
+function textMatchesTarget(text: string, target: string): boolean {
+  const tokens = targetTokens(target);
+  if (tokens.length === 0) return true;
+  const hay = text.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  return tokens.every((token) => hay.includes(token));
+}
+
+function coordsNearCenter(candidate: any, center?: { lat: number; lng: number }, pad = 0.02): boolean {
+  if (!center) return false;
+  const lat = Number(candidate?.gps_coordinates?.latitude ?? candidate?.gpsCoordinates?.latitude);
+  const lng = Number(candidate?.gps_coordinates?.longitude ?? candidate?.gpsCoordinates?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  return Math.abs(lat - center.lat) <= pad && Math.abs(lng - center.lng) <= pad;
 }
 
 function medianOfSorted(sorted: number[]): number | null {
@@ -778,20 +849,6 @@ export async function fetchMultiChannelBuyInByBR(args: {
   });
   if (!args.skipSidecar) assertSidecarRunCurrent();
 
-  // Fan out every OTA website search concurrently. SearchAPI is not
-  // used for OTA pricing here; Airbnb, VRBO, and Booking.com all run
-  // through the operator's local Chrome sidecar.
-  const airbnbFallbackPromise = args.skipSidecar
-    ? fetchAmortizedNightlyByBR(
-        args.community,
-        args.city,
-        args.state,
-        args.streetAddress,
-        args.bboxCenterOverride,
-        args.dateOverride ? { checkIn, checkOut } : undefined,
-      )
-    : Promise.resolve({ ratesByBR: {} as Record<number, number[]> });
-
   type SidecarOp = {
     br: number;
     channel: ChannelKey;
@@ -822,8 +879,8 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const pmSearchCount = reuseSharedPmSearch ? 1 : args.bedroomCounts.length;
   const pmSearchEnabled = false;
   const progressTotal = args.skipSidecar
-    ? 0
-    : (args.skipOta ? 0 : otaSearchBedroomCounts.length * 3) +
+    ? (args.skipOta ? 0 : otaSearchBedroomCounts.length * 2)
+    : (args.skipOta ? 0 : otaSearchBedroomCounts.length * 4) +
       (args.skipPm || !pmSearchEnabled ? 0 : pmSearchCount);
   let progressCompleted = 0;
   const emitProgress = (
@@ -879,7 +936,23 @@ export async function fetchMultiChannelBuyInByBR(args: {
       reason,
     }));
 
+  const searchApiFailureOps = (
+    searchBedrooms: number,
+    channel: ChannelKey,
+    reason: string,
+  ): SidecarOp[] =>
+    targetBrsForSearch(searchBedrooms).map((br) => ({
+      br,
+      channel,
+      cheapestNightly: null,
+      availableCount: 0,
+      rates: channel === "airbnb" ? [] : undefined,
+      workerOnline: false,
+      reason,
+    }));
+
   const sidecarOps: Promise<SidecarOp[]>[] = [];
+  const searchApiOps: Promise<SidecarOp[]>[] = [];
   const pmOps: Promise<{
     br: number;
     medianNightly: number | null;
@@ -887,50 +960,62 @@ export async function fetchMultiChannelBuyInByBR(args: {
     workerOnline: boolean;
     reason?: string;
   }[]>[] = [];
-  // When caller asks us to skip sidecar, we still build the channel
-  // map but browser-backed entries stay null. Normal pricing refreshes
-  // do not skip sidecar: LOW/HIGH/HOLIDAY all use Airbnb + VRBO +
-  // Booking.com searches now.
-  if (!args.skipSidecar && !args.skipOta) for (const br of otaSearchBedroomCounts) {
-    sidecarOps.push(
+  // SearchAPI does the fast Airbnb pass and a supplemental Google Hotels
+  // vacation-rental pass. The supplemental data lands in the existing `pm`
+  // slot to avoid a DB/schema migration; UI labels it as Google Hotels.
+  if (!args.skipOta) for (const br of otaSearchBedroomCounts) {
+    searchApiOps.push(
       (async (): Promise<SidecarOp[]> => {
-        const progressLabel = `Airbnb ${br}+BR (8-window sidecar)`;
+        const progressLabel = `Airbnb ${br}+BR (SearchAPI)`;
         try {
-          assertSidecarRunCurrent();
-          const { searchAirbnbViaSidecar } = await import("./vrbo-sidecar-queue");
-          const r = await searchAirbnbViaSidecar({
-            destination: sidecarDestination,
-            searchTerm: targetDest,
-            checkIn,
-            checkOut,
-            bedrooms: br,
-            walletBudgetMs: 120_000,
-            queueBudgetMs: sidecarQueueBudgetMs,
-            signal: args.signal,
-            stopGeneration: sidecarStopGeneration,
-            queueContext: queueContextFor("Airbnb", br),
-          });
+          if (args.signal?.aborted) {
+            const err = new Error(args.signal.reason instanceof Error ? args.signal.reason.message : "Airbnb SearchAPI scan cancelled");
+            err.name = "AbortError";
+            throw err;
+          }
+          const apiKey = process.env.SEARCHAPI_API_KEY;
+          if (!apiKey) return searchApiFailureOps(br, "airbnb", "SEARCHAPI_API_KEY not configured");
+          const bbox = searchApiBoundingBoxFromCenter(args.bboxCenterOverride);
+          const params: Record<string, string> = {
+            engine: "airbnb",
+            q: sidecarDestination || `${args.community} ${args.city} ${args.state}`,
+            check_in_date: checkIn,
+            check_out_date: checkOut,
+            adults: "2",
+            bedrooms: String(br),
+            type_of_place: "entire_home",
+            currency: "USD",
+            api_key: apiKey,
+          };
+          if (bbox) params.bounding_box = bbox.airbnb;
+          const response = await fetch(
+            `https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`,
+            { signal: args.signal },
+          );
+          if (!response.ok) return searchApiFailureOps(br, "airbnb", `SearchAPI Airbnb HTTP ${response.status}`);
+          const data = await response.json() as any;
+          if (data?.error) return searchApiFailureOps(br, "airbnb", `SearchAPI Airbnb: ${data.error}`);
+          const properties = Array.isArray(data?.properties) ? data.properties : [];
           const targetBrs = targetBrsForSearch(br);
           const byBr = new Map<number, { cheapest: number; availableCount: number; rates: number[] }>();
           for (const targetBr of targetBrs) {
             byBr.set(targetBr, { cheapest: Infinity, availableCount: 0, rates: [] });
           }
-          for (const c of r.candidates) {
-            const total = c.totalPrice > 0
-              ? Math.round(c.totalPrice)
-              : c.nightlyPrice > 0
-                ? Math.round(c.nightlyPrice * nights)
-                : 0;
+          const seen = new Set<string>();
+          for (const c of properties) {
+            const id = String(c?.id ?? c?.listing_id ?? candidateIdFromAirbnbLink(c?.link) ?? "");
+            if (id && seen.has(id)) continue;
+            if (id) seen.add(id);
+            const total = Math.round(priceNumber(c?.price?.extracted_total_price));
             if (!(total > 0)) continue;
+            const parsedBedrooms = typeof c?.bedrooms === "number" && Number.isFinite(c.bedrooms)
+              ? c.bedrooms
+              : extractBedroomsFromListing(c);
             const rawNightly = Math.round(total / nights);
-            for (const targetBr of candidateTargetBrs(c.bedrooms, br, targetBrs)) {
+            for (const targetBr of candidateTargetBrs(parsedBedrooms, br, targetBrs)) {
               const bucket = byBr.get(targetBr);
               if (!bucket) continue;
-              const nightly = normalizeQuotedNightly(rawNightly, "airbnb", region, targetBr, nights, {
-                priceIncludesTaxes: c.priceIncludesTaxes,
-                priceIncludesFees: c.priceIncludesFees,
-                priceBasis: c.priceBasis,
-              });
+              const nightly = rawNightly;
               bucket.rates.push(nightly);
               bucket.availableCount++;
               if (nightly < bucket.cheapest) bucket.cheapest = nightly;
@@ -944,18 +1029,103 @@ export async function fetchMultiChannelBuyInByBR(args: {
               cheapestNightly: bucket && Number.isFinite(bucket.cheapest) ? Math.round(bucket.cheapest) : null,
               availableCount: bucket?.availableCount ?? 0,
               rates: bucket?.rates ?? [],
-              workerOnline: r.workerOnline,
-              reason: r.reason,
+              workerOnline: false,
+              reason: `SearchAPI Airbnb returned ${properties.length} listing(s)`,
             };
           });
         } catch (e: any) {
           rethrowIfSidecarRunCancelled(e);
-          return sidecarFailureOps(br, "airbnb", e?.message ?? String(e));
+          return searchApiFailureOps(br, "airbnb", e?.message ?? String(e));
         } finally {
           markProgressDone(progressLabel, "airbnb", br);
         }
       })(),
     );
+    searchApiOps.push(
+      (async (): Promise<SidecarOp[]> => {
+        const progressLabel = `Google Hotels ${br}+BR supplement`;
+        try {
+          if (args.signal?.aborted) {
+            const err = new Error(args.signal.reason instanceof Error ? args.signal.reason.message : "Google Hotels SearchAPI scan cancelled");
+            err.name = "AbortError";
+            throw err;
+          }
+          const apiKey = process.env.SEARCHAPI_API_KEY;
+          if (!apiKey) return searchApiFailureOps(br, "pm", "SEARCHAPI_API_KEY not configured");
+          const bbox = searchApiBoundingBoxFromCenter(args.bboxCenterOverride);
+          const params: Record<string, string> = {
+            engine: "google_hotels",
+            check_in_date: checkIn,
+            check_out_date: checkOut,
+            adults: "2",
+            bedrooms: String(br),
+            property_type: "vacation_rental",
+            sort_by: "lowest_price",
+            currency: "USD",
+            api_key: apiKey,
+          };
+          if (bbox) params.bounding_box = bbox.googleHotels;
+          else params.q = sidecarDestination || `${args.community} ${args.city} ${args.state} vacation rentals`;
+          const response = await fetch(
+            `https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`,
+            { signal: args.signal },
+          );
+          if (!response.ok) return searchApiFailureOps(br, "pm", `SearchAPI Google Hotels HTTP ${response.status}`);
+          const data = await response.json() as any;
+          if (data?.error) return searchApiFailureOps(br, "pm", `SearchAPI Google Hotels: ${data.error}`);
+          const properties = Array.isArray(data?.properties) ? data.properties : [];
+          const targetBrs = targetBrsForSearch(br);
+          const byBr = new Map<number, { cheapest: number; availableCount: number }>();
+          for (const targetBr of targetBrs) byBr.set(targetBr, { cheapest: Infinity, availableCount: 0 });
+          const seen = new Set<string>();
+          for (const c of properties) {
+            if (String(c?.type ?? "").toLowerCase() && !String(c?.type ?? "").toLowerCase().includes("vacation")) continue;
+            const key = googleHotelCandidateKey(c);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const hay = `${c?.name ?? ""} ${c?.description ?? ""} ${c?.link ?? ""}`;
+            if (!coordsNearCenter(c, args.bboxCenterOverride) && !textMatchesTarget(hay, targetDest)) continue;
+            const total = Math.round(priceNumber(c?.total_price?.extracted_price));
+            const nightly = Math.round(
+              total > 0
+                ? total / nights
+                : priceNumber(c?.price_per_night?.extracted_price),
+            );
+            if (!(nightly > 0)) continue;
+            const parsedBedrooms = extractBedroomsFromListing({ name: c?.name, title: c?.name, description: c?.description });
+            for (const targetBr of candidateTargetBrs(parsedBedrooms, br, targetBrs)) {
+              const bucket = byBr.get(targetBr);
+              if (!bucket) continue;
+              bucket.availableCount++;
+              if (nightly < bucket.cheapest) bucket.cheapest = nightly;
+            }
+          }
+          return targetBrs.map((targetBr) => {
+            const bucket = byBr.get(targetBr);
+            return {
+              br: targetBr,
+              channel: "pm",
+              cheapestNightly: bucket && Number.isFinite(bucket.cheapest) ? Math.round(bucket.cheapest) : null,
+              availableCount: bucket?.availableCount ?? 0,
+              workerOnline: false,
+              reason: `SearchAPI Google Hotels returned ${properties.length} vacation-rental listing(s)`,
+            };
+          });
+        } catch (e: any) {
+          rethrowIfSidecarRunCancelled(e);
+          return searchApiFailureOps(br, "pm", e?.message ?? String(e));
+        } finally {
+          markProgressDone(progressLabel, "pm", br);
+        }
+      })(),
+    );
+  }
+
+  // When caller asks us to skip sidecar, we still build the channel
+  // map from SearchAPI but browser-backed VRBO/Booking entries stay
+  // null. Normal pricing refreshes do not skip sidecar: VRBO and
+  // Booking.com stay on the visible browser path.
+  if (!args.skipSidecar && !args.skipOta) for (const br of otaSearchBedroomCounts) {
     sidecarOps.push(
       (async (): Promise<SidecarOp[]> => {
         const progressLabel = `VRBO ${br}+BR (8-window sidecar)`;
@@ -1159,14 +1329,15 @@ export async function fetchMultiChannelBuyInByBR(args: {
       })());
     }
   }
-  const [airbnbFallbackResult, sidecarResults, pmResults] = await Promise.all([
-    airbnbFallbackPromise,
+  const [searchApiResults, sidecarBrowserResults, pmResults] = await Promise.all([
+    Promise.all(searchApiOps).then((groups) => groups.flat()),
     Promise.all(sidecarOps).then((groups) => groups.flat()),
     Promise.all(pmOps).then((groups) => groups.flat()),
   ]);
+  const sidecarResults = [...searchApiResults, ...sidecarBrowserResults];
 
   const daemonOnline =
-    sidecarResults.some((r) => r.workerOnline) ||
+    sidecarBrowserResults.some((r) => r.workerOnline) ||
     pmResults.some((r) => r.workerOnline);
 
   // Sanity floor for outlier channel rates. Surfaced 2026-04-29: the
@@ -1175,8 +1346,8 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // median for 2BR Hawaii rentals (real basis ~$300+).
   //
   // Strategy: when Airbnb.com returns a baseline, drop any other
-  // channel rate that's < SANITY_FLOOR_RATIO of it. Airbnb's sidecar
-  // result cards are date-filtered and all-in enough to serve as a
+  // channel rate that's < SANITY_FLOOR_RATIO of it. Airbnb's SearchAPI
+  // results are date-filtered and priced enough to serve as a
   // reasonable lower bound for "what a real rental for these dates
   // looks like." Anything below half of that is almost
   // certainly a scraper bug.
@@ -1191,11 +1362,10 @@ export async function fetchMultiChannelBuyInByBR(args: {
     return rate >= baseline * SANITY_FLOOR_RATIO;
   };
 
-  // Build the channel cheapest map, normalized to all-in nightly.
-  // Airbnb sidecar totals are left as-is; VRBO + Booking sidecar
-  // scrapes are often pre-tax, so we multiply them by the
-  // region's combined tax factor (see TAX_NORMALIZATION_FACTOR comment
-  // above).
+  // Build the channel cheapest map, normalized to all-in nightly where the
+  // source exposes enough metadata. Airbnb/SearchAPI and Google Hotels are
+  // left on their returned stay-total basis; VRBO + Booking sidecar scrapes
+  // are normalized before they land here.
   const channelCheapestByBR: MultiChannelBuyInResult["channelCheapestByBR"] = {};
   const channelAvailableCountsByBR: MultiChannelBuyInResult["channelAvailableCountsByBR"] = {};
   const ratesByBR: Record<number, number[]> = {};
@@ -1205,7 +1375,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     );
     const airbnbSamples = airbnbSidecar?.rates?.length
       ? airbnbSidecar.rates
-      : (airbnbFallbackResult.ratesByBR[br] ?? []);
+      : [];
     ratesByBR[br] = airbnbSamples;
     const airbnbCheapest =
       airbnbSidecar?.cheapestNightly != null
@@ -1218,6 +1388,9 @@ export async function fetchMultiChannelBuyInByBR(args: {
     );
     const bookingSidecar = sidecarResults.find(
       (r) => r.br === br && r.channel === "booking",
+    );
+    const googleHotelsSupplement = sidecarResults.find(
+      (r) => r.br === br && r.channel === "pm",
     );
     const pmRates = pmResults.find((r) => r.br === br);
 
@@ -1234,14 +1407,16 @@ export async function fetchMultiChannelBuyInByBR(args: {
       booking: bookingNormalized != null && passSanity(bookingNormalized, airbnbCheapest)
         ? bookingNormalized
         : null,
-      pm: pmRates?.medianNightly != null && passSanity(pmRates.medianNightly, airbnbCheapest)
-        ? pmRates.medianNightly
-        : null,
+      pm: googleHotelsSupplement?.cheapestNightly != null && passSanity(googleHotelsSupplement.cheapestNightly, airbnbCheapest)
+        ? googleHotelsSupplement.cheapestNightly
+        : pmRates?.medianNightly != null && passSanity(pmRates.medianNightly, airbnbCheapest)
+          ? pmRates.medianNightly
+          : null,
     };
     const airbnbCount = airbnbSidecar?.availableCount ?? airbnbSamples.length;
     const vrboCount = vrboSidecar?.availableCount ?? 0;
     const bookingCount = bookingSidecar?.availableCount ?? 0;
-    const pmCount = pmRates?.sampleCount ?? 0;
+    const pmCount = (googleHotelsSupplement?.availableCount ?? 0) + (pmRates?.sampleCount ?? 0);
     channelAvailableCountsByBR[br] = {
       airbnb: airbnbCount,
       vrbo: vrboCount,
