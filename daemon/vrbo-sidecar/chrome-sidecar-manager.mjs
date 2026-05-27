@@ -181,9 +181,24 @@ function safeUnlink(file) {
   } catch {}
 }
 
+function processIsAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (e) {
+    return e?.code === "EPERM";
+  }
+}
+
 function lockIsActive(file, ttlMs) {
   const data = jsonRead(file);
   if (!data?.startedAt) return false;
+  if (data.pid && !processIsAlive(data.pid)) {
+    safeUnlink(file);
+    return false;
+  }
   const age = Date.now() - Number(data.startedAt);
   if (age > ttlMs) {
     safeUnlink(file);
@@ -616,6 +631,12 @@ function freshLocalChromeDataDir(instance, request) {
   return path.join(os.tmpdir(), `rct-sidecar-${instance.name}-${safeId}`);
 }
 
+function workerSlotIndex(maxInstances) {
+  const raw = Number(process.env.SIDECAR_WORKER_SLOT);
+  if (!Number.isInteger(raw) || raw < 1 || raw > maxInstances) return null;
+  return raw - 1;
+}
+
 export class ChromeSidecarManager {
   constructor(options = {}) {
     this.log = options.log ?? (() => {});
@@ -662,6 +683,9 @@ export class ChromeSidecarManager {
       process.env.SIDECAR_LOCAL_BUSY_LOCK ??
       path.join(this.lockDir, "local-chrome.busy.json");
     this.lockTtlMs = numberFromEnv("SIDECAR_LOCK_TTL_MS", DEFAULT_LOCK_TTL_MS);
+    this.localWorkerSlotAffinity = boolFromEnv("SIDECAR_LOCAL_WORKER_SLOT_AFFINITY", true);
+    this.localWorkerSlotFallback = boolFromEnv("SIDECAR_LOCAL_WORKER_SLOT_FALLBACK", false);
+    this.workerSlotIndex = workerSlotIndex(this.maxLocalInstances);
     this.localInstances = Array.from({ length: this.maxLocalInstances }, (_, index) => {
       const port = this.localCdpPort + index;
       return {
@@ -681,6 +705,17 @@ export class ChromeSidecarManager {
         ),
       };
     });
+  }
+
+  orderedLocalInstances() {
+    if (!this.localWorkerSlotAffinity || this.workerSlotIndex == null) return this.localInstances;
+    const preferred = this.localInstances[this.workerSlotIndex];
+    if (!preferred) return this.localInstances;
+    if (!this.localWorkerSlotFallback) return [preferred];
+    return [
+      preferred,
+      ...this.localInstances.filter((instance) => instance !== preferred),
+    ];
   }
 
   async warmPrimaryLocal() {
@@ -742,7 +777,7 @@ export class ChromeSidecarManager {
   }
 
   async tryAcquireLocal(request = {}) {
-    for (const instance of this.localInstances) {
+    for (const instance of this.orderedLocalInstances()) {
       const allocation = await this.tryAcquireLocalInstance(instance, request);
       if (allocation) return allocation;
     }
