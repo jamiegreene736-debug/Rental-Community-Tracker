@@ -17590,7 +17590,7 @@ Return ONLY compact JSON with this exact shape:
       return res.status(400).json({ error: "channel must be airbnb, vrbo, or booking" });
     }
     const terms = Array.isArray(body.terms)
-      ? body.terms.filter((term): term is string => typeof term === "string" && term.trim())
+      ? body.terms.filter((term): term is string => typeof term === "string" && term.trim().length > 0)
       : [];
     const { savePreferredSearchVariations } = await import("./vrbo-sidecar-queue");
     return res.json(await savePreferredSearchVariations({
@@ -17639,6 +17639,41 @@ Return ONLY compact JSON with this exact shape:
     const { cancelActiveAndPendingRequests } = await import("./vrbo-sidecar-queue");
     const result = cancelActiveAndPendingRequests(reason);
     return res.json({ ok: true, ...result });
+  });
+
+  app.post("/api/vrbo-sidecar/request/:id/cancel", async (req, res) => {
+    const id = String(req.params.id ?? "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "request id required" });
+    const body = (req.body ?? {}) as { reason?: unknown };
+    const reason = typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 200)
+      : "cancelled by operator from Operations queue status";
+    const { cancelSidecarRequest } = await import("./vrbo-sidecar-queue");
+    const result = cancelSidecarRequest(id, reason);
+    if (!result.ok) return res.status(400).json(result);
+    return res.json(result);
+  });
+
+  app.post("/api/vrbo-sidecar/request/:id/pause", async (req, res) => {
+    const id = String(req.params.id ?? "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "request id required" });
+    const body = (req.body ?? {}) as { reason?: unknown };
+    const reason = typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 200)
+      : "paused by operator from Operations queue status";
+    const { pauseSidecarRequest } = await import("./vrbo-sidecar-queue");
+    const result = pauseSidecarRequest(id, reason);
+    if (!result.ok) return res.status(400).json(result);
+    return res.json(result);
+  });
+
+  app.post("/api/vrbo-sidecar/request/:id/resume", async (req, res) => {
+    const id = String(req.params.id ?? "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "request id required" });
+    const { resumeSidecarRequest } = await import("./vrbo-sidecar-queue");
+    const result = resumeSidecarRequest(id);
+    if (!result.ok) return res.status(400).json(result);
+    return res.json(result);
   });
 
   // CODEX NOTE (2026-05-04, claude/sidecar-stop-start): manual

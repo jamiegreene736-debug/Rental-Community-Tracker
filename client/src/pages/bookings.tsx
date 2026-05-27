@@ -413,39 +413,34 @@ interface Candidate {
   score: number;
 }
 
+type SidecarQueueRequest = {
+  id: string;
+  status: string;
+  opType: string;
+  label: string;
+  stage?: string;
+  pausedReason?: string;
+  pausedAgeSec?: number;
+  bedrooms?: number;
+  destination?: string;
+  siteCount?: number;
+  ageSec: number;
+  activeSec?: number;
+};
+
 type SidecarQueueStatus = {
   total: number;
   pending: number;
+  paused?: number;
   inProgress: number;
   completed: number;
   failed: number;
   oldestPendingAgeSec: number | null;
   newestRequestAt: string | null;
   byOpType?: Record<string, number>;
-  activeRequests?: Array<{
-    id: string;
-    status: string;
-    opType: string;
-    label: string;
-    stage?: string;
-    bedrooms?: number;
-    destination?: string;
-    siteCount?: number;
-    ageSec: number;
-    activeSec?: number;
-  }>;
-  pendingRequests?: Array<{
-    id: string;
-    status: string;
-    opType: string;
-    label: string;
-    stage?: string;
-    bedrooms?: number;
-    destination?: string;
-    siteCount?: number;
-    ageSec: number;
-    activeSec?: number;
-  }>;
+  activeRequests?: SidecarQueueRequest[];
+  pendingRequests?: SidecarQueueRequest[];
+  pausedRequests?: SidecarQueueRequest[];
   providerHealth?: Array<{
     provider: "airbnb" | "vrbo" | "booking" | string;
     status: "healthy" | "degraded" | "blocked" | "cooldown" | "unknown" | string;
@@ -5940,9 +5935,6 @@ export default function Bookings() {
             <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${bookingsLoading ? "animate-spin" : ""}`} /> Refresh
           </Button>
         </div>
-        <div className="basis-full">
-          <SidecarScreensStrip />
-        </div>
       </div>
 
       <div className="max-w-7xl mx-auto px-3 py-4 sm:px-6 sm:py-6 space-y-5">
@@ -9011,6 +9003,96 @@ function sidecarRuntimeName(runtime: SidecarHeartbeat["workerRuntime"] | null | 
   return "Sidecar worker";
 }
 
+function sidecarQueueAge(seconds: number | undefined): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "now";
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  if (minutes < 60) return rest > 0 ? `${minutes}m ${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const hourMinutes = minutes % 60;
+  return hourMinutes > 0 ? `${hours}h ${hourMinutes}m` : `${hours}h`;
+}
+
+function SidecarQueueRequestRow({
+  request,
+  kind,
+  acting,
+  onAction,
+}: {
+  request: SidecarQueueRequest;
+  kind: "active" | "pending" | "paused";
+  acting: string | null;
+  onAction: (request: SidecarQueueRequest, action: "cancel" | "pause" | "resume") => void;
+}) {
+  const busyCancel = acting === `${request.id}:cancel`;
+  const busyPause = acting === `${request.id}:pause`;
+  const busyResume = acting === `${request.id}:resume`;
+  const statusText = kind === "active"
+    ? `running ${sidecarQueueAge(request.activeSec)}`
+    : kind === "paused"
+      ? `paused ${sidecarQueueAge(request.pausedAgeSec)}`
+      : `queued ${sidecarQueueAge(request.ageSec)}`;
+  return (
+    <div className="rounded-md border bg-background px-2 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-[11px] font-semibold text-foreground">{request.label}</div>
+          <div className="truncate text-[10px] text-muted-foreground">
+            {request.destination ? `${request.destination} · ` : ""}{statusText}
+          </div>
+          {(request.stage || request.pausedReason) && (
+            <div className="mt-0.5 max-h-8 overflow-hidden text-[10px] italic text-muted-foreground">
+              {request.stage || request.pausedReason}
+            </div>
+          )}
+        </div>
+        <Badge variant={kind === "active" ? "default" : kind === "paused" ? "outline" : "secondary"} className="shrink-0 text-[9px] capitalize">
+          {kind}
+        </Badge>
+      </div>
+      <div className="mt-2 flex justify-end gap-1.5">
+        {kind === "paused" ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px]"
+            disabled={acting !== null}
+            onClick={() => onAction(request, "resume")}
+          >
+            <Play className="mr-1 h-3 w-3" />
+            {busyResume ? "Resuming" : "Resume"}
+          </Button>
+        ) : kind === "pending" ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px]"
+            disabled={acting !== null}
+            onClick={() => onAction(request, "pause")}
+          >
+            <Pause className="mr-1 h-3 w-3" />
+            {busyPause ? "Pausing" : "Pause"}
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-6 border-red-200 px-2 text-[10px] text-red-800 hover:bg-red-50"
+          disabled={acting !== null}
+          onClick={() => onAction(request, "cancel")}
+        >
+          <XCircle className="mr-1 h-3 w-3" />
+          {busyCancel ? "Canceling" : "Cancel"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function SidecarScreensStrip() {
   const { data } = useQuery<SidecarScreensResponse>({
     queryKey: ["/api/vrbo-sidecar/screens", "operations-header"],
@@ -9159,7 +9241,9 @@ function SidecarStatusBadge() {
     data: null,
     everSeen: false,
   });
-  const [acting, setActing] = useState<"stop" | "start" | "clear" | null>(null);
+  const [acting, setActing] = useState<"stop" | "start" | "clear" | string | null>(null);
+  const [showQueueStatus, setShowQueueStatus] = useState(false);
+  const sidecarQueue = useSidecarQueueStatus(showQueueStatus || Boolean(state.data?.activeJob));
 
   const refresh = async (): Promise<SidecarHeartbeat | null> => {
     try {
@@ -9249,6 +9333,28 @@ function SidecarStatusBadge() {
     }
   };
 
+  const actOnRequest = async (request: SidecarQueueRequest, action: "cancel" | "pause" | "resume") => {
+    setActing(`${request.id}:${action}`);
+    try {
+      await apiRequest("POST", `/api/vrbo-sidecar/request/${encodeURIComponent(request.id)}/${action}`, {
+        reason: `${action} ${request.label} from Operations queue status`,
+      });
+      toast({
+        title: action === "cancel" ? "Scan cancelled" : action === "pause" ? "Scan paused" : "Scan resumed",
+        description: `${request.label} was ${action === "cancel" ? "cancelled" : action === "pause" ? "paused" : "put back in the queue"}.`,
+      });
+      await refresh();
+    } catch (e: any) {
+      toast({
+        title: `Could not ${action} scan`,
+        description: e?.message ?? String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setActing(null);
+    }
+  };
+
   const data = state.data;
   if (!data) {
     // First heartbeat poll hasn't returned yet — render nothing.
@@ -9307,7 +9413,7 @@ function SidecarStatusBadge() {
           </span>
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-80 text-xs space-y-3" align="end">
+      <PopoverContent className="w-[360px] text-xs space-y-3" align="end">
         <div>
           <div className="font-semibold text-sm mb-1">{runtimeName}</div>
           <div className="text-muted-foreground leading-snug">
@@ -9395,6 +9501,54 @@ function SidecarStatusBadge() {
           <XCircle className="h-3 w-3 mr-1" />
           {acting === "clear" ? "Clearing…" : "Clear Queue"}
         </Button>
+
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 w-full text-xs"
+          onClick={() => setShowQueueStatus((value) => !value)}
+          data-testid="button-sidecar-see-queue-status"
+        >
+          <Clock3 className="h-3 w-3 mr-1" />
+          {showQueueStatus ? "Hide Queue Status" : "See Queue Status"}
+        </Button>
+
+        {showQueueStatus && (
+          <div className="rounded-lg border bg-muted/25 p-2">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="font-semibold text-foreground">Scheduled scans</div>
+              <Badge variant="outline" className="text-[10px]">
+                {(sidecarQueue.status?.inProgress ?? 0)} running · {(sidecarQueue.status?.pending ?? 0)} queued · {(sidecarQueue.status?.paused ?? 0)} paused
+              </Badge>
+            </div>
+            {!sidecarQueue.fetched ? (
+              <div className="flex items-center gap-2 rounded-md border bg-background px-2 py-3 text-[11px] text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Loading queue…
+              </div>
+            ) : !sidecarQueue.status || (
+              (sidecarQueue.status.activeRequests?.length ?? 0) === 0 &&
+              (sidecarQueue.status.pendingRequests?.length ?? 0) === 0 &&
+              (sidecarQueue.status.pausedRequests?.length ?? 0) === 0
+            ) ? (
+              <div className="rounded-md border bg-background px-2 py-3 text-[11px] text-muted-foreground">
+                No active, queued, or paused sidecar scans right now.
+              </div>
+            ) : (
+              <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                {(sidecarQueue.status.activeRequests ?? []).map((request) => (
+                  <SidecarQueueRequestRow key={request.id} request={request} kind="active" acting={acting} onAction={actOnRequest} />
+                ))}
+                {(sidecarQueue.status.pendingRequests ?? []).map((request) => (
+                  <SidecarQueueRequestRow key={request.id} request={request} kind="pending" acting={acting} onAction={actOnRequest} />
+                ))}
+                {(sidecarQueue.status.pausedRequests ?? []).map((request) => (
+                  <SidecarQueueRequestRow key={request.id} request={request} kind="paused" acting={acting} onAction={actOnRequest} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="text-[10px] text-muted-foreground leading-snug space-y-1">
           <div>

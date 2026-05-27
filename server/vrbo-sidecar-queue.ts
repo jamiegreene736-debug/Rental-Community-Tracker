@@ -354,7 +354,7 @@ export type SidecarPmUrlCheckResult = {
 
 export type SidecarRequest = {
   id: string;
-  status: "pending" | "in_progress" | "completed" | "failed";
+  status: "pending" | "paused" | "in_progress" | "completed" | "failed";
   opType: SidecarOpType;
   params:
     | SidecarAirbnbParams
@@ -385,6 +385,8 @@ export type SidecarRequest = {
   claimedAt?: number;
   completedAt?: number;
   cancelled?: boolean;
+  pausedReason?: string;
+  pausedAt?: number;
   stage?: string;
   stageUpdatedAt?: number;
 };
@@ -395,6 +397,8 @@ export type SidecarStatusRequest = {
   opType: SidecarOpType;
   label: string;
   stage?: string;
+  pausedReason?: string;
+  pausedAgeSec?: number;
   bedrooms?: number;
   destination?: string;
   siteCount?: number;
@@ -1475,6 +1479,7 @@ export function enqueueOp(
     if (existing) {
       const isFresh =
         existing.status === "pending" ||
+        existing.status === "paused" ||
         existing.status === "in_progress" ||
         (existing.status === "completed" && existing.completedAt && nowMs() - existing.completedAt < 60 * 1000);
       if (isFresh) {
@@ -1627,28 +1632,81 @@ function cancelRequest(id: string, reason: string): void {
   r.completedAt = nowMs();
 }
 
+export function cancelSidecarRequest(id: string, reason = "cancelled by operator"): {
+  ok: boolean;
+  request?: SidecarStatusRequest;
+  error?: string;
+} {
+  cleanup();
+  const r = queue.get(id);
+  if (!r) return { ok: false, error: "request not found" };
+  if (r.status === "completed" || r.status === "failed") {
+    return { ok: false, error: `request is already ${r.status}` };
+  }
+  cancelRequest(id, reason);
+  const updated = queue.get(id);
+  return { ok: true, request: updated ? describeSidecarRequest(updated) : undefined };
+}
+
+export function pauseSidecarRequest(id: string, reason = "paused by operator"): {
+  ok: boolean;
+  request?: SidecarStatusRequest;
+  error?: string;
+} {
+  cleanup();
+  const r = queue.get(id);
+  if (!r) return { ok: false, error: "request not found" };
+  if (r.status === "paused") return { ok: true, request: describeSidecarRequest(r) };
+  if (r.status !== "pending") {
+    return { ok: false, error: r.status === "in_progress" ? "active scans can be cancelled, not paused" : `request is already ${r.status}` };
+  }
+  r.status = "paused";
+  r.pausedReason = reason.slice(0, 200);
+  r.pausedAt = nowMs();
+  return { ok: true, request: describeSidecarRequest(r) };
+}
+
+export function resumeSidecarRequest(id: string): {
+  ok: boolean;
+  request?: SidecarStatusRequest;
+  error?: string;
+} {
+  cleanup();
+  const r = queue.get(id);
+  if (!r) return { ok: false, error: "request not found" };
+  if (r.status !== "paused") return { ok: false, error: `request is ${r.status}, not paused` };
+  r.status = "pending";
+  r.pausedReason = undefined;
+  r.pausedAt = undefined;
+  return { ok: true, request: describeSidecarRequest(r) };
+}
+
 export function cancelActiveAndPendingRequests(reason = "cancelled by operator"): {
   cancelled: number;
   pending: number;
+  paused: number;
   inProgress: number;
 } {
   cleanup();
   let cancelled = 0;
   let pending = 0;
+  let paused = 0;
   let inProgress = 0;
   for (const r of queue.values()) {
-    if (r.status !== "pending" && r.status !== "in_progress") continue;
+    if (r.status !== "pending" && r.status !== "paused" && r.status !== "in_progress") continue;
     if (r.status === "pending") pending++;
+    if (r.status === "paused") paused++;
     if (r.status === "in_progress") inProgress++;
     cancelRequest(r.id, reason);
     cancelled++;
   }
-  return { cancelled, pending, inProgress };
+  return { cancelled, pending, paused, inProgress };
 }
 
 export function cancelSidecarRunAndRequests(reason = "cancelled by operator"): {
   cancelled: number;
   pending: number;
+  paused: number;
   inProgress: number;
   stopGeneration: number;
 } {
@@ -1666,6 +1724,7 @@ export function clearSidecarQueue(reason = "sidecar queue cleared by operator"):
   cleared: number;
   cancelled: number;
   pending: number;
+  paused: number;
   inProgress: number;
   completed: number;
   failed: number;
@@ -1674,16 +1733,18 @@ export function clearSidecarQueue(reason = "sidecar queue cleared by operator"):
   cleanup();
   queueStopGeneration++;
   let pending = 0;
+  let paused = 0;
   let inProgress = 0;
   let completed = 0;
   let failed = 0;
   for (const r of queue.values()) {
     if (r.status === "pending") pending++;
+    else if (r.status === "paused") paused++;
     else if (r.status === "in_progress") inProgress++;
     else if (r.status === "completed") completed++;
     else if (r.status === "failed") failed++;
   }
-  const cancelled = pending + inProgress;
+  const cancelled = pending + paused + inProgress;
   const cleared = queue.size;
   queue.clear();
   requestKeyIndex.clear();
@@ -1693,6 +1754,7 @@ export function clearSidecarQueue(reason = "sidecar queue cleared by operator"):
     cleared,
     cancelled,
     pending,
+    paused,
     inProgress,
     completed,
     failed,
@@ -1712,9 +1774,71 @@ export function getResult(id: string): SidecarRequest | null {
   return queue.get(id) ?? null;
 }
 
+function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
+  const now = nowMs();
+  const ageSec = Math.max(0, Math.round((now - r.createdAt) / 1000));
+  const activeSec = r.claimedAt ? Math.max(0, Math.round((now - r.claimedAt) / 1000)) : undefined;
+  const pausedAgeSec = r.pausedAt ? Math.max(0, Math.round((now - r.pausedAt) / 1000)) : undefined;
+  const p = r.params as Partial<
+    SidecarAirbnbParams
+    & SidecarVrboParams
+    & SidecarBookingParams
+    & SidecarPmSiteSearchParams
+    & SidecarPmUrlCheckParams
+    & SidecarPmUrlCheckBatchParams
+    & SidecarVrboPhotoScrapeParams
+    & SidecarPhotoUploadParams
+    & SidecarGuestyDisconnectParams
+  >;
+  const bedrooms = typeof p.bedrooms === "number" && Number.isFinite(p.bedrooms) ? p.bedrooms : undefined;
+  const destination = typeof p.searchTerm === "string" && p.searchTerm.trim()
+    ? p.searchTerm.trim().slice(0, 80)
+    : typeof p.destination === "string"
+      ? p.destination.trim().slice(0, 80)
+      : undefined;
+  const siteCount = Array.isArray((p as SidecarPmSiteSearchParams).sites)
+    ? (p as SidecarPmSiteSearchParams).sites.length
+    : Array.isArray((p as SidecarPmUrlCheckBatchParams).urls)
+      ? (p as SidecarPmUrlCheckBatchParams).urls.length
+      : undefined;
+  const br = bedrooms ? ` ${bedrooms}BR` : "";
+  const label = (() => {
+    switch (r.opType) {
+      case "airbnb_search": return `Airbnb${br} search`;
+      case "vrbo_search": return `VRBO${br} search`;
+      case "booking_search": return `Booking.com${br} search`;
+      case "pm_site_search": return `PM websites${br}${siteCount ? ` (${siteCount} sites)` : ""}`;
+      case "pm_url_check_batch": return `PM rate checks${siteCount ? ` (${siteCount} pages)` : ""}`;
+      case "pm_url_check": return "PM rate check";
+      case "google_serp": return "Google discovery";
+      case "vrbo_photo_scrape": return "VRBO photo scrape";
+      case "zillow_photo_scrape": return "Zillow photo scrape";
+      case "vrbo_upload_photos": return "VRBO photo upload";
+      case "booking_upload_photos": return "Booking.com photo upload";
+      case "guesty_disconnect_channel": return `Guesty ${p.channel ?? ""} disconnect`.trim();
+      default: return r.opType;
+    }
+  })();
+  return {
+    id: r.id,
+    status: r.status,
+    opType: r.opType,
+    label,
+    stage: r.stage,
+    pausedReason: r.pausedReason,
+    pausedAgeSec,
+    bedrooms,
+    destination,
+    siteCount,
+    ageSec,
+    activeSec,
+  };
+}
+
 export function getStatus(): {
   total: number;
   pending: number;
+  paused: number;
   inProgress: number;
   completed: number;
   failed: number;
@@ -1723,10 +1847,13 @@ export function getStatus(): {
   byOpType: Record<SidecarOpType, number>;
   activeRequests: SidecarStatusRequest[];
   pendingRequests: SidecarStatusRequest[];
+  pausedRequests: SidecarStatusRequest[];
   providerHealth: SidecarProviderHealth[];
+  searchVariations: SidecarSearchVariationSummary[];
 } {
   cleanup();
   let pending = 0,
+    paused = 0,
     inProgress = 0,
     completed = 0,
     failed = 0;
@@ -1746,65 +1873,10 @@ export function getStatus(): {
     booking_upload_photos: 0,
     guesty_disconnect_channel: 0,
   };
-  const now = nowMs();
-  const describeRequest = (r: SidecarRequest): SidecarStatusRequest => {
-    const ageSec = Math.max(0, Math.round((now - r.createdAt) / 1000));
-    const activeSec = r.claimedAt ? Math.max(0, Math.round((now - r.claimedAt) / 1000)) : undefined;
-    const p = r.params as Partial<
-      SidecarAirbnbParams
-      & SidecarVrboParams
-      & SidecarBookingParams
-      & SidecarPmSiteSearchParams
-      & SidecarPmUrlCheckParams
-      & SidecarPmUrlCheckBatchParams
-      & SidecarVrboPhotoScrapeParams
-      & SidecarPhotoUploadParams
-      & SidecarGuestyDisconnectParams
-    >;
-    const bedrooms = typeof p.bedrooms === "number" && Number.isFinite(p.bedrooms) ? p.bedrooms : undefined;
-    const destination = typeof p.searchTerm === "string" && p.searchTerm.trim()
-      ? p.searchTerm.trim().slice(0, 80)
-      : typeof p.destination === "string"
-        ? p.destination.trim().slice(0, 80)
-        : undefined;
-    const siteCount = Array.isArray((p as SidecarPmSiteSearchParams).sites)
-      ? (p as SidecarPmSiteSearchParams).sites.length
-      : Array.isArray((p as SidecarPmUrlCheckBatchParams).urls)
-        ? (p as SidecarPmUrlCheckBatchParams).urls.length
-        : undefined;
-    const br = bedrooms ? ` ${bedrooms}BR` : "";
-    const label = (() => {
-      switch (r.opType) {
-        case "airbnb_search": return `Airbnb${br} search`;
-        case "vrbo_search": return `VRBO${br} search`;
-        case "booking_search": return `Booking.com${br} search`;
-        case "pm_site_search": return `PM websites${br}${siteCount ? ` (${siteCount} sites)` : ""}`;
-        case "pm_url_check_batch": return `PM rate checks${siteCount ? ` (${siteCount} pages)` : ""}`;
-        case "pm_url_check": return "PM rate check";
-        case "google_serp": return "Google discovery";
-        case "vrbo_photo_scrape": return "VRBO photo scrape";
-        case "zillow_photo_scrape": return "Zillow photo scrape";
-        case "vrbo_upload_photos": return "VRBO photo upload";
-        case "booking_upload_photos": return "Booking.com photo upload";
-        case "guesty_disconnect_channel": return `Guesty ${p.channel ?? ""} disconnect`.trim();
-        default: return r.opType;
-      }
-    })();
-    return {
-      id: r.id,
-      status: r.status,
-      opType: r.opType,
-      label,
-      stage: r.stage,
-      bedrooms,
-      destination,
-      siteCount,
-      ageSec,
-      activeSec,
-    };
-  };
   const activeRequests: SidecarStatusRequest[] = [];
   const pendingRequests: SidecarStatusRequest[] = [];
+  const pausedRequests: SidecarStatusRequest[] = [];
+  const now = nowMs();
   for (const r of queue.values()) {
     if (r.status === "pending") {
       pending++;
@@ -1814,10 +1886,14 @@ export function getStatus(): {
     }
     if (r.status === "in_progress") {
       inProgress++;
-      activeRequests.push(describeRequest(r));
+      activeRequests.push(describeSidecarRequest(r));
     }
     if (r.status === "pending") {
-      pendingRequests.push(describeRequest(r));
+      pendingRequests.push(describeSidecarRequest(r));
+    }
+    if (r.status === "paused") {
+      paused++;
+      pausedRequests.push(describeSidecarRequest(r));
     }
     if (r.status === "completed") completed++;
     if (r.status === "failed") failed++;
@@ -1827,6 +1903,7 @@ export function getStatus(): {
   return {
     total: queue.size,
     pending,
+    paused,
     inProgress,
     completed,
     failed,
@@ -1835,6 +1912,7 @@ export function getStatus(): {
     byOpType,
     activeRequests: activeRequests.sort((a, b) => (b.activeSec ?? 0) - (a.activeSec ?? 0)).slice(0, 5),
     pendingRequests: pendingRequests.sort((a, b) => b.ageSec - a.ageSec).slice(0, 8),
+    pausedRequests: pausedRequests.sort((a, b) => b.ageSec - a.ageSec).slice(0, 8),
     providerHealth: getProviderHealth(),
     searchVariations: Array.from(searchVariationRuns.values()).slice(-12),
   };
@@ -2650,6 +2728,14 @@ async function awaitOpResult(opts: {
           workerOnline: true,
           durationMs: nowMs() - startedAt,
           reason: r.error || "worker reported failure",
+        };
+      }
+      if (r.status === "paused" && now - startedAt >= queueBudgetMs) {
+        return {
+          results: null,
+          workerOnline: true,
+          durationMs: now - startedAt,
+          reason: r.pausedReason ? `request paused by operator: ${r.pausedReason}` : "request paused by operator",
         };
       }
       if (r.status === "in_progress" && activeStartedAt === null) {
