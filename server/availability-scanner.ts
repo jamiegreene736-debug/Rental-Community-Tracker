@@ -41,11 +41,11 @@ const PROPERTY_UNIT_NEEDS: Record<number, { name: string; community: string; uni
 // Airbnb-only threshold was 10 raw listings; multi-channel "verified
 // + priced" counts much smaller numbers, hence the drop.
 //
-// Tuning: bump to 4-5 if too many windows get blocked in practice
-// (signals our cross-channel duplication is heavier than expected);
-// drop to 2 if we want the operator to take more risk on tight
-// windows.
-const AVAILABILITY_THRESHOLD = 3;
+// Tuning: this is intentionally loose. Scanner blocks are high-impact
+// calendar writes, so require a near-empty multi-channel result before
+// blacking out a window; leave thin-but-nonzero inventory as available/tight
+// for human review instead of auto-blocking most of the calendar.
+const AVAILABILITY_THRESHOLD = 2;
 
 type CacheEntry = {
   airbnb: number;

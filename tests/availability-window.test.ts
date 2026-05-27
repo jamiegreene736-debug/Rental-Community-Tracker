@@ -24,7 +24,7 @@ assert.equal(windows[0].checkIn, "2026-06-01", "first future anchor should be th
 assert.equal(windows[0].checkOut, "2026-06-15", "windows should run 14 nights");
 assert.equal(windows[0].nights, AVAILABILITY_WINDOW_NIGHTS);
 assert.equal(availabilityWindowCountForWeeks(104), 48);
-assert.equal(AVAILABILITY_RELIABILITY_FACTOR, 0.5, "false-positive haircut should be 50%");
+assert.equal(AVAILABILITY_RELIABILITY_FACTOR, 0.75, "false-positive haircut should be a 25% reserve");
 console.log("  ✓ generates 48 future 14-night windows");
 
 const thresholds = computeAvailabilityThresholds([
@@ -32,18 +32,19 @@ const thresholds = computeAvailabilityThresholds([
   { unitId: "B", unitLabel: "Unit B", bedrooms: 3 },
 ], 2);
 
-assert.equal(thresholds.blockMinSets, 3, "block floor should not go below 3 effective sets");
-assert.equal(thresholds.blockCandidatesByBR[3], 6, "3BR + 3BR needs 6 effective 3BR candidates for 3 sets");
-assert.equal(thresholds.openCandidatesByBR[3], 10, "open threshold keeps two cushion sets");
-console.log("  ✓ keeps a 3-set block floor for combo inventory");
+assert.equal(thresholds.blockMinSets, 1, "default target should only block below 1 effective set");
+assert.equal(thresholds.openMinSets, 2, "2-set target should open at 2 effective sets");
+assert.equal(thresholds.blockCandidatesByBR[3], 2, "3BR + 3BR blocks only below one complete set");
+assert.equal(thresholds.openCandidatesByBR[3], 4, "3BR + 3BR opens at two complete sets");
+console.log("  ✓ keeps a loose block floor for combo inventory");
 
 assert.equal(
-  availabilityVerdictForScan(2, thresholds, { daemonOnline: true, warnings: [] }),
+  availabilityVerdictForScan(0, thresholds, { daemonOnline: true, warnings: [] }),
   "blocked",
-  "clean low inventory should remain blockable",
+  "clean zero inventory should remain blockable",
 );
 assert.equal(
-  availabilityVerdictForScan(2, thresholds, {
+  availabilityVerdictForScan(0, thresholds, {
     daemonOnline: true,
     warnings: [{
       season: "HIGH",
@@ -70,7 +71,7 @@ assert.match(
   /BOOKING captcha/,
 );
 assert.equal(
-  availabilityVerdictForScan(5, thresholds, {
+  availabilityVerdictForScan(2, thresholds, {
     daemonOnline: true,
     warnings: [{
       season: "HIGH",

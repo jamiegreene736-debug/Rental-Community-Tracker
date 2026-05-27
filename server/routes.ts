@@ -15807,6 +15807,28 @@ export async function registerRoutes(
           searchName: result.searchName,
           reliabilityFactor: AVAILABILITY_RELIABILITY_FACTOR,
         });
+        const syncWindows = finalWindows.map((w) => ({
+          startDate: w.startDate,
+          endDate: w.endDate,
+          verdict: (w.verdict === "open" ? "available" : w.verdict) as "blocked" | "available" | "tight" | "error",
+          maxSets: w.maxSets,
+          minSets: w.minSets,
+          reason: w.reason,
+        }));
+        try {
+          const { syncScannerBlocksForProperty } = await import("./sync-scanner-blocks");
+          const syncResult = await syncScannerBlocksForProperty(propertyId, syncWindows);
+          emit({
+            type: "sync-blocks",
+            result: syncResult,
+            syncedAt: new Date().toISOString(),
+            blockedWindows: syncWindows
+              .filter((w) => w.verdict === "blocked")
+              .map((w) => ({ startDate: w.startDate, endDate: w.endDate })),
+          });
+        } catch (e: any) {
+          emit({ type: "sync-blocks", error: e?.message ?? String(e), syncedAt: new Date().toISOString() });
+        }
         emit({
           type: "done",
           mode: "seasonal-sidecar",

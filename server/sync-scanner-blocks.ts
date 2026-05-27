@@ -39,6 +39,24 @@ export type SyncResult = {
   reason?: string;
 };
 
+function dateMs(value: string): number {
+  return new Date(`${value}T12:00:00Z`).getTime();
+}
+
+function rangesOverlap(
+  a: { startDate: string; endDate: string },
+  b: { startDate: string; endDate: string },
+): boolean {
+  return dateMs(a.startDate) < dateMs(b.endDate) && dateMs(b.startDate) < dateMs(a.endDate);
+}
+
+function rangeCovers(
+  outer: { startDate: string; endDate: string },
+  inner: { startDate: string; endDate: string },
+): boolean {
+  return dateMs(outer.startDate) <= dateMs(inner.startDate) && dateMs(outer.endDate) >= dateMs(inner.endDate);
+}
+
 export async function syncScannerBlocksForProperty(
   propertyId: number,
   windows: SyncWindow[],
@@ -62,10 +80,10 @@ export async function syncScannerBlocksForProperty(
   const desiredBlocks = new Set(
     windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`),
   );
+  const desiredBlockWindows = windows.filter((w) => w.verdict === "blocked");
+  const clearableWindowList = windows.filter((w) => w.verdict === "available" || w.verdict === "tight");
   const clearableWindows = new Set(
-    windows
-      .filter((w) => w.verdict === "available" || w.verdict === "tight")
-      .map((w) => `${w.startDate}:${w.endDate}`),
+    clearableWindowList.map((w) => `${w.startDate}:${w.endDate}`),
   );
 
   let created = 0;
@@ -77,6 +95,7 @@ export async function syncScannerBlocksForProperty(
   for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
     const key = `${w.startDate}:${w.endDate}`;
     if (activeKeyed.has(key)) continue;
+    if (active.some((b) => rangeCovers(b, w))) continue;
     try {
       const reason = w.reason
         ?? (w.maxSets != null && w.minSets != null
@@ -111,7 +130,10 @@ export async function syncScannerBlocksForProperty(
   for (const b of active) {
     const key = `${b.startDate}:${b.endDate}`;
     if (desiredBlocks.has(key)) continue;
-    if (!clearableWindows.has(key)) continue;
+    const overlapsDesiredBlock = desiredBlockWindows.some((w) => rangesOverlap(b, w));
+    const overlapsClearableWindow = clearableWindowList.some((w) => rangesOverlap(b, w));
+    if (!clearableWindows.has(key) && !overlapsClearableWindow) continue;
+    if (overlapsDesiredBlock) continue;
     try {
       await guestyRequest("PUT", calPath, {
         startDate: b.startDate,

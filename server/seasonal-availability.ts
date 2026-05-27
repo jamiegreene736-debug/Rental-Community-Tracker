@@ -68,7 +68,7 @@ const SEASON_SCAN_HEARTBEAT_MS = 12_000;
 export const AVAILABILITY_SCAN_MONTHS = 24;
 export const AVAILABILITY_WINDOWS_PER_MONTH = 2;
 export const AVAILABILITY_WINDOW_NIGHTS = 14;
-export const AVAILABILITY_RELIABILITY_FACTOR = 0.5;
+export const AVAILABILITY_RELIABILITY_FACTOR = 0.75;
 
 let seasonalScanQueue: Promise<unknown> = Promise.resolve();
 let seasonalScanActive: { propertyId: number; startedAt: number } | null = null;
@@ -304,13 +304,13 @@ export function computeAvailabilityThresholds(
 
   const openCandidatesByBR: Record<number, number> = {};
   const blockCandidatesByBR: Record<number, number> = {};
-  // Default rule: block only when we cannot verify at least 3 full
-  // independent buy-in sets, mark
-  // tight until 2 extra cushion sets are visible, then open. This keeps
-  // the net wide enough to catch unlabeled-but-valid resort listings
-  // while still avoiding the "last pair available" oversell risk.
-  const blockMinSets = Math.max(3, manualMinSets);
-  const openMinSets = blockMinSets + 2;
+  // Default rule: only block when the scan cannot prove even a small
+  // replacement cushion. The operator-facing `manualMinSets` is the
+  // "fully open" target, not the hard blackout floor: a 3-set target now
+  // blocks below 1 set, stays tight at 1-2 sets, and opens at 3+. This
+  // avoids blanketing the Guesty calendar when provider coverage is thin.
+  const openMinSets = Math.max(1, manualMinSets);
+  const blockMinSets = Math.max(1, Math.floor(openMinSets / 2));
   for (const [brRaw, required] of Object.entries(requiredByBR)) {
     const br = Number(brRaw);
     const openCandidates = required * openMinSets;

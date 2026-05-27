@@ -437,6 +437,14 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             setCandidates(evt as CandidatesEvent);
           } else if (evt.type === "phase") {
             setScanPhase(evt.label ?? evt.phase ?? "Scanning");
+          } else if (evt.type === "sync-blocks") {
+            setSyncResult(evt.result
+              ? {
+                ...evt.result,
+                syncedAt: evt.syncedAt ?? new Date().toISOString(),
+                blockedWindows: evt.blockedWindows ?? [],
+              }
+              : { success: false, error: evt.error ?? "Guesty block sync failed" });
           } else if (evt.type === "window") {
             done++;
             collected.push(evt as WindowResult);
@@ -769,7 +777,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               Sync blocks to Guesty
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              Manual block floor:
+              Target backup sets:
               <select
                 value={schedule.minSets}
                 onChange={(e) => updateSchedule({ minSets: parseInt(e.target.value, 10) })}
@@ -919,17 +927,17 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           14-night windows: <b>2 per month</b> · <b>24 months</b> · <b>48 scans</b>
         </span>
         <label style={{ fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6 }}>
-          Manual block floor:
+          Target backup sets:
           <select
             value={minSets}
             onChange={(e) => setMinSets(parseInt(e.target.value, 10))}
             disabled={scanning}
             style={{ padding: "4px 8px", fontSize: 12, border: "1px solid #e5e7eb", borderRadius: 4 }}
           >
-            <option value={2}>2 (tight)</option>
-            <option value={3}>3</option>
-            <option value={4}>4 (conservative)</option>
-            <option value={5}>5 (paranoid)</option>
+            <option value={2}>2</option>
+            <option value={3}>3 (recommended)</option>
+            <option value={4}>4</option>
+            <option value={5}>5</option>
           </select>
         </label>
         <button
@@ -956,9 +964,9 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           onClick={syncBlocks}
           disabled={scanning || syncBusy || results.length === 0 || !listingId}
           style={{ fontSize: 12, borderColor: blockedCount > 0 ? "#dc2626" : undefined, color: blockedCount > 0 ? "#dc2626" : undefined }}
-          title={!listingId ? "Select a Guesty listing first" : blockedCount === 0 ? "Nothing to block" : `Push ${blockedCount} blocked window${blockedCount === 1 ? "" : "s"} to Guesty`}
+          title={!listingId ? "Select a Guesty listing first" : "Scan completion now syncs blocks automatically; use this to re-push the current result."}
         >
-          {syncBusy ? "Syncing…" : `Sync ${blockedCount} block${blockedCount === 1 ? "" : "s"} to Guesty`}
+          {syncBusy ? "Syncing…" : `Re-sync Guesty blocks`}
         </button>
       </div>
 
@@ -968,7 +976,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           Scanning <b>{ctx.resortName ?? ctx.community}</b> —{" "}
           needed units: {ctx.units.map((u) => `${u.bedrooms}BR`).join(" + ")}.
           {" "}A "set" = one listing per unit slot (no reuse). Each scan window is <b>{ctx.windowNights ?? 14} nights</b>, sampled <b>{ctx.windowsPerMonth ?? 2}</b>x/month for <b>{ctx.months ?? 24}</b> months.
-          {" "}Windows are <b>blocked</b> below <b>{ctx.blockMinSets ?? ctx.minSets}</b> effective set(s) after the <b>{Math.round((ctx.reliabilityFactor ?? 0.5) * 100)}%</b> haircut and <b>open</b> at <b>{ctx.openMinSets ?? (ctx.minSets + 2)}</b>.
+          {" "}Windows are <b>blocked</b> only below <b>{ctx.blockMinSets ?? 1}</b> effective set(s) after the <b>{Math.round((ctx.reliabilityFactor ?? 0.75) * 100)}%</b> haircut and <b>open</b> at <b>{ctx.openMinSets ?? ctx.minSets}</b>.
         </div>
       )}
       {candidates && (
@@ -976,9 +984,9 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           <b>Lowest verified 14-night inventory</b> — {Object.entries(candidates.countsByBR).map(([br, n]) => (
             <span key={br} style={{ marginRight: 12 }}>{br}BR: <b>{n}</b> effective options</span>
           ))} · max independent sets: <b>{candidates.baselineSets}</b>
-          {candidates.baselineSets < (ctx?.blockMinSets ?? ctx?.minSets ?? 3) && (
+          {candidates.baselineSets < (ctx?.blockMinSets ?? 1) && (
             <span style={{ color: "#991b1b", marginLeft: 8 }}>
-              (below {(ctx?.blockMinSets ?? ctx?.minSets ?? 3)}-set block floor)
+              (below {(ctx?.blockMinSets ?? 1)}-set block floor)
             </span>
           )}
           <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>
