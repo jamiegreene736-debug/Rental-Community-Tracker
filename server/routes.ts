@@ -32687,6 +32687,39 @@ CONSTRAINTS
     }
   });
 
+  app.post("/api/inbox/calls/:id/callback", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid call id" });
+
+      const said = String(req.body?.said ?? "").trim();
+      if (said.length < 2) {
+        return res.status(400).json({ error: "Callback summary required" });
+      }
+
+      const call = await storage.acknowledgeQuoCallEvent(id);
+      if (!call) return res.status(404).json({ error: "Call not found" });
+
+      let note = null;
+      if (call.conversationId) {
+        const formattedPhone = normalizePhone(call.guestPhone) || call.guestPhone;
+        note = await storage.createGuestInboxInternalNote({
+          conversationId: call.conversationId,
+          reservationId: call.reservationId ?? null,
+          guestName: call.guestName ?? null,
+          guestPhone: call.guestPhone ?? null,
+          note: `Called guest back at ${formattedPhone}. Said: ${said}`,
+          source: "missed-call-callback",
+          createdBy: String(req.body?.createdBy ?? "agent").trim() || "agent",
+        });
+      }
+
+      return res.json({ ok: true, call, note });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to complete callback", message: err.message });
+    }
+  });
+
   app.post("/api/inbox/calls/conversations/:conversationId/acknowledge", async (req, res) => {
     try {
       const conversationId = req.params.conversationId;
@@ -32695,6 +32728,18 @@ CONSTRAINTS
       return res.json({ ok: true, cleared });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to clear missed calls", message: err.message });
+    }
+  });
+
+  app.get("/api/inbox/internal-notes/:conversationId", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
+      const notes = await storage.getGuestInboxInternalNotes(conversationId, limit);
+      return res.json({ notes });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load internal notes", message: err.message });
     }
   });
 

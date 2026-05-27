@@ -15,6 +15,7 @@ import {
   type BookingConfirmation, type InsertBookingConfirmation,
   type QuoSmsMessage, type InsertQuoSmsMessage,
   type QuoCallEvent, type InsertQuoCallEvent,
+  type GuestInboxInternalNote, type InsertGuestInboxInternalNote,
   type GuestPhoneOverride, type InsertGuestPhoneOverride,
   type PhotoLabel, type InsertPhotoLabel,
   type PhotoListingCheck, type InsertPhotoListingCheck,
@@ -25,7 +26,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, quoCallEvents, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
   type PropertyMarketRate, type InsertPropertyMarketRate,
 } from "@shared/schema";
 import { db } from "./db";
@@ -209,6 +210,8 @@ export interface IStorage {
   getUnacknowledgedQuoCallEvents(limit?: number): Promise<QuoCallEvent[]>;
   acknowledgeQuoCallEvent(id: number): Promise<QuoCallEvent | undefined>;
   acknowledgeQuoCallEventsByConversation(conversationId: string): Promise<number>;
+  createGuestInboxInternalNote(input: InsertGuestInboxInternalNote): Promise<GuestInboxInternalNote>;
+  getGuestInboxInternalNotes(conversationId: string, limit?: number): Promise<GuestInboxInternalNote[]>;
   upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride>;
   getGuestPhoneOverride(conversationId: string): Promise<GuestPhoneOverride | undefined>;
   getGuestPhoneOverrideByPhone(phone: string): Promise<GuestPhoneOverride | undefined>;
@@ -950,6 +953,19 @@ export class DatabaseStorage implements IStorage {
       ))
       .returning({ id: quoCallEvents.id });
     return rows.length;
+  }
+
+  async createGuestInboxInternalNote(input: InsertGuestInboxInternalNote): Promise<GuestInboxInternalNote> {
+    const [row] = await db.insert(guestInboxInternalNotes).values(input).returning();
+    return row;
+  }
+
+  async getGuestInboxInternalNotes(conversationId: string, limit = 50): Promise<GuestInboxInternalNote[]> {
+    return db.select()
+      .from(guestInboxInternalNotes)
+      .where(eq(guestInboxInternalNotes.conversationId, conversationId))
+      .orderBy(desc(guestInboxInternalNotes.createdAt))
+      .limit(limit);
   }
 
   async upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride> {

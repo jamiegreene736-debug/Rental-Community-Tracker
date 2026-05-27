@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Table,
   TableBody,
@@ -608,11 +609,49 @@ type AgentPropertyBooking = {
   arrivalUnits: AgentArrivalUnit[];
 };
 
+type AgentMissedCall = {
+  id: number;
+  conversationId?: string | null;
+  reservationId?: string | null;
+  guestName?: string | null;
+  guestPhone: string;
+  disposition: "answered" | "missed" | "voicemail" | "unknown" | string;
+  voicemailRecordingUrl?: string | null;
+  voicemailTranscript?: string | null;
+  voicemailDurationSeconds?: number | null;
+  callCompletedAt?: string | null;
+  callStartedAt?: string | null;
+  createdAt?: string | null;
+};
+
 function formatAgentDate(value: string | null): string {
   if (!value) return "TBD";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
+function formatAgentPhone(value: unknown): string {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  const last10 = digits.slice(-10);
+  if (last10.length !== 10) return String(value ?? "Unknown phone") || "Unknown phone";
+  return `(${last10.slice(0, 3)}) ${last10.slice(3, 6)}-${last10.slice(6)}`;
+}
+
+function formatAgentCallTime(call: AgentMissedCall): string {
+  const value = call.callCompletedAt ?? call.callStartedAt ?? call.createdAt ?? null;
+  if (!value) return "Time unknown";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function formatAgentCallDuration(seconds?: number | null): string {
+  const n = Math.max(0, Math.round(Number(seconds ?? 0)));
+  if (!n) return "";
+  const minutes = Math.floor(n / 60);
+  const remainder = n % 60;
+  return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
 function AgentArrivalField({ label, value }: { label: string; value: string }) {
@@ -809,7 +848,49 @@ function AgentPropertyRow({ property }: { property: AgentPortalProperty }) {
 }
 
 function AgentPropertyPortal() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const properties = getAllUnitBuilders();
+  const [callbackCall, setCallbackCall] = useState<AgentMissedCall | null>(null);
+  const [callbackSummary, setCallbackSummary] = useState("");
+
+  const { data: missedCallData, isLoading: missedCallsLoading } = useQuery<{ calls: AgentMissedCall[]; count: number }>({
+    queryKey: ["/api/inbox/calls/unacknowledged"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/inbox/calls/unacknowledged?limit=25");
+      if (!r.ok) throw new Error(`Missed calls returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+
+  const missedCalls = missedCallData?.calls ?? [];
+  const completeCallback = useMutation({
+    mutationFn: async () => {
+      if (!callbackCall) throw new Error("No missed call selected");
+      const said = callbackSummary.trim();
+      if (said.length < 2) throw new Error("Please add what the guest said.");
+      const r = await apiRequest("POST", `/api/inbox/calls/${callbackCall.id}/callback`, { said });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (_data) => {
+      const conversationId = callbackCall?.conversationId;
+      setCallbackCall(null);
+      setCallbackSummary("");
+      queryClient.invalidateQueries({ queryKey: ["/api/inbox/calls/unacknowledged"] });
+      if (conversationId) {
+        queryClient.invalidateQueries({ queryKey: ["/api/inbox/internal-notes", conversationId] });
+        queryClient.invalidateQueries({ queryKey: ["/api/inbox/calls/conversations", conversationId] });
+      }
+      toast({ title: "Callback saved", description: "The missed call was cleared and added to internal notes." });
+    },
+    onError: (e: any) => toast({ title: "Callback not saved", description: e.message, variant: "destructive" }),
+  });
 
   return (
     <div className="min-h-screen bg-background">
@@ -830,6 +911,134 @@ function AgentPropertyPortal() {
             </Button>
           </Link>
         </div>
+
+        <Card className="mb-5 border-red-200 bg-red-50/60 p-4" data-testid="panel-agent-missed-calls">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-red-100 text-red-700">
+                  <PhoneMissed className="h-5 w-5" />
+                </span>
+                <div>
+                  <h2 className="text-sm font-semibold text-red-950">Missed 808 calls</h2>
+                  <p className="text-xs text-red-800">
+                    Call the guest back from your phone, then save what they said here.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <Link href="/inbox">
+              <Button variant="outline" className="w-full gap-2 border-red-200 bg-white text-red-900 hover:bg-red-50 lg:w-auto" data-testid="button-agent-open-call-inbox">
+                <MessageSquare className="h-4 w-4" />
+                Guest Inbox
+              </Button>
+            </Link>
+          </div>
+
+          <div className="mt-4">
+            {missedCallsLoading ? (
+              <div className="flex items-center gap-2 rounded-md border border-red-100 bg-white/80 px-3 py-3 text-sm text-red-800">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Checking missed calls...
+              </div>
+            ) : missedCalls.length === 0 ? (
+              <div className="rounded-md border border-red-100 bg-white/80 px-3 py-3 text-sm text-red-800" data-testid="text-agent-no-missed-calls">
+                No missed 808 calls waiting.
+              </div>
+            ) : (
+              <div className="grid gap-3 lg:grid-cols-2">
+                {missedCalls.map((call) => {
+                  const duration = formatAgentCallDuration(call.voicemailDurationSeconds);
+                  return (
+                    <div key={call.id} className="rounded-md border border-red-200 bg-white p-3 shadow-sm" data-testid={`card-agent-missed-call-${call.id}`}>
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-red-950">
+                            {call.guestName || "Unknown caller"}
+                          </div>
+                          <div className="mt-0.5 text-sm text-red-900">
+                            {formatAgentPhone(call.guestPhone)}
+                          </div>
+                          <div className="mt-1 text-xs text-red-800">
+                            {call.disposition === "voicemail" ? "Voicemail" : "Missed call"} · {formatAgentCallTime(call)}
+                            {duration && ` · ${duration}`}
+                          </div>
+                          {call.voicemailTranscript && (
+                            <div className="mt-2 line-clamp-2 text-xs text-red-900">
+                              {call.voicemailTranscript}
+                            </div>
+                          )}
+                          {call.voicemailRecordingUrl && (
+                            <audio controls src={call.voicemailRecordingUrl} className="mt-2 w-full max-w-[320px]" data-testid={`audio-agent-missed-call-${call.id}`} />
+                          )}
+                        </div>
+                        <Button
+                          size="sm"
+                          className="shrink-0 bg-red-700 text-white hover:bg-red-800"
+                          onClick={() => {
+                            setCallbackCall(call);
+                            setCallbackSummary("");
+                          }}
+                          data-testid={`button-agent-called-back-${call.id}`}
+                        >
+                          Called guest back
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </Card>
+
+        <Dialog open={!!callbackCall} onOpenChange={(open) => {
+          if (!open) {
+            setCallbackCall(null);
+            setCallbackSummary("");
+          }
+        }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Complete guest callback</DialogTitle>
+              <DialogDescription>
+                Save what the guest said. This clears the missed-call notification and adds an internal note in the Guest Inbox.
+              </DialogDescription>
+            </DialogHeader>
+            {callbackCall && (
+              <div className="space-y-3">
+                <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                  <div className="font-medium">{callbackCall.guestName || "Unknown caller"}</div>
+                  <div className="text-muted-foreground">{formatAgentPhone(callbackCall.guestPhone)} · {formatAgentCallTime(callbackCall)}</div>
+                </div>
+                <div>
+                  <label className="text-sm font-medium" htmlFor="agent-callback-summary">Said</label>
+                  <Textarea
+                    id="agent-callback-summary"
+                    className="mt-1 min-h-[110px]"
+                    value={callbackSummary}
+                    onChange={(event) => setCallbackSummary(event.target.value)}
+                    placeholder="Example: Guest confirmed arrival time and said they found the check-in email."
+                    data-testid="textarea-agent-callback-summary"
+                  />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => setCallbackCall(null)} disabled={completeCallback.isPending}>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={() => completeCallback.mutate()}
+                    disabled={completeCallback.isPending || callbackSummary.trim().length < 2}
+                    data-testid="button-agent-save-callback"
+                  >
+                    {completeCallback.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    Save callback
+                  </Button>
+                </div>
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
 
         <Card className="overflow-hidden">
           <Table>

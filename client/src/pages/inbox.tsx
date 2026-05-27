@@ -121,6 +121,18 @@ type QuoCallEvent = {
   createdAt?: string | null;
 };
 
+type GuestInboxInternalNote = {
+  id: number;
+  conversationId: string;
+  reservationId?: string | null;
+  guestName?: string | null;
+  guestPhone?: string | null;
+  note: string;
+  source: string;
+  createdBy: string;
+  createdAt: string;
+};
+
 // ─── AI draft property-context builder ────────────────────────────────────────
 // Given a Guesty listingId, look up the matching NexStay property via the
 // backing map and build a rich text block the AI can use to answer
@@ -2476,6 +2488,17 @@ export default function InboxPage() {
     refetchInterval: 30_000,
   });
 
+  const { data: internalNotesData } = useQuery<{ notes: GuestInboxInternalNote[] }>({
+    queryKey: ["/api/inbox/internal-notes", selectedConvId],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/inbox/internal-notes/${selectedConvId}?limit=20`);
+      if (!r.ok) throw new Error(`Internal notes returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+  });
+
   const { data: smsStatus } = useQuery<any>({
     queryKey: ["/api/inbox/sms/status"],
     queryFn: async () => {
@@ -2516,6 +2539,7 @@ export default function InboxPage() {
   }));
 
   const callEvents = callData?.calls ?? [];
+  const internalNotes = internalNotesData?.notes ?? [];
   const callPosts: GuestyPost[] = callEvents.map((call) => {
     const when = call.callCompletedAt ?? call.callStartedAt ?? call.createdAt ?? "";
     const kind = call.disposition === "voicemail"
@@ -4324,6 +4348,35 @@ export default function InboxPage() {
                                     {call.voicemailTranscript}
                                   </div>
                                 )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {internalNotes.length > 0 && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3" data-testid="panel-internal-notes">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="text-sm font-semibold text-amber-950">Internal notes</div>
+                              <div className="mt-1 text-xs text-amber-800">
+                                Callback notes saved by agents.
+                              </div>
+                            </div>
+                            <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100">
+                              {internalNotes.length}
+                            </Badge>
+                          </div>
+                          <div className="mt-2 space-y-2">
+                            {internalNotes.slice(0, 4).map((note) => (
+                              <div key={note.id} className="rounded-md bg-white/80 p-2 text-xs">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-medium text-amber-950">{note.createdBy || "agent"}</span>
+                                  <span className="text-[10px] text-amber-700">
+                                    {note.createdAt ? new Date(note.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}
+                                  </span>
+                                </div>
+                                <div className="mt-1 whitespace-pre-wrap text-amber-900">{note.note}</div>
                               </div>
                             ))}
                           </div>

@@ -856,6 +856,26 @@ export const insertQuoCallEventSchema = createInsertSchema(quoCallEvents).omit({
 export type InsertQuoCallEvent = z.infer<typeof insertQuoCallEventSchema>;
 export type QuoCallEvent = typeof quoCallEvents.$inferSelect;
 
+export const guestInboxInternalNotes = pgTable("guest_inbox_internal_notes", {
+  id: serial("id").primaryKey(),
+  conversationId: text("conversation_id").notNull(),
+  reservationId: text("reservation_id"),
+  guestName: text("guest_name"),
+  guestPhone: text("guest_phone"),
+  note: text("note").notNull(),
+  source: text("source").notNull().default("manual"),
+  createdBy: text("created_by").notNull().default("agent"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertGuestInboxInternalNoteSchema = createInsertSchema(guestInboxInternalNotes).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertGuestInboxInternalNote = z.infer<typeof insertGuestInboxInternalNoteSchema>;
+export type GuestInboxInternalNote = typeof guestInboxInternalNotes.$inferSelect;
+
 export const guestPhoneOverrides = pgTable("guest_phone_overrides", {
   id: serial("id").primaryKey(),
   conversationId: text("conversation_id").notNull(),
