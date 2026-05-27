@@ -47,4 +47,24 @@ assert.equal(voicemail.durationSeconds, 42);
 assert.equal(phoneLast10(voicemail.guestPhone), "4155550199");
 console.log("  ✓ detects voicemail call events");
 
+const backfilled = parseQuoCallWebhook({
+  type: "call.backfill",
+  data: {
+    object: {
+      id: "ACbackfill123",
+      direction: "incoming",
+      participants: ["+18085550177"],
+      status: "completed",
+      answeredAt: null,
+      createdAt: "2026-05-26T23:00:00Z",
+      completedAt: "2026-05-26T23:01:00Z",
+    },
+  },
+});
+
+assert.equal(backfilled.disposition, "missed");
+assert.equal(backfilled.fromNumber, "+18085550177");
+assert.equal(backfilled.toNumber, "+18084606509");
+console.log("  ✓ parses backfilled Quo call-list records");
+
 console.log("quo call suite passed");

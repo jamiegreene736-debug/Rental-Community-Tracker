@@ -284,6 +284,25 @@ export async function ensureRuntimeSchema(): Promise<void> {
   console.log("[schema] ensured quo_call_events table");
 
   await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS guest_inbox_internal_notes (
+      id serial PRIMARY KEY,
+      conversation_id text NOT NULL,
+      reservation_id text,
+      guest_name text,
+      guest_phone text,
+      note text NOT NULL,
+      source text NOT NULL DEFAULT 'manual',
+      created_by text NOT NULL DEFAULT 'agent',
+      created_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS guest_inbox_internal_notes_conversation_created_idx
+      ON guest_inbox_internal_notes (conversation_id, created_at DESC)
+  `);
+  console.log("[schema] ensured guest_inbox_internal_notes table");
+
+  await db.execute(sql`
     CREATE TABLE IF NOT EXISTS guest_phone_overrides (
       id serial PRIMARY KEY,
       conversation_id text NOT NULL UNIQUE,

@@ -2,6 +2,23 @@ import { storage } from "./storage";
 import type { InsertQuoCallEvent, InsertQuoSmsMessage, QuoCallEvent, QuoSmsMessage } from "@shared/schema";
 
 const QUO_API_BASE = "https://api.openphone.com/v1";
+const DEFAULT_CALL_BACKFILL_HOURS = 48;
+const CALL_BACKFILL_COOLDOWN_MS = 5 * 60 * 1000;
+
+let callBackfillInFlight: Promise<QuoCallBackfillResult> | null = null;
+let lastCallBackfillAt = 0;
+
+export type QuoCallBackfillResult = {
+  ok: true;
+  hours: number;
+  since: string;
+  conversationsScanned: number;
+  callsScanned: number;
+  missedCallsImported: number;
+  skippedCalls: number;
+  errors: string[];
+  cached?: boolean;
+};
 
 export function normalizePhone(value: unknown): string {
   const raw = String(value ?? "").trim();
@@ -79,6 +96,33 @@ function unwrapList<T>(raw: unknown, hints: string[] = []): T[] {
     return null;
   };
   return visit(raw, 0) ?? [];
+}
+
+async function callQuo(path: string, params: URLSearchParams): Promise<any> {
+  const apiKey = process.env.QUO_API_KEY;
+  if (!apiKey) throw new Error("QUO_API_KEY is required for Quo call sync");
+  const url = `${QUO_API_BASE}${path}?${params.toString()}`;
+  const resp = await fetch(url, { headers: { Authorization: apiKey } });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const message = data?.message ?? data?.error ?? `Quo returned HTTP ${resp.status}`;
+    throw new Error(String(message));
+  }
+  return data;
+}
+
+async function listQuoPages(path: string, params: URLSearchParams, maxPages = 10): Promise<any[]> {
+  const rows: any[] = [];
+  let pageToken = "";
+  for (let page = 0; page < maxPages; page++) {
+    const pageParams = new URLSearchParams(params);
+    if (pageToken) pageParams.set("pageToken", pageToken);
+    const data = await callQuo(path, pageParams);
+    rows.push(...unwrapList<any>(data, ["data", "results"]));
+    pageToken = String(data?.nextPageToken ?? "").trim();
+    if (!pageToken) break;
+  }
+  return rows;
 }
 
 async function callGuesty(method: string, path: string): Promise<unknown> {
@@ -320,6 +364,121 @@ export async function recordQuoCallWebhook(payload: any): Promise<{ call: QuoCal
   };
   const call = await storage.upsertQuoCallEvent(row);
   return { call, matched: !!match };
+}
+
+function quoCallPayloadFromApiCall(call: any, conversation: any): any {
+  const participant = normalizePhone(Array.isArray(conversation?.participants) ? conversation.participants[0] : call?.participants?.[0]);
+  const rawDirection = String(call?.direction ?? call?.type ?? "").toLowerCase();
+  const direction = rawDirection.includes("out") ? "outbound" : "inbound";
+  const from = normalizePhone(call?.from ?? call?.caller ?? (direction === "inbound" ? participant : getQuoFromNumber()));
+  const to = normalizePhone(call?.to ?? call?.recipient ?? (direction === "outbound" ? participant : getQuoFromNumber()));
+  return {
+    type: "call.backfill",
+    data: {
+      object: {
+        ...call,
+        direction,
+        from,
+        to,
+        callerName: call?.callerName ?? call?.name ?? conversation?.name ?? null,
+      },
+    },
+    createdAt: call?.createdAt ?? call?.completedAt ?? conversation?.lastActivityAt,
+  };
+}
+
+function shouldImportBackfilledCall(payload: any): boolean {
+  try {
+    const parsed = parseQuoCallWebhook(payload);
+    return parsed.direction === "inbound" && (parsed.disposition === "missed" || parsed.disposition === "voicemail");
+  } catch {
+    return false;
+  }
+}
+
+export async function backfillQuoMissedCalls(options: { hours?: number; force?: boolean } = {}): Promise<QuoCallBackfillResult> {
+  const hours = Math.min(168, Math.max(1, Math.round(Number(options.hours ?? DEFAULT_CALL_BACKFILL_HOURS) || DEFAULT_CALL_BACKFILL_HOURS)));
+  const now = Date.now();
+  if (!options.force && now - lastCallBackfillAt < CALL_BACKFILL_COOLDOWN_MS) {
+    return {
+      ok: true,
+      hours,
+      since: new Date(now - hours * 60 * 60 * 1000).toISOString(),
+      conversationsScanned: 0,
+      callsScanned: 0,
+      missedCallsImported: 0,
+      skippedCalls: 0,
+      errors: [],
+      cached: true,
+    };
+  }
+  if (callBackfillInFlight) return callBackfillInFlight;
+
+  callBackfillInFlight = (async () => {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const fromNumber = getQuoFromNumber();
+    const conversationParams = new URLSearchParams({
+      updatedAfter: since,
+      maxResults: "100",
+    });
+    conversationParams.append("phoneNumbers", fromNumber);
+
+    const conversations = await listQuoPages("/conversations", conversationParams, 5);
+    const errors: string[] = [];
+    let callsScanned = 0;
+    let missedCallsImported = 0;
+    let skippedCalls = 0;
+
+    for (const conversation of conversations) {
+      const phoneNumberId = String(conversation?.phoneNumberId ?? "").trim();
+      const participant = normalizePhone(Array.isArray(conversation?.participants) ? conversation.participants[0] : "");
+      if (!phoneNumberId || !phoneLast10(participant)) {
+        skippedCalls++;
+        continue;
+      }
+
+      const callParams = new URLSearchParams({
+        phoneNumberId,
+        createdAfter: since,
+        maxResults: "100",
+      });
+      callParams.append("participants", participant);
+
+      try {
+        const calls = await listQuoPages("/calls", callParams, 5);
+        for (const call of calls) {
+          callsScanned++;
+          const payload = quoCallPayloadFromApiCall(call, conversation);
+          if (!shouldImportBackfilledCall(payload)) {
+            skippedCalls++;
+            continue;
+          }
+          await recordQuoCallWebhook(payload);
+          missedCallsImported++;
+        }
+      } catch (err: any) {
+        errors.push(`${participant}: ${err?.message ?? err}`);
+      }
+    }
+
+    lastCallBackfillAt = Date.now();
+    return {
+      ok: true,
+      hours,
+      since,
+      conversationsScanned: conversations.length,
+      callsScanned,
+      missedCallsImported,
+      skippedCalls,
+      errors,
+    };
+  })();
+
+  try {
+    return await callBackfillInFlight;
+  } finally {
+    callBackfillInFlight = null;
+  }
 }
 
 export async function sendQuoSms(input: {

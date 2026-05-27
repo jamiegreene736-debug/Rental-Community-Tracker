@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -2170,6 +2170,8 @@ export default function InboxPage() {
   const [templatePreview, setTemplatePreview] = useState<{ open: boolean; title: string; body: string; channel: "guesty" | "sms" }>({ open: false, title: "", body: "", channel: "guesty" });
   const [airbnbPreapprovedIds, setAirbnbPreapprovedIds] = useState<Set<string>>(() => readStoredAirbnbPreapprovals());
   const [guestPhoneInput, setGuestPhoneInput] = useState("");
+  const [callbackCall, setCallbackCall] = useState<QuoCallEvent | null>(null);
+  const [callbackSummary, setCallbackSummary] = useState("");
   // Property filter for the conversation list — narrows the visible
   // conversations to a single listing nickname. Defaults to "all" so
   // nothing is hidden until the user picks a property.
@@ -2967,9 +2969,12 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Phone not saved", description: e.message, variant: "destructive" }),
   });
 
-  const clearMissedCall = useMutation({
-    mutationFn: async (id: number) => {
-      const r = await apiRequest("POST", `/api/inbox/calls/${id}/acknowledge`, {});
+  const completeCallback = useMutation({
+    mutationFn: async () => {
+      if (!callbackCall) throw new Error("No missed call selected");
+      const said = callbackSummary.trim();
+      if (said.length < 2) throw new Error("Please add what the guest said.");
+      const r = await apiRequest("POST", `/api/inbox/calls/${callbackCall.id}/callback`, { said });
       if (!r.ok) {
         const errBody = await r.json().catch(() => ({}));
         throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
@@ -2977,11 +2982,15 @@ export default function InboxPage() {
       return r.json();
     },
     onSuccess: () => {
+      const conversationId = callbackCall?.conversationId ?? selectedConvId;
+      setCallbackCall(null);
+      setCallbackSummary("");
       qc.invalidateQueries({ queryKey: ["/api/inbox/calls/unacknowledged"] });
-      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/conversations", selectedConvId] });
-      toast({ title: "Missed call cleared" });
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/conversations", conversationId] });
+      if (conversationId) qc.invalidateQueries({ queryKey: ["/api/inbox/internal-notes", conversationId] });
+      toast({ title: "Callback saved", description: "The missed call was cleared and added to internal notes." });
     },
-    onError: (e: any) => toast({ title: "Could not clear missed call", description: e.message, variant: "destructive" }),
+    onError: (e: any) => toast({ title: "Callback not saved", description: e.message, variant: "destructive" }),
   });
 
   const clearConversationMissedCalls = useMutation({
@@ -3577,7 +3586,7 @@ export default function InboxPage() {
                       Missed calls need review
                     </div>
                     <div className="mt-1 text-xs text-red-800">
-                      Clear notifications from this inbox after calling or messaging the guest back.
+                      Call the guest back, then save what they said so the note stays with the Guest Inbox thread.
                     </div>
                   </div>
                   <div className="grid gap-2 sm:min-w-[360px]">
@@ -3624,11 +3633,14 @@ export default function InboxPage() {
                               size="sm"
                               variant="outline"
                               className="h-7 px-2 text-[11px]"
-                              onClick={() => clearMissedCall.mutate(call.id)}
-                              disabled={clearMissedCall.isPending}
+                              onClick={() => {
+                                setCallbackCall(call);
+                                setCallbackSummary("");
+                              }}
+                              disabled={completeCallback.isPending}
                               data-testid={`button-clear-missed-call-${call.id}`}
                             >
-                              Clear
+                              Called back
                             </Button>
                           </div>
                         </div>
@@ -3950,11 +3962,14 @@ export default function InboxPage() {
                                         size="sm"
                                         variant="outline"
                                         className="h-7 px-2 text-[11px]"
-                                        onClick={() => clearMissedCall.mutate(callEvent.id)}
-                                        disabled={clearMissedCall.isPending}
+                                        onClick={() => {
+                                          setCallbackCall(callEvent);
+                                          setCallbackSummary("");
+                                        }}
+                                        disabled={completeCallback.isPending}
                                         data-testid={`button-clear-thread-missed-call-${callEvent.id}`}
                                       >
-                                        Clear missed call
+                                        Called guest back
                                       </Button>
                                     )}
                                   </div>
@@ -4354,16 +4369,7 @@ export default function InboxPage() {
                               </div>
                             </div>
                             {callEvents.some((c) => !c.acknowledgedAt && (c.disposition === "missed" || c.disposition === "voicemail")) && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 px-2 text-[11px]"
-                                onClick={() => clearConversationMissedCalls.mutate()}
-                                disabled={clearConversationMissedCalls.isPending}
-                                data-testid="button-clear-conversation-missed-calls"
-                              >
-                                Clear all
-                              </Button>
+                              <Badge className="bg-red-100 text-red-800 hover:bg-red-100">Callback needed</Badge>
                             )}
                           </div>
                           <div className="mt-2 space-y-2">
@@ -4394,6 +4400,21 @@ export default function InboxPage() {
                                   <div className="mt-2 rounded border border-red-100 bg-white p-2 text-red-950">
                                     {call.voicemailTranscript}
                                   </div>
+                                )}
+                                {!call.acknowledgedAt && (call.disposition === "missed" || call.disposition === "voicemail") && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="mt-2 h-7 px-2 text-[11px]"
+                                    onClick={() => {
+                                      setCallbackCall(call);
+                                      setCallbackSummary("");
+                                    }}
+                                    disabled={completeCallback.isPending}
+                                    data-testid={`button-sidebar-called-back-${call.id}`}
+                                  >
+                                    Called guest back
+                                  </Button>
                                 )}
                               </div>
                             ))}
@@ -5417,6 +5438,57 @@ export default function InboxPage() {
               <FileText className="h-3 w-3 mr-1" /> Use in Composer
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!callbackCall} onOpenChange={(open) => {
+        if (!open) {
+          setCallbackCall(null);
+          setCallbackSummary("");
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Complete guest callback</DialogTitle>
+            <DialogDescription>
+              Save what the guest said. This clears the missed-call notification and stores an internal note on the Guest Inbox thread.
+            </DialogDescription>
+          </DialogHeader>
+          {callbackCall && (
+            <div className="space-y-3">
+              <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                <div className="font-medium">{callbackCall.guestName || "Unknown caller"}</div>
+                <div className="text-muted-foreground">
+                  {formatPhone(callbackCall.guestPhone)}
+                  {callbackCall.callCompletedAt && ` · ${new Date(callbackCall.callCompletedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="inbox-callback-summary">Said</Label>
+                <Textarea
+                  id="inbox-callback-summary"
+                  className="mt-1 min-h-[110px]"
+                  value={callbackSummary}
+                  onChange={(event) => setCallbackSummary(event.target.value)}
+                  placeholder="Example: Guest confirmed arrival time and said they found the check-in email."
+                  data-testid="textarea-inbox-callback-summary"
+                />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setCallbackCall(null)} disabled={completeCallback.isPending}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => completeCallback.mutate()}
+                  disabled={completeCallback.isPending || callbackSummary.trim().length < 2}
+                  data-testid="button-inbox-save-callback"
+                >
+                  {completeCallback.isPending && <RefreshCw className="mr-2 h-4 w-4 animate-spin" />}
+                  Save callback
+                </Button>
+              </DialogFooter>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 

@@ -68,7 +68,7 @@ import {
   isSidecarLaneCancellationRequested,
   isSidecarLaneOwner,
 } from "./sidecar-lane";
-import { findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
+import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply } from "./auto-reply";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
@@ -32711,11 +32711,36 @@ CONSTRAINTS
 
   app.get("/api/inbox/calls/unacknowledged", async (req, res) => {
     try {
+      const refresh = String(req.query.refresh ?? "1") !== "0";
+      const hours = Math.min(168, Math.max(1, parseInt(String(req.query.hours ?? "48"), 10) || 48));
+      let backfill = null;
+      if (refresh) {
+        try {
+          backfill = await backfillQuoMissedCalls({
+            hours,
+            force: String(req.query.force ?? "") === "1",
+          });
+        } catch (err: any) {
+          console.warn(`[quo-call-backfill] ${err?.message ?? err}`);
+          backfill = { ok: false, error: err?.message ?? String(err) };
+        }
+      }
       const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
       const calls = await storage.getUnacknowledgedQuoCallEvents(limit);
-      return res.json({ calls, count: calls.length });
+      return res.json({ calls, count: calls.length, backfill });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to load missed calls", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/calls/backfill", async (req, res) => {
+    try {
+      const hours = Math.min(168, Math.max(1, parseInt(String(req.body?.hours ?? req.query.hours ?? "48"), 10) || 48));
+      const result = await backfillQuoMissedCalls({ hours, force: true });
+      const calls = await storage.getUnacknowledgedQuoCallEvents(100);
+      return res.json({ ...result, pendingCount: calls.length });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to backfill missed calls", message: err.message });
     }
   });
 
@@ -32978,6 +33003,19 @@ CONSTRAINTS
       return res.status(500).json({ error: "Failed to match phone", message: err.message });
     }
   });
+
+  setTimeout(() => {
+    void backfillQuoMissedCalls({
+      hours: Math.min(168, Math.max(1, parseInt(String(process.env.QUO_CALL_BACKFILL_HOURS ?? "48"), 10) || 48)),
+    })
+      .then((result) => {
+        console.log(`[quo-call-backfill] startup synced ${result.missedCallsImported} missed/voicemail call(s) from ${result.conversationsScanned} recent conversation(s)`);
+        if (result.errors.length > 0) {
+          console.warn(`[quo-call-backfill] ${result.errors.length} conversation(s) had errors: ${result.errors.slice(0, 3).join("; ")}`);
+        }
+      })
+      .catch((err) => console.warn(`[quo-call-backfill] startup skipped: ${err?.message ?? err}`));
+  }, 15_000);
 
   // ========== INBOX — Message Templates ==========
 
