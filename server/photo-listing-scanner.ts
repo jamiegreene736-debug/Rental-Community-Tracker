@@ -146,6 +146,29 @@ async function dynamicVerificationTokensForFolder(folder: string): Promise<strin
         return tokens.length > 0 ? Array.from(new Set(tokens)) : [STANDALONE_DRAFT_NO_UNIT_TOKEN];
       }
     }
+    if (ref.propertyId < 0) {
+      const draft = await storage.getCommunityDraft(Math.abs(ref.propertyId));
+      if (draft && (draft as any)?.status === "published") {
+        const unitSlot = /unit-b$/i.test(ref.oldUnitId) ? "unit2" : "unit1";
+        const unitLabel = unitSlot === "unit2"
+          ? ((draft as any)?.unit2Address || (draft as any)?.unit2Description || "Unit B")
+          : ((draft as any)?.unit1Address || (draft as any)?.unit1Description || "Unit A");
+        const address = [
+          unitSlot === "unit2" ? (draft as any)?.unit2Address : (draft as any)?.unit1Address,
+          draft?.streetAddress,
+          draft?.city,
+          draft?.state,
+        ].filter(Boolean).join(", ");
+        const tokens = unitVerificationClaims(unitLabel, address);
+        // Published draft combo listings like Caribe Cove can have real
+        // representative unit photo folders but no concrete condo number yet.
+        // Do not block those forever: authorized-URL suppression plus the
+        // two-distinct-photo threshold still guards against one-off resort
+        // amenity false positives, while letting copied OTA/private photos
+        // surface as red dashboard badges.
+        return tokens.length > 0 ? Array.from(new Set(tokens)) : [STANDALONE_DRAFT_NO_UNIT_TOKEN];
+      }
+    }
     return null;
   }
 
