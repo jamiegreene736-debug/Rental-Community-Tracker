@@ -27,6 +27,7 @@ import { STREAMLINE_SITES } from "./pm-scraper-streamline";
 import { VRP_SITES } from "./pm-scraper-vrp";
 import { getSidecarStopGeneration, hasSidecarStopGenerationChanged } from "./vrbo-sidecar-queue";
 import type { SidecarPmSearchSite } from "./vrbo-sidecar-queue";
+import { totalBedroomsForProperty } from "@shared/property-units";
 
 export type ChannelKey = "airbnb" | "vrbo" | "booking" | "pm";
 export type RegionKey = "hawaii" | "florida";
@@ -195,6 +196,25 @@ function nightsBetween(checkIn: string, checkOut: string): number {
   const start = new Date(`${checkIn}T12:00:00Z`).getTime();
   const end = new Date(`${checkOut}T12:00:00Z`).getTime();
   return Math.max(1, Math.round((end - start) / 86_400_000));
+}
+
+function formatSidecarQueueDateRange(checkIn: string, checkOut: string): string {
+  const format = (ymd: string): { month: string; day: number; year: number } | null => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+    const [yearRaw, monthRaw, dayRaw] = ymd.split("-");
+    const year = Number(yearRaw);
+    const month = Number(monthRaw);
+    const day = Number(dayRaw);
+    const monthName = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month - 1];
+    if (!monthName || !Number.isFinite(year) || !Number.isFinite(day)) return null;
+    return { month: monthName, day, year };
+  };
+  const start = format(checkIn);
+  const end = format(checkOut);
+  if (!start || !end) return `${checkIn} to ${checkOut}`;
+  if (start.year === end.year && start.month === end.month) return `${start.month} ${start.day}-${end.day}, ${start.year}`;
+  if (start.year === end.year) return `${start.month} ${start.day}-${end.month} ${end.day}, ${start.year}`;
+  return `${start.month} ${start.day}, ${start.year}-${end.month} ${end.day}, ${end.year}`;
 }
 
 function medianOfSorted(sorted: number[]): number | null {
@@ -740,6 +760,19 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const region = inferRegion(args.city, args.state);
   const sidecarQueueBudgetMs = args.sidecarQueueBudgetMs ?? 285_000;
   const warningSeason = args.warningSeason ?? "LOW";
+  const totalBedrooms = args.propertyId ? totalBedroomsForProperty(args.propertyId) : 0;
+  const maxRequestedBedrooms = args.bedroomCounts.length ? Math.max(...args.bedroomCounts) : 0;
+  const scanBedroomLabel = totalBedrooms > 0 ? `${totalBedrooms}BR` : maxRequestedBedrooms > 0 ? `${maxRequestedBedrooms}BR` : "";
+  const scanLabel = `${[scanBedroomLabel, args.community].filter(Boolean).join(" ")} buy-in scan`.trim();
+  const dateLabel = formatSidecarQueueDateRange(checkIn, checkOut);
+  const queueContextFor = (providerLabel: string, br: number) => ({
+    scanLabel,
+    providerLabel,
+    unitLabel: `${br}BR unit`,
+    dateLabel,
+    propertyId: args.propertyId,
+    detail: `${providerLabel}: scanning ${br}BR unit · ${dateLabel} · ${targetDest}`,
+  });
   if (!args.skipSidecar) assertSidecarRunCurrent();
 
   // Fan out every OTA website search concurrently. SearchAPI is not
@@ -872,6 +905,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             queueBudgetMs: sidecarQueueBudgetMs,
             signal: args.signal,
             stopGeneration: sidecarStopGeneration,
+            queueContext: queueContextFor("Airbnb", br),
           });
           const targetBrs = targetBrsForSearch(br);
           const byBr = new Map<number, { cheapest: number; availableCount: number; rates: number[] }>();
@@ -941,6 +975,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             queueBudgetMs: sidecarQueueBudgetMs,
             signal: args.signal,
             stopGeneration: sidecarStopGeneration,
+            queueContext: queueContextFor("VRBO", br),
           });
           if (!r) return sidecarFailureOps(br, "vrbo", "wrapper returned null");
           // Filter to listings that actually quote a per-night and
@@ -1024,6 +1059,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
             queueBudgetMs: sidecarQueueBudgetMs,
             signal: args.signal,
             stopGeneration: sidecarStopGeneration,
+            queueContext: queueContextFor("Booking.com", br),
           });
           // Booking sidecar publishes `totalPrice` and leaves
           // `nightlyPrice = 0` for the caller to derive (see the

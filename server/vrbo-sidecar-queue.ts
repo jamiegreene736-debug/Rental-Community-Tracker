@@ -71,6 +71,7 @@ export type SidecarAirbnbParams = {
   bedrooms: number;
   searchVariations?: string[];
   variationMode?: SidecarSearchVariationMode;
+  queueContext?: SidecarQueueContext;
 };
 
 export type SidecarVrboParams = {
@@ -81,6 +82,7 @@ export type SidecarVrboParams = {
   bedrooms: number;
   searchVariations?: string[];
   variationMode?: SidecarSearchVariationMode;
+  queueContext?: SidecarQueueContext;
 };
 
 export type SidecarVrboPhotoScrapeParams = {
@@ -121,6 +123,7 @@ export type SidecarBookingParams = {
   bedrooms: number;
   searchVariations?: string[];
   variationMode?: SidecarSearchVariationMode;
+  queueContext?: SidecarQueueContext;
 };
 
 export type SidecarGoogleSerpParams = {
@@ -279,6 +282,15 @@ export type SidecarSearchVariationMode =
       rerunOnlyUntried?: boolean;
     };
 
+export type SidecarQueueContext = {
+  scanLabel?: string;
+  detail?: string;
+  providerLabel?: string;
+  unitLabel?: string;
+  dateLabel?: string;
+  propertyId?: number;
+};
+
 export type SidecarSearchVariationAttempt = {
   term: string;
   typedQuery?: string;
@@ -396,6 +408,11 @@ export type SidecarStatusRequest = {
   status: SidecarRequest["status"];
   opType: SidecarOpType;
   label: string;
+  summary: string;
+  detail: string;
+  providerLabel?: string;
+  unitLabel?: string;
+  dateLabel?: string;
   stage?: string;
   pausedReason?: string;
   pausedAgeSec?: number;
@@ -1802,6 +1819,23 @@ function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
       ? (p as SidecarPmUrlCheckBatchParams).urls.length
       : undefined;
   const br = bedrooms ? ` ${bedrooms}BR` : "";
+  const providerLabel = (() => {
+    switch (r.opType) {
+      case "airbnb_search": return "Airbnb";
+      case "vrbo_search": return "VRBO";
+      case "booking_search": return "Booking.com";
+      case "pm_site_search": return "PM websites";
+      case "pm_url_check_batch":
+      case "pm_url_check": return "PM";
+      case "google_serp": return "Google";
+      case "vrbo_photo_scrape":
+      case "vrbo_upload_photos": return "VRBO";
+      case "booking_upload_photos": return "Booking.com";
+      case "zillow_photo_scrape": return "Zillow";
+      case "guesty_disconnect_channel": return "Guesty";
+      default: return r.opType;
+    }
+  })();
   const label = (() => {
     switch (r.opType) {
       case "airbnb_search": return `Airbnb${br} search`;
@@ -1819,11 +1853,47 @@ function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
       default: return r.opType;
     }
   })();
+  const queueContext = (p as Partial<SidecarAirbnbParams & SidecarVrboParams & SidecarBookingParams>).queueContext;
+  const formatYmd = (ymd: unknown): string | null => {
+    if (typeof ymd !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+    const [yearRaw, monthRaw, dayRaw] = ymd.split("-");
+    const year = Number(yearRaw);
+    const month = Number(monthRaw);
+    const day = Number(dayRaw);
+    if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+    const monthName = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month - 1];
+    return monthName ? `${monthName} ${day}, ${year}` : ymd;
+  };
+  const dateLabel = queueContext?.dateLabel || (() => {
+    const start = formatYmd(p.checkIn);
+    const end = formatYmd(p.checkOut);
+    if (!start || !end) return undefined;
+    const [startMonth, startDay, startYear] = start.replace(",", "").split(" ");
+    const [endMonth, endDay, endYear] = end.replace(",", "").split(" ");
+    if (startYear === endYear && startMonth === endMonth) return `${startMonth} ${startDay}-${endDay}, ${startYear}`;
+    if (startYear === endYear) return `${startMonth} ${startDay}-${endMonth} ${endDay}, ${startYear}`;
+    return `${start}-${end}`;
+  })();
+  const unitLabel = queueContext?.unitLabel || (bedrooms ? `${bedrooms}BR unit` : undefined);
+  const summary = queueContext?.scanLabel || [
+    destination,
+    unitLabel ? `${unitLabel} scan` : label,
+  ].filter(Boolean).join(" · ") || label;
+  const detail = queueContext?.detail || [
+    providerLabel ? `${providerLabel}${unitLabel ? `: scanning ${unitLabel}` : ""}` : label,
+    dateLabel,
+    destination ? `location ${destination}` : "",
+  ].filter(Boolean).join(" · ");
   return {
     id: r.id,
     status: r.status,
     opType: r.opType,
     label,
+    summary,
+    detail,
+    providerLabel: queueContext?.providerLabel || providerLabel,
+    unitLabel,
+    dateLabel,
     stage: r.stage,
     pausedReason: r.pausedReason,
     pausedAgeSec,
@@ -2043,6 +2113,7 @@ export async function searchVrboViaSidecar(opts: {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  queueContext?: SidecarQueueContext;
   rerunOnlyUntried?: boolean;
   searchVariations?: string[];
   pollIntervalMs?: number;
@@ -2090,6 +2161,7 @@ export async function searchVrboViaSidecar(opts: {
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
         searchVariations: policy.terms,
+        queueContext: opts.queueContext,
         variationMode: {
           filterTokens: policy.filterTokens,
           maxVariations: policy.maxVariations,
@@ -2217,6 +2289,7 @@ export async function searchBookingViaSidecar(opts: {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  queueContext?: SidecarQueueContext;
   rerunOnlyUntried?: boolean;
   searchVariations?: string[];
   pollIntervalMs?: number;
@@ -2256,6 +2329,7 @@ export async function searchBookingViaSidecar(opts: {
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
         searchVariations: policy.terms,
+        queueContext: opts.queueContext,
         variationMode: {
           filterTokens: policy.filterTokens,
           maxVariations: policy.maxVariations,
@@ -2289,6 +2363,7 @@ export async function searchAirbnbViaSidecar(opts: {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  queueContext?: SidecarQueueContext;
   rerunOnlyUntried?: boolean;
   searchVariations?: string[];
   pollIntervalMs?: number;
@@ -2328,6 +2403,7 @@ export async function searchAirbnbViaSidecar(opts: {
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
         searchVariations: policy.terms,
+        queueContext: opts.queueContext,
         variationMode: {
           filterTokens: policy.filterTokens,
           maxVariations: policy.maxVariations,

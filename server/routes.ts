@@ -9387,6 +9387,15 @@ export async function registerRoutes(
     let airbnbSidecarReason = "";
     let airbnbProviderHealth: ProviderHealthSnapshot | null = null;
     let airbnbVariationSummary: any = null;
+    const sidecarQueueDateLabel = `${checkIn} to ${checkOut}`;
+    const sidecarQueueContextFor = (providerLabel: string) => ({
+      scanLabel: `${bedrooms}BR ${(resortName || community).trim()} buy-in scan`,
+      providerLabel,
+      unitLabel: `${bedrooms}BR unit`,
+      dateLabel: sidecarQueueDateLabel,
+      propertyId,
+      detail: `${providerLabel}: scanning ${bedrooms}BR unit · ${sidecarQueueDateLabel} · ${(resortName || community).trim()}`,
+    });
     const airbnbSidecarAbort = makeSidecarAbort("airbnb-sidecar");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       try {
@@ -9402,6 +9411,7 @@ export async function registerRoutes(
           rerunOnlyUntried: rerunOnlyUntriedVariations,
           signal: airbnbSidecarAbort.signal,
           stopGeneration: sidecarStopGeneration,
+          queueContext: sidecarQueueContextFor("Airbnb"),
         });
         airbnbSidecarOnline = r.workerOnline;
         airbnbSidecarMs = r.durationMs;
@@ -9486,6 +9496,7 @@ export async function registerRoutes(
           rerunOnlyUntried: rerunOnlyUntriedVariations,
           signal: bookingSidecarAbort.signal,
           stopGeneration: sidecarStopGeneration,
+          queueContext: sidecarQueueContextFor("Booking.com"),
         });
         bookingRawCount = r.candidates.length;
         bookingSidecarCount = r.candidates.length;
@@ -9571,6 +9582,7 @@ export async function registerRoutes(
           rerunOnlyUntried: rerunOnlyUntriedVariations,
           signal: vrboSidecarAbort.signal,
           stopGeneration: sidecarStopGeneration,
+          queueContext: sidecarQueueContextFor("VRBO"),
         });
         if (!r) return [];
         const acceptedVrbo = r.candidates.filter((c) => {

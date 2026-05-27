@@ -418,6 +418,11 @@ type SidecarQueueRequest = {
   status: string;
   opType: string;
   label: string;
+  summary?: string;
+  detail?: string;
+  providerLabel?: string;
+  unitLabel?: string;
+  dateLabel?: string;
   stage?: string;
   pausedReason?: string;
   pausedAgeSec?: number;
@@ -9033,13 +9038,20 @@ function SidecarQueueRequestRow({
     : kind === "paused"
       ? `paused ${sidecarQueueAge(request.pausedAgeSec)}`
       : `queued ${sidecarQueueAge(request.ageSec)}`;
+  const headline = request.summary || request.label;
+  const detail = request.detail || [request.destination, statusText].filter(Boolean).join(" · ");
   return (
     <div className="rounded-md border bg-background px-2 py-2">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-[11px] font-semibold text-foreground">{request.label}</div>
-          <div className="truncate text-[10px] text-muted-foreground">
-            {request.destination ? `${request.destination} · ` : ""}{statusText}
+          <div className="truncate text-[11px] font-semibold text-foreground">{headline}</div>
+          <div className="mt-0.5 text-[10px] font-medium leading-snug text-muted-foreground">
+            {detail}
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            <Badge variant="outline" className="h-5 px-1.5 text-[9px]">{request.label}</Badge>
+            {request.dateLabel && <Badge variant="secondary" className="h-5 px-1.5 text-[9px]">{request.dateLabel}</Badge>}
+            <Badge variant="secondary" className="h-5 px-1.5 text-[9px]">{statusText}</Badge>
           </div>
           {(request.stage || request.pausedReason) && (
             <div className="mt-0.5 max-h-8 overflow-hidden text-[10px] italic text-muted-foreground">
