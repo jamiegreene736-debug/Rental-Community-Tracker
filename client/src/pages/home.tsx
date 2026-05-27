@@ -61,7 +61,7 @@ import {
   CheckSquare,
   StopCircle,
 } from "lucide-react";
-import { getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
 import { useToast } from "@/hooks/use-toast";
 import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/quality-score";
@@ -69,6 +69,7 @@ import { getBuyInRate } from "@shared/pricing-rates";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
+import { usePortalSession } from "@/lib/auth";
 
 const STATUS_LABELS: Record<string, string> = {
   researching: "Researching",
@@ -580,7 +581,99 @@ function minimumStayDisplay(property: Pick<Property, "minimumStayNights" | "mini
 }
 type SortDir = "asc" | "desc";
 
-export default function Home() {
+function AgentPropertyPortal() {
+  const properties = getAllUnitBuilders();
+
+  return (
+    <div className="min-h-screen bg-background">
+      <div className="max-w-[1400px] mx-auto px-3 py-4 sm:px-4 sm:py-6">
+        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight sm:text-2xl" data-testid="text-page-title">
+              Agent Guest Portal
+            </h1>
+            <p className="text-sm text-muted-foreground mt-1 sm:text-base">
+              Guest messages, missed calls, and read-only property details for arrival support.
+            </p>
+          </div>
+          <Link href="/inbox">
+            <Button className="w-full gap-2 sm:w-auto" data-testid="button-agent-open-inbox">
+              <MessageSquare className="h-4 w-4" />
+              Open Guest Inbox
+            </Button>
+          </Link>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {properties.map((property) => {
+            const totalBedrooms = property.units.reduce((sum, unit) => sum + unit.bedrooms, 0);
+            const totalGuests = property.units.reduce((sum, unit) => sum + unit.maxGuests, 0);
+            const unitLabels = property.units.map((unit) => `${unit.unitNumber}: ${unit.bedrooms}BR, ${unit.bathrooms}BA, sleeps ${unit.maxGuests}`);
+            return (
+              <Card key={property.propertyId} className="p-4" data-testid={`card-agent-property-${property.propertyId}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h2 className="text-base font-semibold leading-tight">{property.propertyName}</h2>
+                    <p className="mt-1 text-sm text-muted-foreground">{property.complexName}</p>
+                  </div>
+                  <Badge variant="outline" className="shrink-0">
+                    {property.propertyType ?? "Condominium"}
+                  </Badge>
+                </div>
+
+                <div className="mt-3 space-y-2 text-sm">
+                  <div className="flex items-start gap-2 text-muted-foreground">
+                    <MapPin className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>{property.address}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="rounded-md border bg-muted/20 p-2">
+                      <div className="text-[10px] uppercase text-muted-foreground">Bedrooms</div>
+                      <div className="font-semibold">{totalBedrooms}</div>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 p-2">
+                      <div className="text-[10px] uppercase text-muted-foreground">Max guests</div>
+                      <div className="font-semibold">{totalGuests}</div>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 p-2">
+                      <div className="text-[10px] uppercase text-muted-foreground">Units</div>
+                      <div className="font-semibold">{property.units.length}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 rounded-md border bg-background p-3">
+                  <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Unit details</div>
+                  <ul className="mt-2 space-y-1 text-xs">
+                    {unitLabels.map((label) => (
+                      <li key={label}>{label}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                {(property.neighborhood || property.transit || property.accessibilityNote) && (
+                  <div className="mt-3 space-y-2 text-xs leading-relaxed text-muted-foreground">
+                    {property.accessibilityNote && (
+                      <p><span className="font-medium text-foreground">Accessibility:</span> {property.accessibilityNote}</p>
+                    )}
+                    {property.neighborhood && (
+                      <p><span className="font-medium text-foreground">Area:</span> {property.neighborhood}</p>
+                    )}
+                    {property.transit && (
+                      <p><span className="font-medium text-foreground">Getting around:</span> {property.transit}</p>
+                    )}
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminDashboard() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [searchTerm, setSearchTerm] = useState("");
@@ -3124,4 +3217,11 @@ export default function Home() {
       />
     </div>
   );
+}
+
+export default function Home() {
+  const { data: session, isLoading } = usePortalSession();
+  if (isLoading) return null;
+  if (session?.role === "agent") return <AgentPropertyPortal />;
+  return <AdminDashboard />;
 }

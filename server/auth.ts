@@ -1,15 +1,17 @@
-// Single-password gate for the VacationRentalExpertz portal.
+// Role-aware gate for the VacationRentalExpertz portal.
 //
 // Activated by setting the `ADMIN_SECRET` env var. When unset, this
 // middleware is a no-op so cold deploys, local dev, and the previous
 // open-portal posture all keep working without touching env config.
 //
 // Auth modes:
-//   1. Browser cookie — operator submits the password to /login,
-//      we set an HttpOnly cookie whose value is HMAC-SHA256(secret,
-//      "nexstay-portal-authenticated-v1"). Each request recomputes
-//      the HMAC and timing-safe-compares — no server-side session
-//      storage. Rotating ADMIN_SECRET invalidates every session.
+//   1. Browser cookie — operator/agent submits credentials to /login,
+//      we set an HttpOnly cookie whose value is role + HMAC. Each
+//      request recomputes the HMAC and timing-safe-compares — no
+//      server-side session storage. Rotating ADMIN_SECRET invalidates
+//      every session. Legacy admin cookies from the previous
+//      single-password gate are still accepted as admin until they
+//      expire.
 //   2. `X-Admin-Secret` request header — for CLI / curl / scripts.
 //      Same secret as the cookie path. Matches the existing pattern
 //      Load-Bearing #32 already documents for the Guesty admin
@@ -60,6 +62,8 @@ import crypto from "crypto";
 
 const COOKIE_NAME = "nexstay_auth";
 const COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+export type PortalRole = "admin" | "agent";
+export type PortalSession = { role: PortalRole; username: string };
 
 const PUBLIC_PATH_PREFIXES = [
   "/login",
@@ -95,6 +99,17 @@ function getExpectedCookieValue(secret: string): string {
     .createHmac("sha256", secret)
     .update("nexstay-portal-authenticated-v1")
     .digest("hex");
+}
+
+function getRoleCookieSignature(secret: string, role: PortalRole): string {
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`nexstay-portal-authenticated-v2:${role}`)
+    .digest("hex");
+}
+
+function buildRoleCookieValue(secret: string, role: PortalRole): string {
+  return `${role}:${getRoleCookieSignature(secret, role)}`;
 }
 
 function parseCookies(header: string | undefined): Record<string, string> {
@@ -151,26 +166,96 @@ function constantTimeEqual(a: string, b: string): boolean {
   }
 }
 
-function isAuthenticated(req: Request, secret: string): boolean {
+export function resolvePortalSession(req: Request, secret: string): PortalSession | null {
   const cookies = parseCookies(req.headers.cookie);
   const cookieVal = cookies[COOKIE_NAME];
-  if (cookieVal && constantTimeEqual(cookieVal, getExpectedCookieValue(secret))) {
-    return true;
+  if (cookieVal) {
+    if (constantTimeEqual(cookieVal, getExpectedCookieValue(secret))) {
+      return { role: "admin", username: "admin" };
+    }
+    const match = /^(admin|agent):([a-f0-9]{64})$/i.exec(cookieVal);
+    if (match) {
+      const role = match[1].toLowerCase() as PortalRole;
+      const signature = match[2];
+      if (constantTimeEqual(signature, getRoleCookieSignature(secret, role))) {
+        return { role, username: role };
+      }
+    }
   }
   const header = req.headers["x-admin-secret"];
   if (typeof header === "string" && constantTimeEqual(header, secret)) {
-    return true;
+    return { role: "admin", username: "admin" };
   }
+  return null;
+}
+
+function agentApiMethodAllowed(req: Request): boolean {
+  const method = req.method.toUpperCase();
+  const path = req.path;
+
+  if (method === "GET" && path === "/api/auth/session") return true;
+  if (method === "GET" && path === "/api/guesty-property-map") return true;
+
+  if (method === "GET" && path.startsWith("/api/guesty-proxy/communication/conversations")) return true;
+  if (method === "POST" && /^\/api\/guesty-proxy\/communication\/conversations\/[^/]+\/send-message$/.test(path)) return true;
+
+  if (method === "GET" && /^\/api\/guesty-proxy\/reservations\/[^/]+$/.test(path)) return true;
+
+  if (method === "GET" && path === "/api/inbox/sms/status") return true;
+  if (method === "GET" && path === "/api/inbox/sms/match") return true;
+  if (method === "GET" && path === "/api/inbox/templates") return true;
+  if (method === "GET" && path.startsWith("/api/inbox/sms/conversations/")) return true;
+  if (method === "POST" && /^\/api\/inbox\/sms\/conversations\/[^/]+\/send$/.test(path)) return true;
+  if ((method === "PUT" || method === "PATCH") && /^\/api\/inbox\/sms\/conversations\/[^/]+\/(phone|links)$/.test(path)) return true;
+  if (method === "GET" && path.startsWith("/api/inbox/calls/")) return true;
+  if (method === "POST" && /^\/api\/inbox\/calls\/(\d+|conversations\/[^/]+)\/acknowledge$/.test(path)) return true;
+  if (method === "POST" && path === "/api/inbox/ai-draft") return true;
+
+  if (method === "GET" && /^\/api\/bookings\/[^/]+\/(arrival-details|buy-in-communications|rental-agreement)$/.test(path)) return true;
+
   return false;
+}
+
+export function isAgentAllowedPath(req: Request): boolean {
+  const path = req.path;
+  if (isPublicPath(path)) return true;
+  if (path === "/" || path === "/inbox") return true;
+  if (path.startsWith("/assets/") || path.startsWith("/brand/") || path.startsWith("/photos/")) return true;
+  if (path.startsWith("/api/")) return agentApiMethodAllowed(req);
+  return false;
+}
+
+export function resolveLoginRole(usernameRaw: string, password: string, adminSecret: string): PortalRole | null {
+  const username = usernameRaw.trim().toLowerCase();
+  if ((username === "" || username === "admin") && constantTimeEqual(password, adminSecret)) {
+    return "admin";
+  }
+  if (username === "agent" && constantTimeEqual(password, "agent")) {
+    return "agent";
+  }
+  return null;
 }
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const secret = process.env.ADMIN_SECRET ?? "";
-  if (!secret) return next();
+  if (!secret) {
+    res.locals.portalSession = { role: "admin", username: "admin" } satisfies PortalSession;
+    return next();
+  }
   if (isLoopback(req)) return next();
   if (isAuthorizedBuyInEmailWebhook(req)) return next();
   if (isPublicPath(req.path)) return next();
-  if (isAuthenticated(req, secret)) return next();
+  const session = resolvePortalSession(req, secret);
+  if (session) {
+    res.locals.portalSession = session;
+    if (session.role === "agent" && !isAgentAllowedPath(req)) {
+      if (req.path.startsWith("/api/")) {
+        return res.status(403).json({ error: "Agent access is limited to guest inbox and property information" });
+      }
+      return res.redirect("/");
+    }
+    return next();
+  }
 
   if (req.path.startsWith("/api/")) {
     return res.status(401).json({ error: "Unauthorized" });
@@ -201,8 +286,8 @@ const LOGIN_HTML = (errorMsg: string, nextPath: string) => `<!doctype html>
   h1 { font-size: 20px; margin: 0 0 8px; color: #0f172a; }
   p { font-size: 13px; color: #64748b; margin: 0 0 20px; }
   label { display: block; font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 6px; }
-  input[type=password] { width: 100%; box-sizing: border-box; padding: 10px 12px; font-size: 14px; border: 1px solid #cbd5e1; border-radius: 6px; outline: none; }
-  input[type=password]:focus { border-color: #3b82f6; }
+  input[type=text], input[type=password] { width: 100%; box-sizing: border-box; padding: 10px 12px; font-size: 14px; border: 1px solid #cbd5e1; border-radius: 6px; outline: none; }
+  input[type=text]:focus, input[type=password]:focus { border-color: #3b82f6; }
   button { width: 100%; margin-top: 16px; padding: 10px; font-size: 14px; font-weight: 600; color: white; background: #3b82f6; border: none; border-radius: 6px; cursor: pointer; }
   button:hover { background: #2563eb; }
   .err { color: #dc2626; font-size: 12px; margin-top: 8px; }
@@ -211,10 +296,12 @@ const LOGIN_HTML = (errorMsg: string, nextPath: string) => `<!doctype html>
 <form class="card" method="POST" action="/login">
   <img class="brand" src="/brand/vacation-rental-expertz-horizontal.png" alt="VacationRentalExpertz">
   <h1>VacationRentalExpertz Portal</h1>
-  <p>This portal is private. Sign in with the operator password.</p>
+  <p>This portal is private. Operators can use the admin password; agents use their assigned username and password.</p>
   <input type="hidden" name="next" value="${nextPath.replace(/"/g, "&quot;")}">
+  <label for="username">Username</label>
+  <input id="username" type="text" name="username" autocomplete="username" autofocus>
   <label for="password">Password</label>
-  <input id="password" type="password" name="password" autocomplete="current-password" autofocus required>
+  <input id="password" type="password" name="password" autocomplete="current-password" required>
   <button type="submit">Sign in</button>
   ${errorMsg ? `<div class="err">${errorMsg}</div>` : ""}
 </form>
@@ -260,6 +347,7 @@ export function loginPostHandler(req: Request, res: Response) {
   if (!secret) {
     return res.redirect("/");
   }
+  const username = String((req.body as any)?.username ?? "");
   const password = String((req.body as any)?.password ?? "");
   const nextRaw = String((req.body as any)?.next ?? "/") || "/";
   // Only allow same-site relative redirects after login. An open
@@ -267,14 +355,15 @@ export function loginPostHandler(req: Request, res: Response) {
   // /login?next=https://evil/ to hand off the freshly-issued cookie
   // to a phishing page. Relative paths only.
   const safeNext = nextRaw.startsWith("/") && !nextRaw.startsWith("//") ? nextRaw : "/";
-  if (!constantTimeEqual(password, secret)) {
+  const role = resolveLoginRole(username, password, secret);
+  if (!role) {
     res.status(401);
     res.set("Content-Type", "text/html; charset=utf-8");
     res.set("Cache-Control", "no-store");
-    return res.send(LOGIN_HTML("Incorrect password.", safeNext));
+    return res.send(LOGIN_HTML("Incorrect username or password.", safeNext));
   }
-  res.set("Set-Cookie", buildSetCookie(getExpectedCookieValue(secret), Math.floor(COOKIE_MAX_AGE_MS / 1000)));
-  res.redirect(safeNext);
+  res.set("Set-Cookie", buildSetCookie(buildRoleCookieValue(secret, role), Math.floor(COOKIE_MAX_AGE_MS / 1000)));
+  res.redirect(role === "agent" && safeNext !== "/inbox" ? "/" : safeNext);
 }
 
 export function logoutHandler(_req: Request, res: Response) {

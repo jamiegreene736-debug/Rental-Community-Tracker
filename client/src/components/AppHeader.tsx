@@ -2,6 +2,7 @@ import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { CalendarSearch, Home, MessageSquare, PhoneMissed } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
+import { usePortalSession } from "@/lib/auth";
 
 type GuestyConversationSummary = {
   unread?: boolean;
@@ -104,6 +105,8 @@ function countUnreadConversationThreads(raw: unknown): number {
 
 export default function AppHeader() {
   const [location] = useLocation();
+  const { data: session } = usePortalSession();
+  const isAgent = session?.role === "agent";
   const isHome = location === "/";
   const isInbox = location.startsWith("/inbox");
   const isOperations = location.startsWith("/bookings");
@@ -187,18 +190,20 @@ export default function AppHeader() {
               <span className="hidden md:inline">Inbox</span>
               {missedCallCount > 0 && <PhoneMissed className="hidden h-3.5 w-3.5 text-red-600 sm:block" />}
             </Link>
-            <Link
-              href="/bookings"
-              className={`inline-flex h-10 items-center gap-2 rounded-lg border px-2 text-sm font-medium transition-colors sm:px-3
-                ${isOperations
-                  ? "border-[hsl(var(--brand-orange)/0.40)] bg-[hsl(var(--brand-orange)/0.10)] text-foreground cursor-default pointer-events-none"
-                  : "border-transparent text-muted-foreground hover:border-[hsl(var(--brand-orange)/0.25)] hover:bg-background"
-                }`}
-              data-testid="link-header-operations"
-            >
-              <CalendarSearch className="h-4 w-4 text-[hsl(var(--brand-orange))]" />
-              <span className="hidden md:inline">Operations</span>
-            </Link>
+            {!isAgent && (
+              <Link
+                href="/bookings"
+                className={`inline-flex h-10 items-center gap-2 rounded-lg border px-2 text-sm font-medium transition-colors sm:px-3
+                  ${isOperations
+                    ? "border-[hsl(var(--brand-orange)/0.40)] bg-[hsl(var(--brand-orange)/0.10)] text-foreground cursor-default pointer-events-none"
+                    : "border-transparent text-muted-foreground hover:border-[hsl(var(--brand-orange)/0.25)] hover:bg-background"
+                  }`}
+                data-testid="link-header-operations"
+              >
+                <CalendarSearch className="h-4 w-4 text-[hsl(var(--brand-orange))]" />
+                <span className="hidden md:inline">Operations</span>
+              </Link>
+            )}
           </nav>
         </div>
       </div>

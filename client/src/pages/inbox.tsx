@@ -37,6 +37,7 @@ import type { MessageTemplate } from "@shared/schema";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
+import { usePortalSession } from "@/lib/auth";
 
 type ArrivalUnitDetail = {
   id: number;
@@ -2116,6 +2117,9 @@ export default function InboxPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [location] = useLocation();
+  const { data: session } = usePortalSession();
+  const isAgent = session?.role === "agent";
+  const isAdmin = session?.role === "admin";
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [draftLoading, setDraftLoading] = useState(false);
@@ -2634,7 +2638,7 @@ export default function InboxPage() {
     null;
   const { data: buyInEstimate, isLoading: buyInEstimateLoading } = useQuery<any>({
     queryKey: ["/api/inbox/buy-in-estimate", estimateListingId, estimateCheckIn, estimateCheckOut, estimateCleaningFee],
-    enabled: !!estimateListingId && !!estimateCheckIn && !!estimateCheckOut,
+    enabled: isAdmin && !!estimateListingId && !!estimateCheckIn && !!estimateCheckOut,
     queryFn: async () => {
       const params = new URLSearchParams({
         listingId: String(estimateListingId),
@@ -3149,6 +3153,7 @@ export default function InboxPage() {
   // ── Reservations ──
   const { data: pendingData, isLoading: pendingLoading } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/reservations/pending"],
+    enabled: isAdmin,
     queryFn: () =>
       apiRequest("GET", "/api/guesty-proxy/reservations?limit=50")
         .then(r => r.json())
@@ -3169,6 +3174,7 @@ export default function InboxPage() {
 
   const { data: upcomingData } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/reservations/upcoming"],
+    enabled: isAdmin,
     queryFn: () => {
       const today = new Date().toISOString().split("T")[0];
       return apiRequest("GET", `/api/guesty-proxy/reservations?limit=50&sort=checkIn`)
@@ -3192,6 +3198,7 @@ export default function InboxPage() {
 
   const { data: autoApproveStatus, isLoading: autoLoading } = useQuery<any>({
     queryKey: ["/api/inbox/auto-approve/status"],
+    enabled: isAdmin,
     refetchInterval: 30_000,
   });
 
@@ -3214,11 +3221,13 @@ export default function InboxPage() {
   // ── AI Draft Approval ──
   const { data: autoReplyStatus } = useQuery<any>({
     queryKey: ["/api/inbox/auto-reply/status"],
+    enabled: isAdmin,
     refetchInterval: 30_000,
   });
 
   const { data: autoReplyLogs = [], isLoading: logsLoading } = useQuery<any[]>({
     queryKey: ["/api/inbox/auto-reply/logs"],
+    enabled: isAdmin,
     refetchInterval: 60_000,
   });
   const pendingAutoReplyLogs = autoReplyLogs.filter((log: any) =>
@@ -3405,9 +3414,11 @@ export default function InboxPage() {
         <div className="hidden sm:block h-5 w-px bg-border" />
         <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Guest Inbox</h1>
-          <p className="text-xs text-muted-foreground">Messages · Reservations · Auto-Messages</p>
+          <p className="text-xs text-muted-foreground">
+            {isAgent ? "Messages · Missed calls · Arrival details" : "Messages · Reservations · Auto-Messages"}
+          </p>
         </div>
-        {pendingRes.length > 0 && (
+        {!isAgent && pendingRes.length > 0 && (
           <Badge className="sm:ml-auto bg-amber-500 text-white" data-testid="badge-pending-count">
             {pendingRes.length} pending request{pendingRes.length > 1 ? "s" : ""}
           </Badge>
@@ -3425,25 +3436,31 @@ export default function InboxPage() {
             <TabsTrigger value="messages" data-testid="tab-messages">
               <MessageSquare className="h-4 w-4 mr-1.5" /> Messages
             </TabsTrigger>
-            <TabsTrigger value="reservations" data-testid="tab-reservations">
-              <Calendar className="h-4 w-4 mr-1.5" /> Reservations
-              {pendingRes.length > 0 && (
-                <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
-                  {pendingRes.length}
-                </span>
-              )}
-            </TabsTrigger>
-            <TabsTrigger value="auto-messages" data-testid="tab-auto-messages">
-              <Zap className="h-4 w-4 mr-1.5" /> Auto-Messages
-            </TabsTrigger>
-            <TabsTrigger value="auto-reply" data-testid="tab-auto-reply">
-              <Bot className="h-4 w-4 mr-1.5" /> AI Draft Approval
-              {pendingAutoReplyLogs.length > 0 && (
-                <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
-                  {pendingAutoReplyLogs.length}
-                </span>
-              )}
-            </TabsTrigger>
+            {!isAgent && (
+              <TabsTrigger value="reservations" data-testid="tab-reservations">
+                <Calendar className="h-4 w-4 mr-1.5" /> Reservations
+                {pendingRes.length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
+                    {pendingRes.length}
+                  </span>
+                )}
+              </TabsTrigger>
+            )}
+            {!isAgent && (
+              <>
+                <TabsTrigger value="auto-messages" data-testid="tab-auto-messages">
+                  <Zap className="h-4 w-4 mr-1.5" /> Auto-Messages
+                </TabsTrigger>
+                <TabsTrigger value="auto-reply" data-testid="tab-auto-reply">
+                  <Bot className="h-4 w-4 mr-1.5" /> AI Draft Approval
+                  {pendingAutoReplyLogs.length > 0 && (
+                    <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
+                      {pendingAutoReplyLogs.length}
+                    </span>
+                  )}
+                </TabsTrigger>
+              </>
+            )}
           </TabsList>
 
           {/* ── MESSAGES TAB ── */}
@@ -4023,7 +4040,7 @@ export default function InboxPage() {
                         </div>
 
                         {/* Airbnb pre-approval — live action from the inbox */}
-                        {isAirbnb && (phase === "inquiry" || phase === "request") && (
+                        {!isAgent && isAirbnb && (phase === "inquiry" || phase === "request") && (
                           <div className="mt-2 text-[11px] leading-snug">
                             {preApproved ? (
                               <div className="flex items-start gap-2 p-2 rounded-md bg-green-100 border border-green-300">
@@ -4290,7 +4307,7 @@ export default function InboxPage() {
                           shape used by Financials so the math stays
                           consistent. Hidden when guestGross is 0
                           (Guesty hasn't quoted yet). */}
-                      {(phase === "inquiry" || phase === "request") && guestGross > 0 && (
+                      {!isAgent && (phase === "inquiry" || phase === "request") && guestGross > 0 && (
                         <div>
                           <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1 flex items-center justify-between">
                             <span>Quoted rate</span>
@@ -4331,7 +4348,7 @@ export default function InboxPage() {
                           ~±20% of market — plenty for the is-this-worth-
                           it decision. See the matching note on the
                           `/api/inbox/buy-in-estimate` route. */}
-                      {phase === "inquiry" && buyInEstimate && (
+                      {!isAgent && phase === "inquiry" && buyInEstimate && (
                         <div>
                           <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1 flex items-center justify-between">
                             <span>Buy-in estimate</span>
@@ -4403,12 +4420,12 @@ export default function InboxPage() {
                           </div>
                         </div>
                       )}
-                      {phase === "inquiry" && !buyInEstimate && buyInEstimateLoading && (
+                      {!isAgent && phase === "inquiry" && !buyInEstimate && buyInEstimateLoading && (
                         <div className="text-[11px] text-muted-foreground italic">Loading buy-in estimate…</div>
                       )}
 
                       {/* Financials — only for booked reservations */}
-                      {phase === "booked" && (
+                      {!isAgent && phase === "booked" && (
                         <div>
                           <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
                             Financials
@@ -4456,7 +4473,7 @@ export default function InboxPage() {
                         </div>
                       )}
 
-                      {reservationId && (phase === "booked" || phase === "request") && (
+                      {!isAgent && reservationId && (phase === "booked" || phase === "request") && (
                         <InboxBuyInPanel
                           reservationId={reservationId}
                           guestName={guest.fullName ?? selectedConv.displayGuestName ?? ""}
@@ -4628,9 +4645,14 @@ export default function InboxPage() {
                                 smsOnClick: () => draftStayTemplate({ title: "SMS: post-stay review request", channel: "sms", kind: "post-stay", ...draftCommon }),
                               },
                             ];
+                            const visibleTimeline = isAgent
+                              ? timeline.filter((item) =>
+                                  /arrival|parking|travel|day-before|unit setup|post-stay/i.test(item.title)
+                                )
+                              : timeline;
                             return (
                               <div className="space-y-1.5">
-                                {timeline.map((item) => (
+                                {visibleTimeline.map((item) => (
                                   <div key={item.title} className="border rounded-lg p-2.5 text-xs bg-muted/20">
                                     <div className="flex flex-col gap-2">
                                       <div className="min-w-0">
@@ -4674,15 +4696,17 @@ export default function InboxPage() {
                                     </div>
                                   </div>
                                 ))}
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="h-8 px-2.5 text-[11px] w-full justify-start"
-                                  onClick={openReceiptDialog}
-                                  data-testid="button-send-receipt"
-                                >
-                                  <DollarSign className="h-3 w-3 mr-1.5" /> Open detailed payment receipt
-                                </Button>
+                                {!isAgent && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-8 px-2.5 text-[11px] w-full justify-start"
+                                    onClick={openReceiptDialog}
+                                    data-testid="button-send-receipt"
+                                  >
+                                    <DollarSign className="h-3 w-3 mr-1.5" /> Open detailed payment receipt
+                                  </Button>
+                                )}
                               </div>
                             );
                           })()}

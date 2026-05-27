@@ -1916,6 +1916,10 @@ export function getMultiUnitPropertyIds(): number[] {
   return unitBuilderData.map((p) => p.propertyId);
 }
 
+export function getAllUnitBuilders(): PropertyUnitBuilder[] {
+  return unitBuilderData;
+}
+
 export function getAllMultiUnitProperties(): { propertyId: number; propertyName: string; complexName: string }[] {
   return unitBuilderData.map((p) => ({
     propertyId: p.propertyId,

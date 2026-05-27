@@ -85,6 +85,10 @@ app.get("/login", loginPageHandler);
 app.post("/login", loginPostHandler);
 app.post("/logout", logoutHandler);
 app.use(requireAuth);
+app.get("/api/auth/session", (_req, res) => {
+  const session = res.locals.portalSession ?? { role: "admin", username: "admin" };
+  res.json({ authenticated: true, role: session.role, username: session.username });
+});
 
 (async () => {
   await ensureRuntimeSchema();
