@@ -276,6 +276,7 @@ type BuyInCancellationAdvice = {
   score: number;
   tier: BuyInCancellationTier;
   confidence: "high" | "medium" | "low";
+  basis: "verified_cost" | "no_inventory" | "insufficient_coverage";
   title: string;
   summary: string;
   evidence: string[];
@@ -284,6 +285,7 @@ type BuyInCancellationAdvice = {
   remainingBudget: number;
   proposedCost: number | null;
   providersSearched: number;
+  providersClean: number;
   providersHardFailed: number;
   verifiedCount: number;
   pricedCount: number;
@@ -1563,12 +1565,16 @@ function buyInCancellationTier(score: number): BuyInCancellationTier {
 
 function buyInCancellationTitle(tier: BuyInCancellationTier): string {
   switch (tier) {
-    case "cancel": return "Cancel recommended";
+    case "cancel": return "Cancel likely justified";
     case "strong_cancel": return "Strong cancel signal";
     case "consider_cancel": return "Consider canceling";
     case "watch": return "Manual review needed";
     default: return "Do not cancel from this scan";
   }
+}
+
+function capBuyInCancellationScore(score: number, cap: number): number {
+  return Math.min(score, cap);
 }
 
 function buyInCancellationAdviceClass(tier: BuyInCancellationTier): string {
@@ -1615,13 +1621,17 @@ function buildBuyInCancellationAdvice(args: {
   const providerHardFailed = (key: BuyInSearchProviderKey) => providerStatuses.some(({ key: providerKey, status }) =>
     providerKey === key && status.hardFailed,
   );
+  const providerClean = (key: BuyInSearchProviderKey) => providerStatuses.some(({ key: providerKey, status }) =>
+    providerKey === key && status.stats.searched && status.stats.status === "ok" && !status.hardFailed,
+  );
   const providersSearched = BUY_IN_OTA_PROVIDER_KEYS.filter(providerWasSearched).length;
+  const providersClean = BUY_IN_OTA_PROVIDER_KEYS.filter(providerClean).length;
   const providersHardFailed = BUY_IN_OTA_PROVIDER_KEYS.filter(providerHardFailed).length;
   const verifiedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.verified, 0);
   const pricedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.priced, 0);
   const diagnosticsHardError = audits.some((audit) => audit.diagnostics?.severity === "error");
-  const completedEnough = providersSearched >= 2 && providersHardFailed === 0 && !diagnosticsHardError;
-  const confidence: BuyInCancellationAdvice["confidence"] = completedEnough && providersSearched >= 3
+  const completedEnough = providersClean >= 2 && providersHardFailed === 0 && !diagnosticsHardError;
+  const confidence: BuyInCancellationAdvice["confidence"] = completedEnough && providersClean >= 3
     ? "high"
     : completedEnough
       ? "medium"
@@ -1644,20 +1654,29 @@ function buildBuyInCancellationAdvice(args: {
 
   let score: number;
   let summary: string;
+  let basis: BuyInCancellationAdvice["basis"];
   const evidence: string[] = [];
 
   if (candidateCost == null || verifiedCount === 0) {
-    score = completedEnough ? (providersSearched >= 3 ? 98 : 88) : 55;
-    summary = completedEnough
-      ? "The search found no verified bookable inventory for the requested dates and bedroom count."
-      : "No verified bookable inventory was kept, but provider coverage was not strong enough for a hard cancel call.";
-    evidence.push(`${verifiedCount} verified bookable rows across ${providersSearched}/3 OTA provider checks.`);
+    basis = completedEnough ? "no_inventory" : "insufficient_coverage";
+    // A no-inventory scan is important, but it is still a negative signal
+    // from volatile OTA searches. Do not let one scan say "cancel
+    // recommended" unless there is also a verified replacement-cost loss.
+    score = providersClean >= 3 && providersHardFailed === 0 ? 84 : providersClean >= 2 && providersHardFailed === 0 ? 68 : 45;
+    summary = providersClean >= 3
+      ? "All three OTA checks completed cleanly and found no verified bookable inventory. Treat this as a strong warning, then re-run or manually confirm before canceling."
+      : completedEnough
+        ? "No verified bookable inventory was kept, but only two OTA checks completed cleanly. Treat this as manual-review evidence, not a cancel decision."
+        : "No verified bookable inventory was kept, and provider coverage was not strong enough for a cancellation call.";
+    evidence.push(`${verifiedCount} verified bookable rows across ${providersClean}/3 clean OTA provider checks (${providersSearched}/3 searched).`);
     if (pricedCount > 0) {
       evidence.push(`${pricedCount} priced row${pricedCount === 1 ? "" : "s"} appeared, but none survived verification/identity/availability checks.`);
     }
   } else {
+    basis = "verified_cost";
     score = buyInCancellationScoreFromLoss(projectedProfit ?? 0, remainingBudget);
-    if (confidence === "low" && score > 70) score = 70;
+    if (confidence === "low") score = capBuyInCancellationScore(score, 69);
+    if (confidence === "medium") score = capBuyInCancellationScore(score, 84);
     summary = projectedProfit != null && projectedProfit < 0
       ? `Cheapest verified buy-in is ${fmtMoney(candidateCost)}, leaving a projected loss of ${fmtMoney(Math.abs(projectedProfit))}.`
       : projectedProfit != null && projectedProfit < 200
@@ -1668,11 +1687,17 @@ function buildBuyInCancellationAdvice(args: {
   }
 
   if (providersHardFailed > 0) {
+    score = capBuyInCancellationScore(score, basis === "verified_cost" ? 69 : 45);
     evidence.push(`${providersHardFailed} provider check${providersHardFailed === 1 ? "" : "s"} failed or timed out, so the score is capped.`);
+  }
+  if (providersClean < 3) {
+    evidence.push(`${providersClean}/3 OTA provider checks completed cleanly; missing or warning-provider coverage keeps this out of the hard-cancel tier.`);
   }
   if (remainingBudget <= 0) {
     evidence.push("This booking already has no remaining net budget after existing attached buy-ins.");
-    score = Math.max(score, 90);
+    score = basis === "verified_cost" && confidence === "high" && providersHardFailed === 0
+      ? Math.max(score, 90)
+      : Math.min(Math.max(score, 70), 84);
   }
 
   const tier = buyInCancellationTier(score);
@@ -1680,19 +1705,22 @@ function buildBuyInCancellationAdvice(args: {
     score,
     tier,
     confidence,
+    basis,
     title: buyInCancellationTitle(tier),
     summary,
     evidence,
     methodology: [
       "Use only completed live search diagnostics for the same resort, dates, and bedroom count.",
-      "Treat no-inventory as high confidence only when at least two OTA providers completed without hard failure.",
+      "Treat no-inventory as a warning signal, not a final cancellation decision, unless all three OTA providers completed cleanly and a human re-check confirms it.",
       "Compare the cheapest verified buy-in against net booking payout minus already-attached buy-ins.",
-      "Cap the recommendation when providers failed, timed out, or returned unclear coverage.",
+      "Reserve the hard-cancel tier for verified-cost loss with high provider coverage; cap no-inventory and partial-coverage scans to manual review.",
+      "Cap the recommendation when providers failed, timed out, returned unclear coverage, or only two providers completed cleanly.",
     ],
     projectedProfit,
     remainingBudget,
     proposedCost: candidateCost,
     providersSearched,
+    providersClean,
     providersHardFailed,
     verifiedCount,
     pricedCount,
@@ -1714,6 +1742,11 @@ function BuyInCancellationAdviceCard({ advice }: { advice: BuyInCancellationAdvi
           {advice.confidence} confidence
         </Badge>
       </div>
+      {advice.basis !== "verified_cost" && advice.tier !== "do_not_cancel" && (
+        <div className="mt-2 rounded border border-current/15 bg-white/50 px-2 py-1 text-[11px] font-medium">
+          This is an availability warning, not a one-click cancel instruction. Re-run the scan or manually check the OTAs before canceling a guest.
+        </div>
+      )}
       <div className="mt-2 grid gap-1.5 sm:grid-cols-3">
         <div className="rounded border border-current/15 bg-white/50 px-2 py-1">
           <p className="text-[10px] uppercase tracking-wide opacity-70">Remaining budget</p>
@@ -1734,7 +1767,7 @@ function BuyInCancellationAdviceCard({ advice }: { advice: BuyInCancellationAdvi
           {advice.evidence.map((line, index) => (
             <li key={`cancel-evidence-${index}`}>{line}</li>
           ))}
-          <li>{advice.providersSearched}/3 OTA provider checks searched; {advice.providersHardFailed} hard failure{advice.providersHardFailed === 1 ? "" : "s"}.</li>
+          <li>{advice.providersClean}/3 OTA provider checks completed cleanly; {advice.providersSearched}/3 searched; {advice.providersHardFailed} hard failure{advice.providersHardFailed === 1 ? "" : "s"}.</li>
           <li>{advice.verifiedCount} verified row{advice.verifiedCount === 1 ? "" : "s"}; {advice.pricedCount} priced row{advice.pricedCount === 1 ? "" : "s"}.</li>
         </ul>
         <ul className="mt-1 list-disc space-y-0.5 pl-4 opacity-80">
