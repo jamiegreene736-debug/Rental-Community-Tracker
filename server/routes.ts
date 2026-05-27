@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { randomBytes } from "crypto";
 import { storage } from "./storage";
@@ -128,6 +128,7 @@ import {
   MIN_DISTINCT_STRONG_PHOTO_MATCHES,
   isCommunityOrSharedPhotoCandidate,
   isStrongLensMatch,
+  lensMatchConfidence,
 } from "./photo-match-guardrails";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
@@ -7185,6 +7186,7 @@ export async function registerRoutes(
     url: string;
     source: string;
     position: number;
+    confidence?: number;
   };
   type ReverseImageListingCacheEntry = { value: { checkedUrl: string; matches: ReverseImageListingMatch[]; rawCount: number }; expiresAt: number };
   const reverseImageListingCache = new Map<string, ReverseImageListingCacheEntry>();
@@ -7202,6 +7204,9 @@ export async function registerRoutes(
     matchedPhotoRole: NonNullable<BuyInListingPhotoAudit["role"]>;
     matchedPhotoLabel: string | null;
     matchedPhotoCategory: string | null;
+    matchedPhotoCount?: number;
+    minConfidence?: number;
+    maxConfidence?: number;
   };
   type BuyInListingSitesCacheEntry = {
     value: {
@@ -7646,6 +7651,10 @@ export async function registerRoutes(
     }
     if (selectedKeys.size < 2) {
       select(audited.find((photo) => !photo.skippedReason && !selectedKeys.has(normalizeListingSurfaceKey(photo.url))), "interior");
+    }
+    for (const photo of audited) {
+      if (selectedKeys.size >= 8) break;
+      select(photo, "interior");
     }
     return audited;
   };
@@ -8330,7 +8339,7 @@ export async function registerRoutes(
     const looseResortPhotoProof = propertyUnitConfig?.looseResortPhotoProof === true;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v2|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v3-strict|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     const noCache = req.query.nocache === "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -8719,7 +8728,14 @@ export async function registerRoutes(
       // unit on a property-management company's own site is bookable
       // for commercial use. Populated for the top N priced Airbnb
       // candidates (cap configurable via TOP_AIRBNB_FOR_LENS).
-      photoMatches?: Array<{ url: string; title: string; domain: string }>;
+      photoMatches?: Array<{
+        url: string;
+        title: string;
+        domain: string;
+        matchedPhotoCount?: number;
+        minConfidence?: number;
+        maxConfidence?: number;
+      }>;
       directBookingUrl?: string;
       directBookingHost?: string;
       directBookingConfidence?: "high" | "medium" | "low";
@@ -10305,7 +10321,17 @@ export async function registerRoutes(
     // filter cleans them up at the lens-helper layer so they never
     // reach the candidate pool.
     const OTA_DOMAIN_FILTER = /(?:^|\.)(?:airbnb\.[a-z.]+|vrbo\.com|homeaway\.[a-z.]+|booking\.com|tripadvisor\.com|expedia\.[a-z.]+|hotels\.com|kayak\.com|trivago\.com|priceline\.com|orbitz\.com|travelocity\.com|easemytrip\.com|hotelplanner\.com|reservations\.com|hotwire\.com|agoda\.com|google\.com|gstatic\.com|googleusercontent\.com|bing\.com|yahoo\.com|duckduckgo\.com|youtube\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|twitter\.com|x\.com|threads\.net|amazon\.com|walmart\.com|target\.com|wayfair\.com|etsy\.com|ebay\.com|offerup\.com|mercari\.com|poshmark\.com|depop\.com|letgo\.com|chairish\.com|aptdeco\.com|craigslist\.org|matches\.com|match\.com|to-hawaii\.com|hawaii-aloha\.com|vacationrentals\.com|flipkey\.com|holidaylettings\.com|tripping\.com|realtor\.com|zillow\.com|redfin\.com|coldwellbanker\.com|century21\.com|compass\.com|sothebysrealty\.com|sothebys\.com|hawaiilife\.com|pscondos\.com|hotpads\.com|homes\.com|realtytrac\.com|trulia\.com|movoto\.com|mls\.com|loopnet\.com|apartments\.com)$/i;
-    async function lensMatches(imgUrl: string): Promise<Array<{ url: string; title: string; domain: string }>> {
+    const AIRBNB_DIRECT_LENS_MIN_PHOTO_MATCHES = 5;
+    const AIRBNB_DIRECT_LENS_MIN_CONFIDENCE = 0.95;
+    type AirbnbDirectLensMatch = {
+      url: string;
+      title: string;
+      domain: string;
+      source: string;
+      position: number;
+      confidence: number;
+    };
+    async function lensMatches(imgUrl: string): Promise<AirbnbDirectLensMatch[]> {
       // PR #314: short-circuit when PM Google-discovery is disabled.
       // Google Lens (engine=google_lens) is a Google search surface
       // and was 403'd alongside engine=google. Operator directive:
@@ -10317,30 +10343,47 @@ export async function registerRoutes(
         const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`);
         if (!r.ok) return [];
         const data = await r.json() as any;
-        const sources = [
-          ...(Array.isArray(data?.visual_matches) ? data.visual_matches : []),
-          ...(Array.isArray(data?.organic_results) ? data.organic_results : []),
-          ...(Array.isArray(data?.pages_with_matching_images) ? data.pages_with_matching_images : []),
+        const rows: Array<{ source: string; row: any; idx: number }> = [
+          ...(Array.isArray(data?.visual_matches) ? data.visual_matches.map((row: any, idx: number) => ({ source: "visual", row, idx })) : []),
+          ...(Array.isArray(data?.pages_with_matching_images) ? data.pages_with_matching_images.map((row: any, idx: number) => ({ source: "page", row, idx })) : []),
+          ...(Array.isArray(data?.organic_results) ? data.organic_results.map((row: any, idx: number) => ({ source: "organic", row, idx })) : []),
         ];
         const seen = new Set<string>();
-        const out: Array<{ url: string; title: string; domain: string }> = [];
-        for (const s of sources) {
-          const url = String(s?.link || s?.url || s?.source_url || s?.source || "");
+        const out: AirbnbDirectLensMatch[] = [];
+        for (const { source, row, idx } of rows) {
+          const url = String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || row?.source || "");
           if (!url) continue;
           let domain: string;
           try { domain = new URL(url).hostname.replace(/^www\./, ""); } catch { continue; }
-          const title = String(s?.title || s?.source || domain).slice(0, 80);
+          const title = String(row?.title || row?.snippet || row?.source?.name || row?.source || domain).slice(0, 80);
+          const position = Number(row?.position ?? idx + 1);
+          const rawConfidence = lensMatchConfidence(row, source, Number.isFinite(position) ? position : idx + 1);
+          // SearchAPI's Lens payload does not always expose a numeric
+          // similarity. Treat only the first visual hit as 95% when no
+          // explicit score exists, then require this level across five
+          // distinct Airbnb interior/gallery photos before a direct link
+          // is promoted. This intentionally kills the old one-photo
+          // furniture/retail false positives.
+          const confidence = Math.max(
+            rawConfidence,
+            source === "visual" && (Number.isFinite(position) ? position : idx + 1) === 1 ? AIRBNB_DIRECT_LENS_MIN_CONFIDENCE : 0,
+          );
+          if (confidence < AIRBNB_DIRECT_LENS_MIN_CONFIDENCE) continue;
           if (OTA_DOMAIN_FILTER.test(domain)) continue;
           if (isNonDirectBookingSurface({ domain, title, url })) continue;
           if (!isLikelyDirectBookingSurface({ domain, title, url })) continue;
-          if (seen.has(domain)) continue;
-          seen.add(domain);
+          const key = normalizeListingSurfaceKey(url) || domain;
+          if (seen.has(key)) continue;
+          seen.add(key);
           out.push({
             url,
             title,
             domain,
+            source,
+            position: Number.isFinite(position) ? position : idx + 1,
+            confidence: Math.round(confidence * 1000) / 1000,
           });
-          if (out.length >= 6) break;
+          if (out.length >= 10) break;
         }
         return out;
       } catch (e: any) {
@@ -10354,13 +10397,20 @@ export async function registerRoutes(
     // create an unbounded SearchAPI bill. The direct page is link-only:
     // we do not scrape it, and any direct-link row keeps the Airbnb
     // date-specific rate.
-    const TOP_AIRBNB_FOR_LENS = 30;
-    const AIRBNB_LENS_IMAGES_PER_CANDIDATE = 3;
-    const AIRBNB_LENS_TOTAL_IMAGE_BUDGET = 75;
+    const TOP_AIRBNB_FOR_LENS = 12;
+    const AIRBNB_LENS_IMAGES_PER_CANDIDATE = 8;
+    const AIRBNB_LENS_TOTAL_IMAGE_BUDGET = 96;
     const topAirbnb = airbnb
       .filter((c) => (c.image || c.images?.length) && c.nightlyPrice > 0)
       .slice(0, TOP_AIRBNB_FOR_LENS);
-    const photoMatchesByUrl = new Map<string, Array<{ url: string; title: string; domain: string }>>();
+    const photoMatchesByUrl = new Map<string, Array<{
+      url: string;
+      title: string;
+      domain: string;
+      matchedPhotoCount: number;
+      minConfidence: number;
+      maxConfidence: number;
+    }>>();
     if (topAirbnb.length > 0) {
       // Each Lens call wrapped in a 8s per-call timeout so a single
       // hung SearchAPI request doesn't block the whole batch.
@@ -10376,18 +10426,64 @@ export async function registerRoutes(
       }
       const lensResults = await Promise.all(
         lensJobs.map((job, i) =>
-          withTimeout(lensMatches(job.image), 8_000, [] as Array<{ url: string; title: string; domain: string }>, `lens-${i}-${job.candidate.url.slice(0, 50)}`),
+          withTimeout(lensMatches(job.image), 8_000, [] as AirbnbDirectLensMatch[], `lens-${i}-${job.candidate.url.slice(0, 50)}`),
         ),
       );
+      const evidenceByCandidate = new Map<string, Map<string, {
+        url: string;
+        title: string;
+        domain: string;
+        photoUrls: Set<string>;
+        confidences: number[];
+      }>>();
       lensJobs.forEach((job, i) => {
-        const existing = photoMatchesByUrl.get(job.candidate.url) ?? [];
-        const seen = new Set(existing.map((m) => m.domain));
+        const candidateEvidence = evidenceByCandidate.get(job.candidate.url) ?? new Map<string, {
+          url: string;
+          title: string;
+          domain: string;
+          photoUrls: Set<string>;
+          confidences: number[];
+        }>();
         for (const match of lensResults[i]) {
-          if (seen.has(match.domain)) continue;
-          seen.add(match.domain);
-          existing.push(match);
+          const key = normalizeListingSurfaceKey(match.url) || match.domain;
+          const ev = candidateEvidence.get(key) ?? {
+            url: match.url,
+            title: match.title,
+            domain: match.domain,
+            photoUrls: new Set<string>(),
+            confidences: [],
+          };
+          ev.photoUrls.add(job.image);
+          ev.confidences.push(match.confidence);
+          candidateEvidence.set(key, ev);
         }
-        photoMatchesByUrl.set(job.candidate.url, existing.slice(0, 6));
+        evidenceByCandidate.set(job.candidate.url, candidateEvidence);
+      });
+      evidenceByCandidate.forEach((candidateEvidence, candidateUrl) => {
+        const strictMatches = Array.from(candidateEvidence.values())
+          .map((ev) => {
+            const minConfidence = ev.confidences.length ? Math.min(...ev.confidences) : 0;
+            const maxConfidence = ev.confidences.length ? Math.max(...ev.confidences) : 0;
+            return {
+              url: ev.url,
+              title: ev.title,
+              domain: ev.domain,
+              matchedPhotoCount: ev.photoUrls.size,
+              minConfidence: Math.round(minConfidence * 1000) / 1000,
+              maxConfidence: Math.round(maxConfidence * 1000) / 1000,
+            };
+          })
+          .filter((match) =>
+            match.matchedPhotoCount >= AIRBNB_DIRECT_LENS_MIN_PHOTO_MATCHES &&
+            match.minConfidence >= AIRBNB_DIRECT_LENS_MIN_CONFIDENCE,
+          )
+          .sort((a, b) =>
+            b.matchedPhotoCount - a.matchedPhotoCount ||
+            b.minConfidence - a.minConfidence ||
+            a.domain.localeCompare(b.domain),
+          )
+          .slice(0, 3);
+        photoMatchesByUrl.set(candidateUrl, strictMatches);
       });
     }
     const airbnbWithMatches: Candidate[] = airbnb.map((c) => {
@@ -10400,10 +10496,10 @@ export async function registerRoutes(
         photoMatches: matches,
         directBookingUrl: direct?.url,
         directBookingHost: direct?.domain,
-        directBookingConfidence: direct ? "medium" : undefined,
+        directBookingConfidence: direct ? "high" : undefined,
         directBookingSource: direct ? "airbnb_image_reverse_search" : undefined,
         directBookingReason: direct
-          ? "Google Lens found the same Airbnb listing photo on this direct/PM domain. Rate shown remains the Airbnb date-specific rate; the direct site was not scraped."
+          ? `Google Lens found ${direct.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain. Rate shown remains the Airbnb date-specific rate; the direct site was not scraped.`
           : undefined,
       };
     });
@@ -10458,13 +10554,11 @@ export async function registerRoutes(
       // legitimate matches. Trusting the anchor's location proof
       // restores the candidate volume the operator wants.
       //
-      // Per-anchor cap of 6 — matches the Lens helper's internal cap.
-      // Doubled from 3 to 6 (alongside TOP_AIRBNB_FOR_LENS 15→30) per
-      // operator direction "maximum candidate surface area." Lens
-      // ranks by visual similarity; matches 4-6 are still usually
-      // legit when the anchor's photos are unit-interior shots
-      // (vs. exterior/pool shared across the complex).
-      const filteredMatches = matches.slice(0, 6);
+      // Direct links now require 5+ distinct high-confidence Airbnb
+      // gallery-photo hits on the same PM/direct URL. The older
+      // one-photo Lens promotion produced too many furniture/retail
+      // and wrong-unit matches, so this path is intentionally strict.
+      const filteredMatches = matches.slice(0, 3);
 
       for (const m of filteredMatches) {
         if (existingPmUrls.has(m.url)) continue;
@@ -10521,12 +10615,12 @@ export async function registerRoutes(
           airbnbAnchorPrice: anchor.totalPrice,
           directBookingUrl: m.url,
           directBookingHost: m.domain,
-          directBookingConfidence: "medium",
+          directBookingConfidence: "high",
           directBookingSource: "airbnb_image_reverse_search",
-          directBookingReason: "Google Lens found the Airbnb listing photo on this direct/PM domain; PM page was linked only, not scraped.",
+          directBookingReason: `Google Lens found ${m.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain; PM page was linked only, not scraped.`,
           verified: "yes",
           verifiedNightlyPrice: anchor.nightlyPrice,
-          verifiedReason: "Direct booking link inferred by Google Lens from Airbnb photos. Price is inherited from Airbnb for the requested dates; direct site was not scraped.",
+          verifiedReason: `Strict Airbnb Lens direct-link proof: ${m.matchedPhotoCount}+ distinct listing photos matched this direct/PM URL at >=${Math.round(AIRBNB_DIRECT_LENS_MIN_CONFIDENCE * 100)}% confidence. Price is inherited from Airbnb for the requested dates; direct site was not scraped.`,
         });
       }
     }
@@ -11662,7 +11756,7 @@ export async function registerRoutes(
 
     type ScoredReverseImageListingMatch = ReverseImageListingMatch & { score: number };
     const bestBySurface = new Map<string, ScoredReverseImageListingMatch>();
-    const addMatch = (rawUrl: string, rawTitle: string, source: string, position: number): void => {
+    const addMatch = (rawUrl: string, rawTitle: string, source: string, position: number, rowForConfidence: any = {}): void => {
       const normalized = normalizeListingUrl(rawUrl);
       if (!normalized) return;
       if (!contextAllows(normalized.domain, `${rawTitle} ${normalized.url}`, source, position)) return;
@@ -11675,10 +11769,12 @@ export async function registerRoutes(
       const surfaceKey = classified.platformKey === "airbnb" || classified.platformKey === "vrbo" || classified.platformKey === "booking"
         ? classified.platformKey
         : normalized.domain;
+      const confidence = Math.round(lensMatchConfidence(rowForConfidence ?? {}, source, position) * 1000) / 1000;
       const score =
         (source === "known-source" ? 100_000 : 0) +
         (source === "visual" ? 10_000 : source === "page" ? 5_000 : source === "organic" ? 1_000 : 0) +
         (source === "visual" && position <= 3 ? 3_000 : 0) +
+        confidence * 1_000 +
         (classified.platformKey === "pm" ? 500 : 0) +
         normalized.pathSpecificity * 80 -
         position;
@@ -11691,6 +11787,7 @@ export async function registerRoutes(
         url: normalized.url,
         source,
         position,
+        confidence,
         score,
       });
     };
@@ -11701,7 +11798,7 @@ export async function registerRoutes(
       const rawUrl = String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || "");
       const rawTitle = String(row?.title || row?.snippet || row?.source?.name || row?.source || "");
       const position = Number(row?.position ?? idx + 1);
-      addMatch(rawUrl, rawTitle, source, Number.isFinite(position) ? position : idx + 1);
+      addMatch(rawUrl, rawTitle, source, Number.isFinite(position) ? position : idx + 1, row);
     }
 
     const matches: ReverseImageListingMatch[] = Array.from(bestBySurface.values())
@@ -11753,7 +11850,7 @@ export async function registerRoutes(
     try {
       const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
       const sourceKey = normalizeListingSurfaceKey(sourceUrl);
-      const cacheKey = `buy-in-sites:v4:${sourceKey}`;
+      const cacheKey = `buy-in-sites:v5-strict:${sourceKey}`;
       evictExpiredBuyInListingSites();
       const cached = buyInListingSitesCache.get(cacheKey);
       if (useCache && cached && cached.expiresAt > Date.now()) {
@@ -11795,8 +11892,13 @@ export async function registerRoutes(
       }
 
       const sourceDomain = domainFromUrl(sourceUrl);
-      const matches: BuyInListingSiteMatch[] = [];
-      const seen = new Set<string>();
+      const strictDirectMinPhotoMatches = 5;
+      const strictDirectMinConfidence = 0.95;
+      const evidenceBySurface = new Map<string, {
+        firstMatch: ReverseImageListingMatch;
+        photos: BuyInListingPhotoAudit[];
+        confidences: number[];
+      }>();
       let rawCount = 0;
       const port = process.env.PORT || "5000";
       const lookupEndpoint = `http://127.0.0.1:${port}/api/operations/reverse-image-listings`;
@@ -11826,13 +11928,12 @@ export async function registerRoutes(
         return true;
       };
 
-      const maxPhotosToSearch = 3;
+      const maxPhotosToSearch = 8;
       let photosSearched = 0;
       for (const photo of candidatePhotos) {
         if (photosSearched >= maxPhotosToSearch) break;
         photo.searched = true;
         photosSearched++;
-        const photoMatches: BuyInListingSiteMatch[] = [];
         try {
           const response = await fetch(lookupEndpoint, {
             method: "POST",
@@ -11857,21 +11958,21 @@ export async function registerRoutes(
           for (const match of Array.isArray(body?.matches) ? body.matches as ReverseImageListingMatch[] : []) {
             if (match.source === "known-source") continue;
             if (match.platformKey !== "pm") continue;
+            if ((match.confidence ?? 0) < strictDirectMinConfidence) continue;
             if (!directMatchFitsTarget(match)) continue;
             if (normalizeListingSurfaceKey(match.url) === sourceKey) continue;
             if (domainFromUrl(match.url) === sourceDomain) continue;
             const key = `${match.platformKey}|${match.domain}|${normalizeListingSurfaceKey(match.url)}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            const decoratedMatch = {
-              ...match,
-              matchedPhotoUrl: photo.url,
-              matchedPhotoRole: photo.role,
-              matchedPhotoLabel: photo.label,
-              matchedPhotoCategory: photo.category,
+            const ev = evidenceBySurface.get(key) ?? {
+              firstMatch: match,
+              photos: [],
+              confidences: [],
             };
-            photoMatches.push(decoratedMatch);
-            matches.push(decoratedMatch);
+            if (!ev.photos.some((p) => p.url === photo.url)) {
+              ev.photos.push(photo);
+              ev.confidences.push(match.confidence ?? 0);
+            }
+            evidenceBySurface.set(key, ev);
           }
         } catch (e: any) {
           photo.skippedReason = e?.name === "AbortError"
@@ -11881,10 +11982,33 @@ export async function registerRoutes(
         }
       }
 
+      const matches: BuyInListingSiteMatch[] = Array.from(evidenceBySurface.values())
+        .map((ev) => {
+          const representativePhoto = ev.photos[0];
+          const minConfidence = ev.confidences.length ? Math.min(...ev.confidences) : 0;
+          const maxConfidence = ev.confidences.length ? Math.max(...ev.confidences) : 0;
+          return {
+            ...ev.firstMatch,
+            matchedPhotoUrl: representativePhoto.url,
+            matchedPhotoRole: representativePhoto.role ?? "interior",
+            matchedPhotoLabel: representativePhoto.label,
+            matchedPhotoCategory: representativePhoto.category,
+            matchedPhotoCount: ev.photos.length,
+            minConfidence: Math.round(minConfidence * 1000) / 1000,
+            maxConfidence: Math.round(maxConfidence * 1000) / 1000,
+          };
+        })
+        .filter((match) =>
+          (match.matchedPhotoCount ?? 0) >= strictDirectMinPhotoMatches &&
+          (match.minConfidence ?? 0) >= strictDirectMinConfidence,
+        );
+
       matches.sort((a, b) => {
         const roleRank = (role: NonNullable<BuyInListingPhotoAudit["role"]>): number =>
           role === "main" ? 0 : role === "living-room" ? 1 : 2;
-        return roleRank(a.matchedPhotoRole) - roleRank(b.matchedPhotoRole)
+        return (b.matchedPhotoCount ?? 0) - (a.matchedPhotoCount ?? 0)
+          || (b.minConfidence ?? 0) - (a.minConfidence ?? 0)
+          || roleRank(a.matchedPhotoRole) - roleRank(b.matchedPhotoRole)
           || a.position - b.position
           || a.domain.localeCompare(b.domain);
       });
@@ -11904,6 +12028,8 @@ export async function registerRoutes(
             : "No listing photos could be extracted from the source page." }
           : searchedCount === 0
           ? { message: "Listing photos were found, but all were classified as shared/exterior/amenity-style photos and skipped." }
+          : matches.length === 0
+          ? { message: `No direct booking site passed the strict Airbnb Lens threshold (${strictDirectMinPhotoMatches}+ interior/private photo matches at >=${Math.round(strictDirectMinConfidence * 100)}% confidence).` }
           : {}),
       };
       buyInListingSitesCache.set(cacheKey, {
@@ -11927,7 +12053,8 @@ export async function registerRoutes(
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
-    const id = parseInt(req.params.id, 10);
+    const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(idParam, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid buy-in id" });
 
     try {
