@@ -3079,7 +3079,7 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
 
-  // ── Auto-Reply Agent ──
+  // ── AI Draft Approval ──
   const { data: autoReplyStatus } = useQuery<any>({
     queryKey: ["/api/inbox/auto-reply/status"],
     refetchInterval: 30_000,
@@ -3101,7 +3101,7 @@ export default function InboxPage() {
     onSuccess: (data: any) => {
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] });
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      toast({ title: data.message ?? "Auto-reply complete" });
+      toast({ title: data.message ?? "Draft check complete" });
     },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
@@ -3117,12 +3117,23 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
 
+  const redoDraftReply = useMutation({
+    mutationFn: (id: number) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/redo`).then(r => r.json()),
+    onSuccess: (data: any) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      if (data.ok) toast({ title: "AI draft refreshed" });
+      else toast({ title: "Redo failed", description: data.error, variant: "destructive" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
   const dismissDraft = useMutation({
     mutationFn: (id: number) =>
       apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/dismiss`).then(r => r.json()),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      toast({ title: "Dismissed" });
+      toast({ title: "Draft declined" });
     },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
@@ -3286,7 +3297,7 @@ export default function InboxPage() {
               <Zap className="h-4 w-4 mr-1.5" /> Auto-Messages
             </TabsTrigger>
             <TabsTrigger value="auto-reply" data-testid="tab-auto-reply">
-              <Bot className="h-4 w-4 mr-1.5" /> Auto-Reply
+              <Bot className="h-4 w-4 mr-1.5" /> AI Draft Approval
               {autoReplyLogs.filter((l: any) => l.status === "flagged" || (l.status === "drafted" && !l.replySent)).length > 0 && (
                 <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
                   {autoReplyLogs.filter((l: any) => l.status === "flagged" || (l.status === "drafted" && !l.replySent)).length}
@@ -4655,17 +4666,17 @@ export default function InboxPage() {
             </div>
           </TabsContent>
 
-          {/* ── AUTO-REPLY TAB ── */}
+          {/* ── AI DRAFT APPROVAL TAB ── */}
           <TabsContent value="auto-reply" className="space-y-6">
             <Card>
               <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <CardTitle className="flex items-center gap-2">
-                      <Bot className="h-5 w-5" /> AI Auto-Reply Agent
+                      <Bot className="h-5 w-5" /> AI Draft Approval
                     </CardTitle>
                     <CardDescription className="mt-1">
-                      Polls Guesty every 5 minutes. Uses Claude with listing/reservation tools to draft and send replies automatically. Risky messages (refund, cancel, damage, medical, legal) are drafted for human review instead of auto-sent.
+                      Checks Guesty every 30 seconds and prepares John Carpenter drafts with the standard signature. Nothing is sent until you approve it.
                     </CardDescription>
                   </div>
                 </div>
@@ -4680,7 +4691,7 @@ export default function InboxPage() {
                       data-testid="switch-auto-reply"
                     />
                     <Label htmlFor="auto-reply-toggle" className="text-sm cursor-pointer">
-                      {autoReplyStatus?.enabled ? "Enabled" : "Disabled"}
+                      {autoReplyStatus?.enabled ? "Scheduling drafts" : "Paused"}
                     </Label>
                   </div>
                   <Button
@@ -4691,7 +4702,7 @@ export default function InboxPage() {
                     data-testid="button-run-auto-reply"
                   >
                     <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${runAutoReply.isPending ? "animate-spin" : ""}`} />
-                    Run Now
+                    Check Now
                   </Button>
                   {autoReplyStatus?.lastRunAt && (
                     <span className="text-xs text-muted-foreground">
@@ -4704,14 +4715,14 @@ export default function InboxPage() {
             </Card>
 
             <div>
-              <h3 className="font-semibold mb-3">Recent Activity</h3>
+              <h3 className="font-semibold mb-3">Drafts Awaiting Approval</h3>
               {logsLoading && <p className="text-sm text-muted-foreground">Loading logs…</p>}
               {!logsLoading && autoReplyLogs.length === 0 && (
                 <div className="border rounded-lg p-8 text-center bg-card">
                   <Bot className="h-10 w-10 mx-auto mb-3 opacity-20" />
-                  <p className="font-medium mb-1">No activity yet</p>
+                  <p className="font-medium mb-1">No drafts yet</p>
                   <p className="text-sm text-muted-foreground">
-                    The agent will log every reply attempt here. Click "Run Now" to trigger a poll.
+                    The scheduler will show the latest guest message for each draft here. Click "Check Now" to trigger a poll.
                   </p>
                 </div>
               )}
@@ -4728,12 +4739,12 @@ export default function InboxPage() {
                             )}
                             {log.status === "sent" && (
                               <Badge className="bg-green-600 text-white text-[10px]">
-                                <CheckCircle className="h-2.5 w-2.5 mr-1" /> Sent
+                                <CheckCircle className="h-2.5 w-2.5 mr-1" /> Approved
                               </Badge>
                             )}
                             {log.status === "drafted" && (
                               <Badge className="bg-blue-600 text-white text-[10px]">
-                                <Pencil className="h-2.5 w-2.5 mr-1" /> Drafted
+                                <Pencil className="h-2.5 w-2.5 mr-1" /> Needs Approval
                               </Badge>
                             )}
                             {log.status === "flagged" && (
@@ -4742,7 +4753,7 @@ export default function InboxPage() {
                               </Badge>
                             )}
                             {log.status === "dismissed" && (
-                              <Badge variant="secondary" className="text-[10px]">Dismissed</Badge>
+                              <Badge variant="secondary" className="text-[10px]">Declined</Badge>
                             )}
                             {log.status === "error" && (
                               <Badge variant="destructive" className="text-[10px]">
@@ -4766,7 +4777,7 @@ export default function InboxPage() {
                         {log.replyDraft && (
                           <div>
                             <p className="text-[11px] font-medium text-muted-foreground mb-0.5">
-                              {log.replySent ? "REPLY SENT" : "DRAFT"}
+                              {log.replySent ? "APPROVED REPLY" : "AI DRAFT"}
                             </p>
                             <p className="bg-primary/5 border border-primary/20 rounded px-3 py-2 whitespace-pre-wrap text-[13px]">{log.replyDraft}</p>
                           </div>
@@ -4792,7 +4803,16 @@ export default function InboxPage() {
                             disabled={sendDraftReply.isPending}
                             data-testid={`button-send-draft-${log.id}`}
                           >
-                            <Send className="h-3.5 w-3.5 mr-1.5" /> Send Reply
+                            <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> Approve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => redoDraftReply.mutate(log.id)}
+                            disabled={redoDraftReply.isPending}
+                            data-testid={`button-redo-draft-${log.id}`}
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${redoDraftReply.isPending ? "animate-spin" : ""}`} /> Redo AI Draft
                           </Button>
                           <Button
                             size="sm"
@@ -4801,7 +4821,7 @@ export default function InboxPage() {
                             disabled={dismissDraft.isPending}
                             data-testid={`button-dismiss-draft-${log.id}`}
                           >
-                            <X className="h-3.5 w-3.5 mr-1.5" /> Dismiss
+                            <X className="h-3.5 w-3.5 mr-1.5" /> Decline
                           </Button>
                         </div>
                       )}

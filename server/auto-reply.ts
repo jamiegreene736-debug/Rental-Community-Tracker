@@ -1,7 +1,7 @@
-// Auto-Reply Agent — polls Guesty inbox for new unread guest messages,
-// runs a safety classifier, gathers context (listing, reservation, amenities)
-// via Claude tool-use, and auto-sends a reply when safe. Risky messages are
-// saved as a draft for human review. Every attempt is persisted to autoReplyLog.
+// AI Draft Approval queue — polls Guesty inbox for new/unanswered guest
+// messages, gathers context (listing, reservation, amenities) via Claude
+// tool-use, and saves John Carpenter reply drafts for human approval. Every
+// attempt is persisted to autoReplyLog.
 
 import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";
@@ -13,11 +13,12 @@ import type { InsertAutoReplyLog } from "@shared/schema";
 type AutoReplyStatus = "sent" | "drafted" | "flagged" | "dismissed" | "error";
 
 let _enabled = true;
+let _isRunning = false;
 let _lastRunAt: Date | null = null;
 let _lastRunResult: { processed: number; sent: number; drafted: number; flagged: number; errors: number; message: string } | null = null;
 
 export function getAutoReplyStatus() {
-  return { enabled: _enabled, lastRunAt: _lastRunAt, lastRunResult: _lastRunResult };
+  return { enabled: _enabled, running: _isRunning, lastRunAt: _lastRunAt, lastRunResult: _lastRunResult };
 }
 
 export function setAutoReplyEnabled(enabled: boolean) {
@@ -27,7 +28,7 @@ export function setAutoReplyEnabled(enabled: boolean) {
 
 // --- Safety classifier (input side) ---------------------------------------
 //
-// First line of defense for auto-reply: if the guest's message contains
+// First line of defense for AI Draft Approval: if the guest's message contains
 // any of these terms, we ALWAYS draft for human review instead of
 // auto-sending. The cost of a missed auto-send (host clicks Send a few
 // minutes later) is much smaller than the cost of an auto-send that
@@ -89,11 +90,10 @@ function classifyMessage(text: string): { risky: boolean; matched: string[] } {
 // --- Safety classifier (output side) --------------------------------------
 //
 // Second line of defense: even when the GUEST'S message looks clean,
-// scan the AI's draft before sending. If the model commits to
-// something it shouldn't (refund language, schedule change, pet
-// exception, etc.) we downgrade to "drafted" so the host eyeballs it
-// before it goes out. Patterns are intentionally permissive — false
-// positives just delay a send by one click.
+// scan the AI's draft before it enters the approval queue. If the model commits
+// to something it shouldn't (refund language, schedule change, pet exception,
+// etc.) we flag it so the host sees why it needs extra care. Patterns are
+// intentionally permissive — false positives just add a warning.
 const OUTPUT_RISK_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bI'?ll (?:refund|comp|credit)\b/i, reason: "promised refund/comp/credit" },
   { pattern: /\bwe (?:can|will|'?ll) (?:refund|comp|credit)\b/i, reason: "promised refund/comp/credit" },
@@ -200,7 +200,7 @@ function unwrapConversations(raw: any): GuestyConversation[] {
 // auto-respond. The cleanest contract: pull every OPEN conversation
 // here, then `pickPostToReplyTo` (per-thread) decides whether the
 // guest's latest message is actually awaiting a host reply.
-async function fetchOpenConversations(limit = 30): Promise<GuestyConversation[]> {
+async function fetchOpenConversations(limit = 100): Promise<GuestyConversation[]> {
   // CRITICAL: trailing `&fields=` IS LOAD-BEARING — see the matching note in
   // client/src/pages/inbox.tsx. Without it Guesty returns a stripped state
   // (`{read, status}` only) and we lose `state.lastMessage`,
@@ -453,7 +453,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
 
 const SYSTEM_PROMPT = `You are John Carpenter, a Reservationist at Magical Island Rentals, a premium vacation rental management company in Hawaii.
 
-Your job: read a guest's incoming message and write a warm, concise, professional reply in the tone of a hospitality host. Replies you generate are AUTO-SENT to the guest unless you explicitly flag for human review — so the bar for "I'm sure" is high.
+Your job: read a guest's incoming message and write a warm, concise, professional reply in the tone of a hospitality host. Replies you generate are saved as drafts for human approval before they are sent.
 
 RULES:
 
@@ -704,21 +704,36 @@ Use tools to gather any needed context, then reply. If unsafe or ambiguous, call
   return { draft: null, flagReason: null, toolsUsed, error: "Exceeded max tool-use turns" };
 }
 
+export async function generateAutoReplyDraft(params: {
+  guestMessage: string;
+  guestName?: string;
+  listingId?: string;
+  reservationId?: string;
+  channel?: string;
+  isInitialContact?: boolean;
+}): Promise<DraftResult> {
+  return draftReplyWithClaude(params);
+}
+
 // --- Main loop ------------------------------------------------------------
 
 export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>> {
   if (!_enabled) {
-    const r = { processed: 0, sent: 0, drafted: 0, flagged: 0, errors: 0, message: "Auto-reply is disabled" };
+    const r = { processed: 0, sent: 0, drafted: 0, flagged: 0, errors: 0, message: "AI draft scheduling is paused" };
     _lastRunAt = new Date();
     _lastRunResult = r;
     return r;
   }
+  if (_isRunning) {
+    return _lastRunResult ?? { processed: 0, sent: 0, drafted: 0, flagged: 0, errors: 0, message: "AI draft scheduler is already running" };
+  }
 
+  _isRunning = true;
   console.log("[auto-reply] Polling Guesty inbox for open conversations awaiting a host reply...");
   let processed = 0, sent = 0, drafted = 0, flagged = 0, errors = 0;
 
   try {
-    const open = await fetchOpenConversations(30);
+    const open = await fetchOpenConversations(100);
     console.log(`[auto-reply] Found ${open.length} open conversation(s)`);
 
     for (const conv of open) {
@@ -764,7 +779,7 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
         const moduleField = (latest as any).module ?? (conv as any).module ?? meta.lastMessage?.module ?? { type: "email" };
         const channel = moduleField?.type ?? null;
 
-        // Pre-filter: known risky keywords → draft-only path (no Claude send)
+        // Pre-filter: known risky keywords → highlighted draft path.
         const safety = classifyMessage(guestMessage);
 
         let status: AutoReplyStatus;
@@ -775,7 +790,7 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
         let toolsUsedJson: string | null = null;
 
         if (safety.risky) {
-          // Still generate a draft for the human to review, but do NOT send
+          // Still generate a draft for the human to review, but highlight it.
           const result = await draftReplyWithClaude({
             guestMessage, guestName: guestName ?? undefined,
             listingId: listingId ?? undefined, reservationId: reservationId ?? undefined,
@@ -807,12 +822,11 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
             flagReason = result.flagReason;
             flagged++;
           } else if (result.draft) {
-            // Output-side safety filter — second line of defense even
-            // when the input passed the keyword classifier and Claude
-            // didn't self-flag. Looks for risky commitments in the
-            // generated reply (refund language, schedule confirms,
-            // policy exceptions, leaked access codes) and downgrades
-            // to "drafted" so the host eyeballs it before it goes out.
+            // Output-side safety filter — second line of defense even when the
+            // input passed the keyword classifier and Claude didn't self-flag.
+            // Looks for risky commitments in the generated reply (refund
+            // language, schedule confirms, policy exceptions, leaked access
+            // codes) and highlights those drafts for the approval queue.
             const outputSafety = classifyOutput(result.draft);
             if (outputSafety.risky) {
               status = "flagged";
@@ -820,16 +834,8 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
               flagged++;
               console.warn(`[auto-reply] output blocked for conversation ${conv._id}: ${outputSafety.reason}`);
             } else {
-              try {
-                await sendReply(conv._id, result.draft, moduleField);
-                status = "sent";
-                replySent = true;
-                sent++;
-              } catch (sendErr) {
-                status = "drafted";
-                errorMessage = `send failed: ${(sendErr as Error).message}`;
-                drafted++;
-              }
+              status = "drafted";
+              drafted++;
             }
           } else {
             status = "error";
@@ -868,10 +874,60 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
   _lastRunAt = new Date();
   _lastRunResult = {
     processed, sent, drafted, flagged, errors,
-    message: `Processed ${processed} — sent ${sent}, drafted ${drafted}, flagged ${flagged}, errors ${errors}`,
+    message: `Processed ${processed} — drafted ${drafted}, flagged ${flagged}, errors ${errors}`,
   };
   console.log(`[auto-reply] ${_lastRunResult.message}`);
+  _isRunning = false;
   return _lastRunResult;
+}
+
+export async function redoDraftedReply(logId: number): Promise<{ ok: boolean; error?: string; status?: AutoReplyStatus }> {
+  const log = await storage.getAutoReplyLog(logId);
+  if (!log) return { ok: false, error: "Log not found" };
+  if (!log.guestMessage?.trim()) return { ok: false, error: "No guest message to draft from" };
+  if (log.replySent) return { ok: false, error: "Reply already sent" };
+
+  const result = await draftReplyWithClaude({
+    guestMessage: log.guestMessage,
+    guestName: log.guestName ?? undefined,
+    listingId: log.listingId ?? undefined,
+    reservationId: log.reservationId ?? undefined,
+    channel: log.channel ?? undefined,
+  });
+
+  const inputSafety = classifyMessage(log.guestMessage);
+  const outputSafety = result.draft ? classifyOutput(result.draft) : { risky: false, reason: null };
+  let status: AutoReplyStatus = "drafted";
+  let flagReason: string | null = null;
+  let errorMessage: string | null = null;
+
+  if (result.error) {
+    status = "error";
+    errorMessage = result.error;
+  } else if (inputSafety.risky) {
+    status = "flagged";
+    flagReason = `Risky keywords: ${inputSafety.matched.join(", ")}`;
+  } else if (result.flagReason) {
+    status = "flagged";
+    flagReason = result.flagReason;
+  } else if (outputSafety.risky) {
+    status = "flagged";
+    flagReason = `Output filter: ${outputSafety.reason}`;
+  } else if (!result.draft) {
+    status = "error";
+    errorMessage = "No draft produced";
+  }
+
+  await storage.updateAutoReplyLog(logId, {
+    replyDraft: result.draft,
+    replySent: false,
+    status,
+    flagReason,
+    errorMessage,
+    toolsUsed: JSON.stringify(result.toolsUsed),
+  });
+
+  return { ok: status !== "error", error: errorMessage ?? undefined, status };
 }
 
 export async function sendDraftedReply(logId: number): Promise<{ ok: boolean; error?: string }> {
@@ -897,13 +953,14 @@ export async function dismissReply(logId: number): Promise<{ ok: boolean; error?
 }
 
 export function startAutoReplyScheduler() {
-  // First run delayed slightly so server can finish booting
-  setTimeout(() => { runAutoReply().catch(() => {}); }, 30_000);
+  // Run immediately on boot so the current unread/open Guesty backlog gets
+  // drafts after deploy, then keep polling for new arrivals.
+  runAutoReply().catch(() => {});
 
-  const INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
+  const INTERVAL_MS = 30 * 1000; // near-real-time polling without webhooks
   setInterval(() => {
     runAutoReply().catch(() => {});
   }, INTERVAL_MS);
 
-  console.log("[auto-reply] Scheduler started (every 5 minutes)");
+  console.log("[auto-reply] AI draft scheduler started (every 30 seconds)");
 }

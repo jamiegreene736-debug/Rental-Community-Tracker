@@ -70,7 +70,7 @@ import {
 } from "./sidecar-lane";
 import { findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
-import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply } from "./auto-reply";
+import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, dismissReply, redoDraftedReply } from "./auto-reply";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import {
@@ -32002,7 +32002,7 @@ CONSTRAINTS
     }
   });
 
-  // ========== INBOX — Auto-Reply Agent ==========
+  // ========== INBOX — AI Draft Approval ==========
 
   app.get("/api/inbox/auto-reply/status", (_req, res) => {
     res.json(getAutoReplyStatus());
@@ -32019,7 +32019,7 @@ CONSTRAINTS
       const result = await runAutoReply();
       res.json(result);
     } catch (err: any) {
-      res.status(500).json({ error: "Auto-reply run failed", message: err.message });
+      res.status(500).json({ error: "AI draft approval run failed", message: err.message });
     }
   });
 
@@ -32085,6 +32085,17 @@ CONSTRAINTS
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to send draft", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/auto-reply/logs/:id/redo", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const result = await redoDraftedReply(id);
+      if (!result.ok) return res.status(400).json(result);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to redo draft", message: err.message });
     }
   });
 
