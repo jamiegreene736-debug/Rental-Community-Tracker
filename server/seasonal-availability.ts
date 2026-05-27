@@ -68,7 +68,7 @@ const SEASON_SCAN_HEARTBEAT_MS = 12_000;
 export const AVAILABILITY_SCAN_MONTHS = 24;
 export const AVAILABILITY_WINDOWS_PER_MONTH = 2;
 export const AVAILABILITY_WINDOW_NIGHTS = 14;
-export const AVAILABILITY_RELIABILITY_FACTOR = 0.75;
+export const AVAILABILITY_RELIABILITY_FACTOR = 1;
 export const AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS = 60;
 export const AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS = 120;
 
@@ -306,13 +306,13 @@ export function computeAvailabilityThresholds(
 
   const openCandidatesByBR: Record<number, number> = {};
   const blockCandidatesByBR: Record<number, number> = {};
-  // Default rule: only block when the scan cannot prove even a small
-  // replacement cushion. The operator-facing `manualMinSets` is the
-  // "fully open" target, not the hard blackout floor: a 3-set target now
-  // blocks below 1 set, stays tight at 1-2 sets, and opens at 3+. This
-  // avoids blanketing the Guesty calendar when provider coverage is thin.
+  // Default rule: only block when the scan cannot prove even one complete
+  // replacement set. The operator-facing `manualMinSets` is the "fully open"
+  // target, not the hard blackout floor: a 3-set target blocks at 0 sets,
+  // stays tight at 1-2 sets, and opens at 3+. This avoids blanketing the
+  // Guesty calendar when provider coverage is thin.
   const openMinSets = Math.max(1, manualMinSets);
-  const blockMinSets = Math.max(1, Math.floor(openMinSets / 2));
+  const blockMinSets = 1;
   for (const [brRaw, required] of Object.entries(requiredByBR)) {
     const br = Number(brRaw);
     const openCandidates = required * openMinSets;
@@ -416,7 +416,7 @@ function buildWindowFromScan(args: {
     : !autoBlockAllowed && maxSets < args.thresholds.blockMinSets
     ? `${args.season} ${args.window.nights}-night window found ${maxSets} effective set(s), but check-in is outside the auto-block horizon (${AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS} days, or ${AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS} days for holidays); leaving tight for review instead of blacking out.`
     : args.scan.daemonOnline
-    ? `${args.season} ${args.window.nights}-night window found ${maxSets} effective set(s) after ${Math.round(AVAILABILITY_RELIABILITY_FACTOR * 100)}% reliability haircut; block below ${args.thresholds.blockMinSets}, open at ${args.thresholds.openMinSets}.`
+    ? `${args.season} ${args.window.nights}-night window found ${maxSets} proven set(s); block below ${args.thresholds.blockMinSets}, tight below ${args.thresholds.openMinSets}, open at ${args.thresholds.openMinSets}+.`
     : `${args.season} sample only partially verified because the sidecar was offline; not auto-blocking from incomplete data.`;
   return {
     season: args.season,
@@ -515,7 +515,7 @@ function expandSeasonSamplesToWeekly(args: {
       startDate: ymd(checkIn),
       endDate: ymd(checkOut),
       nights: 7,
-      reason: `${season} sidecar sample ${template.startDate}→${template.endDate} found ${template.maxSets} de-duped set(s); applied to this 7-night week. Block below ${template.blockMinSets}, open at ${template.openMinSets}.`,
+      reason: `${season} sidecar sample ${template.startDate}→${template.endDate} found ${template.maxSets} de-duped set(s); applied to this 7-night week. Block below ${template.blockMinSets}, tight below ${template.openMinSets}, open at ${template.openMinSets}+.`,
     });
   }
   return windows;

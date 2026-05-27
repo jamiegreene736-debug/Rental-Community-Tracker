@@ -28,7 +28,7 @@ assert.equal(windows[0].checkIn, "2026-06-01", "first future anchor should be th
 assert.equal(windows[0].checkOut, "2026-06-15", "windows should run 14 nights");
 assert.equal(windows[0].nights, AVAILABILITY_WINDOW_NIGHTS);
 assert.equal(availabilityWindowCountForWeeks(104), 48);
-assert.equal(AVAILABILITY_RELIABILITY_FACTOR, 0.75, "false-positive haircut should be a 25% reserve");
+assert.equal(AVAILABILITY_RELIABILITY_FACTOR, 1, "availability scan should use proven raw inventory without a haircut");
 assert.equal(AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS, 60, "normal auto-block horizon should stay near-term only");
 assert.equal(AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS, 120, "holiday auto-block horizon should be bounded");
 console.log("  ✓ generates 48 future 14-night windows");
@@ -43,6 +43,19 @@ assert.equal(thresholds.openMinSets, 2, "2-set target should open at 2 effective
 assert.equal(thresholds.blockCandidatesByBR[3], 2, "3BR + 3BR blocks only below one complete set");
 assert.equal(thresholds.openCandidatesByBR[3], 4, "3BR + 3BR opens at two complete sets");
 console.log("  ✓ keeps a loose block floor for combo inventory");
+
+const conservativeThresholds = computeAvailabilityThresholds([
+  { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
+  { unitId: "B", unitLabel: "Unit B", bedrooms: 3 },
+], 5);
+
+assert.equal(conservativeThresholds.blockMinSets, 1, "higher open targets should not raise the hard blackout floor");
+assert.equal(
+  availabilityVerdictForScan(1, conservativeThresholds, { daemonOnline: true, warnings: [] }),
+  "tight",
+  "one complete set should stay bookable even when the open target is conservative",
+);
+console.log("  ✓ conservative targets do not create broad blackout bands");
 
 assert.equal(
   effectiveAvailabilityCount({ airbnb: 1, vrbo: 0, booking: 0, pm: 0, total: 1 }),

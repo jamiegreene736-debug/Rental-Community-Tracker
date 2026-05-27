@@ -980,13 +980,13 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           Scanning <b>{ctx.resortName ?? ctx.community}</b> —{" "}
           needed units: {ctx.units.map((u) => `${u.bedrooms}BR`).join(" + ")}.
           {" "}A "set" = one listing per unit slot (no reuse). Each scan window is <b>{ctx.windowNights ?? 14} nights</b>, sampled <b>{ctx.windowsPerMonth ?? 2}</b>x/month for <b>{ctx.months ?? 24}</b> months.
-          {" "}Windows are <b>blocked</b> only below <b>{ctx.blockMinSets ?? 1}</b> effective set(s) after the <b>{Math.round((ctx.reliabilityFactor ?? 0.75) * 100)}%</b> haircut, and only within <b>{ctx.autoBlockNearTermDays ?? 60}</b> days of arrival or <b>{ctx.autoBlockHolidayDays ?? 120}</b> days for holiday windows. Open starts at <b>{ctx.openMinSets ?? ctx.minSets}</b>.
+          {" "}Windows are <b>blocked</b> only when fewer than <b>{ctx.blockMinSets ?? 1}</b> complete set is proven, and only within <b>{ctx.autoBlockNearTermDays ?? 60}</b> days of arrival or <b>{ctx.autoBlockHolidayDays ?? 120}</b> days for holiday windows. Below <b>{ctx.openMinSets ?? ctx.minSets}</b> sets is <b>tight</b>, not an auto-blackout.
         </div>
       )}
       {candidates && (
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, lineHeight: 1.6 }}>
           <b>Lowest verified 14-night inventory</b> — {Object.entries(candidates.countsByBR).map(([br, n]) => (
-            <span key={br} style={{ marginRight: 12 }}>{br}BR: <b>{n}</b> effective options</span>
+            <span key={br} style={{ marginRight: 12 }}>{br}BR: <b>{n}</b> proven options</span>
           ))} · max independent sets: <b>{candidates.baselineSets}</b>
           {candidates.baselineSets < (ctx?.blockMinSets ?? 1) && (
             <span style={{ color: "#991b1b", marginLeft: 8 }}>
@@ -994,7 +994,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             </span>
           )}
           <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>
-            Counts combine SearchAPI Airbnb, supplemental Google Hotels, and dated VRBO / Booking.com sidecar searches, with false-positive risk discounted by the reliability haircut.
+            Counts combine SearchAPI Airbnb, supplemental Google Hotels, and dated VRBO / Booking.com sidecar searches. Re-scans automatically clear scanner-created Guesty blocks when the current window is open or tight.
           </div>
         </div>
       )}
