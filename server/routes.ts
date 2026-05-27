@@ -9393,6 +9393,7 @@ export async function registerRoutes(
       providerLabel,
       unitLabel: `${bedrooms}BR unit`,
       dateLabel: sidecarQueueDateLabel,
+      listingTitle: listingTitle ?? undefined,
       propertyId,
       detail: `${providerLabel}: scanning ${bedrooms}BR unit · ${sidecarQueueDateLabel} · ${(resortName || community).trim()}`,
     });
@@ -13769,6 +13770,7 @@ export async function registerRoutes(
     const bedroomCounts = buildBedroomCounts(propertyConfig.units);
     const marketKey = resolveBuyInMarket({ name: propertyConfig.community }) || propertyConfig.community;
     const market = COMMUNITY_LOCATION_BY_KEY[propertyConfig.community] || COMMUNITY_LOCATION_BY_KEY[marketKey] || BUY_IN_MARKET_LOCATIONS[marketKey];
+    const listingTitle = getUnitBuilderByPropertyId(propertyId)?.propertyName;
     const searchLocation = searchLocationForBuyInMarket(propertyConfig.community) || `${propertyConfig.community}, ${market?.state || "Hawaii"}`;
     const nights = nightsBetweenDates(checkIn, checkOut);
     const { fetchMultiChannelBuyInByBR } = await import("./multichannel-buy-in");
@@ -13779,6 +13781,7 @@ export async function registerRoutes(
       streetAddress: market?.streetAddress,
       bboxCenterOverride: market ? { lat: market.lat, lng: market.lng } : undefined,
       searchName: market?.searchName || propertyConfig.community,
+      listingTitle,
       bedroomCounts: Object.keys(bedroomCounts).map((br) => Number(br)),
       propertyId,
       dateOverride: { checkIn, checkOut },
@@ -19944,6 +19947,7 @@ Return ONLY compact JSON with this exact shape:
       const cheapestByBedroom: Record<number, { price: number; title: string; link: string }> = {};
       const marketKey = resolveBuyInMarket({ name: propertyConfig.community }) || propertyConfig.community;
       const market = COMMUNITY_LOCATION_BY_KEY[propertyConfig.community] || COMMUNITY_LOCATION_BY_KEY[marketKey] || BUY_IN_MARKET_LOCATIONS[marketKey];
+      const listingTitle = getUnitBuilderByPropertyId(propertyId)?.propertyName;
       const { fetchMultiChannelBuyInByBR } = await import("./multichannel-buy-in");
       const scan = await fetchMultiChannelBuyInByBR({
         community: marketKey,
@@ -19952,6 +19956,7 @@ Return ONLY compact JSON with this exact shape:
         streetAddress: market?.streetAddress,
         bboxCenterOverride: market ? { lat: market.lat, lng: market.lng } : undefined,
         searchName: market?.searchName || propertyConfig.community,
+        listingTitle,
         bedroomCounts: Object.keys(bedroomCounts).map((br) => Number(br)),
         propertyId,
         dateOverride: { checkIn, checkOut },
@@ -28584,6 +28589,7 @@ Return ONLY compact JSON with this exact shape:
         completedWindows: number,
       ) => {
         const controller = new AbortController();
+        const listingTitle = getUnitBuilderByPropertyId(propertyId)?.propertyName;
         const timeout = setTimeout(() => {
           controller.abort(new Error(`${label} exceeded the ${Math.round(OTA_BAND_WINDOW_BUDGET_MS / 60_000)} minute OTA-window budget`));
         }, OTA_BAND_WINDOW_BUDGET_MS);
@@ -28595,6 +28601,7 @@ Return ONLY compact JSON with this exact shape:
             streetAddress: loc.streetAddress,
             bboxCenterOverride: { lat: loc.lat, lng: loc.lng },
             searchName: loc.searchName,
+            listingTitle,
             bedroomCounts: wantBedrooms,
             propertyId,
             dateOverride,

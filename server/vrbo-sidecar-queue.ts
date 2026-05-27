@@ -288,6 +288,7 @@ export type SidecarQueueContext = {
   providerLabel?: string;
   unitLabel?: string;
   dateLabel?: string;
+  listingTitle?: string;
   propertyId?: number;
 };
 
@@ -413,6 +414,7 @@ export type SidecarStatusRequest = {
   providerLabel?: string;
   unitLabel?: string;
   dateLabel?: string;
+  listingTitle?: string;
   stage?: string;
   pausedReason?: string;
   pausedAgeSec?: number;
@@ -1854,6 +1856,7 @@ function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
     }
   })();
   const queueContext = (p as Partial<SidecarAirbnbParams & SidecarVrboParams & SidecarBookingParams>).queueContext;
+  const listingTitle = String(queueContext?.listingTitle ?? "").trim() || undefined;
   const formatYmd = (ymd: unknown): string | null => {
     if (typeof ymd !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
     const [yearRaw, monthRaw, dayRaw] = ymd.split("-");
@@ -1894,6 +1897,7 @@ function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
     providerLabel: queueContext?.providerLabel || providerLabel,
     unitLabel,
     dateLabel,
+    listingTitle,
     stage: r.stage,
     pausedReason: r.pausedReason,
     pausedAgeSec,

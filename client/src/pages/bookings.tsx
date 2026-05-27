@@ -423,6 +423,7 @@ type SidecarQueueRequest = {
   providerLabel?: string;
   unitLabel?: string;
   dateLabel?: string;
+  listingTitle?: string;
   stage?: string;
   pausedReason?: string;
   pausedAgeSec?: number;
@@ -9045,6 +9046,11 @@ function SidecarQueueRequestRow({
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="truncate text-[11px] font-semibold text-foreground">{headline}</div>
+          {request.listingTitle && (
+            <div className="mt-0.5 truncate text-[10px] font-medium text-foreground" title={request.listingTitle}>
+              Listing: {request.listingTitle}
+            </div>
+          )}
           <div className="mt-0.5 text-[10px] font-medium leading-snug text-muted-foreground">
             {detail}
           </div>

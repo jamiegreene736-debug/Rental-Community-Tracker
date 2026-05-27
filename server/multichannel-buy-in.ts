@@ -685,6 +685,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
   // Booking autocomplete. Falls back to `community` when the caller
   // doesn't pin a `searchName` (drafts).
   searchName?: string;
+  listingTitle?: string;
   bedroomCounts: number[];
   propertyId?: number;
   // PR #282: optional explicit dates. When supplied, all sidecar
@@ -765,11 +766,13 @@ export async function fetchMultiChannelBuyInByBR(args: {
   const scanBedroomLabel = totalBedrooms > 0 ? `${totalBedrooms}BR` : maxRequestedBedrooms > 0 ? `${maxRequestedBedrooms}BR` : "";
   const scanLabel = `${[scanBedroomLabel, args.community].filter(Boolean).join(" ")} buy-in scan`.trim();
   const dateLabel = formatSidecarQueueDateRange(checkIn, checkOut);
+  const listingTitle = String(args.listingTitle ?? "").trim() || undefined;
   const queueContextFor = (providerLabel: string, br: number) => ({
     scanLabel,
     providerLabel,
     unitLabel: `${br}BR unit`,
     dateLabel,
+    listingTitle,
     propertyId: args.propertyId,
     detail: `${providerLabel}: scanning ${br}BR unit · ${dateLabel} · ${targetDest}`,
   });

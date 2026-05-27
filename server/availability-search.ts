@@ -147,6 +147,7 @@ export type FindCheapestOptions = {
   state?: string;
   propertyId?: number;
   searchName?: string;
+  listingTitle?: string;
   bounds?: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
   apiKey: string;
 };
@@ -172,6 +173,7 @@ export async function findCheapestPricedNightly(opts: FindCheapestOptions): Prom
       streetAddress: market?.streetAddress,
       bboxCenterOverride: market ? { lat: market.lat, lng: market.lng } : undefined,
       searchName,
+      listingTitle: opts.listingTitle ?? opts.resortName ?? undefined,
       bedroomCounts: [opts.bedrooms],
       propertyId: opts.propertyId,
       dateOverride: { checkIn: opts.checkIn, checkOut: opts.checkOut },
