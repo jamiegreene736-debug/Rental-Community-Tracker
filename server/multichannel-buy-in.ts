@@ -30,6 +30,7 @@ import { VRP_SITES } from "./pm-scraper-vrp";
 import { getSidecarStopGeneration, hasSidecarStopGenerationChanged } from "./vrbo-sidecar-queue";
 import type { SidecarPmSearchSite } from "./vrbo-sidecar-queue";
 import { totalBedroomsForProperty } from "@shared/property-units";
+import { BUY_IN_MARKETS, resolveBuyInMarket } from "@shared/buy-in-market";
 
 export type ChannelKey = "airbnb" | "vrbo" | "booking" | "pm";
 export type RegionKey = "hawaii" | "florida";
@@ -286,6 +287,67 @@ function coordsNearCenter(candidate: any, center?: { lat: number; lng: number },
   const lng = Number(candidate?.gps_coordinates?.longitude ?? candidate?.gpsCoordinates?.longitude);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
   return Math.abs(lat - center.lat) <= pad && Math.abs(lng - center.lng) <= pad;
+}
+
+function googleHotelEvidenceText(candidate: any): string {
+  const fields: unknown[] = [
+    candidate?.name,
+    candidate?.title,
+    candidate?.description,
+    candidate?.link,
+    ...(Array.isArray(candidate?.essential_info) ? candidate.essential_info : []),
+    ...(Array.isArray(candidate?.nearby_places) ? candidate.nearby_places.map((place: any) => place?.name) : []),
+    ...(Array.isArray(candidate?.offers) ? candidate.offers.map((offer: any) => offer?.source) : []),
+  ];
+  return fields
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ");
+}
+
+function googleHotelBedroomSignal(candidate: any): number | null {
+  const explicitFields = [
+    candidate?.bedrooms,
+    candidate?.bedroom_count,
+    candidate?.bedroomCount,
+    candidate?.extracted_bedrooms,
+  ];
+  for (const value of explicitFields) {
+    const n = typeof value === "number" ? value : typeof value === "string" ? Number(value.replace(/[^\d.]/g, "")) : NaN;
+    if (Number.isFinite(n) && n > 0 && n < 20) return Math.round(n);
+  }
+  const evidence = googleHotelEvidenceText(candidate);
+  return extractBedroomsFromListing({
+    name: candidate?.name,
+    title: candidate?.title ?? candidate?.name,
+    description: evidence,
+  });
+}
+
+function googleHotelTargetMatched(candidate: any, opts: {
+  community: string;
+  searchName?: string;
+  sidecarDestination: string;
+}): boolean {
+  const evidence = googleHotelEvidenceText(candidate);
+  const marketKey = resolveBuyInMarket({
+    marketKey: opts.community,
+    name: opts.community,
+    listingTitle: opts.searchName,
+    bookingTitle: opts.sidecarDestination,
+  });
+  const market = marketKey ? BUY_IN_MARKETS[marketKey] : null;
+  if (market?.aliases.some((pattern) => pattern.test(evidence))) return true;
+
+  const targets = [
+    opts.searchName,
+    opts.community,
+    market?.key,
+    market?.location?.searchName,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+
+  return targets.some((target) => textMatchesTarget(evidence, target));
 }
 
 function medianOfSorted(sorted: number[]): number | null {
@@ -1078,22 +1140,56 @@ export async function fetchMultiChannelBuyInByBR(args: {
           const byBr = new Map<number, { cheapest: number; availableCount: number }>();
           for (const targetBr of targetBrs) byBr.set(targetBr, { cheapest: Infinity, availableCount: 0 });
           const seen = new Set<string>();
+          const googleHotelsRejected = {
+            duplicate: 0,
+            type: 0,
+            location: 0,
+            bedrooms: 0,
+            price: 0,
+          };
           for (const c of properties) {
-            if (String(c?.type ?? "").toLowerCase() && !String(c?.type ?? "").toLowerCase().includes("vacation")) continue;
+            if (String(c?.type ?? "").toLowerCase() && !String(c?.type ?? "").toLowerCase().includes("vacation")) {
+              googleHotelsRejected.type++;
+              continue;
+            }
             const key = googleHotelCandidateKey(c);
-            if (seen.has(key)) continue;
+            if (seen.has(key)) {
+              googleHotelsRejected.duplicate++;
+              continue;
+            }
             seen.add(key);
-            const hay = `${c?.name ?? ""} ${c?.description ?? ""} ${c?.link ?? ""}`;
-            if (!coordsNearCenter(c, args.bboxCenterOverride) && !textMatchesTarget(hay, targetDest)) continue;
+            // Google Hotels can return nearby vacation rentals inside the
+            // bounding box. Keep the supplement fast by using only the native
+            // result payload, but require explicit target text plus the
+            // operator-approved coordinate cluster when coordinates exist.
+            const targetMatched = googleHotelTargetMatched(c, {
+              community: args.community,
+              searchName: args.searchName,
+              sidecarDestination,
+            });
+            const locationMatched = args.bboxCenterOverride
+              ? targetMatched && coordsNearCenter(c, args.bboxCenterOverride)
+              : targetMatched;
+            if (!locationMatched) {
+              googleHotelsRejected.location++;
+              continue;
+            }
+            const parsedBedrooms = googleHotelBedroomSignal(c);
+            if (parsedBedrooms == null || !targetBrs.includes(parsedBedrooms)) {
+              googleHotelsRejected.bedrooms++;
+              continue;
+            }
             const total = Math.round(priceNumber(c?.total_price?.extracted_price));
             const nightly = Math.round(
               total > 0
                 ? total / nights
                 : priceNumber(c?.price_per_night?.extracted_price),
             );
-            if (!(nightly > 0)) continue;
-            const parsedBedrooms = extractBedroomsFromListing({ name: c?.name, title: c?.name, description: c?.description });
-            for (const targetBr of candidateTargetBrs(parsedBedrooms, br, targetBrs)) {
+            if (!(nightly > 0)) {
+              googleHotelsRejected.price++;
+              continue;
+            }
+            for (const targetBr of [parsedBedrooms]) {
               const bucket = byBr.get(targetBr);
               if (!bucket) continue;
               bucket.availableCount++;
@@ -1108,7 +1204,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
               cheapestNightly: bucket && Number.isFinite(bucket.cheapest) ? Math.round(bucket.cheapest) : null,
               availableCount: bucket?.availableCount ?? 0,
               workerOnline: false,
-              reason: `SearchAPI Google Hotels returned ${properties.length} vacation-rental listing(s)`,
+              reason: `SearchAPI Google Hotels returned ${properties.length} vacation-rental listing(s); accepted=${Array.from(byBr.values()).reduce((sum, b) => sum + b.availableCount, 0)}; rejected=${JSON.stringify(googleHotelsRejected)}`,
             };
           });
         } catch (e: any) {
