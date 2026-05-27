@@ -5,6 +5,7 @@ import {
   inferRegion,
   type MultiChannelBuyInResult,
   type RegionKey,
+  type ScanWarning,
   type SeasonKey,
 } from "./multichannel-buy-in";
 import { getSidecarStopGeneration, hasSidecarStopGenerationChanged } from "./vrbo-sidecar-queue";
@@ -325,18 +326,38 @@ function effectiveAvailabilityCount(counts: Omit<AvailabilityChannelCounts, "eff
   return Math.floor(counts.total * AVAILABILITY_RELIABILITY_FACTOR);
 }
 
-function verdictForSeason(
+const BLOCKING_QUALITY_WARNING_KINDS = new Set<ScanWarning["kind"]>([
+  "captcha",
+  "blocked",
+  "rate-limit",
+  "timeout",
+  "network",
+]);
+
+export function availabilityBlockingQualityIssue(
+  scan: Pick<MultiChannelBuyInResult, "daemonOnline" | "warnings">,
+): string | null {
+  if (!scan.daemonOnline) return "sidecar offline or incomplete";
+  const warning = scan.warnings.find((w) => BLOCKING_QUALITY_WARNING_KINDS.has(w.kind));
+  if (!warning) return null;
+  const channel = warning.channel === "engine" ? "engine" : warning.channel.toUpperCase();
+  return `${channel} ${warning.kind}${warning.reason ? `: ${warning.reason.slice(0, 120)}` : ""}`;
+}
+
+export function availabilityVerdictForScan(
   maxSets: number,
   thresholds: AvailabilityThresholds,
-  daemonOnline: boolean,
+  scan: Pick<MultiChannelBuyInResult, "daemonOnline" | "warnings">,
 ): SeasonalAvailabilityWindow["verdict"] {
   const verdict =
     maxSets < thresholds.blockMinSets ? "blocked"
     : maxSets < thresholds.openMinSets ? "tight"
     : "open";
-  // If the daemon was offline, the scan is incomplete. Keep the warning
-  // visible as tight, but do not auto-block based on Airbnb-only data.
-  if (!daemonOnline && verdict === "blocked") return "tight";
+  // Only auto-block from a clean, complete sidecar scan. Provider CAPTCHA,
+  // bot walls, timeouts, rate limits, network errors, and offline daemon
+  // states can all look like "0 inventory"; keep those visible as tight
+  // instead of writing a calendar blackout from incomplete evidence.
+  if (verdict === "blocked" && availabilityBlockingQualityIssue(scan)) return "tight";
   return verdict;
 }
 
@@ -356,8 +377,11 @@ function buildWindowFromScan(args: {
     effectiveCountsByBR[br] = counts.effective;
   }
   const maxSets = computeSetsFromCounts(args.units, effectiveCountsByBR);
-  const verdict = verdictForSeason(maxSets, args.thresholds, args.scan.daemonOnline);
-  const reason = args.scan.daemonOnline
+  const qualityIssue = availabilityBlockingQualityIssue(args.scan);
+  const verdict = availabilityVerdictForScan(maxSets, args.thresholds, args.scan);
+  const reason = qualityIssue && maxSets < args.thresholds.blockMinSets
+    ? `${args.season} sample found ${maxSets} effective set(s), but ${qualityIssue}; not auto-blocking from incomplete provider evidence.`
+    : args.scan.daemonOnline
     ? `${args.season} ${args.window.nights}-night window found ${maxSets} effective set(s) after ${Math.round(AVAILABILITY_RELIABILITY_FACTOR * 100)}% reliability haircut; block below ${args.thresholds.blockMinSets}, open at ${args.thresholds.openMinSets}.`
     : `${args.season} sample only partially verified because the sidecar was offline; not auto-blocking from incomplete data.`;
   return {

@@ -5,6 +5,8 @@ process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 const {
   AVAILABILITY_RELIABILITY_FACTOR,
   AVAILABILITY_WINDOW_NIGHTS,
+  availabilityBlockingQualityIssue,
+  availabilityVerdictForScan,
   availabilityWindowCountForWeeks,
   computeAvailabilityThresholds,
   generateTwiceMonthlyAvailabilityWindows,
@@ -34,5 +36,53 @@ assert.equal(thresholds.blockMinSets, 3, "block floor should not go below 3 effe
 assert.equal(thresholds.blockCandidatesByBR[3], 6, "3BR + 3BR needs 6 effective 3BR candidates for 3 sets");
 assert.equal(thresholds.openCandidatesByBR[3], 10, "open threshold keeps two cushion sets");
 console.log("  ✓ keeps a 3-set block floor for combo inventory");
+
+assert.equal(
+  availabilityVerdictForScan(2, thresholds, { daemonOnline: true, warnings: [] }),
+  "blocked",
+  "clean low inventory should remain blockable",
+);
+assert.equal(
+  availabilityVerdictForScan(2, thresholds, {
+    daemonOnline: true,
+    warnings: [{
+      season: "HIGH",
+      channel: "vrbo",
+      kind: "timeout",
+      message: "VRBO timed out during the HIGH scan",
+      reason: "provider search timed out",
+    }],
+  }),
+  "tight",
+  "provider failures should not create automatic blocks",
+);
+assert.match(
+  availabilityBlockingQualityIssue({
+    daemonOnline: true,
+    warnings: [{
+      season: "HIGH",
+      channel: "booking",
+      kind: "captcha",
+      message: "Booking.com hit CAPTCHA",
+      reason: "captcha challenge visible",
+    }],
+  }),
+  /BOOKING captcha/,
+);
+assert.equal(
+  availabilityVerdictForScan(5, thresholds, {
+    daemonOnline: true,
+    warnings: [{
+      season: "HIGH",
+      channel: "vrbo",
+      kind: "timeout",
+      message: "VRBO timed out during the HIGH scan",
+      reason: "provider search timed out",
+    }],
+  }),
+  "open",
+  "provider warnings should only downgrade automatic blocks, not hide sufficient inventory",
+);
+console.log("  ✓ refuses to auto-block from incomplete provider evidence");
 
 console.log("availability window suite passed");
