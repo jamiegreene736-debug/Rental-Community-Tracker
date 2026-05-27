@@ -265,6 +265,10 @@ export type SidecarPropertyCandidate = {
   // snippets set this false so the server can estimate all-in cost.
   priceIncludesFees?: boolean;
   priceBasis?: "all_in" | "pre_tax_total" | "stay_total" | "nightly_base" | "unknown";
+  // A dated provider result card was visible, but the OTA did not expose a
+  // parseable price in the card text. Count this for inventory/availability
+  // only; never use it as a priced buy-in candidate.
+  availabilityOnly?: boolean;
   directBookingUrl?: string;
   directBookingHost?: string;
   directBookingConfidence?: "high" | "medium" | "low";

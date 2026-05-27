@@ -5299,6 +5299,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
       }
 
       if (!/^\/\d+/.test(propertyPath)) { drops.noUrl++; continue; }
+      if (bedroomsExtracted === null) { drops.noBedrooms++; continue; }
 
       // Vrbo card pricing has TWO common formats today (2026-04-29):
       //   New: "$820" big price + "$8,123 total includes taxes & fees"
@@ -5326,8 +5327,21 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
           priceBasis = "pre_tax_total";
         }
       }
-      if (!(totalPrice > 0) || !(totalNights > 0)) { drops.noPrice++; continue; }
-      if (bedroomsExtracted === null) { drops.noBedrooms++; continue; }
+      if (!(totalPrice > 0) || !(totalNights > 0)) {
+        drops.noPrice++;
+        out.push({
+          url: "https://www.vrbo.com" + propertyPath,
+          title: title.slice(0, 80),
+          totalPrice: 0,
+          nightlyPrice: 0,
+          bedrooms: bedroomsExtracted,
+          priceIncludesTaxes: false,
+          priceIncludesFees: false,
+          priceBasis: "unknown",
+          availabilityOnly: true,
+        });
+        continue;
+      }
 
       out.push({
         url: "https://www.vrbo.com" + propertyPath,

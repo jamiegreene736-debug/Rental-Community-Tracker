@@ -1268,11 +1268,11 @@ export async function fetchMultiChannelBuyInByBR(args: {
             byBr.set(targetBr, { cheapest: Infinity, availableCount: 0, cheapestIncludesTaxes: false, cheapestIncludesFees: true });
           }
           for (const c of r.candidates) {
-            if (!(c.nightlyPrice > 0)) continue;
             for (const targetBr of candidateTargetBrs(c.bedrooms, br, targetBrs)) {
               const bucket = byBr.get(targetBr);
               if (!bucket) continue;
               bucket.availableCount++;
+              if (!(c.nightlyPrice > 0)) continue;
               const nightly = normalizeQuotedNightly(c.nightlyPrice, "vrbo", region, targetBr, nights, {
                 priceIncludesTaxes: c.priceIncludesTaxes,
                 priceIncludesFees: c.priceIncludesFees,
