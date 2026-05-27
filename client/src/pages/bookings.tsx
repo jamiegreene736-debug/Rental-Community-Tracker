@@ -2432,6 +2432,13 @@ function ComboComparisonPanel({
     };
   });
   const selected = visibleOptions.find((option) => option.selected);
+  const pricedVisibleOptions = visibleOptions
+    .filter((option) => typeof option.totalCost === "number" && Number.isFinite(option.totalCost))
+    .sort((a, b) => (a.totalCost ?? Number.POSITIVE_INFINITY) - (b.totalCost ?? Number.POSITIVE_INFINITY));
+  const primaryOption = selected ?? pricedVisibleOptions[0] ?? visibleOptions[0];
+  const secondaryOption = pricedVisibleOptions.find((option) => option.label !== primaryOption?.label)
+    ?? visibleOptions.find((option) => option.label !== primaryOption?.label);
+  const summaryOptions = [primaryOption, secondaryOption].filter((option): option is typeof visibleOptions[number] => !!option);
   const directCandidates = Array.from(new Map(
     visibleOptions
       .flatMap((option) => option.pools ?? [])
@@ -2553,8 +2560,8 @@ function ComboComparisonPanel({
           )}
         </div>
       </div>
-      <div className="mt-2 space-y-1">
-        {visibleOptions.map((option) => {
+      <div className="mt-2 space-y-2">
+        {summaryOptions.map((option) => {
           const optimizedCombo = optimizedComboByLabel.get(option.label) ?? null;
           const isOptimizedWinner = optimizedOptionLabel === option.label;
           const isOptimizedOption = !!optimizedCombo;
@@ -2578,7 +2585,7 @@ function ComboComparisonPanel({
           const canAttachCombo = !!onAttachCombo && displayedTotal != null && displayedPicks.length === option.bedrooms.length;
           const attachingThisCombo = attachingComboLabel === option.label;
           return (
-          <details
+          <div
             key={option.label}
             className={`rounded border px-2 py-1.5 ${
               isOptimizedWinner
@@ -2588,7 +2595,7 @@ function ComboComparisonPanel({
                 : option.selected ? "border-emerald-300 bg-white/80" : "border-emerald-100 bg-white/50"
             }`}
           >
-            <summary className="grid cursor-pointer grid-cols-[1fr_auto] gap-3">
+            <div className="grid grid-cols-[1fr_auto] gap-3">
               <div className="min-w-0">
                 <p className="font-medium text-foreground">
                   {option.label}
@@ -2608,7 +2615,7 @@ function ComboComparisonPanel({
               <div className="text-right font-semibold tabular-nums">
                 {displayedTotal == null ? "—" : fmtMoney(displayedTotal)}
               </div>
-            </summary>
+            </div>
             {displayedTotal == null && (option.unavailableDetails?.length ?? 0) > 0 && (
               <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-950">
                 <p className="font-semibold">No complete combo could be built from the visible provider results.</p>
@@ -2682,55 +2689,62 @@ function ComboComparisonPanel({
                 </div>
               </div>
             )}
-            <div className="mt-2 space-y-2 border-t border-emerald-100 pt-2">
-              {(option.pools ?? []).map((pool) => (
-                <div key={`${option.label}-${pool.bedrooms}`}>
-                  <p className="mb-1 text-[11px] font-medium text-emerald-900">{pool.bedrooms}BR options considered</p>
-                  <div className="max-h-48 overflow-y-auto rounded border bg-white/70">
-                    {pool.candidates.filter(candidateVisibleForTarget).length === 0 ? (
-                      <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
-                        <p className="font-medium text-amber-900">
-                          {pool.unavailableReason ?? "No verified Airbnb, VRBO, Booking.com, or direct/Lens option in this pool."}
-                        </p>
-                        {(pool.unavailableDetails?.length ?? 0) > 0 && (
-                          <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                            {pool.unavailableDetails!.slice(0, 5).map((detail, index) => (
-                              <li key={`${option.label}-${pool.bedrooms}-pool-detail-${index}`}>{detail}</li>
-                            ))}
-                          </ul>
-                        )}
+            {(option.pools?.length ?? 0) > 0 && (
+              <details className="mt-2 border-t border-emerald-100 pt-2">
+                <summary className="cursor-pointer text-[11px] font-medium text-emerald-900">
+                  Audit considered rows
+                </summary>
+                <div className="mt-2 space-y-2">
+                  {(option.pools ?? []).map((pool) => (
+                    <div key={`${option.label}-${pool.bedrooms}`}>
+                      <p className="mb-1 text-[11px] font-medium text-emerald-900">{pool.bedrooms}BR options considered</p>
+                      <div className="max-h-48 overflow-y-auto rounded border bg-white/70">
+                        {pool.candidates.filter(candidateVisibleForTarget).length === 0 ? (
+                          <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                            <p className="font-medium text-amber-900">
+                              {pool.unavailableReason ?? "No verified Airbnb, VRBO, Booking.com, or direct/Lens option in this pool."}
+                            </p>
+                            {(pool.unavailableDetails?.length ?? 0) > 0 && (
+                              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                                {pool.unavailableDetails!.slice(0, 5).map((detail, index) => (
+                                  <li key={`${option.label}-${pool.bedrooms}-pool-detail-${index}`}>{detail}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        ) : pool.candidates.filter(candidateVisibleForTarget).map((candidate, index) => {
+                          const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
+                          const isDirectPick = !!directRow;
+                          const candidateKeys = new Set(listingIdentityKeys(candidate));
+                          const isOptimizedPick = !!optimizedCombo?.picks.some((pick) => hasUsedListingIdentity(candidateKeys, pick));
+                          return (
+                          <a
+                            key={`${candidate.url}-${index}`}
+                            href={candidate.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className={`grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-2 py-1.5 last:border-b-0 ${
+                              isOptimizedPick
+                                ? "bg-sky-100 hover:bg-sky-100"
+                                : isDirectPick ? "bg-emerald-50 hover:bg-emerald-100" : "hover:bg-emerald-50/70"
+                            }`}
+                          >
+                            <Badge className={`text-[9px] ${sourceBadgeClass(candidate.source)}`}>{candidate.sourceLabel}</Badge>
+                            <span className="min-w-0 truncate text-[11px]" title={candidate.title}>
+                              {candidate.title}
+                              {isOptimizedPick && <Badge className="ml-1 bg-sky-700 text-white text-[9px]">optimized pick</Badge>}
+                              {!isOptimizedPick && isDirectPick && <Badge className="ml-1 bg-emerald-600 text-white text-[9px]">direct site</Badge>}
+                            </span>
+                            <span className="text-right text-[11px] font-semibold tabular-nums">{fmtMoney(candidate.totalPrice)}</span>
+                          </a>
+                        )})}
                       </div>
-                    ) : pool.candidates.filter(candidateVisibleForTarget).map((candidate, index) => {
-                      const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
-                      const isDirectPick = !!directRow;
-                      const candidateKeys = new Set(listingIdentityKeys(candidate));
-                      const isOptimizedPick = !!optimizedCombo?.picks.some((pick) => hasUsedListingIdentity(candidateKeys, pick));
-                      return (
-                      <a
-                        key={`${candidate.url}-${index}`}
-                        href={candidate.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={`grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-2 py-1.5 last:border-b-0 ${
-                          isOptimizedPick
-                            ? "bg-sky-100 hover:bg-sky-100"
-                            : isDirectPick ? "bg-emerald-50 hover:bg-emerald-100" : "hover:bg-emerald-50/70"
-                        }`}
-                      >
-                        <Badge className={`text-[9px] ${sourceBadgeClass(candidate.source)}`}>{candidate.sourceLabel}</Badge>
-                        <span className="min-w-0 truncate text-[11px]" title={candidate.title}>
-                          {candidate.title}
-                          {isOptimizedPick && <Badge className="ml-1 bg-sky-700 text-white text-[9px]">optimized pick</Badge>}
-                          {!isOptimizedPick && isDirectPick && <Badge className="ml-1 bg-emerald-600 text-white text-[9px]">direct site</Badge>}
-                        </span>
-                        <span className="text-right text-[11px] font-semibold tabular-nums">{fmtMoney(candidate.totalPrice)}</span>
-                      </a>
-                    )})}
-                  </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          </details>
+              </details>
+            )}
+          </div>
         )})}
       </div>
       {directRows.length > 0 && (
@@ -2838,9 +2852,9 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
     .filter((candidate) => candidate.totalPrice > 0)
     .sort((a, b) => a.totalPrice - b.totalPrice)[0]?.url;
   return (
-    <details className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs" open>
+    <details className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs">
       <summary className="cursor-pointer font-medium text-slate-900">
-        Search results reviewed ({totalRows} curated option{totalRows === 1 ? "" : "s"})
+        Provider audit details ({totalRows} curated option{totalRows === 1 ? "" : "s"})
       </summary>
       <div className="mt-2 space-y-3">
         {audits.map((audit) => {
@@ -7112,6 +7126,21 @@ export default function Bookings() {
                             </Button>
                           </div>
                         )}
+                        {comboOptions.length > 0 && (
+                          <ComboComparisonPanel
+                            options={comboOptions}
+                            targetResortName={directBookingTargetResortName(
+                              selectedPropertyId
+                                ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+                                : r.slots.find((slot) => slot.community)?.community ?? "",
+                            )}
+                            community={selectedPropertyId
+                              ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+                              : r.slots.find((slot) => slot.community)?.community ?? ""}
+                            onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
+                            attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
+                          />
+                        )}
                         {searchAudits.length > 0 && (() => {
                           const selectedCombo = comboOptions.find((option) => option.selected && option.totalCost != null);
                           const fallbackCost = comboOptions
@@ -7129,21 +7158,6 @@ export default function Bookings() {
                           );
                         })()}
                         {searchAudits.length > 0 && <AutoFillSearchAuditPanel audits={searchAudits} />}
-                        {comboOptions.length > 0 && (
-                          <ComboComparisonPanel
-                            options={comboOptions}
-                            targetResortName={directBookingTargetResortName(
-                              selectedPropertyId
-                                ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
-                                : r.slots.find((slot) => slot.community)?.community ?? "",
-                            )}
-                            community={selectedPropertyId
-                              ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
-                              : r.slots.find((slot) => slot.community)?.community ?? ""}
-                            onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
-                            attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
-                          />
-                        )}
                         {r.slots.map((slot) => {
                           const slotIsExpanded = expandedSlots.has(slotKey(r._id, slot.unitId));
                           const firstBuyInId = r.slots.find((s) => s.buyIn)?.buyIn?.id ?? null;
@@ -10201,7 +10215,7 @@ function LiveSearchSection({
           picks `cheapest[0]` (the highlighted row) — this table is the
           audit trail so the operator can see what else was scanned and
           override with one click. */}
-      <details open={!hasCurrentFocusedRecommendation}>
+      <details>
         <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
           <Badge className="text-[10px] bg-slate-100 text-slate-700 border border-slate-300">
             All scanned options
@@ -10231,10 +10245,10 @@ function LiveSearchSection({
           from Airbnb listing photos; the direct site is not scraped and
           the displayed rate remains the Airbnb rate. */}
       {[
-        { key: "airbnb",  label: "Airbnb (sidecar-priced + direct-link Lens)", items: availableAirbnb,  defaultOpen: !hasCurrentFocusedRecommendation && availableAirbnb.length > 0 && availableAirbnb.length <= 3 },
-        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: !hasCurrentFocusedRecommendation && availableVrbo.length > 0 },
-        { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: !hasCurrentFocusedRecommendation },
-        { key: "pm",      label: "Direct links from Airbnb photos", items: availablePm, defaultOpen: !hasCurrentFocusedRecommendation },
+        { key: "airbnb",  label: "Airbnb (sidecar-priced + direct-link Lens)", items: availableAirbnb,  defaultOpen: false },
+        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: false },
+        { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: false },
+        { key: "pm",      label: "Direct links from Airbnb photos", items: availablePm, defaultOpen: false },
       ].map((s) => (
         <details key={s.key} open={s.defaultOpen}>
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-2 py-1.5">
