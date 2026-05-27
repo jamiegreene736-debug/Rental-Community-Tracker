@@ -81,9 +81,24 @@ const RISK_KEYWORDS = [
   "hurricane", "tsunami", "evacuation", "flood warning", "wildfire",
 ];
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function keywordPattern(keyword: string): RegExp {
+  const source = keyword.trim().split(/\s+/).map(escapeRegExp).join("\\s+");
+  return new RegExp(`(?<![a-z0-9])${source}(?![a-z0-9])`, "i");
+}
+
+const RISK_KEYWORD_PATTERNS = RISK_KEYWORDS.map((keyword) => ({
+  keyword: keyword.trim(),
+  pattern: keywordPattern(keyword),
+}));
+
 function classifyMessage(text: string): { risky: boolean; matched: string[] } {
-  const lower = text.toLowerCase();
-  const matched = RISK_KEYWORDS.filter((kw) => lower.includes(kw));
+  const matched = RISK_KEYWORD_PATTERNS
+    .filter(({ pattern }) => pattern.test(text))
+    .map(({ keyword }) => keyword);
   return { risky: matched.length > 0, matched };
 }
 
@@ -606,6 +621,7 @@ async function draftReplyWithClaude(params: {
   reservationId?: string;
   channel?: string;
   isInitialContact?: boolean;
+  forceDraftForReview?: boolean;
 }): Promise<DraftResult> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) {
@@ -652,10 +668,14 @@ ${params.guestMessage}
 """
 ${accessibilityMandate}
 
-Use tools to gather any needed context, then reply. If unsafe or ambiguous, call flag_for_human and stop.`;
+Use tools to gather any needed context, then reply. Return only the guest-facing reply text.
+${params.forceDraftForReview
+    ? "This is a manual Redo AI Draft request for a human approval queue. If the message is risky or ambiguous, keep the reply conservative and avoid commitments. You may call flag_for_human to record the review reason, but still write the safest useful guest-facing draft after that tool call unless no guest-facing response is possible."
+    : "If unsafe or ambiguous, call flag_for_human and stop."}`;
 
   const messages: any[] = [{ role: "user", content: userPrompt }];
   const toolsUsed: { name: string; input: unknown }[] = [];
+  let toolFlagReason: string | null = null;
   const MAX_TURNS = 5;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -697,7 +717,20 @@ Use tools to gather any needed context, then reply. If unsafe or ambiguous, call
           toolsUsed.push({ name: block.name, input: block.input });
           if (block.name === "flag_for_human") {
             const reason = (block.input as any)?.reason ?? "flagged by assistant";
-            return { draft: null, flagReason: reason, toolsUsed, error: null };
+            if (!params.forceDraftForReview) {
+              return { draft: null, flagReason: reason, toolsUsed, error: null };
+            }
+            toolFlagReason = reason;
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: JSON.stringify({
+                acknowledged: true,
+                reason,
+                instruction: "This draft will require human approval. Write a safe guest-facing draft now. Do not promise refunds, discounts, exceptions, policy changes, access codes, or facts not present in the fetched context.",
+              }),
+            });
+            continue;
           }
           const result = await runTool(block.name, block.input);
           toolResults.push({
@@ -726,7 +759,7 @@ Use tools to gather any needed context, then reply. If unsafe or ambiguous, call
     const withPersonalTouch = addGuestPersonalTouch(trimmedHumanized, params.guestMessage);
     const withInitialCloser = addInitialContactCloser(withPersonalTouch, !!params.isInitialContact);
     const finalDraft = ensureSignoff(withInitialCloser);
-    return { draft: finalDraft, flagReason: null, toolsUsed, error: null };
+    return { draft: finalDraft, flagReason: toolFlagReason, toolsUsed, error: null };
   }
 
   return { draft: null, flagReason: null, toolsUsed, error: "Exceeded max tool-use turns" };
@@ -828,6 +861,7 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
             listingId: listingId ?? undefined, reservationId: reservationId ?? undefined,
             channel: channel ?? undefined,
             isInitialContact,
+            forceDraftForReview: true,
           });
           replyDraft = result.draft;
           toolsUsedJson = JSON.stringify(result.toolsUsed);
@@ -925,6 +959,7 @@ export async function redoDraftedReply(logId: number): Promise<{ ok: boolean; er
     listingId: log.listingId ?? undefined,
     reservationId: log.reservationId ?? undefined,
     channel: log.channel ?? undefined,
+    forceDraftForReview: true,
   });
 
   const inputSafety = classifyMessage(log.guestMessage);
