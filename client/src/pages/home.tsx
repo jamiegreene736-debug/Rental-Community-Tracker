@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import {
   Dialog,
+  DialogDescription,
   DialogContent,
   DialogHeader,
   DialogTitle,
@@ -623,7 +624,9 @@ function AgentArrivalField({ label, value }: { label: string; value: string }) {
   );
 }
 
-function AgentPropertyBookings({ propertyId }: { propertyId: number }) {
+type AgentPortalProperty = ReturnType<typeof getAllUnitBuilders>[number];
+
+function AgentPropertyBookings({ propertyId, compact = false }: { propertyId: number; compact?: boolean }) {
   const { data, isLoading } = useQuery<{ bookings: AgentPropertyBooking[] }>({
     queryKey: ["/api/agent/properties", propertyId, "bookings"],
     queryFn: async () => {
@@ -637,8 +640,29 @@ function AgentPropertyBookings({ propertyId }: { propertyId: number }) {
 
   const bookings = data?.bookings ?? [];
 
+  if (compact) {
+    if (isLoading) {
+      return (
+        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading
+        </span>
+      );
+    }
+    if (bookings.length === 0) return <span className="text-xs text-muted-foreground">None</span>;
+    const next = bookings[0];
+    return (
+      <div className="min-w-0">
+        <div className="text-sm font-medium">{bookings.length} booking{bookings.length === 1 ? "" : "s"}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          Next: {next.guestName || "Guest"} · {formatAgentDate(next.checkIn)}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="mt-3 rounded-md border bg-background p-3">
+    <div className="rounded-md border bg-background p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Bookings</div>
         {isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
@@ -695,6 +719,95 @@ function AgentPropertyBookings({ propertyId }: { propertyId: number }) {
   );
 }
 
+function AgentPropertyDetailsDialog({ property }: { property: AgentPortalProperty }) {
+  const totalBedrooms = property.units.reduce((sum, unit) => sum + unit.bedrooms, 0);
+  const totalGuests = property.units.reduce((sum, unit) => sum + unit.maxGuests, 0);
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" className="h-8" data-testid={`button-agent-property-details-${property.propertyId}`}>
+          Details
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-h-[88vh] max-w-4xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{property.propertyName}</DialogTitle>
+          <DialogDescription>
+            {property.complexName} · {property.address}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-3 sm:grid-cols-4">
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="text-[10px] uppercase text-muted-foreground">Bedrooms</div>
+            <div className="font-semibold">{totalBedrooms}</div>
+          </div>
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="text-[10px] uppercase text-muted-foreground">Max guests</div>
+            <div className="font-semibold">{totalGuests}</div>
+          </div>
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="text-[10px] uppercase text-muted-foreground">Units</div>
+            <div className="font-semibold">{property.units.length}</div>
+          </div>
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="text-[10px] uppercase text-muted-foreground">Type</div>
+            <div className="font-semibold">{property.propertyType ?? "Condominium"}</div>
+          </div>
+        </div>
+
+        <AgentPropertyBookings propertyId={property.propertyId} />
+
+        {(property.neighborhood || property.transit || property.accessibilityNote) && (
+          <div className="space-y-2 rounded-md border bg-muted/20 p-3 text-xs leading-relaxed text-muted-foreground">
+            {property.accessibilityNote && (
+              <p><span className="font-medium text-foreground">Accessibility:</span> {property.accessibilityNote}</p>
+            )}
+            {property.neighborhood && (
+              <p><span className="font-medium text-foreground">Area:</span> {property.neighborhood}</p>
+            )}
+            {property.transit && (
+              <p><span className="font-medium text-foreground">Getting around:</span> {property.transit}</p>
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AgentPropertyRow({ property }: { property: AgentPortalProperty }) {
+  const totalBedrooms = property.units.reduce((sum, unit) => sum + unit.bedrooms, 0);
+  const totalGuests = property.units.reduce((sum, unit) => sum + unit.maxGuests, 0);
+
+  return (
+    <TableRow data-testid={`row-agent-property-${property.propertyId}`}>
+      <TableCell className="min-w-[240px]">
+        <div className="min-w-0">
+          <div className="font-semibold leading-tight">{property.propertyName}</div>
+          <div className="mt-1 text-xs text-muted-foreground">{property.complexName}</div>
+        </div>
+      </TableCell>
+      <TableCell className="hidden min-w-[260px] text-sm text-muted-foreground lg:table-cell">
+        <div className="flex items-start gap-2">
+          <MapPin className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{property.address}</span>
+        </div>
+      </TableCell>
+      <TableCell className="whitespace-nowrap text-sm">{totalBedrooms} BR</TableCell>
+      <TableCell className="whitespace-nowrap text-sm">{totalGuests} guests</TableCell>
+      <TableCell className="hidden whitespace-nowrap text-sm md:table-cell">{property.units.length} unit{property.units.length === 1 ? "" : "s"}</TableCell>
+      <TableCell className="min-w-[180px]">
+        <AgentPropertyBookings propertyId={property.propertyId} compact />
+      </TableCell>
+      <TableCell className="text-right">
+        <AgentPropertyDetailsDialog property={property} />
+      </TableCell>
+    </TableRow>
+  );
+}
+
 function AgentPropertyPortal() {
   const properties = getAllUnitBuilders();
 
@@ -718,62 +831,26 @@ function AgentPropertyPortal() {
           </Link>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {properties.map((property) => {
-            const totalBedrooms = property.units.reduce((sum, unit) => sum + unit.bedrooms, 0);
-            const totalGuests = property.units.reduce((sum, unit) => sum + unit.maxGuests, 0);
-            return (
-              <Card key={property.propertyId} className="p-4" data-testid={`card-agent-property-${property.propertyId}`}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h2 className="text-base font-semibold leading-tight">{property.propertyName}</h2>
-                    <p className="mt-1 text-sm text-muted-foreground">{property.complexName}</p>
-                  </div>
-                  <Badge variant="outline" className="shrink-0">
-                    {property.propertyType ?? "Condominium"}
-                  </Badge>
-                </div>
-
-                <div className="mt-3 space-y-2 text-sm">
-                  <div className="flex items-start gap-2 text-muted-foreground">
-                    <MapPin className="mt-0.5 h-4 w-4 shrink-0" />
-                    <span>{property.address}</span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="rounded-md border bg-muted/20 p-2">
-                      <div className="text-[10px] uppercase text-muted-foreground">Bedrooms</div>
-                      <div className="font-semibold">{totalBedrooms}</div>
-                    </div>
-                    <div className="rounded-md border bg-muted/20 p-2">
-                      <div className="text-[10px] uppercase text-muted-foreground">Max guests</div>
-                      <div className="font-semibold">{totalGuests}</div>
-                    </div>
-                    <div className="rounded-md border bg-muted/20 p-2">
-                      <div className="text-[10px] uppercase text-muted-foreground">Units</div>
-                      <div className="font-semibold">{property.units.length}</div>
-                    </div>
-                  </div>
-                </div>
-
-                <AgentPropertyBookings propertyId={property.propertyId} />
-
-                {(property.neighborhood || property.transit || property.accessibilityNote) && (
-                  <div className="mt-3 space-y-2 text-xs leading-relaxed text-muted-foreground">
-                    {property.accessibilityNote && (
-                      <p><span className="font-medium text-foreground">Accessibility:</span> {property.accessibilityNote}</p>
-                    )}
-                    {property.neighborhood && (
-                      <p><span className="font-medium text-foreground">Area:</span> {property.neighborhood}</p>
-                    )}
-                    {property.transit && (
-                      <p><span className="font-medium text-foreground">Getting around:</span> {property.transit}</p>
-                    )}
-                  </div>
-                )}
-              </Card>
-            );
-          })}
-        </div>
+        <Card className="overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Property</TableHead>
+                <TableHead className="hidden lg:table-cell">Address</TableHead>
+                <TableHead>Bedrooms</TableHead>
+                <TableHead>Guests</TableHead>
+                <TableHead className="hidden md:table-cell">Units</TableHead>
+                <TableHead>Bookings</TableHead>
+                <TableHead className="text-right">More</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {properties.map((property) => (
+                <AgentPropertyRow key={property.propertyId} property={property} />
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
       </div>
     </div>
   );
