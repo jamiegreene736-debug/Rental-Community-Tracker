@@ -173,6 +173,16 @@ type QueueJobEventPayload = {
 };
 
 type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error";
+type BulkAvailabilityProgress = {
+  scanned: number;
+  total: number;
+  percent: number;
+  blocked: number;
+  available: number;
+  errors: number;
+  label: string;
+  updatedAt: string;
+};
 type BulkAvailabilityQueue = {
   id: string;
   status: "running" | "completed" | "failed";
@@ -197,6 +207,7 @@ type BulkAvailabilityQueue = {
     message: string | null;
     startedAt: string | null;
     completedAt: string | null;
+    progress: BulkAvailabilityProgress | null;
   }>;
 };
 
@@ -3023,21 +3034,38 @@ function AdminDashboard() {
                               : item.status === "error" ? "bg-red-50 text-red-700 border-red-200"
                               : item.status === "running" ? "bg-blue-50 text-blue-700 border-blue-200"
                               : "bg-amber-50 text-amber-700 border-amber-200";
+                            const percent = typeof item.progress?.percent === "number" ? Math.max(0, Math.min(100, item.progress.percent)) : 0;
+                            const showProgress = item.status === "running" || percent > 0;
                             return (
-                              <div key={item.propertyId} className="flex items-start justify-between gap-3 border-b px-3 py-3 last:border-b-0">
-                                <div className="min-w-0">
-                                  <p className="truncate text-sm font-medium">{item.name}</p>
-                                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                                    {item.message || `${item.community} · ${item.totalBedrooms} total BR`}
-                                  </p>
-                                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                                    {item.runId ? `Run #${item.runId}` : "No run yet"} · updated {formatBulkPricingTime(item.completedAt || item.startedAt)}
-                                  </p>
+                              <div key={item.propertyId} className="border-b px-3 py-3 last:border-b-0">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-medium">{item.name}</p>
+                                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                      {item.progress?.label || item.message || `${item.community} · ${item.totalBedrooms} total BR`}
+                                    </p>
+                                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                      {item.runId ? `Run #${item.runId}` : "No run yet"} · {item.progress ? `${item.progress.scanned}/${item.progress.total} windows` : "waiting"}
+                                      {item.progress && ` · ${item.progress.available} available · ${item.progress.blocked} blocked · ${item.progress.errors} errors`}
+                                      {" · "}updated {formatBulkPricingTime(item.progress?.updatedAt || item.completedAt || item.startedAt)}
+                                    </p>
+                                  </div>
+                                  <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>
+                                    {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                                    {item.status}
+                                  </Badge>
                                 </div>
-                                <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>
-                                  {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-                                  {item.status}
-                                </Badge>
+                                {showProgress && (
+                                  <div className="mt-2">
+                                    <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                                      <span>{percent}%</span>
+                                      <span>{item.progress?.scanned ?? 0} / {item.progress?.total ?? 0}</span>
+                                    </div>
+                                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                                      <div className="h-full rounded-full bg-[hsl(var(--brand-blue))] transition-all" style={{ width: `${percent}%` }} />
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             );
                           })}

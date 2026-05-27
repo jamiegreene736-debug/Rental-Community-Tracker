@@ -58,9 +58,20 @@ type CacheEntry = {
 };
 type SearchCache = Map<string, CacheEntry>;
 type AvailabilitySidecarConcurrencyMode = "availability_bulk";
+type AvailabilityScanProgress = {
+  scanned: number;
+  total: number;
+  percent: number;
+  blocked: number;
+  available: number;
+  errors: number;
+  label: string;
+  updatedAt: string;
+};
 type AvailabilityScanOptions = {
   sidecarConcurrencyMode?: AvailabilitySidecarConcurrencyMode;
   windowConcurrency?: number;
+  onProgress?: (progress: AvailabilityScanProgress) => void;
 };
 
 function formatDate(date: Date): string {
@@ -289,6 +300,7 @@ export type BulkAvailabilityQueueItem = {
   message: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  progress: AvailabilityScanProgress | null;
 };
 
 export type BulkAvailabilityQueueStatus = {
@@ -396,6 +408,7 @@ export function startBulkAvailabilityQueue(propertyIds?: number[], weeksAhead = 
         message: null,
         startedAt: null,
         completedAt: null,
+        progress: null,
       };
     }),
   };
@@ -413,19 +426,48 @@ async function processBulkAvailabilityQueue(queue: BulkAvailabilityQueueStatus) 
       item.status = "running";
       item.startedAt = new Date().toISOString();
       item.message = "Scanning availability";
+      item.progress = {
+        scanned: 0,
+        total: Math.ceil(queue.weeksAhead / 2),
+        percent: 0,
+        blocked: 0,
+        available: 0,
+        errors: 0,
+        label: "Starting scan",
+        updatedAt: item.startedAt,
+      };
       refreshBulkAvailabilityTotals(queue);
 
       try {
         const runId = await runAvailabilityScan(queue.weeksAhead, item.propertyId, {
           sidecarConcurrencyMode: "availability_bulk",
           windowConcurrency: 4,
+          onProgress: (progress) => {
+            item.progress = progress;
+            item.message = progress.label;
+          },
         });
         item.runId = runId > 0 ? runId : null;
         item.status = runId > 0 ? "success" : "error";
         item.message = runId > 0 ? `Completed as run #${runId}` : "Scan did not start";
+        if (item.progress) {
+          item.progress = {
+            ...item.progress,
+            percent: runId > 0 ? 100 : item.progress.percent,
+            label: item.message,
+            updatedAt: new Date().toISOString(),
+          };
+        }
       } catch (err: any) {
         item.status = "error";
         item.message = err?.message ?? String(err);
+        if (item.progress) {
+          item.progress = {
+            ...item.progress,
+            label: item.message,
+            updatedAt: new Date().toISOString(),
+          };
+        }
         log(`Bulk availability scan failed for property ${item.propertyId}: ${item.message}`, "scanner");
       } finally {
         item.completedAt = new Date().toISOString();
@@ -520,6 +562,7 @@ export async function runAvailabilityScan(
     runId = run.id;
 
     const windows = generateScanWindows(periodsAhead);
+    const totalPeriods = propertyIds.length * windows.length;
 
     let totalScanned = 0;
     let totalBlocked = 0;
@@ -529,6 +572,16 @@ export async function runAvailabilityScan(
     const searchCache: SearchCache = new Map();
     scanAborted = false;
     consecutiveRateLimits = 0;
+    options.onProgress?.({
+      scanned: 0,
+      total: totalPeriods,
+      percent: 0,
+      blocked: 0,
+      available: 0,
+      errors: 0,
+      label: `Queued ${totalPeriods} date window${totalPeriods === 1 ? "" : "s"}`,
+      updatedAt: new Date().toISOString(),
+    });
 
     const scanWindow = async (window: { checkIn: string; checkOut: string }, clearCacheAfterWindow: boolean) => {
       if (isSidecarLaneCancellationRequested("availability-scan", laneOwnerId)) {
@@ -631,6 +684,17 @@ export async function runAvailabilityScan(
         }
 
         totalScanned++;
+        const percent = totalPeriods > 0 ? Math.round((totalScanned / totalPeriods) * 100) : 100;
+        options.onProgress?.({
+          scanned: totalScanned,
+          total: totalPeriods,
+          percent: Math.max(0, Math.min(100, percent)),
+          blocked: totalBlocked,
+          available: totalAvailable,
+          errors: totalErrors,
+          label: `${config.name} ${window.checkIn}→${window.checkOut}: ${status}`,
+          updatedAt: new Date().toISOString(),
+        });
 
         await storage.updateScannerRun(run.id, {
           totalWeeksScanned: totalScanned,

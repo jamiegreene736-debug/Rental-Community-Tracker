@@ -63,6 +63,16 @@ type BulkAvailabilityQueueItem = {
   message: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  progress: {
+    scanned: number;
+    total: number;
+    percent: number;
+    blocked: number;
+    available: number;
+    errors: number;
+    label: string;
+    updatedAt: string;
+  } | null;
 };
 
 type BulkAvailabilityQueue = {
