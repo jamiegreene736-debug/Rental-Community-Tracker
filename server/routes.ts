@@ -62,6 +62,7 @@ import {
   pauseBulkAvailabilityQueue,
   resumeBulkAvailabilityQueue,
   cancelBulkAvailabilityQueue,
+  requestAvailabilityScannerCancel,
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
@@ -18088,6 +18089,7 @@ Return ONLY compact JSON with this exact shape:
       ? body.reason.trim().slice(0, 200)
       : "stopped by operator from Operations UI";
     const laneCancelResult = cancelActiveSidecarLane(reason);
+    const scannerCancelResult = requestAvailabilityScannerCancel(reason);
     const { cancelActiveAndPendingRequests, pauseQueue } = await import("./vrbo-sidecar-queue");
     const cancelResult = cancelActiveAndPendingRequests(reason);
     const pauseResult = pauseQueue(reason);
@@ -18097,6 +18099,8 @@ Return ONLY compact JSON with this exact shape:
       alreadyPaused: pauseResult.alreadyPaused,
       laneCancelled: laneCancelResult.cancelled,
       laneOwner: laneCancelResult.owner,
+      scannerCancelled: scannerCancelResult.wasRunning,
+      scannerPropertyId: scannerCancelResult.propertyId,
       ...cancelResult,
     });
   });
@@ -18107,6 +18111,7 @@ Return ONLY compact JSON with this exact shape:
       ? body.reason.trim().slice(0, 200)
       : "cleared by operator from Operations UI";
     const laneCancelResult = cancelActiveSidecarLane(reason);
+    const scannerCancelResult = requestAvailabilityScannerCancel(reason);
     const { clearSidecarQueue, pauseQueue } = await import("./vrbo-sidecar-queue");
     const pauseResult = pauseQueue(reason);
     const clearResult = clearSidecarQueue(reason);
@@ -18116,6 +18121,8 @@ Return ONLY compact JSON with this exact shape:
       alreadyPaused: pauseResult.alreadyPaused,
       laneCancelled: laneCancelResult.cancelled,
       laneOwner: laneCancelResult.owner,
+      scannerCancelled: scannerCancelResult.wasRunning,
+      scannerPropertyId: scannerCancelResult.propertyId,
       ...clearResult,
     });
   });

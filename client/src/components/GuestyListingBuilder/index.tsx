@@ -1223,15 +1223,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setScanCompletedAt(new Date());
   }, [scanningAll, availWindows, scanWindow]);
 
-  // Auto-trigger scan when user first opens the Availability tab
-  const autoScanFired = useRef(false);
-  useEffect(() => {
-    if (activeTab === "availability" && !autoScanFired.current && !scanningAll && availWindows.length > 0 && propertyId) {
-      autoScanFired.current = true;
-      runScanAll(availWindows);
-    }
-  }, [activeTab, availWindows, scanningAll, propertyId, runScanAll]);
-
   const pushBlackouts = useCallback(async () => {
     if (!selectedId) return;
     const toBlock = availWindows.filter(w => w.status === "none" || w.status === "low");

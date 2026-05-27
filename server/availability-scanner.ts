@@ -343,6 +343,36 @@ export function getCurrentScanPropertyId(): number | null {
   return currentScanPropertyId;
 }
 
+export function requestAvailabilityScannerCancel(reason = "cancelled by operator"): {
+  wasRunning: boolean;
+  propertyId: number | null;
+} {
+  const wasRunning = scannerRunning || bulkAvailabilityQueueProcessing;
+  scanAborted = true;
+  bulkAvailabilityQueueCancelRequested = true;
+  bulkAvailabilityQueuePaused = false;
+  if (bulkAvailabilityQueue && (bulkAvailabilityQueue.status === "running" || bulkAvailabilityQueue.status === "paused")) {
+    bulkAvailabilityQueue.status = "cancelled";
+    bulkAvailabilityQueue.completedAt = new Date().toISOString();
+    for (const item of bulkAvailabilityQueue.items) {
+      if (item.status === "pending" || item.status === "running") {
+        item.status = "cancelled";
+        item.message = reason;
+        item.completedAt = new Date().toISOString();
+        if (item.progress) {
+          item.progress = {
+            ...item.progress,
+            label: reason,
+            updatedAt: item.completedAt,
+          };
+        }
+      }
+    }
+    refreshBulkAvailabilityTotals(bulkAvailabilityQueue);
+  }
+  return { wasRunning, propertyId: currentScanPropertyId };
+}
+
 export function getScannableProperties(): { id: number; name: string; community: string; bedrooms: number[]; totalBedrooms: number }[] {
   return Object.entries(PROPERTY_UNIT_NEEDS)
     .filter(([, config]) => config.units.length >= 2)
