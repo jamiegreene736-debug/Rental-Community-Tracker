@@ -1201,7 +1201,20 @@ export class DatabaseStorage implements IStorage {
     const rows = await db.select().from(photoListingChecks);
     const cutoff = new Date(Date.now() - olderThanMs);
     const fresh = new Set(
-      rows.filter((r) => r.checkedAt && r.checkedAt > cutoff).map((r) => r.photoFolder),
+      rows
+        .filter((r) => {
+          if (!r.checkedAt || r.checkedAt <= cutoff) return false;
+          const allUnknown =
+            r.airbnbStatus === "unknown" &&
+            r.vrboStatus === "unknown" &&
+            r.bookingStatus === "unknown";
+          // A zero-photo all-unknown row is usually a discovery/runtime
+          // problem, not a healthy fresh scan. Do not let it pin the
+          // dashboard at grey A?/V?/B? for a full day.
+          if (allUnknown && r.photosChecked === 0) return false;
+          return true;
+        })
+        .map((r) => r.photoFolder),
     );
     return knownFolders.filter((f) => !fresh.has(f));
   }
