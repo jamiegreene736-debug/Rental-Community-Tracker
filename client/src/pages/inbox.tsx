@@ -846,7 +846,38 @@ function isHostPost(p: any): boolean {
   );
 }
 
+function postSearchText(p: any): string {
+  const module = p?.module ?? {};
+  const integration = p?.integration ?? {};
+  return [
+    p?.body,
+    p?.text,
+    p?.message,
+    p?.subject,
+    p?.authorName,
+    p?.senderName,
+    p?.senderType,
+    p?.sentBy,
+    p?.source,
+    p?.provider,
+    p?.channel,
+    p?.conversationChannel,
+    module.type,
+    module.provider,
+    module.source,
+    module.name,
+    integration.platform,
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function isAirbnbCustomerServicePost(p: any): boolean {
+  const haystack = postSearchText(p);
+  return /airbnb/.test(haystack) &&
+    /(customer\s*service|customer_service|support|community\s*support|resolution\s*center|case\s*manager|ambassador|specialist)/.test(haystack);
+}
+
 function isGuestySystemPost(p: any): boolean {
+  if (isAirbnbCustomerServicePost(p)) return false;
   if (p.sentBy === "log") return true;
   const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
   if (["log", "system", "internal", "note"].includes(moduleType)) return true;
@@ -2496,7 +2527,8 @@ export default function InboxPage() {
           : "Incoming call";
     const details = [
       `${kind} ${call.direction === "outbound" ? "to" : "from"} ${formatPhone(call.guestPhone)}`,
-      call.durationSeconds ? `Duration ${formatDuration(call.durationSeconds)}` : "",
+      call.durationSeconds ? `Call duration ${formatDuration(call.durationSeconds)}` : "",
+      call.voicemailDurationSeconds ? `Voicemail duration ${formatDuration(call.voicemailDurationSeconds)}` : "",
       call.matchStrategy ? `Matched by ${call.matchStrategy.replace(/-/g, " ")}` : "",
     ].filter(Boolean);
     return {
@@ -3488,8 +3520,22 @@ export default function InboxPage() {
                             <div className="mt-0.5 text-red-800">
                               {call.disposition === "voicemail" ? "Voicemail" : "Missed call"}
                               {call.callCompletedAt && ` · ${new Date(call.callCompletedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                              {call.voicemailDurationSeconds && ` · ${formatDuration(call.voicemailDurationSeconds)}`}
                               {call.matchConfidence && ` · ${call.matchConfidence} confidence`}
                             </div>
+                            {call.voicemailTranscript && (
+                              <div className="mt-1 max-h-10 overflow-hidden text-red-900">
+                                {call.voicemailTranscript}
+                              </div>
+                            )}
+                            {call.voicemailRecordingUrl && (
+                              <audio
+                                controls
+                                src={call.voicemailRecordingUrl}
+                                className="mt-2 w-full max-w-[260px]"
+                                data-testid={`audio-missed-call-voicemail-${call.id}`}
+                              />
+                            )}
                           </div>
                           <div className="flex shrink-0 gap-1">
                             {call.conversationId && (
@@ -3780,12 +3826,20 @@ export default function InboxPage() {
                           const channel = p.module?.type ?? p.type ?? p.integration?.platform ?? "";
                           const callEvent = (p.module as any)?.callEvent as QuoCallEvent | undefined;
                           const isCall = channel === "call" && callEvent;
+                          const isAirbnbSupport = isAirbnbCustomerServicePost(p);
+                          const senderLabel = isHost
+                            ? "You"
+                            : isAirbnbSupport
+                              ? "Airbnb support"
+                              : (selectedConv?.displayGuestName ?? "Guest");
                           return (
                             <div key={p._id} className={`flex flex-col ${isHost ? "items-end" : "items-start"}`}>
                               <div
                                 className={`max-w-[92%] [overflow-wrap:anywhere] rounded-2xl px-3 py-2.5 text-sm whitespace-pre-wrap sm:max-w-[78%] sm:px-4 ${
                                   isCall
                                     ? "border border-red-200 bg-red-50 text-red-950 rounded-bl-sm"
+                                    : isAirbnbSupport
+                                    ? "border border-rose-200 bg-rose-50 text-rose-950 rounded-bl-sm"
                                     : isHost
                                     ? "bg-primary text-primary-foreground rounded-br-sm"
                                     : "bg-muted text-foreground rounded-bl-sm"
@@ -3837,7 +3891,7 @@ export default function InboxPage() {
                               </div>
                               {/* Timestamp + channel row, mirrors Guesty's portal */}
                               <div className="flex items-center gap-1.5 mt-1 text-[10px] text-muted-foreground px-1">
-                                <span>{isHost ? "You" : (selectedConv?.displayGuestName ?? "Guest")}</span>
+                                <span>{senderLabel}</span>
                                 <span>·</span>
                                 <span>{when ? new Date(when).toLocaleString([], { month: "2-digit", day: "2-digit", year: "numeric", hour: "numeric", minute: "2-digit" }) : ""}</span>
                                 {channel && (
@@ -4254,8 +4308,22 @@ export default function InboxPage() {
                                 </div>
                                 <div className="mt-0.5 text-red-800">
                                   {formatPhone(call.guestPhone)}
+                                  {call.voicemailDurationSeconds && ` · ${formatDuration(call.voicemailDurationSeconds)}`}
                                   {call.matchStrategy && ` · ${call.matchStrategy.replace(/-/g, " ")}`}
                                 </div>
+                                {call.voicemailRecordingUrl && (
+                                  <audio
+                                    controls
+                                    src={call.voicemailRecordingUrl}
+                                    className="mt-2 w-full"
+                                    data-testid={`audio-sidebar-voicemail-${call.id}`}
+                                  />
+                                )}
+                                {call.voicemailTranscript && (
+                                  <div className="mt-2 rounded border border-red-100 bg-white p-2 text-red-950">
+                                    {call.voicemailTranscript}
+                                  </div>
+                                )}
                               </div>
                             ))}
                           </div>
