@@ -4,103 +4,17 @@ import { CalendarSearch, Home, MessageSquare, PhoneMissed } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { usePortalSession } from "@/lib/auth";
 
-type GuestyConversationSummary = {
-  unread?: boolean;
-  unreadCount?: number;
-  state?: unknown;
-  lastPost?: unknown;
-  lastMessage?: unknown;
-  lastMessageFrom?: unknown;
-  isLastPostFromGuest?: unknown;
-  meta?: {
-    unreadCount?: number;
-    lastMessage?: unknown;
-    lastPost?: unknown;
-  };
+type AutoReplyLogSummary = {
+  status?: string | null;
+  replySent?: boolean | null;
 };
 
-function objectValue(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
-
-function unwrapConversationList(raw: unknown): GuestyConversationSummary[] {
-  const seen = new Set<unknown>();
-  const hints = ["conversations", "results", "data"];
-
-  const visit = (node: unknown, depth: number): GuestyConversationSummary[] | null => {
-    if (Array.isArray(node)) return node as GuestyConversationSummary[];
-    if (!node || typeof node !== "object" || depth > 3 || seen.has(node)) return null;
-    seen.add(node);
-
-    const obj = node as Record<string, unknown>;
-    for (const hint of hints) {
-      if (Array.isArray(obj[hint])) return obj[hint] as GuestyConversationSummary[];
-    }
-    for (const value of Object.values(obj)) {
-      const found = visit(value, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  };
-
-  return visit(raw, 0) ?? [];
-}
-
-function latestMessageIsFromGuest(conversation: GuestyConversationSummary): boolean | null {
-  const state = objectValue(conversation.state);
-  const meta = objectValue(conversation.meta);
-  const lastMessage = objectValue(
-    conversation.lastMessage ??
-    conversation.lastPost ??
-    meta.lastMessage ??
-    meta.lastPost ??
-    state.lastMessage,
+function isPendingAutoReplyLog(log: AutoReplyLogSummary): boolean {
+  return (
+    !log.replySent &&
+    log.status !== "dismissed" &&
+    (log.status === "drafted" || log.status === "flagged" || log.status === "error")
   );
-
-  const explicit =
-    conversation.isLastPostFromGuest ??
-    state.isLastPostFromGuest ??
-    state.lastMessageFromGuest;
-  if (typeof explicit === "boolean") return explicit;
-
-  const rawAuthor =
-    conversation.lastMessageFrom ??
-    lastMessage.authorType ??
-    lastMessage.authorRole ??
-    lastMessage.senderType ??
-    lastMessage.from;
-  if (typeof rawAuthor !== "string") return null;
-
-  const author = rawAuthor.toLowerCase();
-  if (/\b(guest|nonuser|non-user|traveler)\b/.test(author)) return true;
-  if (/\b(host|owner|user|staff|admin)\b/.test(author)) return false;
-  return null;
-}
-
-function isUnreadConversationThread(conversation: GuestyConversationSummary): boolean {
-  const state = objectValue(conversation.state);
-  const meta = objectValue(conversation.meta);
-  const unreadSignal =
-    (typeof conversation.unreadCount === "number" && conversation.unreadCount > 0) ||
-    conversation.unread === true ||
-    (typeof meta.unreadCount === "number" && meta.unreadCount > 0) ||
-    state.read === false ||
-    state.readByUser === false ||
-    state.readByNonUser === false ||
-    state.status === "UNREAD" ||
-    state.status === "NEW" ||
-    conversation.state === "UNREAD" ||
-    conversation.state === "NEW" ||
-    conversation.state === "UNANSWERED";
-
-  if (!unreadSignal) return false;
-  return latestMessageIsFromGuest(conversation) !== false;
-}
-
-function countUnreadConversationThreads(raw: unknown): number {
-  return unwrapConversationList(raw).filter(isUnreadConversationThread).length;
 }
 
 export default function AppHeader() {
@@ -110,12 +24,13 @@ export default function AppHeader() {
   const isHome = location === "/";
   const isInbox = location.startsWith("/inbox");
   const isOperations = location.startsWith("/bookings");
-  const { data: unreadThreadCount = 0 } = useQuery<number>({
-    queryKey: ["/api/guesty-proxy/communication/conversations", "unread-thread-count"],
+  const { data: pendingDraftCount = 0 } = useQuery<number>({
+    queryKey: ["/api/inbox/auto-reply/logs", "pending-count"],
     queryFn: async () => {
-      const response = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=100&fields=");
+      const response = await apiRequest("GET", "/api/inbox/auto-reply/logs?limit=200");
       if (!response.ok) return 0;
-      return countUnreadConversationThreads(await response.json());
+      const logs = await response.json();
+      return Array.isArray(logs) ? logs.filter(isPendingAutoReplyLog).length : 0;
     },
     refetchInterval: 60_000,
     staleTime: 30_000,
@@ -131,7 +46,7 @@ export default function AppHeader() {
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
-  const inboxAlertCount = unreadThreadCount + missedCallCount;
+  const inboxAlertCount = pendingDraftCount + missedCallCount;
   const unreadBadgeLabel = inboxAlertCount > 99 ? "99+" : String(inboxAlertCount);
 
   return (
