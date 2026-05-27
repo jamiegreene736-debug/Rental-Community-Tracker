@@ -1399,6 +1399,17 @@ function AdminDashboard() {
     checkedAt: string | null;
     errorMessage: string | null;
   };
+  const isPhotoProviderUnavailableError = (message?: string | null) => {
+    const text = (message ?? "").toLowerCase();
+    if (!text.includes("searchapi")) return false;
+    return (
+      text.includes("http 429") ||
+      text.includes("used all of the searches") ||
+      text.includes("timed out") ||
+      text.includes("request failed") ||
+      text.includes("not configured")
+    );
+  };
   const { data: photoCheckData } = useQuery<{ checks: PhotoCheckRow[] }>({
     queryKey: ["/api/photo-listing-check"],
     staleTime: 5 * 60 * 1000,
@@ -1438,6 +1449,7 @@ function AdminDashboard() {
     folders: string[];
     checkedRows: number;
     errorMessages: string[];
+    hasProviderError: boolean;
   };
   const photoByProperty = useMemo(() => {
     const out = new Map<number, PhotoAgg>();
@@ -1486,6 +1498,7 @@ function AdminDashboard() {
         folders,
         checkedRows: 0,
         errorMessages: [],
+        hasProviderError: false,
       };
       for (const f of folders) {
         const row = photoCheckByFolder.get(f);
@@ -1499,6 +1512,9 @@ function AdminDashboard() {
         agg.matchCounts.booking += row.bookingMatches?.length ?? 0;
         if (row.errorMessage && !agg.errorMessages.includes(row.errorMessage)) {
           agg.errorMessages.push(row.errorMessage);
+        }
+        if (isPhotoProviderUnavailableError(row.errorMessage)) {
+          agg.hasProviderError = true;
         }
         if (row.checkedAt && (!agg.lastCheckedAt || row.checkedAt > agg.lastCheckedAt)) {
           agg.lastCheckedAt = row.checkedAt;
@@ -3103,7 +3119,7 @@ function AdminDashboard() {
                         if (noFolders) return "na";
                         if (s === "clean") return "ok";
                         if (s === "found") return "bad";
-                        if ((agg?.errorMessages?.length ?? 0) > 0) return "warn";
+                        if (agg?.hasProviderError) return "warn";
                         return "unknown"; // unknown or null: inconclusive, not a match
                       };
                       const PAL: Record<Tone, { bg: string; glyph: string }> = {
