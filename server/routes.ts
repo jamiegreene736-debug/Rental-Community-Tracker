@@ -6271,7 +6271,7 @@ export async function registerRoutes(
             <div>
               <p class="eyebrow">Option ${index + 1}</p>
               <h2>${escapeHtml(item.title || item.community || "Alternative stay")}</h2>
-              <p>${escapeHtml(item.community || "")}${item.totalPrice ? ` · ${escapeHtml(`Estimated ${item.totalPrice}`)}` : ""}</p>
+              <p>${escapeHtml(item.community || "")}</p>
               ${item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
             </div>
             <div class="photos">
@@ -6400,8 +6400,11 @@ export async function registerRoutes(
         if (lat < bounds.sw_lat || lat > bounds.ne_lat || lng < bounds.sw_lng || lng > bounds.ne_lng) return false;
       }
     }
-    const text = `${p?.property_type ?? ""} ${p?.room_type ?? ""} ${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`.toLowerCase();
-    if (/\b(villa|estate|single[- ]family|detached|private home|mansion)\b/.test(text)) return false;
+    const propertyType = String(p?.property_type ?? "").toLowerCase();
+    const text = `${propertyType} ${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`.toLowerCase();
+    const condoTownhomeSignal = /\b(condo|condominium|townhome|townhouse|apartment|unit|suite)\b/.test(text);
+    if (/\b(villa|estate|single[- ]family|detached|private home|mansion|house)\b/.test(text)) return false;
+    if (/\bhome\b/.test(propertyType) && !condoTownhomeSignal) return false;
     return true;
   }
 
@@ -6569,11 +6572,10 @@ export async function registerRoutes(
       const first = alternatives[0] ?? {};
       const community = String(first.community ?? "a nearby community");
       const title = String(first.title ?? "a comparable nearby option");
-      const priceLine = first.totalPrice ? ` The currently visible buy-in estimate is ${first.totalPrice}, but we will confirm the final details before making any change.` : "";
       const body = [
         `Hi ${guestName},`,
         "",
-        `I am very sorry, but we are running into an availability issue with the original unit setup for your ${checkIn} to ${checkOut} stay. Rather than leave you waiting, we checked comparable nearby options and found ${title} in ${community} as a possible alternative.${priceLine}`,
+        `I am very sorry, but we are running into an availability issue with the original unit setup for your ${checkIn} to ${checkOut} stay. Rather than leave you waiting, we checked comparable nearby options and found ${title} in ${community} as a possible alternative.`,
         "",
         alternativeUrl
           ? `You can review the photos and details here: ${alternativeUrl}`
@@ -9438,6 +9440,21 @@ export async function registerRoutes(
       if (typeof c.bedrooms === "number") return c.bedrooms;
       return null;
     };
+    const candidateLooksStandaloneHome = (c: Candidate): boolean => {
+      const n = norm(candidateHaystack(c));
+      const condoTownhomeSignal = /\b(condo|condominium|townhome|townhouse|apartment|unit|suite|resort|complex)\b/.test(n);
+      if (/\b(single family|single-family|detached|private home|standalone home|whole house|entire house|house)\b/.test(n)) return true;
+      return /\bhome\b/.test(n) && !condoTownhomeSignal;
+    };
+    const candidateMentionsConflictingBuyInMarket = (c: Candidate): boolean => {
+      const n = norm(candidateHaystack(c));
+      const target = norm(community);
+      if (target !== "poipu kai" && /\bpoipu kai\b/.test(n)) return true;
+      if (target !== "pili mai" && /\bpili mai\b/.test(n)) return true;
+      if (!/\b(poipu oceanfront|poipu brenneckes|brenneckes)\b/.test(target) && /\b(poipu oceanfront|brenneckes?)\b/.test(n)) return true;
+      if (!/\b(kapaa beachfront|kaha lani)\b/.test(target) && /\bkaha lani\b/.test(n)) return true;
+      return false;
+    };
     const rawCandidateBedroomSignal = (c: { title?: string; snippet?: string; url?: string; bedrooms?: number }): number | null => {
       const explicit = bedroomFromText(`${c.title ?? ""} ${c.snippet ?? ""} ${c.url ?? ""}`);
       if (explicit !== null) return explicit;
@@ -9486,6 +9503,8 @@ export async function registerRoutes(
       if (mentionsKnownNonRegencyPoipuKaiComplex(hay) && !strongRegencyProof) return false;
       if (mentionsKnownNonPoipuKaiComplex(hay)) return false;
       if (mentionsKnownNonKahaLaniComplex(hay)) return false;
+      if (candidateMentionsConflictingBuyInMarket(c)) return false;
+      if (candidateLooksStandaloneHome(c)) return false;
       const websiteSearchProof = /sidecar searched|website search was driven|rental search page|search-result card/i.test(c.verifiedReason ?? "");
       const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
         .map((m) => parseInt(m[1], 10))
@@ -9535,6 +9554,8 @@ export async function registerRoutes(
       if (mentionsKnownNonRegencyPoipuKaiComplex(hay) && !strongRegencyProof) return "known non-Regency Poipu Kai complex";
       if (mentionsKnownNonPoipuKaiComplex(hay)) return "known non-Poipu Kai complex";
       if (mentionsKnownNonKahaLaniComplex(hay)) return "known non-Kaha Lani complex";
+      if (candidateMentionsConflictingBuyInMarket(c)) return "mentions a different buy-in community";
+      if (candidateLooksStandaloneHome(c)) return "standalone house/home, not condo or townhome inventory";
       const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
         .map((m) => parseInt(m[1], 10))
         .filter((n) => Number.isFinite(n) && n > 0);

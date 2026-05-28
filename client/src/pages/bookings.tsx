@@ -297,6 +297,7 @@ type AlternativeScoutSample = {
   image?: string;
   totalPrice?: number | null;
   sourceLabel?: string;
+  bedrooms?: number;
 };
 
 type AlternativeScoutResult = {
@@ -337,6 +338,13 @@ type AlternativeWorkflowState = {
   sidecarResults?: Record<string, FindBuyInResponse>;
   pageUrl?: string | null;
   draft?: { subject: string; body: string } | null;
+};
+
+type AlternativeReplacementSet = {
+  community: string;
+  plan: number[];
+  picks: Array<LiveCandidate & { community: string }>;
+  totalCost: number;
 };
 
 type AutoFillComboOption = {
@@ -1023,6 +1031,59 @@ function hasUsedListingIdentity(used: Set<string>, item: Parameters<typeof listi
 
 function addUsedListingIdentity(used: Set<string>, item: Parameters<typeof listingIdentityKeys>[0]) {
   for (const key of listingIdentityKeys(item)) used.add(key);
+}
+
+function candidateMatchesBedroom(candidate: Pick<LiveCandidate, "bedrooms">, bedrooms: number): boolean {
+  return typeof candidate.bedrooms !== "number" || Math.round(candidate.bedrooms) === bedrooms;
+}
+
+function bestAlternativeReplacementSet(workflow: AlternativeWorkflowState | undefined): AlternativeReplacementSet | null {
+  const sidecarResults = workflow?.sidecarResults ?? {};
+  const scoutResults = workflow?.scout?.recommended ?? workflow?.scout?.results ?? [];
+  const fallbackPlans = workflow?.scout?.replacementPlans ?? [];
+  const sets: AlternativeReplacementSet[] = [];
+
+  for (const scoutResult of scoutResults) {
+    const data = sidecarResults[scoutResult.community];
+    if (!data) continue;
+    const plans = scoutResult.passingPlans?.length
+      ? scoutResult.passingPlans
+      : scoutResult.replacementPlans?.length
+        ? scoutResult.replacementPlans
+        : fallbackPlans;
+
+    for (const plan of plans) {
+      const used = new Set<string>();
+      const picks: Array<LiveCandidate & { community: string }> = [];
+
+      for (const bedrooms of plan) {
+        const pick = (data.cheapest ?? [])
+          .filter((candidate) => candidate.totalPrice > 0 && candidateMatchesBedroom(candidate, bedrooms))
+          .sort((a, b) => a.totalPrice - b.totalPrice)
+          .find((candidate) => !hasUsedListingIdentity(used, candidate));
+        if (!pick) break;
+        addUsedListingIdentity(used, pick);
+        picks.push({ ...pick, community: scoutResult.community });
+      }
+
+      if (picks.length === plan.length) {
+        sets.push({
+          community: scoutResult.community,
+          plan,
+          picks,
+          totalCost: picks.reduce((sum, pick) => sum + pick.totalPrice, 0),
+        });
+      }
+    }
+  }
+
+  return sets.sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
+}
+
+function alternativeReplacementNeedText(workflow: AlternativeWorkflowState | undefined): string | null {
+  const plans = workflow?.scout?.replacementPlans ?? [];
+  if (!plans.length) return null;
+  return plans.map((plan) => `${plan.join("+")}BR`).join(" or ");
 }
 
 type TwoUnitBedroomCombo = { bedrooms: number[] };
@@ -1842,10 +1903,8 @@ function AlternativeBuyInWorkflowPanel({
   const active = workflow?.activeCommunity ?? null;
   const sidecarResults = workflow?.sidecarResults ?? {};
   const communities = workflow?.scout?.results ?? [];
-  const hasSidecarCandidate = Object.values(sidecarResults).some((result) => (result.cheapest?.length ?? 0) > 0);
-  const replacementPlanText = workflow?.scout?.replacementPlans?.length
-    ? workflow.scout.replacementPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")
-    : null;
+  const completeReplacementSet = bestAlternativeReplacementSet(workflow);
+  const replacementPlanText = alternativeReplacementNeedText(workflow);
   return (
     <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-950">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1896,11 +1955,18 @@ function AlternativeBuyInWorkflowPanel({
           })}
         </div>
       )}
-      {hasSidecarCandidate && (
+      {Object.keys(sidecarResults).length > 0 && !completeReplacementSet && replacementPlanText && (
+        <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-2 text-[11px] text-amber-900">
+          Need a complete replacement set before drafting: {replacementPlanText}. For a 3BR+3BR booking, the sidecar must return two distinct 3BR candidates in the new community.
+        </div>
+      )}
+      {completeReplacementSet && (
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded border bg-white/80 px-2 py-2">
           <div>
             <p className="font-medium">Guest alternative message</p>
-            <p className="text-[11px] text-muted-foreground">Creates a temporary hosted photo/details page and drafts the guest note for manual send.</p>
+            <p className="text-[11px] text-muted-foreground">
+              Creates a temporary hosted photo/details page and drafts the guest note for manual send. Ready set: {completeReplacementSet.plan.join("+")}BR in {completeReplacementSet.community}.
+            </p>
           </div>
           <Button size="sm" className="h-7" onClick={onDraftMessage}>
             <Mail className="mr-1 h-3.5 w-3.5" />
@@ -5585,15 +5651,71 @@ export default function Bookings() {
     }
   };
 
+  const attachAlternativeReplacementSet = async (reservation: GuestyReservation, replacement: AlternativeReplacementSet) => {
+    const meta = reservationPropertyMeta.get(reservation._id);
+    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
+    if (!propertyId) throw new Error("No property selected for this booking.");
+    const propertyName = meta?.propertyName || selectedDisplayName || `Property ${propertyId}`;
+    const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
+    const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      throw new Error("Alternative attach needs valid check-in/check-out dates.");
+    }
+
+    const usedSlots = new Set<number>();
+    const assignments = replacement.picks.map((pick) => {
+      const slotIndex = reservation.slots.findIndex((slot, index) =>
+        !usedSlots.has(index) && Math.round(slot.bedrooms) === Math.round(pick.bedrooms ?? slot.bedrooms),
+      );
+      if (slotIndex < 0) throw new Error(`No ${pick.bedrooms ?? "matching"}BR reservation slot available for ${pick.title}.`);
+      usedSlots.add(slotIndex);
+      return { slot: reservation.slots[slotIndex], pick };
+    });
+
+    for (const { slot } of assignments) {
+      if (!slot.buyIn?.id) continue;
+      await apiRequest("POST", `/api/bookings/detach-buy-in/${slot.buyIn.id}`).then((r) => r.json());
+    }
+
+    for (const { slot, pick } of assignments) {
+      const created = await apiRequest("POST", "/api/buy-ins", {
+        propertyId,
+        propertyName,
+        unitId: slot.unitId,
+        unitLabel: slot.unitLabel,
+        checkIn,
+        checkOut,
+        costPaid: pick.totalPrice.toFixed(2),
+        airbnbConfirmation: null,
+        airbnbListingUrl: pick.url,
+        groundFloorStatus: pick.groundFloorStatus ?? "unknown",
+        groundFloorEvidence: pick.groundFloorEvidence ?? null,
+        notes: `Attached from alternative community ${replacement.community} — ${pick.bedrooms ?? slot.bedrooms}BR ${pick.sourceLabel} — ${pick.title}. Guest-facing draft/page intentionally omitted buy-in pricing.`,
+        status: "active",
+      }).then((r) => r.json());
+      if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
+      await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
+        buyInId: created.id,
+      }).then((r) => r.json());
+    }
+
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", meta?.guestyListingId ?? selectedListingId] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+  };
+
   const draftAlternativeGuestMessage = async (reservation: GuestyReservation) => {
     const workflow = alternativeWorkflows[reservation._id];
-    const sidecarEntries = Object.entries(workflow?.sidecarResults ?? {});
-    const best = sidecarEntries
-      .flatMap(([community, data]) => (data.cheapest ?? []).slice(0, 2).map((candidate) => ({ ...candidate, community })))
-      .sort((a, b) => (a.totalPrice || 999999) - (b.totalPrice || 999999))
-      .slice(0, 3);
-    if (best.length === 0) {
-      toast({ title: "No alternative candidates yet", description: "Run a sidecar search for one suggested community first.", variant: "destructive" });
+    const replacement = bestAlternativeReplacementSet(workflow);
+    if (!replacement) {
+      const need = alternativeReplacementNeedText(workflow);
+      toast({
+        title: "Need a complete alternative set",
+        description: need
+          ? `Run sidecar until one community has distinct candidates for ${need}.`
+          : "Run a sidecar search for one suggested community first.",
+        variant: "destructive",
+      });
       return;
     }
     try {
@@ -5605,18 +5727,28 @@ export default function Bookings() {
         guestName,
         checkIn,
         checkOut,
-        alternatives: best,
+        alternatives: replacement.picks,
       }).then((r) => r.json()) as { url: string };
       const draft = await apiRequest("POST", `/api/bookings/${reservation._id}/alternative-message-draft`, {
         guestName,
         checkIn,
         checkOut,
         alternativeUrl: page.url,
-        alternatives: best.map((candidate) => ({ ...candidate, totalPrice: candidate.totalPrice ? `$${Math.round(candidate.totalPrice).toLocaleString()}` : null })),
+        alternatives: replacement.picks.map((candidate) => ({ ...candidate, totalPrice: null })),
       }).then((r) => r.json()) as { subject: string; body: string };
       updateAlternativeWorkflow(reservation._id, { pageUrl: page.url, draft });
       await navigator.clipboard?.writeText(draft.body).catch(() => undefined);
       toast({ title: "Guest alternative draft ready", description: "Draft copied to clipboard and saved below the scorecard." });
+      const shouldAttach = window.confirm(
+        `Attach ${replacement.picks.length} new buy-in${replacement.picks.length === 1 ? "" : "s"} from ${replacement.community} to this booking now?\n\nThis will replace any currently attached buy-ins for the matching unit slots.`,
+      );
+      if (shouldAttach) {
+        await attachAlternativeReplacementSet(reservation, replacement);
+        toast({
+          title: "Alternative buy-ins attached",
+          description: `${replacement.picks.length} buy-in${replacement.picks.length === 1 ? "" : "s"} attached from ${replacement.community}.`,
+        });
+      }
     } catch (error: any) {
       toast({ title: "Alternative draft failed", description: error?.message ?? String(error), variant: "destructive" });
     }
