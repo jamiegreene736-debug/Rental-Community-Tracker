@@ -692,6 +692,11 @@ async function pushBulkGuestyPricingAfterRefresh(
   };
 }
 
+function isGuestyPushSoftFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /429|too many requests|rate.?limit|Guesty seasonal-rate push failed|Guesty channel-markup push failed|read-back only matched|stored nothing/i.test(message);
+}
+
 async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: string): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const draftId = Math.abs(propertyId);
   const draft = await storage.getCommunityDraft(draftId);
@@ -774,7 +779,28 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     itemKey: item.id,
     meta: { propertyId: item.propertyId },
   });
-  const guestyPush = await pushBulkGuestyPricingAfterRefresh(item.propertyId);
+  let guestyPush: Awaited<ReturnType<typeof pushBulkGuestyPricingAfterRefresh>>;
+  try {
+    guestyPush = await pushBulkGuestyPricingAfterRefresh(item.propertyId);
+  } catch (e: any) {
+    if (!isGuestyPushSoftFailure(e)) throw e;
+    const reason = e?.message ?? String(e);
+    guestyPush = { skipped: true, reason };
+    item.progress = {
+      phase: "done",
+      percent: 100,
+      label: `Market rates saved; Guesty push skipped: ${reason}`,
+      guestyPush,
+    };
+    await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-skipped", `Guesty pricing push skipped for ${item.label}: ${reason}`, {
+      itemKey: item.id,
+      level: "warn",
+      meta: { propertyId: item.propertyId, reason },
+    });
+    item.heartbeatAt = Date.now();
+    await persistBulkPricingJob(job);
+    return;
+  }
   if (guestyPush.skipped) {
     item.progress = {
       phase: "done",

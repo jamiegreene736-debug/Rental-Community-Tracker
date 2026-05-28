@@ -409,15 +409,18 @@ export async function refreshHybridPricingForTarget(args: {
     const holidayRates: number[] = [];
     let totalSamples = 0;
     let lastResult: HybridCalculationResult | null = null;
+    const sampleWindow = hybridPricingWindowForMonth(asOf, 0);
+    const airbnb = await fetchAirbnbMedianNightly({
+      community: args.community,
+      bedrooms,
+      checkIn: sampleWindow.checkIn,
+      checkOut: sampleWindow.checkOut,
+      searchName,
+    });
 
     for (let m = 0; m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths; m++) {
       const { checkIn, checkOut, yearMonth } = hybridPricingWindowForMonth(asOf, m);
-      const airbnb = await fetchAirbnbMedianNightly({ community: args.community, bedrooms, checkIn, checkOut, searchName });
-      if (HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs));
-      }
       if (airbnb.medianNightly == null) continue;
-      totalSamples += airbnb.sampleCount;
       const result = calculateBlendedRate({
         airbnbMedianNightly: airbnb.medianNightly,
         checkIn,
@@ -446,10 +449,15 @@ export async function refreshHybridPricingForTarget(args: {
           baseAirbnbMedian: result.baseAirbnbMedian,
           finalRate: result.finalRate,
           layers: result.layers,
-          notes: [...airbnb.notes, ...result.notes],
+          notes: [
+            ...airbnb.notes,
+            `Airbnb median sampled once for ${sampleWindow.checkIn} to ${sampleWindow.checkOut}; layered rules extrapolated this ${yearMonth} rate.`,
+            ...result.notes,
+          ],
         },
       };
     }
+    totalSamples = airbnb.sampleCount;
 
     const medianNightly = median(allFinalRates);
     if (medianNightly == null) {

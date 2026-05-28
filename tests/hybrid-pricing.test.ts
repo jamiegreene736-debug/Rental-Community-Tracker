@@ -5,6 +5,7 @@ import {
   hybridPricingWindowForMonth,
   isSearchApiAirbnbNoResultsError,
 } from "../server/hybrid-pricing";
+import { readFileSync } from "node:fs";
 
 const july = calculateBlendedRate({
   airbnbMedianNightly: 500,
@@ -64,5 +65,12 @@ try {
   if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
   else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
 }
+
+const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
+assert.equal(
+  hybridPricingSource.split("fetchAirbnbMedianNightly({").length - 1,
+  1,
+  "hybrid pricing should make one Airbnb SearchAPI request per bedroom count, then extrapolate months with rules",
+);
 
 console.log("hybrid pricing suite passed");
