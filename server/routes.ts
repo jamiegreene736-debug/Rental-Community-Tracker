@@ -120,7 +120,7 @@ import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommu
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
-import { refreshHybridPricingForProperty, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
+import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
 import { runFullScanForProperty, runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
@@ -326,7 +326,6 @@ type BulkPricingJob = {
 };
 
 const BULK_PRICING_JOB_TTL_MS = 6 * 60 * 60 * 1000;
-const BULK_PRICING_ITEM_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const BULK_PRICING_ITEM_MAX_ATTEMPTS = 2;
 const BULK_PRICING_RETRY_BACKOFF_MS = 30_000;
 const bulkPricingJobs = new Map<string, BulkPricingJob>();
@@ -367,7 +366,6 @@ const labelBulkPricingError = (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error || "");
   if (/refresh-progress|progress/i.test(message)) return `Progress tracking failed: ${message}`;
   if (/refresh-market-rates|refresh-pricing|pricing/i.test(message)) return `Market pricing refresh failed: ${message}`;
-  if (/sidecar|Chrome|queue/i.test(message)) return `Chrome sidecar queue failed: ${message}`;
   if (/HTTP|fetch/i.test(message)) return `Refresh request failed: ${message}`;
   return message || "Bulk pricing refresh failed";
 };
@@ -694,6 +692,32 @@ async function pushBulkGuestyPricingAfterRefresh(
   };
 }
 
+async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: string): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
+  const draftId = Math.abs(propertyId);
+  const draft = await storage.getCommunityDraft(draftId);
+  if (!draft) throw new Error(`Draft ${draftId} was not found`);
+
+  const unitSlots = unitSlotsForCommunityDraft(draft);
+  const bedroomCounts = Array.from(new Set(unitSlots.map((unit) => unit.bedrooms)))
+    .filter((bedrooms) => Number.isFinite(bedrooms) && bedrooms > 0)
+    .sort((a, b) => a - b);
+  if (bedroomCounts.length === 0) {
+    throw new Error("Enter the single-listing bedroom count or both combo unit bedroom counts, then retry the queue.");
+  }
+
+  const community = communityKeyForDraft(draft);
+  return refreshHybridPricingForTarget({
+    propertyId,
+    propertyName: String(draft.name || draft.listingTitle || fallbackLabel || `Draft ${draftId}`),
+    community,
+    bedroomCounts,
+    unitCount: unitSlots.length || 1,
+    triggerType: "Manual Update",
+    notes: "Bulk market pricing refresh via SearchAPI Airbnb layered pricing.",
+    searchName: String(draft.name || draft.listingTitle || community),
+  });
+}
+
 async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
   item.status = "running";
   item.startedAt = item.startedAt ?? Date.now();
@@ -716,107 +740,73 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     return;
   }
 
-  const base = bulkPricingBaseUrl();
-  const startUrl = item.propertyId < 0
-    ? `${base}/api/community/${Math.abs(item.propertyId)}/refresh-pricing?background=1&mode=banded`
-    : `${base}/api/property/${item.propertyId}/refresh-market-rates?background=1&mode=banded`;
-  const startResponse = await fetch(startUrl, { method: "POST" });
-  const startBody = (await startResponse.json().catch(() => ({}))) as any;
-  if (!startResponse.ok) {
-    throw new Error(startBody?.error || startBody?.message || `HTTP ${startResponse.status}`);
-  }
-  item.progress = startBody?.progress ?? item.progress;
+  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb pricing rules" };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
 
-  const deadline = Date.now() + BULK_PRICING_ITEM_TIMEOUT_MS;
-  let missingProgressCount = 0;
-  let sidecarOfflineSince: number | null = null;
-  while (Date.now() < deadline) {
-    const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
-    if (latestJob?.cancelRequested) job.cancelRequested = true;
-    item.heartbeatAt = Date.now();
-    await persistBulkPricingJob(job);
-    if (job.cancelRequested) {
-      const { cancelSidecarRunAndRequests } = await import("./vrbo-sidecar-queue");
-      cancelSidecarRunAndRequests(`bulk pricing job ${job.id} cancelled`);
-      throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
-    }
+  const pricingResult = item.propertyId < 0
+    ? await refreshHybridPricingForDraft(item.propertyId, item.label)
+    : await refreshHybridPricingForProperty({
+      propertyId: item.propertyId,
+      triggerType: "Manual Update",
+      notes: "Bulk market pricing refresh via SearchAPI Airbnb layered pricing.",
+    });
+  item.progress = {
+    phase: "searchapi-airbnb",
+    percent: 80,
+    label: `SearchAPI Airbnb pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing clean-margin pricing to Guesty`,
+    rows: pricingResult.rows.length,
+  };
+  item.heartbeatAt = Date.now();
+  await persistBulkPricingJob(job);
+  await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb pricing completed for ${item.label}`, {
+    itemKey: item.id,
+    meta: { propertyId: item.propertyId, rows: pricingResult.rows.length },
+  });
 
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-    const progressResponse = await fetch(`${base}/api/property/${item.propertyId}/refresh-progress`);
-    if (progressResponse.status === 404) {
-      missingProgressCount += 1;
-      if (missingProgressCount >= 5) {
-        throw new Error("Lost refresh progress before the scan reported completion");
-      }
-      continue;
-    }
-    missingProgressCount = 0;
-    const progress = (await progressResponse.json().catch(() => null)) as any;
-    if (progress) {
-      item.progress = progress;
-      item.heartbeatAt = Date.now();
-      await persistBulkPricingJob(job);
-      if (progress.daemonOnline === false) {
-        sidecarOfflineSince = sidecarOfflineSince ?? Date.now();
-        if (Date.now() - sidecarOfflineSince > 45_000) {
-          throw new Error("Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac, then retry this market-pricing queue.");
-        }
-      } else if (progress.daemonOnline === true) {
-        sidecarOfflineSince = null;
-      }
-    }
-    if (progress?.phase === "done") {
-      item.progress = { ...progress, label: "Market-rate refresh completed; pushing clean-margin pricing to Guesty" };
-      item.heartbeatAt = Date.now();
-      await persistBulkPricingJob(job);
-      await topQueueEvent("bulk-pricing", job.id, "item-pushing-guesty", `Pushing clean-margin Guesty pricing for ${item.label}`, {
-        itemKey: item.id,
-        meta: { propertyId: item.propertyId },
-      });
-      const guestyPush = await pushBulkGuestyPricingAfterRefresh(item.propertyId);
-      if (guestyPush.skipped) {
-        item.progress = {
-          ...progress,
-          phase: "done",
-          percent: 100,
-          label: `Market rates saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`,
-          guestyPush,
-        };
-        await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-skipped", `Guesty pricing push skipped for ${item.label}: ${guestyPush.reason ?? "not mapped"}`, {
-          itemKey: item.id,
-          level: "warn",
-          meta: { propertyId: item.propertyId, guestyPush },
-        });
-      } else {
-        item.progress = {
-          ...progress,
-          phase: "done",
-          percent: 100,
-          label: `Market rates saved and Guesty pricing pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
-          guestyPush,
-        };
-        await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed clean-margin Guesty pricing for ${item.label}`, {
-          itemKey: item.id,
-          meta: {
-            propertyId: item.propertyId,
-            listingId: guestyPush.listingId,
-            targetMargin: guestyPush.targetMargin,
-            pushedDays: guestyPush.seasonal?.pushedDays,
-            pushedRanges: guestyPush.seasonal?.pushedRanges,
-          },
-        });
-      }
-      item.heartbeatAt = Date.now();
-      await persistBulkPricingJob(job);
-      return;
-    }
-    if (progress?.phase === "error") {
-      throw new Error(progress?.error || progress?.label || "Market-rate refresh failed");
-    }
+  const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
+  if (latestJob?.cancelRequested) {
+    job.cancelRequested = true;
+    throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
   }
-  throw new Error("Market-rate refresh timed out");
+
+  await topQueueEvent("bulk-pricing", job.id, "item-pushing-guesty", `Pushing clean-margin Guesty pricing for ${item.label}`, {
+    itemKey: item.id,
+    meta: { propertyId: item.propertyId },
+  });
+  const guestyPush = await pushBulkGuestyPricingAfterRefresh(item.propertyId);
+  if (guestyPush.skipped) {
+    item.progress = {
+      phase: "done",
+      percent: 100,
+      label: `Market rates saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`,
+      guestyPush,
+    };
+    await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-skipped", `Guesty pricing push skipped for ${item.label}: ${guestyPush.reason ?? "not mapped"}`, {
+      itemKey: item.id,
+      level: "warn",
+      meta: { propertyId: item.propertyId, guestyPush },
+    });
+  } else {
+    item.progress = {
+      phase: "done",
+      percent: 100,
+      label: `Market rates saved and Guesty pricing pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
+      guestyPush,
+    };
+    await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed clean-margin Guesty pricing for ${item.label}`, {
+      itemKey: item.id,
+      meta: {
+        propertyId: item.propertyId,
+        listingId: guestyPush.listingId,
+        targetMargin: guestyPush.targetMargin,
+        pushedDays: guestyPush.seasonal?.pushedDays,
+        pushedRanges: guestyPush.seasonal?.pushedRanges,
+      },
+    });
+  }
+  item.heartbeatAt = Date.now();
+  await persistBulkPricingJob(job);
 }
 
 async function runBulkPricingJob(jobId: string): Promise<void> {
@@ -836,123 +826,78 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
     await topQueueEvent("bulk-pricing", job.id, "running", "Bulk market pricing queue started", {
       meta: { total: job.items.length, dryRun: Boolean(job.dryRun) },
     });
-    if (!job.dryRun) {
-      const { getHeartbeat } = await import("./vrbo-sidecar-queue");
-      const heartbeat = getHeartbeat();
-      if (heartbeat.paused) {
-        throw new Error(heartbeat.pausedReason
-          ? `Chrome sidecar queue is stopped: ${heartbeat.pausedReason}`
-          : "Chrome sidecar queue is stopped. Start the sidecar queue before running bulk market pricing.");
-      }
-      if (!heartbeat.isOnline) {
-        throw new Error("Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac, then retry this market-pricing queue.");
-      }
-    }
-    const lane = await acquireSidecarLane({
-      ownerType: "bulk-pricing",
-      ownerId: job.id,
-      label: `Bulk market pricing ${job.id}`,
-      shouldCancel: async () => {
-        const latest = await loadBulkPricingJob(job.id).catch(() => null);
-        return Boolean(latest?.cancelRequested);
-      },
-      onWait: async (owner) => {
-        job = await loadBulkPricingJob(job.id) ?? job;
-        job.status = "running";
-        job.currentIndex = -1;
-        await persistBulkPricingJob(job);
-        await topQueueEvent("bulk-pricing", job.id, "waiting-sidecar-lane", `Waiting for Chrome sidecar lane held by ${owner.label}`, {
-          level: "warn",
-          meta: { owner },
-        });
-      },
-    });
-    const laneHeartbeat = setInterval(() => lane.heartbeat(), 30_000);
 
-    try {
-      await topQueueEvent("bulk-pricing", job.id, "sidecar-lane-acquired", "Chrome sidecar lane acquired for bulk market pricing", {
-        meta: { acquiredAt: lane.acquiredAt },
-      });
-      for (let i = 0; i < job.items.length; i += 1) {
-        job = await loadBulkPricingJob(job.id) ?? job;
-        job.currentIndex = i;
-        const item = job.items[i];
-        if (!item || item.status === "completed" || item.status === "cancelled") continue;
-        if (job.cancelRequested) {
-          const { cancelSidecarRunAndRequests } = await import("./vrbo-sidecar-queue");
-          cancelSidecarRunAndRequests(`bulk pricing job ${job.id} cancelled`);
-          item.status = "cancelled";
-          item.error = "Cancelled by operator";
+    for (let i = 0; i < job.items.length; i += 1) {
+      job = await loadBulkPricingJob(job.id) ?? job;
+      job.currentIndex = i;
+      const item = job.items[i];
+      if (!item || item.status === "completed" || item.status === "cancelled") continue;
+      if (job.cancelRequested) {
+        item.status = "cancelled";
+        item.error = "Cancelled by operator";
+        item.finishedAt = Date.now();
+        item.heartbeatAt = Date.now();
+        await persistBulkPricingJob(job);
+        continue;
+      }
+
+      let shouldRetry = false;
+      do {
+        shouldRetry = false;
+        try {
+          await runBulkPricingItem(job, item);
+          item.status = "completed";
+          item.progress = item.progress ?? { phase: "done", percent: 100, label: "Market-rate refresh completed" };
           item.finishedAt = Date.now();
           item.heartbeatAt = Date.now();
+          item.error = null;
           await persistBulkPricingJob(job);
-          continue;
-        }
-
-        let shouldRetry = false;
-        do {
-          shouldRetry = false;
-          try {
-            await runBulkPricingItem(job, item);
-            item.status = "completed";
-            item.progress = item.progress ?? { phase: "done", percent: 100, label: "Market-rate refresh completed" };
+          await topQueueEvent("bulk-pricing", job.id, "item-completed", `Completed market pricing refresh for ${item.label}`, {
+            itemKey: item.id,
+            meta: { propertyId: item.propertyId, attempt: item.attemptCount },
+          });
+        } catch (e: any) {
+          if (e?.cancelled || job.cancelRequested) {
+            item.status = "cancelled";
+            item.error = "Cancelled by operator";
             item.finishedAt = Date.now();
             item.heartbeatAt = Date.now();
-            item.error = null;
             await persistBulkPricingJob(job);
-            await topQueueEvent("bulk-pricing", job.id, "item-completed", `Completed market pricing refresh for ${item.label}`, {
+            await topQueueEvent("bulk-pricing", job.id, "item-cancelled", `Cancelled market pricing refresh for ${item.label}`, {
               itemKey: item.id,
-              meta: { propertyId: item.propertyId, attempt: item.attemptCount },
+              level: "warn",
+              meta: { propertyId: item.propertyId },
             });
-          } catch (e: any) {
-            if (e?.cancelled || job.cancelRequested) {
-              item.status = "cancelled";
-              item.error = "Cancelled by operator";
-              item.finishedAt = Date.now();
-              item.heartbeatAt = Date.now();
-              await persistBulkPricingJob(job);
-              await topQueueEvent("bulk-pricing", job.id, "item-cancelled", `Cancelled market pricing refresh for ${item.label}`, {
-                itemKey: item.id,
-                level: "warn",
-                meta: { propertyId: item.propertyId },
-              });
-              break;
-            }
-
-            const message = labelBulkPricingError(e);
-            item.error = message;
-            item.heartbeatAt = Date.now();
-            if (item.attemptCount < BULK_PRICING_ITEM_MAX_ATTEMPTS) {
-              item.status = "queued";
-              item.progress = { phase: "retrying", percent: 0, label: `Retrying after error: ${message}` };
-              item.finishedAt = null;
-              shouldRetry = true;
-              await persistBulkPricingJob(job);
-              await topQueueEvent("bulk-pricing", job.id, "item-retry", `Retrying ${item.label} after transient failure`, {
-                itemKey: item.id,
-                level: "warn",
-                meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
-              });
-              await new Promise((resolve) => setTimeout(resolve, BULK_PRICING_RETRY_BACKOFF_MS));
-            } else {
-              item.status = "failed";
-              item.finishedAt = Date.now();
-              await persistBulkPricingJob(job);
-              await topQueueEvent("bulk-pricing", job.id, "item-failed", `Failed market pricing refresh for ${item.label}`, {
-                itemKey: item.id,
-                level: "error",
-                meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
-              });
-            }
+            break;
           }
-        } while (shouldRetry && !job.cancelRequested);
-      }
-    } finally {
-      clearInterval(laneHeartbeat);
-      lane.release();
-      await topQueueEvent("bulk-pricing", job.id, "sidecar-lane-released", "Chrome sidecar lane released for bulk market pricing", {
-        meta: { jobId: job.id },
-      });
+
+          const message = labelBulkPricingError(e);
+          item.error = message;
+          item.heartbeatAt = Date.now();
+          if (item.attemptCount < BULK_PRICING_ITEM_MAX_ATTEMPTS) {
+            item.status = "queued";
+            item.progress = { phase: "retrying", percent: 0, label: `Retrying after error: ${message}` };
+            item.finishedAt = null;
+            shouldRetry = true;
+            await persistBulkPricingJob(job);
+            await topQueueEvent("bulk-pricing", job.id, "item-retry", `Retrying ${item.label} after transient failure`, {
+              itemKey: item.id,
+              level: "warn",
+              meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
+            });
+            await new Promise((resolve) => setTimeout(resolve, BULK_PRICING_RETRY_BACKOFF_MS));
+          } else {
+            item.status = "failed";
+            item.finishedAt = Date.now();
+            await persistBulkPricingJob(job);
+            await topQueueEvent("bulk-pricing", job.id, "item-failed", `Failed market pricing refresh for ${item.label}`, {
+              itemKey: item.id,
+              level: "error",
+              meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
+            });
+          }
+        }
+      } while (shouldRetry && !job.cancelRequested);
     }
 
     job.finishedAt = Date.now();
@@ -29833,33 +29778,14 @@ Return ONLY compact JSON with this exact shape:
   // POST /api/pricing/bulk-refresh
   //
   // Operator-facing queue for refreshing selected dashboard rows. The queue is
-  // intentionally sequential: each item starts the existing background
-  // property/draft refresh endpoint, polls its real progress, then advances to
-  // the next item. That keeps Chrome sidecar work from stampeding and gives the
-  // UI a stable per-row status modal.
+  // intentionally sequential: each item runs the SearchAPI Airbnb hybrid
+  // pricing engine, then pushes the clean-margin Guesty prices before the next
+  // row starts. Pricing does not acquire the Chrome sidecar lane.
   app.post("/api/pricing/bulk-refresh", async (req, res) => {
     cleanupBulkPricingJobs();
     const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
     const labels = req.body?.labels && typeof req.body.labels === "object" ? req.body.labels as Record<string, string> : {};
     const dryRun = req.body?.dryRun === true;
-    if (!dryRun) {
-      const { getHeartbeat } = await import("./vrbo-sidecar-queue");
-      const heartbeat = getHeartbeat();
-      if (heartbeat.paused) {
-        return res.status(409).json({
-          error: heartbeat.pausedReason
-            ? `Chrome sidecar queue is stopped: ${heartbeat.pausedReason}`
-            : "Chrome sidecar queue is stopped. Start the sidecar queue before running bulk market pricing.",
-          sidecar: heartbeat,
-        });
-      }
-      if (!heartbeat.isOnline) {
-        return res.status(409).json({
-          error: "Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac first, then run bulk market pricing again.",
-          sidecar: heartbeat,
-        });
-      }
-    }
     const seen = new Set<number>();
     const propertyIds = rawIds
       .map((id: unknown) => Number(id))
@@ -30005,12 +29931,6 @@ Return ONLY compact JSON with this exact shape:
         item.heartbeatAt = Date.now();
       }
     }
-    try {
-      if (isSidecarLaneOwner("bulk-pricing", job.id)) {
-        const { cancelSidecarRunAndRequests } = await import("./vrbo-sidecar-queue");
-        cancelSidecarRunAndRequests(`bulk pricing job ${job.id} cancelled`);
-      }
-    } catch {}
     if (job.status === "queued") {
       job.status = "cancelled";
       job.finishedAt = Date.now();

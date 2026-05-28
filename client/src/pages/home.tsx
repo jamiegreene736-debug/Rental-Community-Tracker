@@ -1877,12 +1877,6 @@ function AdminDashboard() {
     if (!Number.isFinite(ms)) return "—";
     return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   };
-  const formatBulkPricingAge = (ageMs?: number | null) => {
-    if (typeof ageMs !== "number" || !Number.isFinite(ageMs) || ageMs < 0) return "never";
-    if (ageMs < 60_000) return `${Math.max(1, Math.round(ageMs / 1000))}s ago`;
-    return `${Math.round(ageMs / 60_000)}m ago`;
-  };
-
   useEffect(() => {
     const validIds = new Set(allProperties.filter(isBulkPricingSelectable).map((property) => property.id));
     setSelectedPricingIds((prev) => {
@@ -2064,7 +2058,7 @@ function AdminDashboard() {
       const response = await apiRequest("POST", `/api/pricing/bulk-refresh/${bulkPricingJob.id}/cancel`);
       const data = await response.json();
       setBulkPricingJob(data.job);
-      toast({ title: "Bulk pricing cancellation sent", description: "Queued items were cancelled and the active sidecar job was stopped." });
+      toast({ title: "Bulk pricing cancellation sent", description: "Queued items were cancelled. The active SearchAPI request may finish before the item stops." });
     } catch (e: any) {
       toast({ title: "Cancel failed", description: e.message, variant: "destructive" });
     } finally {
@@ -2791,7 +2785,7 @@ function AdminDashboard() {
                     <div className="rounded-md border bg-muted/20 p-3 text-sm">
                       <p className="font-medium">Runs one selected property at a time.</p>
                       <p className="mt-1 text-muted-foreground">
-                        This uses the same OTA-only market-rate refresh as each Pricing tab: 7-night sidecar searches on Airbnb, VRBO, and Booking.com. Direct booking and PM websites are not priced. The queue is saved on the server, so closing this tab will not stop it.
+                        This uses SearchAPI's Airbnb engine for 7-night market samples, then applies the layered pricing rules. VRBO, Booking.com, direct booking, and PM websites are not priced. The queue is saved on the server, so closing this tab will not stop it.
                       </p>
                     </div>
                     {!bulkPricingJob ? (
@@ -2837,11 +2831,6 @@ function AdminDashboard() {
                         {bulkPricingLooksStale && (
                           <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                             This queue has not reported a heartbeat in over five minutes. It is saved on the server and will be re-claimed automatically if the worker died.
-                          </div>
-                        )}
-                        {runningBulkPricingItem?.progress?.daemonOnline === false && (
-                          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
-                            Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac, then retry the queue. Last worker poll: {formatBulkPricingAge(runningBulkPricingItem.progress.daemonLastPollAgeMs)}.
                           </div>
                         )}
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -2897,8 +2886,6 @@ function AdminDashboard() {
                                     </p>
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
-                                      {item.progress?.daemonOnline === false && ` · sidecar offline (${formatBulkPricingAge(item.progress.daemonLastPollAgeMs)})`}
-                                      {item.progress?.daemonOnline === true && " · sidecar live"}
                                     </p>
                                   </div>
                                   <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>

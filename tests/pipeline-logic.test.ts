@@ -1074,14 +1074,26 @@ assert.equal(
 assert.equal(
   countLiteral(routeSource, 'app.post("/api/property/:id/refresh-market-rates"'),
   1,
-  "property market pricing should only register the sidecar-backed route",
+  "property market pricing should only register one route",
 );
 assert.equal(
   countLiteral(routeSource, 'app.post("/api/community/:id/refresh-pricing"'),
   1,
-  "draft market pricing should only register the sidecar-backed route",
+  "draft market pricing should only register one route",
 );
 console.log("  ✓ market-pricing routes are not shadowed by legacy handlers");
+
+assert.equal(
+  routeSource.includes('ownerType: "bulk-pricing"'),
+  false,
+  "bulk market pricing should not acquire the Chrome sidecar lane",
+);
+assert.equal(
+  routeSource.includes('Local Chrome sidecar is offline. Start the VRBO sidecar supervisor on the Mac first, then run bulk market pricing again.'),
+  false,
+  "bulk market pricing should not require sidecar heartbeat",
+);
+console.log("  ✓ bulk market pricing stays on SearchAPI Airbnb path, not sidecar");
 
 const schemaMaintenanceSource = readFileSync(new URL("../server/schema-maintenance.ts", import.meta.url), "utf8");
 for (const col of ["single_listing", "booking_title", "property_type", "unit1_bathrooms", "unit2_bathrooms"]) {

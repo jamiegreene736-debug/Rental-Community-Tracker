@@ -287,6 +287,21 @@ function monthStart(base: Date, offset: number): Date {
   return new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + offset, 1));
 }
 
+export function hybridPricingWindowForMonth(asOf: Date, monthOffset: number, stayNights = HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights): { yearMonth: string; checkIn: string; checkOut: string } {
+  const start = monthStart(asOf, monthOffset);
+  const todayUtc = new Date(Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate()));
+  const earliestCurrentMonthCheckIn = addDays(todayUtc, 2);
+  const checkInDate = monthOffset === 0 && start <= earliestCurrentMonthCheckIn
+    ? earliestCurrentMonthCheckIn
+    : start;
+  const checkIn = dateOnly(checkInDate);
+  return {
+    yearMonth: checkIn.slice(0, 7),
+    checkIn,
+    checkOut: dateOnly(addDays(checkInDate, stayNights)),
+  };
+}
+
 function propertyBedroomCounts(config: PropertyUnitConfig): number[] {
   return Array.from(new Set(config.units.map((u) => u.bedrooms))).sort((a, b) => a - b);
 }
@@ -329,10 +344,7 @@ export async function refreshHybridPricingForTarget(args: {
     let lastResult: HybridCalculationResult | null = null;
 
     for (let m = 0; m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths; m++) {
-      const start = monthStart(asOf, m);
-      const checkIn = dateOnly(start);
-      const checkOut = dateOnly(addDays(start, HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights));
-      const yearMonth = checkIn.slice(0, 7);
+      const { checkIn, checkOut, yearMonth } = hybridPricingWindowForMonth(asOf, m);
       const airbnb = await fetchAirbnbMedianNightly({ community: args.community, bedrooms, checkIn, checkOut, searchName });
       if (HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs));

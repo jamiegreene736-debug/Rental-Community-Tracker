@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { calculateBlendedRate } from "../server/hybrid-pricing";
+import { calculateBlendedRate, hybridPricingWindowForMonth } from "../server/hybrid-pricing";
 
 const july = calculateBlendedRate({
   airbnbMedianNightly: 500,
@@ -28,5 +28,13 @@ assert.equal(december.demandClass, "ultra");
 assert.equal(december.seasonTierId, "ultra_holiday");
 assert.equal(december.layers.some((layer) => layer.ruleId === "multi_unit"), true);
 assert.equal(december.finalRate, 939);
+
+const mayWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 0);
+assert.equal(mayWindow.checkIn, "2026-05-29");
+assert.equal(mayWindow.checkOut, "2026-06-05");
+
+const juneWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 1);
+assert.equal(juneWindow.checkIn, "2026-06-01");
+assert.equal(juneWindow.checkOut, "2026-06-08");
 
 console.log("hybrid pricing suite passed");
