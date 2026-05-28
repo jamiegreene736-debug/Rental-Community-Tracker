@@ -538,6 +538,7 @@ export function startBulkAvailabilityQueue(propertyIds?: number[], weeksAhead = 
   };
   bulkAvailabilityQueuePaused = false;
   bulkAvailabilityQueueCancelRequested = false;
+  scanAborted = false;
 
   void processBulkAvailabilityQueue(bulkAvailabilityQueue);
   return bulkAvailabilityQueue;
@@ -665,6 +666,7 @@ export async function runAvailabilityScan(
 
   scannerRunning = true;
   currentScanPropertyId = targetPropertyId || null;
+  scanAborted = false;
   let runId = -1;
   const laneOwnerId = `legacy-availability:${targetPropertyId ?? "all"}:${Date.now()}`;
   let lane: Awaited<ReturnType<typeof acquireSidecarLane>> | null = null;
