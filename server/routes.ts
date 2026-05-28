@@ -21,6 +21,7 @@ import {
   rentalAgreements,
   queueJobEvents as queueJobEventRows,
 } from "@shared/schema";
+import type { BuyIn } from "@shared/schema";
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
@@ -143,7 +144,7 @@ import {
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
-import { fallbackWalkForResort } from "@shared/walking-distance";
+import { fallbackWalkForResort, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
   unitBuilderData,
@@ -6738,6 +6739,85 @@ export async function registerRoutes(
   // The UI calls this after at least two slots are filled. It prefers
   // exact saved/scraped addresses, then uses listing titles + known resort
   // street/city hints so the operator can spot units that are far apart.
+  async function estimateAttachedBuyInProximity(attachedBuyIns: BuyIn[]) {
+    const sorted = attachedBuyIns
+      .filter((b) => b.status !== "cancelled")
+      .sort((a, b) => String(a.unitLabel ?? "").localeCompare(String(b.unitLabel ?? "")));
+    if (sorted.length < 2) return null;
+
+    const propertyId = Number(sorted[0]?.propertyId);
+    const communityName =
+      (Number.isFinite(propertyId) ? PROPERTY_UNIT_NEEDS[propertyId]?.community : undefined) ??
+      String(sorted[0]?.propertyName ?? "").trim() ??
+      null;
+    const loc = communityName ? COMMUNITY_LOCATION_BY_KEY[communityName] : undefined;
+    const resortName = loc?.searchName ?? communityName ?? undefined;
+
+    const units = await Promise.all(
+      sorted.map(async (buyIn) => {
+        const guess = buildAddressGuess(buyIn, communityName, loc);
+        const scraped = guess.source === "saved"
+          ? null
+          : await scrapeAddressFromListingUrl(buyIn.airbnbListingUrl).catch(() => null);
+        const scrapedUnitToken = extractAddressUnitToken(scraped);
+        const finalGuess: ListingAddressGuess = scraped
+          ? { ...guess, address: scraped, source: "scraped", unitToken: scrapedUnitToken ?? guess.unitToken }
+          : guess;
+        return {
+          buyInId: buyIn.id,
+          unitId: buyIn.unitId,
+          unitLabel: buyIn.unitLabel,
+          listingUrl: buyIn.airbnbListingUrl,
+          title: finalGuess.title,
+          unitToken: finalGuess.unitToken,
+          address: finalGuess.address,
+          addressSource: finalGuess.source,
+        };
+      }),
+    );
+
+    const exactAddressCount = units.filter((u) => {
+      if (u.addressSource !== "saved" && u.addressSource !== "scraped") return false;
+      return Boolean(extractAddressUnitToken(u.address));
+    }).length;
+
+    let worstPair: { a: typeof units[number]; b: typeof units[number]; walk: WalkResult } | null = null;
+    for (let i = 0; i < units.length; i++) {
+      for (let j = i + 1; j < units.length; j++) {
+        let walk = await walkBetween(units[i].address, units[j].address, resortName).catch(() => fallbackWalkForResort(resortName));
+        if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
+          // Resort-title searches can geocode both units to the same resort
+          // centroid. In that case the resort footprint default is more honest
+          // than telling the operator two unknown buildings are "steps apart."
+          walk = fallbackWalkForResort(resortName);
+        }
+        if (!worstPair || walk.minutes > worstPair.walk.minutes) {
+          worstPair = { a: units[i], b: units[j], walk };
+        }
+      }
+    }
+
+    if (!worstPair) return null;
+    return {
+      propertyId: Number.isFinite(propertyId) ? propertyId : null,
+      community: communityName,
+      resortName,
+      units,
+      walk: worstPair.walk,
+      confidence: exactAddressCount >= 2 && worstPair.walk.source === "geocoded"
+        ? "exact-address" as const
+        : worstPair.walk.source === "geocoded"
+          ? "listing-title" as const
+          : "resort-default" as const,
+      withinLimit: worstPair.walk.minutes <= MAX_BUY_IN_WALK_MINUTES,
+      maxMinutes: MAX_BUY_IN_WALK_MINUTES,
+      worstPair: {
+        buyInIds: [worstPair.a.buyInId, worstPair.b.buyInId],
+        unitLabels: [worstPair.a.unitLabel, worstPair.b.unitLabel],
+      },
+    };
+  }
+
   app.get("/api/bookings/:reservationId/unit-proximity", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
@@ -6753,62 +6833,19 @@ export async function registerRoutes(
         });
       }
 
-      const propertyId = Number(attached[0]?.propertyId);
-      const communityName =
-        (Number.isFinite(propertyId) ? PROPERTY_UNIT_NEEDS[propertyId]?.community : undefined) ??
-        String(req.query.resort ?? attached[0]?.propertyName ?? "").trim() ??
-        null;
-      const loc = communityName ? COMMUNITY_LOCATION_BY_KEY[communityName] : undefined;
-      const resortName = loc?.searchName ?? communityName ?? undefined;
-
-      const units = await Promise.all(
-        attached.slice(0, 2).map(async (buyIn) => {
-          const guess = buildAddressGuess(buyIn, communityName, loc);
-          const scraped = guess.source === "saved"
-            ? null
-            : await scrapeAddressFromListingUrl(buyIn.airbnbListingUrl).catch(() => null);
-          const scrapedUnitToken = extractAddressUnitToken(scraped);
-          const finalGuess: ListingAddressGuess = scraped
-            ? { ...guess, address: scraped, source: "scraped", unitToken: scrapedUnitToken ?? guess.unitToken }
-            : guess;
-          return {
-            buyInId: buyIn.id,
-            unitId: buyIn.unitId,
-            unitLabel: buyIn.unitLabel,
-            listingUrl: buyIn.airbnbListingUrl,
-            title: finalGuess.title,
-            unitToken: finalGuess.unitToken,
-            address: finalGuess.address,
-            addressSource: finalGuess.source,
-          };
-        }),
-      );
-
-      let walk = await walkBetween(units[0].address, units[1].address, resortName).catch(() => fallbackWalkForResort(resortName));
-      const exactAddressCount = units.filter((u) => {
-        if (u.addressSource !== "saved" && u.addressSource !== "scraped") return false;
-        return Boolean(extractAddressUnitToken(u.address));
-      }).length;
-      if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
-        // Resort-title searches can geocode both units to the same resort
-        // centroid. In that case the resort footprint default is more honest
-        // than telling the operator two unknown buildings are "steps apart."
-        walk = fallbackWalkForResort(resortName);
+      const proximity = await estimateAttachedBuyInProximity(attached);
+      if (!proximity) {
+        return res.json({
+          status: "not_enough",
+          reservationId,
+          message: "At least two attached buy-ins are needed before proximity can be estimated.",
+        });
       }
 
       res.json({
         status: "ready",
         reservationId,
-        propertyId: Number.isFinite(propertyId) ? propertyId : null,
-        community: communityName,
-        resortName,
-        units,
-        walk,
-        confidence: exactAddressCount >= 2 && walk.source === "geocoded"
-          ? "exact-address"
-          : walk.source === "geocoded"
-            ? "listing-title"
-            : "resort-default",
+        ...proximity,
         generatedAt: new Date().toISOString(),
       });
     } catch (err: any) {
@@ -13968,6 +14005,21 @@ export async function registerRoutes(
       const reservationId = req.params.reservationId;
       const { buyInId } = req.body as { buyInId: number };
       if (!buyInId) return res.status(400).json({ error: "buyInId required" });
+
+      const candidate = await storage.getBuyIn(buyInId);
+      if (!candidate) return res.status(404).json({ error: "Buy-in not found" });
+      const currentAttachments = (await storage.getBuyInsByReservation(reservationId))
+        .filter((b) => b.id !== buyInId && b.status !== "cancelled");
+      const proximity = await estimateAttachedBuyInProximity([...currentAttachments, candidate]);
+      if (proximity && !proximity.withinLimit) {
+        return res.status(409).json({
+          error: "Buy-in units too far apart",
+          message: `Buy-in units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking distance. Estimated ${proximity.walk.minutes} minutes between ${proximity.worstPair.unitLabels.join(" and ")}.`,
+          walk: proximity.walk,
+          maxMinutes: MAX_BUY_IN_WALK_MINUTES,
+          confidence: proximity.confidence,
+        });
+      }
 
       const buyIn = await storage.attachBuyIn(buyInId, reservationId);
       if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });

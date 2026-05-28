@@ -10,6 +10,7 @@ import { researchCommunitiesForCity } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "../shared/community-addresses";
 import { checkCommunityType } from "../shared/community-type";
+import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "../server/photo-match-guardrails";
 
 // ---------- Import the internals we want to test ----------
@@ -1051,6 +1052,9 @@ assert.equal(
   "generate-listing fallback must not reference removed DISCLOSURE constant",
 );
 console.log("  ✓ generate-listing fallback has no stale DISCLOSURE reference");
+
+assert.equal(MAX_BUY_IN_WALK_MINUTES, 10, "buy-in unit walking-distance guardrail should stay at 10 minutes");
+console.log("  ✓ buy-in walking-distance guardrail is pinned at 10 minutes");
 
 const schemaMaintenanceSource = readFileSync(new URL("../server/schema-maintenance.ts", import.meta.url), "utf8");
 for (const col of ["single_listing", "booking_title", "property_type", "unit1_bathrooms", "unit2_bathrooms"]) {

@@ -597,6 +597,8 @@ type UnitProximityResponse =
         source: "geocoded" | "fallback";
       };
       confidence: "exact-address" | "listing-title" | "resort-default";
+      withinLimit?: boolean;
+      maxMinutes?: number;
       generatedAt: string;
     };
 
@@ -914,15 +916,23 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
     return new RegExp(`(?:#|unit\\s+|apt\\s+)${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(unit.address);
   };
 
+  const isTooFar = query.data?.status === "ready" && query.data.withinLimit === false;
+  const limit = query.data?.status === "ready" ? query.data.maxMinutes ?? 10 : 10;
+  const cardClass = isTooFar
+    ? "rounded border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-950 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-100"
+    : "rounded border border-sky-200 bg-sky-50/65 px-3 py-2 text-xs text-sky-950 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-100";
+  const mutedClass = isTooFar ? "text-red-800 dark:text-red-200" : "text-sky-800 dark:text-sky-200";
+  const tinyClass = isTooFar ? "text-red-700 dark:text-red-300" : "text-sky-700 dark:text-sky-300";
+
   return (
-    <div className="rounded border border-sky-200 bg-sky-50/65 px-3 py-2 text-xs text-sky-950 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-100">
+    <div className={cardClass}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="inline-flex items-center gap-1 font-medium">
           <Footprints className="h-3.5 w-3.5" />
           Unit walking distance
         </span>
         {query.isLoading ? (
-          <span className="inline-flex items-center gap-1 text-sky-800 dark:text-sky-200">
+          <span className={`inline-flex items-center gap-1 ${mutedClass}`}>
             <Loader2 className="h-3 w-3 animate-spin" />
             checking addresses...
           </span>
@@ -930,22 +940,24 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
           <span className="text-amber-700 dark:text-amber-300">Could not estimate automatically</span>
         ) : query.data?.status === "ready" ? (
           <>
-            <Badge className="bg-sky-700 text-white text-[10px]">
+            <Badge className={`${isTooFar ? "bg-red-700" : "bg-sky-700"} text-white text-[10px]`}>
               {query.data.walk.minutes} min walk
             </Badge>
-            <span className="text-sky-800 dark:text-sky-200">
-              {query.data.walk.description}
+            <span className={mutedClass}>
+              {isTooFar
+                ? `Too far to assign: ${query.data.walk.description} Buy-in units must be within ${limit} minutes.`
+                : query.data.walk.description}
             </span>
-            <span className="text-[10px] text-sky-700 dark:text-sky-300">
+            <span className={`text-[10px] ${tinyClass}`}>
               {sourceText(query.data)}
             </span>
           </>
         ) : (
-          <span className="text-sky-800 dark:text-sky-200">waiting for two attached units</span>
+          <span className={mutedClass}>waiting for two attached units</span>
         )}
       </div>
       {query.data?.status === "ready" && (
-        <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-sky-800 dark:text-sky-200">
+        <div className={`mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[10px] ${mutedClass}`}>
           {query.data.units.map((unit) => (
             <span key={unit.buyInId} className="inline-flex items-center gap-1 min-w-0" title={unit.address}>
               <MapPin className="h-3 w-3 shrink-0" />
