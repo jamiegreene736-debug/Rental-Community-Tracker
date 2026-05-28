@@ -35,13 +35,18 @@ assert.equal(december.seasonTierId, "ultra_holiday");
 assert.equal(december.layers.some((layer) => layer.ruleId === "multi_unit"), true);
 assert.equal(december.finalRate, 939);
 
-const mayWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 0);
+const mayWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 0, 7, () => 0);
 assert.equal(mayWindow.checkIn, "2026-05-29");
 assert.equal(mayWindow.checkOut, "2026-06-05");
 
-const juneWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 1);
+const juneWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 1, 7, () => 0);
 assert.equal(juneWindow.checkIn, "2026-06-01");
 assert.equal(juneWindow.checkOut, "2026-06-08");
+
+const lateJuneWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 1, 7, () => 0.999);
+assert.equal(lateJuneWindow.yearMonth, "2026-06");
+assert.equal(lateJuneWindow.checkIn, "2026-06-24");
+assert.equal(lateJuneWindow.checkOut, "2026-07-01");
 
 assert.equal(isSearchApiAirbnbNoResultsError("SearchAPI Airbnb: Airbnb didn't return any results."), true);
 

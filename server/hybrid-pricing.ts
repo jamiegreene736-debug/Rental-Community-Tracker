@@ -311,16 +311,32 @@ function monthStart(base: Date, offset: number): Date {
   return new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + offset, 1));
 }
 
-export function hybridPricingWindowForMonth(asOf: Date, monthOffset: number, stayNights = HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights): { yearMonth: string; checkIn: string; checkOut: string } {
+function randomIntInclusive(min: number, max: number, rng: () => number): number {
+  if (max <= min) return min;
+  return min + Math.floor(rng() * (max - min + 1));
+}
+
+export function hybridPricingWindowForMonth(
+  asOf: Date,
+  monthOffset: number,
+  stayNights = HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights,
+  rng: () => number = Math.random,
+): { yearMonth: string; checkIn: string; checkOut: string } {
   const start = monthStart(asOf, monthOffset);
+  const monthEnd = monthStart(asOf, monthOffset + 1);
   const todayUtc = new Date(Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate()));
   const earliestCurrentMonthCheckIn = addDays(todayUtc, 2);
-  const checkInDate = monthOffset === 0 && start <= earliestCurrentMonthCheckIn
+  const firstEligibleDate = monthOffset === 0 && start <= earliestCurrentMonthCheckIn
     ? earliestCurrentMonthCheckIn
     : start;
+  const latestCheckInDate = addDays(monthEnd, -stayNights);
+  const firstEligibleMs = firstEligibleDate.getTime();
+  const latestCheckInMs = latestCheckInDate.getTime();
+  const spanDays = Math.max(0, Math.floor((latestCheckInMs - firstEligibleMs) / MS_PER_DAY));
+  const checkInDate = addDays(firstEligibleDate, randomIntInclusive(0, spanDays, rng));
   const checkIn = dateOnly(checkInDate);
   return {
-    yearMonth: checkIn.slice(0, 7),
+    yearMonth: dateOnly(start).slice(0, 7),
     checkIn,
     checkOut: dateOnly(addDays(checkInDate, stayNights)),
   };
