@@ -6,8 +6,28 @@
 // the marked-up base calendar rate is pushed.
 // ─────────────────────────────────────────────────────────────
 
-export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
-export type RegionType = "hawaii" | "florida";
+import {
+  BUY_IN_RATES,
+  SEASON_MULTIPLIERS,
+  getBuyInRate,
+  getCommunityRegion,
+  getLiveBuyIn,
+  getSeasonForMonth,
+  setLivePropertyMarketRates,
+  type LivePropertyMarketRateInput,
+  type RegionType,
+  type SeasonType,
+} from "@shared/pricing-rates";
+import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+
+export {
+  getBuyInRate,
+  getCommunityRegion,
+  getLiveBuyIn,
+  getSeasonForMonth,
+  setLivePropertyMarketRates,
+};
+export type { LivePropertyMarketRateInput, RegionType, SeasonType };
 
 export type MonthRate = {
   month: string;
@@ -109,15 +129,6 @@ export function actualMarginPct(sellRate: number, buyIn: number, channel: Channe
 }
 
 // ─────────────────────────────────────────────────────────────
-// SEASON MULTIPLIERS — region-specific, 3 tiers
-// ─────────────────────────────────────────────────────────────
-
-const SEASON_MULTIPLIERS: Record<RegionType, Record<SeasonType, number>> = {
-  hawaii:  { LOW: 0.80, HIGH: 1.30, HOLIDAY: 1.80 },
-  florida: { LOW: 0.75, HIGH: 1.25, HOLIDAY: 1.70 },
-};
-
-// ─────────────────────────────────────────────────────────────
 // HOLIDAY DATE RANGES — day-level detection overrides monthly season
 // Month numbers are 1-indexed. Ranges use startMonth/startDay → endMonth/endDay.
 // ─────────────────────────────────────────────────────────────
@@ -160,127 +171,10 @@ export function isHolidayDate(date: Date): boolean {
   return getHolidayLabel(date) !== null;
 }
 
-// ─────────────────────────────────────────────────────────────
-// MONTHLY SEASON MAPS — LOW or HIGH only
-// (HOLIDAY is detected at the day level and takes priority)
-// ─────────────────────────────────────────────────────────────
-
-const HAWAII_SEASONS: Record<string, SeasonType> = {
-  "2026-04": "HIGH",   // Spring Break / Easter
-  "2026-05": "LOW",
-  "2026-06": "HIGH",
-  "2026-07": "HIGH",
-  "2026-08": "HIGH",
-  "2026-09": "LOW",
-  "2026-10": "LOW",
-  "2026-11": "LOW",
-  "2026-12": "HIGH",   // Holiday detected within at day level
-  "2027-01": "HIGH",   // Holiday detected within at day level
-  "2027-02": "LOW",
-  "2027-03": "HIGH",   // Spring Break
-  "2027-04": "HIGH",
-  "2027-05": "LOW",
-  "2027-06": "HIGH",
-  "2027-07": "HIGH",
-  "2027-08": "HIGH",
-  "2027-09": "LOW",
-  "2027-10": "LOW",
-  "2027-11": "LOW",
-  "2027-12": "HIGH",
-  "2028-01": "HIGH",
-  "2028-02": "LOW",
-  "2028-03": "HIGH",
-  "2028-04": "HIGH",
-};
-
-const FLORIDA_SEASONS: Record<string, SeasonType> = {
-  "2026-04": "HIGH",
-  "2026-05": "LOW",
-  "2026-06": "HIGH",
-  "2026-07": "HIGH",
-  "2026-08": "HIGH",
-  "2026-09": "LOW",
-  "2026-10": "LOW",
-  "2026-11": "LOW",
-  "2026-12": "HIGH",
-  "2027-01": "LOW",
-  "2027-02": "LOW",
-  "2027-03": "HIGH",
-  "2027-04": "HIGH",
-  "2027-05": "LOW",
-  "2027-06": "HIGH",
-  "2027-07": "HIGH",
-  "2027-08": "HIGH",
-  "2027-09": "LOW",
-  "2027-10": "LOW",
-  "2027-11": "LOW",
-  "2027-12": "HIGH",
-  "2028-01": "LOW",
-  "2028-02": "LOW",
-  "2028-03": "HIGH",
-  "2028-04": "HIGH",
-};
-
-// ─────────────────────────────────────────────────────────────
-// BASE BUY-IN RATES — per community, per bedroom count
-// Source: Airbnb & VRBO live listings · May 2026 · nightly, pre-fees
-// ─────────────────────────────────────────────────────────────
-
-type CommunityRate = {
-  "2BR"?: number;
-  "3BR"?: number;
-  "4BR"?: number;
-  "5BR"?: number;
-  region: RegionType;
-};
-
-const BUY_IN_RATES: Record<string, CommunityRate> = {
-  // Kauai – South Shore
-  "Poipu Kai":        { "2BR": 516, "3BR": 636, "4BR": 858,            region: "hawaii" },
-  "Poipu Oceanfront": { "2BR": 630, "3BR": 792, "4BR": 936,            region: "hawaii" },
-  "Poipu Brenneckes": { "2BR": 510, "3BR": 618, "4BR": 864,            region: "hawaii" },
-  "Pili Mai":         { "2BR": 576, "3BR": 744, "4BR": 840,            region: "hawaii" },
-  // Kauai – East Shore
-  "Kapaa Beachfront": { "2BR": 588, "3BR": 840, "4BR": 1020,           region: "hawaii" },
-  // Kauai – North Shore
-  "Princeville":      { "2BR": 492, "3BR": 744, "4BR": 858,            region: "hawaii" },
-  // Kauai – West Shore
-  "Kekaha Beachfront":{ "2BR": 540, "3BR": 810, "4BR": 1080,           region: "hawaii" },
-  // Big Island – Kona Coast
-  "Keauhou":          { "2BR": 312,                                     region: "hawaii" },
-  // Florida – Orlando Area
-  "Southern Dunes":   {            "3BR": 192, "4BR": 200,             region: "florida" },
-  "Windsor Hills":    {            "3BR": 210, "4BR": 294,             region: "florida" },
-};
-
-const FALLBACK_RATE_PER_BEDROOM = 270;
-
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ];
-
-// ─────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────
-
-export function getCommunityRegion(community: string): RegionType {
-  return BUY_IN_RATES[community]?.region ?? "hawaii";
-}
-
-// Live-rate cache moved to `shared/pricing-rates.ts` so dashboard
-// (`home.tsx → computeBaseRate`) and Builder Pricing tab read from
-// the same Map. This file re-exports the public surface for code
-// that imports from `@/data/pricing-data` (the Builder, drafts).
-// New callers should import directly from `@shared/pricing-rates`.
-import { setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, type LivePropertyMarketRateInput } from "@shared/pricing-rates";
-export { setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate };
-export type { LivePropertyMarketRateInput };
-
-function getSeasonForMonth(yearMonth: string, region: RegionType): SeasonType {
-  const map = region === "florida" ? FLORIDA_SEASONS : HAWAII_SEASONS;
-  return map[yearMonth] ?? "LOW";
-}
 
 // Get season for a specific calendar date (holiday detection takes priority)
 export function getSeasonForDate(date: Date, region: RegionType): SeasonType {
@@ -411,37 +305,6 @@ export function getSeasonalRateReference(
 
   return { community: config.community, region, rates, totalUnits: config.units.length };
 }
-
-// ─────────────────────────────────────────────────────────────
-// PROPERTY → UNIT CONFIGURATION
-// ─────────────────────────────────────────────────────────────
-
-type UnitConfig = {
-  unitId: string;
-  unitLabel: string;
-  bedrooms: number;
-};
-
-// CONDO / TOWNHOME ONLY — mirrors shared/property-units.ts. No villas, detached
-// houses, or single-family dwellings. Properties 7, 10, 12, 14, 21, 26, 28, 31,
-// 36 were removed 2026-04 as part of a business-model pivot.
-const PROPERTY_UNIT_CONFIGS: Record<number, { community: string; units: UnitConfig[] }> = {
-  1:  { community: "Poipu Kai",         units: [{ unitId: "924", unitLabel: "Unit 924", bedrooms: 3 }, { unitId: "114", unitLabel: "Unit 114", bedrooms: 2 }, { unitId: "911", unitLabel: "Unit 911", bedrooms: 2 }] },
-  4:  { community: "Poipu Kai",         units: [{ unitId: "721", unitLabel: "Unit 721", bedrooms: 3 }, { unitId: "812", unitLabel: "Unit 812", bedrooms: 3 }] },
-  8:  { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
-  9:  { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
-  18: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
-  19: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 }] },
-  20: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 }] },
-  23: { community: "Kapaa Beachfront",  units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
-  24: { community: "Poipu Oceanfront",  units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
-  27: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 2 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
-  29: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 4 }] },
-  32: { community: "Pili Mai",          units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 }] },
-  33: { community: "Pili Mai",          units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 }] },
-  34: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
-  37: { community: "Windsor Hills",     units: [{ unitId: "main", unitLabel: "Main Condo", bedrooms: 3 }] },
-};
 
 // ─────────────────────────────────────────────────────────────
 // EXPORTED FUNCTIONS
