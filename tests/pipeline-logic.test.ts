@@ -881,7 +881,9 @@ console.log("\nPoipu Kai buy-in target guard suite");
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const isPoipuKaiCondoLike = (haystack: string): boolean => {
     const n = norm(haystack);
-    const hasNamedPoipuKaiComplex = /\b(regency|kahala|manualoha|nihi kai|poipu sands)\b/.test(n);
+    const hasWrongPoipuKaiLocation = /\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo)\b/.test(n);
+    if (hasWrongPoipuKaiLocation) return false;
+    const hasNamedPoipuKaiComplex = /\b(regency|kahala|manualoha|poipu sands)\b/.test(n);
     if (hasNamedPoipuKaiComplex) return true;
     const hasPoipuKai = /\bpoipu kai\b/.test(n);
     const hasCondoSignal = /\b(condo|condominium|villa|villas|apartment|townhome|townhouse|unit|suite)\b/.test(n);
@@ -906,6 +908,13 @@ console.log("\nPoipu Kai buy-in target guard suite");
     "Poipu Kai plus apartment/condo-style signal should pass",
   );
   console.log("  ✓ Poipu Kai condo/sub-community listings still pass");
+
+  assert.equal(
+    isPoipuKaiCondoLike("Nihi Kai 201, Kipu, 96756, United States"),
+    false,
+    "Nihi Kai / Kipu should not pass as Poipu Kai inventory",
+  );
+  console.log("  ✓ Nihi Kai / Kipu rows are rejected as off-target");
 }
 
 // ---------- Buy-in final target bedroom proof ----------

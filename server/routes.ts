@@ -9170,13 +9170,13 @@ export async function registerRoutes(
       // does not pass just because it contains the separated words.
       const hasLocality = /\b(poipu|koloa|kauai)\b/.test(n);
       return hasLocality && (
-        /\b(regency|kahala|manualoha|nihi kai|poipu sands)\b/.test(n)
+        /\b(regency|kahala|manualoha|poipu sands)\b/.test(n)
       );
     };
     const mentionsKnownNonPoipuKaiComplex = (haystack: string): boolean => {
       if (normalizedResortName !== "poipu kai") return false;
       const n = norm(haystack);
-      return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers?|jobs?|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
+      return /\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers?|jobs?|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
     };
     const mentionsKnownNonKahaLaniComplex = (haystack: string): boolean => {
       if (!targetIsKahaLani) return false;
@@ -9614,11 +9614,11 @@ export async function registerRoutes(
         return mentionsRegencyPoipuKai(hay);
       }
       if (normalizedResortName !== "poipu kai") return true;
-      if (c.source === "airbnb" && c.inTargetBounds) return true;
       const n = norm(candidateHaystack(c));
       if (mentionsKnownNonPoipuKaiComplex(n)) return false;
+      if (c.source === "airbnb" && c.inTargetBounds) return true;
       const hasNamedPoipuKaiComplex =
-        /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n)
+        /\b(regency|kahala|manualoha|makanui|poipu sands)\b/.test(n)
         || /\bvillas?\s+at\s+poipu\s+kai\b/.test(n)
         || /\bpoipu\s+kai\s+villas?\b/.test(n);
       if (hasNamedPoipuKaiComplex) return true;
@@ -12326,7 +12326,7 @@ export async function registerRoutes(
       const n = normalizeText(haystack);
       if (isRegencyPoipuKaiContext) return regencyPoipuKaiTextMatch(n);
       return /\bpoipu kai\b/.test(n)
-        || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n))
+        || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|poipu sands)\b/.test(n))
         || /\bvillas?\s+at\s+poipu\s+kai\b/.test(n)
         || /\bpoipu\s+kai\s+villas?\b/.test(n);
     };
@@ -12335,7 +12335,7 @@ export async function registerRoutes(
       const n = normalizeText(haystack);
       if (/\b(banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers springboardhospitality|job|jobs|career|careers|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie)\b/.test(n)) return true;
       if (isRegencyPoipuKaiContext && /\b(nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston)\b/.test(n)) return true;
-      return /\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|kihei|wailea|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
+      return /\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|kihei|wailea|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
     };
     const rentalSurface = (domain: string, haystack: string): boolean => {
       const d = domain.toLowerCase();
@@ -12573,9 +12573,9 @@ export async function registerRoutes(
           return /\bregency\b/.test(n) && /\b(poipu kai|poipu|koloa|kauai)\b/.test(n);
         }
         if (directTargetIsPoipuKai) {
-          if (/\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(n)) return false;
+          if (/\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea)\b/.test(n)) return false;
           return /\bpoipu kai\b/.test(n)
-            || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(n))
+            || (/\b(poipu|koloa|kauai)\b/.test(n) && /\b(regency|kahala|manualoha|makanui|poipu sands)\b/.test(n))
             || /\bvillas?\s+at\s+poipu\s+kai\b/.test(n)
             || /\bpoipu\s+kai\s+villas?\b/.test(n);
         }

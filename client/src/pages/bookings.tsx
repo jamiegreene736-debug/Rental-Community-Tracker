@@ -2032,9 +2032,9 @@ function directCandidateFitsTarget(
   }
   const targetIsPoipuKai = /\bpoipu kai\b/.test(targetText);
   if (targetIsPoipuKai) {
-    if (/\b(pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|career|careers|job|jobs|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(hay)) return false;
+    if (/\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|career|careers|job|jobs|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(hay)) return false;
     return /\bpoipu kai\b/.test(hay)
-      || (/\b(poipu|koloa|kauai)\b/.test(hay) && /\b(regency|kahala|manualoha|makanui|nihi kai|poipu sands)\b/.test(hay))
+      || (/\b(poipu|koloa|kauai)\b/.test(hay) && /\b(regency|kahala|manualoha|makanui|poipu sands)\b/.test(hay))
       || /\bvillas?\s+at\s+poipu\s+kai\b/.test(hay)
       || /\bpoipu\s+kai\s+villas?\b/.test(hay)
       || /\b1831\s+poipu\b/.test(hay);
@@ -2056,7 +2056,7 @@ function targetLocationRejectReason(
   if (targetIsRegencyPoipuKai && /\b(banyan harbor|lihue|kalapaki|springboard hospitality|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|pili mai|kiahuna|makahuena|waikomo|nihi kai|kahala|manualoha|makanui|poipu sands|villas at poipu kai|poipu kai villas|aston)\b/.test(hay)) {
     return `not in ${targetResortName}`;
   }
-  if (/\bpoipu kai\b/.test(targetText) && /\b(banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|career|careers|job|jobs|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(hay)) {
+  if (/\bpoipu kai\b/.test(targetText) && /\b(banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|career|careers|job|jobs|blue tide|bluetidevillas|leilani house|kauai kailani|kapaa|kapa a|kuhio highway|kuhio|royal coconut coast|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(hay)) {
     return `not in ${community}`;
   }
   return null;
@@ -2666,9 +2666,7 @@ function ComboComparisonPanel({
     sourceLabel?: string | null;
     title?: string | null;
     url?: string | null;
-  }) =>
-    !/^Direct PM\b/i.test(candidate.sourceLabel ?? "")
-    || directCandidateFitsTarget(targetResortName, community, candidate);
+  }) => directCandidateFitsTarget(targetResortName, community, candidate);
   const visibleOptions = options.map((option) => {
     const filteredPicks = option.picks.filter(candidateVisibleForTarget);
     const allPicksVisible = filteredPicks.length === option.picks.length;
@@ -2678,7 +2676,7 @@ function ComboComparisonPanel({
       totalCost: allPicksVisible ? option.totalCost : null,
       unavailableReason: allPicksVisible
         ? option.unavailableReason
-        : "Filtered out direct-link rows that did not match the target resort",
+        : `Filtered out off-target rows that did not match ${targetResortName || community}`,
       picks: filteredPicks,
       pools: option.pools?.map((pool) => ({
         ...pool,
@@ -2772,7 +2770,7 @@ function ComboComparisonPanel({
     }
     return picks.length > 0 ? picks : null;
   };
-  const optimizedCombos = options
+  const optimizedCombos = visibleOptions
     .map((option) => {
       const picks = distinctCheapestDirectPicks(option);
       if (!picks) return null;
@@ -5141,6 +5139,28 @@ export default function Bookings() {
           })),
         })),
       });
+      const distinctCandidateCount = (candidates: LiveCandidate[]): number => {
+        const seen = new Set<string>();
+        let count = 0;
+        for (const candidate of candidates) {
+          if (hasUsedListingIdentity(seen, candidate)) continue;
+          addUsedListingIdentity(seen, candidate);
+          count++;
+        }
+        return count;
+      };
+      const repeatedBedroomShortageReason = (
+        combo: TwoUnitBedroomCombo,
+        index: number,
+        pool: EvaluatedCombo["pools"][number] | undefined,
+        fallback: string,
+      ): string => {
+        const bedrooms = combo.bedrooms[index];
+        const needed = combo.bedrooms.filter((n) => n === bedrooms).length;
+        if (needed <= 1) return fallback;
+        const available = distinctCandidateCount(pool?.candidates ?? []);
+        return `Only ${available} distinct target-matching ${bedrooms}BR option${available === 1 ? "" : "s"} found; ${needed} distinct ${bedrooms}BR units are required for the ${combo.bedrooms.map((b) => `${b}BR`).join(" + ")} combo.`;
+      };
       const evaluateTwoUnitCombos = async (): Promise<{
         best: EvaluatedCombo | null;
         options: AutoFillComboOption[];
@@ -5194,9 +5214,15 @@ export default function Bookings() {
               const pick = planned.picks[i];
               if (!pick) {
                 const pool = pools[i];
-                unavailableReason ||= pool?.unavailableReason ?? `No unused ${missingLabel} ${combo.bedrooms[i]}BR option`;
+                const shortageReason = repeatedBedroomShortageReason(
+                  combo,
+                  i,
+                  pool,
+                  pool?.unavailableReason ?? `No unused ${missingLabel} ${combo.bedrooms[i]}BR option`,
+                );
+                unavailableReason ||= shortageReason;
                 unavailableDetails.push(
-                  `${combo.bedrooms[i]}BR: ${pool?.unavailableReason ?? `No unused ${missingLabel} option`}`,
+                  `${combo.bedrooms[i]}BR: ${shortageReason}`,
                   ...(pool?.unavailableDetails ?? []).map((detail) => `${combo.bedrooms[i]}BR ${detail}`),
                 );
                 break;
@@ -5333,9 +5359,15 @@ export default function Bookings() {
             const pick = pool.candidates.find((candidate) => !hasUsedListingIdentity(used, candidate)) ?? null;
             if (!pick) {
               const lastPool = pools[pools.length - 1];
-              unavailableReason ||= lastPool?.unavailableReason ?? `No unused priced direct/Booking/VRBO ${bedroomCount}BR option or Airbnb fallback`;
+              const shortageReason = repeatedBedroomShortageReason(
+                combo,
+                pools.length - 1,
+                lastPool,
+                lastPool?.unavailableReason ?? `No unused priced direct/Booking/VRBO ${bedroomCount}BR option or Airbnb fallback`,
+              );
+              unavailableReason ||= shortageReason;
               unavailableDetails.push(
-                `${bedroomCount}BR: ${lastPool?.unavailableReason ?? "No provider option available"}`,
+                `${bedroomCount}BR: ${shortageReason}`,
                 ...(lastPool?.unavailableDetails ?? []).map((detail) => `${bedroomCount}BR ${detail}`),
               );
               continue;
