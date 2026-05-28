@@ -1130,6 +1130,22 @@ assert.equal(
 );
 console.log("  ✓ availability scheduler supports mapped draft-backed listings");
 
+const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
+assert.ok(
+  builderSource.includes("?fields=pictures"),
+  "Photos tab should read Guesty pictures with an explicit fields=pictures projection",
+);
+assert.ok(
+  builderSource.includes("fallbackCount"),
+  "Photos tab should not show a false zero when a verified last push exists",
+);
+const guestyServiceSource = readFileSync(new URL("../client/src/services/guestyService.ts", import.meta.url), "utf8");
+assert.ok(
+  guestyServiceSource.includes("isListed integrations airBnb homeAway bookingCom channels tags licenseNumber taxId"),
+  "Channel status should request the fields it needs instead of relying on Guesty's default listing shape",
+);
+console.log("  ✓ Guesty readbacks request explicit listing fields");
+
 const schemaMaintenanceSource = readFileSync(new URL("../server/schema-maintenance.ts", import.meta.url), "utf8");
 for (const col of ["single_listing", "booking_title", "property_type", "unit1_bathrooms", "unit2_bathrooms"]) {
   assert.ok(

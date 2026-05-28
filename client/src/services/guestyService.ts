@@ -223,8 +223,9 @@ class GuestyService {
     );
   }
 
-  async getListing(id: string) {
-    return this.request<Record<string, unknown>>("GET", `/listings/${id}`);
+  async getListing(id: string, fields?: string) {
+    const query = fields ? `fields=${encodeURIComponent(fields).replace(/%20/g, "%20")}` : "";
+    return this.request<Record<string, unknown>>("GET", `/listings/${id}`, null, query);
   }
 
   async createListing(data: GuestyPropertyData) {
@@ -407,7 +408,10 @@ class GuestyService {
   }
 
   async getChannelStatus(id: string): Promise<GuestyChannelStatus> {
-    const listing = await this.getListing(id) as Record<string, unknown>;
+    const listing = await this.getListing(
+      id,
+      "isListed integrations airBnb homeAway bookingCom channels tags licenseNumber taxId",
+    ) as Record<string, unknown>;
     const isListed = !!(listing.isListed);
 
     // Guesty stores channel connections in listing.integrations[] with platform keys

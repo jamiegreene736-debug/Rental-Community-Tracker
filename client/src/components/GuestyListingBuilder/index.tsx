@@ -1132,13 +1132,38 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     try { localStorage.setItem(`nexstay_push_${summary.listingId}`, JSON.stringify(summary)); } catch { /* non-fatal */ }
   }, []);
 
+  const readGuestyPictures = useCallback(async (listingId: string): Promise<{ pictures: any[]; collageUrl: string | null }> => {
+    const encodedId = encodeURIComponent(listingId);
+    const read = async (suffix: string) => {
+      const response = await fetch(`/api/guesty-proxy/listings/${encodedId}${suffix}`);
+      if (!response.ok) throw new Error(`Guesty listing read failed (${response.status})`);
+      return response.json();
+    };
+
+    let listing = await read("?fields=pictures");
+    let pictures: any[] = Array.isArray(listing?.pictures) ? listing.pictures : [];
+    if (!Array.isArray(listing?.pictures)) {
+      // Some Guesty responses omit fields when a projection is rejected or
+      // stale; fall back to the full listing before showing a zero count.
+      listing = await read("");
+      pictures = Array.isArray(listing?.pictures) ? listing.pictures : [];
+    }
+
+    const collage = pictures.find((p) => (p?.caption || "") === "Cover Collage");
+    return { pictures, collageUrl: collage?.original || collage?.url || null };
+  }, []);
+
   // Load persisted summary & fetch live photo count when listing selection changes
   useEffect(() => {
     if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); setGuestyCoverCollageUrl(null); setLastPushedPictures([]); setGuestyLiveAmenities(null); return; }
     // Restore from localStorage
+    let storedSummary: PushSummary | null = null;
     try {
       const stored = localStorage.getItem(`nexstay_push_${selectedId}`);
-      if (stored) setLastPushSummary(JSON.parse(stored));
+      if (stored) {
+        storedSummary = JSON.parse(stored);
+        setLastPushSummary(storedSummary);
+      }
       else setLastPushSummary(null);
     } catch { setLastPushSummary(null); }
     // Fetch live listing data — photo count + current amenities
@@ -1148,37 +1173,37 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setFetchingLiveAmenities(true);
     // Photo count comes from the listing; amenities from properties-api (Popular Amenities panel).
     Promise.all([
-      fetch(`/api/guesty-proxy/listings/${selectedId}`).then(r => r.json()).catch(() => null),
+      readGuestyPictures(selectedId).catch(() => null),
       fetch(`/api/builder/guesty-amenities?listingId=${selectedId}`).then(r => r.json()).catch(() => null),
     ])
-      .then(([listing, amen]) => {
-        const pictures: any[] = Array.isArray(listing?.pictures) ? listing.pictures : [];
-        setGuestyPhotoCount(pictures.length);
-        // Extract the cover-collage URL (first picture captioned
-        // "Cover Collage") so the PhotoCurator can render it as a tile.
-        const collage = pictures.find((p) => (p?.caption || "") === "Cover Collage");
-        setGuestyCoverCollageUrl(collage?.original || collage?.url || null);
+      .then(([photoRead, amen]) => {
+        const liveCount = photoRead?.pictures.length ?? 0;
+        const fallbackCount = storedSummary?.successCount && storedSummary.successCount > 0
+          ? storedSummary.successCount
+          : null;
+        setGuestyPhotoCount(liveCount > 0 ? liveCount : fallbackCount);
+        setGuestyCoverCollageUrl(photoRead?.collageUrl ?? null);
         const canonical: string[] = Array.isArray(amen?.amenities) ? amen.amenities : [];
         const other: string[] = Array.isArray(amen?.otherAmenities) ? amen.otherAmenities : [];
         setGuestyLiveAmenities(guestyNamesToProfileKeys([...canonical, ...other]));
       })
       .catch(() => { setGuestyPhotoCount(null); setGuestyCoverCollageUrl(null); setGuestyLiveAmenities(new Set()); })
       .finally(() => { setGuestyPhotoCountLoading(false); setFetchingLiveAmenities(false); });
-  }, [selectedId, guestyNamesToProfileKeys]);
+  }, [selectedId, guestyNamesToProfileKeys, readGuestyPictures]);
 
   // Refresh live count + cover-collage URL after a successful push
   const refreshGuestyPhotoCount = useCallback(() => {
     if (!selectedId) return;
-    fetch(`/api/guesty-proxy/listings/${selectedId}`)
-      .then(r => r.json())
-      .then((d: any) => {
-        const pictures: any[] = Array.isArray(d?.pictures) ? d.pictures : [];
-        setGuestyPhotoCount(pictures.length);
-        const collage = pictures.find((p) => (p?.caption || "") === "Cover Collage");
-        setGuestyCoverCollageUrl(collage?.original || collage?.url || null);
+    readGuestyPictures(selectedId)
+      .then(({ pictures, collageUrl }) => {
+        const fallbackCount = lastPushSummary?.listingId === selectedId && lastPushSummary.successCount > 0
+          ? lastPushSummary.successCount
+          : null;
+        setGuestyPhotoCount(pictures.length > 0 ? pictures.length : fallbackCount);
+        setGuestyCoverCollageUrl(collageUrl);
       })
       .catch(() => {});
-  }, [selectedId]);
+  }, [selectedId, lastPushSummary, readGuestyPictures]);
 
   const cancelPush = useCallback(() => {
     pushAbortRef.current?.abort();
