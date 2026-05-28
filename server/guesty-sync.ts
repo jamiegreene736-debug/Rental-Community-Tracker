@@ -29,7 +29,17 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
       || rawText.slice(0, 500)
       || `(no body)`;
     log(`[guesty] ${method} ${endpoint} → ${res.status}: ${message.slice(0, 300)}`, "guesty-error");
-    throw new Error(`Guesty ${res.status} on ${method} ${endpoint}: ${message}`);
+    const err = new Error(`Guesty ${res.status} on ${method} ${endpoint}: ${message}`) as Error & {
+      status?: number;
+      method?: string;
+      endpoint?: string;
+      rateLimited?: boolean;
+    };
+    err.status = res.status;
+    err.method = method;
+    err.endpoint = endpoint;
+    err.rateLimited = res.status === 429 || /rate.?limit|too many requests/i.test(message);
+    throw err;
   }
   if (res.status === 204) return { success: true };
 

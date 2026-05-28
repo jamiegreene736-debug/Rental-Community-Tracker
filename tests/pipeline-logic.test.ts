@@ -1145,6 +1145,25 @@ assert.ok(
 console.log("  ✓ Guesty pricing pushes marked-up base rates only");
 
 assert.ok(
+  routeSource.includes("guestyCalendarRequestWithRetry"),
+  "Guesty seasonal calendar pushes should retry throttled calendar writes instead of firing all ranges in a tight loop",
+);
+assert.ok(
+  routeSource.includes("Pushed ${pushedRanges}/${ranges.length} ranges; first failed range"),
+  "Guesty seasonal calendar pushes should surface partial range failures instead of reporting them as completed",
+);
+assert.ok(
+  routeSource.includes("Guesty read-back deferred because Guesty rate limited verification"),
+  "Guesty seasonal calendar pushes should not mark fully written rates as skipped just because read-back verification was rate-limited",
+);
+assert.equal(
+  routeSource.includes("Market rates saved; Guesty push skipped: ${reason}"),
+  false,
+  "Bulk market pricing should retry/fail Guesty push errors instead of hiding them as completed skipped pushes",
+);
+console.log("  ✓ bulk Guesty calendar pushes retry and do not hide partial failures");
+
+assert.ok(
   schedulerSource.includes("storage.getCommunityDraft(Math.abs(propertyId))"),
   "availability scheduler should resolve mapped draft-backed properties instead of rejecting negative property ids",
 );

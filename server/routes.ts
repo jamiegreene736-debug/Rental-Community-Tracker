@@ -818,23 +818,20 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   try {
     guestyPush = await pushBulkGuestyPricingAfterRefresh(item.propertyId);
   } catch (e: any) {
-    if (!isGuestyPushSoftFailure(e)) throw e;
     const reason = e?.message ?? String(e);
-    guestyPush = { skipped: true, reason };
     item.progress = {
-      phase: "done",
-      percent: 100,
-      label: `Market rates saved; Guesty push skipped: ${reason}`,
-      guestyPush,
+      phase: "pushing-guesty",
+      percent: 90,
+      label: `Market rates saved; Guesty push failed and will be retried: ${reason}`,
     };
-    await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-skipped", `Guesty pricing push skipped for ${item.label}: ${reason}`, {
+    await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-failed", `Guesty pricing push failed for ${item.label}: ${reason}`, {
       itemKey: item.id,
-      level: "warn",
+      level: "error",
       meta: { propertyId: item.propertyId, reason },
     });
     item.heartbeatAt = Date.now();
     await persistBulkPricingJob(job);
-    return;
+    throw e;
   }
   if (guestyPush.skipped) {
     item.progress = {
@@ -1053,6 +1050,45 @@ function releasePricingRefreshLock(lock: PricingRefreshLock | null | undefined):
 
 function isImgBbRateLimit(status: number, body: string): boolean {
   return status === 429 || /rate limit|too many requests/i.test(body);
+}
+
+function isGuestyCalendarRetryableError(error: any): boolean {
+  const status = Number(error?.status ?? 0);
+  const message = error?.message ? String(error.message) : String(error || "");
+  return status === 429 || status >= 500 || /429|too many requests|rate.?limit|temporar|timeout|ECONNRESET|ETIMEDOUT/i.test(message);
+}
+
+function isGuestyCalendarRateLimitError(error: any): boolean {
+  const status = Number(error?.status ?? 0);
+  const message = error?.message ? String(error.message) : String(error || "");
+  return Boolean(error?.rateLimited) || status === 429 || /429|too many requests|rate.?limit/i.test(message);
+}
+
+async function guestyCalendarRequestWithRetry<T = any>(
+  method: string,
+  endpoint: string,
+  body: unknown,
+  label: string,
+): Promise<T> {
+  const waitsMs = [2500, 7500, 15000, 30000];
+  for (let attempt = 0; attempt <= waitsMs.length; attempt += 1) {
+    try {
+      return await guestyRequest(method, endpoint, body) as T;
+    } catch (error: any) {
+      const retryable = isGuestyCalendarRetryableError(error);
+      if (!retryable || attempt >= waitsMs.length) {
+        const message = error?.message ?? String(error);
+        throw Object.assign(new Error(`${label} failed after ${attempt + 1} attempt(s): ${message}`), {
+          status: error?.status,
+          rateLimited: isGuestyCalendarRateLimitError(error),
+        });
+      }
+      const waitMs = waitsMs[attempt];
+      console.warn(`[guesty-calendar] ${label} attempt ${attempt + 1} failed; retrying in ${waitMs}ms: ${error?.message ?? error}`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  throw new Error(`${label} failed`);
 }
 
 async function uploadBufferToImgBb(imgbbKey: string, buffer: Buffer): Promise<string> {
@@ -15746,17 +15782,42 @@ export async function registerRoutes(
     const failedRanges: Array<{ range: Range; error: string }> = [];
     for (const range of ranges) {
       try {
-        await guestyRequest("PUT", `/availability-pricing/api/calendar/listings/${listingId}`, {
-          startDate: range.startDate,
-          endDate: range.endDate,
-          price: range.price,
-        });
+        await guestyCalendarRequestWithRetry(
+          "PUT",
+          `/availability-pricing/api/calendar/listings/${listingId}`,
+          {
+            startDate: range.startDate,
+            endDate: range.endDate,
+            price: range.price,
+          },
+          `Guesty calendar PUT ${range.startDate}..${range.endDate}`,
+        );
         pushedRanges++;
+        await new Promise((resolve) => setTimeout(resolve, 650));
       } catch (e: any) {
         failedRanges.push({ range, error: e?.message ?? String(e) });
-        // Keep going — partial success is more useful than aborting the
-        // whole 24-month push because one range glitched.
+        // Stop after a confirmed failed range. Calendar writes are idempotent,
+        // so the queue can retry the item cleanly instead of burning more
+        // Guesty quota and reporting a misleading partial success.
+        break;
       }
+    }
+
+    if (failedRanges.length > 0) {
+      const summary = `Pushed ${pushedRanges}/${ranges.length} ranges; first failed range ${failedRanges[0].range.startDate}..${failedRanges[0].range.endDate}: ${failedRanges[0].error}`;
+      await recordGuestyRatePush("error", summary);
+      return res.json({
+        lastGuestyRatePushAt: schedulePropertyId ? new Date().toISOString() : undefined,
+        lastGuestyRatePushStatus: "error",
+        lastGuestyRatePushSummary: summary,
+        success: false,
+        pushedDays: days.length,
+        pushedRanges,
+        totalRanges: ranges.length,
+        failedRanges: failedRanges.slice(0, 5),
+        error: summary,
+        sampleRange: ranges[0],
+      });
     }
 
     try {
@@ -15764,7 +15825,7 @@ export async function registerRoutes(
       const firstDate = days[0].date;
       const lastDate = days[days.length - 1].date;
       const verifyUrl = `/availability-pricing/api/calendar/listings/${listingId}?startDate=${firstDate}&endDate=${lastDate}`;
-      const verify = await guestyRequest("GET", verifyUrl) as any;
+      const verify = await guestyCalendarRequestWithRetry("GET", verifyUrl, undefined, "Guesty calendar read-back") as any;
       const vDays: any[] = Array.isArray(verify) ? verify
         : Array.isArray(verify?.data) ? verify.data
         : Array.isArray(verify?.data?.days) ? verify.data.days
@@ -15809,7 +15870,10 @@ export async function registerRoutes(
       console.error(`[push-seasonal-rates] verify error:`, err.message);
       // Push happened (or partially happened); only verification failed.
       const success = failedRanges.length === 0;
-      const summary = `Pushed ${pushedRanges}/${ranges.length} ranges; Guesty read-back verification failed: ${err.message}`;
+      const rateLimitedVerify = isGuestyCalendarRateLimitError(err);
+      const summary = rateLimitedVerify
+        ? `Pushed ${pushedRanges}/${ranges.length} ranges; Guesty read-back deferred because Guesty rate limited verification.`
+        : `Pushed ${pushedRanges}/${ranges.length} ranges; Guesty read-back verification failed: ${err.message}`;
       await recordGuestyRatePush(success ? "ok" : "error", summary);
       return res.json({
         lastGuestyRatePushAt: schedulePropertyId ? new Date().toISOString() : undefined,
