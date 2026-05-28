@@ -1766,6 +1766,7 @@ export type RefreshProgressState = {
   startedAt: number;
   phase:
     | "starting"
+    | "searchapi-airbnb"
     | "monthly" | "banded"
     | "airbnb-low" | "airbnb-high" | "airbnb-holiday"
     | "sidecar-low" | "sidecar-high" | "sidecar-holiday"

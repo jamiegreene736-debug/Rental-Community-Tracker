@@ -2576,14 +2576,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
 
     try {
-      // Negative ids (drafts) and positive ids (static) both work —
-      // the static endpoint redirects negative ids to the draft path.
-      const basePath = propertyId < 0
-        ? `/api/community/${-propertyId}/refresh-pricing`
-        : `/api/property/${propertyId}/refresh-market-rates`;
-      const path = propertyId > 0
-        ? `${basePath}?background=1&mode=banded`
-        : `${basePath}?background=1`;
+      const path = `/api/property/${propertyId}/refresh-market-rates`;
       const controller = new AbortController();
       refreshAbortRef.current = controller;
       let r: Response;
@@ -2743,8 +2736,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ),
       });
     } catch (e: any) {
-      // AbortError = operator cancelled, distinct copy. Server scan
-      // and sidecar queue are cancelled by cancelRefresh().
+      // AbortError = operator cancelled, distinct copy. The pricing
+      // refresh is SearchAPI-only and does not enqueue Chrome sidecar work.
       if (e?.name === "AbortError") {
         setRefreshProgress({ phase: "error", percent: 100, label: "Refresh cancelled", error: "Cancelled by operator", startedAt });
         recordRefreshNotice({
@@ -4583,11 +4576,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 </button>
                               </div>
                             )}
-                            {/* Inline progress bar — visible while a
-                                refresh is in flight. Seasonal refreshes
-                                scan LOW, HIGH, and HOLIDAY 7-night
-                                samples for each contiguous season band. Cancel calls AbortController.abort()
-                                — server scan continues in the background. */}
+                            {/* Inline progress bar for the SearchAPI-only market-rate refresh. */}
                             {marketRatesRefreshing && refreshProgress && (() => {
                               // Computed values for freeze detection.
                               // nowTick is unused-but-referenced so React
@@ -4601,17 +4590,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const elapsedStr = `${elapsedMin}:${String(elapsedSec).padStart(2, "0")}`;
                               const ageSinceTickMs = refreshProgress.lastTickAt ? now - refreshProgress.lastTickAt : 0;
                               const ageSinceTickSec = Math.round(ageSinceTickMs / 1000);
-                              // Stale if no server tick in 60s — heartbeat
-                              // is supposed to fire every 15s, so 60s of
-                              // silence means the scan loop itself is
-                              // wedged (not just a slow sidecar op).
+                              // Stale if no server tick in 60s. The endpoint
+                              // is quick, so that usually means the request
+                              // was interrupted by a deploy/restart.
                               const STALE_MS = 60_000;
                               const isStale = !!refreshProgress.lastTickAt && ageSinceTickMs > STALE_MS;
                               const daemonStatus = refreshProgress.daemonOnline === true
                                 ? { label: "Daemon online", color: "#15803d" }
                                 : refreshProgress.daemonOnline === false
                                 ? { label: "Daemon offline", color: "#b91c1c" }
-                                : { label: "Daemon status unknown", color: "#6b7280" };
+                                : null;
                               const hasWindowProgress =
                                 typeof refreshProgress.progressDone === "number" &&
                                 typeof refreshProgress.progressTotal === "number" &&
@@ -4664,7 +4652,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     <button
                                       type="button"
                                       onClick={cancelRefresh}
-                                      title="Cancel the refresh. Server scan continues in the background; refresh later to pick up partial results."
+                                      title="Cancel the in-flight SearchAPI pricing request."
                                       style={{
                                         fontSize: 10,
                                         padding: "1px 6px",
@@ -4722,9 +4710,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       The bar advances as the hybrid pricing request completes. The active pricing flow uses Airbnb SearchAPI data plus configured rate-management layers.
                                     </div>
                                   )}
-                                  {/* Heartbeat row: daemon status + last-tick age. Tells the operator the scan is alive even when the percent hasn't moved. */}
+                                  {/* Heartbeat row: confirms the server-side SearchAPI request is still updating progress. */}
                                   <div style={{ marginTop: 4, display: "flex", gap: 12, fontSize: 9, opacity: 0.85 }}>
-                                    <span style={{ color: daemonStatus.color, fontWeight: 500 }}>● {daemonStatus.label}</span>
+                                    {daemonStatus && <span style={{ color: daemonStatus.color, fontWeight: 500 }}>● {daemonStatus.label}</span>}
                                     {refreshProgress.lastTickAt && (
                                       <span style={{ opacity: 0.7 }}>
                                         Heartbeat: {ageSinceTickSec}s ago

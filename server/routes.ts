@@ -702,6 +702,52 @@ async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: s
   });
 }
 
+function pricingRowsForClient(rows: any[]): Array<{
+  bedrooms: number;
+  low: number;
+  high: number | null;
+  holiday: number | null;
+  basisSource: "hybrid-airbnb-layered" | "airbnb" | "none";
+  channels: { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null };
+  channelCount: number;
+}> {
+  return rows.map((row) => {
+    const low = parsePositivePricingRate(row?.medianNightly) ?? 0;
+    return {
+      bedrooms: Number(row?.bedrooms ?? 0),
+      low,
+      high: parsePositivePricingRate(row?.medianNightlyHigh),
+      holiday: parsePositivePricingRate(row?.medianNightlyHoliday),
+      basisSource: low > 0 ? "hybrid-airbnb-layered" : "none",
+      channels: { airbnb: low > 0 ? low : null, vrbo: null, booking: null, pm: null },
+      channelCount: low > 0 ? 1 : 0,
+    };
+  });
+}
+
+async function refreshPricingTabMarketRates(propertyId: number, label: string): Promise<{
+  pricingResult: { propertyId: number; rows: any[]; logs: any[] };
+  guestyPush: Awaited<ReturnType<typeof pushBulkGuestyPricingAfterRefresh>>;
+}> {
+  const pricingResult = propertyId < 0
+    ? await refreshHybridPricingForDraft(propertyId, label)
+    : await refreshHybridPricingForProperty({
+      propertyId,
+      triggerType: "Manual Update",
+      notes: "Pricing tab manual refresh via SearchAPI Airbnb layered pricing.",
+    });
+
+  let guestyPush: Awaited<ReturnType<typeof pushBulkGuestyPricingAfterRefresh>>;
+  try {
+    guestyPush = await pushBulkGuestyPricingAfterRefresh(propertyId);
+  } catch (e: any) {
+    if (!isGuestyPushSoftFailure(e)) throw e;
+    guestyPush = { skipped: true, reason: e?.message ?? String(e) };
+  }
+
+  return { pricingResult, guestyPush };
+}
+
 async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
   item.status = "running";
   item.startedAt = item.startedAt ?? Date.now();
@@ -28350,6 +28396,75 @@ Return ONLY compact JSON with this exact shape:
     if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
     const draft = await storage.getCommunityDraft(id);
     if (!draft) return res.status(404).json({ error: "Not found" });
+    const quickPropertyKey = -id;
+    const {
+      setRefreshProgress: setQuickRefreshProgress,
+      getRefreshProgress: getQuickRefreshProgress,
+      clearRefreshProgress: clearQuickRefreshProgress,
+    } = await import("./multichannel-buy-in");
+    const quickStartedAt = Date.now();
+    const quickLockClaim = claimPricingRefreshLock(quickPropertyKey, `draft ${id} SearchAPI pricing refresh`);
+    if (!quickLockClaim.claimed) {
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        alreadyRunning: true,
+        propertyId: quickPropertyKey,
+        progress: getQuickRefreshProgress(quickPropertyKey),
+      });
+    }
+    const quickRefreshLock = quickLockClaim.lock;
+    try {
+      setQuickRefreshProgress({
+        propertyId: quickPropertyKey,
+        startedAt: quickStartedAt,
+        phase: "searchapi-airbnb",
+        percent: 10,
+        label: "Running SearchAPI Airbnb pricing rules",
+      });
+      const { pricingResult, guestyPush } = await refreshPricingTabMarketRates(
+        quickPropertyKey,
+        String(draft.name || draft.listingTitle || `Draft ${id}`),
+      );
+      setQuickRefreshProgress({
+        propertyId: quickPropertyKey,
+        startedAt: quickStartedAt,
+        phase: "done",
+        percent: 100,
+        label: guestyPush.skipped
+          ? `SearchAPI pricing saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`
+          : "SearchAPI pricing saved and marked-up Guesty base rates pushed",
+      });
+      setTimeout(() => clearQuickRefreshProgress(quickPropertyKey), 5 * 60 * 1000);
+      const rates = await storage.getPropertyMarketRates(quickPropertyKey);
+      const values = rates.map((row) => parsePositivePricingRate(row.medianNightly)).filter((rate): rate is number => rate != null);
+      const estimatedLowRate = values.length > 0 ? Math.min(...values) : null;
+      const estimatedHighRate = values.length > 0 ? Math.max(...values) : null;
+      const updated = await storage.updateCommunityDraft(id, { estimatedLowRate, estimatedHighRate });
+      releasePricingRefreshLock(quickRefreshLock);
+      return res.json({
+        ok: true,
+        propertyId: quickPropertyKey,
+        mode: "hybrid-airbnb-layered",
+        estimatedLowRate,
+        estimatedHighRate,
+        persisted: pricingRowsForClient(pricingResult.rows),
+        guestyPush,
+        draft: updated,
+      });
+    } catch (e: any) {
+      setQuickRefreshProgress({
+        propertyId: quickPropertyKey,
+        startedAt: quickStartedAt,
+        phase: "error",
+        percent: 100,
+        label: "SearchAPI pricing refresh failed",
+        error: e?.message ?? String(e),
+      });
+      setTimeout(() => clearQuickRefreshProgress(quickPropertyKey), 5 * 60 * 1000);
+      releasePricingRefreshLock(quickRefreshLock);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
     // PR #298: drafts get the same OTA sidecar + per-season scan
     // treatment as static properties. Previously this route only queried
     // a legacy Airbnb fallback for a single LOW window; drafts missed
@@ -28642,10 +28757,70 @@ Return ONLY compact JSON with this exact shape:
     const propertyId = parseInt(req.params.id, 10);
     if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid id" });
 
-    // Negative ids belong to drafts — delegate to the existing draft
-    // refresh path so callers don't need to branch by id sign.
     if (propertyId < 0) {
-      return res.redirect(307, `/api/community/${-propertyId}/refresh-pricing`);
+      return res.redirect(307, `/api/community/${Math.abs(propertyId)}/refresh-pricing`);
+    }
+
+    const {
+      setRefreshProgress: setQuickRefreshProgress,
+      getRefreshProgress: getQuickRefreshProgress,
+      clearRefreshProgress: clearQuickRefreshProgress,
+    } = await import("./multichannel-buy-in");
+    const quickStartedAt = Date.now();
+    const quickLockClaim = claimPricingRefreshLock(propertyId, `property ${propertyId} SearchAPI pricing refresh`);
+    if (!quickLockClaim.claimed) {
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        alreadyRunning: true,
+        propertyId,
+        progress: getQuickRefreshProgress(propertyId),
+      });
+    }
+    const quickRefreshLock = quickLockClaim.lock;
+    try {
+      setQuickRefreshProgress({
+        propertyId,
+        startedAt: quickStartedAt,
+        phase: "searchapi-airbnb",
+        percent: 10,
+        label: "Running SearchAPI Airbnb pricing rules",
+      });
+      const { pricingResult, guestyPush } = await refreshPricingTabMarketRates(
+        propertyId,
+        `Property ${propertyId}`,
+      );
+      setQuickRefreshProgress({
+        propertyId,
+        startedAt: quickStartedAt,
+        phase: "done",
+        percent: 100,
+        label: guestyPush.skipped
+          ? `SearchAPI pricing saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`
+          : "SearchAPI pricing saved and marked-up Guesty base rates pushed",
+      });
+      setTimeout(() => clearQuickRefreshProgress(propertyId), 5 * 60 * 1000);
+      releasePricingRefreshLock(quickRefreshLock);
+      return res.json({
+        ok: true,
+        propertyId,
+        community: PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? PROPERTY_UNIT_NEEDS[propertyId]?.community ?? null,
+        mode: "hybrid-airbnb-layered",
+        persisted: pricingRowsForClient(pricingResult.rows),
+        guestyPush,
+      });
+    } catch (e: any) {
+      setQuickRefreshProgress({
+        propertyId,
+        startedAt: quickStartedAt,
+        phase: "error",
+        percent: 100,
+        label: "SearchAPI pricing refresh failed",
+        error: e?.message ?? String(e),
+      });
+      setTimeout(() => clearQuickRefreshProgress(propertyId), 5 * 60 * 1000);
+      releasePricingRefreshLock(quickRefreshLock);
+      return res.status(500).json({ error: e?.message ?? String(e) });
     }
 
     const config = PROPERTY_UNIT_NEEDS[propertyId];
@@ -29594,7 +29769,7 @@ Return ONLY compact JSON with this exact shape:
           ...state,
           phase: "error" as const,
           label: "Refresh tracking interrupted",
-          error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The server scan loop likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh season-band refresh after the sidecar goes quiet.`,
+          error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The SearchAPI pricing request likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh market-rate refresh after the server is stable.`,
           lastTickAt: state.lastTickAt,
         };
         setRefreshProgress(interrupted);
@@ -29813,12 +29988,7 @@ Return ONLY compact JSON with this exact shape:
   //
   // One-shot: walks every active static property in
   // `PROPERTY_UNIT_NEEDS` plus every saved community draft, calling
-  // the per-id refresh endpoints in series. Used for the initial
-  // backfill after this feature ships and as the work loop for the
-  // monthly cron in `availability-scheduler.ts`. Sequential (not
-  // parallel) because each static-property refresh drives the local
-  // Chrome sidecar through many dated windows. Total runtime can be
-  // long, which is why the normal operator flow uses background mode.
+  // the per-id SearchAPI/rules refresh endpoints in series.
   app.post("/api/admin/refresh-all-market-rates", async (_req, res) => {
     const port = process.env.PORT || "5000";
     const base = `http://127.0.0.1:${port}`;
@@ -29831,7 +30001,7 @@ Return ONLY compact JSON with this exact shape:
 
     for (const id of staticIds) {
       try {
-        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates?mode=banded`, { method: "POST" });
+        const r = await fetch(`${base}/api/property/${id}/refresh-market-rates`, { method: "POST" });
         const data = (await r.json().catch(() => ({}))) as any;
         results.push({ id, kind: "static", ok: r.ok, error: r.ok ? undefined : data?.error });
       } catch (e: any) {

@@ -1055,6 +1055,7 @@ try {
 }
 
 const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
 assert.equal(
   routeSource.includes("${DISCLOSURE}"),
   false,
@@ -1093,7 +1094,25 @@ assert.equal(
   false,
   "bulk market pricing should not require sidecar heartbeat",
 );
-console.log("  ✓ bulk market pricing stays on SearchAPI Airbnb path, not sidecar");
+assert.ok(
+  routeSource.includes('label: "Running SearchAPI Airbnb pricing rules"'),
+  "pricing-tab market-rate refresh should enter the same SearchAPI Airbnb rules path as the dashboard queue",
+);
+assert.ok(
+  routeSource.indexOf('label: "Running SearchAPI Airbnb pricing rules"') < routeSource.indexOf('fetchMultiChannelBuyInBySeason({'),
+  "pricing-tab refresh route should hit SearchAPI rules before any legacy sidecar season-band code",
+);
+assert.equal(
+  builderSource.includes("refresh-pricing?mode=banded"),
+  false,
+  "Pricing tab refresh button should not call the legacy draft season-band endpoint",
+);
+assert.equal(
+  builderSource.includes("mode=banded"),
+  false,
+  "Pricing tab refresh button should not request the old season-band mode",
+);
+console.log("  ✓ bulk and Pricing tab market pricing stay on SearchAPI Airbnb path, not sidecar");
 
 assert.equal(
   routeSource.includes("/api/builder/push-channel-markups"),
@@ -1130,7 +1149,6 @@ assert.equal(
 );
 console.log("  ✓ availability scheduler supports mapped draft-backed listings");
 
-const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
 assert.ok(
   builderSource.includes("?fields=pictures"),
   "Photos tab should read Guesty pictures with an explicit fields=pictures projection",
