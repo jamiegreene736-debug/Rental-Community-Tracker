@@ -66,11 +66,61 @@ try {
   else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
 }
 
+process.env.SEARCHAPI_API_KEY = "test-key";
+const requestedSearchApiUrls: string[] = [];
+globalThis.fetch = (async (input: RequestInfo | URL) => {
+  requestedSearchApiUrls.push(String(input));
+  return new Response(JSON.stringify({
+    properties: [
+      {
+        name: "Poipu Kai 3 bedroom condo",
+        price: { extracted_total_price: 2800, extracted_price_per_qualifier: 250 },
+      },
+      {
+        name: "Poipu Kai 3 bedroom condo with fees",
+        price: { extracted_total_price: 3500, extracted_price_per_qualifier: 280 },
+      },
+      {
+        name: "Poipu Kai 4 bedroom condo",
+        price: { extracted_total_price: 7000, extracted_price_per_qualifier: 500 },
+      },
+      {
+        name: "Poipu Kai 3 bedroom condo missing checkout total",
+        price: { extracted_price_per_qualifier: 120 },
+      },
+    ],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}) as typeof fetch;
+try {
+  const poipuMedian = await fetchAirbnbMedianNightly({
+    community: "Poipu Kai",
+    bedrooms: 3,
+    checkIn: "2026-06-01",
+    checkOut: "2026-06-08",
+  });
+  assert.equal(poipuMedian.medianNightly, 450);
+  assert.equal(poipuMedian.sampleCount, 2);
+  assert.equal(requestedSearchApiUrls.length, 1);
+  const params = new URL(requestedSearchApiUrls[0]).searchParams;
+  assert.equal(params.get("engine"), "airbnb");
+  assert.equal(params.get("bedrooms"), "3");
+  assert.equal(params.get("type_of_place"), "entire_home");
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+  else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+}
+
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
-assert.equal(
-  hybridPricingSource.split("fetchAirbnbMedianNightly({").length - 1,
-  1,
-  "hybrid pricing should make one Airbnb SearchAPI request per bedroom count, then extrapolate months with rules",
+assert.ok(
+  hybridPricingSource.includes("for (let m = 0; m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths; m++)") &&
+    hybridPricingSource.indexOf("for (let m = 0; m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths; m++)") <
+      hybridPricingSource.indexOf("const airbnb = await fetchAirbnbMedianNightly({"),
+  "hybrid pricing should make one Airbnb SearchAPI request per monthly pricing row",
+);
+assert.ok(
+  !hybridPricingSource.includes("sampled once"),
+  "hybrid pricing logs should not claim month rows were extrapolated from one Airbnb sample",
 );
 
 console.log("hybrid pricing suite passed");

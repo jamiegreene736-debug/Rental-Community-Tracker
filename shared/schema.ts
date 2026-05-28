@@ -650,7 +650,7 @@ export const propertyMarketRates = pgTable("property_market_rates", {
   propertyId: integer("property_id").notNull(),
   bedrooms: integer("bedrooms").notNull(),
   // Median amortized nightly across the engine sample (extracted_total_price
-  // ÷ nights), per AGENTS.md Load-Bearing #31 — the priced 7-night-window
+  // ÷ nights), per AGENTS.md Load-Bearing #31 — the priced monthly-row window
   // path. 10–15% accurate vs operator-validated buy-ins for Caribe Cove
   // / Southern Dunes today; direct/PM sites are intentionally excluded
   // from market pricing.
