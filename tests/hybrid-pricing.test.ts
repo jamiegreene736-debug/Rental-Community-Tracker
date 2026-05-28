@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { calculateBlendedRate, hybridPricingWindowForMonth } from "../server/hybrid-pricing";
+import {
+  calculateBlendedRate,
+  fetchAirbnbMedianNightly,
+  hybridPricingWindowForMonth,
+  isSearchApiAirbnbNoResultsError,
+} from "../server/hybrid-pricing";
 
 const july = calculateBlendedRate({
   airbnbMedianNightly: 500,
@@ -36,5 +41,28 @@ assert.equal(mayWindow.checkOut, "2026-06-05");
 const juneWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 1);
 assert.equal(juneWindow.checkIn, "2026-06-01");
 assert.equal(juneWindow.checkOut, "2026-06-08");
+
+assert.equal(isSearchApiAirbnbNoResultsError("SearchAPI Airbnb: Airbnb didn't return any results."), true);
+
+const originalFetch = globalThis.fetch;
+const originalSearchApiKey = process.env.SEARCHAPI_API_KEY;
+process.env.SEARCHAPI_API_KEY = "test-key";
+globalThis.fetch = (async () => new Response(JSON.stringify({
+  error: "Airbnb didn't return any results.",
+}), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+try {
+  const emptyAirbnb = await fetchAirbnbMedianNightly({
+    community: "Kapaa Beachfront",
+    bedrooms: 3,
+    checkIn: "2026-05-29",
+    checkOut: "2026-06-05",
+  });
+  assert.equal(emptyAirbnb.medianNightly, null);
+  assert.equal(emptyAirbnb.sampleCount, 0);
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+  else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+}
 
 console.log("hybrid pricing suite passed");

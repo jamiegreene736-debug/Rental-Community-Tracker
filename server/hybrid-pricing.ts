@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS } from "@shared/buy-in-market";
+import { getBuyInRate, getCommunityRegion, getSeasonForMonth } from "@shared/pricing-rates";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 
 export type HybridDemandClass = "standard" | "high" | "peak" | "ultra";
@@ -238,7 +239,16 @@ function extractBedrooms(candidate: any): number | null {
   return match ? Number(match[1]) : null;
 }
 
-async function fetchAirbnbMedianNightly(args: {
+export function isSearchApiAirbnbNoResultsError(error: unknown): boolean {
+  const text = typeof error === "string"
+    ? error
+    : error && typeof error === "object" && "message" in error
+      ? String((error as { message?: unknown }).message ?? "")
+      : "";
+  return /airbnb.*(?:didn'?t|did not).*return.*(?:any )?results|no .*airbnb.*results|no results/i.test(text);
+}
+
+export async function fetchAirbnbMedianNightly(args: {
   community: string;
   bedrooms: number;
   checkIn: string;
@@ -267,7 +277,17 @@ async function fetchAirbnbMedianNightly(args: {
   const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
   if (!response.ok) throw new Error(`SearchAPI Airbnb HTTP ${response.status}`);
   const data = await response.json() as any;
-  if (data?.error) throw new Error(`SearchAPI Airbnb: ${data.error}`);
+  if (data?.error) {
+    const message = `SearchAPI Airbnb: ${data.error}`;
+    if (isSearchApiAirbnbNoResultsError(message)) {
+      return {
+        medianNightly: null,
+        sampleCount: 0,
+        notes: [`${message}; using fallback if no other Airbnb samples are available.`],
+      };
+    }
+    throw new Error(message);
+  }
   const rates: number[] = [];
   for (const candidate of Array.isArray(data?.properties) ? data.properties : []) {
     const total = Math.round(priceNumber(candidate?.price?.extracted_total_price));
@@ -300,6 +320,53 @@ export function hybridPricingWindowForMonth(asOf: Date, monthOffset: number, sta
     checkIn,
     checkOut: dateOnly(addDays(checkInDate, stayNights)),
   };
+}
+
+function staticFallbackMonthlyRates(args: {
+  propertyId: number;
+  community: string;
+  bedrooms: number;
+  asOf: Date;
+}): {
+  low: number;
+  high: number;
+  holiday: number;
+  monthlyRates: Record<string, HybridMonthlyRate>;
+} {
+  const region = getCommunityRegion(args.community);
+  const monthlyRates: Record<string, HybridMonthlyRate> = {};
+  const lowValues: number[] = [];
+  const highValues: number[] = [];
+  const holidayValues: number[] = [];
+  for (let m = 0; m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths; m++) {
+    const { checkIn, checkOut, yearMonth } = hybridPricingWindowForMonth(args.asOf, m);
+    const season = getSeasonForMonth(yearMonth, region);
+    const rate = getBuyInRate(args.community, args.bedrooms, args.propertyId, season, yearMonth);
+    if (season === "HIGH") highValues.push(rate);
+    else if (season === "HOLIDAY") holidayValues.push(rate);
+    else lowValues.push(rate);
+    monthlyRates[yearMonth] = {
+      medianNightly: rate,
+      season,
+      checkIn,
+      checkOut,
+      channelCount: 0,
+      sampleCount: 0,
+      demandClass: season === "LOW" ? "standard" : season === "HIGH" ? "high" : "peak",
+      seasonTierId: `static_${season.toLowerCase()}`,
+      seasonTierLabel: `Static ${season.toLowerCase()} fallback`,
+      channels: { airbnb: null, vrbo: null, booking: null, pm: null },
+      hybrid: {
+        finalRate: rate,
+        layers: [],
+        notes: ["No usable SearchAPI Airbnb samples returned; used the operator-maintained static buy-in fallback."],
+      },
+    };
+  }
+  const low = median(lowValues) ?? median(Object.values(monthlyRates).map((rate) => rate.medianNightly)) ?? 0;
+  const high = median(highValues) ?? low;
+  const holiday = median(holidayValues) ?? high;
+  return { low, high, holiday, monthlyRates };
 }
 
 function propertyBedroomCounts(config: PropertyUnitConfig): number[] {
@@ -386,18 +453,37 @@ export async function refreshHybridPricingForTarget(args: {
 
     const medianNightly = median(allFinalRates);
     if (medianNightly == null) {
-      await storage.deletePropertyMarketRate(args.propertyId, bedrooms);
+      const fallback = staticFallbackMonthlyRates({
+        propertyId: args.propertyId,
+        community: args.community,
+        bedrooms,
+        asOf,
+      });
+      const fallbackValues = Object.values(fallback.monthlyRates).map((rate) => rate.medianNightly);
+      const row = await storage.upsertPropertyMarketRate({
+        propertyId: args.propertyId,
+        bedrooms,
+        medianNightly: String(fallback.low),
+        medianNightlyHigh: String(fallback.high),
+        medianNightlyHoliday: String(fallback.holiday),
+        monthlyRates: fallback.monthlyRates,
+        lowNightly: String(Math.min(...fallbackValues)),
+        highNightly: String(Math.max(...fallbackValues)),
+        sampleCount: 0,
+        source: "static-buy-in-fallback",
+      });
+      rows.push(row);
       logs.push(await storage.createPricingUpdateLog({
         propertyId: args.propertyId,
         propertyName: args.propertyName,
         bedrooms,
         triggerType: args.triggerType,
         oldRate: previous?.medianNightly ?? null,
-        newRate: null,
-        status: "error",
-        notes: "No usable Airbnb samples returned by SearchAPI.",
+        newRate: String(fallback.low),
+        status: "ok",
+        notes: "No usable Airbnb samples returned by SearchAPI; used the operator-maintained static buy-in fallback.",
         layersJson: [],
-        calendarJson: {},
+        calendarJson: fallback.monthlyRates,
       }));
       continue;
     }
