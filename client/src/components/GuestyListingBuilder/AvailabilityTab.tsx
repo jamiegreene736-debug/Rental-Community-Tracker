@@ -22,6 +22,7 @@ type WindowResult = {
   startDate: string;
   endDate: string;
   season?: "LOW" | "HIGH" | "HOLIDAY";
+  policyBand?: "standard" | "high" | "majorHoliday" | "ultraPeak";
   nights?: number;
   verdict: Verdict;
   maxSets?: number;
@@ -31,6 +32,8 @@ type WindowResult = {
   listingCounts?: Record<string, number>;
   channelCounts?: Record<string, AvailabilityChannelCounts>;
   daemonOnline?: boolean;
+  daysUntilArrival?: number;
+  requiredLeadDays?: number;
   reason?: string;
   sample?: Record<string, CandidateListing[]>;
   overridden?: boolean;
@@ -137,8 +140,8 @@ function parseScanSummary(summary: string | null | undefined): RunBadges {
 export default function AvailabilityTab({ propertyId, listingId }: { propertyId: number | undefined; listingId: string | null }) {
   const isSyntheticDraftProperty = typeof propertyId === "number" && propertyId <= 0;
   // Default to 24 months — matches how Guesty's calendar horizon is typically
-  // set, and gives the scanner enough lookahead to catch high-season buy-in
-  // spikes when rates start publishing.
+  // set, and gives the policy enough lookahead to publish fixed lead-time
+  // blocks before arrivals become too close to safely accept.
   const [weeks, setWeeks] = useState(104);
   const [minSets, setMinSets] = useState(3);
   const [scanning, setScanning] = useState(false);
@@ -182,8 +185,8 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [runNowBusy, setRunNowBusy] = useState(false);
   const schedulerUnavailable = isSyntheticDraftProperty || scheduleSupported === false;
   const schedulerUnavailableMessage = isSyntheticDraftProperty
-    ? "Availability auto-scan is available after this draft is promoted to a configured property."
-    : scheduleUnsupportedReason ?? "Availability auto-scan is not configured for this property yet.";
+    ? "Availability policy automation is available after this draft is promoted to a configured property."
+    : scheduleUnsupportedReason ?? "Availability policy automation is not configured for this property yet.";
 
   // Recent scanner runs — scheduled + manual, newest first. Rendered as
   // a compact table under the scheduler card so the operator can spot
@@ -441,7 +444,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           } else if (evt.type === "candidates") {
             setCandidates(evt as CandidatesEvent);
           } else if (evt.type === "phase") {
-            setScanPhase(evt.label ?? evt.phase ?? "Scanning");
+            setScanPhase(evt.label ?? evt.phase ?? "Applying policy");
           } else if (evt.type === "sync-blocks") {
             setSyncResult(evt.result
               ? {
@@ -457,7 +460,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             setProgress({ done, total });
             setScanPhase(evt.season ? `${evt.season} policy window evaluated` : "Applying policy");
           } else if (evt.type === "error") {
-            setError(evt.error ?? "Scan failed");
+            setError(evt.error ?? "Policy run failed");
           } else if (evt.type === "done") {
             setScanPhase(null);
           }
@@ -603,7 +606,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   if (!propertyId) {
     return (
       <div style={{ padding: 20, fontSize: 13, color: "#6b7280" }}>
-        Select a property to scan availability.
+        Select a property to manage availability rules.
       </div>
     );
   }
@@ -618,7 +621,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           borderRadius: 8,
         }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: "#92400e" }}>
-            Auto-scan scheduler unavailable
+            Availability policy scheduler unavailable
           </div>
           <div style={{ fontSize: 11, color: "#92400e", marginTop: 4 }}>
             {schedulerUnavailableMessage}
@@ -640,10 +643,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: schedule?.enabled ? "#075985" : "#374151" }}>
-              ⏱ Auto-scan scheduler {schedule?.enabled ? "ON" : "OFF"}
+              ⏱ Availability policy scheduler {schedule?.enabled ? "ON" : "OFF"}
             </div>
             <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-              When enabled, the server runs 24-month 14-night inventory + price scan + Guesty block + rate sync every{" "}
+              When enabled, the server applies the fixed lead-time rules, syncs the resulting Guesty blocks, and optionally refreshes pricing every{" "}
               <b>{schedule?.intervalHours ?? 24}h</b> in the background.
               Last run: <b>{schedule?.lastRunAt ? new Date(schedule.lastRunAt).toLocaleString() : "never"}</b>
               {schedule?.lastRunStatus && (() => {
@@ -660,7 +663,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             </div>
             {/* Structured badges for the last run. Parses the summary
                 string so each phase renders as its own labeled chip,
-                making it easy to tell "scan happened, 2 blocks pushed"
+                making it easy to tell "policy applied, 2 blocks pushed"
                 at a glance. On error the full message gets a red box
                 so the operator can see what went wrong without
                 opening the server logs. Skipped runs (e.g. no Guesty
@@ -709,7 +712,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                   )}
                   {b.inventory && (
                     <span style={{ ...chipStyle, background: verdictChipBg(b.inventory.verdict), color: verdictChipColor(b.inventory.verdict), borderColor: "transparent" }}>
-                      Inventory: <b>{b.inventory.sets}</b> sets · {b.inventory.verdict}
+                      Legacy inventory: <b>{b.inventory.sets}</b> sets · {b.inventory.verdict}
                     </span>
                   )}
                   {b.marketSnapshot && (
@@ -764,7 +767,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               onClick={() => updateSchedule({ enabled: !schedule?.enabled })}
               style={{ fontSize: 11 }}
             >
-              {schedule?.enabled ? "Disable" : "Enable"} auto-scan
+              {schedule?.enabled ? "Disable" : "Enable"} policy scheduler
             </button>
             <button
               className="glb-btn"
@@ -772,7 +775,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               disabled={runNowBusy}
               style={{ fontSize: 11 }}
             >
-              {runNowBusy ? "Running…" : "▶ Run pipeline now"}
+              {runNowBusy ? "Running…" : "▶ Apply policy now"}
             </button>
           </div>
         </div>
@@ -780,7 +783,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           <div style={{ marginTop: 8, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11, color: "#6b7280" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <input type="checkbox" checked={schedule.runInventory} onChange={(e) => updateSchedule({ runInventory: e.target.checked })} />
-              24-month 14-night inventory
+              Apply lead-time rules
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <input type="checkbox" checked={schedule.runPricing} onChange={(e) => updateSchedule({ runPricing: e.target.checked })} />
@@ -790,33 +793,36 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               <input type="checkbox" checked={schedule.runSyncBlocks} onChange={(e) => updateSchedule({ runSyncBlocks: e.target.checked })} />
               Sync blocks to Guesty
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              Target backup sets:
-              <select
-                value={schedule.minSets}
-                onChange={(e) => updateSchedule({ minSets: parseInt(e.target.value, 10) })}
-                style={{ padding: "1px 4px", fontSize: 11, border: "1px solid #e5e7eb", borderRadius: 4 }}
-              >
-                <option value={2}>2</option>
-                <option value={3}>3</option>
-                <option value={4}>4</option>
-                <option value={5}>5</option>
-              </select>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              Margin:
-              <input
-                type="number"
-                step="1"
-                min="0"
-                max="50"
-                value={Math.round(parseFloat(String(schedule.targetMargin)) * 100)}
-                onChange={(e) => updateSchedule({ targetMargin: parseFloat(e.target.value) / 100 })}
-                style={{ width: 50, padding: "1px 4px", fontSize: 11, border: "1px solid #e5e7eb", borderRadius: 4 }}
-              />%
-            </label>
           </div>
         )}
+      </div>
+
+      <div style={{
+        marginBottom: 16,
+        padding: "12px 14px",
+        background: "#f8fafc",
+        border: "1px solid #cbd5e1",
+        borderRadius: 8,
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a", marginBottom: 6 }}>
+          Fixed arrival lead-time rules
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, fontSize: 12 }}>
+          {[
+            ["Standard", "45 days"],
+            ["High season", "75 days"],
+            ["Major holiday", "90 days"],
+            ["Ultra peak", "120 days"],
+          ].map(([label, value]) => (
+            <div key={label} style={{ padding: "8px 10px", background: "#fff", border: "1px solid #e2e8f0", borderRadius: 6 }}>
+              <div style={{ color: "#64748b", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em", fontWeight: 700 }}>{label}</div>
+              <div style={{ color: "#0f172a", fontSize: 16, fontWeight: 700 }}>{value}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: "#475569", marginTop: 8, lineHeight: 1.5 }}>
+          Availability blackouts are now based only on these arrival lead-time rules. This tab no longer scrapes Airbnb, VRBO, Booking.com, SearchAPI, or sidecar availability to decide whether a date band should be blocked.
+        </div>
       </div>
 
       {/* ── Recent run history ─────────────────────────────────
@@ -869,7 +875,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                       ) : (
                         <span style={{ color: "#6b7280" }}>
                           {parsed.policy && <>policy <b style={{ color: "#166534" }}>{parsed.policy.open}</b>/<b style={{ color: "#92400e" }}>{parsed.policy.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.policy.blocked}</b> · </>}
-                          {parsed.inventory && <>inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
+                          {parsed.inventory && <>legacy inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
                           {parsed.weeklyWindows && <>windows <b style={{ color: "#166534" }}>{parsed.weeklyWindows.open}</b>/<b style={{ color: "#92400e" }}>{parsed.weeklyWindows.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.weeklyWindows.blocked}</b> · </>}
                           {parsed.blocks && <>blocks <b style={{ color: "#166534" }}>+{parsed.blocks.added}</b>/<b style={{ color: "#991b1b" }}>−{parsed.blocks.removed}</b> · </>}
                           {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
@@ -889,11 +895,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       )}
 
       {/* ── Active blocks pushed to Guesty ─────────────────────
-          The scheduler writes one row per blocked window to
-          `scanner_blocks` and then PUTs Guesty's calendar to mark
-          the range unavailable. This panel lists what's currently
-          active — dates + reason — so the operator can see exactly
-          which windows are blocked without cross-checking Guesty. */}
+          Policy sync writes one tracked row per blocked window and
+          then PUTs Guesty's calendar to mark the range unavailable.
+          This panel lists what's currently active — dates + reason —
+          so the operator can see exactly which fixed-rule windows are
+          blocked without cross-checking Guesty. */}
       {activeBlocks.length > 0 && (
         <div style={{ marginBottom: 16, border: "1px solid #fecaca", borderRadius: 6, overflow: "hidden" }}>
           <div style={{
@@ -941,17 +947,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         <span style={{ fontSize: 12, color: "#6b7280" }}>
           Weekly arrival bands: <b>{weeks}</b> weeks · fixed lead-time policy
         </span>
-        <label style={{ fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6 }}>
-          Policy horizon:
-          <select
-            value={minSets}
-            onChange={(e) => setMinSets(parseInt(e.target.value, 10))}
-            disabled={scanning}
-            style={{ padding: "4px 8px", fontSize: 12, border: "1px solid #e5e7eb", borderRadius: 4 }}
-          >
-            <option value={3}>standard fixed rules</option>
-          </select>
-        </label>
         <button
           className="glb-btn glb-btn-primary"
           onClick={runScan}
@@ -976,7 +971,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           onClick={syncBlocks}
           disabled={scanning || syncBusy || results.length === 0 || !listingId}
           style={{ fontSize: 12, borderColor: blockedCount > 0 ? "#dc2626" : undefined, color: blockedCount > 0 ? "#dc2626" : undefined }}
-          title={!listingId ? "Select a Guesty listing first" : "Scan completion now syncs blocks automatically; use this to re-push the current result."}
+          title={!listingId ? "Select a Guesty listing first" : "Policy runs sync blocks automatically; use this to re-push the current result."}
         >
           {syncBusy ? "Syncing…" : `Re-sync Guesty blocks`}
         </button>
@@ -985,7 +980,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       {/* ── Context + summary ────────────────────────────────── */}
       {ctx && (
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, lineHeight: 1.6 }}>
-          Scanning <b>{ctx.resortName ?? ctx.community}</b> —{" "}
+          Applying policy to <b>{ctx.resortName ?? ctx.community}</b> —{" "}
           needed units: {ctx.units.map((u) => `${u.bedrooms}BR`).join(" + ")}.
           {" "}Each policy window is <b>{ctx.windowNights ?? 7} nights</b>. Windows are <b>blocked</b> by fixed lead-time rules only:
           standard <b>{ctx.autoBlockNearTermDays ?? 45}</b> days, high season <b>75</b> days, major holiday <b>{ctx.autoBlockHolidayDays ?? 90}</b> days, ultra-peak <b>{ctx.autoBlockUltraPeakDays ?? 120}</b> days.
@@ -1112,12 +1107,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       })()}
 
       {/* ── Weekly pricing correlation ──────────────────────────
-          Per-window rate forecast that reacts to the scanner's demand
-          signal. Tight windows (inventory at or near the minSets floor)
-          get a +12% demand markup; open windows stay at baseline; blocked
-          windows are skipped (we're blocking, not pricing them). Push
-          button applies the final rates to Guesty's calendar per-week
-          instead of the coarser per-month push the scheduler does. */}
+          Per-window rate forecast for policy windows. Open windows use
+          baseline pricing; blocked windows are skipped because the
+          fixed lead-time policy is making them unavailable. Push button
+          applies the final rates to Guesty's calendar per-week instead
+          of the coarser per-month push the scheduler does. */}
       {results.length > 0 && (
         <div style={{ marginBottom: 24, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
           <div style={{
@@ -1128,7 +1122,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               Weekly Pricing Correlation
             </span>
             <span style={{ fontSize: 11, color: "#6b7280" }}>
-              Rates adjust upward when scanner verdict = <b>tight</b> (demand signal +12%). Blocked windows skipped.
+              Open policy windows can receive weekly rates. Blocked windows are skipped.
             </span>
             <div style={{ flex: 1 }} />
             {!pricingRows && (
@@ -1235,7 +1229,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           )}
           {!pricingRows && !pricingBusy && (
             <div style={{ padding: "12px 16px", fontSize: 12, color: "#6b7280", textAlign: "center" }}>
-              Click <b>Compute weekly rates</b> to see pricing based on this scan's tightness signal.
+              Click <b>Compute weekly rates</b> to see pricing for non-blocked policy windows.
             </div>
           )}
         </div>
@@ -1279,7 +1273,9 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
 	                      </div>
 	                      {typeof r.maxSets === "number" && !r.overridden && (
 	                        <div style={{ fontSize: 10, opacity: 0.8 }}>
-	                          {r.maxSets} set{r.maxSets === 1 ? "" : "s"} / block &lt; {r.minSets ?? minSets}
+	                          {r.requiredLeadDays != null && r.daysUntilArrival != null
+	                            ? `${r.daysUntilArrival} days away / needs ${r.requiredLeadDays}`
+	                            : `${r.maxSets} set${r.maxSets === 1 ? "" : "s"}`}
 	                        </div>
 	                      )}
                     </div>
@@ -1302,12 +1298,9 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               </div>
               <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
                 Verdict: <b style={{ color: verdictColor(selected.verdict).fg }}>{selected.verdict}</b>
-                {typeof selected.maxSets === "number" && <> · {selected.maxSets} effective set{selected.maxSets === 1 ? "" : "s"}</>}
-                <> · block below {selected.blockMinSets ?? selected.minSets ?? minSets}</>
-                {selected.openMinSets != null && <> · open at {selected.openMinSets}</>}
-                {selected.listingCounts && (
-                  <> · effective by BR: {Object.entries(selected.listingCounts).map(([br, n]) => `${br}BR=${n}`).join(" · ")}</>
-                )}
+                {selected.policyBand && <> · {selected.policyBand === "majorHoliday" ? "major holiday" : selected.policyBand === "ultraPeak" ? "ultra peak" : selected.policyBand === "high" ? "high season" : "standard"}</>}
+                {selected.requiredLeadDays != null && <> · needs {selected.requiredLeadDays} days lead time</>}
+                {selected.daysUntilArrival != null && <> · arrival is {selected.daysUntilArrival} day{selected.daysUntilArrival === 1 ? "" : "s"} away</>}
               </div>
               {selected.reason && (
                 <div style={{ fontSize: 11, color: "#4b5563", marginTop: 4, maxWidth: 900 }}>
@@ -1316,7 +1309,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               )}
               {selected.daemonOnline === false && (
                 <div style={{ fontSize: 11, color: "#92400e", marginTop: 4 }}>
-                  Sidecar was offline or incomplete for this sample, so it is shown as tight instead of auto-blocked.
+                  Legacy note: this older saved row came from an availability-evidence run. Current blackout decisions use fixed lead-time rules only.
                 </div>
               )}
               {selected.overridden && (
@@ -1331,7 +1324,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 className="glb-btn"
                 onClick={() => applyOverride(selected, "force-open")}
                 style={{ fontSize: 11 }}
-                title="Force this window to be bookable regardless of inventory"
+                title="Force this window to be bookable regardless of the fixed policy"
               >
                 Force open
               </button>
@@ -1339,7 +1332,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 className="glb-btn"
                 onClick={() => applyOverride(selected, "force-block")}
                 style={{ fontSize: 11 }}
-                title="Force this window to be blocked regardless of inventory"
+                title="Force this window to be blocked regardless of the fixed policy"
               >
                 Force block
               </button>
@@ -1358,7 +1351,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           {selectedChannelRows.length > 0 && (
             <div style={{ marginBottom: 12, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
               <div style={{ padding: "6px 10px", background: "#f9fafb", fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                Sidecar availability by bedroom
+                Legacy availability evidence by bedroom
               </div>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                 <thead>
@@ -1387,18 +1380,18 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 </tbody>
               </table>
               <div style={{ padding: "6px 10px", fontSize: 10, color: "#9ca3af", borderTop: "1px solid #f3f4f6" }}>
-                Effective count discounts likely cross-listed homes so the blocker does not assume every SearchAPI or sidecar result is a unique buy-in option.
+                Shown only for older saved rows. Current availability blackouts do not use SearchAPI, sidecar counts, or OTA scraping.
               </div>
             </div>
           )}
 
-          {/* Legacy static-Airbnb scans included sample URLs. Sidecar
-              scans primarily return channel counts, but keep this fallback
-              visible when old scan payloads are loaded. */}
+          {/* Older availability-evidence rows included sample URLs. Keep
+              this fallback visible when old payloads are loaded, but the
+              current policy path does not use these URLs for blackouts. */}
           {selected.sample && Object.keys(selected.sample).length > 0 ? (
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                Legacy sample candidate listings
+                Legacy sample listings
               </div>
               {Object.entries(selected.sample).map(([br, listings]) => (
                 <div key={br} style={{ marginBottom: 8 }}>
@@ -1420,12 +1413,12 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 </div>
               ))}
               <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6 }}>
-                These URLs appear only for the legacy static scan path; sidecar scans use dated channel counts above.
+                These URLs appear only on older saved availability-evidence rows. They are not used by the current fixed policy.
               </div>
             </div>
           ) : selectedChannelRows.length === 0 ? (
             <div style={{ fontSize: 12, color: "#6b7280" }}>
-              {selected.verdict === "blocked" && "No dated inventory was verified for the required bedroom mix. This window will be blocked on Guesty if you click Sync."}
+              {selected.verdict === "blocked" && "This arrival falls inside the fixed lead-time rule and will remain blocked on Guesty after sync."}
             </div>
           ) : null}
         </div>
