@@ -98,7 +98,6 @@ export async function syncScannerBlocksForProperty(
   }
 
   const active = await storage.getActiveScannerBlocks(propertyId);
-  const activeKeyed = new Map(active.map((b) => [`${b.startDate}:${b.endDate}`, b]));
   const desiredBlocks = new Set(
     windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`),
   );
@@ -113,11 +112,38 @@ export async function syncScannerBlocksForProperty(
   const failures: SyncResult["failures"] = [];
   const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
 
+  // Clear stale scanner-created blocks first. If an old block overlaps a
+  // desired policy block but does not exactly match it, remove it and let the
+  // create phase write the exact replacement range. This keeps the calendar
+  // from accumulating legacy scanner blackout bands after policy changes.
+  for (const b of active) {
+    const key = `${b.startDate}:${b.endDate}`;
+    if (desiredBlocks.has(key)) continue;
+    const overlapsKnownWindow =
+      desiredBlockWindows.some((w) => rangesOverlap(b, w)) ||
+      clearableWindowList.some((w) => rangesOverlap(b, w));
+    if (!clearableWindows.has(key) && !overlapsKnownWindow) continue;
+    try {
+      await guestyCalendarPutWithRetry(calPath, {
+        startDate: b.startDate,
+        endDate: b.endDate,
+        status: "available",
+      });
+      await storage.markScannerBlockRemoved(b.id);
+      removed++;
+      await sleep(750);
+    } catch (e: any) {
+      failures.push({ action: "remove", startDate: b.startDate, error: e?.message ?? String(e) });
+    }
+  }
+
+  const remainingActive = await storage.getActiveScannerBlocks(propertyId);
+  const activeKeyed = new Map(remainingActive.map((b) => [`${b.startDate}:${b.endDate}`, b]));
+
   // Block new windows via calendar PUT.
   for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
     const key = `${w.startDate}:${w.endDate}`;
     if (activeKeyed.has(key)) continue;
-    if (active.some((b) => rangeCovers(b, w))) continue;
     try {
       const reason = w.reason
         ?? (w.maxSets != null && w.minSets != null
@@ -148,35 +174,13 @@ export async function syncScannerBlocksForProperty(
     }
   }
 
-  // Unblock windows by setting status: "available" on the same range.
-  for (const b of active) {
-    const key = `${b.startDate}:${b.endDate}`;
-    if (desiredBlocks.has(key)) continue;
-    const overlapsDesiredBlock = desiredBlockWindows.some((w) => rangesOverlap(b, w));
-    const overlapsClearableWindow = clearableWindowList.some((w) => rangesOverlap(b, w));
-    if (!clearableWindows.has(key) && !overlapsClearableWindow) continue;
-    if (overlapsDesiredBlock) continue;
-    try {
-      await guestyCalendarPutWithRetry(calPath, {
-        startDate: b.startDate,
-        endDate: b.endDate,
-        status: "available",
-      });
-      await storage.markScannerBlockRemoved(b.id);
-      removed++;
-      await sleep(750);
-    } catch (e: any) {
-      failures.push({ action: "remove", startDate: b.startDate, error: e?.message ?? String(e) });
-    }
-  }
-
   return {
     success: failures.length === 0,
     propertyId,
     guestyListingId,
     created,
     removed,
-    unchanged: active.length - removed,
+    unchanged: Math.max(0, remainingActive.length - created),
     failures,
   };
 }
