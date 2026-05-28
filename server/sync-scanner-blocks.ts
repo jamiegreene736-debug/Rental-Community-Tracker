@@ -57,6 +57,28 @@ function rangeCovers(
   return dateMs(outer.startDate) <= dateMs(inner.startDate) && dateMs(outer.endDate) >= dateMs(inner.endDate);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function guestyCalendarPutWithRetry(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<any> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      return await guestyRequest("PUT", path, body);
+    } catch (e: any) {
+      lastError = e;
+      const message = e?.message ?? String(e);
+      if (!/429|too many requests|rate.?limit/i.test(message) || attempt === 5) throw e;
+      await sleep(2_000 * attempt + Math.floor(Math.random() * 750));
+    }
+  }
+  throw lastError;
+}
+
 export async function syncScannerBlocksForProperty(
   propertyId: number,
   windows: SyncWindow[],
@@ -101,7 +123,7 @@ export async function syncScannerBlocksForProperty(
         ?? (w.maxSets != null && w.minSets != null
           ? `low-inventory: ${w.maxSets} / ${w.minSets} sets`
           : "below threshold");
-      const resp = await guestyRequest("PUT", calPath, {
+      const resp = await guestyCalendarPutWithRetry(calPath, {
         startDate: w.startDate,
         endDate: w.endDate,
         status: "unavailable",
@@ -120,7 +142,7 @@ export async function syncScannerBlocksForProperty(
         reason,
       });
       created++;
-      await new Promise((r) => setTimeout(r, 120));
+      await sleep(750);
     } catch (e: any) {
       failures.push({ action: "create", startDate: w.startDate, error: e?.message ?? String(e) });
     }
@@ -135,14 +157,14 @@ export async function syncScannerBlocksForProperty(
     if (!clearableWindows.has(key) && !overlapsClearableWindow) continue;
     if (overlapsDesiredBlock) continue;
     try {
-      await guestyRequest("PUT", calPath, {
+      await guestyCalendarPutWithRetry(calPath, {
         startDate: b.startDate,
         endDate: b.endDate,
         status: "available",
       });
       await storage.markScannerBlockRemoved(b.id);
       removed++;
-      await new Promise((r) => setTimeout(r, 120));
+      await sleep(750);
     } catch (e: any) {
       failures.push({ action: "remove", startDate: b.startDate, error: e?.message ?? String(e) });
     }

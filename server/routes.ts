@@ -119,7 +119,7 @@ import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage,
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
-import { runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason } from "./availability-scheduler";
+import { runFullScanForProperty, runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
   availabilityWindowCountForWeeks,
@@ -20307,7 +20307,13 @@ Return ONLY compact JSON with this exact shape:
     await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
     const delayMs = Math.min(delayMinutes, 180) * 60 * 1000;
     setTimeout(() => {
-      runFullScanNow(propertyId).catch((err) => {
+      runFullScanForProperty(propertyId, {
+        minSets: 3,
+        targetMargin: 0.2,
+        runInventory: true,
+        runPricing: false,
+        runSyncBlocks: true,
+      }).catch((err) => {
         console.error(`[availability-policy] scheduled sync failed for property ${propertyId}:`, err?.message ?? err);
       });
     }, delayMs);
@@ -20322,8 +20328,14 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
-      const result = await runFullScanNow(propertyId);
-      res.json({ ok: result.status !== "error", ...result });
+      const summary = await runFullScanForProperty(propertyId, {
+        minSets: 3,
+        targetMargin: 0.2,
+        runInventory: true,
+        runPricing: false,
+        runSyncBlocks: true,
+      });
+      res.json({ ok: !summary.startsWith("skipped:"), status: summary.startsWith("skipped:") ? "skipped" : "ok", summary });
     } catch (err: any) {
       res.status(500).json({ error: "Sync failed", message: err.message });
     }
@@ -20333,14 +20345,28 @@ Return ONLY compact JSON with this exact shape:
     const mappings = await storage.getGuestyPropertyMap();
     const results: Array<{ propertyId: number; guestyListingId: string; status: string; summary: string }> = [];
     for (const mapping of mappings) {
-      const result = await runFullScanNow(mapping.propertyId);
+      let status = "ok";
+      let summary = "";
+      try {
+        summary = await runFullScanForProperty(mapping.propertyId, {
+          minSets: 3,
+          targetMargin: 0.2,
+          runInventory: true,
+          runPricing: false,
+          runSyncBlocks: true,
+        });
+        status = summary.startsWith("skipped:") ? "skipped" : "ok";
+      } catch (e: any) {
+        status = "error";
+        summary = e?.message ?? String(e);
+      }
       results.push({
         propertyId: mapping.propertyId,
         guestyListingId: mapping.guestyListingId,
-        status: result.status,
-        summary: result.summary,
+        status,
+        summary,
       });
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
     res.json({
       ok: results.every((r) => r.status !== "error"),
