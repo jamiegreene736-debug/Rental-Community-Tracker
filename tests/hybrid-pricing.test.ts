@@ -198,6 +198,10 @@ assert.ok(
   "market-rate refresh should scan the configured pricing horizon month-by-month",
 );
 assert.ok(
+  hybridPricingSource.includes("seasonalMedians[legacySeasonForDemandClass(tier.demandClass)].push(basis)"),
+  "season summary medians must bucket by sampled stay demand tier, not calendar season map (Hawaii has no HOLIDAY months in HAWAII_SEASONS)",
+);
+assert.ok(
   hybridPricingSource.includes("fetchAmortizedNightlyByBR("),
   "market-rate refresh should fall back to the amortized geo Airbnb path when direct queries are empty",
 );

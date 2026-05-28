@@ -525,7 +525,22 @@ function representativeMonthlyRate(
   monthlyRates: Record<string, HybridMonthlyRate>,
   season: LegacySeason,
 ): HybridMonthlyRate | null {
-  return Object.values(monthlyRates).find((rate) => rate.season === season) ?? null;
+  return Object.values(monthlyRates).find(
+    (rate) => legacySeasonForDemandClass(rate.demandClass) === season,
+  ) ?? null;
+}
+
+function seasonalMedianSummary(
+  seasonalMedians: Record<LegacySeason, number[]>,
+): { lowMedian: number | null; highMedian: number | null; holidayMedian: number | null; missing: LegacySeason[] } {
+  const missing: LegacySeason[] = [];
+  const lowMedian = median(seasonalMedians.LOW);
+  const highMedian = median(seasonalMedians.HIGH);
+  const holidayMedian = median(seasonalMedians.HOLIDAY);
+  if (lowMedian == null) missing.push("LOW");
+  if (highMedian == null) missing.push("HIGH");
+  if (holidayMedian == null) missing.push("HOLIDAY");
+  return { lowMedian, highMedian, holidayMedian, missing };
 }
 
 export async function refreshHybridPricingForTarget(args: {
@@ -589,7 +604,7 @@ export async function refreshHybridPricingForTarget(args: {
       const season = getSeasonForMonth(window.yearMonth, pricingRegion);
       const tier = resolveSeasonTier(window.checkIn);
       totalSamples += airbnb.sampleCount;
-      seasonalMedians[season].push(basis);
+      seasonalMedians[legacySeasonForDemandClass(tier.demandClass)].push(basis);
       monthlyRates[window.yearMonth] = {
         medianNightly: basis,
         season,
@@ -617,13 +632,12 @@ export async function refreshHybridPricingForTarget(args: {
       await sleep(HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs);
     }
 
-    const lowMedian = median(seasonalMedians.LOW);
-    const highMedian = median(seasonalMedians.HIGH);
-    const holidayMedian = median(seasonalMedians.HOLIDAY);
-    if (lowMedian == null || highMedian == null || holidayMedian == null) {
+    const { lowMedian, highMedian, holidayMedian, missing } = seasonalMedianSummary(seasonalMedians);
+    if (missing.length > 0) {
       await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
       throw new Error(
-        `SearchAPI Airbnb did not produce LOW/HIGH/HOLIDAY monthly samples for ${searchName}; static fallback is disabled.`,
+        `SearchAPI Airbnb monthly scans for ${searchName} did not produce ${missing.join("/")} demand-tier samples ` +
+        `(need standard/low, high, and peak/ultra windows); static fallback is disabled.`,
       );
     }
     const lowRate = representativeMonthlyRate(monthlyRates, "LOW");
