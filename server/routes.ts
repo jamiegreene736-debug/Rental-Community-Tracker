@@ -119,7 +119,7 @@ import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage,
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
-import { runFullScanForProperty, runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason, resolveAvailabilityPropertyConfig } from "./availability-scheduler";
+import { runFullScanForProperty, runFullScanNow, runLeadTimePolicySyncForProperty, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason, resolveAvailabilityPropertyConfig } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
   availabilityWindowCountForWeeks,
@@ -20596,13 +20596,7 @@ Return ONLY compact JSON with this exact shape:
     await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
     const delayMs = Math.min(delayMinutes, 180) * 60 * 1000;
     setTimeout(() => {
-      runFullScanForProperty(propertyId, {
-        minSets: 3,
-        targetMargin: 0.2,
-        runInventory: true,
-        runPricing: false,
-        runSyncBlocks: true,
-      }).catch((err) => {
+      runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 }).catch((err) => {
         console.error(`[availability-policy] scheduled sync failed for property ${propertyId}:`, err?.message ?? err);
       });
     }, delayMs);
@@ -20617,13 +20611,7 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
-      const summary = await runFullScanForProperty(propertyId, {
-        minSets: 3,
-        targetMargin: 0.2,
-        runInventory: true,
-        runPricing: false,
-        runSyncBlocks: true,
-      });
+      const summary = await runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 });
       res.json({ ok: !summary.startsWith("skipped:"), status: summary.startsWith("skipped:") ? "skipped" : "ok", summary });
     } catch (err: any) {
       res.status(500).json({ error: "Sync failed", message: err.message });
@@ -20637,13 +20625,7 @@ Return ONLY compact JSON with this exact shape:
       let status = "ok";
       let summary = "";
       try {
-        summary = await runFullScanForProperty(mapping.propertyId, {
-          minSets: 3,
-          targetMargin: 0.2,
-          runInventory: true,
-          runPricing: false,
-          runSyncBlocks: true,
-        });
+        summary = await runLeadTimePolicySyncForProperty(mapping.propertyId, { minSets: 3 });
         status = summary.startsWith("skipped:") ? "skipped" : "ok";
       } catch (e: any) {
         status = "error";

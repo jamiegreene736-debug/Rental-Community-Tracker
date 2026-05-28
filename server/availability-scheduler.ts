@@ -23,8 +23,15 @@ import {
 } from "./availability-search";
 import { getPropertyUnits } from "@shared/property-units";
 import { applyAirbnbBiasAndCombo } from "@shared/pricing-rates";
+import {
+  computeAvailabilityThresholds,
+  scanSeasonalAvailabilityCapacity,
+  type SeasonalAvailabilityWindow,
+} from "./seasonal-availability";
+import { syncScannerBlocksForProperty } from "./sync-scanner-blocks";
 
 const TICK_MS = 10 * 60 * 1000; // every 10 min
+const POLICY_WEEKS = 104;
 
 let _timer: NodeJS.Timeout | null = null;
 let _lastTickAt: Date | null = null;
@@ -257,6 +264,160 @@ function seasonForMonth(yearMonth: string): SeasonKey {
 // Guesty mapping yet shouldn't look like a failure.
 const SKIP_PREFIX = "skipped:";
 
+function easternDateKey(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+function easternHour(d: Date): number {
+  const hour = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    hour12: false,
+  }).format(d);
+  return Number.parseInt(hour, 10);
+}
+
+/** Daily policy pass runs once per Eastern calendar day after 1 AM. */
+export function isDueForPolicyPass(
+  lastRunAt: Date | null,
+  now: Date,
+  intervalHours: number,
+): boolean {
+  if (intervalHours < 24) {
+    return !lastRunAt || (now.getTime() - lastRunAt.getTime()) >= intervalHours * 60 * 60 * 1000;
+  }
+  if (easternHour(now) < 1) return false;
+  if (!lastRunAt) return true;
+  return easternDateKey(lastRunAt) < easternDateKey(now);
+}
+
+function applyPolicyOverrides(
+  windows: SeasonalAvailabilityWindow[],
+  overrides: Awaited<ReturnType<typeof storage.getScannerOverrides>>,
+): SeasonalAvailabilityWindow[] {
+  const overrideByStart = new Map(overrides.map((o) => [o.startDate, o]));
+  return windows.map((window) => {
+    const ov = overrideByStart.get(window.startDate);
+    if (!ov) return window;
+    const verdict = ov.mode === "force-block" ? "blocked" : "open";
+    return {
+      ...window,
+      verdict,
+      maxSets: ov.mode === "force-open" ? window.openMinSets + 5 : 0,
+      reason: ov.mode === "force-open"
+        ? `Manual override forced this ${window.season} window open.`
+        : `Manual override forced this ${window.season} window blocked.`,
+    };
+  });
+}
+
+function formatPolicySummary(windows: SeasonalAvailabilityWindow[]): string {
+  const open = windows.filter((w) => w.verdict === "open").length;
+  const tight = windows.filter((w) => w.verdict === "tight").length;
+  const blocked = windows.filter((w) => w.verdict === "blocked").length;
+  return `policy ${open} open/${tight} tight/${blocked} blocked`;
+}
+
+// Same path as Availability tab "Apply policy" — fixed lead-time windows + Guesty sync.
+export async function runLeadTimePolicySyncForProperty(
+  propertyId: number,
+  opts: { minSets?: number; weeks?: number; syncToGuesty?: boolean } = {},
+): Promise<string> {
+  const weeks = opts.weeks ?? POLICY_WEEKS;
+  const syncToGuesty = opts.syncToGuesty ?? true;
+  const minSets = opts.minSets ?? 3;
+
+  const unsupportedReason = await getAvailabilitySchedulerUnsupportedReason(propertyId);
+  if (unsupportedReason) return `${SKIP_PREFIX} ${unsupportedReason}`;
+
+  const config = await resolveAvailabilityPropertyConfig(propertyId);
+  if (!config) return `${SKIP_PREFIX} property not in availability config`;
+
+  const guestyListingId = await storage.getGuestyListingId(propertyId);
+  if (!guestyListingId) {
+    return `${SKIP_PREFIX} no Guesty listing mapped — connect one to enable scans`;
+  }
+
+  let resortName: string | null = null;
+  try {
+    const listing = await guestyRequest("GET", `/listings/${guestyListingId}?fields=title%20nickname`) as any;
+    const title = listing?.title ?? listing?.nickname ?? null;
+    if (title) resortName = title.split(/\s+[–-]\s+/)[0].trim();
+  } catch { /* non-fatal */ }
+
+  const result = await scanSeasonalAvailabilityCapacity({
+    propertyId,
+    config,
+    resortName,
+    manualMinSets: minSets,
+    weeks,
+  });
+  const finalWindows = applyPolicyOverrides(
+    result.windows,
+    await storage.getScannerOverrides(propertyId),
+  );
+  const parts = [formatPolicySummary(finalWindows)];
+
+  if (syncToGuesty) {
+    const syncWindows = finalWindows.map((w) => ({
+      startDate: w.startDate,
+      endDate: w.endDate,
+      verdict: (w.verdict === "open" ? "available" : w.verdict) as "blocked" | "available" | "tight" | "error",
+      maxSets: w.maxSets,
+      minSets: w.minSets,
+      reason: w.reason,
+    }));
+    const syncResult = await syncScannerBlocksForProperty(propertyId, syncWindows);
+    const failed = syncResult.failures.length;
+    parts.push(`blocks +${syncResult.created}/-${syncResult.removed}${failed ? `/×${failed}` : ""}`);
+  }
+
+  return parts.join(" · ");
+}
+
+async function runScheduledAvailabilityPass(
+  propertyId: number,
+  opts: { minSets: number; targetMargin: number; runInventory: boolean; runPricing: boolean; runSyncBlocks: boolean },
+): Promise<string> {
+  const parts: string[] = [];
+  const runPolicy = opts.runInventory || opts.runSyncBlocks;
+
+  if (runPolicy) {
+    parts.push(await runLeadTimePolicySyncForProperty(propertyId, {
+      minSets: opts.minSets,
+      weeks: POLICY_WEEKS,
+      syncToGuesty: opts.runSyncBlocks,
+    }));
+  }
+
+  if (opts.runPricing) {
+    const legacy = await runFullScanForProperty(propertyId, {
+      minSets: opts.minSets,
+      targetMargin: opts.targetMargin,
+      runInventory: false,
+      runPricing: true,
+      runSyncBlocks: false,
+    });
+    if (!legacy.startsWith(SKIP_PREFIX)) {
+      for (const segment of legacy.split(" · ")) {
+        if (segment.startsWith("market-snapshot") || segment.startsWith("rates ")) {
+          parts.push(segment);
+        }
+      }
+    } else if (!runPolicy) {
+      return legacy;
+    }
+  }
+
+  if (parts.length === 0) return `${SKIP_PREFIX} no phases enabled`;
+  return parts.join(" · ");
+}
+
 // Returns a short human-readable summary that goes in lastRunSummary.
 // Summaries beginning with SKIP_PREFIX indicate the run was a clean
 // no-op (precondition missing, not a failure).
@@ -470,11 +631,11 @@ async function tick() {
     const now = Date.now();
     for (const row of rows) {
       if (!row.enabled) continue;
-      const due = !row.lastRunAt || (now - row.lastRunAt.getTime()) >= row.intervalHours * 60 * 60 * 1000;
+      const due = isDueForPolicyPass(row.lastRunAt, new Date(now), row.intervalHours);
       if (!due) continue;
       const startedAt = Date.now();
       try {
-        const summary = await runFullScanForProperty(row.propertyId, {
+        const summary = await runScheduledAvailabilityPass(row.propertyId, {
           minSets: row.minSets,
           targetMargin: parseFloat(String(row.targetMargin)),
           runInventory: row.runInventory,
@@ -521,7 +682,7 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
   const startedAt = Date.now();
   try {
     const sched = await storage.getScannerSchedule(propertyId);
-    const summary = await runFullScanForProperty(propertyId, {
+    const summary = await runScheduledAvailabilityPass(propertyId, {
       minSets: sched?.minSets ?? 3,
       targetMargin: sched ? parseFloat(String(sched.targetMargin)) : 0.2,
       runInventory: sched?.runInventory ?? true,
