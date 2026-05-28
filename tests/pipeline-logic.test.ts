@@ -1216,7 +1216,16 @@ assert.ok(
   guestyServiceSource.includes("isListed integrations airBnb homeAway bookingCom channels tags licenseNumber taxId"),
   "Channel status should request the fields it needs instead of relying on Guesty's default listing shape",
 );
-console.log("  ✓ Guesty readbacks request explicit listing fields");
+const guestySyncSource = readFileSync(new URL("../server/guesty-sync.ts", import.meta.url), "utf8");
+assert.ok(
+  guestySyncSource.includes("waitForGuestyRequestSlot"),
+  "Server Guesty calls should share a process-wide request gate to prevent background jobs from stampeding the rate limit",
+);
+assert.ok(
+  guestySyncSource.includes("guestyRateLimitPauseUntil"),
+  "Server Guesty calls should honor a shared pause after a 429 response",
+);
+console.log("  ✓ Guesty readbacks request explicit listing fields and server calls are rate-gated");
 
 const schemaMaintenanceSource = readFileSync(new URL("../server/schema-maintenance.ts", import.meta.url), "utf8");
 for (const col of ["single_listing", "booking_title", "property_type", "unit1_bathrooms", "unit2_bathrooms"]) {

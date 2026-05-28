@@ -6,8 +6,35 @@ import {
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
 
+let guestyRequestGate: Promise<void> = Promise.resolve();
+let nextGuestyRequestAt = 0;
+let guestyRateLimitPauseUntil = 0;
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 120000);
+  const dateMs = Date.parse(value);
+  if (Number.isFinite(dateMs)) return Math.max(0, Math.min(dateMs - Date.now(), 120000));
+  return null;
+}
+
+async function waitForGuestyRequestSlot() {
+  const minGapMs = Math.max(0, Number(process.env.GUESTY_REQUEST_MIN_GAP_MS ?? 500));
+  const previous = guestyRequestGate.catch(() => undefined);
+  const current = previous.then(async () => {
+    const now = Date.now();
+    const waitMs = Math.max(0, nextGuestyRequestAt - now, guestyRateLimitPauseUntil - now);
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    nextGuestyRequestAt = Date.now() + minGapMs;
+  });
+  guestyRequestGate = current;
+  await current;
+}
+
 export async function guestyRequest(method: string, endpoint: string, body?: unknown) {
   const token = await getGuestyToken();
+  await waitForGuestyRequestSlot();
   const res = await fetch(`https://open-api.guesty.com/v1${endpoint}`, {
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
@@ -29,16 +56,22 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
       || rawText.slice(0, 500)
       || `(no body)`;
     log(`[guesty] ${method} ${endpoint} → ${res.status}: ${message.slice(0, 300)}`, "guesty-error");
+    const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+    if (res.status === 429) {
+      guestyRateLimitPauseUntil = Math.max(guestyRateLimitPauseUntil, Date.now() + (retryAfterMs ?? 15000));
+    }
     const err = new Error(`Guesty ${res.status} on ${method} ${endpoint}: ${message}`) as Error & {
       status?: number;
       method?: string;
       endpoint?: string;
       rateLimited?: boolean;
+      retryAfterMs?: number;
     };
     err.status = res.status;
     err.method = method;
     err.endpoint = endpoint;
     err.rateLimited = res.status === 429 || /rate.?limit|too many requests/i.test(message);
+    err.retryAfterMs = retryAfterMs ?? undefined;
     throw err;
   }
   if (res.status === 204) return { success: true };

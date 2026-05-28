@@ -1083,7 +1083,9 @@ async function guestyCalendarRequestWithRetry<T = any>(
           rateLimited: isGuestyCalendarRateLimitError(error),
         });
       }
-      const waitMs = waitsMs[attempt];
+      const waitMs = Number.isFinite(Number(error?.retryAfterMs)) && Number(error?.retryAfterMs) > 0
+        ? Math.min(Number(error.retryAfterMs), 120000)
+        : waitsMs[attempt];
       console.warn(`[guesty-calendar] ${label} attempt ${attempt + 1} failed; retrying in ${waitMs}ms: ${error?.message ?? error}`);
       await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
