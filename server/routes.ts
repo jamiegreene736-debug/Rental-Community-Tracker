@@ -15736,17 +15736,19 @@ export async function registerRoutes(
   // To hit a steady margin target across months, the base rate itself has
   // to scale with season — that's what this endpoint writes.
   app.post("/api/builder/push-seasonal-rates", async (req: Request, res: Response) => {
-    const { listingId, monthlyRates, propertyId } = req.body as {
+    const { listingId, monthlyRates, propertyId, liveMarketBuyIn } = req.body as {
       listingId?: string;
       propertyId?: number;
       // Each entry: { yearMonth: "2026-08", price: 1970 } — price becomes the
       // per-night base for every day in that month.
       monthlyRates?: Array<{ yearMonth: string; price: number }>;
+      liveMarketBuyIn?: Record<string, number>; // from /refresh-market-rates (bias+combo already applied)
     };
     if (!listingId) return res.status(400).json({ error: "listingId required" });
     if (!Array.isArray(monthlyRates) || monthlyRates.length === 0) {
       return res.status(400).json({ error: "monthlyRates array required" });
     }
+    if (liveMarketBuyIn) console.log(`[push-seasonal-rates] liveMarketBuyIn provided for ${Object.keys(liveMarketBuyIn).length} months (final 20% will be layered on top)`);
 
     // Expand monthly rates into per-day entries Guesty will accept.
     type DayEntry = { date: string; price: number };
@@ -16107,6 +16109,48 @@ export async function registerRoutes(
       console.error(`[market-comps] error:`, err.message);
       return res.status(500).json({ error: err.message });
     }
+  });
+
+  // Lightweight POST /api/builder/refresh-market-rates
+  // Called by the manual "Update Market Rates" button in the Pricing tab
+  // (and can be hit by dashboard queue for ad-hoc properties like Bonita).
+  // Uses the new surgical sampler (random 7-night, exact-BR, per-season
+  // markup, combo handling). Returns the adjusted buy-in numbers the UI
+  // can immediately apply to the rate table + pass into the next push.
+  app.post("/api/builder/refresh-market-rates", async (req: Request, res: Response) => {
+    const apiKey = process.env.SEARCHAPI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+
+    const { community, bedrooms, unitCount = 1, sameBrCombo = false } = req.body as {
+      community?: string; bedrooms?: number | number[]; unitCount?: number; sameBrCombo?: boolean;
+    };
+    if (!community || !bedrooms) {
+      return res.status(400).json({ error: "community and bedrooms (number or array) required" });
+    }
+
+    const brList = Array.isArray(bedrooms) ? bedrooms : [bedrooms];
+    const { sampleMedianBuyInForSeason } = await import("./availability-search");
+
+    const results: any[] = [];
+    const seasons: ("LOW" | "HIGH" | "HOLIDAY")[] = ["LOW", "HIGH", "HOLIDAY"];
+    for (const br of brList) {
+      const perSeason: any = {};
+      for (const s of seasons) {
+        const sample = await sampleMedianBuyInForSeason({
+          community,
+          bedrooms: br,
+          season: s,
+          unitCount,
+          sameBrCombo,
+          apiKey,
+          maxSamples: 3,
+        });
+        perSeason[s] = sample;
+      }
+      results.push({ bedrooms: br, perSeason });
+    }
+
+    res.json({ ok: true, community, results, note: "median after per-season Airbnb markup + combo; caller applies final 20% on push" });
   });
 
   // ===========================================================

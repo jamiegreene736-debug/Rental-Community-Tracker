@@ -129,6 +129,23 @@ export function actualMarginPct(sellRate: number, buyIn: number, channel: Channe
 }
 
 // ─────────────────────────────────────────────────────────────
+// SEASON MULTIPLIERS — region-specific, 3 tiers
+// ─────────────────────────────────────────────────────────────
+
+const SEASON_MULTIPLIERS: Record<RegionType, Record<SeasonType, number>> = {
+  hawaii:  { LOW: 0.80, HIGH: 1.30, HOLIDAY: 1.80 },
+  florida: { LOW: 0.75, HIGH: 1.25, HOLIDAY: 1.70 },
+};
+
+// Per-season markup to correct Airbnb's typical under-pricing vs VRBO/Booking.com medians.
+// Mirrors shared/pricing-rates.ts for client-side preview in Pricing tab.
+export const AIRBNB_TO_MARKET_MARKUPS: Record<SeasonType, number> = {
+  LOW: 1.16,
+  HIGH: 1.09,
+  HOLIDAY: 1.05,
+};
+
+// ─────────────────────────────────────────────────────────────
 // HOLIDAY DATE RANGES — day-level detection overrides monthly season
 // Month numbers are 1-indexed. Ranges use startMonth/startDay → endMonth/endDay.
 // ─────────────────────────────────────────────────────────────
