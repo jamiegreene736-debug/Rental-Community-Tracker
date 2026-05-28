@@ -709,7 +709,7 @@ async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: s
     bedroomCounts,
     unitCount: unitSlots.length || 1,
     triggerType: "Manual Update",
-    notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal medians (no hybrid markup layers).",
+    notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly medians (no hybrid markup layers).",
   });
 }
 
@@ -745,7 +745,7 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string, c
     : await refreshHybridPricingForProperty({
       propertyId,
       triggerType: "Manual Update",
-      notes: "Pricing tab manual refresh from SearchAPI Airbnb seasonal medians (no hybrid markup layers).",
+      notes: "Pricing tab manual refresh from SearchAPI Airbnb monthly medians (no hybrid markup layers).",
     });
 
   assertPricingRefreshNotCancelled(propertyId, cancelGeneration);
@@ -783,7 +783,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     return;
   }
 
-  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb seasonal pricing" };
+  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb monthly pricing" };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
 
@@ -792,17 +792,17 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     : await refreshHybridPricingForProperty({
       propertyId: item.propertyId,
       triggerType: "Manual Update",
-      notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal medians (no hybrid markup layers).",
+      notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly medians (no hybrid markup layers).",
     });
   item.progress = {
     phase: "searchapi-airbnb",
     percent: 80,
-    label: `SearchAPI Airbnb seasonal pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
+    label: `SearchAPI Airbnb monthly pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
     rows: pricingResult.rows.length,
   };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
-  await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb seasonal pricing completed for ${item.label}`, {
+  await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb monthly pricing completed for ${item.label}`, {
     itemKey: item.id,
     meta: { propertyId: item.propertyId, rows: pricingResult.rows.length },
   });

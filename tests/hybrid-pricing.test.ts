@@ -190,8 +190,12 @@ assert.equal(
   "market-rate refresh must not run hybrid layered markup on sampled medians",
 );
 assert.ok(
-  hybridPricingSource.includes("pickRandom7NightInSeason(pricingRegion, season as SeasonKey, 10)"),
-  "market-rate refresh should sample a random 7-night Airbnb window per season within 10 months",
+  hybridPricingSource.includes("hybridPricingWindowForMonth(asOf, monthOffset, stayNights)"),
+  "market-rate refresh should run one SearchAPI Airbnb scan per calendar month",
+);
+assert.ok(
+  hybridPricingSource.includes("for (let monthOffset = 0; monthOffset < horizonMonths; monthOffset += 1)"),
+  "market-rate refresh should scan the configured pricing horizon month-by-month",
 );
 assert.ok(
   hybridPricingSource.includes("fetchAmortizedNightlyByBR("),
