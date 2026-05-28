@@ -145,10 +145,10 @@ export const BUY_IN_MARKET_SEARCH_LOCATIONS: Record<string, string> = Object.fro
 // an alternative buy-in should be plausibly explainable to a guest as the
 // same area, not just any cheaper inventory in the state.
 export const SIMILAR_BUY_IN_MARKETS: Record<string, string[]> = {
-  "Poipu Kai": ["Pili Mai", "Poipu Brenneckes", "Poipu Oceanfront"],
-  "Pili Mai": ["Poipu Kai", "Poipu Brenneckes", "Poipu Oceanfront"],
-  "Poipu Brenneckes": ["Poipu Oceanfront", "Poipu Kai", "Pili Mai"],
-  "Poipu Oceanfront": ["Poipu Brenneckes", "Poipu Kai", "Pili Mai"],
+  "Poipu Kai": ["Poipu Oceanfront", "Poipu Brenneckes", "Kapaa Beachfront"],
+  "Pili Mai": ["Poipu Oceanfront", "Poipu Brenneckes", "Kapaa Beachfront"],
+  "Poipu Brenneckes": ["Poipu Oceanfront", "Kapaa Beachfront", "Kekaha Beachfront"],
+  "Poipu Oceanfront": ["Poipu Brenneckes", "Kapaa Beachfront", "Kekaha Beachfront"],
   "Kapaa Beachfront": ["Princeville"],
   "Princeville": ["Kapaa Beachfront"],
   "Windsor Hills": ["Caribe Cove", "Southern Dunes"],

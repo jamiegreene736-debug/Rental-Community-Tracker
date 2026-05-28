@@ -30,6 +30,7 @@ import {
   users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, autoReplyStyleExamples, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
   type PropertyMarketRate, type InsertPropertyMarketRate,
   type PricingUpdateLog, type InsertPricingUpdateLog,
+  type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -173,6 +174,9 @@ export interface IStorage {
   getAllPropertyMarketRates(): Promise<PropertyMarketRate[]>;
   createPricingUpdateLog(input: InsertPricingUpdateLog): Promise<PricingUpdateLog>;
   getPricingUpdateLogs(filters?: { propertyId?: number; limit?: number }): Promise<PricingUpdateLog[]>;
+  getPropertyBuyInMarkets(propertyId: number): Promise<PropertyBuyInMarkets | undefined>;
+  upsertPropertyBuyInMarkets(input: InsertPropertyBuyInMarkets): Promise<PropertyBuyInMarkets>;
+  deletePropertyBuyInMarkets(propertyId: number): Promise<boolean>;
 
   getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]>;
   upsertLodgifyPropertyId(propertyId: number, lodgifyPropertyId: string): Promise<LodgifyPropertyMap>;
@@ -696,6 +700,38 @@ export class DatabaseStorage implements IStorage {
       .from(pricingUpdateLogs)
       .orderBy(desc(pricingUpdateLogs.createdAt))
       .limit(limit);
+  }
+
+  async getPropertyBuyInMarkets(propertyId: number): Promise<PropertyBuyInMarkets | undefined> {
+    const [row] = await db
+      .select()
+      .from(propertyBuyInMarkets)
+      .where(eq(propertyBuyInMarkets.propertyId, propertyId));
+    return row;
+  }
+
+  async upsertPropertyBuyInMarkets(input: InsertPropertyBuyInMarkets): Promise<PropertyBuyInMarkets> {
+    const [row] = await db
+      .insert(propertyBuyInMarkets)
+      .values({ ...input, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: propertyBuyInMarkets.propertyId,
+        set: {
+          baseCommunity: input.baseCommunity,
+          recommendedMarkets: input.recommendedMarkets ?? [],
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async deletePropertyBuyInMarkets(propertyId: number): Promise<boolean> {
+    const rows = await db
+      .delete(propertyBuyInMarkets)
+      .where(eq(propertyBuyInMarkets.propertyId, propertyId))
+      .returning({ propertyId: propertyBuyInMarkets.propertyId });
+    return rows.length > 0;
   }
 
   async getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]> {

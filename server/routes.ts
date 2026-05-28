@@ -99,6 +99,7 @@ import {
   type SeasonType,
 } from "@shared/pricing-rates";
 import {
+  BUY_IN_MARKETS,
   BUY_IN_MARKET_BOUNDS,
   BUY_IN_MARKET_LOCATIONS,
   BUY_IN_MARKET_PLATFORM_SEARCH_TERMS,
@@ -6251,6 +6252,107 @@ export async function registerRoutes(
     }
   });
 
+  const validBuyInMarketKeys = () => Object.keys(BUY_IN_MARKETS).filter((key) => key !== "Florida Generic").sort();
+  const defaultBuyInMarketsFor = (baseCommunity: string): string[] =>
+    (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
+      .filter((market) => !!BUY_IN_MARKETS[market] && market !== baseCommunity)
+      .slice(0, 3);
+  const sanitizeRecommendedBuyInMarkets = (baseCommunity: string, raw: unknown): string[] => {
+    if (!Array.isArray(raw)) throw new Error("markets must be an array");
+    const seen = new Set<string>();
+    const markets: string[] = [];
+    for (const value of raw) {
+      const market = String(value ?? "").trim();
+      if (!market) continue;
+      if (!BUY_IN_MARKETS[market]) throw new Error(`Unknown buy-in market: ${market}`);
+      if (market === "Florida Generic") throw new Error("Florida Generic cannot be a recommended buy-in market");
+      if (market === baseCommunity) throw new Error("Recommended buy-in markets must be separate from the property's base community");
+      if (seen.has(market)) throw new Error(`Duplicate buy-in market: ${market}`);
+      seen.add(market);
+      markets.push(market);
+      if (markets.length > 3) throw new Error("Only 3 recommended buy-in markets can be saved");
+    }
+    return markets;
+  };
+
+  app.get("/api/property/:propertyId/buy-in-markets", async (req, res) => {
+    try {
+      const propertyId = parseInt(req.params.propertyId, 10);
+      if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
+      const baseCommunity = PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? PROPERTY_UNIT_NEEDS[propertyId]?.community;
+      if (!baseCommunity) return res.status(404).json({ error: "Property not found in unit config" });
+      let saved: Awaited<ReturnType<typeof storage.getPropertyBuyInMarkets>> | undefined;
+      try {
+        saved = await storage.getPropertyBuyInMarkets(propertyId);
+      } catch (err: any) {
+        const missingTable = err?.code === "42P01" || /property_buy_in_markets/i.test(String(err?.message ?? ""));
+        if (!missingTable) throw err;
+      }
+      const defaultMarkets = defaultBuyInMarketsFor(baseCommunity);
+      const markets = Array.isArray(saved?.recommendedMarkets) ? saved.recommendedMarkets : defaultMarkets;
+      return res.json({
+        propertyId,
+        baseCommunity,
+        markets,
+        defaultMarkets,
+        saved: !!saved,
+        availableMarkets: validBuyInMarketKeys(),
+        updatedAt: saved?.updatedAt ?? null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load buy-in markets", message: err?.message ?? String(err) });
+    }
+  });
+
+  app.put("/api/property/:propertyId/buy-in-markets", async (req, res) => {
+    try {
+      const propertyId = parseInt(req.params.propertyId, 10);
+      if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
+      const baseCommunity = PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? PROPERTY_UNIT_NEEDS[propertyId]?.community;
+      if (!baseCommunity) return res.status(404).json({ error: "Property not found in unit config" });
+      const markets = sanitizeRecommendedBuyInMarkets(baseCommunity, req.body?.markets);
+      const row = await storage.upsertPropertyBuyInMarkets({
+        propertyId,
+        baseCommunity,
+        recommendedMarkets: markets,
+      });
+      return res.json({
+        propertyId,
+        baseCommunity,
+        markets: row.recommendedMarkets,
+        defaultMarkets: defaultBuyInMarketsFor(baseCommunity),
+        saved: true,
+        availableMarkets: validBuyInMarketKeys(),
+        updatedAt: row.updatedAt,
+      });
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      const status = /markets must|Unknown|Duplicate|Only 3|separate/.test(message) ? 400 : 500;
+      return res.status(status).json({ error: "Failed to save buy-in markets", message });
+    }
+  });
+
+  app.delete("/api/property/:propertyId/buy-in-markets", async (req, res) => {
+    try {
+      const propertyId = parseInt(req.params.propertyId, 10);
+      if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
+      const baseCommunity = PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? PROPERTY_UNIT_NEEDS[propertyId]?.community;
+      if (!baseCommunity) return res.status(404).json({ error: "Property not found in unit config" });
+      await storage.deletePropertyBuyInMarkets(propertyId);
+      return res.json({
+        propertyId,
+        baseCommunity,
+        markets: defaultBuyInMarketsFor(baseCommunity),
+        defaultMarkets: defaultBuyInMarketsFor(baseCommunity),
+        saved: false,
+        availableMarkets: validBuyInMarketKeys(),
+        updatedAt: null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to reset buy-in markets", message: err?.message ?? String(err) });
+    }
+  });
+
   app.get("/alternatives/:token", async (req, res) => {
     try {
       const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -6443,7 +6545,11 @@ export async function registerRoutes(
       const propertyConfig = PROPERTY_UNIT_NEEDS[propertyId];
       const baseCommunity = requestedCommunity || propertyConfig?.community || "Poipu Kai";
       const sourceRequiresOceanfront = oceanfrontComparableBuyInMarket(baseCommunity);
-      const similar = (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
+      const savedMarketConfig = await storage.getPropertyBuyInMarkets(propertyId).catch(() => undefined);
+      const configuredSimilar = Array.isArray(savedMarketConfig?.recommendedMarkets) && savedMarketConfig.recommendedMarkets.length > 0
+        ? savedMarketConfig.recommendedMarkets
+        : SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [];
+      const similar = configuredSimilar
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
         .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community))
         .slice(0, 5);

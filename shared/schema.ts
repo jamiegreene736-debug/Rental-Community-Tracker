@@ -82,6 +82,16 @@ export const insertSidecarSearchVariationSchema = createInsertSchema(sidecarSear
 export type InsertSidecarSearchVariation = z.infer<typeof insertSidecarSearchVariationSchema>;
 export type SidecarSearchVariation = typeof sidecarSearchVariations.$inferSelect;
 
+export const propertyBuyInMarkets = pgTable("property_buy_in_markets", {
+  propertyId: integer("property_id").primaryKey(),
+  baseCommunity: text("base_community").notNull(),
+  recommendedMarkets: jsonb("recommended_markets").$type<string[]>().default(sql`'[]'::jsonb`).notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PropertyBuyInMarkets = typeof propertyBuyInMarkets.$inferSelect;
+export type InsertPropertyBuyInMarkets = typeof propertyBuyInMarkets.$inferInsert;
+
 export const reservationCancellationAudits = pgTable("reservation_cancellation_audits", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull(),
