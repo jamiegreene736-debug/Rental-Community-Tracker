@@ -1136,6 +1136,14 @@ assert.ok(
   schedulerSource.includes("storage.getCommunityDraft(Math.abs(propertyId))"),
   "availability scheduler should resolve mapped draft-backed properties instead of rejecting negative property ids",
 );
+assert.ok(
+  schedulerSource.includes("configFromMappedGuestyListing(propertyId)"),
+  "availability scheduler should fall back to mapped Guesty listing details when a draft-backed property row is incomplete",
+);
+assert.ok(
+  schedulerSource.includes("title nickname name bedrooms bedroomsCount bedroomCount beds"),
+  "availability scheduler Guesty fallback should request bedroom/title fields needed to infer standalone mapped drafts",
+);
 assert.equal(
   schedulerSource.includes("if (mapping.propertyId <= 0)"),
   false,

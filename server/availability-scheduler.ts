@@ -52,6 +52,32 @@ function positiveDraftInteger(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function firstNonEmptyString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function numberFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/[^\d.-]/g, ""));
+    if (Number.isFinite(parsed)) return Math.trunc(parsed);
+  }
+  return null;
+}
+
+function inferBedroomsFromGuestyListing(listing: any): number | null {
+  const direct = numberFromUnknown(
+    listing?.bedrooms ?? listing?.bedroomsCount ?? listing?.bedroomCount ?? listing?.beds,
+  );
+  if (direct && direct > 0) return direct;
+  const text = firstNonEmptyString(listing?.nickname, listing?.title, listing?.name);
+  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  return match ? positiveDraftInteger(match[1]) : null;
+}
+
 function communityKeyForAvailabilityDraft(draft: any): string {
   const pricingArea = typeof draft?.pricingArea === "string" ? draft.pricingArea.trim() : "";
   const resolved = resolveBuyInMarket({
@@ -69,6 +95,46 @@ function communityKeyForAvailabilityDraft(draft: any): string {
   if (resolved) return resolved;
   if (pricingArea) return pricingArea;
   return draft?.name ?? "Poipu Kai";
+}
+
+function configFromGuestyListing(listing: any): PropertyUnitConfig | null {
+  const title = firstNonEmptyString(listing?.nickname, listing?.title, listing?.name);
+  const address = listing?.address ?? {};
+  const community = resolveBuyInMarket({
+    name: title,
+    listingTitle: listing?.title,
+    bookingTitle: listing?.nickname,
+    streetAddress: firstNonEmptyString(address?.full, address?.formatted, address?.display, address?.street, address?.streetAddress),
+    city: address?.city,
+    state: address?.state,
+  });
+  const bedrooms = inferBedroomsFromGuestyListing(listing);
+  if (!community || !bedrooms) return null;
+  return {
+    community,
+    units: [{
+      unitId: "main",
+      unitLabel: title || `${bedrooms}BR Guesty listing`,
+      bedrooms,
+    }],
+  };
+}
+
+async function configFromMappedGuestyListing(propertyId: number): Promise<PropertyUnitConfig | null> {
+  const listingId = await storage.getGuestyListingId(propertyId).catch(() => null);
+  if (!listingId) return null;
+  try {
+    const fields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.formatted address.display address.city address.state address.street address.streetAddress");
+    const listing = await guestyRequest("GET", `/listings/${listingId}?fields=${fields}`) as any;
+    const config = configFromGuestyListing(listing);
+    if (config) {
+      console.log(`[availability-scheduler] resolved draft-backed property ${propertyId} from mapped Guesty listing ${listingId}: ${config.community} ${config.units.map((u) => `${u.bedrooms}BR`).join("+")}`);
+    }
+    return config;
+  } catch (e: any) {
+    console.warn(`[availability-scheduler] couldn't resolve mapped Guesty listing ${listingId} for property ${propertyId}:`, e?.message ?? e);
+    return null;
+  }
 }
 
 function inferAvailabilityDraftBedrooms(draft: any, unitKey: "unit1" | "unit2"): number | null {
@@ -151,7 +217,8 @@ export async function resolveAvailabilityPropertyConfig(propertyId: number): Pro
   if (!Number.isFinite(propertyId)) return null;
   if (propertyId > 0) return PROPERTY_UNIT_CONFIGS[propertyId] ?? null;
   const draft = await storage.getCommunityDraft(Math.abs(propertyId)).catch(() => null);
-  return draft ? configFromAvailabilityDraft(draft) : null;
+  const draftConfig = draft ? configFromAvailabilityDraft(draft) : null;
+  return draftConfig ?? await configFromMappedGuestyListing(propertyId);
 }
 
 export async function getAvailabilitySchedulerUnsupportedReason(propertyId: number): Promise<string | null> {
