@@ -1130,6 +1130,18 @@ assert.equal(
   false,
   "scheduler rate push should not compute or push per-channel price adjustments",
 );
+assert.ok(
+  routeSource.includes("const success = fullyVerified;"),
+  "Guesty seasonal-rate push should trust read-back verification when deciding whether the desired rates landed",
+);
+assert.ok(
+  routeSource.includes("confirmed the desired prices anyway"),
+  "Guesty seasonal-rate push should explain benign range errors when read-back verifies the final calendar state",
+);
+assert.ok(
+  routeSource.includes("First failed range:"),
+  "bulk Guesty pricing errors should include the first failed range instead of only HTTP 200",
+);
 console.log("  ✓ Guesty pricing pushes marked-up base rates only");
 
 assert.ok(

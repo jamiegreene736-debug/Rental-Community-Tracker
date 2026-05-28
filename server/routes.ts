@@ -660,7 +660,17 @@ async function pushBulkGuestyPricingAfterRefresh(
   });
   const seasonal = await seasonalResponse.json().catch(() => ({}));
   if (!seasonalResponse.ok || seasonal?.success === false) {
-    throw new Error(seasonal?.error || `Guesty seasonal-rate push failed with HTTP ${seasonalResponse.status}`);
+    const firstFailure = Array.isArray(seasonal?.failedRanges) && seasonal.failedRanges.length > 0
+      ? seasonal.failedRanges[0]
+      : null;
+    const firstFailureText = firstFailure
+      ? ` First failed range: ${firstFailure?.range?.startDate ?? "unknown"}-${firstFailure?.range?.endDate ?? "unknown"}: ${firstFailure?.error ?? "unknown error"}`
+      : "";
+    throw new Error(
+      seasonal?.error ||
+        seasonal?.lastGuestyRatePushSummary ||
+        `Guesty seasonal-rate push failed with HTTP ${seasonalResponse.status}.${firstFailureText}`.trim(),
+    );
   }
 
   return {
@@ -15769,24 +15779,30 @@ export async function registerRoutes(
         if (priceByDate.get(dateStr) === Math.round(rate)) matched++;
       }
       const fullyVerified = matched >= days.length;
-      const success = failedRanges.length === 0 && fullyVerified;
+      const success = fullyVerified;
+      const firstFailure = failedRanges[0];
+      const failedRangeSummary = failedRanges.length
+        ? ` ${failedRanges.length} range update(s) returned errors; read-back ${fullyVerified ? "confirmed the desired prices anyway" : "did not fully confirm the desired prices"}. First error: ${firstFailure.range.startDate}-${firstFailure.range.endDate}: ${firstFailure.error}`
+        : "";
       const summary = success
-        ? `Pushed ${days.length} calendar days in ${pushedRanges}/${ranges.length} ranges; verified ${matched}/${days.length} days.`
-        : `Attempted ${days.length} calendar days; pushed ${pushedRanges}/${ranges.length} ranges; verified ${matched}/${days.length} days.`;
+        ? `Pushed ${days.length} calendar days in ${pushedRanges}/${ranges.length} ranges; verified ${matched}/${days.length} days.${failedRangeSummary}`
+        : `Attempted ${days.length} calendar days; pushed ${pushedRanges}/${ranges.length} ranges; verified ${matched}/${days.length} days.${failedRangeSummary}`;
       await recordGuestyRatePush(success ? "ok" : "error", summary);
       return res.json({
         lastGuestyRatePushAt: schedulePropertyId ? new Date().toISOString() : undefined,
         lastGuestyRatePushStatus: success ? "ok" : "error",
         lastGuestyRatePushSummary: summary,
-        success: failedRanges.length === 0 && fullyVerified,
+        success,
         pushedDays: days.length,
         pushedRanges,
         totalRanges: ranges.length,
         failedRanges: failedRanges.slice(0, 5),
         verifiedDays: matched,
-        error: fullyVerified
+        error: success
           ? undefined
-          : `Guesty read-back only matched ${matched}/${days.length} pushed days. Refresh Guesty or retry the push before trusting the table.`,
+          : failedRanges.length
+            ? `Guesty failed ${failedRanges.length}/${ranges.length} range update(s); first failed range ${firstFailure.range.startDate}-${firstFailure.range.endDate}: ${firstFailure.error}. Read-back only matched ${matched}/${days.length} pushed days.`
+            : `Guesty read-back only matched ${matched}/${days.length} pushed days. Refresh Guesty or retry the push before trusting the table.`,
         sampleRange: ranges[0],
       });
     } catch (err: any) {
