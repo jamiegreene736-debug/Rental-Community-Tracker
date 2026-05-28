@@ -380,6 +380,28 @@ function GuestyRatePushCard({
     }
   };
 
+  // Manual market-rate refresh (Pricing tab button) — surgical v1 for the user spec.
+  const refreshMarketRates = async () => {
+    if (!propertyId) return;
+    setMarketRefreshing(true);
+    try {
+      const propPricing = getPropertyPricing(propertyId);
+      const units = propPricing?.units ?? [];
+      const brs = Array.from(new Set(units.map((u) => u.bedrooms)));
+      const r = await fetch("/api/builder/refresh-market-rates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ community: units[0]?.community ?? "unknown", bedrooms: brs, unitCount: units.length, sameBrCombo: brs.length === 1 && units.length > 1 }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "refresh failed");
+      setLiveMarket(data);
+      setSeasonalPushResult((prev: any) => ({ ...(prev || {}), marketRefreshed: Date.now(), live: data }));
+    } catch (e: any) { console.warn("[refresh-market]", e.message); } finally { setMarketRefreshing(false); }
+  };
+
+  // One-click: push seasonal base rates AND channel-equalizing markups.
+  // After this, every month × every channel should land at targetMargin%.
   const setUpCleanMargin = async () => {
     // eslint-disable-next-line no-console
     console.log("[GuestyRatePushCard] setUpCleanMargin clicked", { listingId, seasonalMonths: seasonalMonths.length });
@@ -2918,6 +2940,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, GuestyMonthlyRate>>({});
   const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
   const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
+  // Live market refresh state (from the new /refresh-market-rates endpoint)
+  const [liveMarket, setLiveMarket] = useState<any>(null);
+  const [marketRefreshing, setMarketRefreshing] = useState(false);
   // Merge the per-month rates we just pushed to Guesty directly into the
   // table's state. Sidesteps Guesty's eventually-consistent calendar GET,
   // which was returning stale rates immediately after the PUT.

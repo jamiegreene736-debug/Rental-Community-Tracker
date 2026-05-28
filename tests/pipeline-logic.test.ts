@@ -1289,3 +1289,23 @@ for (const prop of unitBuilderData.filter((p) => dashboardPropertyIds.has(p.prop
 console.log("  ✓ active dashboard property addresses match their communities");
 
 console.log("\nall suites passed ✅");
+
+// ── Surgical addition: market-rate sampler helpers (random near-future windows) ──
+import { pickRandom7NightInSeason, AIRBNB_TO_MARKET_MARKUPS, applyAirbnbBiasAndCombo } from "../shared/pricing-rates";
+
+function testMarketPicker() {
+  const w = pickRandom7NightInSeason("hawaii", "LOW", 10);
+  if (!w) throw new Error("picker returned null");
+  const d = new Date(w.checkIn);
+  const daysAhead = (d.getTime() - Date.now()) / 86400000;
+  if (daysAhead > 400) throw new Error("picker produced far-future window (>400d) — the 2028 bug");
+  if (daysAhead < 1) throw new Error("picker produced past window");
+  console.log("[test] pickRandom7NightInSeason LOW ok, daysAhead~", Math.round(daysAhead));
+  const adj = applyAirbnbBiasAndCombo(500, "LOW", 2, true);
+  if (adj < 1100) throw new Error("combo+markup math off");
+  console.log("[test] applyAirbnbBiasAndCombo combo LOW ok ->", adj);
+  if (!AIRBNB_TO_MARKET_MARKUPS.LOW) throw new Error("missing markup table");
+  console.log("[test] market picker + markup + combo: PASS");
+}
+
+testMarketPicker();

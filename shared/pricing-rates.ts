@@ -76,6 +76,15 @@ export const SEASON_MULTIPLIERS: Record<RegionType, Record<SeasonType, number>> 
   florida: { LOW: 0.75, HIGH: 1.25, HOLIDAY: 1.70 },
 };
 
+// Per-season markup to correct Airbnb's typical under-pricing vs VRBO/Booking.com medians.
+// Applied to the exact-BR median *before* combo handling and the final 20% business markup.
+// Tunable; conservative values from historical spread observations.
+export const AIRBNB_TO_MARKET_MARKUPS: Record<SeasonType, number> = {
+  LOW: 1.16,      // shoulder/low: biggest Airbnb discount vs reality
+  HIGH: 1.09,     // peak summer: smaller gap
+  HOLIDAY: 1.05,  // holiday spikes: Airbnb closer to other channels
+};
+
 const HAWAII_SEASONS: Record<string, SeasonType> = {
   "2026-04": "HIGH",  "2026-05": "LOW",  "2026-06": "HIGH",  "2026-07": "HIGH",
   "2026-08": "HIGH",  "2026-09": "LOW",  "2026-10": "LOW",   "2026-11": "LOW",
@@ -449,4 +458,83 @@ export function totalNightlyBuyInForMonth(
     total += getBuyInRate(community, slot.bedrooms, propertyId, season, yearMonth);
   }
   return total;
+}
+
+// ─────────────────────────────────────────────────────────────
+// RANDOM 7-NIGHT SEASONAL SAMPLER (for live market-rate refreshes)
+// Picks a *random* 7-night window inside the *next* season occurrence
+// within a hard 10-month lookahead cap. Never returns 2028+ dates
+// that have no Airbnb calendar data yet. Used by scheduler + manual
+// Pricing tab refresh to avoid the "no usable exact-2BR LOW samples"
+// failure for far-future windows.
+// ─────────────────────────────────────────────────────────────
+
+export type SeasonKey = SeasonType;
+
+export function pickRandom7NightInSeason(
+  region: RegionType,
+  season: SeasonKey,
+  maxLookaheadMonths = 10,
+): { checkIn: string; checkOut: string } | null {
+  const seasonMap = region === "florida" ? FLORIDA_SEASONS : HAWAII_SEASONS;
+  const ymd = (d: Date) => d.toISOString().slice(0, 10);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const maxFuture = new Date(today.getTime() + maxLookaheadMonths * 30 * 86_400_000);
+
+  // For HOLIDAY use the existing holiday ranges (first future one within cap)
+  if (season === "HOLIDAY") {
+    const holidays: Array<{ sm: number; sd: number; em: number; ed: number }> = [
+      { sm: 12, sd: 20, em: 1, ed: 5 },
+      { sm: 7, sd: 1, em: 7, ed: 7 },
+      { sm: 11, sd: 22, em: 11, ed: 30 },
+      { sm: 3, sd: 15, em: 4, ed: 5 },
+      { sm: 2, sd: 14, em: 2, ed: 17 },
+    ];
+    for (const yearOffset of [0, 1]) {
+      for (const h of holidays) {
+        const year = today.getFullYear() + yearOffset;
+        const ci = new Date(year, h.sm - 1, h.sd + 2);
+        if (ci > today && ci < maxFuture) {
+          const co = new Date(ci.getTime() + 7 * 86_400_000);
+          return { checkIn: ymd(ci), checkOut: ymd(co) };
+        }
+      }
+    }
+    return null;
+  }
+
+  // LOW / HIGH: walk forward month-by-month (capped), find first match,
+  // then pick a *random* day 4-21 for check-in (true random 7-night inside season month).
+  for (let offset = 1; offset <= maxLookaheadMonths; offset++) {
+    const target = new Date(today.getFullYear(), today.getMonth() + offset, 1);
+    if (target > maxFuture) break;
+    const ym = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}`;
+    if (seasonMap[ym] === season) {
+      // Random day in 4..21 to avoid 1st/31st edge cases in pricing calendars
+      const day = 4 + Math.floor(Math.random() * 18);
+      const ci = new Date(target.getFullYear(), target.getMonth(), day);
+      if (ci > today) {
+        const co = new Date(ci.getTime() + 7 * 86_400_000);
+        return { checkIn: ymd(ci), checkOut: ymd(co) };
+      }
+    }
+  }
+  return null;
+}
+
+// Apply per-season Airbnb bias correction, then combo adjustment, then caller adds final 20%.
+export function applyAirbnbBiasAndCombo(
+  median: number,
+  season: SeasonKey,
+  unitCount: number,   // 1 for single listing, 2+ for combo (two physical units behind one Guesty listing)
+  sameBrCount = false, // when true and unitCount===2, user spec allows explicit double
+): number {
+  const bias = AIRBNB_TO_MARKET_MARKUPS[season] ?? 1.10;
+  let adjusted = Math.round(median * bias);
+  if (unitCount > 1) {
+    // Combo: either explicit double (identical BRs) or sum (different BRs). Caller passes effective count.
+    adjusted = sameBrCount && unitCount === 2 ? adjusted * 2 : adjusted * unitCount;
+  }
+  return Math.round(adjusted);
 }
