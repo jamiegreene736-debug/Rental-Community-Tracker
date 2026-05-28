@@ -297,23 +297,29 @@ function toLegacySeason(demandClass: HybridDemandClass): "LOW" | "HIGH" | "HOLID
   return "HOLIDAY";
 }
 
-export async function refreshHybridPricingForProperty(args: {
+export async function refreshHybridPricingForTarget(args: {
   propertyId: number;
+  propertyName: string;
+  community: string;
+  bedroomCounts: number[];
+  unitCount: number;
   triggerType: HybridTriggerType;
   notes?: string;
+  searchName?: string;
   asOf?: Date;
 }): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const { storage } = await import("./storage");
-  const config = PROPERTY_UNIT_CONFIGS[args.propertyId];
-  if (!config) throw new Error(`Property ${args.propertyId} is not configured for hybrid pricing`);
-  const market = BUY_IN_MARKETS[config.community];
-  const location = BUY_IN_MARKET_LOCATIONS[config.community];
-  const searchName = market?.platformSearch?.airbnb || location?.searchName || market?.searchLocation || config.community;
+  const market = BUY_IN_MARKETS[args.community];
+  const location = BUY_IN_MARKET_LOCATIONS[args.community];
+  const searchName = args.searchName || market?.platformSearch?.airbnb || location?.searchName || market?.searchLocation || args.community;
   const asOf = args.asOf ?? new Date();
   const rows: any[] = [];
   const logs: any[] = [];
+  const bedroomCounts = Array.from(new Set(args.bedroomCounts))
+    .filter((bedrooms) => Number.isFinite(bedrooms) && bedrooms > 0)
+    .sort((a, b) => a - b);
 
-  for (const bedrooms of propertyBedroomCounts(config)) {
+  for (const bedrooms of bedroomCounts) {
     const previous = (await storage.getPropertyMarketRates(args.propertyId)).find((r) => r.bedrooms === bedrooms);
     const monthlyRates: Record<string, HybridMonthlyRate> = {};
     const allFinalRates: number[] = [];
@@ -327,7 +333,7 @@ export async function refreshHybridPricingForProperty(args: {
       const checkIn = dateOnly(start);
       const checkOut = dateOnly(addDays(start, HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights));
       const yearMonth = checkIn.slice(0, 7);
-      const airbnb = await fetchAirbnbMedianNightly({ community: config.community, bedrooms, checkIn, checkOut, searchName });
+      const airbnb = await fetchAirbnbMedianNightly({ community: args.community, bedrooms, checkIn, checkOut, searchName });
       if (HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs));
       }
@@ -338,8 +344,8 @@ export async function refreshHybridPricingForProperty(args: {
         checkIn,
         checkOut,
         bedrooms,
-        unitCount: config.units.length,
-        isMultiUnit: config.units.length > 1,
+        unitCount: args.unitCount,
+        isMultiUnit: args.unitCount > 1,
         asOf,
       });
       lastResult = result;
@@ -371,7 +377,7 @@ export async function refreshHybridPricingForProperty(args: {
       await storage.deletePropertyMarketRate(args.propertyId, bedrooms);
       logs.push(await storage.createPricingUpdateLog({
         propertyId: args.propertyId,
-        propertyName: `${config.community} property ${args.propertyId}`,
+        propertyName: args.propertyName,
         bedrooms,
         triggerType: args.triggerType,
         oldRate: previous?.medianNightly ?? null,
@@ -399,7 +405,7 @@ export async function refreshHybridPricingForProperty(args: {
     rows.push(row);
     logs.push(await storage.createPricingUpdateLog({
       propertyId: args.propertyId,
-      propertyName: `${config.community} property ${args.propertyId}`,
+      propertyName: args.propertyName,
       bedrooms,
       triggerType: args.triggerType,
       oldRate: previous?.medianNightly ?? null,
@@ -411,6 +417,26 @@ export async function refreshHybridPricingForProperty(args: {
     }));
   }
   return { propertyId: args.propertyId, rows, logs };
+}
+
+export async function refreshHybridPricingForProperty(args: {
+  propertyId: number;
+  triggerType: HybridTriggerType;
+  notes?: string;
+  asOf?: Date;
+}): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
+  const config = PROPERTY_UNIT_CONFIGS[args.propertyId];
+  if (!config) throw new Error(`Property ${args.propertyId} is not configured for hybrid pricing`);
+  return refreshHybridPricingForTarget({
+    propertyId: args.propertyId,
+    propertyName: `${config.community} property ${args.propertyId}`,
+    community: config.community,
+    bedroomCounts: propertyBedroomCounts(config),
+    unitCount: config.units.length,
+    triggerType: args.triggerType,
+    notes: args.notes,
+    asOf: args.asOf,
+  });
 }
 
 export async function runHybridPricingForAllProperties(triggerType: HybridTriggerType = "Weekly Automated Scan") {
