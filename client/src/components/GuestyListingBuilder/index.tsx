@@ -2862,8 +2862,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const monthlySampleTotal = monthlySampleComplete
         ? Math.round(monthlySampleRates.reduce((s, n) => s + (n ?? 0), 0))
         : null;
-      const currentUnitRates = propPricing.units.map((u) => {
-        const buyInRate = getBuyInRate(u.community, u.bedrooms, propertyId, row.season, row.yearMonth);
+      const currentUnitRates = propPricing.units.map((u, unitIdx) => {
+        const perUnitMonthly = monthlySampleRates[unitIdx];
+        const buyInRate = perUnitMonthly ?? getBuyInRate(u.community, u.bedrooms, propertyId, row.season, row.yearMonth);
         return {
           buyInRate,
           sellRate: cleanBaseRateFromBuyIn(buyInRate),

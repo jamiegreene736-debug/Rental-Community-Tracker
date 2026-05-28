@@ -287,6 +287,16 @@ export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEnt
   return _liveBuyIns.get(liveKey(propertyId, bedrooms)) ?? null;
 }
 
+export function getLiveMonthlyBuyIn(
+  propertyId: number,
+  bedrooms: number,
+  yearMonth: string,
+): number | null {
+  const monthly = getLiveBuyIn(propertyId, bedrooms)?.monthlyRates[yearMonth]?.medianNightly;
+  if (monthly == null || !Number.isFinite(monthly) || monthly <= 0) return null;
+  return Math.round(monthly);
+}
+
 function fallbackSeasonBasisFromLow(
   community: string,
   lowBasis: number | null,
@@ -343,10 +353,8 @@ export function getBuyInRate(
     const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
     if (live) {
       if (yearMonth) {
-        const monthly = live.monthlyRates[yearMonth]?.medianNightly;
-        if (monthly != null && Number.isFinite(monthly) && monthly > 0) {
-          return Math.round(monthly);
-        }
+        const monthly = getLiveMonthlyBuyIn(propertyId, bedrooms, yearMonth);
+        if (monthly != null) return monthly;
       }
       const normalized = normalizeSeasonalBasis(
         community,
