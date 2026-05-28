@@ -120,7 +120,7 @@ import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommu
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
-import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
+import { refreshHybridPricingForProperty, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
 import { runFullScanForProperty, runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
@@ -28511,110 +28511,6 @@ Return ONLY compact JSON with this exact shape:
     res.json({ success: true });
   });
 
-  // Hybrid layered pricing replaces the old active market-pricing flow.
-  // It uses SearchAPI Airbnb medians only, then applies the config-driven
-  // blended OTA uplift and rate-management layers in server/hybrid-pricing.ts.
-  app.post("/api/property/:id/refresh-market-rates", async (req, res) => {
-    const propertyId = parseInt(req.params.id, 10);
-    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid id" });
-    if (propertyId < 0) {
-      return res.redirect(307, `/api/community/${-propertyId}/refresh-pricing`);
-    }
-    try {
-      const result = await refreshHybridPricingForProperty({
-        propertyId,
-        triggerType: "Manual Update",
-        notes: "Manual Update from Pricing tab",
-      });
-      res.json({
-        ok: true,
-        mode: "hybrid-airbnb-layered",
-        propertyId,
-        persisted: result.rows,
-        logs: result.logs,
-        snapshot: {
-          persisted: result.rows.map((row: any) => ({
-            bedrooms: row.bedrooms,
-            medianNightly: Number(row.medianNightly),
-            medianNightlyHigh: row.medianNightlyHigh != null ? Number(row.medianNightlyHigh) : null,
-            medianNightlyHoliday: row.medianNightlyHoliday != null ? Number(row.medianNightlyHoliday) : null,
-            monthlyRates: row.monthlyRates ?? {},
-            basisSource: row.source,
-            sampleCount: row.sampleCount,
-          })),
-        },
-      });
-    } catch (e: any) {
-      console.error(`[hybrid-pricing] property ${propertyId} failed:`, e?.message ?? e);
-      res.status(500).json({ error: e?.message ?? String(e) });
-    }
-  });
-
-  app.post("/api/community/:id/refresh-pricing", async (req, res) => {
-    const id = parseInt(req.params.id, 10);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid ID" });
-    const draft = await storage.getCommunityDraft(id);
-    if (!draft) return res.status(404).json({ error: "Not found" });
-    const bedroomsRaw = (draft as any).singleListing === true
-      ? [inferCommunityDraftBedroomCount(draft, "unit1")]
-      : [
-          inferCommunityDraftBedroomCount(draft, "unit1"),
-          inferCommunityDraftBedroomCount(draft, "unit2"),
-        ];
-    const validBedroomCounts = bedroomsRaw.filter((b): b is number => typeof b === "number" && Number.isFinite(b) && b > 0);
-    const bedroomCounts = Array.from(new Set(validBedroomCounts)).sort((a, b) => a - b);
-    if (bedroomCounts.length === 0) {
-      return res.status(400).json({
-        error: "Bedroom counts are required before hybrid pricing can run",
-        message: "Enter the single-listing bedroom count or both combo unit bedroom counts, then retry.",
-      });
-    }
-    try {
-      const propertyKey = -id;
-      const result = await refreshHybridPricingForTarget({
-        propertyId: propertyKey,
-        propertyName: draft.name,
-        community: draft.name,
-        bedroomCounts,
-        unitCount: (draft as any).singleListing === true ? 1 : Math.max(1, validBedroomCounts.length),
-        triggerType: "Manual Update",
-        notes: "Manual Update from draft Pricing tab",
-        searchName: draft.name,
-      });
-      const numericRates = result.rows
-        .map((row: any) => Number(row.medianNightly))
-        .filter((n: number) => Number.isFinite(n) && n > 0)
-        .sort((a: number, b: number) => a - b);
-      const estimatedLowRate = numericRates[0] ?? null;
-      const estimatedHighRate = numericRates[numericRates.length - 1] ?? estimatedLowRate;
-      const updated = await storage.updateCommunityDraft(id, { estimatedLowRate, estimatedHighRate });
-      res.json({
-        ok: true,
-        mode: "hybrid-airbnb-layered",
-        propertyId: propertyKey,
-        estimatedLowRate,
-        estimatedHighRate,
-        persisted: result.rows,
-        logs: result.logs,
-        draft: updated,
-        snapshot: {
-          persisted: result.rows.map((row: any) => ({
-            bedrooms: row.bedrooms,
-            medianNightly: Number(row.medianNightly),
-            medianNightlyHigh: row.medianNightlyHigh != null ? Number(row.medianNightlyHigh) : null,
-            medianNightlyHoliday: row.medianNightlyHoliday != null ? Number(row.medianNightlyHoliday) : null,
-            monthlyRates: row.monthlyRates ?? {},
-            basisSource: row.source,
-            sampleCount: row.sampleCount,
-          })),
-        },
-      });
-    } catch (e: any) {
-      console.error(`[hybrid-pricing] draft ${id} failed:`, e?.message ?? e);
-      res.status(500).json({ error: e?.message ?? String(e) });
-    }
-  });
-
   app.post("/api/pricing/hybrid/run", async (req, res) => {
     const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
     const propertyIds = rawIds
@@ -28655,35 +28551,6 @@ Return ONLY compact JSON with this exact shape:
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? String(e) });
     }
-  });
-
-  app.post("/api/pricing/bulk-refresh", async (req, res) => {
-    const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
-    const propertyIds = rawIds
-      .map((id: unknown) => Number(id))
-      .filter((id): id is number => Number.isInteger(id) && id > 0);
-    if (propertyIds.length === 0) return res.status(400).json({ error: "Select at least one promoted property" });
-    const results: Array<{ id: number; ok: boolean; rows?: number; error?: string }> = [];
-    for (const id of Array.from(new Set<number>(propertyIds))) {
-      try {
-        const result = await refreshHybridPricingForProperty({ propertyId: id, triggerType: "Manual Update" });
-        results.push({ id, ok: true, rows: result.rows.length });
-      } catch (e: any) {
-        results.push({ id, ok: false, error: e?.message ?? String(e) });
-      }
-    }
-    res.status(202).json({
-      ok: true,
-      mode: "hybrid-airbnb-layered",
-      job: {
-        id: `hybrid_${Date.now()}`,
-        status: results.every((r) => r.ok) ? "completed" : "failed",
-        completed: results.filter((r) => r.ok).length,
-        failed: results.filter((r) => !r.ok).length,
-        total: results.length,
-        items: results,
-      },
-    });
   });
 
   // Re-run the sidecar-backed 7-night market-rate lookup for a saved draft

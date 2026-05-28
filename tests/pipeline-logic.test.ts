@@ -1065,6 +1065,24 @@ console.log("  ✓ generate-listing fallback has no stale DISCLOSURE reference")
 assert.equal(MAX_BUY_IN_WALK_MINUTES, 10, "buy-in unit walking-distance guardrail should stay at 10 minutes");
 console.log("  ✓ buy-in walking-distance guardrail is pinned at 10 minutes");
 
+const countLiteral = (source: string, literal: string): number => source.split(literal).length - 1;
+assert.equal(
+  countLiteral(routeSource, 'app.post("/api/pricing/bulk-refresh"'),
+  1,
+  "bulk market pricing should only register the server-owned queue route",
+);
+assert.equal(
+  countLiteral(routeSource, 'app.post("/api/property/:id/refresh-market-rates"'),
+  1,
+  "property market pricing should only register the sidecar-backed route",
+);
+assert.equal(
+  countLiteral(routeSource, 'app.post("/api/community/:id/refresh-pricing"'),
+  1,
+  "draft market pricing should only register the sidecar-backed route",
+);
+console.log("  ✓ market-pricing routes are not shadowed by legacy handlers");
+
 const schemaMaintenanceSource = readFileSync(new URL("../server/schema-maintenance.ts", import.meta.url), "utf8");
 for (const col of ["single_listing", "booking_title", "property_type", "unit1_bathrooms", "unit2_bathrooms"]) {
   assert.ok(
