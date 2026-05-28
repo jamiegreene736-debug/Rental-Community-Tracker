@@ -1113,6 +1113,23 @@ assert.equal(
 );
 console.log("  ✓ Guesty pricing pushes marked-up base rates only");
 
+assert.ok(
+  schedulerSource.includes("storage.getCommunityDraft(Math.abs(propertyId))"),
+  "availability scheduler should resolve mapped draft-backed properties instead of rejecting negative property ids",
+);
+assert.equal(
+  schedulerSource.includes("if (mapping.propertyId <= 0)"),
+  false,
+  "daily availability policy sync should include mapped draft-backed Guesty listings",
+);
+const availabilityTabSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/AvailabilityTab.tsx", import.meta.url), "utf8");
+assert.equal(
+  availabilityTabSource.includes("isSyntheticDraftProperty"),
+  false,
+  "Availability tab should ask the server whether a mapped draft-backed property is supported",
+);
+console.log("  ✓ availability scheduler supports mapped draft-backed listings");
+
 const schemaMaintenanceSource = readFileSync(new URL("../server/schema-maintenance.ts", import.meta.url), "utf8");
 for (const col of ["single_listing", "booking_title", "property_type", "unit1_bathrooms", "unit2_bathrooms"]) {
   assert.ok(

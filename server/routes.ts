@@ -119,7 +119,7 @@ import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage,
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
-import { runFullScanForProperty, runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason } from "./availability-scheduler";
+import { runFullScanForProperty, runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason, resolveAvailabilityPropertyConfig } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
   availabilityWindowCountForWeeks,
@@ -15987,7 +15987,7 @@ export async function registerRoutes(
     const minSets = Math.max(1, parseInt((req.query.minSets as string) ?? "3", 10) || 3);
     const mode = String(req.query.mode ?? "seasonal-sidecar");
 
-    const config = PROPERTY_UNIT_CONFIGS[propertyId];
+    const config = await resolveAvailabilityPropertyConfig(propertyId);
     if (!config) return res.status(404).json({ error: `Property ${propertyId} not in config` });
 
     const community = config.community;
@@ -19897,7 +19897,7 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
-    const unsupportedReason = getAvailabilitySchedulerUnsupportedReason(propertyId);
+    const unsupportedReason = await getAvailabilitySchedulerUnsupportedReason(propertyId);
     if (unsupportedReason) {
       return res.json({
         schedule: null,
@@ -19913,7 +19913,7 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/availability/schedule/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
-    const unsupportedReason = getAvailabilitySchedulerUnsupportedReason(propertyId);
+    const unsupportedReason = await getAvailabilitySchedulerUnsupportedReason(propertyId);
     if (unsupportedReason) {
       return res.status(409).json({
         error: unsupportedReason,
@@ -19991,7 +19991,7 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/availability/weekly-pricing/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
-    const config = PROPERTY_UNIT_CONFIGS[propertyId];
+    const config = await resolveAvailabilityPropertyConfig(propertyId);
     if (!config) return res.status(404).json({ error: "property not in config" });
     const body = (req.body ?? {}) as {
       windows?: Array<{ startDate: string; endDate: string; verdict: "open" | "tight" | "blocked" }>;

@@ -138,7 +138,6 @@ function parseScanSummary(summary: string | null | undefined): RunBadges {
 }
 
 export default function AvailabilityTab({ propertyId, listingId }: { propertyId: number | undefined; listingId: string | null }) {
-  const isSyntheticDraftProperty = typeof propertyId === "number" && propertyId <= 0;
   // Default to 24 months — matches how Guesty's calendar horizon is typically
   // set, and gives the policy enough lookahead to publish fixed lead-time
   // blocks before arrivals become too close to safely accept.
@@ -183,10 +182,8 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [scheduleSupported, setScheduleSupported] = useState(true);
   const [scheduleUnsupportedReason, setScheduleUnsupportedReason] = useState<string | null>(null);
   const [runNowBusy, setRunNowBusy] = useState(false);
-  const schedulerUnavailable = isSyntheticDraftProperty || scheduleSupported === false;
-  const schedulerUnavailableMessage = isSyntheticDraftProperty
-    ? "Availability policy automation is available after this draft is promoted to a configured property."
-    : scheduleUnsupportedReason ?? "Availability policy automation is not configured for this property yet.";
+  const schedulerUnavailable = scheduleSupported === false;
+  const schedulerUnavailableMessage = scheduleUnsupportedReason ?? "Availability policy automation is not configured for this property yet.";
 
   // Recent scanner runs — scheduled + manual, newest first. Rendered as
   // a compact table under the scheduler card so the operator can spot
@@ -277,13 +274,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [scheduleFetched, setScheduleFetched] = useState(false);
   const fetchSchedule = useCallback(async () => {
     if (!propertyId) return;
-    if (isSyntheticDraftProperty) {
-      setSchedule(null);
-      setScheduleSupported(false);
-      setScheduleUnsupportedReason("draft property id");
-      setScheduleFetched(true);
-      return;
-    }
     try {
       const r = await fetch(`/api/availability/schedule/${propertyId}`);
       const d = await r.json();
@@ -298,7 +288,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       }
       setScheduleFetched(true);
     } catch { /* ignore */ }
-  }, [propertyId, isSyntheticDraftProperty]);
+  }, [propertyId]);
 
   useEffect(() => {
     fetchSchedule();

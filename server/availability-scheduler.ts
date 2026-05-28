@@ -10,10 +10,11 @@
 
 import { storage } from "./storage";
 import { guestyRequest } from "./guesty-sync";
-import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 import {
   totalNightlyBuyInForMonth,
 } from "@shared/pricing-rates";
+import { resolveBuyInMarket } from "@shared/buy-in-market";
 import {
   getSeasonalAvailabilityQueueStatus,
   scanSeasonalAvailabilityCapacity,
@@ -46,12 +47,121 @@ export function getScannerSchedulerStatus() {
   };
 }
 
-export function getAvailabilitySchedulerUnsupportedReason(propertyId: number): string | null {
-  if (!Number.isFinite(propertyId)) return "invalid property id";
-  if (propertyId <= 0) {
-    return "draft property id; promote the draft before enabling availability scans";
+function positiveDraftInteger(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function communityKeyForAvailabilityDraft(draft: any): string {
+  const pricingArea = typeof draft?.pricingArea === "string" ? draft.pricingArea.trim() : "";
+  const resolved = resolveBuyInMarket({
+    marketKey: pricingArea,
+    name: draft?.name,
+    listingTitle: draft?.listingTitle,
+    bookingTitle: draft?.bookingTitle,
+    streetAddress: draft?.streetAddress,
+    unit1Address: draft?.unit1Address,
+    unit2Address: draft?.unit2Address,
+    city: draft?.city,
+    state: draft?.state,
+    sourceUrl: draft?.sourceUrl,
+  });
+  if (resolved) return resolved;
+  if (pricingArea) return pricingArea;
+  return draft?.name ?? "Poipu Kai";
+}
+
+function inferAvailabilityDraftBedrooms(draft: any, unitKey: "unit1" | "unit2"): number | null {
+  const stored = unitKey === "unit1" ? draft?.unit1Bedrooms : draft?.unit2Bedrooms;
+  const combined = draft?.singleListing === true ? draft?.combinedBedrooms : null;
+  const fromStructured = positiveDraftInteger(stored) ?? positiveDraftInteger(combined);
+  if (fromStructured) return fromStructured;
+
+  const text = [
+    unitKey === "unit1" ? draft?.unit1Description : draft?.unit2Description,
+    unitKey === "unit1" ? draft?.unit1Bedding : draft?.unit2Bedding,
+    draft?.listingTitle,
+    draft?.bookingTitle,
+    draft?.name,
+    draft?.unitTypes,
+  ].filter(Boolean).join(" ");
+  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  if (!match) return null;
+  const n = Number.parseInt(match[1], 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function unitLabelFromDraftAddress(address: unknown, fallback: string): string {
+  if (typeof address !== "string" || !address.trim()) return fallback;
+  const match = address.match(/(?:#|unit|apt|apartment|suite|ste)\s*([A-Za-z]?\d{1,5}[A-Za-z]?)/i);
+  return match?.[1] ? `Unit ${match[1]}` : fallback;
+}
+
+function configFromAvailabilityDraft(draft: any): PropertyUnitConfig | null {
+  const community = communityKeyForAvailabilityDraft(draft);
+  const isSingle = draft?.singleListing === true;
+  const combinedBedrooms = positiveDraftInteger(draft?.combinedBedrooms);
+  const unit1Bedrooms = inferAvailabilityDraftBedrooms(draft, "unit1") ?? (isSingle ? combinedBedrooms : null);
+  let unit2Bedrooms = isSingle ? null : inferAvailabilityDraftBedrooms(draft, "unit2");
+
+  if (!isSingle && !unit2Bedrooms && combinedBedrooms && unit1Bedrooms && combinedBedrooms > unit1Bedrooms) {
+    unit2Bedrooms = combinedBedrooms - unit1Bedrooms;
   }
-  if (!PROPERTY_UNIT_CONFIGS[propertyId]) return "property not in availability config";
+
+  if (isSingle) {
+    const bedrooms = unit1Bedrooms ?? combinedBedrooms;
+    return bedrooms
+      ? {
+          community,
+          units: [{
+            unitId: "main",
+            unitLabel: unitLabelFromDraftAddress(draft?.unit1Address, `${bedrooms}BR Guesty listing`),
+            bedrooms,
+          }],
+        }
+      : null;
+  }
+
+  let unitBedrooms = [unit1Bedrooms, unit2Bedrooms]
+    .filter((bedrooms): bedrooms is number => !!bedrooms && bedrooms > 0);
+  if (unitBedrooms.length === 0 && combinedBedrooms) {
+    unitBedrooms = combinedBedrooms % 2 === 0
+      ? [combinedBedrooms / 2, combinedBedrooms / 2]
+      : [Math.ceil(combinedBedrooms / 2), Math.floor(combinedBedrooms / 2)];
+  }
+  if (unitBedrooms.length === 1 && combinedBedrooms && combinedBedrooms > unitBedrooms[0]) {
+    unitBedrooms.push(combinedBedrooms - unitBedrooms[0]);
+  }
+  if (unitBedrooms.length === 0) return null;
+
+  return {
+    community,
+    units: unitBedrooms.map((bedrooms, index) => ({
+      unitId: index === 0 ? "unit-a" : "unit-b",
+      unitLabel: unitLabelFromDraftAddress(
+        index === 0 ? draft?.unit1Address : draft?.unit2Address,
+        index === 0 ? "Unit A" : "Unit B",
+      ),
+      bedrooms,
+    })),
+  };
+}
+
+export async function resolveAvailabilityPropertyConfig(propertyId: number): Promise<PropertyUnitConfig | null> {
+  if (!Number.isFinite(propertyId)) return null;
+  if (propertyId > 0) return PROPERTY_UNIT_CONFIGS[propertyId] ?? null;
+  const draft = await storage.getCommunityDraft(Math.abs(propertyId)).catch(() => null);
+  return draft ? configFromAvailabilityDraft(draft) : null;
+}
+
+export async function getAvailabilitySchedulerUnsupportedReason(propertyId: number): Promise<string | null> {
+  if (!Number.isFinite(propertyId)) return "invalid property id";
+  const config = await resolveAvailabilityPropertyConfig(propertyId);
+  if (!config) {
+    return propertyId <= 0
+      ? "draft-backed property is missing bedroom/community data for availability scans"
+      : "property not in availability config";
+  }
   return null;
 }
 
@@ -71,10 +181,10 @@ export async function runFullScanForProperty(
   propertyId: number,
   opts: { minSets: number; targetMargin: number; runInventory: boolean; runPricing: boolean; runSyncBlocks: boolean },
 ): Promise<string> {
-  const unsupportedReason = getAvailabilitySchedulerUnsupportedReason(propertyId);
+  const unsupportedReason = await getAvailabilitySchedulerUnsupportedReason(propertyId);
   if (unsupportedReason) return `${SKIP_PREFIX} ${unsupportedReason}`;
 
-  const config = PROPERTY_UNIT_CONFIGS[propertyId];
+  const config = await resolveAvailabilityPropertyConfig(propertyId);
   if (!config) return `${SKIP_PREFIX} property not in availability config`;
 
   const guestyListingId = await storage.getGuestyListingId(propertyId);
@@ -315,10 +425,6 @@ async function maybeRunDailyPolicySync() {
     let skipped = 0;
     let failed = 0;
     for (const mapping of mappings) {
-      if (mapping.propertyId <= 0) {
-        skipped++;
-        continue;
-      }
       const startedAt = Date.now();
       try {
         const summary = await runFullScanForProperty(mapping.propertyId, {
