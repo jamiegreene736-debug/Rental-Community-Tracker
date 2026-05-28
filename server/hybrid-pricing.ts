@@ -9,6 +9,18 @@ import { extractBedroomsFromListing, fetchAmortizedNightlyByBR } from "./communi
 export type HybridDemandClass = "standard" | "high" | "peak" | "ultra";
 export type HybridTriggerType = "Weekly Automated Scan" | "Manual Update" | "Admin Backfill";
 
+export type HybridMonthScannedEvent = {
+  propertyId: number;
+  bedrooms: number;
+  monthOffset: number;
+  horizonMonths: number;
+  yearMonth: string;
+  checkIn: string;
+  checkOut: string;
+  medianNightly: number;
+  sampleCount: number;
+};
+
 export type HybridLayerBreakdown = {
   layer: number;
   name: string;
@@ -553,6 +565,7 @@ export async function refreshHybridPricingForTarget(args: {
   notes?: string;
   searchName?: string;
   asOf?: Date;
+  onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
 }): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const { storage } = await import("./storage");
   const asOf = args.asOf ?? new Date();
@@ -629,6 +642,32 @@ export async function refreshHybridPricingForTarget(args: {
           ],
         },
       };
+      console.info("[hybrid-pricing] monthly scan ok", JSON.stringify({
+        propertyId: args.propertyId,
+        propertyName: args.propertyName,
+        community: args.community,
+        bedrooms,
+        monthOffset,
+        horizonMonths,
+        yearMonth: window.yearMonth,
+        checkIn: window.checkIn,
+        checkOut: window.checkOut,
+        medianNightly: basis,
+        sampleCount: airbnb.sampleCount,
+        calendarSeason: season,
+        demandClass: tier.demandClass,
+      }));
+      await args.onMonthScanned?.({
+        propertyId: args.propertyId,
+        bedrooms,
+        monthOffset,
+        horizonMonths,
+        yearMonth: window.yearMonth,
+        checkIn: window.checkIn,
+        checkOut: window.checkOut,
+        medianNightly: basis,
+        sampleCount: airbnb.sampleCount,
+      });
       await sleep(HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs);
     }
 
@@ -648,6 +687,13 @@ export async function refreshHybridPricingForTarget(args: {
       throw new Error(`SearchAPI Airbnb monthly scans missing a LOW/HIGH/HOLIDAY month for ${searchName}.`);
     }
     const monthlyValues = Object.values(monthlyRates).map((rate) => rate.medianNightly);
+    const scannedMonths = Object.keys(monthlyRates).sort();
+    if (scannedMonths.length !== horizonMonths) {
+      await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
+      throw new Error(
+        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one median per calendar month.`,
+      );
+    }
     const row = await storage.upsertPropertyMarketRate({
       propertyId: args.propertyId,
       bedrooms,
@@ -669,7 +715,10 @@ export async function refreshHybridPricingForTarget(args: {
       oldRate: previous?.medianNightly ?? null,
       newRate: String(lowMedian),
       status: "ok",
-      notes: args.notes || "SearchAPI Airbnb monthly medians saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.",
+      notes: [
+        args.notes || "SearchAPI Airbnb monthly medians saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.",
+        `Scanned ${scannedMonths.length} calendar months (${scannedMonths[0]} through ${scannedMonths[scannedMonths.length - 1]}).`,
+      ].join(" "),
       layersJson: [],
       calendarJson: monthlyRates,
     }));
@@ -706,7 +755,8 @@ export async function refreshHybridPricingForTarget(args: {
       },
       lowNightly: Math.min(...monthlyValues),
       highNightly: Math.max(...monthlyValues),
-      monthsScanned: Object.keys(monthlyRates).length,
+      monthsScanned: scannedMonths.length,
+      scannedMonths,
       monthlyPreview: summarizeMonthlyHybridRates(monthlyRates),
       layers: [],
     }));
@@ -719,6 +769,7 @@ export async function refreshHybridPricingForProperty(args: {
   triggerType: HybridTriggerType;
   notes?: string;
   asOf?: Date;
+  onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
 }): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const config = PROPERTY_UNIT_CONFIGS[args.propertyId];
   if (!config) throw new Error(`Property ${args.propertyId} is not configured for hybrid pricing`);
@@ -731,6 +782,7 @@ export async function refreshHybridPricingForProperty(args: {
     triggerType: args.triggerType,
     notes: args.notes,
     asOf: args.asOf,
+    onMonthScanned: args.onMonthScanned,
   });
 }
 

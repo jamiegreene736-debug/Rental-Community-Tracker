@@ -118,7 +118,7 @@ import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommu
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
-import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
+import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
 import { runFullScanForProperty, runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason, resolveAvailabilityPropertyConfig } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
@@ -688,7 +688,11 @@ function isGuestyPushSoftFailure(error: unknown): boolean {
   return /429|too many requests|rate.?limit|Guesty seasonal-rate push failed|read-back only matched|stored nothing/i.test(message);
 }
 
-async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: string): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
+async function refreshHybridPricingForDraft(
+  propertyId: number,
+  fallbackLabel: string,
+  onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>,
+): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const draftId = Math.abs(propertyId);
   const draft = await storage.getCommunityDraft(draftId);
   if (!draft) throw new Error(`Draft ${draftId} was not found`);
@@ -710,6 +714,7 @@ async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: s
     unitCount: unitSlots.length || 1,
     triggerType: "Manual Update",
     notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly medians (no hybrid markup layers).",
+    onMonthScanned,
   });
 }
 
@@ -783,16 +788,32 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     return;
   }
 
-  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb monthly pricing" };
+  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb monthly pricing (starting month 1)" };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
 
+  const onMonthScanned = async (event: HybridMonthScannedEvent) => {
+    item.progress = {
+      phase: "searchapi-airbnb",
+      percent: Math.min(79, Math.round(10 + (70 * (event.monthOffset + 1)) / event.horizonMonths)),
+      label: `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) → $${event.medianNightly}/night`,
+      currentMonth: event.yearMonth,
+      monthsScanned: event.monthOffset + 1,
+      horizonMonths: event.horizonMonths,
+      bedrooms: event.bedrooms,
+      lastMedianNightly: event.medianNightly,
+    };
+    item.heartbeatAt = Date.now();
+    await persistBulkPricingJob(job);
+  };
+
   const pricingResult = item.propertyId < 0
-    ? await refreshHybridPricingForDraft(item.propertyId, item.label)
+    ? await refreshHybridPricingForDraft(item.propertyId, item.label, onMonthScanned)
     : await refreshHybridPricingForProperty({
       propertyId: item.propertyId,
       triggerType: "Manual Update",
       notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly medians (no hybrid markup layers).",
+      onMonthScanned,
     });
   item.progress = {
     phase: "searchapi-airbnb",

@@ -202,6 +202,14 @@ assert.ok(
   "season summary medians must bucket by sampled stay demand tier, not calendar season map (Hawaii has no HOLIDAY months in HAWAII_SEASONS)",
 );
 assert.ok(
+  hybridPricingSource.includes('[hybrid-pricing] monthly scan ok'),
+  "each calendar month scan should log to Railway/server logs",
+);
+assert.ok(
+  hybridPricingSource.includes("scannedMonths.length !== horizonMonths"),
+  "market-rate refresh must fail when fewer than horizonMonths monthly medians were stored",
+);
+assert.ok(
   hybridPricingSource.includes("fetchAmortizedNightlyByBR("),
   "market-rate refresh should fall back to the amortized geo Airbnb path when direct queries are empty",
 );
