@@ -162,8 +162,8 @@ assert.ok(
   "pricing refresh should persist the Airbnb SearchAPI layered basis",
 );
 assert.ok(
-  hybridPricingSource.includes("hybridPricingWindowForSeason(asOf, season)"),
-  "market-rate refresh should sample a random 7-night Airbnb window per season",
+  hybridPricingSource.includes("pickRandom7NightInSeason(pricingRegion, season as SeasonKey, 10)"),
+  "market-rate refresh should sample a random 7-night Airbnb window per season within 10 months",
 );
 assert.equal(
   hybridPricingSource.includes("staticFallbackMonthlyRates"),

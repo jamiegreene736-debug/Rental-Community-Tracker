@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS } from "@shared/buy-in-market";
-import { getCommunityRegion, getSeasonForMonth } from "@shared/pricing-rates";
+import { getCommunityRegion, getSeasonForMonth, pickRandom7NightInSeason, type SeasonKey } from "@shared/pricing-rates";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 
 export type HybridDemandClass = "standard" | "high" | "peak" | "ultra";
@@ -468,7 +468,16 @@ export async function refreshHybridPricingForTarget(args: {
     let lastResult: HybridCalculationResult | null = null;
 
     for (const season of ["LOW", "HIGH", "HOLIDAY"] as const) {
-      const window = hybridPricingWindowForSeason(asOf, season);
+      // Cap lookahead at 10 months — hybridPricingWindowForSeason walks the full
+      // 24-month config horizon and can land on 2028+ dates with zero Airbnb inventory.
+      const sampled = pickRandom7NightInSeason(pricingRegion, season as SeasonKey, 10);
+      if (!sampled) {
+        await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
+        throw new Error(
+          `No eligible ${season} 7-night Airbnb pricing window exists within 10 months for ${searchName}`,
+        );
+      }
+      const window = { checkIn: sampled.checkIn, checkOut: sampled.checkOut };
       const airbnb = await fetchAirbnbMedianNightly({
         community: args.community,
         bedrooms,
