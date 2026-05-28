@@ -12,7 +12,12 @@ import { storage } from "./storage";
 import { guestyRequest } from "./guesty-sync";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 import {
-  totalNightlyBuyInForMonth,
+  BUY_IN_RATES,
+  SEASON_MULTIPLIERS,
+  getBuyInRate,
+  getCommunityRegion,
+  getSeasonForMonth,
+  normalizeSeasonalBasis,
 } from "@shared/pricing-rates";
 import { resolveBuyInMarket } from "@shared/buy-in-market";
 import {
@@ -241,6 +246,57 @@ export async function getAvailabilitySchedulerUnsupportedReason(propertyId: numb
 // Guesty mapping yet shouldn't look like a failure.
 const SKIP_PREFIX = "skipped:";
 
+type MarketRateRow = Awaited<ReturnType<typeof storage.getPropertyMarketRates>>[number];
+
+function parsePositiveRate(value: unknown): number | null {
+  const n = typeof value === "number"
+    ? value
+    : typeof value === "string"
+      ? Number.parseFloat(value)
+      : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function savedMarketBasisForMonth(args: {
+  community: string;
+  bedrooms: number;
+  propertyId: number;
+  yearMonth: string;
+  row?: MarketRateRow | null;
+}): number {
+  const { community, bedrooms, propertyId, yearMonth, row } = args;
+  const region = getCommunityRegion(community);
+  const season = getSeasonForMonth(yearMonth, region);
+  const monthly = row?.monthlyRates && typeof row.monthlyRates === "object"
+    ? parsePositiveRate((row.monthlyRates as Record<string, any>)[yearMonth]?.medianNightly)
+    : null;
+  if (monthly != null) return monthly;
+
+  const low = parsePositiveRate(row?.medianNightly);
+  if (low != null) {
+    const normalized = normalizeSeasonalBasis(
+      community,
+      low,
+      parsePositiveRate(row?.medianNightlyHigh),
+      parsePositiveRate(row?.medianNightlyHoliday),
+    );
+    if (season === "HIGH" && normalized.high != null) return normalized.high;
+    if (season === "HOLIDAY" && normalized.holiday != null) return normalized.holiday;
+    if (season === "LOW") return normalized.low;
+    const multiplier = SEASON_MULTIPLIERS[region][season];
+    return Math.round(low * multiplier);
+  }
+
+  const staticCommunity = BUY_IN_RATES[community];
+  return getBuyInRate(
+    community,
+    bedrooms,
+    staticCommunity ? undefined : propertyId,
+    season,
+    yearMonth,
+  );
+}
+
 // Returns a short human-readable summary that goes in lastRunSummary.
 // Summaries beginning with SKIP_PREFIX indicate the run was a clean
 // no-op (precondition missing, not a failure).
@@ -328,13 +384,27 @@ export async function runFullScanForProperty(
     const feeDirect = 0.03;
     const today = new Date();
     const ranges: Array<{ startDate: string; endDate: string; price: number }> = [];
+    const marketRows = await storage.getPropertyMarketRates(propertyId).catch((e: any) => {
+      summaries.push(`market basis fallback: ${(e?.message ?? "DB read failed").slice(0, 40)}`);
+      return [] as MarketRateRow[];
+    });
+    const marketRowByBedrooms = new Map<number, MarketRateRow>();
+    for (const row of marketRows) marketRowByBedrooms.set(row.bedrooms, row);
     for (let m = 0; m < 24; m++) {
       const d = new Date(today.getFullYear(), today.getMonth() + m, 1);
       const y = d.getFullYear();
       const mm = d.getMonth() + 1;
       const yearMonth = `${y}-${String(mm).padStart(2, "0")}`;
-      // Cost basis = sum of buy-in cost per slot for this month/season.
-      const setCost = totalNightlyBuyInForMonth(community, config.units, yearMonth, propertyId);
+      // Cost basis = sum of persisted market-rate basis per slot for this
+      // month/season. This must match the Pricing tab's sheet base; falling
+      // back to static BUY_IN_RATES is only for properties with no saved scan.
+      const setCost = config.units.reduce((sum, unit) => sum + savedMarketBasisForMonth({
+        community,
+        bedrooms: unit.bedrooms,
+        propertyId,
+        yearMonth,
+        row: marketRowByBedrooms.get(unit.bedrooms),
+      }), 0);
       if (setCost <= 0) continue;
       const targetRate = Math.round(((1 + opts.targetMargin) * setCost) / (1 - feeDirect));
       const startDate = new Date(y, mm - 1, 1).toISOString().slice(0, 10);
