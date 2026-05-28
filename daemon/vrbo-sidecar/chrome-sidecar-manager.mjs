@@ -6,14 +6,14 @@ import path from "path";
 import { spawn } from "child_process";
 import { boolFromEnv, nonEmptyEnv, resolveChromeProxyConfig, sanitizeProxyOption } from "./proxy-config.mjs";
 
-const DEFAULT_VIEWPORT = { width: 1280, height: 820 };
+const DEFAULT_VIEWPORT = { width: 1600, height: 1000 };
 const DEFAULT_LOCAL_CDP_PORT = 9222;
 const DEFAULT_MAX_LOCAL_INSTANCES = 8;
 const HARD_MAX_LOCAL_INSTANCES = 12;
 const DEFAULT_SERVER_CDP_BASE_PORT = 9223;
 const DEFAULT_SERVER_WEBDRIVER_BASE_PORT = 4445;
 const DEFAULT_SERVER_NOVNC_BASE_PORT = 7901;
-const DEFAULT_MAX_SERVER_INSTANCES = 4;
+const DEFAULT_MAX_SERVER_INSTANCES = 8;
 const DEFAULT_LOCK_TTL_MS = 45 * 60_000;
 const REQUIRED_PROXY_COUNTRY = "us";
 const DEFAULT_CHROME_BINARY =

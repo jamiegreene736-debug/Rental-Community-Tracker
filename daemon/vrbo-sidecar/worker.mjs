@@ -36,7 +36,15 @@ const CHROME_DATA_DIR = path.join(
 );
 const CHROME_BINARY = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CDP_PORT = 9222;
-const VIEWPORT = { width: 1280, height: 820 };
+const DEFAULT_VIEWPORT = { width: 1600, height: 1000 };
+function parseViewportSize(value, fallback = DEFAULT_VIEWPORT) {
+  const [widthRaw, heightRaw] = String(value ?? "").split(",").map((part) => Number(part.trim()));
+  return {
+    width: Number.isFinite(widthRaw) && widthRaw >= 1200 ? Math.round(widthRaw) : fallback.width,
+    height: Number.isFinite(heightRaw) && heightRaw >= 800 ? Math.round(heightRaw) : fallback.height,
+  };
+}
+const VIEWPORT = parseViewportSize(process.env.SIDECAR_VIEWPORT_SIZE ?? process.env.SIDECAR_PLAYWRIGHT_VIEWPORT);
 const SIDE_CAR_CHROME_VISIBLE = process.env.SIDECAR_CHROME_VISIBLE === "1";
 const SIDECAR_ALLOW_FOCUS = process.env.SIDECAR_ALLOW_FOCUS === "1";
 const SIDECAR_CAPTCHA_SURFACE_WINDOW = process.env.SIDECAR_CAPTCHA_SURFACE_WINDOW !== "0";
@@ -1703,7 +1711,7 @@ function browserFingerprintForRequest(request = activeRuntimeRequest) {
       platform: "Win32",
       uaPlatform: "Windows",
       userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.${chromePatch}.0 Safari/537.36`,
-      viewport: pickOne([{ width: 1366, height: 768 }, { width: 1440, height: 900 }, { width: 1536, height: 864 }, { width: 1600, height: 900 }, { width: 1920, height: 1080 }], rand),
+      viewport: pickOne([{ width: 1600, height: 1000 }, { width: 1680, height: 1050 }, { width: 1920, height: 1080 }], rand),
       webglVendor: "Google Inc. (Intel)",
       webglRenderer: pickOne([
         "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
@@ -1716,7 +1724,7 @@ function browserFingerprintForRequest(request = activeRuntimeRequest) {
       platform: "MacIntel",
       uaPlatform: "macOS",
       userAgent: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.${chromePatch}.0 Safari/537.36`,
-      viewport: pickOne([{ width: 1440, height: 900 }, { width: 1512, height: 982 }, { width: 1680, height: 1050 }, { width: 1728, height: 1117 }], rand),
+      viewport: pickOne([{ width: 1600, height: 1000 }, { width: 1680, height: 1050 }, { width: 1728, height: 1117 }, { width: 1920, height: 1080 }], rand),
       webglVendor: "Google Inc. (Apple)",
       webglRenderer: pickOne([
         "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)",
