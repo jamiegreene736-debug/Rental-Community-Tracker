@@ -4,6 +4,9 @@
 
 /* LIGHT MODE */
 :root {
+  --brand-teal: 185 100% 34%;
+  --brand-blue: 215 100% 25%;
+  --brand-orange: 37 100% 56%;
   --button-outline: rgba(0,0,0, .10);
   --badge-outline: rgba(0,0,0, .05);
   --opaque-button-border-intensity: -8;
@@ -18,15 +21,15 @@
   --sidebar: 0 0% 96%;
   --sidebar-foreground: 0 0% 9%;
   --sidebar-border: 0 0% 92%;
-  --sidebar-primary: 201 89% 28%;
+  --sidebar-primary: var(--brand-teal);
   --sidebar-primary-foreground: 0 0% 98%;
   --sidebar-accent: 0 0% 92%;
   --sidebar-accent-foreground: 0 0% 9%;
-  --sidebar-ring: 201 89% 48%;
+  --sidebar-ring: var(--brand-orange);
   --popover: 0 0% 95%;
   --popover-foreground: 0 0% 9%;
   --popover-border: 0 0% 90%;
-  --primary: 201 89% 28%;
+  --primary: var(--brand-teal);
   --primary-foreground: 0 0% 98%;
   --secondary: 0 0% 90%;
   --secondary-foreground: 0 0% 9%;
@@ -37,10 +40,10 @@
   --destructive: 0 84% 32%;
   --destructive-foreground: 0 0% 98%;
   --input: 0 0% 75%;
-  --ring: 201 89% 48%;
-  --chart-1: 201 89% 28%;
-  --chart-2: 173 58% 32%;
-  --chart-3: 43 74% 38%;
+  --ring: var(--brand-orange);
+  --chart-1: var(--brand-teal);
+  --chart-2: var(--brand-blue);
+  --chart-3: var(--brand-orange);
   --chart-4: 280 65% 35%;
   --chart-5: 340 75% 38%;
   --font-sans: Open Sans, sans-serif;
@@ -88,6 +91,9 @@
 }
 
 .dark {
+  --brand-teal: 185 86% 44%;
+  --brand-blue: 215 100% 62%;
+  --brand-orange: 37 100% 60%;
   --button-outline: rgba(255,255,255, .10);
   --badge-outline: rgba(255,255,255, .05);
   --opaque-button-border-intensity: 9;
@@ -102,15 +108,15 @@
   --sidebar: 0 0% 11%;
   --sidebar-foreground: 0 0% 98%;
   --sidebar-border: 0 0% 14%;
-  --sidebar-primary: 201 89% 48%;
+  --sidebar-primary: var(--brand-teal);
   --sidebar-primary-foreground: 0 0% 98%;
   --sidebar-accent: 0 0% 14%;
   --sidebar-accent-foreground: 0 0% 98%;
-  --sidebar-ring: 201 89% 58%;
+  --sidebar-ring: var(--brand-orange);
   --popover: 0 0% 13%;
   --popover-foreground: 0 0% 98%;
   --popover-border: 0 0% 17%;
-  --primary: 201 89% 28%;
+  --primary: var(--brand-teal);
   --primary-foreground: 0 0% 98%;
   --secondary: 0 0% 16%;
   --secondary-foreground: 0 0% 98%;
@@ -121,10 +127,10 @@
   --destructive: 0 84% 32%;
   --destructive-foreground: 0 0% 98%;
   --input: 0 0% 30%;
-  --ring: 201 89% 58%;
-  --chart-1: 201 89% 65%;
-  --chart-2: 173 58% 68%;
-  --chart-3: 43 74% 72%;
+  --ring: var(--brand-orange);
+  --chart-1: var(--brand-teal);
+  --chart-2: var(--brand-blue);
+  --chart-3: var(--brand-orange);
   --chart-4: 280 65% 72%;
   --chart-5: 340 75% 70%;
   --shadow-2xs: 0px 2px 0px 0px hsl(0 0% 0% / 0.00);

@@ -4,11 +4,11 @@
   "referencedBy": [
     {
       "propertyId": 32,
-      "address": "2253 Poipu Rd, Unit A, Koloa, HI 96756"
+      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756"
     },
     {
       "propertyId": 33,
-      "address": "2253 Poipu Rd, Unit B, Koloa, HI 96756"
+      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756"
     }
   ],
   "verificationStatus": "needs-review",
@@ -19,5 +19,5 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+  "notes": "Community amenity shots (pool, grounds, clubhouse). `sourceListing.url` is null — worth backfilling when the original scrape source can be identified."
 }

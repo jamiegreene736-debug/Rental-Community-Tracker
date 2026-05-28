@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Loader2,
   RefreshCw,
   CheckCircle2,
   XCircle,
   ShieldCheck,
+  ShieldAlert,
   Home,
   ExternalLink,
   Search as SearchIcon,
@@ -20,6 +21,22 @@ import {
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
 
+function humanizeApiError(err: unknown, fallback: string) {
+  const raw = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  const stripped = raw.replace(/^\d+:\s*/, "").trim();
+  if (!stripped) return fallback;
+
+  try {
+    const parsed = JSON.parse(stripped);
+    if (typeof parsed?.message === "string" && parsed.message.trim()) return parsed.message;
+    if (typeof parsed?.error === "string" && parsed.error.trim()) return parsed.error;
+  } catch {
+    // Not a JSON error body; use the server's text as-is.
+  }
+
+  return stripped || fallback;
+}
+
 export type UnitStub = {
   id: string;
   unitNumber: string;
@@ -30,6 +47,20 @@ export type UnitStub = {
   replacementLabel?: string;   // e.g. "Unit #13D" — set if this unit already has an active swap.
 };
 
+// Per-platform verdict from the server's SERP-based availability check.
+//   clean   — SearchAPI responded and no matching listing was found
+//   found   — SearchAPI responded and a listing for this unit was found
+//             (candidates with `found` are rejected server-side and never
+//             reach the UI, so in practice this value will not appear)
+//   unknown — the SearchAPI call errored, so we genuinely don't know.
+//             Previously treated as "clean" silently; now surfaced.
+export type PlatformStatus = "clean" | "found" | "unknown";
+export type PlatformCheck = {
+  airbnb: PlatformStatus;
+  vrbo: PlatformStatus;
+  bookingCom: PlatformStatus;
+};
+
 export type ReplacementUnitData = {
   url: string;
   address: string;
@@ -37,23 +68,32 @@ export type ReplacementUnitData = {
   bedrooms: number | null;
   source: string;
   photos: { url: string; label: string }[];
+  photoFolder?: string;
   // Count of full-size photos the Apify scraper found on the source
   // listing. Server only returns candidates with >= 12 photos, but we
   // surface the exact number so the user can see they're picking a
   // listing with a rich gallery (e.g. 25 vs 13).
   photoCount?: number;
+  expandedSearch?: boolean;
+  relaxedPhotoFloor?: boolean;
   // Room categories detected by the interior-content probe (Claude
   // Haiku vision on 8 stratified samples). If Bedrooms isn't in here,
   // the server would have already rejected the candidate — we surface
   // this so the UI can show a "✓ Bedrooms · ✓ Bathrooms" style badge
   // as proof the listing actually has interior photography.
   sampledCategories?: string[];
+  platformCheck?: PlatformCheck;
 };
 
 export function UnitReplacementFlow({
   unit,
   allUnits,
   communityFolder,
+  communityName,
+  propertyAddress,
+  streetAddress,
+  city,
+  state,
   propertyId,
   skipUrls = [],
   onClose,
@@ -62,6 +102,11 @@ export function UnitReplacementFlow({
   unit: UnitStub;
   allUnits: UnitStub[];
   communityFolder: string;
+  communityName?: string;
+  propertyAddress?: string;
+  streetAddress?: string;
+  city?: string;
+  state?: string;
   propertyId: number;
   skipUrls?: string[];
   onClose?: () => void;
@@ -71,15 +116,29 @@ export function UnitReplacementFlow({
   const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
   const [result, setResult] = useState<ReplacementUnitData | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
+  const [searchStartedAt, setSearchStartedAt] = useState<number | null>(null);
+  const [progressTick, setProgressTick] = useState(0);
+  const [lastSearchExpanded, setLastSearchExpanded] = useState(false);
   // URLs the user explicitly skipped via "Try another" — fed back into
   // the next find-unit call so we don't surface the same listing again.
   const [extraSkipUrls, setExtraSkipUrls] = useState<string[]>([]);
 
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
 
-  async function search(opts: { extraSkip?: string } = {}) {
+  const isWorking = stage === "searching" || stage === "checking";
+  useEffect(() => {
+    if (!isWorking) return;
+    const id = window.setInterval(() => setProgressTick((tick) => tick + 1), 1_000);
+    return () => window.clearInterval(id);
+  }, [isWorking]);
+
+  async function search(opts: { extraSkip?: string; expanded?: boolean } = {}) {
+    const expanded = opts.expanded === true;
     setResult(null);
     setSwapError(null);
+    setLastSearchExpanded(expanded);
+    setSearchStartedAt(Date.now());
+    setProgressTick(0);
     setStage("searching");
     setTimeout(() => setStage(s => s === "searching" ? "checking" : s), 2000);
     const nextExtra = opts.extraSkip ? [...extraSkipUrls, opts.extraSkip] : extraSkipUrls;
@@ -87,8 +146,14 @@ export function UnitReplacementFlow({
     try {
       const resp = await apiRequest("POST", "/api/replacement/find-unit", {
         communityFolder,
+        communityName,
+        propertyAddress,
+        streetAddress,
+        city,
+        state,
         requiredBedrooms: selectedUnit.bedrooms,
         skipUrls: [...skipUrls, ...nextExtra],
+        expandedSearch: expanded,
       });
       const data = await resp.json();
       if (data.error) {
@@ -99,9 +164,11 @@ export function UnitReplacementFlow({
         setStage("found");
         setResult(data.unit);
       }
-    } catch {
+    } catch (err) {
       setStage("error");
-      setSwapError("Failed to connect. Please try again.");
+      setSwapError(humanizeApiError(err, "Failed to connect. Please try again."));
+    } finally {
+      setSearchStartedAt(null);
     }
   }
 
@@ -121,9 +188,6 @@ export function UnitReplacementFlow({
         newBedrooms: result.bedrooms,
         newSourceUrl: result.url,
         thumbnailUrl: result.photos[0]?.url || null,
-        // Tell the server which folder to rescrape photos into so the
-        // builder's Photos tab reflects the new unit, not the stub.
-        photoFolder: selectedUnit.photoFolder,
       });
       if (!resp.ok) {
         const err = await resp.json();
@@ -131,16 +195,17 @@ export function UnitReplacementFlow({
       }
       const data = await resp.json();
       const swapId: number = data?.swap?.id ?? 0;
+      const photoFolder = typeof data?.photoFolder === "string" ? data.photoFolder : undefined;
       // Notify parent to apply the replacement and re-run the platform check
-      onUnitReplaced?.(selectedUnit.id, result, swapId);
+      onUnitReplaced?.(selectedUnit.id, { ...result, photoFolder }, swapId);
       onClose?.();
     } catch (err: any) {
-      setSwapError(err?.message || "Failed to record swap. Please try again.");
+      setSwapError(humanizeApiError(err, "Failed to record swap. Please try again."));
       setStage("found");
     }
   }
 
-  const steps = ["Search Zillow", "Check Airbnb", "Confirm Clean"];
+  const steps = ["Search Zillow", "Check platforms", "Confirm Clean"];
   const stepDone = stage === "checking"
     ? [true, false, false]
     : (stage === "found" || stage === "replacing")
@@ -151,6 +216,19 @@ export function UnitReplacementFlow({
     : stage === "checking"
       ? [false, true, false]
       : [false, false, false];
+  const elapsedSeconds = searchStartedAt
+    ? Math.max(progressTick, Math.floor((Date.now() - searchStartedAt) / 1000))
+    : 0;
+  const progressPercent = stage === "searching"
+    ? Math.min(42, 10 + elapsedSeconds * 2.2)
+    : stage === "checking"
+      ? Math.min(94, 42 + Math.max(0, elapsedSeconds - 2) * 0.75)
+      : stage === "found"
+        ? 100
+        : 0;
+  const elapsedLabel = elapsedSeconds >= 60
+    ? `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`
+    : `${elapsedSeconds}s`;
 
   return (
     <div className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-3 space-y-3">
@@ -191,7 +269,7 @@ export function UnitReplacementFlow({
           </div>
 
           {stage === "idle" && (
-            <Button size="sm" className="w-full" onClick={search} data-testid="button-start-unit-search">
+            <Button size="sm" className="w-full" onClick={() => search()} data-testid="button-start-unit-search">
               <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
               Find Replacement Unit
             </Button>
@@ -202,8 +280,40 @@ export function UnitReplacementFlow({
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 <span>
-                  {stage === "searching" ? "Searching Zillow & Homes.com…" : "Checking Airbnb for conflicts…"}
+                  {stage === "searching"
+                    ? lastSearchExpanded
+                      ? "Expanded search across Zillow, Realtor, Redfin, and Homes.com…"
+                      : "Searching Zillow, Realtor, and Redfin…"
+                    : "Checking Airbnb, VRBO, and Booking.com for conflicts…"}
                 </span>
+              </div>
+              <div className="space-y-1.5">
+                <div
+                  className="h-2 w-full overflow-hidden rounded-full bg-amber-100 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(progressPercent)}
+                  aria-label="Replacement search progress"
+                  data-testid="replacement-search-progress"
+                >
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-teal-500 to-blue-700 transition-all duration-700"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                  <span>{Math.round(progressPercent)}% · {elapsedLabel}</span>
+                  <span className="text-right">
+                    {stage === "searching"
+                      ? lastSearchExpanded
+                        ? "Finding more real-estate candidates"
+                        : "Finding real-estate candidates"
+                      : elapsedSeconds > 90
+                        ? "Still checking candidates; this can take a few minutes"
+                        : "Verifying candidate is not already listed"}
+                  </span>
+                </div>
               </div>
               <div className="flex gap-1.5">
                 {steps.map((label, i) => (
@@ -241,16 +351,85 @@ export function UnitReplacementFlow({
           <Button size="sm" variant="outline" onClick={() => { setStage("idle"); setSwapError(null); }} data-testid="button-retry-unit-search">
             Try Again
           </Button>
+          <Button size="sm" onClick={() => search({ expanded: true })} data-testid="button-expand-unit-search">
+            <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
+            Expand Search
+          </Button>
         </div>
       )}
 
       {/* Found unit — confirm replacement */}
-      {(stage === "found" || stage === "replacing") && result && (
+      {(stage === "found" || stage === "replacing") && result && (() => {
+        // Platform-check header: all three platforms must report
+        // "clean" for a full green shield. Any "unknown" downgrades to
+        // amber (SearchAPI couldn't confirm on that platform, so the
+        // user should treat the result as "probably clean, not proven").
+        // We never surface "found" — the server filters those out.
+        const pc = result.platformCheck;
+        const statuses: Array<[label: string, key: keyof PlatformCheck]> = [
+          ["Airbnb",      "airbnb"],
+          ["VRBO",        "vrbo"],
+          ["Booking.com", "bookingCom"],
+        ];
+        const allClean = pc ? statuses.every(([, k]) => pc[k] === "clean") : false;
+        const anyUnknown = pc ? statuses.some(([, k]) => pc[k] === "unknown") : true;
+        const headerTone = allClean
+          ? "green"
+          : anyUnknown
+            ? "amber"
+            : "green"; // no platformCheck field at all → treat as old-behavior green
+        return (
         <div className="space-y-2.5">
-          <p className="text-xs font-medium text-green-700 dark:text-green-400 flex items-center gap-1.5">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            Clean replacement found — not on Airbnb
-          </p>
+          <div className="space-y-1.5">
+            <p
+              className={`text-xs font-medium flex items-center gap-1.5 ${
+                headerTone === "green"
+                  ? "text-green-700 dark:text-green-400"
+                  : "text-amber-700 dark:text-amber-400"
+              }`}
+            >
+              {headerTone === "green" ? (
+                <ShieldCheck className="h-3.5 w-3.5" />
+              ) : (
+                <ShieldAlert className="h-3.5 w-3.5" />
+              )}
+              {allClean
+                ? "Clean on Airbnb, VRBO, and Booking.com"
+                : anyUnknown
+                  ? "Partial check — one or more platforms couldn't be verified"
+                  : "Clean replacement found"}
+            </p>
+            {pc && (
+              <div className="flex items-center gap-1 flex-wrap">
+                {statuses.map(([label, key]) => {
+                  const s = pc[key];
+                  const cls =
+                    s === "clean"
+                      ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300"
+                      : s === "found"
+                        ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300"
+                        : "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
+                  const glyph = s === "clean" ? "✓" : s === "found" ? "✗" : "⚠";
+                  const title =
+                    s === "clean"
+                      ? `${label}: no listing found`
+                      : s === "found"
+                        ? `${label}: listing found`
+                        : `${label}: SearchAPI error — could not verify`;
+                  return (
+                    <span
+                      key={key}
+                      title={title}
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}
+                      data-testid={`platform-status-${key}`}
+                    >
+                      {glyph} {label}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <div className="rounded border border-border bg-background px-3 py-2.5 space-y-2">
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-start gap-2 min-w-0">
@@ -266,7 +445,7 @@ export function UnitReplacementFlow({
                   )}
                 </div>
               </div>
-              {typeof result.photoCount === "number" && (
+                  {typeof result.photoCount === "number" && (
                 <div
                   className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold flex items-center gap-1 ${
                     result.photoCount >= 20
@@ -287,6 +466,11 @@ export function UnitReplacementFlow({
                 </div>
               )}
             </div>
+            {result.relaxedPhotoFloor && (
+              <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                Expanded search accepted this smaller gallery. Review the source photos before confirming.
+              </div>
+            )}
             {result.photos.length > 0 && (
               <div className="grid grid-cols-6 gap-1">
                 {result.photos.map((photo, i) => (
@@ -371,9 +555,10 @@ export function UnitReplacementFlow({
                 // Skip this URL and immediately re-search so the user
                 // doesn't have to click Find again.
                 const skipThis = result.url;
+                const expanded = result.expandedSearch === true;
                 setResult(null);
                 setSwapError(null);
-                search({ extraSkip: skipThis });
+                search({ extraSkip: skipThis, expanded });
               }}
               data-testid="button-try-another-unit"
             >
@@ -381,7 +566,8 @@ export function UnitReplacementFlow({
             </Button>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

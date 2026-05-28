@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "wouter";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +22,10 @@ import {
   AlertTriangle,
   ClipboardList,
   DollarSign,
+  Plus,
+  RotateCcw,
+  Save,
+  Trash2,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import type { Unit, PropertyUnitBuilder } from "@/data/unit-builder-data";
@@ -220,7 +224,171 @@ function getDownloadAllUrl(property: PropertyUnitBuilder): string {
   return url;
 }
 
-function UnitCard({ unit, complexName }: { unit: Unit; complexName: string }) {
+type BuyInMarketsResponse = {
+  propertyId: number;
+  baseCommunity: string;
+  markets: string[];
+  defaultMarkets: string[];
+  saved: boolean;
+  availableMarkets: string[];
+  updatedAt: string | null;
+};
+
+function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
+  const [data, setData] = useState<BuyInMarketsResponse | null>(null);
+  const [markets, setMarkets] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadMarkets = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/property/${propertyId}/buy-in-markets`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.message ?? payload?.error ?? "Failed to load buy-in markets");
+      setData(payload);
+      setMarkets(Array.isArray(payload.markets) ? payload.markets.slice(0, 3) : []);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadMarkets();
+  }, [propertyId]);
+
+  const availableMarkets = (data?.availableMarkets ?? []).filter((market) => market !== data?.baseCommunity);
+  const chooseMarket = (index: number, value: string) => {
+    setMarkets((prev) => prev.map((market, i) => (i === index ? value : market)));
+  };
+  const addMarket = () => {
+    const next = availableMarkets.find((market) => !markets.includes(market));
+    if (!next) return;
+    setMarkets((prev) => [...prev, next].slice(0, 3));
+  };
+  const removeMarket = (index: number) => {
+    setMarkets((prev) => prev.filter((_, i) => i !== index));
+  };
+  const saveMarkets = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const cleaned = markets.map((market) => market.trim()).filter(Boolean);
+      const response = await fetch(`/api/property/${propertyId}/buy-in-markets`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markets: cleaned }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.message ?? payload?.error ?? "Failed to save buy-in markets");
+      setData(payload);
+      setMarkets(Array.isArray(payload.markets) ? payload.markets.slice(0, 3) : []);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const resetMarkets = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/property/${propertyId}/buy-in-markets`, { method: "DELETE" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.message ?? payload?.error ?? "Failed to reset buy-in markets");
+      setData(payload);
+      setMarkets(Array.isArray(payload.markets) ? payload.markets.slice(0, 3) : []);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+        Loading buy-in markets...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-md border bg-muted/20 p-3">
+        <p className="text-xs text-muted-foreground mb-1">Base community</p>
+        <p className="text-sm font-medium" data-testid={`text-buy-in-base-${propertyId}`}>
+          {data?.baseCommunity ?? "Unknown"}
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {markets.map((market, index) => (
+          <div key={`${index}-${market}`} className="flex items-center gap-2">
+            <select
+              className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+              value={market}
+              onChange={(event) => chooseMarket(index, event.target.value)}
+              data-testid={`select-buy-in-market-${propertyId}-${index}`}
+            >
+              {availableMarkets.map((option) => (
+                <option key={option} value={option} disabled={markets.includes(option) && option !== market}>
+                  {option}
+                </option>
+              ))}
+            </select>
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              onClick={() => removeMarket(index)}
+              aria-label={`Remove market ${index + 1}`}
+              data-testid={`button-remove-buy-in-market-${propertyId}-${index}`}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+        {markets.length === 0 && (
+          <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+            No custom recommended markets saved.
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {error}
+        </p>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="outline" onClick={addMarket} disabled={markets.length >= 3 || saving} data-testid={`button-add-buy-in-market-${propertyId}`}>
+          <Plus className="h-4 w-4 mr-2" />
+          Add market
+        </Button>
+        <Button type="button" onClick={saveMarkets} disabled={saving} data-testid={`button-save-buy-in-markets-${propertyId}`}>
+          <Save className="h-4 w-4 mr-2" />
+          {saving ? "Saving" : "Save"}
+        </Button>
+        <Button type="button" variant="ghost" onClick={resetMarkets} disabled={saving} data-testid={`button-reset-buy-in-markets-${propertyId}`}>
+          <RotateCcw className="h-4 w-4 mr-2" />
+          Defaults
+        </Button>
+      </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        {data?.saved ? "Custom markets saved for this property." : "Using default markets."}
+      </p>
+    </div>
+  );
+}
+
+function UnitCard({ unit, propertyId, complexName }: { unit: Unit; propertyId: number; complexName: string }) {
   return (
     <Card className="overflow-visible">
       <div className="p-4 md:p-6">
@@ -261,6 +429,9 @@ function UnitCard({ unit, complexName }: { unit: Unit; complexName: string }) {
               </TabsTrigger>
               <TabsTrigger value="long" className="flex-1" data-testid={`tab-long-${unit.id}`}>
                 Full Desc
+              </TabsTrigger>
+              <TabsTrigger value="buy-in-markets" className="flex-1" data-testid={`tab-buy-in-markets-${unit.id}`}>
+                Buy In Markets
               </TabsTrigger>
             </TabsList>
 
@@ -305,6 +476,10 @@ function UnitCard({ unit, complexName }: { unit: Unit; complexName: string }) {
                 </Card>
                 <CopyButton text={unit.longDescription} label={`long-desc-${unit.id}`} />
               </div>
+            </TabsContent>
+
+            <TabsContent value="buy-in-markets" className="mt-3">
+              <BuyInMarketsTab propertyId={propertyId} />
             </TabsContent>
           </Tabs>
         </div>
@@ -439,12 +614,12 @@ export default function UnitBuilder() {
 
         <div className="space-y-6">
           {property.units.map((unit) => (
-            <UnitCard key={unit.id} unit={unit} complexName={property.complexName} />
+            <UnitCard key={unit.id} unit={unit} propertyId={property.propertyId} complexName={property.complexName} />
           ))}
         </div>
 
         <div className="mt-6 text-xs text-muted-foreground text-center">
-          NexStay property data. Unit status verified against Booking.com and VRBO.
+          VacationRentalExpertz property data. Unit status verified against Booking.com and VRBO.
         </div>
       </div>
     </div>

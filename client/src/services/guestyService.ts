@@ -43,7 +43,19 @@ export type GuestyPricing = {
 export type GuestyBookingSettings = {
   minNights?: number;
   maxNights?: number;
+  // Legacy single-policy field. Kept for callers that haven't migrated
+  // to per-channel policies. When `cancellationPolicies` is also set,
+  // the per-channel values win.
   cancellationPolicy?: string;
+  // Per-channel cancellation policies. Each channel has its own enum
+  // of accepted values — see GuestyListingBuilder's dropdowns for the
+  // options. Pushed via `integrations.{airbnb2|homeaway2|bookingCom}`
+  // alongside the top-level `terms.cancellationPolicy` fallback.
+  cancellationPolicies?: {
+    airbnb?: string;
+    vrbo?: string;
+    booking?: string;
+  };
   instantBooking?: boolean;
   advanceNotice?: number;    // days before check-in that booking must be made (0 = same day)
   preparationTime?: number;  // buffer/cleaning days blocked after checkout
@@ -73,6 +85,8 @@ export type GuestyPropertyData = {
   tatLicense?: string;
   getLicense?: string;
   strPermit?: string;
+  dbprLicense?: string;
+  touristTaxAccount?: string;
   bedrooms?: number;
   bathrooms?: number;
   listingRooms?: GuestyRoom[];
@@ -87,6 +101,12 @@ export type ChannelInfo = {
   live: boolean;
   id: string | null;
   status: string | null;
+  // Public listing URL on the channel's own site, when derivable. Airbnb
+  // has a canonical pattern we construct from the ID; VRBO and
+  // Booking.com require Guesty to have stamped a URL field on the
+  // integration record (best-effort, null when not present). Used to
+  // make the Channel Status cards click through to the live listing.
+  publicUrl: string | null;
   // Airbnb only: regulatory/compliance state pulled from
   // integrations[].airbnb2.permits.regulations[0]. null = no regulations
   // record (jurisdiction isn't regulated in Airbnb's eyes, or the field
@@ -96,6 +116,16 @@ export type ChannelInfo = {
     jurisdiction: string | null;        // e.g. "kauai_county_hawaii"
     regulationType: string | null;      // e.g. "registration"
     lastUpdatedOn: string | null;
+  } | null;
+  // VRBO only: compliance fields detected from any of the paths Guesty
+  // actually persists them on a real listing payload — see getChannelStatus
+  // for the full lookup. null = none detected; otherwise each field is
+  // independently nullable. Used by the VRBO compliance card sub-block to
+  // show a persistent "compliance on file" state across page reloads.
+  vrboLicense?: {
+    licenseNumber: string | null;       // TAT (Transient Accommodations Tax)
+    taxId: string | null;               // GET (General Excise Tax)
+    parcelNumber: string | null;        // TMK (Tax Map Key)
   } | null;
 };
 
@@ -120,6 +150,17 @@ export type BuildResult = {
   errors: BuildStepEntry[];
   success: boolean;
 };
+
+function hasPublishableStreetAddress(address: GuestyAddress | undefined): boolean {
+  const full = (address?.full ?? "").trim();
+  if (!full) return false;
+
+  const firstLine = full.split(",")[0]?.trim() ?? "";
+  const hasStreetNumber = /\d/.test(firstLine);
+  const hasStreetWord = /\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|pl|place|ct|court|cir|circle|loop|way|hwy|highway|terrace|terr|trail|trl)\b/i.test(firstLine);
+
+  return hasStreetNumber && hasStreetWord;
+}
 
 class GuestyService {
   // All Guesty API calls are proxied through /api/guesty-proxy — the server
@@ -169,16 +210,32 @@ class GuestyService {
   }
 
   async getListings(limit = 25, skip = 0) {
-    return this.request<{ results: Array<{ _id: string; nickname?: string; title?: string }> }>(
+    if (skip === 0 && limit >= 200) {
+      const res = await fetch("/api/guesty-listings-all?limit=100&maxPages=50&fields=_id%20nickname%20title");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || body.error || `HTTP ${res.status}`);
+      }
+      return res.json() as Promise<{ results: Array<{ _id?: string; id?: string; nickname?: string; title?: string }> }>;
+    }
+    return this.request<{ results: Array<{ _id?: string; id?: string; nickname?: string; title?: string }> }>(
       "GET", "/listings", null, `limit=${limit}&skip=${skip}`
     );
   }
 
-  async getListing(id: string) {
-    return this.request<Record<string, unknown>>("GET", `/listings/${id}`);
+  async getListing(id: string, fields?: string) {
+    const query = fields ? `fields=${encodeURIComponent(fields).replace(/%20/g, "%20")}` : "";
+    return this.request<Record<string, unknown>>("GET", `/listings/${id}`, null, query);
   }
 
   async createListing(data: GuestyPropertyData) {
+    if (!hasPublishableStreetAddress(data.address)) {
+      const current = data.address?.full?.trim() || "no address";
+      throw new Error(
+        `A real street address is required before creating a Guesty listing. This draft currently has "${current}". Add the resort street address before publishing.`
+      );
+    }
+
     const payload: Record<string, unknown> = {
       nickname: (data.nickname || "").slice(0, 40).trimEnd(),
       title: data.title,
@@ -272,11 +329,23 @@ class GuestyService {
   }
 
   async updateBookingSettings(id: string, settings: GuestyBookingSettings) {
+    // Top-level `terms.cancellationPolicy` is the fallback applied when a
+    // channel-specific policy isn't set. We default it to the Airbnb
+    // value (most listings publish on Airbnb) so the listing has a sane
+    // universal policy even if the operator only cared about one channel.
+    const perChannel = settings.cancellationPolicies;
+    const universalPolicy =
+      settings.cancellationPolicy ??
+      perChannel?.airbnb ??
+      perChannel?.vrbo ??
+      perChannel?.booking ??
+      "firm";
+
     const terms: Record<string, unknown> = {
-      minNights:          settings.minNights          ?? 3,
-      maxNights:          settings.maxNights          ?? 365,
-      cancellationPolicy: settings.cancellationPolicy ?? "flexible",
-      instantBooking:     settings.instantBooking     ?? true,
+      minNights:          settings.minNights  ?? 3,
+      maxNights:          settings.maxNights  ?? 365,
+      cancellationPolicy: universalPolicy,
+      instantBooking:     settings.instantBooking ?? true,
     };
     // Guesty stores advanceNotice in hours (0 = same day, 24 = 1 day, 48 = 2 days…)
     if (settings.advanceNotice !== undefined) {
@@ -286,7 +355,28 @@ class GuestyService {
     if (settings.preparationTime !== undefined) {
       terms.preparationTime = settings.preparationTime;
     }
-    return this.request("PUT", `/listings/${id}`, { terms });
+
+    const body: Record<string, unknown> = { terms };
+
+    // NOTE: per-channel cancellation policies are visible + editable in
+    // the UI (Pricing tab → Booking Rules card), but only the
+    // `universalPolicy` above is synced to Guesty via `terms.cancellationPolicy`.
+    //
+    // An earlier version of this function also sent
+    // `body.integrations = { airbnb2: {...}, homeaway2: {...},
+    // bookingCom: {...} }` — Guesty rejected that with a 500 because
+    // their write shape for `integrations` is an ARRAY of
+    // `{platform, <platform-key>:{...}}` entries, not an object keyed
+    // by platform. Sending the wrong shape 500'd every Booking-Rules
+    // push. Until we confirm Guesty's actual accepted write shape
+    // (docs are opaque on this), we push only the top-level policy and
+    // rely on the operator to set channel-specific overrides in
+    // Guesty's UI. The per-channel dropdowns in our builder serve as
+    // the operator's own record of what they intend — not a sync
+    // mechanism. See PR #43 for the fix and PR #35 for the original
+    // per-channel UI.
+
+    return this.request("PUT", `/listings/${id}`, body);
   }
 
   async blockCalendarDates(listingId: string, startDate: string, endDate: string) {
@@ -303,12 +393,25 @@ class GuestyService {
     return this.request("PUT", `/listings/${id}`, { isListed: true });
   }
 
+  async listOnChannelsAndVerify(id: string): Promise<GuestyChannelStatus> {
+    await this.listOnChannels(id);
+    return this.getChannelStatus(id);
+  }
+
   async unlistFromChannels(id: string) {
     return this.request("PUT", `/listings/${id}`, { isListed: false });
   }
 
+  async unlistFromChannelsAndVerify(id: string): Promise<GuestyChannelStatus> {
+    await this.unlistFromChannels(id);
+    return this.getChannelStatus(id);
+  }
+
   async getChannelStatus(id: string): Promise<GuestyChannelStatus> {
-    const listing = await this.getListing(id) as Record<string, unknown>;
+    const listing = await this.getListing(
+      id,
+      "isListed integrations airBnb homeAway bookingCom channels tags licenseNumber taxId",
+    ) as Record<string, unknown>;
     const isListed = !!(listing.isListed);
 
     // Guesty stores channel connections in listing.integrations[] with platform keys
@@ -324,22 +427,45 @@ class GuestyService {
       return entry[key] as Record<string, string> | undefined;
     };
 
+    // Guesty has versioned its integration platform keys over the years —
+    // the current keys are "airbnb2" / "homeaway2" (with "bookingCom" still
+    // being the booking platform as of 2026-04). List both the current and
+    // legacy keys so we don't miss older accounts that still hold the old
+    // platform name.
     const airbnbData = findIntegration(["airbnb2", "airbnb"])
       ?? (listing.airBnb || (listing.channels as Record<string, unknown>)?.airbnb) as Record<string, string> | undefined;
-    const vrboData = findIntegration(["homeaway", "vrbo"])
+    const vrboData = findIntegration(["homeaway2", "homeaway", "vrbo"])
       ?? (listing.homeAway || (listing.channels as Record<string, unknown>)?.homeAway) as Record<string, string> | undefined;
-    const bookingComData = findIntegration(["bookingCom", "booking_com"])
+    const bookingComData = findIntegration(["bookingCom2", "bookingCom", "booking_com"])
       ?? (listing.bookingCom || (listing.channels as Record<string, unknown>)?.bookingCom) as Record<string, string> | undefined;
+
+    // Look for the public listing URL across the various field names
+    // Guesty has used for it over different API versions — `listingUrl`
+    // is the current canonical, but older records may have `url`,
+    // `propertyUrl`, or `publicUrl`. Returns the first non-empty match.
+    const pickChannelUrl = (d: Record<string, unknown> | undefined): string | null => {
+      if (!d) return null;
+      for (const k of ["listingUrl", "url", "publicUrl", "propertyUrl"]) {
+        const v = d[k];
+        if (typeof v === "string" && /^https?:\/\//i.test(v)) return v;
+      }
+      return null;
+    };
 
     const toInfo = (data: Record<string, unknown> | undefined): ChannelInfo => {
       const d = data as Record<string, string> | undefined;
-      const hasId = !!(d?.id || d?.listingId || d?.propertyId || d?.hotelId);
+      // Channel ID fields vary by platform: Airbnb uses `id`, Booking.com
+      // typically `hotelId`, and VRBO (homeaway2) uses `advertiserId` — no
+      // single convention. Look across all of them so connection detection
+      // doesn't hinge on a specific vendor's naming.
+      const hasId = !!(d?.id || d?.listingId || d?.propertyId || d?.hotelId || d?.advertiserId);
       const isCompleted = d?.status === "COMPLETED" || d?.status === "connected";
       return {
         connected: hasId || isCompleted,
         live: (hasId || isCompleted) && isListed,
-        id: d?.id || d?.listingId || d?.propertyId || d?.hotelId || null,
+        id: d?.id || d?.listingId || d?.propertyId || d?.hotelId || d?.advertiserId || null,
         status: d?.status || null,
+        publicUrl: pickChannelUrl(data),
       };
     };
 
@@ -366,10 +492,86 @@ class GuestyService {
     const airbnbInfo = toInfo(airbnbData);
     airbnbInfo.compliance = airbnbCompliance;
 
+    // Airbnb URLs are deterministic from the listing ID —
+    // https://www.airbnb.com/rooms/{id} has been the canonical shape
+    // for years. Only fill this in when the integration didn't already
+    // stamp a listingUrl, so a channel-manager-provided URL always wins.
+    if (!airbnbInfo.publicUrl && airbnbInfo.id) {
+      airbnbInfo.publicUrl = `https://www.airbnb.com/rooms/${airbnbInfo.id}`;
+    }
+
+    // VRBO compliance fields. Detect from the four places Guesty stores
+    // them, in priority order — whichever has the most complete picture
+    // wins. The Kaha Lani case (2026-04-28): operator manually filled the
+    // "Vrbo license requirements" panel in Guesty admin which writes to
+    // the listing's TOP-LEVEL `licenseNumber` / `taxId` fields, but this
+    // readback was missing that path entirely — so the comparison
+    // surfaced as "Compliance on file but incomplete" with GET (taxId)
+    // appearing absent even though Guesty's UI showed it filled in.
+    //
+    //   1. `listing.tags`  — TMK:/TAT:/GET: prefixed entries written by
+    //      /api/builder/push-compliance Step 1. Carries all three values
+    //      (TAT, GET, TMK).
+    //   2. `listing.licenseNumber` (TAT) and `listing.taxId` (GET) at
+    //      the top level. Written by push-compliance Step 2 AND by
+    //      Guesty's "Vrbo license requirements" admin panel when the
+    //      operator edits manually — the canonical Guesty path for
+    //      these fields. TMK doesn't have a top-level slot.
+    //   3. `integrations[platform=bookingCom].bookingCom.license.information.contentData`
+    //      — Booking.com Hawaii variant 6 (`hawaii-hotel_v1`) license
+    //      object written by push-compliance Step 3b. Carries TAT
+    //      (`number`) and TMK (`tmk_number`) but NOT GET. Guesty's UI
+    //      "Vrbo license requirements" panel surfaces these too because
+    //      the variant is shared between VRBO and Booking.com.
+    //   4. `listing.channels.homeaway.{licenseNumber, taxId, parcelNumber}`
+    //      — the original path. Real Guesty payloads rarely populate
+    //      this; kept as a last-resort fallback.
+    const vrboInfo = toInfo(vrboData);
+    const vrboLicense = (() => {
+      // From tags (most complete — has TAT/GET/TMK)
+      const tagsArr: string[] = Array.isArray(listing.tags) ? listing.tags as string[] : [];
+      const tagValue = (prefix: string): string | null => {
+        const m = tagsArr.find((t) => typeof t === "string" && t.startsWith(prefix));
+        return m ? m.slice(prefix.length).trim() || null : null;
+      };
+      const fromTagsTat = tagValue("TAT:");
+      const fromTagsGet = tagValue("GET:");
+      const fromTagsTmk = tagValue("TMK:");
+
+      // From listing top-level (the Guesty-canonical path the admin UI
+      // writes to). `licenseNumber` is the Registration/License Number
+      // field (TAT for Hawaii); `taxId` is the General Excise/Tax ID
+      // field (GET for Hawaii).
+      const fromTopLevelTat = typeof listing.licenseNumber === "string" && listing.licenseNumber.trim() ? listing.licenseNumber.trim() : null;
+      const fromTopLevelGet = typeof listing.taxId === "string" && listing.taxId.trim() ? listing.taxId.trim() : null;
+
+      // From Booking.com Hawaii variant contentData (TAT + TMK only)
+      const bookingInteg = integrations.find((i) => i.platform === "bookingCom" || i.platform === "bookingCom2") as Record<string, unknown> | undefined;
+      const bookingLicenseInfo = ((bookingInteg?.bookingCom as Record<string, unknown> | undefined)?.license as Record<string, unknown> | undefined)?.information as Record<string, unknown> | undefined;
+      const contentData = bookingLicenseInfo?.contentData as Array<{ name?: string; value?: string }> | undefined;
+      const contentValue = (name: string): string | null => {
+        if (!Array.isArray(contentData)) return null;
+        const m = contentData.find((c) => c?.name === name);
+        return (m?.value && typeof m.value === "string") ? m.value : null;
+      };
+      const fromBookingTat = contentValue("number");
+      const fromBookingTmk = contentValue("tmk_number");
+
+      // Legacy/future-proof: channels.homeaway path
+      const homeaway = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
+
+      const licenseNumber = fromTagsTat || fromTopLevelTat || fromBookingTat || homeaway.licenseNumber || null;
+      const taxId         = fromTagsGet || fromTopLevelGet || homeaway.taxId || null;
+      const parcelNumber  = fromTagsTmk || fromBookingTmk || homeaway.parcelNumber || null;
+      if (!licenseNumber && !taxId && !parcelNumber) return null;
+      return { licenseNumber, taxId, parcelNumber };
+    })();
+    vrboInfo.vrboLicense = vrboLicense;
+
     return {
       isListed,
       airbnb: airbnbInfo,
-      vrbo: toInfo(vrboData),
+      vrbo: vrboInfo,
       bookingCom: toInfo(bookingComData),
     };
   }
@@ -547,6 +749,20 @@ class GuestyService {
       } catch (e) {
         log("amenities", "error", { error: (e as Error).message });
       }
+    }
+
+    // Final step: flip isListed from false → true so the listing goes live
+    // across connected channels (Airbnb/VRBO/Booking.com) immediately. The
+    // createListing call above sets isListed:false so the listing exists as
+    // a draft while we populate it; without this step the operator has to
+    // open Guesty admin → this listing → List on channels → Edit → toggle
+    // Status to Listed, which is easy to miss after a build.
+    try {
+      log("list_on_channels", "pending");
+      await this.listOnChannels(listingId);
+      log("list_on_channels", "success");
+    } catch (e) {
+      log("list_on_channels", "error", { error: (e as Error).message });
     }
 
     return { listingId, steps, errors, success: errors.length === 0 };

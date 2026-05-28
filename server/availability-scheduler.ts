@@ -22,8 +22,11 @@ import {
   computeSetsFromCounts,
   verdictFor,
   findCheapestPricedNightly,
+  sampleMedianBuyInForSeason,
   type SeasonKey,
 } from "./availability-search";
+import { getPropertyUnits } from "@shared/property-units";
+import { applyAirbnbBiasAndCombo } from "@shared/pricing-rates";
 
 const TICK_MS = 10 * 60 * 1000; // every 10 min
 
@@ -35,25 +38,23 @@ export function getScannerSchedulerStatus() {
   return { lastTickAt: _lastTickAt, running: _tickRunning };
 }
 
-// Pick a representative mid-season check-in. LOW = Sep, HIGH = Jul,
-// HOLIDAY = late Dec. Roll forward 1 year if the target is already in
-// the past or too close to now (listings hide short-notice).
+// Pick a *random* 7-night inside the next season occurrence (capped 10mo).
+// Delegates to the shared helper that guarantees no 2028+ far-future dates
+// (the root cause of "SearchAPI Airbnb returned no usable exact-2BR LOW samples").
+// Keeps the old signature so the rest of the file is untouched.
 function pickDateForSeason(season: SeasonKey): { checkIn: string; checkOut: string } {
+  // Use the shared random picker (capped 10mo, random day inside season month).
+  // This is the surgical fix for 2028 far-future "no usable samples" errors.
+  const { pickRandom7NightInSeason } = require("@shared/pricing-rates"); // sync require safe in this context
+  const region = "hawaii" as const;
+  const w = pickRandom7NightInSeason(region, season as any, 10);
+  if (w) return w;
+  // ultimate fallback (should never hit)
   const now = new Date();
-  const y = now.getFullYear();
-  const minAhead = 30 * 86_400_000;
-  const makeWindow = (year: number, month: number, day: number) => {
-    const d = new Date(year, month, day, 12, 0, 0);
-    if (d.getTime() < now.getTime() + minAhead) return makeWindow(year + 1, month, day);
-    const ci = d.toISOString().slice(0, 10);
-    const co = new Date(d.getTime() + 7 * 86_400_000).toISOString().slice(0, 10);
-    return { checkIn: ci, checkOut: co };
-  };
-  switch (season) {
-    case "LOW":     return makeWindow(y, 8, 15);   // mid-September
-    case "HIGH":    return makeWindow(y, 6, 10);   // mid-July
-    case "HOLIDAY": return makeWindow(y, 11, 26);  // late-December
-  }
+  const d = new Date(now.getFullYear() + 1, season === "LOW" ? 8 : 6, 10);
+  const ci = d.toISOString().slice(0, 10);
+  const co = new Date(d.getTime() + 7 * 86_400_000).toISOString().slice(0, 10);
+  return { checkIn: ci, checkOut: co };
 }
 
 // Which season is this month in? Hawaii-ish default map — good enough
@@ -72,7 +73,17 @@ function seasonForMonth(yearMonth: string): SeasonKey {
 }
 
 // Main pipeline — identical to what the UI buttons do, all in one pass.
+// Sentinel prefix the scheduler uses to distinguish "this was a no-op
+// because the preconditions aren't met" from "this crashed". The tick
+// + manual runners treat summaries starting with this as status="skipped"
+// instead of "ok"/"error". Keeps run history clean — a freshly-created
+// property with scheduler auto-enabled (per Load-Bearing #10) but no
+// Guesty mapping yet shouldn't look like a failure.
+const SKIP_PREFIX = "skipped:";
+
 // Returns a short human-readable summary that goes in lastRunSummary.
+// Summaries beginning with SKIP_PREFIX indicate the run was a clean
+// no-op (precondition missing, not a failure).
 export async function runFullScanForProperty(
   propertyId: number,
   opts: { minSets: number; targetMargin: number; runInventory: boolean; runPricing: boolean; runSyncBlocks: boolean },
@@ -84,7 +95,14 @@ export async function runFullScanForProperty(
   if (!config) throw new Error(`Property ${propertyId} not in config`);
 
   const guestyListingId = await storage.getGuestyListingId(propertyId);
-  if (!guestyListingId) throw new Error(`No Guesty listing mapped for property ${propertyId}`);
+  if (!guestyListingId) {
+    // Graceful skip: scheduler auto-enables on Availability-tab load
+    // for every property (Load-Bearing #10), but properties that
+    // haven't been built on Guesty yet have no listing to scan
+    // against. Return a skip summary rather than throwing so the
+    // run history shows this as a no-op, not an error.
+    return `${SKIP_PREFIX} no Guesty listing mapped — connect one to enable scans`;
+  }
 
   // Resort name from Guesty listing title
   let resortName: string | null = null;
@@ -113,38 +131,59 @@ export async function runFullScanForProperty(
     summaries.push(`inventory ${baselineSets} sets (${baselineVerdict})`);
   }
 
-  // ── Pricing telemetry: 1 sample per season per BR ──
-  // We snapshot the live Airbnb retail rate per season for visibility
-  // (lets the operator see if the market is moving), but we do NOT use
-  // these as the cost basis — those are other hosts' SELL prices, not
-  // our buy-in cost. Pushing rates off them caused 197% margins.
+  // ── Pricing telemetry: random 7-night per season per BR (live market) ──
+  // Now uses the surgical sampler: exact-BR median from SearchAPI, per-season
+  // Airbnb bias markup, combo handling (sum or double per PROPERTY_UNIT_CONFIGS),
+  // then the existing push layers the final 20% target margin. This directly
+  // implements the requested flow and eliminates far-future 2028 sample failures.
   const priceByBR: Record<SeasonKey, Record<number, number | null>> = {
     LOW: {}, HIGH: {}, HOLIDAY: {},
   };
   if (opts.runPricing) {
     const seasons: SeasonKey[] = ["LOW", "HIGH", "HOLIDAY"];
+    const unitsForProp = getPropertyUnits(propertyId);
+    const isCombo = unitsForProp.length > 1;
+    const sameBr = isCombo && new Set(unitsForProp.map(u => u.bedrooms)).size === 1;
     for (const s of seasons) {
-      const { checkIn, checkOut } = pickDateForSeason(s);
       const res = await Promise.all(uniqueBedrooms.map(async (br) => {
-        const nightly = await findCheapestPricedNightly({
-          resortName, community, bedrooms: br, checkIn, checkOut,
-          q: `${resortName ?? community}, Hawaii`, apiKey,
+        const sample = await sampleMedianBuyInForSeason({
+          community,
+          bedrooms: br,
+          season: s,
+          unitCount: isCombo ? unitsForProp.length : 1,
+          sameBrCombo: sameBr,
+          apiKey,
+          maxSamples: 4,
         });
-        return [br, nightly] as [number, number | null];
+        // Use the post-markup+combo adjusted as the "live buy-in" snapshot
+        return [br, sample.adjustedBuyIn ?? sample.median] as [number, number | null];
       }));
       for (const [br, n] of res) priceByBR[s][br] = n;
     }
     const pricedSeasons = Object.entries(priceByBR)
       .filter(([_, m]) => Object.values(m).some((v) => v != null))
       .map(([s]) => s);
-    summaries.push(`market-snapshot ${pricedSeasons.length}/3 seasons`);
+    summaries.push(`market-snapshot ${pricedSeasons.length}/3 seasons (live+markup+combo)`);
   }
 
   // ── Block sync: push owner-blocks for insufficient windows ──
   if (opts.runSyncBlocks && opts.runInventory) {
-    // Build 52 weeks of verdicts. With the baseline-count model the
-    // verdict is the same for every non-overridden week — we still write
-    // overrides per-week though.
+    // Build 52 weeks of verdicts. ONLY explicit per-window overrides
+    // (force-block) turn into actual Guesty blocks here — the baseline
+    // supply count is NOT fanned out across all 52 weeks.
+    //
+    // Earlier revisions applied `baselineVerdict` to every non-override
+    // week, which meant a single point-in-time Airbnb-listing count of
+    // "2 sets, need 3" auto-blocked every future week for a year.
+    // That's the wrong shape: baseline is a SIGNAL about current supply
+    // tightness, not an ACTION that should block bookings 11 months
+    // out when supply will almost certainly have shifted by then.
+    //
+    // The per-week scan flow (manual "Run inventory scan" button +
+    // "Push Blackouts to Guesty" in the Availability tab) is the
+    // correct place to push real per-week blocks — it actually queries
+    // each window individually. See Load-Bearing Decision #19 in
+    // AGENTS.md.
     const overrides = await storage.getScannerOverrides(propertyId);
     const overrideByStart = new Map(overrides.map((o) => [o.startDate, o]));
     const today = new Date(); today.setHours(12, 0, 0, 0);
@@ -156,9 +195,8 @@ export async function runFullScanForProperty(
       const sd = start.toISOString().slice(0, 10);
       const ed = end.toISOString().slice(0, 10);
       const ov = overrideByStart.get(sd);
-      const verdict = ov
-        ? (ov.mode === "force-block" ? "blocked" : "open" as const)
-        : baselineVerdict;
+      const verdict: "open" | "blocked" =
+        ov && ov.mode === "force-block" ? "blocked" : "open";
       windows.push({ startDate: sd, endDate: ed, verdict, maxSets: baselineSets, minSets: opts.minSets });
     }
 
@@ -281,6 +319,7 @@ async function tick() {
       if (!row.enabled) continue;
       const due = !row.lastRunAt || (now - row.lastRunAt.getTime()) >= row.intervalHours * 60 * 60 * 1000;
       if (!due) continue;
+      const startedAt = Date.now();
       try {
         const summary = await runFullScanForProperty(row.propertyId, {
           minSets: row.minSets,
@@ -289,11 +328,26 @@ async function tick() {
           runPricing: row.runPricing,
           runSyncBlocks: row.runSyncBlocks,
         });
-        await storage.markScannerScheduleRan(row.propertyId, "ok", summary);
-        console.log(`[availability-scheduler] property ${row.propertyId} ok · ${summary}`);
+        const durationMs = Date.now() - startedAt;
+        // "skipped:"-prefixed summaries are clean no-ops (missing
+        // precondition, e.g. no Guesty mapping yet). Record as
+        // "skipped" so the UI can show a neutral pill instead of
+        // green-ok, and the error log stays clean.
+        const status: "ok" | "skipped" = summary.startsWith(SKIP_PREFIX) ? "skipped" : "ok";
+        await storage.markScannerScheduleRan(row.propertyId, status, summary);
+        await storage.recordScannerRun({
+          propertyId: row.propertyId,
+          status, summary, durationMs, trigger: "scheduled",
+        }).catch(() => {});
+        console.log(`[availability-scheduler] property ${row.propertyId} ${status} · ${summary}`);
       } catch (e: any) {
+        const durationMs = Date.now() - startedAt;
         const msg = e?.message ?? String(e);
         await storage.markScannerScheduleRan(row.propertyId, "error", msg.slice(0, 200)).catch(() => {});
+        await storage.recordScannerRun({
+          propertyId: row.propertyId,
+          status: "error", summary: msg.slice(0, 200), durationMs, trigger: "scheduled",
+        }).catch(() => {});
         console.error(`[availability-scheduler] property ${row.propertyId} FAILED: ${msg}`);
       }
     }
@@ -310,7 +364,8 @@ export function startAvailabilityScheduler() {
 }
 
 // Exposed so the UI's "Run now" button can force a sync without waiting.
-export async function runFullScanNow(propertyId: number): Promise<{ summary: string; status: "ok" | "error" }> {
+export async function runFullScanNow(propertyId: number): Promise<{ summary: string; status: "ok" | "error" | "skipped" }> {
+  const startedAt = Date.now();
   try {
     const sched = await storage.getScannerSchedule(propertyId);
     const summary = await runFullScanForProperty(propertyId, {
@@ -320,11 +375,20 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
       runPricing: sched?.runPricing ?? true,
       runSyncBlocks: sched?.runSyncBlocks ?? true,
     });
-    await storage.markScannerScheduleRan(propertyId, "ok", summary).catch(() => {});
-    return { summary, status: "ok" };
+    const durationMs = Date.now() - startedAt;
+    const status: "ok" | "skipped" = summary.startsWith(SKIP_PREFIX) ? "skipped" : "ok";
+    await storage.markScannerScheduleRan(propertyId, status, summary).catch(() => {});
+    await storage.recordScannerRun({
+      propertyId, status, summary, durationMs, trigger: "manual",
+    }).catch(() => {});
+    return { summary, status };
   } catch (e: any) {
+    const durationMs = Date.now() - startedAt;
     const msg = e?.message ?? String(e);
     await storage.markScannerScheduleRan(propertyId, "error", msg.slice(0, 200)).catch(() => {});
+    await storage.recordScannerRun({
+      propertyId, status: "error", summary: msg.slice(0, 200), durationMs, trigger: "manual",
+    }).catch(() => {});
     return { summary: msg, status: "error" };
   }
 }

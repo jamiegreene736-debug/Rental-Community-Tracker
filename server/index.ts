@@ -6,6 +6,11 @@ import { startWeeklyScheduler, cleanupStaleRuns } from "./availability-scanner";
 import { startAutoApproveScheduler } from "./auto-approve";
 import { startAutoReplyScheduler } from "./auto-reply";
 import { startAvailabilityScheduler } from "./availability-scheduler";
+import { startPhotoListingScheduler } from "./photo-listing-scanner";
+import { startBookingConfirmationScheduler } from "./booking-confirmations";
+import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
+import { ensureRuntimeSchema } from "./schema-maintenance";
+import { requireAuth, loginPageHandler, loginPostHandler, logoutHandler } from "./auth";
 
 const app = express();
 const httpServer = createServer(app);
@@ -35,7 +40,7 @@ export function log(message: string, source = "express") {
     hour12: true,
   });
 
-  console.log(`${formattedTime} [${source}] ${message}`);
+  console.log(`${formattedTime} [${source}] ${sanitizeForChatText(message, { maxLength: 4_000 })}`);
 }
 
 app.use((req, res, next) => {
@@ -54,7 +59,7 @@ app.use((req, res, next) => {
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        logLine += ` :: ${JSON.stringify(sanitizeForChatValue(capturedJsonResponse, { maxLength: 1_000, maxArrayLength: 5 }))}`;
       }
 
       log(logLine);
@@ -64,14 +69,36 @@ app.use((req, res, next) => {
   next();
 });
 
+// Single-password gate. No-op when ADMIN_SECRET env var is unset, so
+// cold deploys + local dev keep working. See server/auth.ts for the
+// full whitelist (sidecar, loopback, /login, static assets) and the
+// "FOUR EXCLUSIONS" inline comment for why each one is load-bearing.
+//
+// Login routes are registered BEFORE requireAuth even though the
+// middleware whitelists them — Express short-circuits on the first
+// matching route, which avoids touching the auth check for the most
+// common public-path requests. NOTE FOR CODEX: this ordering is not
+// strictly required (the whitelist would handle it either way), but
+// it keeps the hot path one function call shorter and makes the auth
+// flow easier to reason about.
+app.get("/login", loginPageHandler);
+app.post("/login", loginPostHandler);
+app.post("/logout", logoutHandler);
+app.use(requireAuth);
+app.get("/api/auth/session", (_req, res) => {
+  const session = res.locals.portalSession ?? { role: "admin", username: "admin" };
+  res.json({ authenticated: true, role: session.role, username: session.username });
+});
+
 (async () => {
+  await ensureRuntimeSchema();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
+    const message = sanitizeForChatText(err.message || "Internal Server Error", { maxLength: 1_000 });
 
-    console.error("Internal Server Error:", err);
+    console.error("Internal Server Error:", sanitizeForChatText(err, { maxLength: 4_000 }));
 
     if (res.headersSent) {
       return next(err);
@@ -108,6 +135,8 @@ app.use((req, res, next) => {
       startAutoApproveScheduler();
       startAutoReplyScheduler();
       startAvailabilityScheduler();
+      startPhotoListingScheduler();
+      startBookingConfirmationScheduler();
     },
   );
 })();

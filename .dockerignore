@@ -4,3 +4,12 @@ dist
 .env.*
 screenshots
 attached_assets
+.git
+.github
+.agents
+AGENTS.md
+CLAUDE.md
+tests
+test-artifacts
+scripts
+*.log

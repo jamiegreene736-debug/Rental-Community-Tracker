@@ -3,7 +3,6 @@ import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 import {
   Loader2,
   ArrowRight,
@@ -17,9 +16,12 @@ import {
   Camera,
   Search,
 } from "lucide-react";
-import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "@/data/unit-builder-data";
+import { loadDraftPropertyByNegativeId } from "@/data/adapt-draft";
+import { apiRequest } from "@/lib/queryClient";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 import { useToast } from "@/hooks/use-toast";
+import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -50,6 +52,7 @@ type UnitOverride = {
   bedrooms: number;
   unitLabel: string;
   sourceUrl: string;
+  photoFolder?: string;
   swapId?: number;
 };
 
@@ -128,7 +131,30 @@ export default function BuilderPreflight() {
   const { propertyId } = useParams<{ propertyId: string }>();
   const [, setLocation] = useLocation();
   const id = parseInt(propertyId || "0", 10);
-  const property = getUnitBuilderByPropertyId(id);
+  const staticProperty = getUnitBuilderByPropertyId(id);
+
+  // Draft fallback: when the static lookup misses AND the id is
+  // negative (the convention the dashboard uses for promoted
+  // drafts: -draftId), fetch /api/community/drafts and adapt the
+  // matching draft to PropertyUnitBuilder shape. Lets the builder
+  // operate on promoted drafts without migrating them into the
+  // static unitBuilderData array. Per-unit photo folders are
+  // fetched alongside so the units' photos array is populated
+  // (the wizard persists photos to disk via /persist-photos on
+  // save; this just lists them).
+  const [draftProperty, setDraftProperty] = useState<PropertyUnitBuilder | null>(null);
+  const [draftLoading, setDraftLoading] = useState<boolean>(!staticProperty && id < 0);
+  useEffect(() => {
+    if (staticProperty || id >= 0) return;
+    setDraftLoading(true);
+    loadDraftPropertyByNegativeId(id)
+      .then((p) => { if (p) setDraftProperty(p); })
+      .catch(() => { /* leave draftProperty null → renders the not-found state */ })
+      .finally(() => setDraftLoading(false));
+  }, [id, staticProperty]);
+  const property = staticProperty ?? draftProperty;
+  const isPromotedDraft = id < 0;
+
   const { toast } = useToast();
 
   // Per-row rescrape state so each row can show its own spinner/result.
@@ -187,14 +213,132 @@ export default function BuilderPreflight() {
     return `${Math.floor(diff / 86_400_000)}d ago`;
   };
 
+  // ── Photo source scraper for promoted drafts ─────────────────────────────
+  // Drafts whose Step 4 wizard scrape didn't find a matching Zillow listing
+  // arrive at preflight with no photos persisted on the volume. Without
+  // photos, the reverse-image-search half of the Platform Check is fully
+  // skipped (it has nothing to feed Google Lens), so the check returns "no
+  // signals" regardless of whether the property is actually listed somewhere.
+  //
+  // Mirrors the same real-estate discovery logic /api/replacement/find-unit
+  // uses for active properties: searches Zillow/Realtor by community +
+  // street address + bedroom count, supplements with Apify when a resort
+  // street root is known, then scrapes the first usable detail result.
+  // Operator clicks one button per unit; URL paste isn't needed.
+  const [scrapingUnitId, setScrapingUnitId] = useState<string | null>(null);
+  // Track URLs the operator has already accepted/rejected so the
+  // "Try another" path skips them. Reset when the property changes.
+  const [skippedUrlsByUnit, setSkippedUrlsByUnit] = useState<Record<string, string[]>>({});
+
+  // Parse street / city / state out of the property's display address
+  // ("9000 Treasure Trove Lane, Kissimmee, Florida"). For HI properties
+  // the address often has a building suffix ("…, Bldg 38, Koloa, HI
+  // 96756") which we tolerate by taking position[-2] / position[-1].
+  const parsePropertyAddress = (addr: string): { street: string; city: string; state: string } => {
+    const parts = (addr || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length < 2) return { street: addr || "", city: "", state: "" };
+    const street = parts[0];
+    let city = "";
+    let state = "";
+    if (parts.length >= 3) {
+      city = parts[parts.length - 2];
+      state = (parts[parts.length - 1].split(" ")[0] || "").trim(); // "FL 34747" → "FL"
+    } else {
+      city = parts[1];
+      state = parts[2] ?? "";
+    }
+    return { street, city, state };
+  };
+
+  const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unit: { id: string; bedrooms: number }) => {
+    if (id >= 0 || !property) return; // promoted drafts only
+    const draftId = -id;
+    const { street, city, state } = parsePropertyAddress(property.address);
+    const loadSourceUrl = async (folder?: string): Promise<string | null> => {
+      if (!folder) return null;
+      try {
+        const r = await apiRequest("GET", `/api/builder/photo-source/${encodeURIComponent(folder)}`);
+        const data = await r.json() as { source?: { sourceListing?: { url?: string } } | null };
+        const url = data?.source?.sourceListing?.url;
+        return typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+      } catch {
+        return null;
+      }
+    };
+    setScrapingUnitId(unit.id);
+    try {
+      const existingSources = await Promise.all(property.units.map((u) => loadSourceUrl(u.photoFolder)));
+      const skipUrls = Array.from(new Set([
+        ...(skippedUrlsByUnit[unit.id] ?? []),
+        ...existingSources.filter((u): u is string => !!u),
+      ]));
+      const currentUnitHasPhotos = property.units.some((u) => u.id === unit.id && (u.photos?.length ?? 0) > 0);
+      const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", {
+        communityName: property.complexName,
+        streetAddress: street || undefined,
+        city: city || undefined,
+        state: state || undefined,
+        bedrooms: unit.bedrooms,
+        skipUrls,
+        skipFirst: skipUrls.length === 0 && currentUnitHasPhotos ? 1 : 0,
+      });
+      const fetchData = await fetchR.json();
+      const photos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
+      const sourceUrl: string | null = fetchData?.sourceUrl ?? null;
+      if (photos.length === 0) {
+        toast({
+          title: "No real-estate listing found",
+          description: fetchData?.note || `Couldn't find a representative ${unit.bedrooms}BR listing at ${property.complexName}. The community may not have Zillow/Realtor coverage.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      // Pass empty array for the OTHER unit so persist-photos doesn't wipe
+      // its existing folder. The endpoint skips a unit when its URL list
+      // is empty.
+      const persistBody = unitIndex === 0
+        ? { unit1Photos: photos.map((p) => p.url), unit2Photos: [], unit1SourceUrl: sourceUrl }
+        : { unit1Photos: [], unit2Photos: photos.map((p) => p.url), unit2SourceUrl: sourceUrl };
+      const persistR = await apiRequest("POST", `/api/community/${draftId}/persist-photos`, persistBody);
+      const persistData = await persistR.json();
+      const saved = unitIndex === 0 ? persistData?.unit1?.saved : persistData?.unit2?.saved;
+      toast({
+        title: `Saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}`,
+        description: sourceUrl
+          ? `From ${new URL(sourceUrl).hostname}. Re-run the Platform Check to reverse-image-search them.`
+          : "Re-run the Platform Check below to reverse-image-search them.",
+      });
+      // Track this URL so a subsequent "Try another" click skips it.
+      if (sourceUrl) {
+        setSkippedUrlsByUnit((prev) => ({
+          ...prev,
+          [unit.id]: [...(prev[unit.id] ?? []), sourceUrl],
+        }));
+      }
+      // Refresh property state so unit.photos / photoFolder reflect the
+      // new folder. Without this the next Platform Check still sees the
+      // stale (empty) photos array.
+      const updated = await loadDraftPropertyByNegativeId(id);
+      if (updated) setDraftProperty(updated);
+    } catch (e: any) {
+      toast({ title: "Scrape failed", description: e?.message || String(e), variant: "destructive" });
+    } finally {
+      setScrapingUnitId(null);
+    }
+  };
+
   const [platformChecking, setPlatformChecking] = useState(false);
   // Track which unit IDs are still being checked (for per-row spinner)
   const [checkingUnitIds, setCheckingUnitIds] = useState<Set<string>>(new Set());
   const [completedCount, setCompletedCount] = useState(0);
   const [totalUnits, setTotalUnits] = useState(0);
   const [checkPhase, setCheckPhase] = useState<"text" | "photo" | "done" | null>(null);
+  const [checkStartedAt, setCheckStartedAt] = useState<number | null>(null);
+  const [progressTick, setProgressTick] = useState(0);
   const [results, setResults] = useState<ProgressiveResults>({});
   const [platformDone, setPlatformDone] = useState(false);
+  const [fullAuditRunning, setFullAuditRunning] = useState(false);
+  const [lastCheckWasFullAudit, setLastCheckWasFullAudit] = useState(false);
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
   const [replacementTargetId, setReplacementTargetId] = useState<string | null>(null);
   const [swapsCommitted, setSwapsCommitted] = useState(false);
@@ -204,15 +348,24 @@ export default function BuilderPreflight() {
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
 
-  // Load any previously saved unit swaps from the DB on mount
+  const isCheckRunning = platformChecking || checkingUnitIds.size > 0;
   useEffect(() => {
-    if (!id) return;
+    if (!isCheckRunning) return;
+    const id = setInterval(() => setProgressTick(t => t + 1), 1_000);
+    return () => clearInterval(id);
+  }, [isCheckRunning]);
+
+  // Load any previously saved unit swaps from the DB, then auto-run the
+  // platform check for static builder properties if no swaps are blocking it.
+  // Promoted drafts can arrive with freshly scraped photos and should not kick
+  // off reverse-image search until the operator explicitly asks for it.
+  useEffect(() => {
+    if (!id || !property) return;
     fetch(`/api/unit-swaps/${id}`)
       .then(r => r.ok ? r.json() : null)
       .then((data: { swaps: any[] } | null) => {
         if (!data?.swaps?.length) {
-          // No saved swaps — auto-run the platform check immediately
-          if (!autoRunFired.current && property) {
+          if (!isPromotedDraft && !autoRunFired.current) {
             autoRunFired.current = true;
             runPlatformCheck();
           }
@@ -221,12 +374,18 @@ export default function BuilderPreflight() {
         const restored: Record<string, UnitOverride> = {};
         let allCommitted = true;
         for (const swap of data.swaps) {
+          if (!swap?.oldUnitId || restored[swap.oldUnitId]) continue;
+          const photoFolder =
+            typeof swap.photoFolder === "string" && swap.photoFolder.trim()
+              ? swap.photoFolder
+              : replacementPhotoFolderForUnit(id, swap.oldUnitId);
           restored[swap.oldUnitId] = {
             unitNumber: swap.newUnitLabel.replace(/^Unit\s*#?/i, "").trim(),
             address: swap.newAddress,
             bedrooms: swap.newBedrooms ?? 1,
             unitLabel: swap.newUnitLabel,
             sourceUrl: swap.newSourceUrl,
+            photoFolder,
             swapId: swap.id,
           };
           if (!swap.committed) allCommitted = false;
@@ -235,14 +394,13 @@ export default function BuilderPreflight() {
         setSwapsCommitted(allCommitted);
       })
       .catch(() => {
-        // On error, still auto-run
-        if (!autoRunFired.current && property) {
+        if (!isPromotedDraft && !autoRunFired.current) {
           autoRunFired.current = true;
           runPlatformCheck();
         }
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, property]);
 
   const commitAndContinue = async () => {
     setCommitting(true);
@@ -256,6 +414,14 @@ export default function BuilderPreflight() {
   };
 
   if (!property) {
+    if (draftLoading) {
+      return (
+        <div className="max-w-2xl mx-auto p-8 text-center">
+          <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2 text-muted-foreground" />
+          <p className="text-muted-foreground text-sm">Loading promoted draft…</p>
+        </div>
+      );
+    }
     return (
       <div className="max-w-2xl mx-auto p-8 text-center">
         <p className="text-muted-foreground">Property not found.</p>
@@ -276,6 +442,7 @@ export default function BuilderPreflight() {
         ...u,
         unitNumber: override.unitNumber,
         bedrooms: override.bedrooms,
+        photoFolder: override.photoFolder ?? u.photoFolder,
         _overrideAddress: override.address,
         _isReplaced: true,
         _replacedLabel: override.unitLabel,
@@ -291,33 +458,44 @@ export default function BuilderPreflight() {
   const city = cityMatch ? cityMatch[1].trim() : property.address;
 
   // ── Check one unit at a time, updating results as each completes ──────────
-  const runPlatformCheck = async (unitsToCheck = effectiveUnits) => {
+  const runPlatformCheck = async (
+    unitsToCheck = effectiveUnits,
+    opts: { fullPhotoAudit?: boolean } = {},
+  ) => {
+    const fullPhotoAudit = opts.fullPhotoAudit === true;
     setPlatformChecking(true);
+    setFullAuditRunning(fullPhotoAudit);
+    setLastCheckWasFullAudit(false);
     setPlatformDone(false);
     setResults({});
     setCompletedCount(0);
     setTotalUnits(unitsToCheck.length);
     setCheckPhase("text");
+    setCheckStartedAt(Date.now());
+    setProgressTick(0);
     const pendingIds = new Set(unitsToCheck.map(u => u.id));
     setCheckingUnitIds(new Set(pendingIds));
 
-    const hasPhotos = unitsToCheck.some(u => !(u as any)._isReplaced && (u as any).photoFolder);
+    const hasPhotos = unitsToCheck.some(u => fullPhotoAudit ? !!(u as any).photoFolder : (!(u as any)._isReplaced && (u as any).photoFolder));
     if (hasPhotos) setCheckPhase("text");
 
     await Promise.all(
       unitsToCheck.map(async (unit) => {
-        const address = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
-        const hasUnitPhoto = !(unit as any)._isReplaced && (unit as any).photoFolder;
+        const singleUnitListing = property.units.length === 1;
+        const address = (unit as any)._overrideAddress || (singleUnitListing ? property.address : `${property.address}, Unit ${unit.unitNumber}`);
+        const hasUnitPhoto = fullPhotoAudit ? !!(unit as any).photoFolder : (!(unit as any)._isReplaced && (unit as any).photoFolder);
         const unitPayload = [{
           unitId: unit.id,
           unitNumber: unit.unitNumber,
           address,
-          photoFolder: (unit as any)._isReplaced ? "" : unit.photoFolder,
+          photoFolder: hasUnitPhoto ? unit.photoFolder : "",
         }];
         const params = new URLSearchParams({
           name: property.propertyName,
           city,
           units: JSON.stringify(unitPayload),
+          photoMode: fullPhotoAudit ? "full" : "sample",
+          singleListing: singleUnitListing ? "1" : "0",
         });
         if (hasUnitPhoto) setCheckPhase("photo");
         try {
@@ -370,13 +548,22 @@ export default function BuilderPreflight() {
 
     setCheckPhase("done");
     setPlatformChecking(false);
+    setFullAuditRunning(false);
+    setCheckStartedAt(null);
     setPlatformDone(true);
+    setLastCheckWasFullAudit(fullPhotoAudit);
   };
 
   const rerunChecks = () => {
     setPlatformDone(false);
     setResults({});
     runPlatformCheck();
+  };
+
+  const runFullUnitAudit = () => {
+    setPlatformDone(false);
+    setResults({});
+    runPlatformCheck(effectiveUnits, { fullPhotoAudit: true });
   };
 
   // Undo a saved unit swap — deletes from DB and removes from state
@@ -401,6 +588,7 @@ export default function BuilderPreflight() {
       bedrooms: newUnit.bedrooms ?? property.units.find(u => u.id === oldUnitId)?.bedrooms ?? 1,
       unitLabel: newUnit.unitLabel,
       sourceUrl: newUnit.url,
+      photoFolder: newUnit.photoFolder ?? replacementPhotoFolderForUnit(id, oldUnitId),
       swapId,
     };
     const updatedOverrides = { ...unitOverrides, [oldUnitId]: newOverride };
@@ -416,6 +604,7 @@ export default function BuilderPreflight() {
           ...u,
           unitNumber: override.unitNumber,
           bedrooms: override.bedrooms,
+          photoFolder: override.photoFolder ?? u.photoFolder,
           _overrideAddress: override.address,
           _isReplaced: true,
           _replacedLabel: override.unitLabel,
@@ -428,18 +617,28 @@ export default function BuilderPreflight() {
     runPlatformCheck(updatedUnits);
   }
 
-  const isCheckRunning = platformChecking || checkingUnitIds.size > 0;
   const hasAnyResults = Object.keys(results).length > 0;
+  const actualProgress = totalUnits > 0 ? (completedCount / totalUnits) * 100 : 0;
+  const elapsedSeconds = checkStartedAt ? Math.max(progressTick, Math.floor((Date.now() - checkStartedAt) / 1000)) : 0;
+  const activeProgressCap = totalUnits > 0
+    ? Math.min(96, ((completedCount + 0.85) / totalUnits) * 100)
+    : 0;
+  const estimatedWorkingProgress = isCheckRunning && totalUnits > 0
+    ? Math.min(activeProgressCap, actualProgress + 8 + elapsedSeconds * (checkPhase === "photo" ? 1.8 : 2.5))
+    : actualProgress;
+  const platformProgressValue = Math.max(actualProgress, estimatedWorkingProgress);
+  const visiblePlatformProgressValue = isCheckRunning
+    ? Math.max(14, platformProgressValue)
+    : platformProgressValue;
+  const checkingLabels = effectiveUnits
+    .filter((unit) => checkingUnitIds.has(unit.id))
+    .map((unit) => `Unit ${unit.unitNumber}`)
+    .join(", ");
+  const canFullUnitAudit = effectiveUnits.some((unit) => !!(unit as any).photoFolder);
   const targetUnit = replacementTargetId
     ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
     : property.units[0];
-
-  // Does any unit across any platform show a "listed" status?
-  const anyUnitListed = effectiveUnits.some(unit => {
-    const r = results[unit.id];
-    if (!r) return false;
-    return PLATFORM_LIST.some(({ key }) => isListedStatus(r.platforms[key].status));
-  });
+  const parsedReplacementAddress = parsePropertyAddress(property.address);
 
   return (
     <div className="min-h-screen bg-background">
@@ -468,28 +667,150 @@ export default function BuilderPreflight() {
           </p>
         </div>
 
+        {/* ── Photo Sources (promoted drafts only) ──
+            The reverse-image-search half of the Platform Check needs
+            photos to scan. When the wizard's Step 4 scrape didn't
+            find a matching Zillow listing, the unit photo folders
+            arrive empty. This card calls the same multi-query Zillow
+            discovery that /api/replacement/find-unit uses for active
+            properties — operator clicks one button per unit, no URL
+            paste needed. "Try another" walks through subsequent
+            results so a bad first match isn't a dead end. */}
+        {isPromotedDraft && (
+          <Card className="p-6 mb-6">
+            <h2 className="text-base font-semibold mb-1">Photo Sources</h2>
+            {(() => {
+              const allUnitsHavePhotos = property.units.length > 0
+                && property.units.every((unit) => (unit.photos?.length ?? 0) > 0);
+              const someUnitsHavePhotos = property.units.some((unit) => (unit.photos?.length ?? 0) > 0);
+              if (allUnitsHavePhotos) {
+                return (
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Photos are already saved for every unit at{" "}
+                    <strong>{property.complexName}</strong>. The Platform Check
+                    can use the photos on file when you click <strong>Run check</strong>{" "}
+                    below. Use <strong>Find different photos</strong> only if the saved
+                    Zillow match looks wrong or you want to replace a unit&apos;s photo set.
+                  </p>
+                );
+              }
+              if (someUnitsHavePhotos) {
+                return (
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Some units already have photos saved. Click <strong>Find Photos</strong>{" "}
+                    for any unit without photos, or <strong>Find different photos</strong>{" "}
+                    if an existing saved match looks wrong. Then click <strong>Run check</strong>{" "}
+                    on the Platform Check.
+                  </p>
+                );
+              }
+              return (
+                <p className="text-sm text-muted-foreground mb-4">
+                  The reverse-image-search half of the Platform Check below needs
+                  photos to scan. Click <strong>Find Photos</strong> for each unit
+                  and we&apos;ll search Zillow for a representative listing at{" "}
+                  <strong>{property.complexName}</strong>, scrape its photos, and
+                  save them to the draft. Then click <strong>Run check</strong>{" "}
+                  on the Platform Check.
+                </p>
+              );
+            })()}
+            <div className="space-y-3">
+              {property.units.map((unit, i) => {
+                const folderHasPhotos = (unit.photos?.length ?? 0) > 0;
+                const skippedCount = (skippedUrlsByUnit[unit.id] ?? []).length;
+                return (
+                  <div key={unit.id} className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium w-20 flex-shrink-0">
+                      Unit {String.fromCharCode(65 + i)}
+                    </span>
+                    <span className="text-xs text-muted-foreground flex-1">
+                      {unit.bedrooms}BR · ~{unit.sqft || "?"} sqft
+                    </span>
+                    <Button
+                      size="sm"
+                      onClick={() => handleScrapePhotosForUnit(i === 0 ? 0 : 1, unit)}
+                      disabled={scrapingUnitId !== null}
+                      className="h-8 text-xs"
+                      data-testid={`button-scrape-photos-${unit.id}`}
+                    >
+                      {scrapingUnitId === unit.id ? (
+                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Searching Zillow…</>
+                      ) : folderHasPhotos ? (
+                        <><RefreshCw className="h-3 w-3 mr-1" /> Find different photos</>
+                      ) : (
+                        <><Search className="h-3 w-3 mr-1" /> Find Photos</>
+                      )}
+                    </Button>
+                    {folderHasPhotos && (
+                      <Badge variant="outline" className="text-[10px] flex-shrink-0">
+                        {unit.photos.length} on file
+                      </Badge>
+                    )}
+                    {skippedCount > 0 && !folderHasPhotos && (
+                      <span className="text-[10px] text-muted-foreground flex-shrink-0">
+                        skipped {skippedCount}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        )}
+
         {/* ── Platform Check ── */}
         <Card className="p-6 mb-6">
           <div className="flex items-start justify-between gap-4 mb-1">
             <h2 className="text-base font-semibold">Platform Check</h2>
-            {platformDone && (
-              <Button
-                id="btn-rerun-checks"
-                aria-label="Re-run platform check"
-                variant="ghost"
-                size="sm"
-                onClick={rerunChecks}
-                disabled={isCheckRunning}
-                className="h-7 px-2 text-xs flex-shrink-0"
-              >
-                <RotateCcw className="h-3 w-3 mr-1" />
-                Re-run
-              </Button>
+            {!isCheckRunning && (
+              <div className="flex flex-wrap justify-end gap-2">
+                {canFullUnitAudit && (
+                  <Button
+                    id="btn-full-unit-audit"
+                    aria-label="Run full unit photo audit"
+                    variant="outline"
+                    size="sm"
+                    onClick={runFullUnitAudit}
+                    className="h-7 px-2 text-xs flex-shrink-0"
+                  >
+                    <Camera className="h-3 w-3 mr-1" />
+                    Full unit audit
+                  </Button>
+                )}
+                <Button
+                  id={platformDone ? "btn-rerun-checks" : "btn-run-checks"}
+                  aria-label={platformDone ? "Re-run platform check" : "Run platform check"}
+                  variant="ghost"
+                  size="sm"
+                  onClick={rerunChecks}
+                  className="h-7 px-2 text-xs flex-shrink-0"
+                >
+                  {platformDone ? (
+                    <>
+                      <RotateCcw className="h-3 w-3 mr-1" />
+                      Re-run
+                    </>
+                  ) : (
+                    <>
+                      <Search className="h-3 w-3 mr-1" />
+                      Run check
+                    </>
+                  )}
+                </Button>
+              </div>
             )}
           </div>
           <p className="text-sm text-muted-foreground mb-4">
-            Searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search.
+            {isPromotedDraft
+              ? "Click Run check when you're ready. It searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search."
+              : "Searches Airbnb, VRBO, and Booking.com for each unit using text search and reverse image search."}
           </p>
+          {lastCheckWasFullAudit && hasAnyResults && (
+            <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
+              Full unit audit complete: every available photo in each unit folder was checked against Airbnb, VRBO, and Booking.com.
+            </div>
+          )}
 
           {/* Committed swaps summary — renders every unit (swapped OR original)
               so the user can rescrape any one of them directly. */}
@@ -522,14 +843,15 @@ export default function BuilderPreflight() {
               <div className="space-y-1.5">
                 {property.units.map((origUnit, idx) => {
                   const override = unitOverrides[origUnit.id];
+                  const unitPhotoFolder = override?.photoFolder ?? origUnit.photoFolder;
                   const positionLabel = `Unit ${String.fromCharCode(65 + idx)}`;
                   const rescrapeHandler = async () => {
-                    if (!origUnit.photoFolder) {
+                    if (!unitPhotoFolder) {
                       toast({ title: "Can't rescrape", description: "No photoFolder on this unit.", variant: "destructive" });
                       return;
                     }
                     setRescrapingUnitId(origUnit.id);
-                    const folder = origUnit.photoFolder;
+                    const folder = unitPhotoFolder;
                     try {
                       const r = await fetch("/api/builder/rescrape-unit-photos", {
                         method: "POST",
@@ -598,7 +920,7 @@ export default function BuilderPreflight() {
                       setRescrapingUnitId(null);
                     }
                   };
-                  const receipt = origUnit.photoFolder ? rescrapeReceipts[origUnit.photoFolder] : undefined;
+                  const receipt = unitPhotoFolder ? rescrapeReceipts[unitPhotoFolder] : undefined;
                   return (
                     <div key={origUnit.id} className="rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2 space-y-1.5">
                     <div className="flex items-center justify-between gap-2">
@@ -752,10 +1074,18 @@ export default function BuilderPreflight() {
 
           {/* Progress bar */}
           {isCheckRunning && totalUnits > 0 && (
-            <div className="mb-5 space-y-2">
+            <div className="mb-5 space-y-2 rounded-md border border-primary/15 bg-primary/5 p-3">
+              <style>{`
+                @keyframes preflight-progress-stripes {
+                  from { background-position: 0 0; }
+                  to { background-position: 32px 0; }
+                }
+              `}</style>
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span className="flex items-center gap-1.5 font-medium">
-                  {checkPhase === "photo" ? (
+                  {fullAuditRunning ? (
+                    <><Camera className="h-3.5 w-3.5 animate-pulse text-primary" /> Running full unit photo audit…</>
+                  ) : checkPhase === "photo" ? (
                     <><Camera className="h-3.5 w-3.5 animate-pulse text-primary" /> Running photo reverse-image search…</>
                   ) : checkPhase === "text" ? (
                     <><Search className="h-3.5 w-3.5 animate-pulse text-primary" /> Searching Airbnb, VRBO &amp; Booking.com…</>
@@ -763,14 +1093,40 @@ export default function BuilderPreflight() {
                     <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking…</>
                   )}
                 </span>
-                <span>{completedCount} / {totalUnits} unit{totalUnits !== 1 ? "s" : ""} done</span>
+                <span>{completedCount} / {totalUnits} unit{totalUnits !== 1 ? "s" : ""} done · {elapsedSeconds}s</span>
               </div>
-              <Progress value={totalUnits > 0 ? (completedCount / totalUnits) * 100 : 0} className="h-2" />
-              <p className="text-xs text-muted-foreground">
-                {checkPhase === "photo"
-                  ? "Uploading photos to run Google Lens reverse image search — this takes 15–30 s per unit."
-                  : "Querying search engines for address and unit number matches across all platforms."}
-              </p>
+              <div
+                className="relative h-3 overflow-hidden rounded-full bg-muted"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(visiblePlatformProgressValue)}
+                aria-label="Platform check progress"
+              >
+                <div
+                  className="h-full rounded-full bg-primary transition-[width] duration-700 ease-out"
+                  style={{
+                    width: `${Math.min(100, visiblePlatformProgressValue)}%`,
+                    backgroundImage:
+                      "linear-gradient(45deg, rgba(255,255,255,0.28) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.28) 50%, rgba(255,255,255,0.28) 75%, transparent 75%, transparent)",
+                    backgroundSize: "32px 32px",
+                    animation: "preflight-progress-stripes 1s linear infinite",
+                  }}
+                />
+                <div className="absolute inset-0 animate-pulse bg-primary/10" />
+              </div>
+              <div className="flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+                <p>
+                  {fullAuditRunning
+                    ? "Checking every available unit photo with Google Lens. This is slower, but gives the strongest photo-overlap answer."
+                    : checkPhase === "photo"
+                    ? "Uploading photos to Google Lens and waiting for reverse-image matches."
+                    : "Querying search engines for address and unit number matches across all platforms."}
+                </p>
+                <p className="font-medium text-foreground/80">
+                  {checkingLabels ? `Working on ${checkingLabels}` : "Finalizing results..."}
+                </p>
+              </div>
             </div>
           )}
 
@@ -805,7 +1161,6 @@ export default function BuilderPreflight() {
                       const isReplaced = (unit as any)._isReplaced;
                       const displayAddress = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
                       const unitChecking = checkingUnitIds.has(unit.id);
-                      const listed = r && isListedStatus(r.status);
                       return (
                         <tr
                           key={`${key}-${unit.id}`}
@@ -828,8 +1183,8 @@ export default function BuilderPreflight() {
                             {r && (
                               <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
                             )}
-                            {/* Per-row replace button only on Airbnb row (avoid 3x repetition) */}
-                            {key === "airbnb" && listed && !isReplaced && property.communityPhotoFolder && (
+                            {/* Per-row replace button only on Airbnb row (avoid 3x repetition). */}
+                            {key === "airbnb" && property.communityPhotoFolder && !swapsCommitted && (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -841,7 +1196,7 @@ export default function BuilderPreflight() {
                                 }}
                               >
                                 <RefreshCw className="h-3 w-3 mr-1" />
-                                Replace this unit
+                                {isReplaced ? "Change replacement" : "Replace this unit"}
                               </Button>
                             )}
                           </td>
@@ -906,7 +1261,7 @@ export default function BuilderPreflight() {
               Continue to Builder <ArrowRight className="h-4 w-4 ml-2" />
             </Button>
           )}
-          {anyUnitListed && property.communityPhotoFolder && (
+          {property.communityPhotoFolder && (
             <Button
               id="btn-use-different-unit"
               aria-label="Find a replacement unit"
@@ -918,7 +1273,7 @@ export default function BuilderPreflight() {
               }}
               className="sm:w-auto"
             >
-              Use a Different Unit
+              Find / Replace a Unit
             </Button>
           )}
         </div>
@@ -947,6 +1302,11 @@ export default function BuilderPreflight() {
                 replacementLabel: unitOverrides[u.id]?.unitLabel,
               }))}
               communityFolder={property.communityPhotoFolder}
+              communityName={property.complexName}
+              propertyAddress={property.address}
+              streetAddress={parsedReplacementAddress.street || undefined}
+              city={parsedReplacementAddress.city || undefined}
+              state={parsedReplacementAddress.state || undefined}
               propertyId={id}
               skipUrls={Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean)}
               onClose={() => { setShowReplacementFlow(false); setReplacementTargetId(null); }}

@@ -4,7 +4,7 @@
   "referencedBy": [
     {
       "propertyId": 32,
-      "address": "2253 Poipu Rd, Unit A, Koloa, HI 96756",
+      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
       "unitId": "prop32-kia-3br",
       "unitNumber": "Building 38",
       "bedrooms": 3,
@@ -12,7 +12,7 @@
     },
     {
       "propertyId": 33,
-      "address": "2253 Poipu Rd, Unit B, Koloa, HI 96756",
+      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
       "unitId": "prop33-kia-3br-a",
       "unitNumber": "Building 10",
       "bedrooms": 3,
@@ -27,7 +27,7 @@
     "platform": null,
     "scrapedDate": null
   },
-  "notes": "Folder is shared by 2 units across propertyIds [32, 33]. Photos must be visually generic enough for every unit, OR each unit needs its own folder. Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology.",
+  "notes": "Photos confirmed by operator (2026-04-24) to be actual Pili Mai interiors. `sourceListing.url` is still null because the original scrape source wasn't recorded — worth backfilling if the Zillow/VRBO URL it was pulled from can be identified, so future audits have a verifiable trail. Folder is shared by 2 units across propertyIds [32, 33]; photos remain representative.",
   "bedrooms": 3,
   "bathrooms": "3"
 }

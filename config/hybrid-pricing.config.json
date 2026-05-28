@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "scanSettings": {
+    "enabled": true,
+    "intervalHours": 168,
+    "horizonMonths": 24,
+    "defaultStayNights": 7,
+    "searchApiPageSize": 20,
+    "rateLimitMs": 250
+  },
+  "platformBlendUplift": {
+    "standard": 1.12,
+    "high": 1.15,
+    "peak": 1.18,
+    "ultra": 1.22
+  },
+  "seasonTiers": [
+    {
+      "id": "ultra_holiday",
+      "label": "Ultra-Peak Holiday",
+      "demandClass": "ultra",
+      "multiplier": 1.22,
+      "recurringRanges": [{ "start": "12-15", "end": "01-05" }]
+    },
+    {
+      "id": "peak_july_fourth",
+      "label": "July 4th Peak",
+      "demandClass": "peak",
+      "multiplier": 1.15,
+      "recurringRanges": [{ "start": "06-28", "end": "07-07" }]
+    },
+    {
+      "id": "peak_thanksgiving",
+      "label": "Thanksgiving Peak",
+      "demandClass": "peak",
+      "multiplier": 1.14,
+      "relativeHolidayRanges": [{ "holiday": "thanksgiving", "startOffsetDays": -3, "endOffsetDays": 4 }]
+    },
+    {
+      "id": "peak_easter",
+      "label": "Easter Peak",
+      "demandClass": "peak",
+      "multiplier": 1.13,
+      "absoluteRanges": [
+        { "start": "2026-04-02", "end": "2026-04-08" },
+        { "start": "2027-03-25", "end": "2027-03-31" },
+        { "start": "2028-04-13", "end": "2028-04-19" }
+      ]
+    },
+    {
+      "id": "high_summer",
+      "label": "High Season Summer",
+      "demandClass": "high",
+      "multiplier": 1.10,
+      "recurringRanges": [{ "start": "06-01", "end": "08-15" }]
+    },
+    {
+      "id": "high_spring_break",
+      "label": "High Season Spring Break",
+      "demandClass": "high",
+      "multiplier": 1.09,
+      "recurringRanges": [{ "start": "03-15", "end": "04-15" }]
+    },
+    {
+      "id": "high_presidents_week",
+      "label": "High Season Presidents Week",
+      "demandClass": "high",
+      "multiplier": 1.10,
+      "relativeHolidayRanges": [{ "holiday": "presidents_day", "startOffsetDays": -3, "endOffsetDays": 5 }]
+    }
+  ],
+  "unitSize": {
+    "smallMultiplier": 1.0,
+    "fourBedroomMultiplier": 1.08,
+    "fivePlusBedroomMultiplier": 1.12,
+    "multiUnitMultiplier": 1.15
+  },
+  "stayPattern": {
+    "cleanFivePlusMultiplier": 1.0,
+    "shortHighDemandMultiplier": 1.07,
+    "difficultGapMultiplier": 1.08
+  },
+  "leadTime": [
+    { "id": "far", "minDays": 180, "multiplier": 0.98, "label": "180+ days out" },
+    { "id": "normal", "minDays": 90, "maxDays": 179, "multiplier": 1.0, "label": "90-179 days out" },
+    { "id": "near", "minDays": 45, "maxDays": 89, "multiplier": 1.03, "label": "45-89 days out" },
+    { "id": "urgent", "maxDays": 44, "multiplier": 1.07, "label": "Under 45 days out" }
+  ]
+}

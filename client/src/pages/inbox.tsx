@@ -1,6 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -11,18 +11,210 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import {
+  aliasAttachmentHref,
+  filesToAliasEmailAttachments,
+  formatAttachmentSize,
+  parseAliasEmailAttachments,
+  type AliasEmailAttachment,
+} from "@/lib/emailAttachments";
+import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
-  ToggleRight, Bot, Flag, X,
+  ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
+  FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
 } from "lucide-react";
+import {
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { MessageTemplate } from "@shared/schema";
+import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
+import { fallbackWalkForResort } from "@shared/walking-distance";
+import { usePortalSession } from "@/lib/auth";
+
+type ArrivalUnitDetail = {
+  id: number;
+  unitLabel: string;
+  unitAddress?: string;
+  accessCode?: string;
+  wifiName?: string;
+  wifiPassword?: string;
+  parkingInfo?: string;
+  managementCompany?: string;
+  managementContact?: string;
+  arrivalNotes?: string;
+};
+
+type InboxBuyInRecord = ArrivalUnitDetail & {
+  propertyName?: string;
+  checkIn?: string;
+  checkOut?: string;
+  managementCompany?: string;
+  managementContact?: string;
+};
+
+type InboxVendorContactRecord = {
+  id: number;
+  buyInId: number;
+  vendorName?: string | null;
+  vendorEmail: string;
+  reverseAliasEmail?: string | null;
+};
+
+type InboxBuyInCommunications = {
+  alias: { aliasEmail: string; mailboxEmail: string; status?: string | null; expiresAt?: string | null } | null;
+  buyIns: InboxBuyInRecord[];
+  contacts: InboxVendorContactRecord[];
+  emails: Array<{
+    id: number;
+    buyInId: number;
+    direction: "outbound" | "inbound" | string;
+    fromEmail: string;
+    toEmail: string;
+    subject: string;
+    body: string;
+    attachmentsJson?: string | null;
+    status?: string | null;
+    sentAt?: string | null;
+  }>;
+};
+
+type InboxRentalAgreement = {
+  agreement: {
+    id: number;
+    token: string;
+    status: string;
+    signingUrl?: string;
+    signedName?: string | null;
+    signedAt?: string | null;
+  } | null;
+};
+
+type QuoCallEvent = {
+  id: number;
+  providerCallId: string;
+  conversationId?: string | null;
+  reservationId?: string | null;
+  guestName?: string | null;
+  guestPhone: string;
+  fromNumber: string;
+  toNumber: string;
+  direction: "inbound" | "outbound" | string;
+  status?: string | null;
+  disposition: "answered" | "missed" | "voicemail" | "unknown" | string;
+  durationSeconds?: number | null;
+  matchStrategy?: string | null;
+  matchConfidence?: string | null;
+  voicemailRecordingUrl?: string | null;
+  voicemailTranscript?: string | null;
+  voicemailDurationSeconds?: number | null;
+  callStartedAt?: string | null;
+  callCompletedAt?: string | null;
+  acknowledgedAt?: string | null;
+  createdAt?: string | null;
+};
+
+type GuestInboxInternalNote = {
+  id: number;
+  conversationId: string;
+  reservationId?: string | null;
+  guestName?: string | null;
+  guestPhone?: string | null;
+  note: string;
+  source: string;
+  createdBy: string;
+  createdAt: string;
+};
+
+// ─── AI draft property-context builder ────────────────────────────────────────
+// Given a Guesty listingId, look up the matching NexStay property via the
+// backing map and build a rich text block the AI can use to answer
+// specific guest questions (per-unit bedroom counts, distance between
+// units, parking, pool, etc.) instead of hand-waving. Also flags whether
+// the property is in Hawaii so the server can pick the right tone
+// variant. Returns null when we can't resolve the listing — the server
+// falls back to a generic prompt in that case.
+async function buildPropertyContextForDraft(
+  listingId: string,
+): Promise<{ text: string; isHawaii: boolean } | null> {
+  if (!listingId) return null;
+  try {
+    const r = await apiRequest("GET", "/api/guesty-property-map");
+    const maps = await r.json() as Array<{ propertyId: number; guestyListingId: string }>;
+    const row = maps.find(m => m.guestyListingId === listingId);
+    if (!row) return null;
+    const prop = getUnitBuilderByPropertyId(row.propertyId);
+    if (!prop) return null;
+
+    const unitLines = prop.units.map((u, i) => {
+      const label = `Unit ${String.fromCharCode(65 + i)}`;
+      // Include both shortDescription AND longDescription per unit so the
+      // AI can answer specific bedding/layout questions ("what beds in
+      // each room?", "any king bed?", "is there a sleeper sofa?"). Earlier
+      // version only sent shortDescription, which had bedding embedded in
+      // a single line — Claude often skipped over it. longDescription
+      // spells out the layout sentence-by-sentence (king master / queen
+      // second / twin third) so the AI can quote it back accurately.
+      const longTrimmed = u.longDescription.length > 600
+        ? u.longDescription.slice(0, 600) + "…"
+        : u.longDescription;
+      return `- ${label} (${u.unitNumber}): ${u.bedrooms}BR / ${u.bathrooms}BA · ~${u.sqft} sqft · sleeps ${u.maxGuests}.\n    Layout: ${longTrimmed}`;
+    }).join("\n");
+
+    // Per-resort walking-distance fallback (same helper the Builder
+    // uses before its live /api/tools/walk-between result arrives).
+    const walk = prop.units.length >= 2 ? fallbackWalkForResort(prop.complexName) : null;
+
+    // Amenity strings tied to questions the AI is most likely to need
+    // to answer: parking, pool, AC, pets, kitchen, accessibility.
+    const amenityKeys = getGuestyAmenities(row.propertyId);
+    const amenityLabels = amenityKeys.map(getAmenityLabel);
+    const parkingAmenities = amenityLabels.filter(a => /parking|garage|carport/i.test(a));
+    const otherHighlights = amenityLabels.filter(a => /pool|hot tub|beach|ac|air conditioning|pet|wifi|laundry|kitchen|bbq|grill/i.test(a));
+
+    const parts: string[] = [];
+    parts.push(`PROPERTY: ${prop.propertyName} at ${prop.complexName}`);
+    parts.push(`Address: ${prop.address}`);
+    if (prop.propertyType) {
+      // propertyType is load-bearing for accessibility questions —
+      // a Townhouse is multi-story, while a Condominium is usually
+      // single-level INSIDE the condo. Do not let the AI conflate
+      // that with ground-floor / bottom-floor building access.
+      parts.push(`Property type: ${prop.propertyType}${prop.propertyType === "Townhouse" ? " (multi-story attached units, has internal stairs)" : prop.propertyType === "Condominium" ? " (single-level inside the condo; this does NOT mean ground-floor or bottom-floor access)" : ""}`);
+    }
+    parts.push(`Total: ${prop.units.reduce((s, u) => s + u.bedrooms, 0)} bedrooms across ${prop.units.length} unit${prop.units.length === 1 ? "" : "s"}, sleeps ${prop.units.reduce((s, u) => s + u.maxGuests, 0)}.`);
+    parts.push(`\nUNITS:\n${unitLines}`);
+    if (walk) parts.push(`\nDISTANCE BETWEEN UNITS: ${walk.description} (approx ${walk.minutes}-min walk)`);
+    if (parkingAmenities.length > 0) parts.push(`\nPARKING: ${parkingAmenities.join(", ")}`);
+    if (otherHighlights.length > 0) parts.push(`\nKEY AMENITIES: ${otherHighlights.slice(0, 12).join(", ")}`);
+    // Per-complex floor-plan / accessibility note. Only set on
+    // properties where there's meaningful variation propertyType
+    // alone doesn't capture (Pili Mai mixes Moana single-level and
+    // Mahina multi-level plans). When present, surface it as its
+    // own section so the AI can quote it back accurately for
+    // accessibility / seniors / "downstair units?" asks.
+    if (prop.accessibilityNote) {
+      parts.push(`\nFLOOR PLAN / ACCESSIBILITY: ${prop.accessibilityNote}`);
+    }
+    parts.push(`\nDESCRIPTION: ${prop.combinedDescription.slice(0, 600)}${prop.combinedDescription.length > 600 ? "…" : ""}`);
+
+    // Hawaii detection by state code / name in the address string.
+    // Every current listing is HI; this check keeps the Hawaiian tone
+    // from bleeding onto future mainland additions.
+    const isHawaii = /\b(HI|Hawaii|Hawai['ʻ]?i)\b/i.test(prop.address);
+
+    return { text: parts.join("\n"), isHawaii };
+  } catch {
+    return null;
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -40,6 +232,7 @@ interface GuestyConversation {
   status?: string;
   module?: GuestyModule;      // channel the conversation is on
   integration?: { platform?: string };
+  conversationChannel?: string;
 }
 
 type GuestyModule = { type?: string; [k: string]: unknown };
@@ -48,10 +241,15 @@ interface GuestyPost {
   _id: string;
   body?: string;
   text?: string;
+  message?: string;
   sentAt?: string;
   postedAt?: string;
+  createdAt?: string;
   authorType?: string;
   authorRole?: string;
+  sentBy?: string;
+  direction?: string;
+  isIncoming?: boolean;
   module?: GuestyModule;
 }
 
@@ -68,11 +266,22 @@ interface GuestyReservation {
   integration?: { platform?: string };
   source?: string;
   confirmationCode?: string;
+  cancellationPolicy?: string | null;
+  cancellationPolicySummary?: string | null;
+  cancellationPolicyFreeCancellationUntil?: string | null;
+  cancellationPolicyPenalty?: string | null;
+  cancellationPolicyDetailsAvailable?: boolean;
+  cancellationPolicySource?: string | null;
+  cancellationPolicyAssumed?: boolean;
+  listing?: Record<string, unknown>;
   nightsCount?: number;
+  createdAt?: string;
+  confirmedAt?: string;
 }
 
 const TRIGGER_OPTIONS = [
   { value: "booking_confirmed",    label: "When booking is confirmed" },
+  { value: "days_after_booking",   label: "X days after booking" },
   { value: "days_before_checkin",  label: "X days before check-in" },
   { value: "day_of_checkin",       label: "Day of check-in" },
   { value: "days_before_checkout", label: "X days before check-out" },
@@ -84,71 +293,252 @@ const MERGE_TAGS = [
   "{confirmation_code}", "{num_nights}",
 ];
 
+const GUESTY_VARIABLE_PATTERN = /\{\{[^}]+\}\}/;
+const SMS_PLACEHOLDER_PATTERN = /\[(?:PASTE|ADD) [^\]]+\]/i;
+
+const TEMPLATE_CHANNEL_OPTIONS = [
+  { value: "guesty", label: "Guesty / OTA / email" },
+  { value: "sms", label: "Text message" },
+];
+
+function templateChannelLabel(channel?: string): string {
+  return channel === "sms" ? "Text message" : "Guesty / OTA / email";
+}
+
+function templateChannelBadgeVariant(channel?: string): "default" | "secondary" | "outline" {
+  return channel === "sms" ? "secondary" : "outline";
+}
+
+function extractUrlsFromText(value: string): string[] {
+  return Array.from(value.matchAll(/https?:\/\/[^\s<>"')]+/gi)).map((match) =>
+    match[0].replace(/[.,;:!?]+$/, ""),
+  );
+}
+
+function findRelevantThreadUrl(posts: GuestyPost[], kind: "prearrival" | "payment"): string {
+  const urlRows = posts
+    .map((p) => cleanMessageBody(p.body ?? p.text ?? (p as any).message ?? ""))
+    .flatMap((body) => extractUrlsFromText(body).map((url) => ({ body: body.toLowerCase(), url })));
+  const preferred = urlRows.find(({ body, url }) => {
+    const urlLower = url.toLowerCase();
+    if (kind === "prearrival") {
+      return /guest-app|check[- ]?in|pre[- ]?arrival|rental agreement|agreement/.test(body) ||
+        /guest-app|guesty/.test(urlLower);
+    }
+    return /invoice|payment|balance|card/.test(body) || /invoice|payment|checkout|pay/.test(urlLower);
+  });
+  return preferred?.url ?? urlRows[0]?.url ?? "";
+}
+
 const DEFAULT_TEMPLATES: Omit<MessageTemplate, "id" | "createdAt">[] = [
   {
-    name: "Booking Confirmed",
+    name: "Booking Confirmation / Next Steps",
+    deliveryChannel: "guesty",
     trigger: "booking_confirmed",
     daysOffset: 0,
     isActive: true,
-    body: `Aloha {guest_name}! 🌺
+    body: `Hi {guest_name},
 
-We're so excited to host you at {property_name}! Your reservation is confirmed for {check_in_date} through {check_out_date} ({num_nights} nights).
+This confirms your reservation at {property_name} for {check_in_date} through {check_out_date} ({num_nights} nights).
 
-We'll send check-in details 3 days before your arrival. In the meantime, please don't hesitate to reach out with any questions — we're always happy to help.
+Confirmation code: {confirmation_code}
 
-Can't wait to welcome you to Hawaii!
-The NexStay Team`,
+This stay is set up as two units that are minutes from each other. We will send more details about the unit setup in a follow-up message.
+
+We will send the detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.
+
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
   },
   {
-    name: "Pre-Arrival (3 days before)",
+    name: "Unit Setup Confirmation",
+    deliveryChannel: "guesty",
+    trigger: "days_after_booking",
+    daysOffset: 1,
+    isActive: true,
+    body: `Hi {guest_name},
+
+Just a quick note about your upcoming stay at {property_name}.
+
+This reservation is set up as two nearby units that are only minutes from each other. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.
+
+Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.
+
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
+  },
+  {
+    name: "Internal Rental Agreement Request",
+    deliveryChannel: "guesty",
+    trigger: "days_after_booking",
+    daysOffset: 0,
+    isActive: false,
+    body: `Hi {guest_name},
+
+Please have the primary guest review and sign our secure rental agreement for the stay at {property_name}.
+
+Please complete it here:
+[agreement link]
+
+This confirms the booking details, house rules, authorized guest, signed rental agreement, and two-separate-units acknowledgment before arrival. Please do not send credit card details in this message thread.
+
+Once completed, you are all set. We will send final arrival/access details 14 days before check-in.
+
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
+  },
+  {
+    name: "Guesty Invoice / Payment Method Request",
+    deliveryChannel: "guesty",
+    trigger: "days_after_booking",
+    daysOffset: 0,
+    isActive: true,
+    body: `Hi {guest_name},
+
+Please use the secure Guesty invoice link below to add your payment method or complete any remaining balance for your stay at {property_name}.
+
+{{guest_invoice}}
+
+For security, please do not send credit card details in this message thread.
+
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
+  },
+  {
+    name: "SMS: Rental Agreement",
+    deliveryChannel: "sms",
+    trigger: "days_after_booking",
+    daysOffset: 0,
+    isActive: false,
+    body: `Hi {guest_name}, please review and sign the secure rental agreement for {property_name}: [agreement link]
+
+This covers the rental agreement, two-unit acknowledgment, and arrival requirements. Please do not text card details. Thanks, John`,
+  },
+  {
+    name: "SMS: Reminder to Sign Rental Agreement",
+    deliveryChannel: "sms",
+    trigger: "days_after_booking",
+    daysOffset: 1,
+    isActive: false,
+    body: `Hi {guest_name}, quick reminder to sign the secure rental agreement for {property_name}: [agreement link]
+
+Once that is complete, you are all set for the next step. Thanks, John`,
+  },
+  {
+    name: "SMS: Secure Payment Link",
+    deliveryChannel: "sms",
+    trigger: "days_after_booking",
+    daysOffset: 0,
+    isActive: false,
+    body: `Hi {guest_name}, I sent the secure Guesty payment request for {property_name} in the booking thread/email. Please use that secure link to add your payment method or complete any remaining balance.
+
+Please do not text card details. Thanks, John`,
+  },
+  {
+    name: "14-Day Arrival Details",
+    deliveryChannel: "guesty",
+    trigger: "days_before_checkin",
+    daysOffset: 14,
+    isActive: true,
+    body: `Hi {guest_name},
+
+Your stay at {property_name} is coming up, so I wanted to send your arrival details.
+
+Check-in date: {check_in_date}
+Confirmation code: {confirmation_code}
+
+Address / access code / parking / Wi-Fi:
+[INSERT UNIT DETAILS]
+
+Please reply here if anything looks unclear before arrival.
+
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
+  },
+  {
+    name: "Parking + Travel Reminder",
+    deliveryChannel: "guesty",
     trigger: "days_before_checkin",
     daysOffset: 3,
     isActive: true,
-    body: `Aloha {guest_name}!
+    body: `Hi {guest_name},
 
-Your stay at {property_name} is just 3 days away — so exciting! Here's everything you need for a smooth arrival:
+Your stay at {property_name} is just a few days away. A few quick reminders:
 
-📍 Address: [INSERT ADDRESS]
-🔑 Check-in: [INSERT CHECK-IN TIME & ACCESS INSTRUCTIONS]
-🅿️ Parking: [INSERT PARKING DETAILS]
-📶 WiFi: [INSERT WIFI DETAILS]
+- Please review your arrival/access details before travel day.
+- Bring any parking or gate information with you.
+- For restaurants, beaches, groceries, and local activities, I recommend making reservations where possible during busy weeks.
 
-Your confirmation code is {confirmation_code}. If anything comes up before you arrive, we're just a message away.
+If you want recommendations near the property, reply here and I am happy to help.
 
-See you soon!
-The NexStay Team`,
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
   },
   {
-    name: "Check-out Reminder",
-    trigger: "days_before_checkout",
+    name: "SMS: Arrival Details Reminder",
+    deliveryChannel: "sms",
+    trigger: "days_before_checkin",
+    daysOffset: 14,
+    isActive: true,
+    body: `Hi {guest_name}, your arrival details for {property_name} have been sent in the booking thread/email. Please review them before travel day and reply here if anything looks unclear. Thanks, John`,
+  },
+  {
+    name: "SMS: Day-Of Arrival Help",
+    deliveryChannel: "sms",
+    trigger: "day_of_checkin",
+    daysOffset: 0,
+    isActive: true,
+    body: `Hi {guest_name}, hope your travel day is going smoothly. Your arrival details were sent in the booking thread/email. Reply here if you need help with access or parking. - John`,
+  },
+  {
+    name: "Day-Before Final Check-In",
+    deliveryChannel: "guesty",
+    trigger: "days_before_checkin",
     daysOffset: 1,
     isActive: true,
-    body: `Aloha {guest_name}!
+    body: `Hi {guest_name},
 
-We hope you're having an amazing time! Just a friendly reminder that check-out is tomorrow.
+Your check-in for {property_name} is tomorrow. Please keep your arrival details handy, including the address, access code, parking information, and Wi-Fi details.
 
-⏰ Check-out time: 10:00 AM
-🗝️ Please leave the key/lockbox as you found it and feel free to leave used towels in the bathroom.
+Confirmation code: {confirmation_code}
 
-We'd love to know how your stay has been — feel free to share any feedback!
+Safe travels, and please reply here if anything comes up.
 
-Mahalo for choosing NexStay. 🤙
-The NexStay Team`,
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
   },
   {
-    name: "Post-Stay Review Request",
+    name: "Post-Stay Thank You / Review Request",
+    deliveryChannel: "guesty",
     trigger: "days_after_checkout",
     daysOffset: 2,
     isActive: true,
-    body: `Aloha {guest_name}!
+    body: `Hi {guest_name},
 
-It was such a pleasure having you at {property_name}! We hope you had an unforgettable time in Hawaii.
+Thank you again for staying at {property_name}. I hope you had a wonderful trip.
 
-If you have a moment, we'd really appreciate a review — it means the world to small hosts like us and helps future guests find a great place to stay.
+If you have a moment, I would really appreciate a review. It helps future guests feel confident booking and means a lot to us.
 
-We hope to see you again on your next Hawaii adventure! 🌊
-Mahalo nui loa,
-The NexStay Team`,
+We would be happy to host you again anytime.
+
+Thanks,
+John Carpenter
+VacationRentalExpertz`,
+  },
+  {
+    name: "SMS: Post-Stay Review Request",
+    deliveryChannel: "sms",
+    trigger: "days_after_checkout",
+    daysOffset: 2,
+    isActive: true,
+    body: `Hi {guest_name}, thank you again for staying at {property_name}. If you have a moment, we would really appreciate a review. We would be happy to host you again anytime. - John`,
   },
 ];
 
@@ -157,6 +547,7 @@ The NexStay Team`,
 function triggerLabel(trigger: string, daysOffset: number): string {
   switch (trigger) {
     case "booking_confirmed": return "On booking confirmation";
+    case "days_after_booking": return `${daysOffset} day${daysOffset > 1 ? "s" : ""} after booking`;
     case "days_before_checkin": return daysOffset === 0 ? "Day of check-in" : `${daysOffset} day${daysOffset > 1 ? "s" : ""} before check-in`;
     case "day_of_checkin": return "Day of check-in";
     case "days_before_checkout": return `${daysOffset} day${daysOffset > 1 ? "s" : ""} before check-out`;
@@ -168,6 +559,36 @@ function triggerLabel(trigger: string, daysOffset: number): string {
 function formatDate(d?: string) {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function aliasExpirationSummary(expiresAt?: string | null) {
+  if (!expiresAt) return { date: "Not set", relative: "expiration not saved yet", expired: false };
+  const date = new Date(expiresAt);
+  if (Number.isNaN(date.getTime())) return { date: "Not set", relative: "expiration not saved yet", expired: false };
+  const days = Math.ceil((date.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  if (days < 0) return { date: formatDate(expiresAt), relative: "expired", expired: true };
+  if (days === 0) return { date: formatDate(expiresAt), relative: "expires today", expired: false };
+  return { date: formatDate(expiresAt), relative: `${days} day${days === 1 ? "" : "s"} left`, expired: false };
+}
+
+function extractEmailForInput(value: string): string {
+  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match?.[0] ?? "";
+}
+
+function buildDefaultVendorEmailDraft(unit: InboxBuyInRecord, guestName?: string) {
+  return {
+    subject: `Arrival details request for ${unit.unitLabel || unit.propertyName || "unit"}`,
+    body: [
+      "Aloha,",
+      "",
+      `We booked ${unit.propertyName || "this property"}${unit.unitLabel ? ` - ${unit.unitLabel}` : ""} for ${guestName || "our guest"} from ${formatDate(unit.checkIn)} to ${formatDate(unit.checkOut)}.`,
+      "Can you please send the arrival details, property address, access code, Wi-Fi, parking instructions, and any check-in notes when available?",
+      "",
+      "Mahalo,",
+      "John Carpenter",
+    ].join("\n"),
+  };
 }
 
 function platformBadge(res: GuestyReservation) {
@@ -188,6 +609,777 @@ function channelBadge(raw: string) {
   if (src.includes("whatsapp")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-green-600 text-white">WhatsApp</span>;
   if (!src) return null;
   return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-slate-400 text-white">{src}</span>;
+}
+
+function readableCancellationPolicy(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value
+    .replace(/^Cancellation policy:\s*/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return null;
+  const labels: Record<string, string> = {
+    firm: "Firm cancellation policy",
+    strict: "Strict cancellation policy",
+    flexible: "Flexible cancellation policy",
+    moderate: "Moderate cancellation policy",
+    relaxed: "Relaxed cancellation policy",
+    "non refundable": "Non-refundable cancellation policy",
+    nonrefundable: "Non-refundable cancellation policy",
+  };
+  return labels[cleaned.toLowerCase()] ?? cleaned;
+}
+
+function findCancellationPolicyValue(value: unknown, depth = 0): string | null {
+  if (!value || depth > 5 || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findCancellationPolicyValue(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  for (const key of ["cancellationPolicyText", "cancellationPolicyDescription", "cancellationPolicyName", "cancellationPolicy", "cancelationPolicy", "cancellation_policy", "policy"]) {
+    const direct = readableCancellationPolicy(obj[key]);
+    if (direct) return direct;
+  }
+  for (const [key, nested] of Object.entries(obj)) {
+    if (/cancell?ation|cancel|ratePlan|terms|policy/i.test(key)) {
+      const direct = readableCancellationPolicy(nested);
+      if (direct) return direct;
+      const found = findCancellationPolicyValue(nested, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function reservationChannelKind(value: any): "airbnb" | "booking" | "vrbo" | "manual" | "other" {
+  const raw = [
+    value?.integration?.platform,
+    value?.integration?.provider,
+    value?.source,
+    value?.channel,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (raw.includes("airbnb")) return "airbnb";
+  if (raw.includes("booking")) return "booking";
+  if (raw.includes("vrbo") || raw.includes("homeaway")) return "vrbo";
+  if (raw.includes("manual") || raw.includes("direct")) return "manual";
+  return "other";
+}
+
+function cancellationPolicyBriefSummary(label: string, kind: ReturnType<typeof reservationChannelKind>): string {
+  const lower = label.toLowerCase();
+  if (kind === "booking") {
+    return "Guest is under the Booking.com rate-plan cancellation terms configured in Guesty/Booking.com for this listing.";
+  }
+  if (kind === "vrbo") {
+    return "Guest is under the cancellation, refund, no-show, and date-change terms configured in Guesty and pushed to VRBO/Homeaway for this listing.";
+  }
+  if (lower.includes("non-refundable") || lower.includes("non refundable") || lower.includes("no refund")) {
+    return "Guest booked a non-refundable policy; treat the stay as no-refund unless Guesty/channel rules or an approved exception say otherwise.";
+  }
+  if (lower.includes("flexible")) {
+    return "Guest booked the flexible cancellation policy; refund eligibility follows the flexible window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("moderate")) {
+    return "Guest booked the moderate cancellation policy; refund eligibility follows the moderate window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("firm")) {
+    return "Guest booked the firm cancellation policy; refund eligibility follows the firm window configured in Guesty/channel rules.";
+  }
+  if (lower.includes("strict")) {
+    return "Guest booked the strict cancellation policy; refunds are limited to the strict terms configured in Guesty/channel rules.";
+  }
+  if (lower.includes("relaxed")) {
+    return "Guest booked the relaxed cancellation policy; refund eligibility follows the relaxed window configured in Guesty/channel rules.";
+  }
+  return "Guest is under the cancellation, refund, no-show, and date-change terms attached to this booking in Guesty.";
+}
+
+function cancellationPolicyTerms(label: string, kind: ReturnType<typeof reservationChannelKind>) {
+  const lower = label.toLowerCase();
+  if (kind === "booking") {
+    return {
+      freeCancellationUntil: "Not exposed by Guesty for this Booking.com rate plan",
+      penalty: "Check the Booking.com rate-plan/extranet terms; Guesty only returned the booking/rate-plan reference, not the penalty schedule.",
+      detailsAvailable: false,
+    };
+  }
+  if (kind === "vrbo") {
+    if (lower.includes("relaxed")) {
+      return { freeCancellationUntil: "14+ days before check-in", penalty: "7-14 days before check-in: 50% refund. Less than 7 days before check-in: no refund.", detailsAvailable: true };
+    }
+    if (lower.includes("moderate")) {
+      return { freeCancellationUntil: "30+ days before check-in", penalty: "14-30 days before check-in: 50% refund. Less than 14 days before check-in: no refund.", detailsAvailable: true };
+    }
+    if (lower.includes("firm")) {
+      return { freeCancellationUntil: "60+ days before check-in", penalty: "30-60 days before check-in: 50% refund. Less than 30 days before check-in: no refund.", detailsAvailable: true };
+    }
+    if (lower.includes("strict")) {
+      return { freeCancellationUntil: "60+ days before check-in", penalty: "Less than 60 days before check-in: no refund.", detailsAvailable: true };
+    }
+  }
+  if (lower.includes("non-refundable") || lower.includes("non refundable") || lower.includes("no refund")) {
+    return { freeCancellationUntil: "No free-cancellation window", penalty: "Reservation is non-refundable once booked unless the channel/Guesty exception rules apply.", detailsAvailable: true };
+  }
+  if (lower.includes("flexible")) {
+    return { freeCancellationUntil: "1 day / 24 hours before check-in", penalty: "After that cutoff, Guesty/channel cancellation fees apply; for Airbnb Flexible, the first night is generally not refunded after the cutoff.", detailsAvailable: true };
+  }
+  if (lower.includes("moderate")) {
+    return { freeCancellationUntil: "5 days before check-in on Airbnb; 7 days before arrival for Guesty direct/manual policies", penalty: "After that cutoff, Guesty/channel cancellation fees apply; for Airbnb Moderate, the host is generally paid nights stayed, one extra night, and 50% of remaining nights.", detailsAvailable: true };
+  }
+  if (lower.includes("firm")) {
+    return { freeCancellationUntil: "14-30 days before check-in, depending on channel policy", penalty: "After that cutoff, Guesty/channel cancellation fees apply; Airbnb Firm usually becomes 50% refundable until 7 days before check-in, then non-refundable.", detailsAvailable: true };
+  }
+  if (lower.includes("strict")) {
+    return { freeCancellationUntil: "14-60 days before check-in, depending on channel policy", penalty: "After that cutoff, Guesty/channel cancellation fees apply; strict policies generally become non-refundable closer to check-in.", detailsAvailable: true };
+  }
+  if (lower.includes("relaxed")) {
+    return { freeCancellationUntil: "14+ days before check-in", penalty: "7-14 days before check-in: 50% refund. Less than 7 days before check-in: no refund.", detailsAvailable: true };
+  }
+  return { freeCancellationUntil: "Configured in Guesty, but the exact cutoff was not exposed", penalty: "Use the Guesty/channel reservation policy details for the cancellation fee or no-show penalty.", detailsAvailable: false };
+}
+
+function cancellationPolicySummaryForReservation(value: any): { label: string; summary: string; freeCancellationUntil: string; penalty: string; detailsAvailable: boolean; source?: string | null; assumed: boolean } | null {
+  if (!value) return null;
+  const kind = reservationChannelKind(value);
+  if (value.cancellationPolicy) {
+    const label = readableCancellationPolicy(value.cancellationPolicy) ?? String(value.cancellationPolicy);
+    const terms = cancellationPolicyTerms(label, kind);
+    return {
+      label,
+      summary: value.cancellationPolicySummary ?? cancellationPolicyBriefSummary(label, kind),
+      freeCancellationUntil: value.cancellationPolicyFreeCancellationUntil ?? terms.freeCancellationUntil,
+      penalty: value.cancellationPolicyPenalty ?? terms.penalty,
+      detailsAvailable: value.cancellationPolicyDetailsAvailable ?? terms.detailsAvailable,
+      source: value.cancellationPolicySource,
+      assumed: value.cancellationPolicyAssumed === true,
+    };
+  }
+
+  const directPolicy = findCancellationPolicyValue(value);
+  if (directPolicy) {
+    return {
+      label: directPolicy,
+      summary: cancellationPolicyBriefSummary(directPolicy, kind),
+      ...cancellationPolicyTerms(directPolicy, kind),
+      source: "Guesty reservation policy",
+      assumed: false,
+    };
+  }
+
+  const listingPolicy = findCancellationPolicyValue(value.listing);
+  if (listingPolicy) {
+    return {
+      label: listingPolicy,
+      summary: cancellationPolicyBriefSummary(listingPolicy, kind),
+      ...cancellationPolicyTerms(listingPolicy, kind),
+      source: "Assumed from the Guesty listing/channel policy",
+      assumed: true,
+    };
+  }
+
+  if (kind === "booking") {
+    const label = "Booking.com cancellation policy configured in Guesty";
+    return {
+      label,
+      summary: cancellationPolicyBriefSummary(label, kind),
+      ...cancellationPolicyTerms(label, kind),
+      source: "Assumed from the policy Guesty pushed to Booking.com",
+      assumed: true,
+    };
+  }
+  if (kind === "vrbo") {
+    const label = "VRBO cancellation policy configured in Guesty";
+    return {
+      label,
+      summary: cancellationPolicyBriefSummary(label, kind),
+      ...cancellationPolicyTerms(label, kind),
+      source: "Assumed from the policy Guesty pushed to VRBO",
+      assumed: true,
+    };
+  }
+
+  return null;
+}
+
+// ─── Inbound message cleanup ───────────────────────────────────────────────────
+// Some Guesty channel integrations forward inbound emails as a full HTML
+// document (`<!DOCTYPE html><html>...</html>`). The inbox renders message
+// bodies as plain text, so without scrubbing the markup leaks through to
+// the operator (and the conversation-list preview) as raw tags. We don't
+// want to render unsanitised HTML — that's a clean XSS path — so this
+// converts to readable plain text instead: strip head/style/script blocks
+// entirely, turn block-level closers and `<br>` into newlines, drop the
+// remaining tags, decode common entities, collapse whitespace. Only fires
+// when the body actually looks like HTML, so plain-text replies that
+// happen to contain a stray `<` or `>` survive untouched.
+function cleanMessageBody(raw: string): string {
+  if (!raw) return "";
+  const trimmed = raw.trim();
+  const looksHtml =
+    /^<!DOCTYPE/i.test(trimmed) ||
+    /<\/?(html|body|head|p|br|div)\b/i.test(raw);
+  if (!looksHtml) return raw;
+  let s = raw;
+  s = s.replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, "");
+  s = s.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+  s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+  s = s.replace(/<!DOCTYPE[^>]*>/gi, "");
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<\/(p|div|li|tr|h[1-6]|blockquote)\s*>/gi, "\n");
+  s = s.replace(/<[^>]+>/g, "");
+  s = s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+  s = s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return s;
+}
+
+function isHostPost(p: any): boolean {
+  return (
+    p.authorType === "host" ||
+    p.authorRole === "host" ||
+    p.senderType === "host" ||
+    p.sentBy === "host" ||
+    p.direction === "outbound" ||
+    p.direction === "out" ||
+    p.direction === "outgoing" ||
+    p.isIncoming === false
+  );
+}
+
+function postSearchText(p: any): string {
+  const module = p?.module ?? {};
+  const integration = p?.integration ?? {};
+  return [
+    p?.body,
+    p?.text,
+    p?.message,
+    p?.subject,
+    p?.authorName,
+    p?.senderName,
+    p?.senderType,
+    p?.sentBy,
+    p?.source,
+    p?.provider,
+    p?.channel,
+    p?.conversationChannel,
+    module.type,
+    module.provider,
+    module.source,
+    module.name,
+    integration.platform,
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function isAirbnbCustomerServicePost(p: any): boolean {
+  const haystack = postSearchText(p);
+  return /airbnb/.test(haystack) &&
+    /(customer\s*service|customer_service|support|community\s*support|resolution\s*center|case\s*manager|ambassador|specialist)/.test(haystack);
+}
+
+function isGuestySystemPost(p: any): boolean {
+  if (isAirbnbCustomerServicePost(p)) return false;
+  if (p.sentBy === "log") return true;
+  const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
+  if (["log", "system", "internal", "note"].includes(moduleType)) return true;
+  const body = String(p.body ?? p.text ?? p.message ?? "").trim().toLowerCase();
+  return body === "new guest inquiry" ||
+    body === "new inquiry" ||
+    body === "new reservation request" ||
+    body.startsWith("new guest reservation");
+}
+
+function isSignedHostTemplateBody(body: string): boolean {
+  return /john carpenter/i.test(body) && /(magical island rentals|vacationrentalexpertz|nexstay)/i.test(body);
+}
+
+function normalizeGuestyManualMessageBody(body: string): string {
+  return body;
+}
+
+// ─── Outbound message templates ────────────────────────────────────────────────
+// Guest-facing messages sent from the inbox are signed by the operator's
+// brand. Sender + brand live in one place so future templates pick up the
+// same identity. Property nicknames, totals, etc. are still merged from
+// Guesty data per-message.
+const OUTBOUND_SENDER_NAME = "John Carpenter";
+const OUTBOUND_BRAND_NAME = "VacationRentalExpertz";
+const AIRBNB_PREAPPROVAL_STORAGE_KEY = "nexstay_airbnb_preapproved_reservation_ids";
+
+function readStoredAirbnbPreapprovals(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(AIRBNB_PREAPPROVAL_STORAGE_KEY);
+    const ids = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeStoredAirbnbPreapprovals(ids: Set<string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(AIRBNB_PREAPPROVAL_STORAGE_KEY, JSON.stringify(Array.from(ids)));
+  } catch {
+    // localStorage can fail in private windows; the live Guesty state still refetches.
+  }
+}
+
+const formatMoney = (n: number): string =>
+  `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const formatLongDate = (isoYmd: string): string => {
+  // `new Date("2026-04-28")` parses as UTC midnight, which renders as
+  // April 27 in negative timezone offsets. Build the date in local time
+  // so the receipt's "today" matches the operator's wall clock.
+  const [y, m, d] = isoYmd.split("-").map(Number);
+  if (!y || !m || !d) return isoYmd;
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: "long", day: "numeric", year: "numeric",
+  });
+};
+
+const isVrboOrBookingChannel = (channelRaw?: string): boolean => {
+  const channel = String(channelRaw ?? "").toLowerCase();
+  return channel.includes("vrbo") || channel.includes("homeaway") || channel.includes("booking");
+};
+
+const addDaysToIsoYmd = (iso?: string, days = 0): string | null => {
+  if (!iso) return null;
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return null;
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + days);
+  const yy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+};
+
+const inferResortNameForWalk = (propertyName?: string): string | undefined => {
+  const label = String(propertyName ?? "");
+  const resorts = [
+    "Regency at Poipu Kai",
+    "Pili Mai",
+    "Pili Mai at Poipu",
+    "Kaha Lani Resort",
+    "Lae Nani Resort",
+    "Mauna Kai Princeville",
+    "Kaiulani of Princeville",
+    "Keauhou Estates",
+    "Kiahuna Plantation",
+    "Southern Dunes",
+    "Windsor Hills",
+  ];
+  return resorts.find((name) => label.toLowerCase().includes(name.toLowerCase()));
+};
+
+const representativeUnitSetupLine = (propertyName?: string): string => {
+  const walk = fallbackWalkForResort(inferResortNameForWalk(propertyName));
+  return `Your reservation is set up as two separate units. ${walk.description} The units shown are examples of the setup; your assigned units will be very similar quality and will always match the same bedroom counts.`;
+};
+
+const addDays = (date: Date, days: number): Date => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+};
+
+const parseStayDate = (iso?: string): Date | null => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const formatShortDate = (date: Date | null, fallback: string): string =>
+  date ? date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : fallback;
+
+// Renders a payment-receipt body. `pastPayments` lists every prior
+// payment on the booking (date + amount); today's charge is supplied
+// separately as `paymentAmount` / `paymentDateIso` so it can be flagged
+// "(today's payment)" inline. Total paid is derived by summing all
+// payments — there's no separate aggregate field to keep in sync.
+function buildReceiptBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  paymentAmount: number;
+  paymentDateIso: string;
+  bookingTotal: number;
+  pastPayments: Array<{ date: string; amount: number }>;
+}): string {
+  const past = args.pastPayments
+    .filter((p) => p.amount > 0)
+    .map((p) => ({ date: p.date, amount: p.amount, isToday: false }));
+  const todayRow = args.paymentAmount > 0
+    ? [{ date: args.paymentDateIso, amount: args.paymentAmount, isToday: true }]
+    : [];
+  const allPayments = [...past, ...todayRow];
+  const totalPaid = allPayments.reduce((sum, p) => sum + p.amount, 0);
+  const balance = Math.max(0, args.bookingTotal - totalPaid);
+  const stayLabel = args.propertyName ? ` for your stay at ${args.propertyName}` : "";
+  const checkInLine = args.checkInIso
+    ? ` (check-in ${formatLongDate(args.checkInIso.slice(0, 10))})`
+    : "";
+
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `This is ${OUTBOUND_SENDER_NAME} with ${OUTBOUND_BRAND_NAME} confirming we just processed a payment of ${formatMoney(args.paymentAmount)} on ${formatLongDate(args.paymentDateIso)} on the card we have on file${stayLabel}${checkInLine}.`,
+    ``,
+    `Booking total: ${formatMoney(args.bookingTotal)}`,
+  ];
+
+  if (allPayments.length > 1) {
+    lines.push(``);
+    lines.push(`Payment history:`);
+    for (const p of allPayments) {
+      const dateLabel = p.date ? formatLongDate(p.date.slice(0, 10)) : "Date —";
+      const tag = p.isToday ? " (today's payment)" : "";
+      lines.push(`  • ${dateLabel}: ${formatMoney(p.amount)}${tag}`);
+    }
+  }
+
+  lines.push(``);
+  lines.push(`Total paid to date: ${formatMoney(totalPaid)}`);
+  lines.push(`Remaining balance:  ${formatMoney(balance)}`);
+  lines.push(``);
+  lines.push(`If you have any questions about this charge or your reservation, just reply to this message — happy to help.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+
+  return lines.join("\n");
+}
+
+function buildBookingConfirmationBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  checkOutIso?: string;
+  confirmationCode?: string;
+  numNights?: number | null;
+  bookingTotal?: number;
+  totalPaid?: number;
+  channelRaw?: string;
+}): string {
+  const total = args.bookingTotal ?? 0;
+  const paid = args.totalPaid ?? 0;
+  const balance = Math.max(0, total - paid);
+  const balanceDueIso = addDaysToIsoYmd(args.checkInIso, -120);
+  const shouldMentionBalanceDue = isVrboOrBookingChannel(args.channelRaw) && balance > 0 && !!balanceDueIso;
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `This confirms your reservation${args.propertyName ? ` at ${args.propertyName}` : ""}.`,
+  ];
+  if (args.checkInIso || args.checkOutIso) {
+    lines.push(``);
+    if (args.checkInIso) lines.push(`Check-in: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+    if (args.checkOutIso) lines.push(`Check-out: ${formatLongDate(args.checkOutIso.slice(0, 10))}`);
+    if (args.numNights) lines.push(`Nights: ${args.numNights}`);
+  }
+  if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
+  if (total > 0 || paid > 0) {
+    lines.push(``);
+    if (total > 0) lines.push(`Booking total: ${formatMoney(total)}`);
+    if (paid > 0) lines.push(`Paid to date: ${formatMoney(paid)}`);
+    if (shouldMentionBalanceDue) {
+      lines.push(`Remaining balance: ${formatMoney(balance)}, due 120 days prior to arrival on ${formatLongDate(balanceDueIso)}.`);
+    }
+  }
+  lines.push(``);
+  lines.push(representativeUnitSetupLine(args.propertyName));
+  lines.push(``);
+  lines.push(`We will send the detailed arrival information 14 days prior to arrival, including addresses, access details, parking, Wi-Fi, and anything else needed for check-in.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n");
+}
+
+function buildRepresentativeUnitsFollowUpBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Just a quick note about your upcoming stay${args.propertyName ? ` at ${args.propertyName}` : ""}.`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  lines.push(``);
+  lines.push(`This reservation is set up as two nearby units that are only minutes from each other. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.`);
+  lines.push(``);
+  lines.push(`Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n");
+}
+
+function buildAgreementRequestBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  agreementUrl: string;
+  checkInIso?: string;
+  confirmationCode?: string;
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Please have the primary guest review and sign our secure rental agreement${args.propertyName ? ` for the stay at ${args.propertyName}` : ""}.`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
+  lines.push(``);
+  lines.push(`Please complete it here:`);
+  lines.push(args.agreementUrl);
+  lines.push(``);
+  lines.push(`This confirms the booking details, house rules, authorized guest, signed rental agreement, and the two-separate-units acknowledgment before arrival. Please do not send credit card details in this message thread.`);
+  lines.push(``);
+  lines.push(`Once completed, you are all set. We will send final arrival/access details 14 days before check-in.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n");
+}
+
+function buildAgreementRequestSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  checkOutIso?: string;
+  agreementUrl: string;
+}): string {
+  const propertyLabel = smsAgreementPropertyLabel(args.propertyName);
+  return [
+    `Hi ${args.guestFirstName || "there"}, please review and sign the secure rental agreement for: ${propertyLabel}`,
+    args.checkInIso ? `Arriving: ${formatLongDate(args.checkInIso.slice(0, 10))}` : "",
+    args.checkOutIso ? `Departing: ${formatLongDate(args.checkOutIso.slice(0, 10))}` : "",
+    args.agreementUrl,
+    ``,
+    `This confirms your reservation details, the two-unit acknowledgment, and arrival requirements. Thanks, ${OUTBOUND_SENDER_NAME}`,
+  ].filter(Boolean).join("\n");
+}
+
+function smsAgreementPropertyLabel(propertyName: string): string {
+  const raw = String(propertyName || "your stay").trim();
+  return raw
+    .replace(/\s*-\s*Sleeps\s+\d+\s*$/i, "")
+    .replace(/\b(\d+)\s*BR\b/gi, "$1 Bedroom")
+    .replace(/\bTownhomes\b/gi, "Townhouse")
+    .replace(/\s*-\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildGuestyInvoicePaymentBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  confirmationCode?: string;
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Please use the secure Guesty invoice link below to add your payment method or complete any remaining balance${args.propertyName ? ` for your stay at ${args.propertyName}` : ""}.`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
+  lines.push(``);
+  lines.push(`{{guest_invoice}}`);
+  lines.push(``);
+  lines.push(`For security, please do not send credit card details in this message thread.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n");
+}
+
+function buildGuestyInvoicePaymentSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  paymentUrl?: string;
+}): string {
+  const link = args.paymentUrl?.trim() || "[PASTE SECURE GUESTY PAYMENT LINK]";
+  return [
+    `Hi ${args.guestFirstName || "there"}, please use this secure Guesty link to add your payment method or complete any remaining balance${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
+    link,
+    ``,
+    `Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
+  ].join("\n");
+}
+
+function buildArrivalDetailsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  units: ArrivalUnitDetail[];
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Your stay${args.propertyName ? ` at ${args.propertyName}` : ""} is coming up, so I wanted to send the arrival details for the units you will be staying in.`,
+  ];
+  if (args.checkInIso) {
+    lines.push(``);
+    lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  }
+  lines.push(``);
+  if (args.units.length === 0) {
+    lines.push(`I am still confirming the final unit access details and will send them shortly.`);
+  } else {
+    args.units.forEach((unit, index) => {
+      lines.push(`${args.units.length > 1 ? `Unit ${index + 1}` : "Unit"}: ${unit.unitLabel}`);
+      if (unit.unitAddress) lines.push(`Address: ${unit.unitAddress}`);
+      if (unit.accessCode) lines.push(`Access code: ${unit.accessCode}`);
+      if (unit.wifiName || unit.wifiPassword) {
+        lines.push(`Wi-Fi: ${unit.wifiName || "Network TBD"}${unit.wifiPassword ? ` / ${unit.wifiPassword}` : ""}`);
+      }
+      if (unit.parkingInfo) lines.push(`Parking: ${unit.parkingInfo}`);
+      if (unit.managementCompany || unit.managementContact) {
+        lines.push(`Local contact: ${[unit.managementCompany, unit.managementContact].filter(Boolean).join(" - ")}`);
+      }
+      if (unit.arrivalNotes) lines.push(`Notes: ${unit.arrivalNotes}`);
+      lines.push(``);
+    });
+  }
+  lines.push(`A quick note: the listing photos are representative sample photos for this bundled stay. The exact assigned units may vary, but they are matched to the same bedroom count and resort/community standard.`);
+  lines.push(``);
+  lines.push(`Please reply here if anything looks unclear before arrival.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildArrivalDetailsSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, your arrival details${args.propertyName ? ` for ${args.propertyName}` : ""} have been sent in the booking thread/email. Please review them before travel day and reply here if anything looks unclear. Thanks, ${OUTBOUND_SENDER_NAME}`;
+}
+
+function buildLocalTipsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  units: ArrivalUnitDetail[];
+}): string {
+  const parking = args.units.map((u) => u.parkingInfo).filter(Boolean).join("\n");
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Your stay${args.propertyName ? ` at ${args.propertyName}` : ""} is just a few days away. A few quick reminders before travel day:`,
+    ``,
+    `- Please review your arrival/access details before you leave.`,
+    `- If you are renting a car, keep the parking details handy.${parking ? `\n\nParking notes:\n${parking}` : ""}`,
+    `- For restaurants, activities, luaus, boat tours, and popular beach parking, reservations can be helpful during busy weeks.`,
+    `- Grocery stops are usually easiest before heading fully into resort areas.`,
+    ``,
+    `If you want specific restaurant or local area ideas near the property, reply here and I am happy to help.`,
+    ``,
+    `Thanks,`,
+    OUTBOUND_SENDER_NAME,
+    OUTBOUND_BRAND_NAME,
+  ];
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildLocalTipsSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, quick travel reminder${args.propertyName ? ` for ${args.propertyName}` : ""}: please keep your arrival/access and parking details handy before you leave. Reply here if you need help. - ${OUTBOUND_SENDER_NAME}`;
+}
+
+function buildDayBeforeBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  units: ArrivalUnitDetail[];
+}): string {
+  const lines: string[] = [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Your check-in${args.propertyName ? ` for ${args.propertyName}` : ""} is tomorrow. Please keep your arrival details handy, including the address, access code, parking information, and Wi-Fi details.`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  if (args.units.length > 0) {
+    lines.push(``);
+    args.units.forEach((unit, index) => {
+      lines.push(`${args.units.length > 1 ? `Unit ${index + 1}` : "Unit"}: ${unit.unitLabel}`);
+      if (unit.unitAddress) lines.push(`Address: ${unit.unitAddress}`);
+      if (unit.accessCode) lines.push(`Access code: ${unit.accessCode}`);
+      if (unit.parkingInfo) lines.push(`Parking: ${unit.parkingInfo}`);
+      lines.push(``);
+    });
+  }
+  lines.push(`Safe travels, and please reply here if anything comes up.`);
+  lines.push(``);
+  lines.push(`Thanks,`);
+  lines.push(OUTBOUND_SENDER_NAME);
+  lines.push(OUTBOUND_BRAND_NAME);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildDayBeforeSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, check-in${args.propertyName ? ` for ${args.propertyName}` : ""} is tomorrow. Please keep your arrival details handy. Reply here if anything comes up. Safe travels, ${OUTBOUND_SENDER_NAME}`;
+}
+
+function buildPostStayBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return [
+    `Hi ${args.guestFirstName || "there"},`,
+    ``,
+    `Thank you again for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. I hope you had a wonderful trip.`,
+    ``,
+    `If you have a moment, I would really appreciate a review. It helps future guests feel confident booking and means a lot to us.`,
+    ``,
+    `We would be happy to host you again anytime.`,
+    ``,
+    `Thanks,`,
+    OUTBOUND_SENDER_NAME,
+    OUTBOUND_BRAND_NAME,
+  ].join("\n");
+}
+
+function buildPostStaySmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, thank you again for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. If you have a moment, we would really appreciate a review. We would be happy to host you again anytime. - ${OUTBOUND_SENDER_NAME}`;
+}
+
+function buildUnitSetupSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+}): string {
+  return `Hi ${args.guestFirstName || "there"}, quick note${args.propertyName ? ` for ${args.propertyName}` : ""}: this stay is set up as nearby units, and final arrival details will come before check-in. Reply here with any questions. - ${OUTBOUND_SENDER_NAME}`;
 }
 
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
@@ -224,6 +1416,63 @@ function unwrapList<T>(raw: unknown, hints: string[] = []): T[] {
   return visit(raw, 0) ?? [];
 }
 
+function normalizePhone(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const digits = raw.replace(/\D/g, "");
+  if (raw.startsWith("+") && digits.length >= 10) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return digits ? `+${digits}` : "";
+}
+
+function formatPhone(value: unknown): string {
+  const normalized = normalizePhone(value);
+  const digits = normalized.replace(/\D/g, "");
+  const last10 = digits.slice(-10);
+  if (last10.length !== 10) return normalized || "Unknown phone";
+  return `(${last10.slice(0, 3)}) ${last10.slice(3, 6)}-${last10.slice(6)}`;
+}
+
+function formatDuration(seconds?: number | null): string {
+  const n = Math.max(0, Math.round(Number(seconds ?? 0)));
+  if (!n) return "0:00";
+  const m = Math.floor(n / 60);
+  const s = n % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function normalizeDeepLinkText(value: string | null | undefined): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function findPhoneInObject(node: unknown, depth = 0): string {
+  if (!node || depth > 5) return "";
+  if (typeof node === "string" || typeof node === "number") {
+    const phone = normalizePhone(node);
+    return phone.replace(/\D/g, "").length >= 10 ? phone : "";
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findPhoneInObject(item, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (typeof node === "object") {
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (/phone|mobile|cell|tel|number/i.test(key) || typeof value === "object") {
+        const found = findPhoneInObject(value, depth + 1);
+        if (found) return found;
+      }
+    }
+  }
+  return "";
+}
+
 // Normalize a conversation object across Guesty API versions.
 // v1 puts guest/listing/last-message data at the top level.
 // v2 (inbox-v2) nests it under `meta`: meta.guest, meta.listing, meta.lastMessage, etc.
@@ -233,8 +1482,18 @@ function normalizeConversation(c: any): GuestyConversation & {
   displayListingName: string;
   displayPreview: string;
   displayTimestamp: string | undefined;
+  displayGuestPhone: string;
   isUnread: boolean;
   reservationId?: string;
+  // Indicators surfaced on the list row beside the guest name. Each
+  // flag means "host action is pending" for a different reason.
+  // Computed from the conversation/reservation stub the list endpoint
+  // already returns — no extra queries.
+  needsReply: boolean;       // latest guest message awaits a host response
+  lastMessageFromGuest: boolean; // durable reply-owed signal; survives simply opening/reading
+  needsPreapprove: boolean;  // Airbnb inquiry not yet pre-approved (host has 24h)
+  phase?: "inquiry" | "request" | "booked" | "cancelled" | "other";
+  conversationChannel?: string;
 } {
   const meta = c?.meta ?? {};
   const guest = c?.guest ?? meta.guest ?? {};
@@ -250,7 +1509,19 @@ function normalizeConversation(c: any): GuestyConversation & {
     firstReservation?.listing ??
     firstReservation?.listingObj ??
     {};
-  const lastMsg = c?.lastPost ?? meta.lastMessage ?? meta.lastPost ?? {};
+  // Inbox-v2 stores the last-message preview at `state.lastMessage`
+  // ({ body, date }) — NOT at `lastPost` / `meta.lastMessage`. Both of
+  // those are null on every current Guesty conversation we've checked
+  // (e.g. Michelle 69ea7b4608e5bc000f8e89ef on 2026-05-04). Without
+  // this fallback the list row preview was empty and `displayTimestamp`
+  // dropped to `createdAt`, so threads with brand-new activity looked
+  // dormant — the operator missed Michelle's May-3 follow-up entirely
+  // and only spotted it in Guesty's own UI. NOTE FOR CODEX: do NOT
+  // remove the legacy `lastPost` / `meta.lastMessage` paths; cached
+  // older fixtures still hit them.
+  const stateObj = (c?.state && typeof c.state === "object") ? c.state as any : null;
+  const stateLastMsg = stateObj?.lastMessage ?? null;
+  const lastMsg = c?.lastPost ?? meta.lastMessage ?? meta.lastPost ?? stateLastMsg ?? {};
   const mod = c?.module ?? meta.module ?? meta.lastMessage?.module ?? undefined;
 
   const guestName =
@@ -259,6 +1530,15 @@ function normalizeConversation(c: any): GuestyConversation & {
     guest.name ??
     [guest.firstName, guest.lastName].filter(Boolean).join(" ") ??
     "Guest";
+  const guestPhone = normalizePhone(
+    guest.phone ??
+    guest.phoneNumber ??
+    guest.mobile ??
+    guest.mobilePhone ??
+    firstReservation?.guest?.phone ??
+    firstReservation?.guest?.phoneNumber ??
+    findPhoneInObject({ guest, firstReservation }),
+  );
 
   const listingName =
     c?.listingNickname ??
@@ -269,29 +1549,67 @@ function normalizeConversation(c: any): GuestyConversation & {
     firstReservation?.listingTitle ??
     "—";
 
-  const preview =
+  const preview = cleanMessageBody(
     lastMsg.body ??
-    lastMsg.text ??
-    lastMsg.message ??
-    meta.lastMessagePreview ??
-    "";
+      lastMsg.text ??
+      lastMsg.message ??
+      meta.lastMessagePreview ??
+      "",
+  );
 
-  // v2 list endpoint doesn't return a last-message timestamp, so fall back to
-  // the conversation's createdAt so rows at least show some date.
+  // v2 list endpoint doesn't populate `lastMessageAt` — Guesty moved
+  // the timestamp to `state.lastMessage.date`. Fall through to that
+  // before resorting to `createdAt` (which is the THREAD creation date,
+  // not the latest activity, so it would freeze list ordering on
+  // long-running conversations). NOTE FOR CODEX: stateLastMsg.date is
+  // the source of truth for "most recent activity"; the field was
+  // missing from this list before 2026-05-04 (Michelle inbox bug).
   const timestamp =
     c?.lastMessageAt ??
     meta.lastMessageAt ??
     lastMsg.createdAt ??
+    stateLastMsg?.date ??
     c?.createdAt ??
     undefined;
 
-  const unread =
-    (typeof c?.unreadCount === "number" && c.unreadCount > 0) ||
-    c?.unread === true ||
-    meta.unreadCount > 0 ||
+  // Two related but distinct signals:
+  //
+  //   isUnread: Guesty still considers the latest guest post unread.
+  //   needsReply: the last real message came from the guest, so the
+  //               thread remains action-needed even if opening the
+  //               thread marked it read.
+  //
+  // Jamie cares most about "not responded to yet" at a glance. That
+  // means the row indicator and filter use last-from-guest, not only
+  // readByNonUser. It clears only after a host/you message becomes the
+  // latest post, so the status sticks until an actual reply happens.
+  const legacyLastFromGuest =
     c?.state === "NEW" ||
     c?.state === "UNREAD" ||
     c?.state === "UNANSWERED";
+  const lastMsgLooksSignedHostReply = isSignedHostTemplateBody(preview);
+  const lastMsgLooksGuestAuthored =
+    !!preview &&
+    !!lastMsg &&
+    typeof lastMsg === "object" &&
+    Object.keys(lastMsg).length > 0 &&
+    !isHostPost(lastMsg) &&
+    !lastMsgLooksSignedHostReply;
+  const explicitLastFromGuest =
+    typeof stateObj?.isLastPostFromGuest === "boolean"
+      ? stateObj.isLastPostFromGuest
+      : null;
+  const lastMessageFromGuest =
+    explicitLastFromGuest !== null
+      ? explicitLastFromGuest
+      : legacyLastFromGuest || lastMsgLooksGuestAuthored;
+  const unreadSignal =
+    (typeof c?.unreadCount === "number" && c.unreadCount > 0) ||
+    c?.unread === true ||
+    meta.unreadCount > 0 ||
+    legacyLastFromGuest ||
+    stateObj?.readByNonUser === false;
+  const unread = unreadSignal && lastMessageFromGuest;
 
   const reservationId =
     c?.reservationId ??
@@ -307,6 +1625,52 @@ function normalizeConversation(c: any): GuestyConversation & {
   else if (resStatus === "request" || resStatus === "pending" || resStatus === "awaitingpayment") phase = "request";
   else if (["reserved", "confirmed", "accepted", "checked_in", "checkedin", "completed"].includes(resStatus)) phase = "booked";
 
+  // Channel detection — used by needsPreapprove. Pre-approval is an
+  // Airbnb-only concept (VRBO/Booking.com handle inquiries differently)
+  // so the indicator is gated to airbnb conversations.
+  const channelRaw =
+    c?.integration?.platform ??
+    firstReservation?.integration?.platform ??
+    firstReservation?.source ??
+    c?.source ??
+    (mod && (mod as any).type) ??
+    "";
+  const isAirbnb = String(channelRaw).toLowerCase().includes("airbnb");
+
+  // Pre-approval indicator: an Airbnb inquiry that hasn't been
+  // pre-approved yet. Once the host pre-approves, Guesty flips
+  // status away from "inquiry" (or sets preApproveState=true on the
+  // reservation), so checking phase + the explicit flag covers both
+  // shapes that can come back on the list endpoint stub.
+  const preApprovedFlag =
+    firstReservation?.preApproveState === true ||
+    firstReservation?.preApproved === true ||
+    String(firstReservation?.preApprovalStatus ?? "").toLowerCase() === "preapproved" ||
+    resStatus.includes("preapproved") ||
+    resStatus === "accepted";
+  const needsPreapprove = isAirbnb && phase === "inquiry" && !preApprovedFlag;
+
+  // Surface check-in / check-out / guest count at the top level so the
+  // AI Draft call can pass them down — otherwise the AI ends every
+  // reply with "what dates are you thinking?" even on inquiries that
+  // already have dates attached. Inquiries always carry checkIn /
+  // checkOut on the Guesty reservation; guestsCount is what the guest
+  // entered into Airbnb's date picker (sometimes missing on direct
+  // bookings, in which case we leave it null and the prompt guides
+  // the AI to read it from the message body).
+  const conversationCheckIn =
+    firstReservation?.checkInDateLocalized ??
+    firstReservation?.checkIn ??
+    null;
+  const conversationCheckOut =
+    firstReservation?.checkOutDateLocalized ??
+    firstReservation?.checkOut ??
+    null;
+  const conversationGuests =
+    firstReservation?.guestsCount ??
+    firstReservation?.numberOfGuests ??
+    null;
+
   return {
     ...c,
     guestName,
@@ -320,8 +1684,16 @@ function normalizeConversation(c: any): GuestyConversation & {
     displayListingName: listingName || "—",
     displayPreview: typeof preview === "string" ? preview : "",
     displayTimestamp: timestamp,
+    displayGuestPhone: guestPhone,
     isUnread: !!unread,
+    needsReply: !!lastMessageFromGuest,
+    lastMessageFromGuest: !!lastMessageFromGuest,
+    needsPreapprove,
     phase,
+    conversationChannel: String(channelRaw || ""),
+    conversationCheckIn,
+    conversationCheckOut,
+    conversationGuests,
   };
 }
 
@@ -337,11 +1709,12 @@ function TemplateEditor({
   onClose: () => void;
 }) {
   const [name, setName] = useState(template?.name ?? "");
+  const [deliveryChannel, setDeliveryChannel] = useState(template?.deliveryChannel ?? "guesty");
   const [trigger, setTrigger] = useState(template?.trigger ?? "booking_confirmed");
   const [daysOffset, setDaysOffset] = useState(template?.daysOffset ?? 0);
   const [body, setBody] = useState(template?.body ?? "");
   const [isActive, setIsActive] = useState(template?.isActive ?? true);
-  const needsDays = trigger === "days_before_checkin" || trigger === "days_before_checkout" || trigger === "days_after_checkout";
+  const needsDays = trigger === "days_after_booking" || trigger === "days_before_checkin" || trigger === "days_before_checkout" || trigger === "days_after_checkout";
 
   const insertTag = (tag: string) => setBody(b => b + tag);
 
@@ -360,6 +1733,22 @@ function TemplateEditor({
             placeholder="e.g. Check-in Instructions"
             className="mt-1"
           />
+        </div>
+        <div>
+          <Label>Delivery Channel</Label>
+          <Select value={deliveryChannel} onValueChange={setDeliveryChannel}>
+            <SelectTrigger className="mt-1" data-testid="select-template-channel">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TEMPLATE_CHANNEL_OPTIONS.map(o => (
+                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Text templates should stay short and link-focused. Guesty/email templates are the formal guest record.
+          </p>
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -426,7 +1815,7 @@ function TemplateEditor({
       <DialogFooter>
         <Button variant="outline" onClick={onClose} data-testid="button-template-cancel">Cancel</Button>
         <Button
-          onClick={() => onSave({ name, trigger, daysOffset, body, isActive })}
+          onClick={() => onSave({ name, deliveryChannel, trigger, daysOffset, body, isActive })}
           disabled={!name || !body}
           data-testid="button-template-save"
         >
@@ -437,16 +1826,427 @@ function TemplateEditor({
   );
 }
 
+function InboxBuyInPanel({
+  reservationId,
+  guestName,
+  data,
+}: {
+  reservationId: string;
+  guestName?: string;
+  data?: InboxBuyInCommunications;
+}) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [form, setForm] = useState<Record<string, string>>({});
+  const [composeId, setComposeId] = useState<number | null>(null);
+  const [emailDrafts, setEmailDrafts] = useState<Record<number, { subject: string; body: string }>>({});
+  const [emailAttachments, setEmailAttachments] = useState<Record<number, AliasEmailAttachment[]>>({});
+
+  const saveDetails = useMutation({
+    mutationFn: ({ id, values }: { id: number; values: Record<string, string> }) =>
+      apiRequest("PATCH", `/api/buy-ins/${id}`, values).then((r) => r.json()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/bookings", reservationId, "buy-in-communications"] });
+      qc.invalidateQueries({ queryKey: ["/api/bookings", reservationId, "arrival-details"] });
+      setEditingId(null);
+      toast({ title: "Buy-in details saved" });
+    },
+    onError: (err: any) => toast({ title: "Save failed", description: err?.message ?? "Could not save buy-in details", variant: "destructive" }),
+  });
+
+  const sendVendorEmail = useMutation({
+    mutationFn: ({ unit, contact }: { unit: InboxBuyInRecord; contact?: InboxVendorContactRecord }) => {
+      const draft = emailDrafts[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName);
+      const vendorEmail = contact?.vendorEmail ?? extractEmailForInput(unit.managementContact ?? "");
+      return apiRequest("POST", `/api/buy-ins/${unit.id}/vendor-email`, {
+        reservationId,
+        guestName: guestName ?? "",
+        vendorName: contact?.vendorName ?? unit.managementCompany ?? "",
+        vendorEmail,
+        subject: draft.subject,
+        body: draft.body,
+        attachments: emailAttachments[unit.id] ?? [],
+      }).then((r) => r.json());
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/bookings", reservationId, "buy-in-communications"] });
+      setEmailAttachments((prev) => composeId ? { ...prev, [composeId]: [] } : prev);
+      setComposeId(null);
+      toast({ title: "PM email sent", description: "The message is saved in this guest's buy-in email history." });
+    },
+    onError: (err: any) => toast({ title: "Email failed", description: err?.message ?? "Could not send PM email", variant: "destructive" }),
+  });
+
+  const units = data?.buyIns ?? [];
+  if (units.length === 0 && !data?.alias) return null;
+
+  const startEdit = (unit: InboxBuyInRecord) => {
+    setEditingId(unit.id);
+    setForm({
+      managementCompany: unit.managementCompany ?? "",
+      managementContact: unit.managementContact ?? "",
+      unitAddress: unit.unitAddress ?? "",
+      accessCode: unit.accessCode ?? "",
+      wifiName: unit.wifiName ?? "",
+      wifiPassword: unit.wifiPassword ?? "",
+      parkingInfo: unit.parkingInfo ?? "",
+      arrivalNotes: unit.arrivalNotes ?? "",
+    });
+  };
+  const set = (key: string, value: string) => setForm((prev) => ({ ...prev, [key]: value }));
+  const updateEmailDraft = (unit: InboxBuyInRecord, key: "subject" | "body", value: string) => {
+    setEmailDrafts((prev) => ({
+      ...prev,
+      [unit.id]: {
+        ...(prev[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName)),
+        [key]: value,
+      },
+    }));
+  };
+  const startCompose = (unit: InboxBuyInRecord) => {
+    setComposeId(unit.id);
+    setEmailDrafts((prev) => ({
+      ...prev,
+      [unit.id]: prev[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName),
+    }));
+  };
+  const addEmailAttachments = async (unitId: number, files: FileList | null) => {
+    if (!files?.length) return;
+    try {
+      const next = await filesToAliasEmailAttachments(files);
+      setEmailAttachments((prev) => ({ ...prev, [unitId]: [...(prev[unitId] ?? []), ...next] }));
+    } catch (err: any) {
+      toast({ title: "Attachment skipped", description: err?.message ?? "Could not read attachment", variant: "destructive" });
+    }
+  };
+
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+        Buy-in
+      </div>
+      <div className="border rounded-lg divide-y text-xs">
+        {data?.alias && (
+          <div className="px-2.5 py-2">
+            <div className="flex flex-wrap items-center gap-1.5 font-medium">
+              <Mail className="h-3.5 w-3.5" />
+              <span className="truncate">{data.alias.aliasEmail}</span>
+              {(() => {
+                const expiry = aliasExpirationSummary(data.alias.expiresAt);
+                return (
+                  <Badge variant={expiry.expired ? "destructive" : "secondary"} className="text-[10px]">
+                    {expiry.expired ? "Expired" : `Expires ${expiry.date}`}
+                  </Badge>
+                );
+              })()}
+            </div>
+            {(() => {
+              const expiry = aliasExpirationSummary(data.alias.expiresAt);
+              return (
+                <div className="text-[11px] text-muted-foreground">
+                  Forwards to {data.alias.mailboxEmail} until {expiry.date} ({expiry.relative}). Saved messages and attachments are retained after expiration.
+                </div>
+              );
+            })()}
+          </div>
+        )}
+        {units.map((unit) => {
+          const contact = data?.contacts?.find((row) => row.buyInId === unit.id);
+          const emails = (data?.emails ?? []).filter((row) => row.buyInId === unit.id);
+          const editing = editingId === unit.id;
+          const composing = composeId === unit.id;
+          const draft = emailDrafts[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName);
+          const vendorEmail = contact?.vendorEmail ?? extractEmailForInput(unit.managementContact ?? "");
+          return (
+            <div key={unit.id} className="px-2.5 py-2 space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-medium truncate">{unit.unitLabel || unit.propertyName}</div>
+                  <div className="text-[11px] text-muted-foreground truncate">
+                    {unit.managementCompany || "PM not saved"} · {contact?.vendorEmail || unit.managementContact || "No vendor email"}
+                  </div>
+                  {contact?.reverseAliasEmail && (
+                    <div className="text-[10px] text-muted-foreground font-mono truncate">{contact.reverseAliasEmail}</div>
+                  )}
+                </div>
+                <Button size="sm" variant="outline" className="h-7" onClick={() => editing ? setEditingId(null) : startEdit(unit)}>
+                  {editing ? "Close" : "Edit"}
+                </Button>
+              </div>
+              {editing && (
+                <div className="space-y-1.5">
+                  <Input className="h-8 text-xs" value={form.managementCompany ?? ""} onChange={(e) => set("managementCompany", e.target.value)} placeholder="Management company" />
+                  <Input className="h-8 text-xs" value={form.managementContact ?? ""} onChange={(e) => set("managementContact", e.target.value)} placeholder="PM email / phone" />
+                  <Input className="h-8 text-xs" value={form.unitAddress ?? ""} onChange={(e) => set("unitAddress", e.target.value)} placeholder="Unit address" />
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Input className="h-8 text-xs" value={form.accessCode ?? ""} onChange={(e) => set("accessCode", e.target.value)} placeholder="Access code" />
+                    <Input className="h-8 text-xs" value={form.parkingInfo ?? ""} onChange={(e) => set("parkingInfo", e.target.value)} placeholder="Parking" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Input className="h-8 text-xs" value={form.wifiName ?? ""} onChange={(e) => set("wifiName", e.target.value)} placeholder="Wi-Fi name" />
+                    <Input className="h-8 text-xs" value={form.wifiPassword ?? ""} onChange={(e) => set("wifiPassword", e.target.value)} placeholder="Wi-Fi password" />
+                  </div>
+                  <Textarea rows={3} className="text-xs" value={form.arrivalNotes ?? ""} onChange={(e) => set("arrivalNotes", e.target.value)} placeholder="Arrival notes" />
+                  <Button size="sm" className="w-full" disabled={saveDetails.isPending} onClick={() => saveDetails.mutate({ id: unit.id, values: form })}>
+                    {saveDetails.isPending ? "Saving..." : "Save buy-in details"}
+                  </Button>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                <div>
+                  <span className="text-muted-foreground">Address:</span> {unit.unitAddress || "Not saved"}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Access:</span> {unit.accessCode || "Not saved"}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Wi-Fi:</span> {unit.wifiName || "Not saved"}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Parking:</span> {unit.parkingInfo || "Not saved"}
+                </div>
+              </div>
+              <details className="rounded-md border bg-background/60 p-2" open={emails.length > 0}>
+                <summary className="cursor-pointer text-[11px] font-medium">
+                  Alias email history ({emails.length})
+                </summary>
+                <div className="mt-2 space-y-2">
+                  {emails.length === 0 && (
+                    <div className="text-[11px] text-muted-foreground">
+                      No PM/vendor emails saved for this unit yet.
+                    </div>
+                  )}
+                  {emails.map((email) => (
+                    <div key={email.id} className="rounded border bg-muted/20 p-2">
+                      {(() => {
+                        const attachments = parseAliasEmailAttachments(email.attachmentsJson);
+                        return (
+                          <>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-medium truncate">{email.subject}</span>
+                              <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+                                {email.direction}
+                              </Badge>
+                            </div>
+                            <div className="text-[10px] text-muted-foreground truncate">
+                              {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
+                            </div>
+                            <div className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed">
+                              {email.body}
+                            </div>
+                            {attachments.length > 0 && (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {attachments.map((attachment, index) => {
+                                  const href = aliasAttachmentHref(attachment);
+                                  const label = `${attachment.filename}${formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ""}`;
+                                  return href ? (
+                                    <a
+                                      key={`${attachment.filename}-${index}`}
+                                      href={href}
+                                      download={attachment.filename}
+                                      target={attachment.url ? "_blank" : undefined}
+                                      rel={attachment.url ? "noreferrer" : undefined}
+                                      className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] text-primary hover:underline"
+                                    >
+                                      <Paperclip className="h-3 w-3 shrink-0" />
+                                      <span className="truncate">{label}</span>
+                                    </a>
+                                  ) : (
+                                    <span
+                                      key={`${attachment.filename}-${index}`}
+                                      className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                                    >
+                                      <Paperclip className="h-3 w-3 shrink-0" />
+                                      <span className="truncate">{label}</span>
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  ))}
+                </div>
+              </details>
+              <div className="space-y-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 w-full justify-start text-[11px]"
+                  onClick={() => composing ? setComposeId(null) : startCompose(unit)}
+                  disabled={!vendorEmail}
+                  title={vendorEmail ? `Send via alias to ${vendorEmail}` : "Save a PM/vendor email first"}
+                >
+                  <Mail className="h-3 w-3 mr-1.5" />
+                  {composing ? "Close PM email composer" : "Write PM/vendor email"}
+                </Button>
+                {composing && (
+                  <div className="space-y-1.5 rounded-md border bg-background/60 p-2">
+                    <Input
+                      className="h-8 text-xs"
+                      value={draft.subject}
+                      onChange={(e) => updateEmailDraft(unit, "subject", e.target.value)}
+                      placeholder="Subject"
+                    />
+                    <Textarea
+                      rows={5}
+                      className="text-xs"
+                      value={draft.body}
+                      onChange={(e) => updateEmailDraft(unit, "body", e.target.value)}
+                      placeholder="Message to PM/vendor"
+                    />
+                    <div className="rounded-md border bg-background/60 p-2">
+                      <Label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium">
+                        <Paperclip className="h-3 w-3" />
+                        Attachments
+                      </Label>
+                      <Input
+                        type="file"
+                        multiple
+                        className="h-8 text-xs"
+                        onChange={(event) => {
+                          void addEmailAttachments(unit.id, event.currentTarget.files);
+                          event.currentTarget.value = "";
+                        }}
+                      />
+                      {(emailAttachments[unit.id] ?? []).length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {(emailAttachments[unit.id] ?? []).map((attachment, index) => (
+                            <Badge key={`${attachment.filename}-${index}`} variant="secondary" className="gap-1 text-[10px]">
+                              <Paperclip className="h-3 w-3" />
+                              <span className="max-w-[160px] truncate">{attachment.filename}</span>
+                              {formatAttachmentSize(attachment.size) && <span>{formatAttachmentSize(attachment.size)}</span>}
+                              <button
+                                type="button"
+                                className="ml-0.5 rounded-sm hover:bg-background/70"
+                                onClick={() => setEmailAttachments((prev) => ({
+                                  ...prev,
+                                  [unit.id]: (prev[unit.id] ?? []).filter((_, i) => i !== index),
+                                }))}
+                                aria-label={`Remove ${attachment.filename}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      disabled={sendVendorEmail.isPending || !vendorEmail || !draft.subject.trim() || !draft.body.trim()}
+                      onClick={() => sendVendorEmail.mutate({ unit, contact })}
+                    >
+                      {sendVendorEmail.isPending ? "Sending..." : `Send to ${vendorEmail}`}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function InboxPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
+  const [location] = useLocation();
+  const { data: session } = usePortalSession();
+  const isAgent = session?.role === "agent";
+  const isAdmin = session?.role === "admin";
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [draftLoading, setDraftLoading] = useState(false);
   const [templateDialog, setTemplateDialog] = useState<{ open: boolean; template: Partial<MessageTemplate> | null }>({ open: false, template: null });
+  const [templatePreview, setTemplatePreview] = useState<{ open: boolean; title: string; body: string; channel: "guesty" | "sms" }>({ open: false, title: "", body: "", channel: "guesty" });
+  const [airbnbPreapprovedIds, setAirbnbPreapprovedIds] = useState<Set<string>>(() => readStoredAirbnbPreapprovals());
+  const [guestPhoneInput, setGuestPhoneInput] = useState("");
+  const [callbackCall, setCallbackCall] = useState<QuoCallEvent | null>(null);
+  const [callbackSummary, setCallbackSummary] = useState("");
+  // Property filter for the conversation list — narrows the visible
+  // conversations to a single listing nickname. Defaults to "all" so
+  // nothing is hidden until the user picks a property.
+  const [propertyFilter, setPropertyFilter] = useState<string>("all");
+  // Reply-status filter for the conversation list. "unread" here means
+  // "guest is waiting on us" rather than merely "thread was opened" —
+  // see normalizeConversation.needsReply.
+  const [replyStatusFilter, setReplyStatusFilter] = useState<"all" | "unread" | "read">("all");
+  // Guesty's conversation list can lag for a short period after
+  // /send-message succeeds. Hide the reply-needed marker locally as
+  // soon as our send completes; if the guest replies again with a newer
+  // last-message timestamp, the marker comes back.
+  const [locallyRepliedAtByConversation, setLocallyRepliedAtByConversation] = useState<Record<string, number>>({});
+  // Receipt template state. Pre-populated from Guesty's money fields
+  // when the dialog opens; every value is editable so the operator can
+  // correct stale Guesty data on the spot. The body regenerates from
+  // these inputs until the operator types into the textarea — at that
+  // point we stop overwriting their edits (`receiptBodyTouched`).
+  const [receiptDialog, setReceiptDialog] = useState<{
+    open: boolean;
+    reservationId: string | null;
+    propertyName: string;
+    guestFirstName: string;
+    checkInIso?: string;
+  }>({ open: false, reservationId: null, propertyName: "", guestFirstName: "" });
+  const [receiptPaymentAmount, setReceiptPaymentAmount] = useState<string>("");
+  const [receiptPaymentDate, setReceiptPaymentDate] = useState<string>("");
+  const [receiptTotalPrice, setReceiptTotalPrice] = useState<string>("");
+  // Editable list of prior payments shown to the guest as a per-line
+  // breakdown ("Jan 5, 2026: $4,200 · Feb 28, 2026: $4,000 · today: $200").
+  // Pre-populated from Guesty's payment records when the dialog opens;
+  // operator can edit, add, or remove rows on the fly.
+  const [receiptPastPayments, setReceiptPastPayments] = useState<
+    Array<{ id: string; date: string; amount: string }>
+  >([]);
+  const [receiptPaymentsLoading, setReceiptPaymentsLoading] = useState<boolean>(false);
+  const [receiptBody, setReceiptBody] = useState<string>("");
+  const [receiptBodyTouched, setReceiptBodyTouched] = useState<boolean>(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  const deepLinkNoticeRef = useRef<string | null>(null);
+
+  const inboxDeepLink = useMemo(() => {
+    const search = typeof window !== "undefined"
+      ? window.location.search
+      : (location.includes("?") ? `?${location.split("?")[1]}` : "");
+    const params = new URLSearchParams(search);
+    return {
+      conversationId: params.get("conversationId") || params.get("conversation") || null,
+      reservationId: params.get("reservationId") || params.get("reservation") || null,
+      guest: params.get("guest") || null,
+      confirmation: params.get("confirmation") || null,
+    };
+  }, [location]);
+
+  const previewTemplateBody = (title: string, body: string, channel: "guesty" | "sms" = "guesty") => {
+    setTemplatePreview({ open: true, title, body, channel });
+  };
+
+  const rememberAirbnbPreapproval = (reservationId: string) => {
+    setAirbnbPreapprovedIds((prev) => {
+      const next = new Set(prev);
+      next.add(reservationId);
+      writeStoredAirbnbPreapprovals(next);
+      return next;
+    });
+  };
+
+  const forgetAirbnbPreapproval = (reservationId: string) => {
+    setAirbnbPreapprovedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(reservationId);
+      writeStoredAirbnbPreapprovals(next);
+      return next;
+    });
+  };
 
   // ── Conversations ──
   // Guesty Open API mounts conversations under /communication/ — see
@@ -454,7 +2254,23 @@ export default function InboxPage() {
   const { data: convData, isLoading: convLoading, error: convError } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/communication/conversations"],
     queryFn: async () => {
-      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=30");
+      // CRITICAL: the trailing `&fields=` IS LOAD-BEARING — do not delete.
+      // Guesty's /communication/conversations list endpoint returns a
+      // STRIPPED state object by default (`{read, status}` only). Passing
+      // `fields=` (even empty) flips it to "return the full document",
+      // which expands `state` to include `state.lastMessage.{body, date}`,
+      // `state.readByNonUser`, `state.isLastPostFromGuest`, plus
+      // `updatedAt`, `lastMessageFrom`, etc. Without it, every conversation
+      // row falls back to the THREAD creation date for its timestamp and
+      // never shows an unread dot — which is exactly how Michelle's Kaha
+      // Lani thread (69ea7b4608e5bc000f8e89ef) stayed pinned at Apr 23
+      // even after her May 3 follow-up. NOTE FOR CODEX: this is a Guesty
+      // API quirk, not a typo. The previous PR added the client-side
+      // unwrapping logic but missed that the data wasn't being requested
+      // in the first place — adding `fields=` is what actually makes the
+      // unwrapping useful. Verified 2026-05-04 against production: omit
+      // it and `state.lastMessage` is missing on every list row.
+      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=100&fields=");
       if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
       return r.json();
     },
@@ -469,8 +2285,160 @@ export default function InboxPage() {
     "conversations", "results", "data",
   ]);
 
+  const { data: missedCallData } = useQuery<{ calls: QuoCallEvent[]; count: number }>({
+    queryKey: ["/api/inbox/calls/unacknowledged"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/inbox/calls/unacknowledged?limit=100");
+      if (!r.ok) throw new Error(`Missed calls returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+  const missedCalls = missedCallData?.calls ?? [];
+  const missedCallCount = missedCallData?.count ?? missedCalls.length;
+  const missedCallsByConversation = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const call of missedCalls) {
+      if (!call.conversationId) continue;
+      counts[call.conversationId] = (counts[call.conversationId] ?? 0) + 1;
+    }
+    return counts;
+  }, [missedCalls]);
+
+  const markConversationReplied = (conversationId: string | null) => {
+    if (!conversationId) return;
+    setLocallyRepliedAtByConversation((prev) => ({
+      ...prev,
+      [conversationId]: Date.now(),
+    }));
+  };
+
+  const applyLocalReplyOverride = (raw: GuestyConversation) => {
+    const normalized = normalizeConversation(raw);
+    const locallyPreapproved =
+      !!normalized.reservationId && airbnbPreapprovedIds.has(normalized.reservationId);
+    const localReplyAt = locallyRepliedAtByConversation[normalized._id];
+    const preapprovalPatched = locallyPreapproved
+      ? { ...normalized, needsPreapprove: false }
+      : normalized;
+    if (!localReplyAt) return preapprovalPatched;
+    const lastActivityAt = normalized.displayTimestamp
+      ? new Date(normalized.displayTimestamp).getTime()
+      : 0;
+    if (Number.isFinite(lastActivityAt) && lastActivityAt > localReplyAt) return preapprovalPatched;
+    return {
+      ...preapprovalPatched,
+      isUnread: false,
+      needsReply: false,
+      lastMessageFromGuest: false,
+    };
+  };
+
+  // Unique listing names for the property filter dropdown. Sourced from
+  // the conversations themselves (no extra fetch) so the dropdown only
+  // ever lists properties the operator currently has conversations
+  // for — no empty options.
+  const listingOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of conversations) {
+      const name = applyLocalReplyOverride(c).displayListingName;
+      if (name && name !== "—") set.add(name);
+    }
+    return Array.from(set).sort();
+  }, [conversations, locallyRepliedAtByConversation]);
+
+  // Apply the property filter. "all" passes everything through.
+  // Then sort by latest activity (newest first) using the same timestamp
+  // resolution as `normalizeConversation` — Guesty's default list
+  // ordering is by conversation creation date, which freezes a stale
+  // thread (e.g. Michelle's inquiry created Apr 23) at the position
+  // it had on creation even after she sends new messages on May 3.
+  // The list endpoint doesn't accept `&sort=-state.lastMessage.date`,
+  // so we sort client-side after normalizing. NOTE FOR CODEX: this
+  // is intentionally not a `useMemo` over `normalizeConversation`
+  // because that helper isn't memoized — re-walking 30 conversations
+  // per render is cheap (sub-ms) and avoids a stale-memo trap.
+  const filteredConversations = useMemo(() => {
+    const propertyMatched = propertyFilter === "all"
+      ? conversations
+      : conversations.filter((c) => applyLocalReplyOverride(c).displayListingName === propertyFilter);
+    const matched = propertyMatched.filter((c) => {
+      if (replyStatusFilter === "all") return true;
+      const needsReply = applyLocalReplyOverride(c).needsReply;
+      return replyStatusFilter === "unread" ? needsReply : !needsReply;
+    });
+    const ts = (c: any): number => {
+      const v = applyLocalReplyOverride(c).displayTimestamp;
+      const t = v ? new Date(v).getTime() : NaN;
+      return Number.isFinite(t) ? t : 0;
+    };
+    return [...matched].sort((a, b) => ts(b) - ts(a));
+  }, [conversations, propertyFilter, replyStatusFilter, locallyRepliedAtByConversation]);
+
+  useEffect(() => {
+    const deepLinkKey = [
+      inboxDeepLink.conversationId,
+      inboxDeepLink.reservationId,
+      inboxDeepLink.guest,
+      inboxDeepLink.confirmation,
+    ].filter(Boolean).join("|");
+    if (!deepLinkKey || convLoading) return;
+
+    const guestTarget = normalizeDeepLinkText(inboxDeepLink.guest);
+    const confirmationTarget = normalizeDeepLinkText(inboxDeepLink.confirmation);
+    const matchesConfirmation = (c: GuestyConversation) => {
+      if (!confirmationTarget) return false;
+      const meta = (c as any)?.meta ?? {};
+      const firstReservation =
+        Array.isArray(meta.reservations) && meta.reservations.length > 0
+          ? meta.reservations[0]
+          : ((c as any)?.reservation ?? meta.reservation ?? null);
+      const code = normalizeDeepLinkText(
+        (c as any)?.confirmationCode ??
+        firstReservation?.confirmationCode ??
+        firstReservation?.confirmation?.code,
+      );
+      return code === confirmationTarget;
+    };
+    const matchesGuest = (c: GuestyConversation) => {
+      if (!guestTarget) return false;
+      const guestName = normalizeDeepLinkText(applyLocalReplyOverride(c).displayGuestName);
+      return guestName === guestTarget || guestName.includes(guestTarget) || guestTarget.includes(guestName);
+    };
+
+    const match =
+      (inboxDeepLink.conversationId
+        ? conversations.find((c) => c._id === inboxDeepLink.conversationId)
+        : undefined) ??
+      (inboxDeepLink.reservationId
+        ? conversations.find((c) => applyLocalReplyOverride(c).reservationId === inboxDeepLink.reservationId)
+        : undefined) ??
+      conversations.find(matchesConfirmation) ??
+      conversations.find(matchesGuest);
+
+    if (match) {
+      const normalized = applyLocalReplyOverride(match);
+      setPropertyFilter("all");
+      setReplyStatusFilter("all");
+      if (selectedConvId !== normalized._id) {
+        setSelectedConvId(normalized._id);
+      }
+      deepLinkNoticeRef.current = deepLinkKey;
+      return;
+    }
+
+    if (conversations.length > 0 && deepLinkNoticeRef.current !== deepLinkKey) {
+      deepLinkNoticeRef.current = deepLinkKey;
+      toast({
+        title: "Conversation not found",
+        description: "Inbox loaded, but this reservation was not in the current Guesty conversation list.",
+      });
+    }
+  }, [inboxDeepLink, conversations, convLoading, selectedConvId, locallyRepliedAtByConversation, toast]);
+
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
-  const selectedConv = selectedConvRaw ? normalizeConversation(selectedConvRaw) : null;
+  const selectedConv = selectedConvRaw ? applyLocalReplyOverride(selectedConvRaw) : null;
 
   // Conversation metadata (assignee, priority, integration, etc.)
   const { data: threadData, isLoading: threadLoading } = useQuery<any>({
@@ -500,6 +2468,59 @@ export default function InboxPage() {
     refetchInterval: 30_000,
   });
 
+  const { data: smsData, isLoading: smsLoading } = useQuery<any>({
+    queryKey: ["/api/inbox/sms/conversations", selectedConvId, "messages"],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/inbox/sms/conversations/${selectedConvId}/messages`);
+      if (!r.ok) throw new Error(`SMS returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 15_000,
+  });
+
+  const { data: callData, isLoading: callsLoading } = useQuery<{ calls: QuoCallEvent[] }>({
+    queryKey: ["/api/inbox/calls/conversations", selectedConvId],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/inbox/calls/conversations/${selectedConvId}`);
+      if (!r.ok) throw new Error(`Calls returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+  });
+
+  const { data: internalNotesData } = useQuery<{ notes: GuestInboxInternalNote[] }>({
+    queryKey: ["/api/inbox/internal-notes", selectedConvId],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/inbox/internal-notes/${selectedConvId}?limit=20`);
+      if (!r.ok) throw new Error(`Internal notes returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+  });
+
+  const { data: smsStatus } = useQuery<any>({
+    queryKey: ["/api/inbox/sms/status"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/inbox/sms/status");
+      if (!r.ok) throw new Error(`SMS status returned HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 30_000,
+  });
+
+  const { data: phoneData } = useQuery<any>({
+    queryKey: ["/api/inbox/sms/conversations", selectedConvId, "phone"],
+    enabled: !!selectedConvId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/inbox/sms/conversations/${selectedConvId}/phone`);
+      if (!r.ok) throw new Error(`Phone override returned HTTP ${r.status}`);
+      return r.json();
+    },
+  });
+
   const posts: GuestyPost[] = (() => {
     // postsData from the /posts endpoint is the authoritative source.
     const fromPosts = unwrapList<GuestyPost>(postsData, ["posts", "results", "messages"]);
@@ -510,11 +2531,73 @@ export default function InboxPage() {
     return selectedConv?.posts ?? [];
   })();
 
+  const smsPosts: GuestyPost[] = unwrapList<any>(smsData, ["messages"]).map((m: any) => ({
+    _id: `quo-sms-${m.providerMessageId ?? m.id}`,
+    body: m.body,
+    sentAt: m.sentAt ?? m.createdAt,
+    sentBy: m.direction === "outbound" ? "host" : "guest",
+    direction: m.direction === "outbound" ? "outbound" : "inbound",
+    module: { type: "sms", provider: "quo" },
+  }));
+
+  const callEvents = callData?.calls ?? [];
+  const internalNotes = internalNotesData?.notes ?? [];
+  const callPosts: GuestyPost[] = callEvents.map((call) => {
+    const when = call.callCompletedAt ?? call.callStartedAt ?? call.createdAt ?? "";
+    const kind = call.disposition === "voicemail"
+      ? "Voicemail"
+      : call.disposition === "missed"
+        ? "Missed call"
+        : call.direction === "outbound"
+          ? "Outgoing call"
+          : "Incoming call";
+    const details = [
+      `${kind} ${call.direction === "outbound" ? "to" : "from"} ${formatPhone(call.guestPhone)}`,
+      call.durationSeconds ? `Call duration ${formatDuration(call.durationSeconds)}` : "",
+      call.voicemailDurationSeconds ? `Voicemail duration ${formatDuration(call.voicemailDurationSeconds)}` : "",
+      call.matchStrategy ? `Matched by ${call.matchStrategy.replace(/-/g, " ")}` : "",
+    ].filter(Boolean);
+    return {
+      _id: `quo-call-${call.id}`,
+      body: details.join("\n"),
+      sentAt: when,
+      sentBy: call.direction === "outbound" ? "host" : "guest",
+      direction: call.direction === "outbound" ? "outbound" : "inbound",
+      module: { type: "call", provider: "quo", callEvent: call },
+    };
+  });
+
+  const threadPosts = [...posts, ...smsPosts, ...callPosts];
+  const savedGuestPhone = normalizePhone(phoneData?.override?.phone);
+  const effectiveGuestPhone = savedGuestPhone || selectedConv?.displayGuestPhone || "";
+  const detectedPreArrivalFormUrl = findRelevantThreadUrl(threadPosts, "prearrival");
+  const detectedPaymentUrl = findRelevantThreadUrl(threadPosts, "payment");
+  const savedPreArrivalFormUrl = String(phoneData?.override?.preArrivalFormUrl ?? "");
+  const savedPaymentUrl = String(phoneData?.override?.paymentUrl ?? "");
+  const effectivePreArrivalFormUrl = savedPreArrivalFormUrl || detectedPreArrivalFormUrl;
+  const effectivePaymentUrl = savedPaymentUrl || detectedPaymentUrl;
+  const hasUnresolvedGuestyVariable = GUESTY_VARIABLE_PATTERN.test(replyText);
+  const hasSmsPlaceholder = SMS_PLACEHOLDER_PATTERN.test(replyText);
+  const smsConfigured = smsStatus?.configured !== false;
+  const smsDisabledReason = !smsConfigured
+    ? (smsStatus?.message ?? "SMS is not configured yet in Railway")
+    : hasUnresolvedGuestyVariable
+      ? "Guesty variables like {{guest_invoice}} only expand when sent through Guesty. Use Send in Guesty or remove the placeholder before texting."
+    : hasSmsPlaceholder
+      ? "Paste the real secure Guesty link before texting this draft."
+    : !effectiveGuestPhone
+      ? "No guest phone number found on this thread"
+      : undefined;
+
+  useEffect(() => {
+    setGuestPhoneInput(effectiveGuestPhone);
+  }, [selectedConvId, effectiveGuestPhone]);
+
   useEffect(() => {
     if (threadRef.current) {
       threadRef.current.scrollTop = threadRef.current.scrollHeight;
     }
-  }, [posts.length]);
+  }, [threadPosts.length]);
 
   // Full reservation details (money breakdown, pre-approval status, etc.)
   // The conversation endpoint only gives us a minimal reservation stub.
@@ -530,17 +2613,280 @@ export default function InboxPage() {
     staleTime: 60_000,
   });
 
+  useEffect(() => {
+    const res = reservationFull?.data ?? reservationFull ?? null;
+    const id = res?._id ?? reservationId;
+    if (!id) return;
+    const statusRaw = String(res?.status ?? "").toLowerCase();
+    const preApproved =
+      res?.preApproveState === true ||
+      res?.preApproved === true ||
+      String(res?.preApprovalStatus ?? "").toLowerCase() === "preapproved" ||
+      statusRaw.includes("preapproved") ||
+      statusRaw === "accepted";
+    if (preApproved && !airbnbPreapprovedIds.has(id)) {
+      rememberAirbnbPreapproval(id);
+    }
+  }, [reservationFull, reservationId, airbnbPreapprovedIds]);
+
+  const { data: arrivalDetails, isLoading: arrivalDetailsLoading } = useQuery<{ units: ArrivalUnitDetail[] }>({
+    queryKey: ["/api/bookings", reservationId, "arrival-details"],
+    enabled: !!reservationId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/bookings/${reservationId}/arrival-details`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 60_000,
+  });
+
+  const { data: buyInComms } = useQuery<InboxBuyInCommunications>({
+    queryKey: ["/api/bookings", reservationId, "buy-in-communications"],
+    enabled: !!reservationId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/bookings/${reservationId}/buy-in-communications`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 60_000,
+  });
+
+  const { data: rentalAgreement, refetch: refetchRentalAgreement } = useQuery<InboxRentalAgreement>({
+    queryKey: ["/api/bookings", reservationId, "rental-agreement"],
+    enabled: !!reservationId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/bookings/${reservationId}/rental-agreement`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 30_000,
+  });
+
+  // ── Inquiry-time buy-in estimate ──
+  // Reuses `nexstay_cleaning_fee` localStorage key from buy-in-tracker.tsx
+  // so the operator's preferred cleaning-fee assumption is shared between
+  // both surfaces. Default $250/unit matches buy-in-tracker. NOTE FOR
+  // CODEX: don't fork to a different storage key — we want one source of
+  // truth so changing it on either page propagates everywhere.
+  const [estimateCleaningFee, setEstimateCleaningFee] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("nexstay_cleaning_fee") || "250", 10) || 250; } catch { return 250; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("nexstay_cleaning_fee", String(estimateCleaningFee)); } catch { /* localStorage may be unavailable in private mode */ }
+  }, [estimateCleaningFee]);
+
+  // The estimate endpoint needs (listingId, checkIn, checkOut). Pull them
+  // straight from the selected conversation's reservation stub — Guesty
+  // populates these on every inquiry. Gated to inquiries only at the
+  // render layer; this query stays enabled for any phase as long as we
+  // have the inputs, so opening a booked thread doesn't refetch on
+  // every state change.
+  const estimateListingId =
+    (selectedConv as any)?.listingId ??
+    (selectedConv as any)?.meta?.reservations?.[0]?.listingId ??
+    (selectedConv as any)?.meta?.reservations?.[0]?.listing?._id ??
+    null;
+  const estimateCheckIn =
+    (selectedConv as any)?.meta?.reservations?.[0]?.checkInDateLocalized ??
+    (selectedConv as any)?.meta?.reservations?.[0]?.checkIn ??
+    null;
+  const estimateCheckOut =
+    (selectedConv as any)?.meta?.reservations?.[0]?.checkOutDateLocalized ??
+    (selectedConv as any)?.meta?.reservations?.[0]?.checkOut ??
+    null;
+  const { data: buyInEstimate, isLoading: buyInEstimateLoading } = useQuery<any>({
+    queryKey: ["/api/inbox/buy-in-estimate", estimateListingId, estimateCheckIn, estimateCheckOut, estimateCleaningFee],
+    enabled: isAdmin && !!estimateListingId && !!estimateCheckIn && !!estimateCheckOut,
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        listingId: String(estimateListingId),
+        checkIn: String(estimateCheckIn),
+        checkOut: String(estimateCheckOut),
+        cleaningFeePerUnit: String(estimateCleaningFee),
+      });
+      const r = await apiRequest("GET", `/api/inbox/buy-in-estimate?${params.toString()}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 60_000,
+  });
+
+  const draftArrivalDetails = ({
+    title = "14-day arrival details",
+    channel = "guesty",
+    guestFirstName,
+    propertyName,
+    checkInIso,
+  }: {
+    title?: string;
+    channel?: "guesty" | "sms";
+    guestFirstName: string;
+    propertyName: string;
+    checkInIso?: string;
+  }) => {
+    const body = channel === "sms"
+      ? buildArrivalDetailsSmsBody({ guestFirstName, propertyName })
+      : buildArrivalDetailsBody({
+        guestFirstName,
+        propertyName,
+        checkInIso,
+        units: arrivalDetails?.units ?? [],
+      });
+    previewTemplateBody(title, body, channel);
+  };
+
+  const ensureRentalAgreementLink = async (args: {
+    channelRaw: string;
+    guestName: string;
+    guestEmail?: string | null;
+    guestPhone?: string | null;
+    propertyName: string;
+    checkInIso?: string;
+    checkOutIso?: string;
+    confirmationCode?: string;
+    numNights?: number | null;
+    bookingTotal?: number;
+    cancellationPolicy?: string | null;
+  }): Promise<string> => {
+    if (!reservationId) throw new Error("No reservation found for this agreement");
+    const channel = String(args.channelRaw ?? "");
+    if (!/vrbo|homeaway|booking/i.test(channel)) {
+      throw new Error("Internal rental agreements are only for VRBO/HomeAway and Booking.com bookings.");
+    }
+    if (rentalAgreement?.agreement?.signingUrl) return rentalAgreement.agreement.signingUrl;
+    const response = await apiRequest("POST", `/api/bookings/${reservationId}/rental-agreement`, {
+      conversationId: selectedConvId,
+      channel,
+      guestName: args.guestName,
+      guestEmail: args.guestEmail,
+      guestPhone: args.guestPhone,
+      propertyName: args.propertyName,
+      checkIn: args.checkInIso?.slice(0, 10),
+      checkOut: args.checkOutIso?.slice(0, 10),
+      confirmationCode: args.confirmationCode,
+      nights: args.numNights,
+      bookingTotal: args.bookingTotal,
+      cancellationPolicy: args.cancellationPolicy,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.message || payload?.error || `HTTP ${response.status}`);
+    await refetchRentalAgreement();
+    return payload.signingUrl || payload.agreement?.signingUrl || `/agreement/${payload.agreement?.token}`;
+  };
+
+  const draftStayTemplate = async ({
+    title = "Template preview",
+    channel = "guesty",
+    kind,
+    guestFirstName,
+    propertyName,
+    checkInIso,
+    checkOutIso,
+    confirmationCode,
+    numNights,
+    bookingTotal,
+    totalPaid,
+    cancellationPolicy,
+    channelRaw,
+    guestName,
+    guestEmail,
+    guestPhone,
+  }: {
+    title?: string;
+    channel?: "guesty" | "sms";
+    kind: "booking" | "agreement-request" | "guesty-invoice-payment" | "representative-follow-up" | "local-tips" | "day-before" | "post-stay";
+    guestFirstName: string;
+    propertyName: string;
+    checkInIso?: string;
+    checkOutIso?: string;
+    confirmationCode?: string;
+    numNights?: number | null;
+    bookingTotal?: number;
+    totalPaid?: number;
+    cancellationPolicy?: string | null;
+    channelRaw?: string;
+    guestName?: string;
+    guestEmail?: string | null;
+    guestPhone?: string | null;
+  }) => {
+    try {
+      const units = arrivalDetails?.units ?? [];
+      const agreementUrl = kind === "agreement-request"
+        ? await ensureRentalAgreementLink({
+          channelRaw: channelRaw ?? "",
+          guestName: guestName || guestFirstName,
+          guestEmail,
+          guestPhone,
+          propertyName,
+          checkInIso,
+          checkOutIso,
+          confirmationCode,
+          numNights,
+          bookingTotal,
+          cancellationPolicy,
+        })
+        : "";
+      const body = channel === "sms" && kind === "agreement-request"
+        ? buildAgreementRequestSmsBody({ guestFirstName, propertyName, checkInIso, checkOutIso, agreementUrl })
+        : channel === "sms" && kind === "guesty-invoice-payment"
+          ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName, paymentUrl: effectivePaymentUrl })
+        : channel === "sms" && kind === "representative-follow-up"
+          ? buildUnitSetupSmsBody({ guestFirstName, propertyName })
+        : channel === "sms" && kind === "local-tips"
+          ? buildLocalTipsSmsBody({ guestFirstName, propertyName })
+        : channel === "sms" && kind === "day-before"
+          ? buildDayBeforeSmsBody({ guestFirstName, propertyName })
+        : channel === "sms" && kind === "post-stay"
+          ? buildPostStaySmsBody({ guestFirstName, propertyName })
+        : kind === "booking"
+          ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid, channelRaw })
+        : kind === "agreement-request"
+          ? buildAgreementRequestBody({ guestFirstName, propertyName, agreementUrl, checkInIso, confirmationCode })
+        : kind === "guesty-invoice-payment"
+          ? buildGuestyInvoicePaymentBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
+        : kind === "representative-follow-up"
+          ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso })
+          : kind === "local-tips"
+            ? buildLocalTipsBody({ guestFirstName, propertyName, units })
+            : kind === "day-before"
+              ? buildDayBeforeBody({ guestFirstName, propertyName, checkInIso, units })
+              : buildPostStayBody({ guestFirstName, propertyName });
+      previewTemplateBody(title, body, channel);
+    } catch (err: any) {
+      toast({ title: "Could not create agreement", description: err?.message ?? "Please try again.", variant: "destructive" });
+    }
+  };
+
   const sendMessage = useMutation({
     // /posts adds a message to the thread but doesn't deliver it to the guest —
     // /send-message does both. Guesty requires a `module` describing the channel.
     mutationFn: async () => {
       if (!selectedConv) throw new Error("No conversation selected");
       const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
-      const mod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
+      const rawMod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
+
+      // Guesty's /send-message validator rejects extra keys on the
+      // `module` object with a 400 — specifically `templateValues`,
+      // `templateVariableNames`, and `externalId`, which show up on
+      // the module of any post that was itself sent via a Guesty
+      // template or external channel link. Reading `selectedConv.module`
+      // or `lastPostModule` carries those fields forward, and the
+      // send blows up with `"module.templateValues" is not allowed`.
+      //
+      // Whitelist only what /send-message accepts. Everything else is
+      // metadata from Guesty's read shape that the write shape doesn't
+      // tolerate.
+      const mod: GuestyModule = {};
+      const allowedKeys = ["type", "channelId", "platform", "integrationId"] as const;
+      for (const k of allowedKeys) {
+        if (rawMod[k] !== undefined) (mod as any)[k] = rawMod[k];
+      }
+      if (!mod.type) mod.type = "email";
+
       const r = await apiRequest(
         "POST",
         `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
-        { body: replyText, module: mod },
+        { body: normalizeGuestyManualMessageBody(replyText), module: mod },
       );
       if (!r.ok) {
         const errBody = await r.json().catch(() => ({}));
@@ -549,6 +2895,7 @@ export default function InboxPage() {
       return r.json();
     },
     onSuccess: () => {
+      markConversationReplied(selectedConvId);
       setReplyText("");
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
@@ -558,15 +2905,305 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed to send", description: e.message, variant: "destructive" }),
   });
 
+  const sendTextMessage = useMutation({
+    mutationFn: async () => {
+      if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
+      const to = effectiveGuestPhone;
+      if (!to) throw new Error("No guest phone number found on this Guesty thread");
+      if (GUESTY_VARIABLE_PATTERN.test(replyText)) {
+        throw new Error("Guesty variables like {{guest_invoice}} do not expand in Quo texts. Send this through Guesty or remove the placeholder before texting.");
+      }
+      if (SMS_PLACEHOLDER_PATTERN.test(replyText)) {
+        throw new Error("Paste the real secure link before sending this text.");
+      }
+      const r = await apiRequest("POST", `/api/inbox/sms/conversations/${selectedConvId}/send`, {
+        to,
+        body: replyText,
+        reservationId: selectedConv.reservationId ?? null,
+        guestName: selectedConv.displayGuestName ?? null,
+      });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      markConversationReplied(selectedConvId);
+      setReplyText("");
+      qc.invalidateQueries({ queryKey: ["/api/inbox/sms/conversations", selectedConvId, "messages"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+      toast({ title: "Text sent via Quo" });
+    },
+    onError: (e: any) => toast({ title: "Text failed", description: e.message, variant: "destructive" }),
+  });
+
+  const saveGuestPhone = useMutation({
+    mutationFn: async () => {
+      if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
+      const normalized = normalizePhone(guestPhoneInput);
+      const digits = normalized.replace(/\D/g, "");
+      if (digits.length < 10 || digits.length > 15) {
+        throw new Error("Enter a valid phone number with area code");
+      }
+      const r = await apiRequest("PUT", `/api/inbox/sms/conversations/${selectedConvId}/phone`, {
+        phone: normalized,
+        reservationId: selectedConv.reservationId ?? null,
+        guestName: selectedConv.displayGuestName ?? null,
+        sourcePhone: selectedConv.displayGuestPhone ?? null,
+        preArrivalFormUrl: effectivePreArrivalFormUrl || null,
+        paymentUrl: effectivePaymentUrl || null,
+      });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (data) => {
+      const phone = normalizePhone(data?.override?.phone);
+      setGuestPhoneInput(phone);
+      qc.invalidateQueries({ queryKey: ["/api/inbox/sms/conversations", selectedConvId, "phone"] });
+      toast({ title: "Guest phone saved", description: phone });
+    },
+    onError: (e: any) => toast({ title: "Phone not saved", description: e.message, variant: "destructive" }),
+  });
+
+  const completeCallback = useMutation({
+    mutationFn: async () => {
+      if (!callbackCall) throw new Error("No missed call selected");
+      const said = callbackSummary.trim();
+      if (said.length < 2) throw new Error("Please add what the guest said.");
+      const r = await apiRequest("POST", `/api/inbox/calls/${callbackCall.id}/callback`, { said });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      const conversationId = callbackCall?.conversationId ?? selectedConvId;
+      setCallbackCall(null);
+      setCallbackSummary("");
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/unacknowledged"] });
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/conversations", conversationId] });
+      if (conversationId) qc.invalidateQueries({ queryKey: ["/api/inbox/internal-notes", conversationId] });
+      toast({ title: "Callback saved", description: "The missed call was cleared and added to internal notes." });
+    },
+    onError: (e: any) => toast({ title: "Callback not saved", description: e.message, variant: "destructive" }),
+  });
+
+  const clearConversationMissedCalls = useMutation({
+    mutationFn: async () => {
+      if (!selectedConvId) throw new Error("No conversation selected");
+      const r = await apiRequest("POST", `/api/inbox/calls/conversations/${selectedConvId}/acknowledge`, {});
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/unacknowledged"] });
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/conversations", selectedConvId] });
+      toast({ title: "Missed calls cleared", description: `${data?.cleared ?? 0} notification${data?.cleared === 1 ? "" : "s"} cleared` });
+    },
+    onError: (e: any) => toast({ title: "Could not clear missed calls", description: e.message, variant: "destructive" }),
+  });
+
+  // Regenerate the receipt body whenever any input changes — but only
+  // until the operator edits the textarea directly (then `receiptBodyTouched`
+  // pins their version).
+  useEffect(() => {
+    if (!receiptDialog.open) return;
+    if (receiptBodyTouched) return;
+    if (!receiptPaymentDate) return;
+    const pastPayments = receiptPastPayments
+      .map((p) => ({ date: p.date, amount: parseFloat(p.amount) || 0 }))
+      .filter((p) => p.amount > 0);
+    const body = buildReceiptBody({
+      guestFirstName: receiptDialog.guestFirstName,
+      propertyName: receiptDialog.propertyName,
+      checkInIso: receiptDialog.checkInIso,
+      paymentAmount: parseFloat(receiptPaymentAmount) || 0,
+      paymentDateIso: receiptPaymentDate,
+      bookingTotal: parseFloat(receiptTotalPrice) || 0,
+      pastPayments,
+    });
+    setReceiptBody(body);
+  }, [
+    receiptDialog.open,
+    receiptDialog.guestFirstName,
+    receiptDialog.propertyName,
+    receiptDialog.checkInIso,
+    receiptPaymentAmount,
+    receiptPaymentDate,
+    receiptTotalPrice,
+    receiptPastPayments,
+    receiptBodyTouched,
+  ]);
+
+  const newReceiptRowId = () =>
+    `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const resetReceiptState = () => {
+    setReceiptDialog({ open: false, reservationId: null, propertyName: "", guestFirstName: "" });
+    setReceiptPaymentAmount("");
+    setReceiptPaymentDate("");
+    setReceiptTotalPrice("");
+    setReceiptPastPayments([]);
+    setReceiptPaymentsLoading(false);
+    setReceiptBody("");
+    setReceiptBodyTouched(false);
+  };
+
+  // Send the receipt body through the same Guesty proxy + module
+  // whitelist `sendMessage` uses. Guesty's /send-message validator
+  // rejects extra module keys (`templateValues`, `externalId`, …) with
+  // a 400, so the same allow-list applies.
+  const sendReceipt = useMutation({
+    mutationFn: async () => {
+      if (!selectedConv) throw new Error("No conversation selected");
+      if (!receiptBody.trim()) throw new Error("Receipt body is empty");
+      const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
+      const rawMod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
+      const mod: GuestyModule = {};
+      const allowedKeys = ["type", "channelId", "platform", "integrationId"] as const;
+      for (const k of allowedKeys) {
+        if (rawMod[k] !== undefined) (mod as any)[k] = rawMod[k];
+      }
+      if (!mod.type) mod.type = "email";
+
+      const r = await apiRequest(
+        "POST",
+        `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
+        { body: receiptBody, module: mod },
+      );
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.error ?? errBody.message ?? `Guesty returned HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      resetReceiptState();
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+      toast({ title: "Receipt sent" });
+    },
+    onError: (e: any) => toast({ title: "Failed to send receipt", description: e.message, variant: "destructive" }),
+  });
+
   const generateDraft = async () => {
     if (!selectedConv) return;
     setDraftLoading(true);
-    const lastGuestPost = [...posts].reverse().find(p => p.authorType !== "host" && p.authorRole !== "host");
+    // Find the guest's MOST RECENT message. Sort posts ascending by
+    // timestamp first — Guesty's /posts endpoint returns newest-
+    // first, so a naive `[...posts].reverse()` gave us oldest-first
+    // and `.find()` then returned the guest's *first* message
+    // (Jamie's bug report: AI Draft answered the original inquiry
+    // instead of the latest follow-up about discount/payment).
+    // Mirror the rendering's isHost detection (line ~1079) so a host
+    // post tagged with `direction: "outbound"` or `senderType: "host"`
+    // — but no `authorType`/`authorRole` — is correctly excluded.
+    const postTime = (p: any) => {
+      const t = new Date(p.sentAt ?? p.postedAt ?? p.createdAt ?? 0).getTime();
+      return Number.isFinite(t) ? t : 0;
+    };
+    const postBody = (p: any) => cleanMessageBody(String(p?.body ?? p?.text ?? p?.message ?? "")).trim();
+    const sortedAsc = [...threadPosts].sort((a: any, b: any) => postTime(a) - postTime(b));
+    const conversationalPosts = sortedAsc.filter((p: any) => !isGuestySystemPost(p) && postBody(p));
+    const isInitialContact = !conversationalPosts.some(isHostPost);
+    const lastGuestPost = [...conversationalPosts].reverse().find((p: any) => !isHostPost(p));
+    const guestMessage = postBody(lastGuestPost);
+    const isWelcomeDraft = isInitialContact && !guestMessage;
+    const conversationHistory = conversationalPosts
+      .slice(-10)
+      .map((p: any) => {
+        const role = isHostPost(p) ? "Host" : "Guest";
+        const timestamp = postTime(p);
+        const when = timestamp
+          ? new Date(timestamp).toLocaleString("en-US", {
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit",
+            })
+          : "";
+        const body = postBody(p).replace(/\s+/g, " ").slice(0, 1200);
+        return `${role}${when ? ` ${when}` : ""}: ${body}`;
+      })
+      .join("\n");
+    // Build property-specific context so the AI can answer "how many
+    // bedrooms per unit?" / "how far apart are the units?" / "is
+    // parking free?" with facts instead of hand-waves. Non-blocking:
+    // if the listing isn't mapped to one of our properties we fall
+    // through with propertyContext=null and the server uses its
+    // generic prompt.
+    const ctx = selectedConv.listingId
+      ? await buildPropertyContextForDraft(selectedConv.listingId)
+      : null;
+    const selectedReservation =
+      (reservationFull as any)?.data ??
+      reservationFull ??
+      (selectedConv as any)?.meta?.reservations?.[0] ??
+      null;
+    // Channel name (airbnb / vrbo / booking / direct / email / …) so
+    // the server can give a channel-correct answer when the guest
+    // asks about payment timing — e.g. "Airbnb sets the payment
+    // schedule" rather than a generic disclaimer.
+    const channel =
+      selectedReservation?.integration?.platform ??
+      selectedReservation?.source ??
+      selectedConv.conversationChannel ??
+      (selectedConv as any).integration?.platform ??
+      selectedConv.module?.type ??
+      "";
+    const checkInForDraft =
+      selectedReservation?.checkInDateLocalized ??
+      selectedReservation?.checkIn ??
+      (selectedConv as any).conversationCheckIn ??
+      null;
+    const checkOutForDraft =
+      selectedReservation?.checkOutDateLocalized ??
+      selectedReservation?.checkOut ??
+      (selectedConv as any).conversationCheckOut ??
+      null;
+    const guestsForDraft =
+      selectedReservation?.guestsCount ??
+      selectedReservation?.numberOfGuests ??
+      (selectedConv as any).conversationGuests ??
+      null;
+    const reservationStatusForDraft =
+      selectedReservation?.status ??
+      (selectedConv as any).status ??
+      null;
     try {
       const r = await apiRequest("POST", "/api/inbox/ai-draft", {
-        guestMessage: lastGuestPost?.body ?? lastGuestPost?.text ?? "",
+        guestMessage,
         guestName: selectedConv.guestName,
         propertyName: selectedConv.listingNickname,
+        propertyContext: ctx?.text ?? null,
+        // Gates the Hawaiian-tone variant of the system prompt on the
+        // server — Aloha openings / "mahalo" / "'ohana" / etc. — so
+        // only Hawaii listings get that flavor. Non-HI properties
+        // stay on the standard friendly+professional voice.
+        isHawaii: ctx?.isHawaii ?? false,
+        channel,
+        // The reservation already carries dates and guest count for
+        // inquiries / requests / bookings. Send them through so the
+        // AI doesn't end every reply with "what dates are you thinking
+        // and how many guests?" when the answers are already attached
+        // to the conversation.
+        checkIn: checkInForDraft,
+        checkOut: checkOutForDraft,
+        guestsCount: guestsForDraft,
+        conversationHistory,
+        reservationStatus: reservationStatusForDraft,
+        conversationPhase: (selectedConv as any).phase ?? null,
+        isInitialContact,
+        isWelcomeDraft,
       });
       const data = await r.json();
       if (data.draft) setReplyText(data.draft);
@@ -581,6 +3218,7 @@ export default function InboxPage() {
   // ── Reservations ──
   const { data: pendingData, isLoading: pendingLoading } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/reservations/pending"],
+    enabled: isAdmin,
     queryFn: () =>
       apiRequest("GET", "/api/guesty-proxy/reservations?limit=50")
         .then(r => r.json())
@@ -601,6 +3239,7 @@ export default function InboxPage() {
 
   const { data: upcomingData } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/reservations/upcoming"],
+    enabled: isAdmin,
     queryFn: () => {
       const today = new Date().toISOString().split("T")[0];
       return apiRequest("GET", `/api/guesty-proxy/reservations?limit=50&sort=checkIn`)
@@ -624,6 +3263,7 @@ export default function InboxPage() {
 
   const { data: autoApproveStatus, isLoading: autoLoading } = useQuery<any>({
     queryKey: ["/api/inbox/auto-approve/status"],
+    enabled: isAdmin,
     refetchInterval: 30_000,
   });
 
@@ -643,16 +3283,26 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
 
-  // ── Auto-Reply Agent ──
+  // ── AI Draft Approval ──
   const { data: autoReplyStatus } = useQuery<any>({
     queryKey: ["/api/inbox/auto-reply/status"],
+    enabled: isAdmin,
     refetchInterval: 30_000,
   });
 
   const { data: autoReplyLogs = [], isLoading: logsLoading } = useQuery<any[]>({
     queryKey: ["/api/inbox/auto-reply/logs"],
+    enabled: isAdmin,
     refetchInterval: 60_000,
   });
+  const [editedAutoReplyDrafts, setEditedAutoReplyDrafts] = useState<Record<number, string>>({});
+  const pendingAutoReplyLogs = autoReplyLogs.filter((log: any) =>
+    !log.replySent && log.status !== "dismissed" && (log.status === "drafted" || log.status === "flagged" || log.status === "error")
+  );
+  const autoReplyDraftValue = (log: any) =>
+    Object.prototype.hasOwnProperty.call(editedAutoReplyDrafts, log.id)
+      ? editedAutoReplyDrafts[log.id]
+      : (log.replyDraft ?? "");
 
   const toggleAutoReply = useMutation({
     mutationFn: (enabled: boolean) =>
@@ -665,18 +3315,71 @@ export default function InboxPage() {
     onSuccess: (data: any) => {
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] });
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      toast({ title: data.message ?? "Auto-reply complete" });
+      toast({ title: data.message ?? "Draft check complete" });
     },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
 
   const sendDraftReply = useMutation({
-    mutationFn: (id: number) =>
-      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/send`).then(r => r.json()),
-    onSuccess: (data: any) => {
+    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/send`, { replyDraft }).then(r => r.json()),
+    onSuccess: (data: any, vars) => {
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      setEditedAutoReplyDrafts(prev => {
+        const next = { ...prev };
+        delete next[vars.id];
+        return next;
+      });
       if (data.ok) toast({ title: "Reply sent to guest" });
       else toast({ title: "Send failed", description: data.error, variant: "destructive" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const saveDraftReply = useMutation({
+    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/draft`, { replyDraft }).then(r => r.json()),
+    onSuccess: (data: any, vars) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      setEditedAutoReplyDrafts(prev => {
+        const next = { ...prev };
+        delete next[vars.id];
+        return next;
+      });
+      if (data.ok) toast({ title: "Draft saved" });
+      else toast({ title: "Save failed", description: data.error, variant: "destructive" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const analyzeDraftReply = useMutation({
+    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/analyze`, { replyDraft }).then(r => r.json()),
+    onSuccess: (data: any, vars) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      setEditedAutoReplyDrafts(prev => {
+        const next = { ...prev };
+        delete next[vars.id];
+        return next;
+      });
+      if (data.ok) toast({ title: "Saved and analyzed", description: data.analysis });
+      else toast({ title: "Analyze failed", description: data.error, variant: "destructive" });
+    },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const redoDraftReply = useMutation({
+    mutationFn: (id: number) =>
+      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/redo`).then(r => r.json()),
+    onSuccess: (data: any, id) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      setEditedAutoReplyDrafts(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      if (data.ok) toast({ title: "AI draft refreshed" });
+      else toast({ title: "Redo failed", description: data.error, variant: "destructive" });
     },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
@@ -686,7 +3389,7 @@ export default function InboxPage() {
       apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/dismiss`).then(r => r.json()),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      toast({ title: "Dismissed" });
+      toast({ title: "Draft declined" });
     },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
@@ -701,13 +3404,9 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed to approve", description: e.message, variant: "destructive" }),
   });
 
-  // Pre-approve an Airbnb inquiry directly from the inbox. Hits our server
-  // wrapper that PUTs the reservation with preApproveState:true (with fallback
-  // candidate endpoints). On success we:
-  //   1. Optimistically patch the react-query cache so the banner flips green
-  //      immediately, without waiting for the GET round-trip
-  //   2. Invalidate the reservation + conversation queries so the authoritative
-  //      server state is refetched in the background
+  // Pre-approve an Airbnb inquiry directly from the inbox. The server uses
+  // Guesty's reservation-v3 pre-approve action, then we keep a tiny local
+  // acknowledgement so the green state survives Guesty's read-after-write lag.
   const preapproveAirbnb = useMutation({
     mutationFn: async (reservationId: string) => {
       const r = await apiRequest("POST", `/api/inbox/reservations/${reservationId}/airbnb/preapprove`, {});
@@ -717,7 +3416,8 @@ export default function InboxPage() {
       }
       return r.json();
     },
-    onSuccess: (_data, reservationId) => {
+    onSuccess: (data, reservationId) => {
+      rememberAirbnbPreapproval(reservationId);
       // Optimistically flip preApproveState=true on the cached reservation
       qc.setQueryData(["/api/guesty-proxy/reservations", reservationId], (old: any) => {
         if (!old) return old;
@@ -730,7 +3430,15 @@ export default function InboxPage() {
       // Refetch authoritative state in the background
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations", reservationId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
-      toast({ title: "Pre-approved on Airbnb", description: "Kim can now book without further host action." });
+      // Use the ACTUAL selected conversation's guest name — the toast
+      // previously hardcoded "Kim" (leftover from a test conversation),
+      // which made the operator think the wrong guest had been
+      // pre-approved. Falls back to "Guest" if the name isn't available.
+      const who = selectedConv?.guestName || "Guest";
+      toast({
+        title: data?.alreadyRequested ? "Already pre-approved on Airbnb" : "Pre-approved on Airbnb",
+        description: `${who} can now book without further host action.`,
+      });
     },
     onError: (e: any) => toast({ title: "Pre-approval failed", description: e.message, variant: "destructive" }),
   });
@@ -745,7 +3453,8 @@ export default function InboxPage() {
       }
       return r.json();
     },
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
+      forgetAirbnbPreapproval(vars.reservationId);
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/reservations"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
       toast({ title: "Inquiry declined" });
@@ -808,59 +3517,179 @@ export default function InboxPage() {
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <div className="border-b bg-card px-6 py-4 flex items-center gap-4">
+      <div className="border-b bg-card px-4 py-3 sm:px-6 sm:py-4 flex flex-wrap items-center gap-3 sm:gap-4">
         <Link href="/">
           <Button variant="ghost" size="sm" className="gap-1" data-testid="button-back-home">
             <ArrowLeft className="h-4 w-4" /> Dashboard
           </Button>
         </Link>
-        <div className="h-5 w-px bg-border" />
-        <div>
+        <div className="hidden sm:block h-5 w-px bg-border" />
+        <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Guest Inbox</h1>
-          <p className="text-xs text-muted-foreground">Messages · Reservations · Auto-Messages</p>
+          <p className="text-xs text-muted-foreground">
+            {isAgent ? "Messages · Missed calls · Arrival details" : "Messages · Reservations · Auto-Messages"}
+          </p>
         </div>
-        {pendingRes.length > 0 && (
-          <Badge className="ml-auto bg-amber-500 text-white" data-testid="badge-pending-count">
+        {!isAgent && pendingRes.length > 0 && (
+          <Badge className="sm:ml-auto bg-amber-500 text-white" data-testid="badge-pending-count">
             {pendingRes.length} pending request{pendingRes.length > 1 ? "s" : ""}
+          </Badge>
+        )}
+        {missedCallCount > 0 && (
+          <Badge className="bg-red-600 text-white" data-testid="badge-missed-call-count">
+            {missedCallCount} missed call{missedCallCount === 1 ? "" : "s"}
           </Badge>
         )}
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 py-6">
+      <div className="max-w-7xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
         <Tabs defaultValue="messages">
-          <TabsList className="mb-6" data-testid="tabs-inbox">
+          <TabsList className="mb-4 sm:mb-6 flex h-auto w-full max-w-full justify-start overflow-x-auto p-1 sm:w-auto" data-testid="tabs-inbox">
             <TabsTrigger value="messages" data-testid="tab-messages">
               <MessageSquare className="h-4 w-4 mr-1.5" /> Messages
             </TabsTrigger>
-            <TabsTrigger value="reservations" data-testid="tab-reservations">
-              <Calendar className="h-4 w-4 mr-1.5" /> Reservations
-              {pendingRes.length > 0 && (
-                <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
-                  {pendingRes.length}
-                </span>
-              )}
-            </TabsTrigger>
-            <TabsTrigger value="auto-messages" data-testid="tab-auto-messages">
-              <Zap className="h-4 w-4 mr-1.5" /> Auto-Messages
-            </TabsTrigger>
-            <TabsTrigger value="auto-reply" data-testid="tab-auto-reply">
-              <Bot className="h-4 w-4 mr-1.5" /> Auto-Reply
-              {autoReplyLogs.filter((l: any) => l.status === "flagged" || (l.status === "drafted" && !l.replySent)).length > 0 && (
-                <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
-                  {autoReplyLogs.filter((l: any) => l.status === "flagged" || (l.status === "drafted" && !l.replySent)).length}
-                </span>
-              )}
-            </TabsTrigger>
+            {!isAgent && (
+              <TabsTrigger value="reservations" data-testid="tab-reservations">
+                <Calendar className="h-4 w-4 mr-1.5" /> Reservations
+                {pendingRes.length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
+                    {pendingRes.length}
+                  </span>
+                )}
+              </TabsTrigger>
+            )}
+            {!isAgent && (
+              <>
+                <TabsTrigger value="auto-messages" data-testid="tab-auto-messages">
+                  <Zap className="h-4 w-4 mr-1.5" /> Auto-Messages
+                </TabsTrigger>
+                <TabsTrigger value="auto-reply" data-testid="tab-auto-reply">
+                  <Bot className="h-4 w-4 mr-1.5" /> AI Draft Approval
+                  {pendingAutoReplyLogs.length > 0 && (
+                    <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
+                      {pendingAutoReplyLogs.length}
+                    </span>
+                  )}
+                </TabsTrigger>
+              </>
+            )}
           </TabsList>
 
           {/* ── MESSAGES TAB ── */}
           <TabsContent value="messages">
-            <div className="grid grid-cols-[280px_1fr_300px] gap-4 h-[calc(100vh-220px)] min-h-[600px]">
+            {missedCalls.length > 0 && (
+              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-red-950" data-testid="panel-missed-calls">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      <PhoneMissed className="h-4 w-4" />
+                      Missed calls need review
+                    </div>
+                    <div className="mt-1 text-xs text-red-800">
+                      Call the guest back, then save what they said so the note stays with the Guest Inbox thread.
+                    </div>
+                  </div>
+                  <div className="grid gap-2 sm:min-w-[360px]">
+                    {missedCalls.slice(0, 3).map((call) => (
+                      <div key={call.id} className="rounded-md border border-red-200 bg-white/80 px-3 py-2 text-xs">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-medium text-red-950">
+                              {call.guestName || "Unknown caller"} · {formatPhone(call.guestPhone)}
+                            </div>
+                            <div className="mt-0.5 text-red-800">
+                              {call.disposition === "voicemail" ? "Voicemail" : "Missed call"}
+                              {call.callCompletedAt && ` · ${new Date(call.callCompletedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                              {call.voicemailDurationSeconds && ` · ${formatDuration(call.voicemailDurationSeconds)}`}
+                              {call.matchConfidence && ` · ${call.matchConfidence} confidence`}
+                            </div>
+                            {call.voicemailTranscript && (
+                              <div className="mt-1 max-h-10 overflow-hidden text-red-900">
+                                {call.voicemailTranscript}
+                              </div>
+                            )}
+                            {call.voicemailRecordingUrl && (
+                              <audio
+                                controls
+                                src={call.voicemailRecordingUrl}
+                                className="mt-2 w-full max-w-[260px]"
+                                data-testid={`audio-missed-call-voicemail-${call.id}`}
+                              />
+                            )}
+                          </div>
+                          <div className="flex shrink-0 gap-1">
+                            {call.conversationId && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-[11px]"
+                                onClick={() => setSelectedConvId(call.conversationId!)}
+                                data-testid={`button-open-missed-call-${call.id}`}
+                              >
+                                Open
+                              </Button>
+                            )}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={() => {
+                                setCallbackCall(call);
+                                setCallbackSummary("");
+                              }}
+                              disabled={completeCallback.isPending}
+                              data-testid={`button-clear-missed-call-${call.id}`}
+                            >
+                              Called back
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px] lg:h-[calc(100vh-220px)] lg:min-h-[600px]">
               {/* Conversation List */}
-              <div className="border rounded-lg bg-card overflow-y-auto">
-                <div className="px-4 py-3 border-b flex items-center justify-between">
-                  <span className="text-sm font-medium">Conversations</span>
-                  {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />}
+              <div className="border rounded-lg bg-card max-h-[42vh] overflow-y-auto lg:max-h-none">
+                <div className="px-4 py-3 border-b flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium shrink-0">Conversations</span>
+                  {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
+                </div>
+                <div className="px-3 py-2 border-b space-y-2">
+                  {/* Property filter — only visible when there's something to
+                      filter (>1 distinct listing). Hidden when there's a single
+                      property in the inbox so the dropdown isn't dead UI. */}
+                  {listingOptions.length > 1 && (
+                    <Select value={propertyFilter} onValueChange={setPropertyFilter}>
+                      <SelectTrigger
+                        className="h-8 text-xs"
+                        data-testid="select-conversation-property-filter"
+                      >
+                        <SelectValue placeholder="All properties" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All properties</SelectItem>
+                        {listingOptions.map((p) => (
+                          <SelectItem key={p} value={p}>{p}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <Select value={replyStatusFilter} onValueChange={(value) => setReplyStatusFilter(value as "all" | "unread" | "read")}>
+                    <SelectTrigger
+                      className="h-8 text-xs"
+                      data-testid="select-conversation-reply-status-filter"
+                    >
+                      <SelectValue placeholder="All reply statuses" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All reply statuses</SelectItem>
+                      <SelectItem value="unread">Unread / reply needed</SelectItem>
+                      <SelectItem value="read">Read / replied</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 {convError && !convLoading && (
                   <div className="p-6 text-center text-sm text-destructive">
@@ -875,9 +3704,26 @@ export default function InboxPage() {
                     No conversations yet
                   </div>
                 )}
-                {conversations.map(rawC => {
-                  const c = normalizeConversation(rawC);
+                {!convError && conversations.length > 0 && filteredConversations.length === 0 && (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    No conversations match those filters.{" "}
+                    <button
+                      className="underline text-primary"
+                      onClick={() => {
+                        setPropertyFilter("all");
+                        setReplyStatusFilter("all");
+                      }}
+                      data-testid="button-clear-conversation-filter"
+                    >
+                      Clear filters
+                    </button>
+                  </div>
+                )}
+                <TooltipProvider>
+                {filteredConversations.map(rawC => {
+                  const c = applyLocalReplyOverride(rawC);
                   const active = c._id === selectedConvId;
+                  const conversationMissedCalls = missedCallsByConversation[c._id] ?? 0;
                   return (
                     <button
                       key={c._id}
@@ -887,11 +3733,63 @@ export default function InboxPage() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
-                          <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                          <div
+                            className={`relative w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0 ${
+                              c.needsReply ? "ring-2 ring-amber-300 ring-offset-1 ring-offset-background" : ""
+                            }`}
+                          >
+                            {c.needsReply && (
+                              <span
+                                className="absolute -left-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm"
+                                data-testid={`indicator-reply-owed-avatar-${c._id}`}
+                                aria-label="Unread reply needed"
+                              >
+                                <MessageCircle className="h-2.5 w-2.5" />
+                              </span>
+                            )}
                             <User className="h-3.5 w-3.5 text-primary" />
                           </div>
                           <div className="min-w-0">
-                            <p className="font-medium text-sm truncate">{c.displayGuestName}</p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="font-medium text-sm truncate">{c.displayGuestName}</p>
+                              {/* Pending-action icons. Each one means a
+                                  different host action is outstanding —
+                                  reply needed (unread incoming) and/or
+                                  pre-approval owed on an Airbnb inquiry. */}
+                              {c.needsReply && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span data-testid={`indicator-needs-reply-${c._id}`}>
+                                      <MessageCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right">Reply needed</TooltipContent>
+                                </Tooltip>
+                              )}
+                              {c.needsPreapprove && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span data-testid={`indicator-needs-preapprove-${c._id}`}>
+                                      <ShieldAlert className="h-3.5 w-3.5 text-red-600 shrink-0" />
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right">Pre-approval needed (Airbnb)</TooltipContent>
+                                </Tooltip>
+                              )}
+                              {conversationMissedCalls > 0 && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span
+                                      className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[9px] font-semibold leading-none text-white"
+                                      data-testid={`indicator-missed-calls-${c._id}`}
+                                    >
+                                      {conversationMissedCalls}
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right">Missed call notification</TooltipContent>
+                                </Tooltip>
+                              )}
+                            </div>
                             <p className="text-xs text-muted-foreground truncate">{c.displayListingName}</p>
                             {c.phase && c.phase !== "other" && (
                               <span
@@ -923,10 +3821,11 @@ export default function InboxPage() {
                     </button>
                   );
                 })}
+                </TooltipProvider>
               </div>
 
               {/* Thread + Reply */}
-              <div className="border rounded-lg bg-card flex flex-col">
+              <div className="border rounded-lg bg-card flex min-h-[560px] flex-col lg:min-h-0">
                 {!selectedConvId ? (
                   <div className="flex-1 flex items-center justify-center text-muted-foreground">
                     <div className="text-center">
@@ -937,7 +3836,7 @@ export default function InboxPage() {
                 ) : (
                   <>
                     {/* Thread header */}
-                    <div className="px-5 py-3 border-b flex items-center justify-between gap-3">
+                    <div className="px-4 py-3 sm:px-5 border-b flex flex-wrap items-center justify-between gap-3">
                       <div className="min-w-0">
                         <p className="font-medium truncate">{selectedConv?.displayGuestName ?? "Guest"}</p>
                         <p className="text-xs text-muted-foreground truncate">{selectedConv?.displayListingName ?? "—"}</p>
@@ -961,20 +3860,46 @@ export default function InboxPage() {
                     </div>
 
                     {/* Messages — sorted oldest → newest, each with channel badge + full timestamp */}
-                    <div ref={threadRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-                      {(threadLoading || postsLoading) && posts.length === 0 && (
+                    <div ref={threadRef} className="flex-1 overflow-y-auto px-3 py-4 sm:px-5 space-y-3">
+                      {(threadLoading || postsLoading || smsLoading || callsLoading) && threadPosts.length === 0 && (
                         <div className="text-center text-xs text-muted-foreground py-4">Loading messages…</div>
                       )}
-                      {[...posts]
+                      {[...threadPosts]
+                        // Filter system log posts (e.g. "New guest inquiry"
+                        // module=log) — they're metadata for Guesty's UI,
+                        // not a message either side actually wrote, and
+                        // rendering them as a left-aligned bubble made
+                        // the thread look like the guest sent boilerplate
+                        // before her real first message. Identified by
+                        // `sentBy === "log"` OR `module.type === "log"`.
+                        // NOTE FOR CODEX: server-side `isSystemPost` in
+                        // auto-reply.ts also filters these — keep the
+                        // two definitions in sync if Guesty adds a new
+                        // system module type.
+                        .filter((p: any) => !isGuestySystemPost(p))
                         .sort((a: any, b: any) => {
                           const ta = new Date(a.sentAt ?? a.postedAt ?? a.createdAt ?? 0).getTime();
                           const tb = new Date(b.sentAt ?? b.postedAt ?? b.createdAt ?? 0).getTime();
                           return ta - tb; // ascending: oldest at top, newest at bottom
                         })
                         .map((p: any) => {
-                          const bodyText = p.body ?? p.text ?? p.message ?? "";
+                          const bodyText = cleanMessageBody(p.body ?? p.text ?? p.message ?? "");
                           const when = p.sentAt ?? p.postedAt ?? p.createdAt ?? "";
+                          // Guesty inbox-v2 uses `sentBy: "guest" | "host"`.
+                          // Older shapes used `authorType` / `direction` /
+                          // `isIncoming`. Without the `sentBy` check,
+                          // every post on a current Guesty thread fell
+                          // through to the default "not host" branch and
+                          // rendered on the left side as a guest bubble —
+                          // making it impossible to tell who said what
+                          // (Michelle's thread on 2026-05-04 had John's
+                          // replies indistinguishable from her own
+                          // messages). NOTE FOR CODEX: the `sentBy`
+                          // check should win over the legacy fields if
+                          // they ever conflict — Guesty stopped
+                          // populating the legacy ones in inbox-v2.
                           const isHost =
+                            p.sentBy === "host" ||
                             p.authorType === "host" ||
                             p.authorRole === "host" ||
                             p.senderType === "host" ||
@@ -982,21 +3907,77 @@ export default function InboxPage() {
                             p.direction === "out" ||
                             p.isIncoming === false;
                           const channel = p.module?.type ?? p.type ?? p.integration?.platform ?? "";
+                          const callEvent = (p.module as any)?.callEvent as QuoCallEvent | undefined;
+                          const isCall = channel === "call" && callEvent;
+                          const isAirbnbSupport = isAirbnbCustomerServicePost(p);
+                          const senderLabel = isHost
+                            ? "You"
+                            : isAirbnbSupport
+                              ? "Airbnb support"
+                              : (selectedConv?.displayGuestName ?? "Guest");
                           return (
                             <div key={p._id} className={`flex flex-col ${isHost ? "items-end" : "items-start"}`}>
                               <div
-                                className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap ${
-                                  isHost
+                                className={`max-w-[92%] [overflow-wrap:anywhere] rounded-2xl px-3 py-2.5 text-sm whitespace-pre-wrap sm:max-w-[78%] sm:px-4 ${
+                                  isCall
+                                    ? "border border-red-200 bg-red-50 text-red-950 rounded-bl-sm"
+                                    : isAirbnbSupport
+                                    ? "border border-rose-200 bg-rose-50 text-rose-950 rounded-bl-sm"
+                                    : isHost
                                     ? "bg-primary text-primary-foreground rounded-br-sm"
                                     : "bg-muted text-foreground rounded-bl-sm"
                                 }`}
                                 data-testid={`message-${p._id}`}
                               >
-                                {bodyText}
+                                {isCall ? (
+                                  <div className="space-y-2">
+                                    <div className="flex items-center gap-2 font-medium">
+                                      {callEvent.disposition === "voicemail" ? (
+                                        <Voicemail className="h-4 w-4" />
+                                      ) : callEvent.disposition === "missed" ? (
+                                        <PhoneMissed className="h-4 w-4" />
+                                      ) : (
+                                        <PhoneCall className="h-4 w-4" />
+                                      )}
+                                      <span>{callEvent.disposition === "voicemail" ? "Voicemail" : callEvent.disposition === "missed" ? "Missed call" : "Call"}</span>
+                                    </div>
+                                    <div className="text-xs leading-relaxed">
+                                      {bodyText}
+                                    </div>
+                                    {callEvent.voicemailRecordingUrl && (
+                                      <audio
+                                        controls
+                                        src={callEvent.voicemailRecordingUrl}
+                                        className="mt-1 w-full max-w-[320px]"
+                                        data-testid={`audio-voicemail-${callEvent.id}`}
+                                      />
+                                    )}
+                                    {callEvent.voicemailTranscript && (
+                                      <div className="rounded-md border border-red-200 bg-white/80 p-2 text-xs text-red-950">
+                                        {callEvent.voicemailTranscript}
+                                      </div>
+                                    )}
+                                    {!callEvent.acknowledgedAt && (callEvent.disposition === "missed" || callEvent.disposition === "voicemail") && (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 px-2 text-[11px]"
+                                        onClick={() => {
+                                          setCallbackCall(callEvent);
+                                          setCallbackSummary("");
+                                        }}
+                                        disabled={completeCallback.isPending}
+                                        data-testid={`button-clear-thread-missed-call-${callEvent.id}`}
+                                      >
+                                        Called guest back
+                                      </Button>
+                                    )}
+                                  </div>
+                                ) : bodyText}
                               </div>
                               {/* Timestamp + channel row, mirrors Guesty's portal */}
                               <div className="flex items-center gap-1.5 mt-1 text-[10px] text-muted-foreground px-1">
-                                <span>{isHost ? "You" : (selectedConv?.displayGuestName ?? "Guest")}</span>
+                                <span>{senderLabel}</span>
                                 <span>·</span>
                                 <span>{when ? new Date(when).toLocaleString([], { month: "2-digit", day: "2-digit", year: "numeric", hour: "numeric", minute: "2-digit" }) : ""}</span>
                                 {channel && (
@@ -1010,7 +3991,7 @@ export default function InboxPage() {
                           );
                         })}
                       {/* Thread debug: only shown when both queries settled and still no posts */}
-                      {!threadLoading && !postsLoading && posts.length === 0 && (threadData || postsData) && (
+                      {!threadLoading && !postsLoading && !smsLoading && !callsLoading && threadPosts.length === 0 && (threadData || postsData || smsData || callData) && (
                         <details className="text-[11px] font-mono bg-amber-50 border border-amber-200 rounded p-2" open>
                           <summary className="cursor-pointer font-semibold text-amber-800">🐞 No posts parsed — debug</summary>
                           <div className="mt-1 space-y-1 text-amber-900">
@@ -1034,25 +4015,31 @@ export default function InboxPage() {
                       )}
                     </div>
 
-                    {/* Reply compose */}
-                    <div className="border-t px-4 py-3 space-y-2">
+                    {/* Reply compose. 10 rows by default fits a typical
+                        AI-drafted 4-7 sentence reply without scrolling
+                        for the signature; `resize-y` lets the operator
+                        drag taller for long custom messages without
+                        letting them drag horizontally (which would break
+                        the column layout). */}
+                    <div className="border-t px-3 py-3 sm:px-4 space-y-2">
                       <Textarea
                         data-testid="textarea-reply"
                         placeholder="Write a reply…"
                         value={replyText}
                         onChange={e => setReplyText(e.target.value)}
-                        rows={3}
-                        className="resize-none"
+                        rows={10}
+                        className="resize-y min-h-[180px]"
                         onKeyDown={e => {
                           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && replyText.trim()) {
                             sendMessage.mutate();
                           }
                         }}
                       />
-                      <div className="flex items-center gap-2 justify-end">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
                         <Button
                           variant="outline"
                           size="sm"
+                          className="w-full sm:w-auto"
                           onClick={generateDraft}
                           disabled={draftLoading}
                           data-testid="button-ai-draft"
@@ -1061,13 +4048,26 @@ export default function InboxPage() {
                           {draftLoading ? "Drafting…" : "AI Draft"}
                         </Button>
                         <Button
+                          variant="outline"
                           size="sm"
+                          className="w-full sm:w-auto"
+                          onClick={() => sendTextMessage.mutate()}
+                          disabled={!replyText.trim() || sendTextMessage.isPending || Boolean(smsDisabledReason)}
+                          title={smsDisabledReason ?? `Send SMS to ${effectiveGuestPhone}`}
+                          data-testid="button-send-text"
+                        >
+                          <MessageCircle className="h-3.5 w-3.5 mr-1.5" />
+                          {sendTextMessage.isPending ? "Texting…" : "Send Text"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="w-full sm:w-auto"
                           onClick={() => sendMessage.mutate()}
-                          disabled={!replyText.trim() || sendMessage.isPending}
+                          disabled={!replyText.trim() || sendMessage.isPending || sendTextMessage.isPending}
                           data-testid="button-send-reply"
                         >
                           <Send className="h-3.5 w-3.5 mr-1.5" />
-                          Send
+                          Send in Guesty
                         </Button>
                       </div>
                     </div>
@@ -1076,7 +4076,7 @@ export default function InboxPage() {
               </div>
 
               {/* Reservation detail panel (right column) */}
-              <div className="border rounded-lg bg-card overflow-y-auto">
+              <div className="border rounded-lg bg-card max-h-none overflow-y-auto lg:max-h-none">
                 {!selectedConv ? (
                   <div className="p-6 text-center text-sm text-muted-foreground">
                     <Calendar className="h-8 w-8 mx-auto mb-2 opacity-30" />
@@ -1111,6 +4111,7 @@ export default function InboxPage() {
                   // accounts/docs also reference preApproved / preApprovalStatus,
                   // so we check all three.
                   const preApproved =
+                    (res?._id ? airbnbPreapprovedIds.has(res._id) : false) ||
                     res?.preApproveState === true ||
                     res?.preApproved === true ||
                     String(res?.preApprovalStatus ?? "").toLowerCase() === "preapproved" ||
@@ -1137,6 +4138,7 @@ export default function InboxPage() {
                   const hostFee      = asNum(m.hostServiceFee);
                   const netPayout    = asNum(m.netIncome) || asNum(m.hostPayout) || Math.max(0, accommodation + cleaning - hostFee);
                   const hasMoney     = guestGross > 0 || netPayout > 0;
+                  const cancellationPolicy = cancellationPolicySummaryForReservation(res);
 
                   return (
                     <div className="p-4 space-y-4 text-sm">
@@ -1178,7 +4180,7 @@ export default function InboxPage() {
                         </div>
 
                         {/* Airbnb pre-approval — live action from the inbox */}
-                        {isAirbnb && (phase === "inquiry" || phase === "request") && (
+                        {!isAgent && isAirbnb && (phase === "inquiry" || phase === "request") && (
                           <div className="mt-2 text-[11px] leading-snug">
                             {preApproved ? (
                               <div className="flex items-start gap-2 p-2 rounded-md bg-green-100 border border-green-300">
@@ -1216,20 +4218,34 @@ export default function InboxPage() {
                                         </>
                                       )}
                                     </Button>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      className="h-7 px-2.5 text-[11px]"
-                                      onClick={() => {
-                                        if (confirm(`Decline this Airbnb inquiry from ${guest.fullName ?? "this guest"}? This action cannot be undone.`)) {
-                                          declineAirbnb.mutate({ reservationId: res._id });
-                                        }
-                                      }}
-                                      disabled={declineAirbnb.isPending}
-                                      data-testid="button-decline-airbnb"
-                                    >
-                                      <XCircle className="h-3 w-3 mr-1" /> Decline
-                                    </Button>
+                                    {/* Airbnb only allows API-driven decline
+                                        for booking REQUESTS, not inquiries —
+                                        Guesty returns "Reservation status is
+                                        inquiry - can't decline" on the
+                                        inquiry path. Inquiries auto-expire
+                                        after 24h if you don't respond, so
+                                        the right "no thanks" action on an
+                                        inquiry is to send a polite reply, or
+                                        just let it lapse.
+                                        We hide the Decline button on
+                                        inquiries to avoid the user clicking
+                                        into a 502 from Guesty's API. */}
+                                    {phase === "request" && (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 px-2.5 text-[11px]"
+                                        onClick={() => {
+                                          if (confirm(`Decline this Airbnb booking request from ${guest.fullName ?? "this guest"}? This action cannot be undone.`)) {
+                                            declineAirbnb.mutate({ reservationId: res._id });
+                                          }
+                                        }}
+                                        disabled={declineAirbnb.isPending}
+                                        data-testid="button-decline-airbnb"
+                                      >
+                                        <XCircle className="h-3 w-3 mr-1" /> Decline
+                                      </Button>
+                                    )}
                                     <a
                                       href={`https://app.guesty.com/reservations/${res._id}`}
                                       target="_blank"
@@ -1240,19 +4256,200 @@ export default function InboxPage() {
                                     </a>
                                   </div>
                                 )}
+                                {/* Inquiry-specific footnote — Airbnb's
+                                    decline action is request-only, so we
+                                    explain what to do with an inquiry the
+                                    operator doesn't want to take instead
+                                    of leaving a no-op Decline button. */}
+                                {phase === "inquiry" && (
+                                  <div className="text-[10px] text-amber-800/80 italic mt-1">
+                                    Airbnb inquiries can't be declined — they auto-expire after 24h. To pass, send a polite reply or just let the inquiry lapse.
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>
                         )}
                       </div>
 
+                      {cancellationPolicy && (
+                        <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sky-950">
+                          <div className="flex items-start gap-2">
+                            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-sky-700" />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="text-[10px] uppercase tracking-wider text-sky-800 font-medium">
+                                  Cancellation policy
+                                </div>
+                                {cancellationPolicy.assumed && (
+                                  <Badge variant="outline" className="border-sky-300 bg-white/70 text-[10px] text-sky-900">
+                                    Assumed from Guesty
+                                  </Badge>
+                                )}
+                              </div>
+                              <div className="mt-0.5 break-words text-xs font-medium">
+                                {cancellationPolicy.label}
+                              </div>
+                              <div className="mt-1 break-words text-[11px] leading-relaxed text-sky-900">
+                                <span className="font-semibold">Policy summary:</span> {cancellationPolicy.summary}
+                              </div>
+                              <dl className="mt-2 grid gap-1 text-[11px] leading-relaxed">
+                                <div>
+                                  <dt className="font-semibold text-sky-900">Free until penalty</dt>
+                                  <dd className="break-words">{cancellationPolicy.freeCancellationUntil}</dd>
+                                </div>
+                                <div>
+                                  <dt className="font-semibold text-sky-900">Penalty</dt>
+                                  <dd className="break-words">{cancellationPolicy.penalty}</dd>
+                                </div>
+                              </dl>
+                              {cancellationPolicy.source && (
+                                <div className="mt-1 text-[11px] text-sky-800">
+                                  {cancellationPolicy.source}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Guest */}
                       <div>
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Guest</div>
                         <div className="mt-0.5 font-medium">{guest.fullName ?? selectedConv.displayGuestName}</div>
-                        {guest.phone && <div className="text-xs text-muted-foreground">{guest.phone}</div>}
+                        <div className="mt-2 space-y-1.5">
+                          <Label htmlFor="guest-sms-phone" className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                            SMS phone
+                          </Label>
+                          <div className="flex gap-1.5">
+                            <Input
+                              id="guest-sms-phone"
+                              value={guestPhoneInput}
+                              onChange={(e) => setGuestPhoneInput(e.target.value)}
+                              onBlur={() => {
+                                const normalized = normalizePhone(guestPhoneInput);
+                                if (normalized) setGuestPhoneInput(normalized);
+                              }}
+                              placeholder="+18085551234"
+                              className="h-8 text-xs"
+                              data-testid="input-guest-sms-phone"
+                            />
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-8 px-2 text-[11px]"
+                              onClick={() => saveGuestPhone.mutate()}
+                              disabled={saveGuestPhone.isPending || !guestPhoneInput.trim()}
+                              data-testid="button-save-guest-sms-phone"
+                            >
+                              Save
+                            </Button>
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">
+                            {savedGuestPhone
+                              ? `Saved override${selectedConv.displayGuestPhone && selectedConv.displayGuestPhone !== savedGuestPhone ? ` · Guesty: ${selectedConv.displayGuestPhone}` : ""}`
+                              : selectedConv.displayGuestPhone
+                                ? "Pulled from Guesty"
+                                : "Enter a number with area code before texting"}
+                          </div>
+                        </div>
                         {guest.isReturning && <Badge variant="secondary" className="text-[10px] mt-1">Returning guest</Badge>}
                       </div>
+
+                      {callEvents.length > 0 && (
+                        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-red-950" data-testid="card-conversation-calls">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-red-800 font-medium">
+                                <PhoneCall className="h-3.5 w-3.5" />
+                                Quo calls
+                              </div>
+                              <div className="mt-1 text-xs text-red-900">
+                                {callEvents.filter((c) => !c.acknowledgedAt && (c.disposition === "missed" || c.disposition === "voicemail")).length} uncleared · {callEvents.length} total
+                              </div>
+                            </div>
+                            {callEvents.some((c) => !c.acknowledgedAt && (c.disposition === "missed" || c.disposition === "voicemail")) && (
+                              <Badge className="bg-red-100 text-red-800 hover:bg-red-100">Callback needed</Badge>
+                            )}
+                          </div>
+                          <div className="mt-2 space-y-2">
+                            {callEvents.slice(0, 4).map((call) => (
+                              <div key={call.id} className="rounded-md bg-white/80 p-2 text-xs">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-medium">
+                                    {call.disposition === "voicemail" ? "Voicemail" : call.disposition === "missed" ? "Missed call" : "Call"}
+                                  </span>
+                                  <span className="text-[10px] text-red-700">
+                                    {call.callCompletedAt ? new Date(call.callCompletedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}
+                                  </span>
+                                </div>
+                                <div className="mt-0.5 text-red-800">
+                                  {formatPhone(call.guestPhone)}
+                                  {call.voicemailDurationSeconds && ` · ${formatDuration(call.voicemailDurationSeconds)}`}
+                                  {call.matchStrategy && ` · ${call.matchStrategy.replace(/-/g, " ")}`}
+                                </div>
+                                {call.voicemailRecordingUrl && (
+                                  <audio
+                                    controls
+                                    src={call.voicemailRecordingUrl}
+                                    className="mt-2 w-full"
+                                    data-testid={`audio-sidebar-voicemail-${call.id}`}
+                                  />
+                                )}
+                                {call.voicemailTranscript && (
+                                  <div className="mt-2 rounded border border-red-100 bg-white p-2 text-red-950">
+                                    {call.voicemailTranscript}
+                                  </div>
+                                )}
+                                {!call.acknowledgedAt && (call.disposition === "missed" || call.disposition === "voicemail") && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="mt-2 h-7 px-2 text-[11px]"
+                                    onClick={() => {
+                                      setCallbackCall(call);
+                                      setCallbackSummary("");
+                                    }}
+                                    disabled={completeCallback.isPending}
+                                    data-testid={`button-sidebar-called-back-${call.id}`}
+                                  >
+                                    Called guest back
+                                  </Button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {internalNotes.length > 0 && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3" data-testid="panel-internal-notes">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="text-sm font-semibold text-amber-950">Internal notes</div>
+                              <div className="mt-1 text-xs text-amber-800">
+                                Callback notes saved by agents.
+                              </div>
+                            </div>
+                            <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100">
+                              {internalNotes.length}
+                            </Badge>
+                          </div>
+                          <div className="mt-2 space-y-2">
+                            {internalNotes.slice(0, 4).map((note) => (
+                              <div key={note.id} className="rounded-md bg-white/80 p-2 text-xs">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-medium text-amber-950">{note.createdBy || "agent"}</span>
+                                  <span className="text-[10px] text-amber-700">
+                                    {note.createdAt ? new Date(note.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}
+                                  </span>
+                                </div>
+                                <div className="mt-1 whitespace-pre-wrap text-amber-900">{note.note}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Listing */}
                       <div>
@@ -1290,8 +4487,134 @@ export default function InboxPage() {
                         </div>
                       </div>
 
+                      {/* Quoted rate — what the GUEST sees on Airbnb for
+                          this stay. Shown for inquiries and booking
+                          requests (the cases where the host might
+                          haggle); the booked-phase Financials block
+                          below already covers the same numbers when
+                          they're settled. Pull from the same `money`
+                          shape used by Financials so the math stays
+                          consistent. Hidden when guestGross is 0
+                          (Guesty hasn't quoted yet). */}
+                      {!isAgent && (phase === "inquiry" || phase === "request") && guestGross > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1 flex items-center justify-between">
+                            <span>Quoted rate</span>
+                            <span className="text-muted-foreground/70 font-normal normal-case tracking-normal">what guest sees</span>
+                          </div>
+                          <div className="border rounded-lg divide-y text-xs">
+                            <div className="flex justify-between px-2.5 py-1.5">
+                              <span className="text-muted-foreground">Total</span>
+                              <span className="font-semibold">${guestGross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                            </div>
+                            {nights && nights > 0 && (
+                              <div className="flex justify-between px-2.5 py-1.5">
+                                <span className="text-muted-foreground">Per night</span>
+                                <span>${Math.round(guestGross / nights).toLocaleString()}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Buy-in estimate — INQUIRIES ONLY.
+                          Shows the operator's expected cost to acquire
+                          inventory for the guest's dates: per-unit nightly
+                          rate × nights + flat per-unit cleaning fee. The
+                          per-night line at the bottom AMORTIZES cleaning
+                          across the stay so short stays surface as
+                          unprofitable (a 4-night stay with $250×2 cleaning
+                          adds $125/night vs ~$71/night on a 7-night stay).
+                          Compare against `guestGross / nights` above to
+                          decide whether the inquiry makes sense at the
+                          quoted number or should be passed.
+                          NOTE FOR CODEX: this is a STATIC-table estimate
+                          (BUY_IN_RATES × season multiplier), NOT a live
+                          /find-buy-in call. The full live search lives
+                          at /api/operations/find-buy-in and is too slow
+                          (~60s) and expensive (~$0.30/call) to fire on
+                          every inquiry view. The static value is within
+                          ~±20% of market — plenty for the is-this-worth-
+                          it decision. See the matching note on the
+                          `/api/inbox/buy-in-estimate` route. */}
+                      {!isAgent && phase === "inquiry" && buyInEstimate && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1 flex items-center justify-between">
+                            <span>Buy-in estimate</span>
+                            {buyInEstimate.ok && (
+                              <span className="text-muted-foreground/70 font-normal normal-case tracking-normal">
+                                {buyInEstimate.season?.toLowerCase()} · {buyInEstimate.nights}n
+                              </span>
+                            )}
+                          </div>
+                          {buyInEstimate.ok ? (
+                            <div className="border rounded-lg divide-y text-xs">
+                              {buyInEstimate.units.map((u: any, i: number) => (
+                                <div key={i} className="flex justify-between px-2.5 py-1.5">
+                                  <span className="text-muted-foreground">
+                                    {u.label} · {u.bedrooms}BR · {buyInEstimate.nights} × ${u.nightlyRate.toLocaleString()}
+                                  </span>
+                                  <span>${u.lineTotal.toLocaleString()}</span>
+                                </div>
+                              ))}
+                              <div className="flex justify-between items-center px-2.5 py-1.5 gap-2">
+                                <span className="text-muted-foreground flex items-center gap-1.5 min-w-0">
+                                  Cleaning · $
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={2000}
+                                    step={25}
+                                    value={estimateCleaningFee}
+                                    onChange={e => setEstimateCleaningFee(Math.max(0, Math.min(2000, parseInt(e.target.value) || 0)))}
+                                    className="w-12 h-5 px-1 text-xs text-right border rounded bg-background"
+                                    title="Cleaning fee per unit per stay (saved across pages)"
+                                    data-testid="input-estimate-cleaning-fee"
+                                  />
+                                  /unit × {buyInEstimate.unitCount}
+                                </span>
+                                <span>${buyInEstimate.cleaningTotal.toLocaleString()}</span>
+                              </div>
+                              <div className="flex justify-between px-2.5 py-2 bg-amber-50 dark:bg-amber-950/20 font-semibold">
+                                <span className="text-amber-900">Total cost</span>
+                                <span className="text-amber-900">${buyInEstimate.grandTotal.toLocaleString()}</span>
+                              </div>
+                              <div className="flex justify-between px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                                <span>Per night (cleaning amortized)</span>
+                                <span>${buyInEstimate.perNightAmortized.toLocaleString()}</span>
+                              </div>
+                              {/* Profit-vs-cost hint: only when the
+                                  Quoted rate is also visible above
+                                  (guestGross > 0). Operator should be
+                                  able to glance both and decide. */}
+                              {guestGross > 0 && (
+                                <div className={`flex justify-between px-2.5 py-1.5 text-[11px] font-medium ${
+                                  guestGross > buyInEstimate.grandTotal ? "text-green-700" : "text-red-700"
+                                }`}>
+                                  <span>{guestGross > buyInEstimate.grandTotal ? "Margin" : "Loss"} vs quoted</span>
+                                  <span>
+                                    {guestGross > buyInEstimate.grandTotal ? "+" : "−"}$
+                                    {Math.abs(guestGross - buyInEstimate.grandTotal).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="text-[11px] text-muted-foreground italic px-2 py-1.5 border rounded-lg">
+                              {buyInEstimate.reason ?? "Estimate not available"}
+                            </div>
+                          )}
+                          <div className="text-[10px] text-muted-foreground/70 mt-1">
+                            Static estimate from operator-validated rate table — within ~±20% of market.
+                          </div>
+                        </div>
+                      )}
+                      {!isAgent && phase === "inquiry" && !buyInEstimate && buyInEstimateLoading && (
+                        <div className="text-[11px] text-muted-foreground italic">Loading buy-in estimate…</div>
+                      )}
+
                       {/* Financials — only for booked reservations */}
-                      {phase === "booked" && (
+                      {!isAgent && phase === "booked" && (
                         <div>
                           <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
                             Financials
@@ -1339,6 +4662,245 @@ export default function InboxPage() {
                         </div>
                       )}
 
+                      {!isAgent && reservationId && (phase === "booked" || phase === "request") && (
+                        <InboxBuyInPanel
+                          reservationId={reservationId}
+                          guestName={guest.fullName ?? selectedConv.displayGuestName ?? ""}
+                          data={buyInComms}
+                        />
+                      )}
+
+                      {/* Templates — manual on-demand outbound message
+                          timeline for booked/request reservations. */}
+                      {(phase === "booked" || phase === "request") && res?._id && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                            Templates
+                          </div>
+                          {(() => {
+                            const fullName = guest.fullName ?? selectedConv.displayGuestName ?? "";
+                            const firstName = String(fullName).trim().split(/\s+/)[0] ?? "";
+                            const propertyName = listing.title ?? listing.nickname ?? "";
+                            const checkInIso = res?.checkInDateLocalized ?? res?.checkIn;
+                            const checkOutIso = res?.checkOutDateLocalized ?? res?.checkOut;
+                            const checkInDate = parseStayDate(checkInIso);
+                            const checkOutDate = parseStayDate(checkOutIso);
+                            const bookingDate = parseStayDate(res?.confirmedAt ?? res?.createdAt ?? selectedConv.lastMessageAt);
+                            const needsAgreement = /vrbo|homeaway|booking/i.test(channelRaw);
+                            const outboundTemplateBodies = threadPosts
+                              .map((p: any) => ({
+                                body: cleanMessageBody(p.body ?? p.text ?? p.message ?? ""),
+                                host: isHostPost(p),
+                                system: isGuestySystemPost(p),
+                              }))
+                              .filter(({ body, host, system }: { body: string; host: boolean; system: boolean }) =>
+                                body.trim().length > 0 && !system && (host || isSignedHostTemplateBody(body))
+                              )
+                              .map(({ body }: { body: string }) => body);
+                            const wasSent = (pattern: RegExp) => outboundTemplateBodies.some((body: string) => pattern.test(body));
+                            const totalPriceFromMoney = asNum(m.totalPrice) || guestGross || 0;
+                            const totalPaidFromMoney = asNum(m.totalPaid);
+                            const openReceiptDialog = () => {
+                              const today = new Date();
+                              const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+                              setReceiptDialog({
+                                open: true,
+                                reservationId: res._id,
+                                propertyName,
+                                guestFirstName: firstName,
+                                checkInIso: res?.checkIn,
+                              });
+                              setReceiptTotalPrice(totalPriceFromMoney > 0 ? totalPriceFromMoney.toFixed(2) : "");
+                              setReceiptPastPayments([]);
+                              setReceiptPaymentsLoading(true);
+                              setReceiptPaymentAmount("");
+                              setReceiptPaymentDate(todayIso);
+                              setReceiptBody("");
+                              setReceiptBodyTouched(false);
+                              apiRequest("GET", `/api/inbox/reservations/${res._id}/payments`)
+                                .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+                                .then((data: any) => {
+                                  const rows = (data?.payments ?? []).map((p: any) => ({
+                                    id: newReceiptRowId(),
+                                    date: String(p.date ?? "").slice(0, 10),
+                                    amount: typeof p.amount === "number" ? p.amount.toFixed(2) : String(p.amount ?? ""),
+                                  }));
+                                  setReceiptPastPayments(rows);
+                                })
+                                .catch(() => { /* leave list empty; operator can add manually */ })
+                                .finally(() => setReceiptPaymentsLoading(false));
+                            };
+                            const draftCommon = {
+                              guestName: fullName,
+                              guestFirstName: firstName,
+                              guestEmail: guest.email ?? res?.guest?.email ?? null,
+                              guestPhone: effectiveGuestPhone || null,
+                              channelRaw,
+                              propertyName,
+                              checkInIso,
+                              checkOutIso,
+                              confirmationCode: res?.confirmationCode,
+                              numNights: nights ?? res?.nightsCount ?? null,
+                              bookingTotal: totalPriceFromMoney,
+                              totalPaid: totalPaidFromMoney,
+                              cancellationPolicy: findCancellationPolicyValue(res),
+                            };
+                            const timeline = [
+                              {
+                                title: "Booking confirmation / next steps",
+                                due: null as Date | null,
+                                dueLabel: "At booking",
+                                sent: outboundTemplateBodies.length > 0,
+                                detail: totalPriceFromMoney > 0 ? `Total ${formatMoney(totalPriceFromMoney)}` : "Confirm dates and payment",
+                                testId: "button-draft-booking-confirmation",
+                                onClick: () => draftStayTemplate({ title: "Booking confirmation / next steps", kind: "booking", ...draftCommon }),
+                              },
+                              ...(needsAgreement ? [{
+                                title: "Agreement + card authorization",
+                                due: bookingDate,
+                                dueLabel: "After booking",
+                                sent: rentalAgreement?.agreement?.status === "signed" || wasSent(/\/agreement\/|rental agreement|signed terms|complete it here|two-separate-units|two separate units acknowledgment|card authorization/i),
+                                detail: rentalAgreement?.agreement?.status === "signed" ? "Signed internal agreement" : "Internal agreement · two-unit acknowledgment",
+                                testId: "button-draft-agreement-request",
+                                onClick: () => draftStayTemplate({ title: "Agreement + card authorization", kind: "agreement-request", ...draftCommon }),
+                                smsTestId: "button-draft-sms-agreement-request",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: rental agreement", channel: "sms", kind: "agreement-request", ...draftCommon }),
+                              },
+                              {
+                                title: "Guesty invoice / payment method",
+                                due: bookingDate,
+                                dueLabel: "After booking",
+                                sent: wasSent(/guest invoice|secure guesty invoice|payment method|remaining balance|guest_invoice|credit card details/i),
+                                detail: "Guesty invoice/payment link",
+                                testId: "button-draft-guesty-invoice-payment",
+                                onClick: () => draftStayTemplate({ title: "Guesty invoice / payment method", kind: "guesty-invoice-payment", ...draftCommon }),
+                                smsTestId: "button-draft-sms-payment-link",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: secure payment link", channel: "sms", kind: "guesty-invoice-payment", ...draftCommon }),
+                              }] : []),
+                              {
+                                title: "Unit setup confirmation",
+                                due: bookingDate ? addDays(bookingDate, 1) : null,
+                                dueLabel: "1 day after booking",
+                                sent: wasSent(/two nearby units|representative of the resort\/community|representative of the resort|unit style|assigned units will match/i),
+                                detail: "Confirms nearby units and sample photos",
+                                testId: "button-draft-representative-follow-up",
+                                onClick: () => draftStayTemplate({ title: "Unit setup confirmation", kind: "representative-follow-up", ...draftCommon }),
+                                smsTestId: "button-draft-sms-unit-setup",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: unit setup note", channel: "sms", kind: "representative-follow-up", ...draftCommon }),
+                              },
+                              {
+                                title: "14-day arrival details",
+                                due: checkInDate ? addDays(checkInDate, -14) : null,
+                                dueLabel: "14 days before arrival",
+                                sent: wasSent(/arrival details|access code|check-in date/i),
+                                detail: `${arrivalDetails?.units?.length ?? 0} attached unit${(arrivalDetails?.units?.length ?? 0) === 1 ? "" : "s"}`,
+                                testId: "button-draft-arrival-details",
+                                disabled: arrivalDetailsLoading,
+                                onClick: () => draftArrivalDetails({ title: "14-day arrival details", guestFirstName: firstName, propertyName, checkInIso }),
+                                smsTestId: "button-draft-sms-arrival-details",
+                                smsOnClick: () => draftArrivalDetails({ title: "SMS: arrival details reminder", channel: "sms", guestFirstName: firstName, propertyName, checkInIso }),
+                              },
+                              {
+                                title: "Parking + travel reminder",
+                                due: checkInDate ? addDays(checkInDate, -3) : null,
+                                dueLabel: "3 days before arrival",
+                                sent: wasSent(/local area|restaurant|restaurants|parking notes|few days away/i),
+                                detail: "Restaurants, travel day, parking",
+                                testId: "button-draft-local-tips",
+                                onClick: () => draftStayTemplate({ title: "Parking + travel reminder", kind: "local-tips", ...draftCommon }),
+                                smsTestId: "button-draft-sms-local-tips",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: parking + travel reminder", channel: "sms", kind: "local-tips", ...draftCommon }),
+                              },
+                              {
+                                title: "Day-before final check-in reminder",
+                                due: checkInDate ? addDays(checkInDate, -1) : null,
+                                dueLabel: "1 day before arrival",
+                                sent: wasSent(/check-in.+tomorrow|tomorrow.+check-in|safe travels/i),
+                                detail: "Final access and parking reminder",
+                                testId: "button-draft-day-before-checkin",
+                                onClick: () => draftStayTemplate({ title: "Day-before final check-in reminder", kind: "day-before", ...draftCommon }),
+                                smsTestId: "button-draft-sms-day-before",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: day-before arrival nudge", channel: "sms", kind: "day-before", ...draftCommon }),
+                              },
+                              {
+                                title: "Post-stay thank-you / review request",
+                                due: checkOutDate ? addDays(checkOutDate, 2) : null,
+                                dueLabel: "2 days after checkout",
+                                sent: wasSent(/thank you again for staying|appreciate a review|review request/i),
+                                detail: "Review and repeat guest note",
+                                testId: "button-draft-post-stay-review",
+                                onClick: () => draftStayTemplate({ title: "Post-stay thank-you / review request", kind: "post-stay", ...draftCommon }),
+                                smsTestId: "button-draft-sms-post-stay-review",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: post-stay review request", channel: "sms", kind: "post-stay", ...draftCommon }),
+                              },
+                            ];
+                            const visibleTimeline = isAgent
+                              ? timeline.filter((item) =>
+                                  /arrival|parking|travel|day-before|unit setup|post-stay/i.test(item.title)
+                                )
+                              : timeline;
+                            return (
+                              <div className="space-y-1.5">
+                                {visibleTimeline.map((item) => (
+                                  <div key={item.title} className="border rounded-lg p-2.5 text-xs bg-muted/20">
+                                    <div className="flex flex-col gap-2">
+                                      <div className="min-w-0">
+                                        <p className="font-medium flex items-start gap-1.5 leading-snug">
+                                          {item.sent ? <CheckCircle className="h-3 w-3 text-green-600 shrink-0" /> : <Clock className="h-3 w-3 text-amber-600 shrink-0" />}
+                                          <span className="break-words">{item.title}</span>
+                                        </p>
+                                        <p className="text-[11px] text-muted-foreground">
+                                          Due {formatShortDate(item.due, item.dueLabel)}
+                                          {" · "}
+                                          {item.sent ? "Completed" : item.detail}
+                                        </p>
+                                      </div>
+                                      <div className="flex items-center gap-1.5">
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-7 flex-1 px-2 text-[11px]"
+                                          disabled={Boolean(item.disabled)}
+                                          onClick={item.onClick}
+                                          data-testid={item.testId}
+                                        >
+                                          <FileText className="h-3 w-3 mr-1" />
+                                          Guesty
+                                        </Button>
+                                        {item.smsOnClick && (
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            className="h-7 flex-1 px-2 text-[11px]"
+                                            disabled={Boolean(item.disabled) || Boolean(smsDisabledReason)}
+                                            onClick={item.smsOnClick}
+                                            title={smsDisabledReason ?? `Draft text for ${effectiveGuestPhone}`}
+                                            data-testid={item.smsTestId}
+                                          >
+                                            <MessageCircle className="h-3 w-3 mr-1" />
+                                            Text
+                                          </Button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                                {!isAgent && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-8 px-2.5 text-[11px] w-full justify-start"
+                                    onClick={openReceiptDialog}
+                                    data-testid="button-send-receipt"
+                                  >
+                                    <DollarSign className="h-3 w-3 mr-1.5" /> Open detailed payment receipt
+                                  </Button>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
                       {/* Confirmation code + Guesty deep link */}
                       <div>
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Confirmation</div>
@@ -1376,7 +4938,7 @@ export default function InboxPage() {
                       <p className="text-xs text-muted-foreground">
                         {autoApproveStatus?.enabled
                           ? `Active · Checks every 15 min${autoApproveStatus?.lastRunAt ? ` · Last run: ${new Date(autoApproveStatus.lastRunAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}`
-                          : "Paused — new Airbnb requests will not be auto-confirmed"}
+                          : "Paused — new Airbnb requests will not be auto-approved"}
                       </p>
                       {autoApproveStatus?.lastRunResult?.message && (
                         <p className="text-xs text-muted-foreground mt-0.5 italic">{autoApproveStatus.lastRunResult.message}</p>
@@ -1577,10 +5139,15 @@ export default function InboxPage() {
                         />
                         <div className="min-w-0">
                           <p className="font-medium text-sm">{t.name}</p>
-                          <Badge variant="outline" className="text-[10px] mt-0.5">
-                            <Clock className="h-2.5 w-2.5 mr-1" />
-                            {triggerLabel(t.trigger, t.daysOffset)}
-                          </Badge>
+                          <div className="flex flex-wrap gap-1 mt-0.5">
+                            <Badge variant={templateChannelBadgeVariant(t.deliveryChannel)} className="text-[10px]">
+                              {templateChannelLabel(t.deliveryChannel)}
+                            </Badge>
+                            <Badge variant="outline" className="text-[10px]">
+                              <Clock className="h-2.5 w-2.5 mr-1" />
+                              {triggerLabel(t.trigger, t.daysOffset)}
+                            </Badge>
+                          </div>
                           <p className="text-xs text-muted-foreground mt-2 line-clamp-2 whitespace-pre-wrap">
                             {t.body}
                           </p>
@@ -1613,17 +5180,17 @@ export default function InboxPage() {
             </div>
           </TabsContent>
 
-          {/* ── AUTO-REPLY TAB ── */}
+          {/* ── AI DRAFT APPROVAL TAB ── */}
           <TabsContent value="auto-reply" className="space-y-6">
             <Card>
               <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <CardTitle className="flex items-center gap-2">
-                      <Bot className="h-5 w-5" /> AI Auto-Reply Agent
+                      <Bot className="h-5 w-5" /> AI Draft Approval
                     </CardTitle>
                     <CardDescription className="mt-1">
-                      Polls Guesty every 5 minutes. Uses Claude with listing/reservation tools to draft and send replies automatically. Risky messages (refund, cancel, damage, medical, legal) are drafted for human review instead of auto-sent.
+                      Checks Guesty every 30 seconds and prepares John Carpenter drafts with the standard signature. Nothing is sent until you approve it.
                     </CardDescription>
                   </div>
                 </div>
@@ -1638,7 +5205,7 @@ export default function InboxPage() {
                       data-testid="switch-auto-reply"
                     />
                     <Label htmlFor="auto-reply-toggle" className="text-sm cursor-pointer">
-                      {autoReplyStatus?.enabled ? "Enabled" : "Disabled"}
+                      {autoReplyStatus?.enabled ? "Scheduling drafts" : "Paused"}
                     </Label>
                   </div>
                   <Button
@@ -1649,7 +5216,7 @@ export default function InboxPage() {
                     data-testid="button-run-auto-reply"
                   >
                     <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${runAutoReply.isPending ? "animate-spin" : ""}`} />
-                    Run Now
+                    Check Now
                   </Button>
                   {autoReplyStatus?.lastRunAt && (
                     <span className="text-xs text-muted-foreground">
@@ -1662,19 +5229,19 @@ export default function InboxPage() {
             </Card>
 
             <div>
-              <h3 className="font-semibold mb-3">Recent Activity</h3>
+              <h3 className="font-semibold mb-3">Drafts Awaiting Approval</h3>
               {logsLoading && <p className="text-sm text-muted-foreground">Loading logs…</p>}
-              {!logsLoading && autoReplyLogs.length === 0 && (
+              {!logsLoading && pendingAutoReplyLogs.length === 0 && (
                 <div className="border rounded-lg p-8 text-center bg-card">
                   <Bot className="h-10 w-10 mx-auto mb-3 opacity-20" />
-                  <p className="font-medium mb-1">No activity yet</p>
+                  <p className="font-medium mb-1">No drafts yet</p>
                   <p className="text-sm text-muted-foreground">
-                    The agent will log every reply attempt here. Click "Run Now" to trigger a poll.
+                    The scheduler will show the latest guest message for each draft here. Click "Check Now" to trigger a poll.
                   </p>
                 </div>
               )}
               <div className="space-y-3">
-                {autoReplyLogs.map((log: any) => (
+                {pendingAutoReplyLogs.map((log: any) => (
                   <Card key={log.id} data-testid={`auto-reply-log-${log.id}`}>
                     <CardContent className="py-4">
                       <div className="flex items-start justify-between gap-3 mb-2">
@@ -1686,12 +5253,12 @@ export default function InboxPage() {
                             )}
                             {log.status === "sent" && (
                               <Badge className="bg-green-600 text-white text-[10px]">
-                                <CheckCircle className="h-2.5 w-2.5 mr-1" /> Sent
+                                <CheckCircle className="h-2.5 w-2.5 mr-1" /> Approved
                               </Badge>
                             )}
                             {log.status === "drafted" && (
                               <Badge className="bg-blue-600 text-white text-[10px]">
-                                <Pencil className="h-2.5 w-2.5 mr-1" /> Drafted
+                                <Pencil className="h-2.5 w-2.5 mr-1" /> Needs Approval
                               </Badge>
                             )}
                             {log.status === "flagged" && (
@@ -1700,7 +5267,7 @@ export default function InboxPage() {
                               </Badge>
                             )}
                             {log.status === "dismissed" && (
-                              <Badge variant="secondary" className="text-[10px]">Dismissed</Badge>
+                              <Badge variant="secondary" className="text-[10px]">Declined</Badge>
                             )}
                             {log.status === "error" && (
                               <Badge variant="destructive" className="text-[10px]">
@@ -1724,9 +5291,16 @@ export default function InboxPage() {
                         {log.replyDraft && (
                           <div>
                             <p className="text-[11px] font-medium text-muted-foreground mb-0.5">
-                              {log.replySent ? "REPLY SENT" : "DRAFT"}
+                              {log.replySent ? "APPROVED REPLY" : "AI DRAFT - EDIT BEFORE SENDING"}
                             </p>
-                            <p className="bg-primary/5 border border-primary/20 rounded px-3 py-2 whitespace-pre-wrap text-[13px]">{log.replyDraft}</p>
+                            <Textarea
+                              value={autoReplyDraftValue(log)}
+                              onChange={(e) => setEditedAutoReplyDrafts(prev => ({ ...prev, [log.id]: e.target.value }))}
+                              rows={Math.max(5, Math.min(12, autoReplyDraftValue(log).split("\n").length + 3))}
+                              disabled={log.replySent}
+                              className="bg-primary/5 border-primary/20 text-[13px] leading-relaxed resize-y"
+                              data-testid={`textarea-ai-draft-${log.id}`}
+                            />
                           </div>
                         )}
 
@@ -1742,15 +5316,46 @@ export default function InboxPage() {
                         )}
                       </div>
 
-                      {!log.replySent && log.replyDraft && log.status !== "dismissed" && (
-                        <div className="flex gap-2 mt-3 pt-3 border-t">
+                      {!log.replySent && log.status !== "dismissed" && (
+                        <div className="flex gap-2 mt-3 pt-3 border-t flex-wrap">
+                          {log.replyDraft && (
+                            <>
+                              <Button
+                                size="sm"
+                                onClick={() => sendDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
+                                disabled={sendDraftReply.isPending || !autoReplyDraftValue(log).trim()}
+                                data-testid={`button-send-draft-${log.id}`}
+                              >
+                                <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> Send
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => saveDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
+                                disabled={saveDraftReply.isPending || !autoReplyDraftValue(log).trim()}
+                                data-testid={`button-save-draft-${log.id}`}
+                              >
+                                <FileText className="h-3.5 w-3.5 mr-1.5" /> Save
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => analyzeDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
+                                disabled={analyzeDraftReply.isPending || !autoReplyDraftValue(log).trim()}
+                                data-testid={`button-save-analyze-draft-${log.id}`}
+                              >
+                                <Sparkles className={`h-3.5 w-3.5 mr-1.5 ${analyzeDraftReply.isPending ? "animate-spin" : ""}`} /> Save & Analyze
+                              </Button>
+                            </>
+                          )}
                           <Button
                             size="sm"
-                            onClick={() => sendDraftReply.mutate(log.id)}
-                            disabled={sendDraftReply.isPending}
-                            data-testid={`button-send-draft-${log.id}`}
+                            variant="outline"
+                            onClick={() => redoDraftReply.mutate(log.id)}
+                            disabled={redoDraftReply.isPending}
+                            data-testid={`button-redo-draft-${log.id}`}
                           >
-                            <Send className="h-3.5 w-3.5 mr-1.5" /> Send Reply
+                            <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${redoDraftReply.isPending ? "animate-spin" : ""}`} /> Redo AI Draft
                           </Button>
                           <Button
                             size="sm"
@@ -1759,7 +5364,7 @@ export default function InboxPage() {
                             disabled={dismissDraft.isPending}
                             data-testid={`button-dismiss-draft-${log.id}`}
                           >
-                            <X className="h-3.5 w-3.5 mr-1.5" /> Dismiss
+                            <X className="h-3.5 w-3.5 mr-1.5" /> Decline
                           </Button>
                         </div>
                       )}
@@ -1779,6 +5384,310 @@ export default function InboxPage() {
           onSave={saveTemplate}
           onClose={() => setTemplateDialog({ open: false, template: null })}
         />
+      </Dialog>
+
+      <Dialog open={templatePreview.open} onOpenChange={(open) => setTemplatePreview((prev) => ({ ...prev, open }))}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{templatePreview.title || "Template preview"}</DialogTitle>
+          </DialogHeader>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Badge variant={templateChannelBadgeVariant(templatePreview.channel)}>
+              {templateChannelLabel(templatePreview.channel)}
+            </Badge>
+            <span>
+              {templatePreview.channel === "sms"
+                ? "Short draft intended for the Text button."
+                : "Formal draft intended for Guesty/OTA/email messaging."}
+            </span>
+          </div>
+          <Textarea
+            value={templatePreview.body}
+            readOnly
+            rows={16}
+            className="font-mono text-sm leading-relaxed"
+            data-testid="textarea-template-preview"
+          />
+          {/\{\{guest_invoice\}\}/i.test(templatePreview.body) && (
+            <p className="text-[11px] text-muted-foreground border rounded-md bg-muted/40 px-2.5 py-2">
+              Guesty note: the invoice/payment variable requires Guesty invoice/payment processing to be configured for this reservation. If the channel does not expand the variable, send the invoice from Guesty and keep this inbox message as the audit-trail request.
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setTemplatePreview({ open: false, title: "", body: "", channel: "guesty" })}
+              data-testid="button-template-preview-cancel"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                setReplyText(templatePreview.body);
+                setTemplatePreview({ open: false, title: "", body: "", channel: "guesty" });
+                toast({
+                  title: "Draft loaded",
+                  description: templatePreview.channel === "sms"
+                    ? "Review in the composer, then use Send Text."
+                    : "Review in the composer, then send in Guesty.",
+                });
+              }}
+              disabled={!templatePreview.body.trim()}
+              data-testid="button-template-preview-use"
+            >
+              <FileText className="h-3 w-3 mr-1" /> Use in Composer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!callbackCall} onOpenChange={(open) => {
+        if (!open) {
+          setCallbackCall(null);
+          setCallbackSummary("");
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Complete guest callback</DialogTitle>
+            <DialogDescription>
+              Save what the guest said. This clears the missed-call notification and stores an internal note on the Guest Inbox thread.
+            </DialogDescription>
+          </DialogHeader>
+          {callbackCall && (
+            <div className="space-y-3">
+              <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                <div className="font-medium">{callbackCall.guestName || "Unknown caller"}</div>
+                <div className="text-muted-foreground">
+                  {formatPhone(callbackCall.guestPhone)}
+                  {callbackCall.callCompletedAt && ` · ${new Date(callbackCall.callCompletedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="inbox-callback-summary">Said</Label>
+                <Textarea
+                  id="inbox-callback-summary"
+                  className="mt-1 min-h-[110px]"
+                  value={callbackSummary}
+                  onChange={(event) => setCallbackSummary(event.target.value)}
+                  placeholder="Example: Guest confirmed arrival time and said they found the check-in email."
+                  data-testid="textarea-inbox-callback-summary"
+                />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setCallbackCall(null)} disabled={completeCallback.isPending}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => completeCallback.mutate()}
+                  disabled={completeCallback.isPending || callbackSummary.trim().length < 2}
+                  data-testid="button-inbox-save-callback"
+                >
+                  {completeCallback.isPending && <RefreshCw className="mr-2 h-4 w-4 animate-spin" />}
+                  Save callback
+                </Button>
+              </DialogFooter>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Payment-receipt dialog. Pre-populated from Guesty's reservation
+          money fields — booking total + paid-to-date — and asks the
+          operator for the amount/date of the payment they just took.
+          The body live-renders in the textarea until the operator types
+          into it (then their edits stick). Sends through the same Guesty
+          /communication/conversations/:id/send-message proxy as the
+          inline reply composer. */}
+      <Dialog
+        open={receiptDialog.open}
+        onOpenChange={(open) => {
+          if (!open) resetReceiptState();
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>
+              Send payment receipt
+              {receiptDialog.guestFirstName ? ` to ${receiptDialog.guestFirstName}` : ""}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-1">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="receipt-payment-amount">Payment amount (USD)</Label>
+                <Input
+                  id="receipt-payment-amount"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={receiptPaymentAmount}
+                  onChange={(e) => setReceiptPaymentAmount(e.target.value)}
+                  placeholder="200.00"
+                  data-testid="input-receipt-payment-amount"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  The charge you just ran on the guest's card.
+                </p>
+              </div>
+              <div>
+                <Label htmlFor="receipt-payment-date">Payment date</Label>
+                <Input
+                  id="receipt-payment-date"
+                  type="date"
+                  value={receiptPaymentDate}
+                  onChange={(e) => setReceiptPaymentDate(e.target.value)}
+                  data-testid="input-receipt-payment-date"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Defaults to today.
+                </p>
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="receipt-total-price">Booking total (USD)</Label>
+              <Input
+                id="receipt-total-price"
+                type="number"
+                min={0}
+                step="0.01"
+                value={receiptTotalPrice}
+                onChange={(e) => setReceiptTotalPrice(e.target.value)}
+                placeholder="1500.00"
+                className="max-w-xs"
+                data-testid="input-receipt-total-price"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Pre-filled from Guesty.
+              </p>
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <Label>Previous payments</Label>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() =>
+                    setReceiptPastPayments((rows) => [
+                      ...rows,
+                      { id: newReceiptRowId(), date: "", amount: "" },
+                    ])
+                  }
+                  data-testid="button-receipt-add-payment"
+                >
+                  <Plus className="h-3 w-3 mr-1" /> Add payment
+                </Button>
+              </div>
+              {receiptPaymentsLoading ? (
+                <p className="text-[11px] text-muted-foreground italic">
+                  Loading payment history from Guesty…
+                </p>
+              ) : receiptPastPayments.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground italic">
+                  No previous payments on file. Today's charge below will be the only line item — add rows here if you took earlier payments outside Guesty.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {receiptPastPayments.map((row) => (
+                    <div key={row.id} className="flex items-center gap-2">
+                      <Input
+                        type="date"
+                        value={row.date}
+                        onChange={(e) =>
+                          setReceiptPastPayments((rows) =>
+                            rows.map((r) => (r.id === row.id ? { ...r, date: e.target.value } : r)),
+                          )
+                        }
+                        className="w-44"
+                        data-testid={`input-receipt-past-date-${row.id}`}
+                      />
+                      <Input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={row.amount}
+                        onChange={(e) =>
+                          setReceiptPastPayments((rows) =>
+                            rows.map((r) => (r.id === row.id ? { ...r, amount: e.target.value } : r)),
+                          )
+                        }
+                        placeholder="amount"
+                        className="flex-1"
+                        data-testid={`input-receipt-past-amount-${row.id}`}
+                      />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-9 w-9 p-0 shrink-0"
+                        onClick={() =>
+                          setReceiptPastPayments((rows) => rows.filter((r) => r.id !== row.id))
+                        }
+                        data-testid={`button-receipt-remove-payment-${row.id}`}
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div>
+              <Label htmlFor="receipt-body">Message preview</Label>
+              <Textarea
+                id="receipt-body"
+                value={receiptBody}
+                onChange={(e) => {
+                  setReceiptBody(e.target.value);
+                  setReceiptBodyTouched(true);
+                }}
+                rows={14}
+                className="font-mono text-xs"
+                data-testid="textarea-receipt-body"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                {receiptBodyTouched
+                  ? "You've edited the message — it won't auto-update from the fields above anymore."
+                  : "The message regenerates as you change the fields above. Edit the textarea to override."}
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={resetReceiptState}
+              data-testid="button-receipt-cancel"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const amt = parseFloat(receiptPaymentAmount);
+                if (!Number.isFinite(amt) || amt <= 0) {
+                  toast({ title: "Enter a payment amount greater than 0", variant: "destructive" });
+                  return;
+                }
+                if (!receiptBody.trim()) {
+                  toast({ title: "Receipt message is empty", variant: "destructive" });
+                  return;
+                }
+                sendReceipt.mutate();
+              }}
+              disabled={sendReceipt.isPending || !receiptPaymentAmount || !receiptBody.trim()}
+              data-testid="button-receipt-send"
+            >
+              {sendReceipt.isPending ? (
+                <>
+                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Sending…
+                </>
+              ) : (
+                <>
+                  <Send className="h-3 w-3 mr-1" /> Send receipt
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </div>
   );

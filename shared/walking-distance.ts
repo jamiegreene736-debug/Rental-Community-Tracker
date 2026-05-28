@@ -17,6 +17,7 @@
 
 export const WALKING_SPEED_MPH = 3;
 export const PATH_BEND_FACTOR = 1.15; // paths inside resorts bend ~15% longer than straight-line
+export const MAX_BUY_IN_WALK_MINUTES = 10;
 
 export type WalkResult = {
   minutes: number;       // rounded up to nearest minute
@@ -91,7 +92,7 @@ export function describeWalkFromMinutes(minutes: number, resortName?: string): s
 }
 
 export function fallbackWalkForResort(resortName?: string | null): WalkResult {
-  const mins = (resortName && RESORT_DEFAULT_WALK_MINUTES[resortName]) ?? 3;
+  const mins = resortName ? RESORT_DEFAULT_WALK_MINUTES[resortName] ?? 3 : 3;
   return {
     minutes: mins,
     feet: Math.round(mins * (WALKING_SPEED_MPH / 60) * 5280 / PATH_BEND_FACTOR),

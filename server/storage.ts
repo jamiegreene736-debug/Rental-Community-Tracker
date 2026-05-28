@@ -1,6 +1,8 @@
 import {
   type User, type InsertUser,
   type BuyIn, type InsertBuyIn,
+  type ReservationCancellationAudit, type InsertReservationCancellationAudit,
+  type ManualReservation, type InsertManualReservation,
   type LodgifyBooking, type InsertLodgifyBooking,
   type ScannerRun, type InsertScannerRun,
   type AvailabilityScan, type InsertAvailabilityScan,
@@ -10,14 +12,106 @@ import {
   type GuestyPropertyMap, type InsertGuestyPropertyMap,
   type MessageTemplate, type InsertMessageTemplate,
   type AutoReplyLog, type InsertAutoReplyLog,
+  type AutoReplyStyleExample, type InsertAutoReplyStyleExample,
+  type BookingConfirmation, type InsertBookingConfirmation,
+  type QuoSmsMessage, type InsertQuoSmsMessage,
+  type QuoCallEvent, type InsertQuoCallEvent,
+  type GuestInboxInternalNote, type InsertGuestInboxInternalNote,
+  type GuestPhoneOverride, type InsertGuestPhoneOverride,
   type PhotoLabel, type InsertPhotoLabel,
+  type PhotoListingCheck, type InsertPhotoListingCheck,
+  type PhotoListingAlert, type InsertPhotoListingAlert,
+  type PhotoSync, type InsertPhotoSync,
+  type PhotoSyncAudit, type InsertPhotoSyncAudit,
   type ScannerBlock, type InsertScannerBlock,
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
-  users, buyIns, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, photoLabels, scannerBlocks, scannerOverrides, scannerSchedule,
+  type ScannerRunHistory, type InsertScannerRunHistory,
+  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, autoReplyStyleExamples, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
+  type PropertyMarketRate, type InsertPropertyMarketRate,
+  type PricingUpdateLog, type InsertPricingUpdateLog,
+  type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
+
+function listingUrlKey(url: string | null | undefined): string {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    for (const key of [
+      "checkin",
+      "checkout",
+      "check_in",
+      "check_out",
+      "arrival",
+      "departure",
+      "startDate",
+      "endDate",
+      "adults",
+      "group_adults",
+    ]) {
+      u.searchParams.delete(key);
+    }
+    return `${u.hostname.replace(/^www\./, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase()}`;
+  } catch {
+    return String(url).split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+function normalizedIdentityText(value: string | null | undefined): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isGenericRentalTitle(title: string): boolean {
+  const t = normalizedIdentityText(title);
+  if (!t) return true;
+  if (/^(?:condo|apartment|townhouse|home|house|villa|rental unit|guest suite|loft|cottage|bungalow|place)\s+in\s+[a-z ]+$/.test(t)) return true;
+  if (/^(?:beautiful|lovely|spacious|modern|luxury|elegant)?\s*(?:\d+\s*(?:br|bedroom)\s*)?(?:condo|apartment|townhouse|home|house|villa|rental)$/.test(t)) return true;
+  return false;
+}
+
+function titleFromBuyInNotes(notes: string | null | undefined): string {
+  const raw = String(notes ?? "");
+  const firstClause = raw.split(" · ")[0] ?? raw;
+  const dash = firstClause.indexOf(" — ");
+  if (dash >= 0) return firstClause.slice(dash + 3).trim();
+  const bought = firstClause.match(/^Bought via .+? — (.+)$/i);
+  return bought?.[1]?.trim() ?? "";
+}
+
+function urlsFromText(text: string | null | undefined): string[] {
+  const raw = String(text ?? "");
+  return [...raw.matchAll(/https?:\/\/[^\s)]+/g)].map((m) => m[0]);
+}
+
+function buyInIdentityKeys(row: Pick<BuyIn, "airbnbListingUrl" | "notes">): Set<string> {
+  const keys = new Set<string>();
+  const primaryKey = listingUrlKey(row.airbnbListingUrl);
+  if (primaryKey) keys.add(`url:${primaryKey}`);
+  for (const url of urlsFromText(row.notes)) {
+    const key = listingUrlKey(url);
+    if (key) keys.add(`url:${key}`);
+  }
+  const titleKey = normalizedIdentityText(titleFromBuyInNotes(row.notes));
+  if (titleKey.length >= 12 && !isGenericRentalTitle(titleKey)) {
+    keys.add(`title:${titleKey}`);
+  }
+  return keys;
+}
+
+function identitySetsOverlap(a: Set<string>, b: Set<string>): boolean {
+  for (const key of a) {
+    if (b.has(key)) return true;
+  }
+  return false;
+}
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -35,6 +129,17 @@ export interface IStorage {
   getBuyInsByReservation(reservationId: string): Promise<BuyIn[]>;
   attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined>;
   detachBuyIn(buyInId: number): Promise<BuyIn | undefined>;
+
+  upsertReservationCancellationAudit(audit: InsertReservationCancellationAudit): Promise<ReservationCancellationAudit>;
+  getReservationCancellationAudits(propertyId: number): Promise<ReservationCancellationAudit[]>;
+  getAllReservationCancellationAudits(): Promise<ReservationCancellationAudit[]>;
+  updateReservationCancellationAudit(id: number, data: Partial<Pick<InsertReservationCancellationAudit, "operatorStatus" | "operatorNotes">>): Promise<ReservationCancellationAudit | undefined>;
+
+  createManualReservation(reservation: InsertManualReservation): Promise<ManualReservation>;
+  getManualReservations(filters?: { propertyId?: number; includePast?: boolean }): Promise<ManualReservation[]>;
+  getManualReservation(id: number): Promise<ManualReservation | undefined>;
+  updateManualReservation(id: number, data: Partial<InsertManualReservation>): Promise<ManualReservation | undefined>;
+  deleteManualReservation(id: number): Promise<boolean>;
 
   upsertLodgifyBooking(booking: InsertLodgifyBooking): Promise<LodgifyBooking>;
   getLodgifyBookings(): Promise<LodgifyBooking[]>;
@@ -63,11 +168,22 @@ export interface IStorage {
   updateCommunityDraft(id: number, data: Partial<InsertCommunityDraft>): Promise<CommunityDraft | undefined>;
   deleteCommunityDraft(id: number): Promise<boolean>;
 
+  upsertPropertyMarketRate(input: InsertPropertyMarketRate): Promise<PropertyMarketRate>;
+  deletePropertyMarketRate(propertyId: number, bedrooms: number): Promise<void>;
+  getPropertyMarketRates(propertyId: number): Promise<PropertyMarketRate[]>;
+  getAllPropertyMarketRates(): Promise<PropertyMarketRate[]>;
+  createPricingUpdateLog(input: InsertPricingUpdateLog): Promise<PricingUpdateLog>;
+  getPricingUpdateLogs(filters?: { propertyId?: number; limit?: number }): Promise<PricingUpdateLog[]>;
+  getPropertyBuyInMarkets(propertyId: number): Promise<PropertyBuyInMarkets | undefined>;
+  upsertPropertyBuyInMarkets(input: InsertPropertyBuyInMarkets): Promise<PropertyBuyInMarkets>;
+  deletePropertyBuyInMarkets(propertyId: number): Promise<boolean>;
+
   getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]>;
   upsertLodgifyPropertyId(propertyId: number, lodgifyPropertyId: string): Promise<LodgifyPropertyMap>;
   deleteLodgifyPropertyId(propertyId: number): Promise<boolean>;
 
   createUnitSwap(swap: InsertUnitSwap): Promise<UnitSwap>;
+  getAllUnitSwaps(): Promise<UnitSwap[]>;
   getUnitSwaps(propertyId: number): Promise<UnitSwap[]>;
   getLatestUnitSwap(propertyId: number, unitId: string): Promise<UnitSwap | undefined>;
   deleteUnitSwap(id: number): Promise<boolean>;
@@ -89,6 +205,26 @@ export interface IStorage {
   getAutoReplyLog(id: number): Promise<AutoReplyLog | undefined>;
   updateAutoReplyLog(id: number, data: Partial<InsertAutoReplyLog>): Promise<AutoReplyLog | undefined>;
   getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined>;
+  createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample>;
+  getRecentAutoReplyStyleExamples(limit?: number): Promise<AutoReplyStyleExample[]>;
+
+  createBookingConfirmation(b: InsertBookingConfirmation): Promise<BookingConfirmation>;
+  getBookingConfirmationByReservationId(reservationId: string): Promise<BookingConfirmation | undefined>;
+  getRecentBookingConfirmations(limit?: number): Promise<BookingConfirmation[]>;
+
+  createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
+  getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
+  getQuoSmsMessageByProviderId(providerMessageId: string): Promise<QuoSmsMessage | undefined>;
+  upsertQuoCallEvent(c: InsertQuoCallEvent): Promise<QuoCallEvent>;
+  getQuoCallEventsByConversation(conversationId: string, limit?: number): Promise<QuoCallEvent[]>;
+  getUnacknowledgedQuoCallEvents(limit?: number): Promise<QuoCallEvent[]>;
+  acknowledgeQuoCallEvent(id: number): Promise<QuoCallEvent | undefined>;
+  acknowledgeQuoCallEventsByConversation(conversationId: string): Promise<number>;
+  createGuestInboxInternalNote(input: InsertGuestInboxInternalNote): Promise<GuestInboxInternalNote>;
+  getGuestInboxInternalNotes(conversationId: string, limit?: number): Promise<GuestInboxInternalNote[]>;
+  upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride>;
+  getGuestPhoneOverride(conversationId: string): Promise<GuestPhoneOverride | undefined>;
+  getGuestPhoneOverrideByPhone(phone: string): Promise<GuestPhoneOverride | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -137,6 +273,16 @@ export class DatabaseStorage implements IStorage {
     //   2. Fully cover the booking window: buyIn.checkIn <= booking.checkIn AND buyIn.checkOut >= booking.checkOut
     //   3. Be status=active
     //   4. Not already be attached to any reservation
+    //   5. Have a non-zero costPaid. Auto-fill creates buy-in records
+    //      with costPaid=0 when it falls back to the unpriced-PM
+    //      fallback (no priced bookable inventory found). Detaching
+    //      unlinks the reservation but doesn't delete the record, so
+    //      these orphan $0 rows accumulate across auto-fill runs and
+    //      flood the picker. Filter them out — a $0 buy-in isn't a
+    //      useful candidate to attach (the operator still needs to
+    //      negotiate a price with the PM). Buy-ins with a real price
+    //      that happen to be 0 (comp stays etc.) can be entered via
+    //      the manual create flow at any cost > 0.
     const rows = await db
       .select()
       .from(buyIns)
@@ -148,6 +294,7 @@ export class DatabaseStorage implements IStorage {
           gte(buyIns.checkOut, params.checkOut),
           eq(buyIns.status, "active"),
           sql`${buyIns.guestyReservationId} IS NULL`,
+          sql`${buyIns.costPaid} > 0`,
         ),
       );
     return rows;
@@ -177,6 +324,23 @@ export class DatabaseStorage implements IStorage {
       );
     }
 
+    // Refuse if another slot in the same reservation already points to
+    // the same physical listing. Multi-unit reservations need distinct
+    // units; the identity set covers normalized URL, URL(s) embedded in
+    // auto-fill notes (photo-match anchors), and specific non-generic
+    // listing titles.
+    const existingIdentity = buyInIdentityKeys(existing);
+    if (existingIdentity.size > 0) {
+      const sameListing = currentAttachments.find(
+        (b) => b.id !== buyInId && identitySetsOverlap(buyInIdentityKeys(b), existingIdentity),
+      );
+      if (sameListing) {
+        throw new Error(
+          `Reservation ${reservationId} already has buy-in ${sameListing.id} attached for the same physical listing on unit "${sameListing.unitId}" — choose a different unit`,
+        );
+      }
+    }
+
     const [row] = await db
       .update(buyIns)
       .set({ guestyReservationId: reservationId, attachedAt: new Date() })
@@ -192,6 +356,125 @@ export class DatabaseStorage implements IStorage {
       .where(eq(buyIns.id, buyInId))
       .returning();
     return row;
+  }
+
+  async upsertReservationCancellationAudit(audit: InsertReservationCancellationAudit): Promise<ReservationCancellationAudit> {
+    const [existing] = await db
+      .select()
+      .from(reservationCancellationAudits)
+      .where(eq(reservationCancellationAudits.guestyReservationId, audit.guestyReservationId))
+      .limit(1);
+
+    if (existing) {
+      const [row] = await db
+        .update(reservationCancellationAudits)
+        .set({
+          ...audit,
+          operatorStatus: existing.operatorStatus,
+          operatorNotes: existing.operatorNotes,
+          updatedAt: new Date(),
+        })
+        .where(eq(reservationCancellationAudits.id, existing.id))
+        .returning();
+      return row;
+    }
+
+    const [row] = await db.insert(reservationCancellationAudits).values(audit).returning();
+    return row;
+  }
+
+  async getReservationCancellationAudits(propertyId: number): Promise<ReservationCancellationAudit[]> {
+    try {
+      return await db
+        .select()
+        .from(reservationCancellationAudits)
+        .where(eq(reservationCancellationAudits.propertyId, propertyId))
+        .orderBy(desc(reservationCancellationAudits.cancelledAt), desc(reservationCancellationAudits.createdAt));
+    } catch (error: any) {
+      if (error?.code === "42P01" || /reservation_cancellation_audits.*does not exist/i.test(String(error?.message ?? ""))) {
+        console.warn("reservation_cancellation_audits table is missing; returning no cancellation audits until db:push runs");
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async getAllReservationCancellationAudits(): Promise<ReservationCancellationAudit[]> {
+    try {
+      return await db
+        .select()
+        .from(reservationCancellationAudits)
+        .orderBy(desc(reservationCancellationAudits.cancelledAt), desc(reservationCancellationAudits.createdAt));
+    } catch (error: any) {
+      if (error?.code === "42P01" || /reservation_cancellation_audits.*does not exist/i.test(String(error?.message ?? ""))) {
+        console.warn("reservation_cancellation_audits table is missing; returning no cancellation audits until db:push runs");
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async updateReservationCancellationAudit(
+    id: number,
+    data: Partial<Pick<InsertReservationCancellationAudit, "operatorStatus" | "operatorNotes">>,
+  ): Promise<ReservationCancellationAudit | undefined> {
+    const [row] = await db
+      .update(reservationCancellationAudits)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(reservationCancellationAudits.id, id))
+      .returning();
+    return row;
+  }
+
+  async createManualReservation(reservation: InsertManualReservation): Promise<ManualReservation> {
+    const [row] = await db.insert(manualReservations).values(reservation).returning();
+    return row;
+  }
+
+  async getManualReservations(filters?: { propertyId?: number; includePast?: boolean }): Promise<ManualReservation[]> {
+    const clauses = [eq(manualReservations.status, "active")];
+    if (filters?.propertyId) {
+      clauses.push(eq(manualReservations.propertyId, filters.propertyId));
+    }
+    if (!filters?.includePast) {
+      clauses.push(gte(manualReservations.checkOut, new Date().toISOString().slice(0, 10)));
+    }
+    try {
+      return await db
+        .select()
+        .from(manualReservations)
+        .where(and(...clauses))
+        .orderBy(manualReservations.checkIn);
+    } catch (error: any) {
+      if (error?.code === "42P01" || /manual_reservations.*does not exist/i.test(String(error?.message ?? ""))) {
+        console.warn("manual_reservations table is missing; returning no manual reservations until db:push runs");
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async getManualReservation(id: number): Promise<ManualReservation | undefined> {
+    const [row] = await db.select().from(manualReservations).where(eq(manualReservations.id, id));
+    return row;
+  }
+
+  async updateManualReservation(id: number, data: Partial<InsertManualReservation>): Promise<ManualReservation | undefined> {
+    const [row] = await db
+      .update(manualReservations)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(manualReservations.id, id))
+      .returning();
+    return row;
+  }
+
+  async deleteManualReservation(id: number): Promise<boolean> {
+    const [row] = await db
+      .update(manualReservations)
+      .set({ status: "deleted", updatedAt: new Date() })
+      .where(eq(manualReservations.id, id))
+      .returning();
+    return !!row;
   }
 
   async upsertLodgifyBooking(booking: InsertLodgifyBooking): Promise<LodgifyBooking> {
@@ -350,6 +633,107 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
+  // Per-property live market rates. One row per (propertyId, bedrooms)
+  // pair — `upsertPropertyMarketRate` deletes any existing row for that
+  // pair and re-inserts so callers don't need to track previous IDs.
+  // Read paths return `PropertyMarketRate[]` ordered by bedrooms ASC so
+  // a property with mixed-BR units gets a stable iteration order.
+  async upsertPropertyMarketRate(input: InsertPropertyMarketRate): Promise<PropertyMarketRate> {
+    await db
+      .delete(propertyMarketRates)
+      .where(and(
+        eq(propertyMarketRates.propertyId, input.propertyId),
+        eq(propertyMarketRates.bedrooms, input.bedrooms),
+      ));
+    const [row] = await db.insert(propertyMarketRates).values(input as typeof propertyMarketRates.$inferInsert).returning();
+    return row;
+  }
+
+  // PR #291: clear out stale rows when a refresh scan returns no
+  // usable basis. Without this, a previous scan's bad data (e.g. the
+  // booking-regex bug surfaced 2026-04-29 that persisted $67 for
+  // Kaha Lani 3BR) sticks around forever — the route's upsert is
+  // skipped when basis is null/0, so the bad row never gets
+  // overwritten. Deleting on empty-scan lets the Pricing tab fall
+  // through to BUY_IN_RATES static which is at least sane.
+  async deletePropertyMarketRate(propertyId: number, bedrooms: number): Promise<void> {
+    await db
+      .delete(propertyMarketRates)
+      .where(and(
+        eq(propertyMarketRates.propertyId, propertyId),
+        eq(propertyMarketRates.bedrooms, bedrooms),
+      ));
+  }
+
+  async getPropertyMarketRates(propertyId: number): Promise<PropertyMarketRate[]> {
+    return db
+      .select()
+      .from(propertyMarketRates)
+      .where(eq(propertyMarketRates.propertyId, propertyId))
+      .orderBy(propertyMarketRates.bedrooms);
+  }
+
+  async getAllPropertyMarketRates(): Promise<PropertyMarketRate[]> {
+    return db
+      .select()
+      .from(propertyMarketRates)
+      .orderBy(propertyMarketRates.propertyId, propertyMarketRates.bedrooms);
+  }
+
+  async createPricingUpdateLog(input: InsertPricingUpdateLog): Promise<PricingUpdateLog> {
+    const [row] = await db.insert(pricingUpdateLogs).values(input as typeof pricingUpdateLogs.$inferInsert).returning();
+    return row;
+  }
+
+  async getPricingUpdateLogs(filters: { propertyId?: number; limit?: number } = {}): Promise<PricingUpdateLog[]> {
+    const limit = Math.min(Math.max(filters.limit ?? 50, 1), 250);
+    if (typeof filters.propertyId === "number" && Number.isFinite(filters.propertyId)) {
+      return db
+        .select()
+        .from(pricingUpdateLogs)
+        .where(eq(pricingUpdateLogs.propertyId, filters.propertyId))
+        .orderBy(desc(pricingUpdateLogs.createdAt))
+        .limit(limit);
+    }
+    return db
+      .select()
+      .from(pricingUpdateLogs)
+      .orderBy(desc(pricingUpdateLogs.createdAt))
+      .limit(limit);
+  }
+
+  async getPropertyBuyInMarkets(propertyId: number): Promise<PropertyBuyInMarkets | undefined> {
+    const [row] = await db
+      .select()
+      .from(propertyBuyInMarkets)
+      .where(eq(propertyBuyInMarkets.propertyId, propertyId));
+    return row;
+  }
+
+  async upsertPropertyBuyInMarkets(input: InsertPropertyBuyInMarkets): Promise<PropertyBuyInMarkets> {
+    const [row] = await db
+      .insert(propertyBuyInMarkets)
+      .values({ ...input, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: propertyBuyInMarkets.propertyId,
+        set: {
+          baseCommunity: input.baseCommunity,
+          recommendedMarkets: input.recommendedMarkets ?? [],
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async deletePropertyBuyInMarkets(propertyId: number): Promise<boolean> {
+    const rows = await db
+      .delete(propertyBuyInMarkets)
+      .where(eq(propertyBuyInMarkets.propertyId, propertyId))
+      .returning({ propertyId: propertyBuyInMarkets.propertyId });
+    return rows.length > 0;
+  }
+
   async getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]> {
     return db.select().from(lodgifyPropertyMap).orderBy(lodgifyPropertyMap.propertyId);
   }
@@ -376,6 +760,10 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  async getAllUnitSwaps(): Promise<UnitSwap[]> {
+    return db.select().from(unitSwaps).orderBy(desc(unitSwaps.createdAt));
+  }
+
   async getUnitSwaps(propertyId: number): Promise<UnitSwap[]> {
     return db.select().from(unitSwaps).where(eq(unitSwaps.propertyId, propertyId)).orderBy(desc(unitSwaps.createdAt));
   }
@@ -400,12 +788,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async upsertGuestyPropertyMap(propertyId: number, guestyListingId: string): Promise<GuestyPropertyMap> {
-    const [result] = await db
+    const [updated] = await db
+      .update(guestyPropertyMap)
+      .set({ guestyListingId, updatedAt: new Date() })
+      .where(eq(guestyPropertyMap.propertyId, propertyId))
+      .returning();
+    if (updated) return updated;
+
+    const [inserted] = await db
       .insert(guestyPropertyMap)
       .values({ propertyId, guestyListingId })
-      .onConflictDoUpdate({ target: guestyPropertyMap.propertyId, set: { guestyListingId, updatedAt: new Date() } })
       .returning();
-    return result;
+    return inserted;
   }
 
   async getGuestyPropertyMap(): Promise<GuestyPropertyMap[]> {
@@ -466,6 +860,221 @@ export class DatabaseStorage implements IStorage {
 
   async getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined> {
     const [row] = await db.select().from(autoReplyLog).where(eq(autoReplyLog.triggerPostId, postId)).limit(1);
+    return row;
+  }
+
+  async createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample> {
+    const [row] = await db.insert(autoReplyStyleExamples).values(example).returning();
+    return row;
+  }
+
+  async getRecentAutoReplyStyleExamples(limit = 8): Promise<AutoReplyStyleExample[]> {
+    return db.select().from(autoReplyStyleExamples).orderBy(desc(autoReplyStyleExamples.createdAt)).limit(limit);
+  }
+
+  // ── Booking confirmations ──
+  // Insert is performed AFTER a successful Guesty send, so a failed
+  // send leaves no row and gets retried on the next scheduler tick.
+  // The unique constraint on `reservationId` (in shared/schema.ts) is
+  // the safety net against rare double-sends — concurrent ticks both
+  // calling insert hit the constraint and one of them throws.
+  async createBookingConfirmation(b: InsertBookingConfirmation): Promise<BookingConfirmation> {
+    const [row] = await db.insert(bookingConfirmations).values(b).returning();
+    return row;
+  }
+
+  async getBookingConfirmationByReservationId(reservationId: string): Promise<BookingConfirmation | undefined> {
+    const [row] = await db.select().from(bookingConfirmations).where(eq(bookingConfirmations.reservationId, reservationId)).limit(1);
+    return row;
+  }
+
+  async getRecentBookingConfirmations(limit = 100): Promise<BookingConfirmation[]> {
+    return db.select().from(bookingConfirmations).orderBy(desc(bookingConfirmations.sentAt)).limit(limit);
+  }
+
+  // ── Quo SMS mirror ──
+  async createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage> {
+    const [row] = await db
+      .insert(quoSmsMessages)
+      .values(m)
+      .onConflictDoUpdate({
+        target: quoSmsMessages.providerMessageId,
+        set: {
+          conversationId: m.conversationId ?? null,
+          reservationId: m.reservationId ?? null,
+          guestName: m.guestName ?? null,
+          guestPhone: m.guestPhone,
+          fromNumber: m.fromNumber,
+          toNumber: m.toNumber,
+          direction: m.direction,
+          body: m.body,
+          status: m.status ?? null,
+          rawPayload: m.rawPayload ?? null,
+          sentAt: m.sentAt ?? new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getQuoSmsMessagesByConversation(conversationId: string, limit = 100): Promise<QuoSmsMessage[]> {
+    return db.select()
+      .from(quoSmsMessages)
+      .where(eq(quoSmsMessages.conversationId, conversationId))
+      .orderBy(desc(quoSmsMessages.sentAt))
+      .limit(limit);
+  }
+
+  async getQuoSmsMessageByProviderId(providerMessageId: string): Promise<QuoSmsMessage | undefined> {
+    const [row] = await db.select()
+      .from(quoSmsMessages)
+      .where(eq(quoSmsMessages.providerMessageId, providerMessageId))
+      .limit(1);
+    return row;
+  }
+
+  async upsertQuoCallEvent(c: InsertQuoCallEvent): Promise<QuoCallEvent> {
+    const [row] = await db.insert(quoCallEvents)
+      .values({
+        providerCallId: c.providerCallId,
+        conversationId: c.conversationId ?? null,
+        reservationId: c.reservationId ?? null,
+        guestName: c.guestName ?? null,
+        guestPhone: c.guestPhone,
+        fromNumber: c.fromNumber,
+        toNumber: c.toNumber,
+        direction: c.direction,
+        status: c.status ?? null,
+        disposition: c.disposition ?? "unknown",
+        durationSeconds: c.durationSeconds ?? null,
+        matchStrategy: c.matchStrategy ?? null,
+        matchConfidence: c.matchConfidence ?? null,
+        voicemailId: c.voicemailId ?? null,
+        voicemailStatus: c.voicemailStatus ?? null,
+        voicemailRecordingUrl: c.voicemailRecordingUrl ?? null,
+        voicemailTranscript: c.voicemailTranscript ?? null,
+        voicemailDurationSeconds: c.voicemailDurationSeconds ?? null,
+        rawPayload: c.rawPayload ?? null,
+        callStartedAt: c.callStartedAt ?? null,
+        callCompletedAt: c.callCompletedAt ?? null,
+        acknowledgedAt: c.acknowledgedAt ?? null,
+      })
+      .onConflictDoUpdate({
+        target: quoCallEvents.providerCallId,
+        set: {
+          conversationId: c.conversationId ?? null,
+          reservationId: c.reservationId ?? null,
+          guestName: c.guestName ?? null,
+          guestPhone: c.guestPhone,
+          fromNumber: c.fromNumber,
+          toNumber: c.toNumber,
+          direction: c.direction,
+          status: c.status ?? null,
+          disposition: c.disposition ?? "unknown",
+          durationSeconds: c.durationSeconds ?? null,
+          matchStrategy: c.matchStrategy ?? null,
+          matchConfidence: c.matchConfidence ?? null,
+          voicemailId: c.voicemailId ?? null,
+          voicemailStatus: c.voicemailStatus ?? null,
+          voicemailRecordingUrl: c.voicemailRecordingUrl ?? null,
+          voicemailTranscript: c.voicemailTranscript ?? null,
+          voicemailDurationSeconds: c.voicemailDurationSeconds ?? null,
+          rawPayload: c.rawPayload ?? null,
+          callStartedAt: c.callStartedAt ?? null,
+          callCompletedAt: c.callCompletedAt ?? null,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getQuoCallEventsByConversation(conversationId: string, limit = 50): Promise<QuoCallEvent[]> {
+    return db.select()
+      .from(quoCallEvents)
+      .where(eq(quoCallEvents.conversationId, conversationId))
+      .orderBy(desc(quoCallEvents.callCompletedAt), desc(quoCallEvents.createdAt))
+      .limit(limit);
+  }
+
+  async getUnacknowledgedQuoCallEvents(limit = 50): Promise<QuoCallEvent[]> {
+    return db.select()
+      .from(quoCallEvents)
+      .where(and(
+        sql`${quoCallEvents.acknowledgedAt} IS NULL`,
+        or(eq(quoCallEvents.disposition, "missed"), eq(quoCallEvents.disposition, "voicemail")),
+      ))
+      .orderBy(desc(quoCallEvents.callCompletedAt), desc(quoCallEvents.createdAt))
+      .limit(limit);
+  }
+
+  async acknowledgeQuoCallEvent(id: number): Promise<QuoCallEvent | undefined> {
+    const [row] = await db.update(quoCallEvents)
+      .set({ acknowledgedAt: new Date(), updatedAt: new Date() })
+      .where(eq(quoCallEvents.id, id))
+      .returning();
+    return row;
+  }
+
+  async acknowledgeQuoCallEventsByConversation(conversationId: string): Promise<number> {
+    const rows = await db.update(quoCallEvents)
+      .set({ acknowledgedAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(quoCallEvents.conversationId, conversationId),
+        sql`${quoCallEvents.acknowledgedAt} IS NULL`,
+        or(eq(quoCallEvents.disposition, "missed"), eq(quoCallEvents.disposition, "voicemail")),
+      ))
+      .returning({ id: quoCallEvents.id });
+    return rows.length;
+  }
+
+  async createGuestInboxInternalNote(input: InsertGuestInboxInternalNote): Promise<GuestInboxInternalNote> {
+    const [row] = await db.insert(guestInboxInternalNotes).values(input).returning();
+    return row;
+  }
+
+  async getGuestInboxInternalNotes(conversationId: string, limit = 50): Promise<GuestInboxInternalNote[]> {
+    return db.select()
+      .from(guestInboxInternalNotes)
+      .where(eq(guestInboxInternalNotes.conversationId, conversationId))
+      .orderBy(desc(guestInboxInternalNotes.createdAt))
+      .limit(limit);
+  }
+
+  async upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride> {
+    const [row] = await db.insert(guestPhoneOverrides)
+      .values(input)
+      .onConflictDoUpdate({
+        target: guestPhoneOverrides.conversationId,
+        set: {
+          reservationId: input.reservationId ?? null,
+          guestName: input.guestName ?? null,
+          phone: input.phone,
+          sourcePhone: input.sourcePhone ?? null,
+          preArrivalFormUrl: input.preArrivalFormUrl ?? null,
+          paymentUrl: input.paymentUrl ?? null,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getGuestPhoneOverride(conversationId: string): Promise<GuestPhoneOverride | undefined> {
+    const [row] = await db.select()
+      .from(guestPhoneOverrides)
+      .where(eq(guestPhoneOverrides.conversationId, conversationId))
+      .limit(1);
+    return row;
+  }
+
+  async getGuestPhoneOverrideByPhone(phone: string): Promise<GuestPhoneOverride | undefined> {
+    const wanted = String(phone ?? "").replace(/\D/g, "").slice(-10);
+    if (!wanted) return undefined;
+    const [row] = await db.select()
+      .from(guestPhoneOverrides)
+      .where(sql`right(regexp_replace(${guestPhoneOverrides.phone}, '\\D', '', 'g'), 10) = ${wanted}`)
+      .limit(1);
     return row;
   }
 
@@ -602,12 +1211,213 @@ export class DatabaseStorage implements IStorage {
 
   async markScannerScheduleRan(
     propertyId: number,
-    status: "ok" | "error",
+    status: "ok" | "error" | "skipped",
     summary: string,
   ): Promise<void> {
     await db.update(scannerSchedule)
       .set({ lastRunAt: new Date(), lastRunStatus: status, lastRunSummary: summary, updatedAt: new Date() })
       .where(eq(scannerSchedule.propertyId, propertyId));
+  }
+
+  async markScannerGuestyRatePush(
+    propertyId: number,
+    status: "ok" | "error",
+    summary: string,
+  ): Promise<void> {
+    const now = new Date();
+    const existing = await this.getScannerSchedule(propertyId);
+    if (existing) {
+      await db.update(scannerSchedule)
+        .set({
+          lastGuestyRatePushAt: now,
+          lastGuestyRatePushStatus: status,
+          lastGuestyRatePushSummary: summary,
+          updatedAt: now,
+        })
+        .where(eq(scannerSchedule.id, existing.id));
+      return;
+    }
+    await db.insert(scannerSchedule)
+      .values({
+        propertyId,
+        enabled: false,
+        lastGuestyRatePushAt: now,
+        lastGuestyRatePushStatus: status,
+        lastGuestyRatePushSummary: summary,
+      })
+      .returning();
+  }
+
+  // Append one row per scanner run (scheduled tick or manual "Run now").
+  // `scannerSchedule.lastRunSummary` holds only the latest; this table
+  // keeps the trail the UI renders as "Last N runs".
+  async recordScannerRun(data: InsertScannerRunHistory): Promise<void> {
+    await db.insert(scannerRunHistory).values(data);
+  }
+
+  async getRecentScannerRuns(propertyId: number, limit: number): Promise<ScannerRunHistory[]> {
+    return db.select().from(scannerRunHistory)
+      .where(eq(scannerRunHistory.propertyId, propertyId))
+      .orderBy(desc(scannerRunHistory.ranAt))
+      .limit(limit);
+  }
+
+  // ── Photo listing (reverse-image) checks ──
+  async upsertPhotoListingCheck(data: InsertPhotoListingCheck): Promise<PhotoListingCheck> {
+    const update = {
+      airbnbStatus: data.airbnbStatus,
+      vrboStatus: data.vrboStatus,
+      bookingStatus: data.bookingStatus,
+      airbnbMatches: data.airbnbMatches ?? null,
+      vrboMatches: data.vrboMatches ?? null,
+      bookingMatches: data.bookingMatches ?? null,
+      photosChecked: data.photosChecked ?? 0,
+      lensCalls: data.lensCalls ?? 0,
+      errorMessage: data.errorMessage ?? null,
+      checkedAt: new Date(),
+    };
+    // Production predates a unique index on photo_folder, so ON CONFLICT
+    // crashes there. Do a read-update-insert upsert that works on the
+    // existing table shape; schema cleanup can happen later via db:push.
+    const [existing] = await db.select()
+      .from(photoListingChecks)
+      .where(eq(photoListingChecks.photoFolder, data.photoFolder))
+      .orderBy(desc(photoListingChecks.checkedAt))
+      .limit(1);
+    if (existing) {
+      const [row] = await db.update(photoListingChecks)
+        .set(update)
+        .where(eq(photoListingChecks.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(photoListingChecks).values(data).returning();
+    return row;
+  }
+
+  async getAllPhotoListingChecks(): Promise<PhotoListingCheck[]> {
+    return db.select().from(photoListingChecks);
+  }
+
+  async getPhotoListingCheckByFolder(folder: string): Promise<PhotoListingCheck | undefined> {
+    const [row] = await db.select().from(photoListingChecks).where(eq(photoListingChecks.photoFolder, folder));
+    return row;
+  }
+
+  async createPhotoListingAlert(data: InsertPhotoListingAlert): Promise<PhotoListingAlert> {
+    const [row] = await db.insert(photoListingAlerts).values(data).returning();
+    return row;
+  }
+
+  async getUnacknowledgedPhotoListingAlerts(): Promise<PhotoListingAlert[]> {
+    return db.select().from(photoListingAlerts)
+      .where(sql`${photoListingAlerts.acknowledgedAt} IS NULL`)
+      .orderBy(desc(photoListingAlerts.detectedAt));
+  }
+
+  async getPhotoListingAlertById(id: number): Promise<PhotoListingAlert | undefined> {
+    const [row] = await db.select().from(photoListingAlerts).where(eq(photoListingAlerts.id, id));
+    return row;
+  }
+
+  // Sets photo_labels.perceptual_hash for an existing row. No-op if the
+  // row doesn't exist (folder/filename pair not yet labeled — caller
+  // will catch up on the next labeler pass).
+  async updatePhotoLabelHash(folder: string, filename: string, perceptualHash: string): Promise<void> {
+    await db.update(photoLabels)
+      .set({ perceptualHash })
+      .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)));
+  }
+
+  // Sets photo_labels.channel_usage (JSON-encoded) for one row. Used
+  // by the channel-photo-independence flow to record that a specific
+  // photo is currently live on a particular channel.
+  async updatePhotoLabelChannelUsage(folder: string, filename: string, channelUsage: string): Promise<void> {
+    await db.update(photoLabels)
+      .set({ channelUsage })
+      .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)));
+  }
+
+  // ── Channel-photo-independence: photo_sync ──
+  // One row per (guestyListingId, channel). Caller upserts: get existing
+  // by listing+channel and either insert a new row or update in place.
+  async getPhotoSync(guestyListingId: string, channel: string): Promise<PhotoSync | undefined> {
+    const [row] = await db.select().from(photoSync)
+      .where(and(eq(photoSync.guestyListingId, guestyListingId), eq(photoSync.channel, channel)));
+    return row;
+  }
+
+  async getPhotoSyncByListing(guestyListingId: string): Promise<PhotoSync[]> {
+    return db.select().from(photoSync).where(eq(photoSync.guestyListingId, guestyListingId));
+  }
+
+  async upsertPhotoSync(data: InsertPhotoSync): Promise<PhotoSync> {
+    const existing = await this.getPhotoSync(data.guestyListingId, data.channel);
+    if (existing) {
+      const [row] = await db.update(photoSync)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(photoSync.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(photoSync).values(data).returning();
+    return row;
+  }
+
+  // ── Channel-photo-independence: photo_sync_audit ──
+  // Append-only. Caller passes the action ("isolate" | "re-enable" |
+  // "replace" | "scan") and any structured details as a JSON blob.
+  async createPhotoSyncAudit(data: InsertPhotoSyncAudit): Promise<PhotoSyncAudit> {
+    const [row] = await db.insert(photoSyncAudit).values(data).returning();
+    return row;
+  }
+
+  async getRecentPhotoSyncAudit(guestyListingId: string, limit = 100): Promise<PhotoSyncAudit[]> {
+    return db.select().from(photoSyncAudit)
+      .where(eq(photoSyncAudit.guestyListingId, guestyListingId))
+      .orderBy(desc(photoSyncAudit.performedAt))
+      .limit(limit);
+  }
+
+  async getRecentPhotoListingAlerts(limit: number): Promise<PhotoListingAlert[]> {
+    return db.select().from(photoListingAlerts)
+      .orderBy(desc(photoListingAlerts.detectedAt))
+      .limit(limit);
+  }
+
+  async acknowledgePhotoListingAlert(id: number): Promise<PhotoListingAlert | undefined> {
+    const [row] = await db.update(photoListingAlerts)
+      .set({ acknowledgedAt: new Date() })
+      .where(eq(photoListingAlerts.id, id))
+      .returning();
+    return row;
+  }
+
+  async getStalePhotoListingFolders(olderThanMs: number, knownFolders: string[]): Promise<string[]> {
+    // Returns a list of folders that EITHER have no row yet OR were
+    // last checked more than `olderThanMs` ago. Caller supplies the
+    // `knownFolders` list (derived from unit-builder) so the scheduler
+    // doesn't scan folders that no longer belong to any property.
+    if (knownFolders.length === 0) return [];
+    const rows = await db.select().from(photoListingChecks);
+    const cutoff = new Date(Date.now() - olderThanMs);
+    const fresh = new Set(
+      rows
+        .filter((r) => {
+          if (!r.checkedAt || r.checkedAt <= cutoff) return false;
+          const allUnknown =
+            r.airbnbStatus === "unknown" &&
+            r.vrboStatus === "unknown" &&
+            r.bookingStatus === "unknown";
+          // A zero-photo all-unknown row is usually a discovery/runtime
+          // problem, not a healthy fresh scan. Do not let it pin the
+          // dashboard at grey A?/V?/B? for a full day.
+          if (allUnknown && r.photosChecked === 0) return false;
+          return true;
+        })
+        .map((r) => r.photoFolder),
+    );
+    return knownFolders.filter((f) => !fresh.has(f));
   }
 }
 

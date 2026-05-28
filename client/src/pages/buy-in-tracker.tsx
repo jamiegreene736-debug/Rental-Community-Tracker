@@ -45,6 +45,7 @@ import {
   AlertCircle,
   ExternalLink,
   Search,
+  Copy,
   Star,
   Sparkles,
   Award,
@@ -70,6 +71,7 @@ import {
   type UnitPricing,
 } from "@/data/pricing-data";
 import { getAllMultiUnitProperties, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { buildBuyInTrackerSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 
 type ReportSummary = {
   totalBuyInCost: number;
@@ -340,7 +342,7 @@ type AirbnbProperty = {
   accommodations: string[];
   images: string[];
   badges: string[];
-  source?: "airbnb" | "vrbo" | "suite-paradise";
+  source?: "airbnb" | "vrbo" | "booking" | "suite-paradise";
 };
 
 type SearchBucket = {
@@ -351,6 +353,7 @@ type SearchBucket = {
   searchUrl?: string;
   vrboSearchUrl?: string;
   note?: string;
+  geoFiltered?: boolean;
 };
 
 type AirbnbSearchResults = {
@@ -368,12 +371,39 @@ type OtherPlatformResults = {
   checkOut: string;
   unitsNeeded: { bedrooms: number; count: number }[];
   vrbo: Record<string, SearchBucket>;
+  booking: Record<string, SearchBucket>;
   suiteParadise: Record<string, SearchBucket>;
+};
+
+type SidecarSearchDiagnostics = {
+  daemonOnline?: boolean;
+  durationMs?: number;
+  snapshotCheckIn?: string;
+  snapshotCheckOut?: string;
+  channelAvailableCountsByBR?: Record<string, { airbnb?: number; vrbo?: number; booking?: number; pm?: number; total?: number }>;
+  channelCheapestByBR?: Record<string, { airbnb?: number | null; vrbo?: number | null; booking?: number | null; pm?: number | null }>;
+  warnings?: Array<{ channel?: string; severity?: string; message?: string; reason?: string }>;
+};
+
+type UnifiedBuyInTrackerSearch = {
+  community: string;
+  searchLocation: string;
+  checkIn: string;
+  checkOut: string;
+  unitsNeeded: { bedrooms: number; count: number }[];
+  searches: {
+    airbnb: Record<string, SearchBucket>;
+    vrbo: Record<string, SearchBucket>;
+    booking: Record<string, SearchBucket>;
+    "suite-paradise": Record<string, SearchBucket>;
+  };
+  diagnostics?: SidecarSearchDiagnostics;
 };
 
 const PLATFORM_LABELS: Record<string, { name: string; color: string; bookLabel: string }> = {
   airbnb: { name: "Airbnb", color: "text-rose-600 dark:text-rose-400", bookLabel: "Book on Airbnb" },
-  vrbo: { name: "VRBO & Others", color: "text-blue-600 dark:text-blue-400", bookLabel: "View Listing" },
+  vrbo: { name: "VRBO", color: "text-blue-600 dark:text-blue-400", bookLabel: "View VRBO Evidence" },
+  booking: { name: "Booking.com", color: "text-indigo-600 dark:text-indigo-400", bookLabel: "View Booking.com Evidence" },
   "suite-paradise": { name: "Suite Paradise", color: "text-emerald-600 dark:text-emerald-400", bookLabel: "View on Suite Paradise" },
 };
 
@@ -383,7 +413,9 @@ function BestBuyInFinder() {
   const [checkOut, setCheckOut] = useState("");
   const [results, setResults] = useState<AirbnbSearchResults | null>(null);
   const [otherResults, setOtherResults] = useState<OtherPlatformResults | null>(null);
+  const [sidecarDiagnostics, setSidecarDiagnostics] = useState<SidecarSearchDiagnostics | null>(null);
   const [loading, setLoading] = useState(false);
+  const [lastSearchError, setLastSearchError] = useState<string | null>(null);
   // Per-platform fee buffers — each tuned to that platform's actual fee structure
   // Airbnb: ~14% guest service fee + ~14.96% Hawaii TAT/GET ≈ 28% on top of search-result price
   // VRBO/Google Hotels: ~10% service fee + ~14.96% taxes ≈ 22%
@@ -408,14 +440,17 @@ function BestBuyInFinder() {
   const getEstimatedListingCost = (listing: AirbnbProperty): number => {
     const base = listing.price?.extracted_total_price ?? 0;
     if (base <= 0) return 0;
+    if (listing.price?.qualifier === "sidecar_all_in") return Math.round(base);
     const buf = listing.source === "airbnb" ? airbnbFeePercent
               : listing.source === "vrbo" ? vrboFeePercent
+              : listing.source === "booking" ? 0
               : 18; // direct/suite-paradise
     return Math.round(base * (1 + buf / 100) + cleaningFeePerUnit);
   };
   const getBufferPercentForSource = (source: string | undefined): number => {
     return source === "airbnb" ? airbnbFeePercent
          : source === "vrbo" ? vrboFeePercent
+         : source === "booking" ? 0
          : 18;
   };
   const [selectedListings, setSelectedListings] = useState<Record<string, AirbnbProperty[]>>({});
@@ -427,7 +462,7 @@ function BestBuyInFinder() {
     vrbo: { listed: boolean; url: string | null; snippet: string | null };
     booking: { listed: boolean; url: string | null; snippet: string | null };
   }>>([]);
-  const [activePlatform, setActivePlatform] = useState<"airbnb" | "vrbo" | "suite-paradise">("airbnb");
+  const [activePlatform, setActivePlatform] = useState<"airbnb" | "vrbo" | "booking" | "suite-paradise">("airbnb");
   const { toast } = useToast();
   const autoSearchFired = useRef(false);
 
@@ -452,41 +487,64 @@ function BestBuyInFinder() {
     findBestUnitsFromParams(selectedPropertyId, checkIn, checkOut);
   }, [selectedPropertyId, checkIn, checkOut]);
 
+  const loadUnifiedBuyInSearch = async (propId: string, ci: string, co: string) => {
+    const res = await fetch(`/api/buy-in-tracker/search?propertyId=${propId}&checkIn=${ci}&checkOut=${co}`);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "Server error");
+      throw new Error(`Buy-in sidecar search ${res.status}: ${sanitizeForChatText(errText, { maxLength: 800 })}`);
+    }
+    const data = await res.json() as UnifiedBuyInTrackerSearch;
+    const airbnbData: AirbnbSearchResults = {
+      community: data.community,
+      searchLocation: data.searchLocation,
+      checkIn: data.checkIn,
+      checkOut: data.checkOut,
+      unitsNeeded: data.unitsNeeded,
+      searches: data.searches.airbnb,
+    };
+    const otherData: OtherPlatformResults = {
+      community: data.community,
+      checkIn: data.checkIn,
+      checkOut: data.checkOut,
+      unitsNeeded: data.unitsNeeded,
+      vrbo: data.searches.vrbo,
+      booking: data.searches.booking,
+      suiteParadise: data.searches["suite-paradise"],
+    };
+    for (const key of Object.keys(airbnbData.searches)) {
+      for (const prop of airbnbData.searches[key].properties) prop.source = "airbnb";
+    }
+    for (const key of Object.keys(otherData.vrbo)) {
+      for (const prop of otherData.vrbo[key].properties) prop.source = "vrbo";
+    }
+    for (const key of Object.keys(otherData.booking)) {
+      for (const prop of otherData.booking[key].properties) prop.source = "booking";
+    }
+    for (const key of Object.keys(otherData.suiteParadise)) {
+      for (const prop of otherData.suiteParadise[key].properties) prop.source = "suite-paradise";
+    }
+    return { airbnbData, otherData, diagnostics: data.diagnostics ?? null };
+  };
+
   const findBestUnitsFromParams = async (propId: string, ci: string, co: string) => {
     if (co <= ci) return;
     setLoading(true);
     setResults(null);
     setOtherResults(null);
+    setSidecarDiagnostics(null);
+    setLastSearchError(null);
     setSelectedListings({});
     setPlatformCheckState("idle");
     setPlatformCheckResults([]);
     setActivePlatform("airbnb");
     try {
-      const [airbnbRes, otherRes] = await Promise.all([
-        fetch(`/api/airbnb/search?propertyId=${propId}&checkIn=${ci}&checkOut=${co}`),
-        fetch(`/api/vrbo/search?propertyId=${propId}&checkIn=${ci}&checkOut=${co}`),
-      ]);
-      let airbnbData: AirbnbSearchResults | null = null;
-      let otherData: OtherPlatformResults | null = null;
-      if (airbnbRes.ok) {
-        airbnbData = await airbnbRes.json();
-        for (const key of Object.keys(airbnbData!.searches)) {
-          for (const prop of airbnbData!.searches[key].properties) prop.source = "airbnb";
-        }
-        setResults(airbnbData);
-      }
-      if (otherRes.ok) {
-        otherData = await otherRes.json();
-        for (const key of Object.keys(otherData!.vrbo)) {
-          for (const prop of otherData!.vrbo[key].properties) prop.source = "vrbo";
-        }
-        for (const key of Object.keys(otherData!.suiteParadise)) {
-          for (const prop of otherData!.suiteParadise[key].properties) prop.source = "suite-paradise";
-        }
-        setOtherResults(otherData);
-      }
-      if (airbnbData) autoSelectCheapest(airbnbData, otherData);
-    } catch {
+      const { airbnbData, otherData, diagnostics } = await loadUnifiedBuyInSearch(propId, ci, co);
+      setResults(airbnbData);
+      setOtherResults(otherData);
+      setSidecarDiagnostics(diagnostics);
+      autoSelectCheapest(airbnbData, otherData);
+    } catch (err: any) {
+      setLastSearchError(sanitizeForChatText(err?.message ?? err, { maxLength: 800 }));
     } finally {
       setLoading(false);
     }
@@ -541,6 +599,12 @@ function BestBuyInFinder() {
             allCandidates.push({ ...p, source: "vrbo" });
           }
         }
+        const bookingSearch = otherData.booking[key];
+        if (bookingSearch && !bookingSearch.error) {
+          for (const p of bookingSearch.properties) {
+            allCandidates.push({ ...p, source: "booking" });
+          }
+        }
         const spSearch = otherData.suiteParadise[key];
         if (spSearch && !spSearch.error) {
           for (const p of spSearch.properties) {
@@ -567,6 +631,31 @@ function BestBuyInFinder() {
   const getTotalNeededCount = () => {
     if (!results) return 0;
     return results.unitsNeeded.reduce((sum, n) => sum + n.count, 0);
+  };
+
+  const copySafeSearchLog = async (status: "success" | "error") => {
+    const log = buildBuyInTrackerSearchDebugLog({
+      status,
+      request: {
+        propertyId: selectedPropertyId,
+        checkIn,
+        checkOut,
+      },
+      airbnb: results,
+      other: otherResults,
+      selectedCounts: Object.fromEntries(
+        Object.entries(selectedListings).map(([key, items]) => [key, items.length]),
+      ),
+      diagnostics: sidecarDiagnostics ?? undefined,
+      error: lastSearchError ?? undefined,
+    });
+
+    try {
+      await navigator.clipboard.writeText(log);
+      toast({ title: "Safe debug log copied", description: "Raw URLs and secrets were redacted." });
+    } catch {
+      toast({ title: "Could not copy debug log", variant: "destructive" });
+    }
   };
 
   const allUnitsSelected = () => {
@@ -679,6 +768,9 @@ function BestBuyInFinder() {
           const buf = getBufferPercentForSource(listing.source);
           const listedPrice = listing.price?.extracted_total_price ?? 0;
           const sourceName = (listing.source || "airbnb").charAt(0).toUpperCase() + (listing.source || "airbnb").slice(1);
+          const estimateNote = listing.price?.qualifier === "sidecar_all_in"
+            ? "sidecar all-in estimate from visible dated OTA search"
+            : `+${buf}% fees & taxes + $${cleaningFeePerUnit} cleaning`;
 
           await apiRequest("POST", "/api/buy-ins", {
             propertyId: propId,
@@ -690,7 +782,7 @@ function BestBuyInFinder() {
             costPaid: String(estimatedCost),
             airbnbConfirmation: null,
             airbnbListingUrl: listing.bookingLink || listing.link || null,
-            notes: `${sourceName} listing: ${listing.title} — Listed: $${listedPrice}, Est. checkout: $${estimatedCost} (+${buf}% fees & taxes + $${cleaningFeePerUnit} cleaning). VERIFY exact total at checkout before booking.`,
+            notes: `${sourceName} listing: ${listing.title} — Listed: $${listedPrice}, Est. checkout: $${estimatedCost} (${estimateNote}). VERIFY exact total at checkout before booking.`,
             status: "active",
           });
         }
@@ -724,52 +816,22 @@ function BestBuyInFinder() {
     setLoading(true);
     setResults(null);
     setOtherResults(null);
+    setSidecarDiagnostics(null);
+    setLastSearchError(null);
     setSelectedListings({});
     setPlatformCheckState("idle");
     setPlatformCheckResults([]);
     setActivePlatform("airbnb");
     try {
-      const [airbnbRes, otherRes] = await Promise.all([
-        fetch(`/api/airbnb/search?propertyId=${selectedPropertyId}&checkIn=${checkIn}&checkOut=${checkOut}`),
-        fetch(`/api/vrbo/search?propertyId=${selectedPropertyId}&checkIn=${checkIn}&checkOut=${checkOut}`),
-      ]);
-
-      let airbnbData: AirbnbSearchResults | null = null;
-      let otherData: OtherPlatformResults | null = null;
-
-      if (airbnbRes.ok) {
-        airbnbData = await airbnbRes.json();
-        for (const key of Object.keys(airbnbData!.searches)) {
-          for (const prop of airbnbData!.searches[key].properties) {
-            prop.source = "airbnb";
-          }
-        }
-        setResults(airbnbData);
-      } else {
-        const errData = await airbnbRes.json().catch(() => ({ error: "Server error" }));
-        toast({ title: "Airbnb search issue", description: errData.error || "Failed to search Airbnb", variant: "destructive" });
-      }
-
-      if (otherRes.ok) {
-        otherData = await otherRes.json();
-        for (const key of Object.keys(otherData!.vrbo)) {
-          for (const prop of otherData!.vrbo[key].properties) {
-            prop.source = "vrbo";
-          }
-        }
-        for (const key of Object.keys(otherData!.suiteParadise)) {
-          for (const prop of otherData!.suiteParadise[key].properties) {
-            prop.source = "suite-paradise";
-          }
-        }
-        setOtherResults(otherData);
-      }
-
-      if (airbnbData) {
-        autoSelectCheapest(airbnbData, otherData);
-      }
+      const { airbnbData, otherData, diagnostics } = await loadUnifiedBuyInSearch(selectedPropertyId, checkIn, checkOut);
+      setResults(airbnbData);
+      setOtherResults(otherData);
+      setSidecarDiagnostics(diagnostics);
+      autoSelectCheapest(airbnbData, otherData);
     } catch (err: any) {
-      toast({ title: "Search failed", description: err.message, variant: "destructive" });
+      const safeError = sanitizeForChatText(err?.message ?? err, { maxLength: 800 });
+      setLastSearchError(safeError);
+      toast({ title: "Search failed", description: safeError, variant: "destructive" });
     } finally {
       setLoading(false);
     }
@@ -793,7 +855,7 @@ function BestBuyInFinder() {
           <Label className="text-sm">Property</Label>
           <Select
             value={selectedPropertyId}
-            onValueChange={v => { setSelectedPropertyId(v); setResults(null); setOtherResults(null); }}
+            onValueChange={v => { setSelectedPropertyId(v); setResults(null); setOtherResults(null); setLastSearchError(null); }}
           >
             <SelectTrigger data-testid="select-finder-property">
               <SelectValue placeholder="Select property..." />
@@ -812,7 +874,7 @@ function BestBuyInFinder() {
           <Input
             type="date"
             value={checkIn}
-            onChange={e => { setCheckIn(e.target.value); setResults(null); setOtherResults(null); }}
+            onChange={e => { setCheckIn(e.target.value); setResults(null); setOtherResults(null); setLastSearchError(null); }}
             data-testid="input-finder-checkin"
           />
         </div>
@@ -821,7 +883,7 @@ function BestBuyInFinder() {
           <Input
             type="date"
             value={checkOut}
-            onChange={e => { setCheckOut(e.target.value); setResults(null); setOtherResults(null); }}
+            onChange={e => { setCheckOut(e.target.value); setResults(null); setOtherResults(null); setLastSearchError(null); }}
             data-testid="input-finder-checkout"
           />
         </div>
@@ -832,7 +894,24 @@ function BestBuyInFinder() {
             <><Search className="h-4 w-4 mr-2" /> Find Best Buy-Ins</>
           )}
         </Button>
+        {(results || lastSearchError) && (
+          <Button
+            onClick={() => copySafeSearchLog(results ? "success" : "error")}
+            disabled={loading}
+            variant="outline"
+            data-testid="button-copy-safe-buyin-log"
+          >
+            <Copy className="h-4 w-4 mr-2" /> Copy Safe Log
+          </Button>
+        )}
       </div>
+
+      {lastSearchError && !loading && !results && (
+        <div className="mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+          <div className="min-w-0 flex-1 break-words">{lastSearchError}</div>
+        </div>
+      )}
 
       {selectedProp && pricing && !results && !loading && (
         <div className="mt-4 p-3 rounded-md bg-muted/50">
@@ -903,12 +982,14 @@ function BestBuyInFinder() {
 
         // ── Platform result counts ────────────────────────────────────────
         const vrboTotalCount = otherResults ? Object.values(otherResults.vrbo).reduce((sum, s) => sum + s.totalResults, 0) : 0;
+        const bookingTotalCount = otherResults ? Object.values(otherResults.booking).reduce((sum, s) => sum + s.totalResults, 0) : 0;
         const spTotalCount = otherResults ? Object.values(otherResults.suiteParadise).reduce((sum, s) => sum + s.totalResults, 0) : 0;
         const airbnbTotalCount = Object.values(results.searches).reduce((sum, s) => sum + (s.totalResults || 0), 0);
 
         const getActiveSearchData = (key: string) => {
           if (activePlatform === "airbnb") return results.searches[key];
           if (activePlatform === "vrbo" && otherResults) return otherResults.vrbo[key];
+          if (activePlatform === "booking" && otherResults) return otherResults.booking[key];
           if (activePlatform === "suite-paradise" && otherResults) return otherResults.suiteParadise[key];
           return null;
         };
@@ -921,6 +1002,53 @@ function BestBuyInFinder() {
               Searching near <span className="font-medium text-foreground">{results.community}</span> for {formatDate(results.checkIn)} – {formatDate(results.checkOut)}
             </span>
           </div>
+
+          {sidecarDiagnostics && (
+            <Card className="p-3 border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/20" data-testid="card-sidecar-search-diagnostics">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2">
+                  {sidecarDiagnostics.daemonOnline ? (
+                    <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                  )}
+                  <span className="text-sm font-medium">
+                    Sidecar {sidecarDiagnostics.daemonOnline ? "live" : "degraded"}
+                  </span>
+                  {sidecarDiagnostics.durationMs != null && (
+                    <Badge variant="outline" className="text-xs">{Math.round(sidecarDiagnostics.durationMs / 1000)}s</Badge>
+                  )}
+                </div>
+                <div className="flex gap-2 flex-wrap text-xs text-muted-foreground">
+                  {results.unitsNeeded.map((need) => {
+                    const key = String(need.bedrooms);
+                    const counts = sidecarDiagnostics.channelAvailableCountsByBR?.[key];
+                    const cheapest = sidecarDiagnostics.channelCheapestByBR?.[key];
+                    if (!counts && !cheapest) return null;
+                    return (
+                      <span key={`diag-${key}`} className="rounded-md border border-border bg-background px-2 py-1">
+                        {need.bedrooms}BR: A {counts?.airbnb ?? 0} · V {counts?.vrbo ?? 0} · B {counts?.booking ?? 0}
+                        {cheapest?.airbnb || cheapest?.vrbo || cheapest?.booking ? (
+                          <span className="ml-1">
+                            ({[cheapest?.airbnb && `A $${Math.round(cheapest.airbnb)}`, cheapest?.vrbo && `V $${Math.round(cheapest.vrbo)}`, cheapest?.booking && `B $${Math.round(cheapest.booking)}`].filter(Boolean).join(" · ")}/nt)
+                          </span>
+                        ) : null}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+              {sidecarDiagnostics.warnings && sidecarDiagnostics.warnings.length > 0 && (
+                <div className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                  {sidecarDiagnostics.warnings.slice(0, 3).map((w, idx) => (
+                    <span key={idx} className="mr-3">
+                      {w.channel ? `${w.channel}: ` : ""}{w.message || w.reason}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
 
           {hasAllPrices && listedBuyInCost > 0 && activePlatform === "airbnb" && (
             <Card className="p-4 border-blue-200 dark:border-blue-800 bg-blue-50/30 dark:bg-blue-950/20" data-testid="card-profitability-summary">
@@ -1055,6 +1183,16 @@ function BestBuyInFinder() {
             </Button>
             <Button
               size="sm"
+              variant={activePlatform === "booking" ? "default" : "outline"}
+              onClick={() => setActivePlatform("booking")}
+              data-testid="button-platform-booking"
+            >
+              <span className="text-indigo-500 mr-1.5">●</span>
+              Booking.com
+              <Badge variant="secondary" className="ml-2 text-xs">{bookingTotalCount}</Badge>
+            </Button>
+            <Button
+              size="sm"
               variant={activePlatform === "suite-paradise" ? "default" : "outline"}
               onClick={() => setActivePlatform("suite-paradise")}
               data-testid="button-platform-sp"
@@ -1067,7 +1205,12 @@ function BestBuyInFinder() {
 
           {activePlatform === "vrbo" && (
             <div className="p-3 rounded-md bg-muted/50 text-xs text-muted-foreground">
-              Vacation rental listings from Google's aggregated data (VRBO, Booking.com, and other platforms). Prices are per-night estimates multiplied by your stay length — actual totals may vary with cleaning fees and taxes. Use the direct VRBO links to see exact pricing.
+              VRBO results come from the live sidecar browser flow using the same visible search fields, dropdown choices, dates, and bedroom filters as Operations/find-buy-in.
+            </div>
+          )}
+          {activePlatform === "booking" && (
+            <div className="p-3 rounded-md bg-muted/50 text-xs text-muted-foreground">
+              Booking.com results come from the live sidecar browser flow. Broad city-only results are rejected unless the resort-prefix tokens survive into the visible search result page.
             </div>
           )}
           {activePlatform === "suite-paradise" && (
@@ -1197,6 +1340,7 @@ function BestBuyInFinder() {
                                   <div className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold flex-shrink-0 ${
                                     activePlatform === "airbnb" ? "bg-rose-100 dark:bg-rose-900 text-rose-700 dark:text-rose-300" :
                                     activePlatform === "vrbo" ? "bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300" :
+                                    activePlatform === "booking" ? "bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300" :
                                     "bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300"
                                   }`}>
                                     {idx + 1}
@@ -1222,6 +1366,7 @@ function BestBuyInFinder() {
                               {prop.price && (() => {
                                 const est = getEstimatedListingCost(prop);
                                 const buf = getBufferPercentForSource(prop.source);
+                                const allInSidecar = prop.price?.qualifier === "sidecar_all_in";
                                 return (
                                 <span data-testid={`text-price-${key}-${idx}`}>
                                   <span className="font-semibold text-green-600 dark:text-green-400">
@@ -1233,7 +1378,9 @@ function BestBuyInFinder() {
                                   <span className="text-xs text-muted-foreground ml-2 line-through">
                                     {prop.price.total_price ?? formatCurrency(prop.price.extracted_total_price ?? 0)}
                                   </span>
-                                  <span className="text-xs text-muted-foreground ml-1">listed (+{buf}% fees +${cleaningFeePerUnit} cleaning)</span>
+                                  <span className="text-xs text-muted-foreground ml-1">
+                                    {allInSidecar ? "sidecar all-in estimate" : `listed (+${buf}% fees +$${cleaningFeePerUnit} cleaning)`}
+                                  </span>
                                 </span>
                                 );
                               })()}
@@ -1389,7 +1536,7 @@ function BestBuyInFinder() {
                 <div className="mt-3 border-t pt-3">
                   <div className="flex items-center gap-3 flex-wrap">
                     <p className="text-xs font-medium text-gray-700 dark:text-gray-300 flex-1">
-                      Platform check — verify NexStay units aren't already listed independently:
+                      Platform check — verify VacationRentalExpertz units aren't already listed independently:
                     </p>
                     {platformCheckState === "idle" && (
                       <Button size="sm" variant="outline" className="text-xs h-7" onClick={runPlatformCheck} data-testid="button-platform-check">

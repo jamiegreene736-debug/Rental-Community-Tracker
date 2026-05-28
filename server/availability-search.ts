@@ -19,6 +19,20 @@
 
 import type { PropertyUnitConfig } from "@shared/property-units";
 
+import {
+  BUY_IN_MARKET_LOCATIONS,
+  resolveBuyInMarket,
+  searchLocationForBuyInMarket,
+} from "@shared/buy-in-market";
+
+import {
+  pickRandom7NightInSeason,
+  applyAirbnbBiasAndCombo,
+  type SeasonKey as SharedSeasonKey,
+  type RegionType,
+  getCommunityRegion,
+} from "@shared/pricing-rates";
+
 export type CandidateListing = {
   id: string;          // Airbnb listing id (extracted from /rooms/<id> URL)
   url: string;
@@ -122,9 +136,9 @@ export function verdictFor(maxSets: number, minSets: number): "open" | "tight" |
 
 // ── Price-side helpers (Phase 3) ────────────────────────────────────────
 // The cheap site-search counts inventory but doesn't carry prices. For
-// pricing we sample the SearchAPI airbnb engine sparingly — once per
-// season per bedroom count — and reuse those numbers across all weeks
-// in that season. ~6 priced calls per scan per property.
+// pricing, legacy availability callers now delegate to the multichannel
+// sidecar scan so "cheapest" means the same Airbnb/VRBO/Booking visible-UI
+// evidence used by Operations/find-buy-in.
 
 export type SeasonKey = "LOW" | "HIGH" | "HOLIDAY";
 
@@ -138,58 +152,173 @@ export type FindCheapestOptions = {
   checkIn: string;
   checkOut: string;
   q: string;
+  city?: string;
+  state?: string;
+  propertyId?: number;
+  searchName?: string;
+  listingTitle?: string;
   bounds?: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
   apiKey: string;
 };
 
-// Single airbnb-engine call. Returns the cheapest available listing's
-// per-night rate for the given window — null if nothing comes back with
-// a usable price. Tolerates the engine's missing-price cases silently
-// (some short-notice or far-future windows have no priced inventory).
+// Returns the cheapest visible OTA sidecar nightly for the given window. This
+// used to be a single SearchAPI Airbnb call; keep the function name for older
+// availability callers, but route through the same multichannel sidecar layer
+// used by Operations/find-buy-in so all "cheapest" surfaces follow the same
+// visible-dropdown/no-URL-injection policy.
 export async function findCheapestPricedNightly(opts: FindCheapestOptions): Promise<number | null> {
-  const nights = Math.max(1, Math.round(
-    (new Date(opts.checkOut + "T12:00:00").getTime() - new Date(opts.checkIn + "T12:00:00").getTime()) / 86_400_000,
-  ));
-  const sp: Record<string, string> = {
-    engine: "airbnb",
-    check_in_date: opts.checkIn,
-    check_out_date: opts.checkOut,
-    adults: "2",
-    bedrooms: String(opts.bedrooms),
-    type_of_place: "entire_home",
-    currency: "USD",
-    api_key: opts.apiKey,
-    q: opts.q,
-  };
-  if (opts.bounds) {
-    sp.sw_lat = String(opts.bounds.sw_lat);
-    sp.sw_lng = String(opts.bounds.sw_lng);
-    sp.ne_lat = String(opts.bounds.ne_lat);
-    sp.ne_lng = String(opts.bounds.ne_lng);
-  }
   try {
-    const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`);
-    if (!r.ok) return null;
-    const data = await r.json() as any;
-    let properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
-    if (opts.resortName) {
-      const tokens = opts.resortName.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter((t) => t.length >= 3);
-      properties = properties.filter((p: any) => {
-        const hay = `${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`.toLowerCase();
-        return tokens.every((t) => hay.includes(t));
-      });
-    }
-    properties = properties.filter((p: any) => {
-      const pb = typeof p?.bedrooms === "number" ? p.bedrooms : null;
-      return pb == null || pb === opts.bedrooms;
+    const { fetchMultiChannelBuyInByBR } = await import("./multichannel-buy-in");
+    const marketKey =
+      resolveBuyInMarket({ name: opts.searchName ?? opts.resortName ?? opts.community, city: opts.city, state: opts.state }) ||
+      resolveBuyInMarket({ name: opts.community, city: opts.city, state: opts.state }) ||
+      opts.community;
+    const market = BUY_IN_MARKET_LOCATIONS[marketKey] || BUY_IN_MARKET_LOCATIONS[opts.community];
+    const searchName = opts.searchName || opts.resortName || market?.searchName || opts.community;
+    const scan = await fetchMultiChannelBuyInByBR({
+      community: marketKey,
+      city: opts.city || market?.city || "",
+      state: opts.state || market?.state || "",
+      streetAddress: market?.streetAddress,
+      bboxCenterOverride: market ? { lat: market.lat, lng: market.lng } : undefined,
+      searchName,
+      listingTitle: opts.listingTitle ?? opts.resortName ?? undefined,
+      bedroomCounts: [opts.bedrooms],
+      propertyId: opts.propertyId,
+      dateOverride: { checkIn: opts.checkIn, checkOut: opts.checkOut },
+      skipPm: true,
+      reuseSharedOtaSearch: true,
+      sidecarQueueBudgetMs: 180_000,
     });
-    const prices = properties
-      .map((p: any) => Number(p?.price?.extracted_total_price ?? 0))
-      .filter((n) => n > 0);
-    if (prices.length === 0) return null;
-    const cheapestTotal = Math.min(...prices);
-    return Math.round(cheapestTotal / nights);
-  } catch {
+    const byChannel = scan.channelCheapestByBR?.[opts.bedrooms] || {};
+    const candidates = [
+      scan.consensusCheapestByBR?.[opts.bedrooms],
+      byChannel.airbnb,
+      byChannel.vrbo,
+      byChannel.booking,
+      byChannel.pm,
+    ].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);
+    return candidates.length ? Math.round(Math.min(...candidates)) : null;
+  } catch (e: any) {
+    console.error(
+      `[availability-search] sidecar cheapest error ${opts.resortName ?? searchLocationForBuyInMarket(opts.community) ?? opts.community} ` +
+      `${opts.bedrooms}BR ${opts.checkIn}→${opts.checkOut}: ${e?.message ?? e}`,
+    );
     return null;
   }
+}
+
+// ── Live market-rate sampler for dashboard queue + Pricing tab manual button ──
+// Implements the exact user spec: random 7-night per season, exact-BR median
+// from SearchAPI Airbnb, per-season bias markup, combo doubling/sum, then
+// the caller layers the final 20% before Guesty push.
+// Surgical: reuses the existing fetch pattern; hard-caps lookahead to kill
+// 2028 "no usable samples" errors.
+
+export type MarketRateSample = {
+  season: SharedSeasonKey;
+  checkIn: string;
+  checkOut: string;
+  median: number | null;
+  adjustedBuyIn: number | null; // after bias markup + combo
+  rawSampleCount: number;
+  error?: string;
+};
+
+export async function sampleMedianBuyInForSeason(opts: {
+  community: string;
+  bedrooms: number;          // exact unit type (e.g. 2 for the 2BR side of a combo)
+  season: SharedSeasonKey;
+  unitCount?: number;        // >1 = combo listing (sum or double)
+  sameBrCombo?: boolean;     // hint for explicit 2x rule
+  apiKey: string;
+  maxSamples?: number;       // default 4
+}): Promise<MarketRateSample> {
+  const region: RegionType = getCommunityRegion(opts.community);
+  const window = pickRandom7NightInSeason(region, opts.season, 10);
+  if (!window) {
+    return {
+      season: opts.season,
+      checkIn: "",
+      checkOut: "",
+      median: null,
+      adjustedBuyIn: null,
+      rawSampleCount: 0,
+      error: "no future window in 10-month cap",
+    };
+  }
+
+  const { checkIn, checkOut } = window;
+  const nights = Math.max(1, Math.round((+new Date(checkOut) - +new Date(checkIn)) / 86_400_000));
+  const prices: number[] = [];
+  let lastErr: string | null = null;
+
+  // Up to 2 random windows in the season month if first is thin (true "random 7-night")
+  const attempts = [window];
+  if ((opts.maxSamples ?? 4) > 2) {
+    // second attempt: nudge +3 days (still same season month, still random-ish)
+    const d2 = new Date(checkIn + "T12:00:00");
+    d2.setDate(d2.getDate() + 3);
+    attempts.push({ checkIn: d2.toISOString().slice(0, 10), checkOut: new Date(d2.getTime() + 7 * 86_400_000).toISOString().slice(0, 10) });
+  }
+
+  for (const w of attempts) {
+    if (prices.length >= (opts.maxSamples ?? 4)) break;
+    const sp = new URLSearchParams({
+      engine: "airbnb",
+      check_in_date: w.checkIn,
+      check_out_date: w.checkOut,
+      adults: "2",
+      bedrooms: String(opts.bedrooms),
+      type_of_place: "entire_home",
+      currency: "USD",
+      api_key: opts.apiKey,
+      q: opts.community,
+    });
+    try {
+      const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`);
+      if (!r.ok) { lastErr = `HTTP ${r.status}`; continue; }
+      const data = await r.json() as any;
+      const props: any[] = Array.isArray(data?.properties) ? data.properties : [];
+      for (const p of props) {
+        const pb = typeof p?.bedrooms === "number" ? p.bedrooms : null;
+        if (pb != null && pb !== opts.bedrooms) continue; // exact-BR only
+        const total = Number(p?.price?.extracted_total_price ?? 0);
+        if (total > 0) prices.push(total / nights);
+      }
+    } catch (e: any) {
+      lastErr = e?.message ?? String(e);
+    }
+  }
+
+  if (prices.length === 0) {
+    const msg = `SearchAPI Airbnb returned no usable exact-${opts.bedrooms}BR ${opts.season} samples for ${opts.community} ${checkIn} to ${checkOut}; static fallback is disabled for market-rate refreshes.`;
+    console.warn(`[market-rate-sampler] ${msg} ${lastErr ? lastErr : ""}`);
+    return {
+      season: opts.season,
+      checkIn,
+      checkOut,
+      median: null,
+      adjustedBuyIn: null,
+      rawSampleCount: 0,
+      error: msg,
+    };
+  }
+
+  // Median of the collected nightly rates (not cheapest)
+  const sorted = [...prices].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+
+  const unitCount = Math.max(1, opts.unitCount ?? 1);
+  const adjusted = applyAirbnbBiasAndCombo(Math.round(median), opts.season, unitCount, !!opts.sameBrCombo);
+
+  return {
+    season: opts.season,
+    checkIn,
+    checkOut,
+    median: Math.round(median),
+    adjustedBuyIn: adjusted,
+    rawSampleCount: prices.length,
+  };
 }

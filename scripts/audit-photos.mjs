@@ -104,7 +104,7 @@ for (const [folder, count] of refUnit) {
 }
 
 // Report
-console.log(`\nNexStay photo audit — ${folderEntries.length} folders, ${[...allHashes.values()].reduce((a, b) => a + b.length, 0)} files\n`);
+console.log(`\nVacationRentalExpertz photo audit — ${folderEntries.length} folders, ${[...allHashes.values()].reduce((a, b) => a + b.length, 0)} files\n`);
 const fmt = (label, arr) => {
   console.log(`${label} (${arr.length})`);
   for (const m of arr) console.log(`  - ${m}`);

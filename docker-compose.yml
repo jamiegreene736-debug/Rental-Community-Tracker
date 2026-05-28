@@ -1,0 +1,41 @@
+# Optional local Chrome sidecar.
+#
+# The existing Mac launchd sidecar remains the primary/default path:
+# daemon/vrbo-sidecar/worker.mjs still uses http://127.0.0.1:9222 unless
+# you explicitly opt into this container profile.
+#
+# To run the local container instead of the Mac Google Chrome profile:
+#   docker compose --profile local-chrome-container up -d chrome-local
+#   export LOCAL_CHROME_CDP_URL=http://127.0.0.1:9222
+#   export LOCAL_CHROME_WEBDRIVER_URL=http://127.0.0.1:4444
+#   export LOCAL_CHROME_NOVNC_URL=http://127.0.0.1:7900
+#
+# noVNC live view:
+#   http://127.0.0.1:7900
+
+services:
+  chrome-local:
+    image: selenium/standalone-chrome-debug:latest
+    container_name: rct-chrome-local
+    profiles:
+      - local-chrome-container
+    shm_size: 2gb
+    ports:
+      - "9222:9222" # Chrome remote debugging / CDP
+      - "4444:4444" # Selenium WebDriver; used to launch Chrome in the container
+      - "5900:5900" # VNC
+      - "7900:7900" # noVNC browser view
+    environment:
+      SE_NODE_MAX_SESSIONS: "1"
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+      SE_START_XVFB: "true"
+      SE_SCREEN_WIDTH: "1600"
+      SE_SCREEN_HEIGHT: "1000"
+      SE_SCREEN_DEPTH: "24"
+      SE_BROWSER_ARGS_REMOTE_DEBUGGING_ADDRESS: "--remote-debugging-address=0.0.0.0"
+      SE_BROWSER_ARGS_REMOTE_DEBUGGING_PORT: "--remote-debugging-port=9222"
+      SE_BROWSER_ARGS_NO_SANDBOX: "--no-sandbox"
+      SE_BROWSER_ARGS_DISABLE_SETUID_SANDBOX: "--disable-setuid-sandbox"
+      SE_BROWSER_ARGS_DISABLE_DEV_SHM_USAGE: "--disable-dev-shm-usage"
+      SE_BROWSER_ARGS_DISABLE_GPU: "--disable-gpu"
+    restart: unless-stopped

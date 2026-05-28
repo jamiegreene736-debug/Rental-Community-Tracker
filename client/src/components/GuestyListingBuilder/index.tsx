@@ -1,14 +1,18 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Component, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
+import { useLocation } from "wouter";
+import { useQueryClient } from "@tanstack/react-query";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
-import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey } from "@/data/pricing-data";
+import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
-import PhotoCurator from "./PhotoCurator";
+import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
+import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { useToast } from "@/hooks/use-toast";
+import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -85,6 +89,7 @@ const CSS = `
   .glb-ch-icon { width:26px; height:26px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:14px; flex-shrink:0; background:var(--bg-hover); }
   .glb-badge { display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:100px; font-size:11px; font-weight:500; border:1px solid transparent; }
   .glb-badge.live { background:var(--green-bg); border-color:var(--green-border); color:var(--green); }
+  .glb-badge.live-warn { background:#fffbeb; border-color:#f59e0b; color:#b45309; }
   .glb-badge.not-live { background:var(--red-bg); border-color:var(--red-border); color:var(--red); }
   .glb-badge.no-account { background:var(--bg-hover); border-color:var(--border); color:var(--faint); }
   .glb-badge-dot { width:5px; height:5px; border-radius:50%; background:currentColor; flex-shrink:0; }
@@ -160,8 +165,17 @@ const CSS = `
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
-type GuestyListing = { _id: string; nickname?: string; title?: string };
+type GuestyListing = { _id?: string; id?: string; nickname?: string; title?: string };
 type LogEntry = BuildStepEntry & { icon: string };
+type TmkLookupResult = {
+  taxMapKey: string;
+  confidence: "unit-cpr" | "master-parcel";
+  note: string;
+  searchedAddress: string;
+  geocodedAddress: string;
+  source: string;
+  sourceUrl?: string;
+};
 
 type Props = {
   propertyData?: GuestyPropertyData | null;
@@ -169,9 +183,41 @@ type Props = {
   // folder → source listing URL (Zillow/Airbnb/VRBO). Fed straight to the
   // PhotoCurator so each unit section can show a "View source listing" link.
   sourceUrlsByFolder?: Record<string, string>;
+  isSingleListing?: boolean;
   onBuildComplete?: (result: { listingId: string | null }) => void;
   onUpdateComplete?: (result: { listingId: string | null }) => void;
+  // Fired after the user mutates a photo label (delete/restore/rename) in
+  // the PhotoCurator. The builder page uses this to re-fetch
+  // `usePhotoLabels` so the page's isHidden filter picks up the new state
+  // and `propertyData.photos` rebuilds without a full page reload — the
+  // tab badge "Photos (N)" and the deleted tile disappear immediately.
+  onPhotoOverridesChanged?: () => void;
 };
+
+class BuilderSectionErrorBoundary extends Component<
+  { resetKey: string; fallback: ReactNode; children: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("[GuestyListingBuilder] optional section render failed", error);
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const STEP_LABELS: Record<string, string> = {
@@ -187,103 +233,117 @@ function fmt(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function fmtDateTime(value?: string | number | null) {
+  if (value == null) return "never";
+  const date = typeof value === "number" ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown time";
+  return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
 function statusIcon(status: string) {
   if (status === "success") return "✓";
   if (status === "error") return "✗";
   return "…";
 }
 
+function normalizeListingName(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[–—-]/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function guestyListingId(listing: GuestyListing | null | undefined): string {
+  return String(listing?._id ?? listing?.id ?? "").trim();
+}
+
+type GuestyMonthlyRate = {
+  avgRate: number;
+  minRate: number;
+  maxRate: number;
+  days: number;
+  source?: "guesty" | "last-push";
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
-// Channel markup push card. Lets the user set a per-channel price uplift
-// (e.g. +17% on Booking.com to recover the commission) and pushes it to
-// Guesty. Guesty's schema for channel markup differs across accounts so
-// the server tries multiple field shapes and reports which one stuck.
-function ChannelMarkupCard({
+// Pushes the marked-up base calendar rates to Guesty. Guesty owns any
+// downstream channel pricing adjustments.
+function GuestyRatePushCard({
   listingId,
-  markupPct,
-  setMarkupPct,
+  propertyId,
   seasonalMonths,
-  guestyRatesByMonth,
   applyPushedRates,
+  targetMarginPct,
+  setTargetMarginPct,
+  allowCustomMargin,
+  lastGuestyRatePushAt,
+  lastGuestyRatePushStatus,
+  lastGuestyRatePushSummary,
+  onGuestyRatePushRecorded,
 }: {
   listingId: string | null;
-  // Decimal form: { airbnb: 0.155, vrbo: 0, ... }. Inputs below translate to/from %.
-  markupPct: Record<ChannelKey, number>;
-  setMarkupPct: (m: Record<ChannelKey, number>) => void;
+  propertyId?: number;
   seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number }>;
-  guestyRatesByMonth: Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>;
   // Called with the per-month rates we just pushed so the parent table
   // shows them instantly, without depending on Guesty's calendar GET
   // catching up (which is eventually-consistent and was returning stale
   // rates in practice).
   applyPushedRates?: (rates: Array<{ yearMonth: string; price: number }>) => void;
+  targetMarginPct: number;
+  setTargetMarginPct: (value: number) => void;
+  allowCustomMargin: boolean;
+  lastGuestyRatePushAt?: string | null;
+  lastGuestyRatePushStatus?: string | null;
+  lastGuestyRatePushSummary?: string | null;
+  onGuestyRatePushRecorded?: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
-  // User's target margin — defaults to 20% (the old hard-coded floor).
-  // Configurable because some properties need a bigger cushion or can
-  // accept tighter margins in slow months.
-  const [targetMarginPct, setTargetMarginPct] = useState(20);
   const [seasonalPushResult, setSeasonalPushResult] = useState<any>(null);
+  const [targetMarginInput, setTargetMarginInput] = useState(String(targetMarginPct));
 
-  // Fee-differential markups: make every channel net the same as Direct
-  // after that channel's fee. Result is a FLAT per-channel markup that
-  // doesn't depend on the current Guesty rate or the buy-in — so it
-  // equalizes channels instead of inflating low-season profit.
-  //
-  //   base * (1 + m) * (1 - fee_ch) = base * (1 - fee_direct)
-  //   ⇒ m_ch = (1 - fee_direct) / (1 - fee_ch) - 1
-  //
-  // Pair this with per-month seasonal base rates (below) and every month
-  // × every channel lands at exactly targetMargin%.
-  const computeAutoMarkups = (): Record<ChannelKey, number> => {
-    const feeDirect = CHANNEL_HOST_FEE.direct ?? 0;
-    const result: Record<ChannelKey, number> = { airbnb: 0, vrbo: 0, booking: 0, direct: 0 };
-    for (const ch of ["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]) {
-      const fee = CHANNEL_HOST_FEE[ch] ?? 0;
-      const raw = (1 - feeDirect) / (1 - fee) - 1;
-      // Round UP to the next 0.1% so the resulting margin stays AT or
-      // ABOVE 20% (rounding to nearest occasionally pushed channels
-      // like Vrbo down to ~19.96%, which was enough to flip cells red
-      // even though they mathematically should clear).
-      result[ch] = Math.max(0, Math.ceil(raw * 1000) / 1000);
-    }
-    return result;
+  useEffect(() => {
+    setTargetMarginInput(String(targetMarginPct));
+  }, [targetMarginPct]);
+
+  const marginMinPct = allowCustomMargin ? -99 : 20;
+  const marginMaxPct = 100;
+  const applyTargetMarginInput = (raw: string) => {
+    setTargetMarginInput(raw);
+    const parsed = parseFloat(raw);
+    if (!Number.isFinite(parsed)) return;
+    setTargetMarginPct(Math.max(marginMinPct, Math.min(marginMaxPct, parsed)));
+  };
+  const normalizeTargetMarginInput = () => {
+    const parsed = parseFloat(targetMarginInput);
+    const next = Number.isFinite(parsed)
+      ? Math.max(marginMinPct, Math.min(marginMaxPct, parsed))
+      : targetMarginPct;
+    setTargetMarginPct(next);
+    setTargetMarginInput(String(next));
   };
 
-  // Seasonal base-rate plan: what Guesty's calendar SHOULD charge per night
-  // so the Direct channel nets targetMargin% after Stripe's fee. Every
-  // channel with the fee-differential markup above then lands at the same
-  // margin. Returns one rate per month — server expands to daily.
+  // Marked-up base-rate plan: what Guesty's calendar should charge per night
+  // after applying the target margin to the saved buy-in basis. Guesty
+  // handles channel-specific adjustments after this base rate lands.
   const computeSeasonalRates = (): Array<{ yearMonth: string; price: number; buyIn: number }> => {
-    const feeDirect = CHANNEL_HOST_FEE.direct ?? 0;
     const m = targetMarginPct / 100;
     return seasonalMonths
       .filter((row) => row.totalBuyIn > 0)
       .map((row) => ({
         yearMonth: row.yearMonth,
         buyIn: row.totalBuyIn,
-        // Direct channel: price × (1 - feeDirect) = (1 + m) × buyIn
-        // ⇒ price = (1 + m) × buyIn / (1 - feeDirect)
-        price: Math.round(((1 + m) * row.totalBuyIn) / (1 - feeDirect)),
+        // Direct channel: price × (1 - feeDirect) = (1 + m) × buyIn.
+        // Use the same helper as the pricing table so "Sheet Rate" and
+        // the pushed Guesty base calendar rate stay in lockstep.
+        price: cleanBaseRateFromBuyIn(row.totalBuyIn, m),
       }));
   };
 
-  const autoCalculate = () => {
-    const next = computeAutoMarkups();
-    setMarkupPct(next);
-    setResult(null);
-    setError(null);
-  };
-
-  const autoCalculateAndPush = async () => {
-    const next = computeAutoMarkups();
-    setMarkupPct(next);
-    await pushMarkups(next);
-  };
-
-  const pushSeasonalRates = async () => {
+  const pushMarkedUpRates = async () => {
     if (!listingId) return;
     setBusy(true);
     setError(null);
@@ -295,17 +355,24 @@ function ChannelMarkupCard({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           listingId,
+          propertyId,
           monthlyRates: plan.map(({ yearMonth, price }) => ({ yearMonth, price })),
         }),
       });
       const data = await r.json();
-      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      if (!r.ok || data.success === false) {
+        const failed = Array.isArray(data.failedRanges) && data.failedRanges.length > 0
+          ? ` First failed range: ${data.failedRanges[0]?.range?.startDate ?? "unknown"}-${data.failedRanges[0]?.range?.endDate ?? "unknown"}`
+          : "";
+        throw new Error(data.error || `Guesty calendar push did not fully verify.${failed}`.trim());
+      }
       setSeasonalPushResult({ ...data, plan });
       // Apply the pushed plan directly to the parent's Guesty-rates state
       // so the 24-month table updates immediately. We don't trust a
       // re-fetch because Guesty's calendar GET was returning stale rates
       // right after the PUT (eventual consistency on their side).
       applyPushedRates?.(plan);
+      await onGuestyRatePushRecorded?.();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -313,11 +380,31 @@ function ChannelMarkupCard({
     }
   };
 
+  // Manual market-rate refresh (Pricing tab button) — surgical v1 for the user spec.
+  const refreshMarketRates = async () => {
+    if (!propertyId) return;
+    setMarketRefreshing(true);
+    try {
+      const propPricing = getPropertyPricing(propertyId);
+      const units = propPricing?.units ?? [];
+      const brs = Array.from(new Set(units.map((u) => u.bedrooms)));
+      const r = await fetch("/api/builder/refresh-market-rates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ community: units[0]?.community ?? "unknown", bedrooms: brs, unitCount: units.length, sameBrCombo: brs.length === 1 && units.length > 1 }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "refresh failed");
+      setLiveMarket(data);
+      setSeasonalPushResult((prev: any) => ({ ...(prev || {}), marketRefreshed: Date.now(), live: data }));
+    } catch (e: any) { console.warn("[refresh-market]", e.message); } finally { setMarketRefreshing(false); }
+  };
+
   // One-click: push seasonal base rates AND channel-equalizing markups.
   // After this, every month × every channel should land at targetMargin%.
   const setUpCleanMargin = async () => {
     // eslint-disable-next-line no-console
-    console.log("[ChannelMarkupCard] setUpCleanMargin clicked", { listingId, seasonalMonths: seasonalMonths.length });
+    console.log("[GuestyRatePushCard] setUpCleanMargin clicked", { listingId, seasonalMonths: seasonalMonths.length });
     if (!listingId) {
       setError("No Guesty listing selected. Pick one in the dropdown at the top of the builder first.");
       return;
@@ -326,69 +413,10 @@ function ChannelMarkupCard({
       setError("No pricing data loaded for this property.");
       return;
     }
-    const markups = computeAutoMarkups();
-    // eslint-disable-next-line no-console
-    console.log("[ChannelMarkupCard] computed markups", markups);
-    setMarkupPct(markups);
     setError(null);
-    await pushSeasonalRates();
-    await pushMarkups(markups);
+    await pushMarkedUpRates();
   };
 
-  const pushMarkups = async (override?: Record<ChannelKey, number>) => {
-    if (!listingId) return;
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    const source = override ?? markupPct;
-    // The server expects decimals (0.155 = +15.5%). We skip channels at 0
-    // so Guesty doesn't reset a previously-set markup we intentionally
-    // wanted to keep — callers pass 0 explicitly when they mean "clear it".
-    const body = {
-      listingId,
-      markups: {
-        airbnb: source.airbnb > 0 ? source.airbnb : undefined,
-        vrbo: source.vrbo > 0 ? source.vrbo : undefined,
-        booking: source.booking > 0 ? source.booking : undefined,
-        direct: source.direct > 0 ? source.direct : undefined,
-      },
-    };
-    try {
-      const r = await fetch("/api/builder/push-channel-markups", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-      setResult(data);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const updateChannel = (ch: ChannelKey, input: string) => {
-    const n = parseFloat(input);
-    setMarkupPct({ ...markupPct, [ch]: isNaN(n) ? 0 : n / 100 });
-  };
-
-  // Show live "would-push" markup % per channel in the inputs (0 renders empty)
-  const asInput = (v: number) => (v > 0 ? (v * 100).toFixed(1) : "");
-
-  // Preview the auto-calc so the user can see what it WOULD set before clicking.
-  const autoPreview = useMemo(() => computeAutoMarkups(), [seasonalMonths, guestyRatesByMonth]);
-  const anyGapExists = (Object.keys(autoPreview) as ChannelKey[]).some((ch) => autoPreview[ch] > (markupPct[ch] ?? 0));
-
-  const channelRows: Array<{ key: ChannelKey; label: string }> = [
-    { key: "airbnb",  label: "Airbnb" },
-    { key: "vrbo",    label: "Vrbo" },
-    { key: "booking", label: "Booking.com" },
-    { key: "direct",  label: "Direct" },
-  ];
-
-  // Preview the seasonal base rates for the banner / summary.
   const seasonalPlan = useMemo(() => computeSeasonalRates(), [seasonalMonths, targetMarginPct]);
   const seasonalPriceRange = seasonalPlan.length > 0
     ? { min: Math.min(...seasonalPlan.map((p) => p.price)), max: Math.max(...seasonalPlan.map((p) => p.price)) }
@@ -397,67 +425,49 @@ function ChannelMarkupCard({
   return (
     <div style={{ marginTop: 20, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
-        💵 Clean-margin pricing — seasonal base rates + channel markups
+        💵 Guesty rate push — marked-up base calendar rates
       </div>
       <p style={{ fontSize: 11, color: "#6b7280", marginBottom: 12, maxWidth: 760 }}>
-        Two things together deliver a steady margin across all 24 months:
-        (1) Guesty's <b>base calendar rate scales with season</b> so low months aren't wildly over-profitable,
-        (2) each channel's <b>markup covers only its fee differential vs Direct</b>. Click the one-click button
-        below and Guesty will end up with the same target margin on every month × every channel.
+        Pushes the <b>buy-in cost plus target margin</b> to Guesty's base calendar rate for each month.
+        Guesty will apply its channel pricing rules after this base rate is stored.
       </p>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <label style={{ fontSize: 11, color: "#6b7280" }}>
-          Target margin:
+          {allowCustomMargin ? "Single-listing target margin:" : "Target margin:"}
           <input
             type="number"
             step="1"
-            min="0"
-            max="50"
-            value={targetMarginPct}
-            onChange={(e) => setTargetMarginPct(parseFloat(e.target.value) || 0)}
+            min={marginMinPct}
+            max={marginMaxPct}
+            value={targetMarginInput}
+            disabled={!allowCustomMargin}
+            onChange={(e) => applyTargetMarginInput(e.target.value)}
+            onBlur={normalizeTargetMarginInput}
             style={{ marginLeft: 6, padding: "3px 6px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: 60 }}
             data-testid="input-target-margin"
           />
           <span style={{ marginLeft: 2 }}>%</span>
         </label>
+        {!allowCustomMargin && (
+          <span style={{ fontSize: 11, color: "#6b7280" }}>
+            Combo listings stay locked at the standard 20% margin guardrail.
+          </span>
+        )}
         {seasonalPriceRange && (
           <span style={{ fontSize: 11, color: "#6b7280" }}>
-            Seasonal base rates will range <b>${seasonalPriceRange.min.toLocaleString()}</b>–<b>${seasonalPriceRange.max.toLocaleString()}</b> per night.
+            Marked-up Guesty rates will range <b>${seasonalPriceRange.min.toLocaleString()}</b>–<b>${seasonalPriceRange.max.toLocaleString()}</b> per night.
+          </span>
+        )}
+        {lastGuestyRatePushAt && (
+          <span style={{ fontSize: 11, color: lastGuestyRatePushStatus === "error" ? "#991b1b" : "#166534" }}>
+            Last Guesty rate push: <b>{fmtDateTime(lastGuestyRatePushAt)}</b>
+            {lastGuestyRatePushSummary ? ` · ${lastGuestyRatePushSummary}` : ""}
           </span>
         )}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 10 }}>
-        {channelRows.map(({ key, label }) => {
-          const needed = autoPreview[key];
-          const current = markupPct[key] ?? 0;
-          const shortfall = needed > current + 1e-6;
-          return (
-            <label key={key} style={{ fontSize: 11, color: "#6b7280" }}>
-              {label}
-              {" "}
-              <span style={{ color: "#9ca3af" }}>({(CHANNEL_HOST_FEE[key] * 100).toFixed(1)}% fee)</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
-                <input
-                  type="number"
-                  step="0.5"
-                  value={asInput(current)}
-                  onChange={(e) => updateChannel(key, e.target.value)}
-                  placeholder="0"
-                  style={{ padding: "4px 8px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: "100%" }}
-                  data-testid={`input-markup-${key}`}
-                />
-                <span style={{ fontSize: 11, color: "#6b7280" }}>%</span>
-              </div>
-              <div style={{ fontSize: 10, marginTop: 2, color: shortfall ? "#b45309" : "#6b7280" }}>
-                fee-differential vs Direct: <b>{(needed * 100).toFixed(1)}%</b>
-              </div>
-            </label>
-          );
-        })}
-      </div>
       {!listingId && (
         <div style={{ marginBottom: 10, padding: "8px 12px", background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 4, fontSize: 11, color: "#92400e" }}>
-          ⚠ <b>Select a Guesty listing</b> in the dropdown at the top of the builder before pushing rates or markups. None of the push buttons will work until a listing is selected.
+          ⚠ <b>Select a Guesty listing</b> in the dropdown at the top of the builder before pushing rates.
         </div>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -467,38 +477,9 @@ function ChannelMarkupCard({
           disabled={busy || !listingId || seasonalMonths.length === 0}
           style={{ fontSize: 12 }}
           data-testid="button-set-up-clean-margin"
-          title={!listingId ? "Select a Guesty listing in the dropdown at the top of the builder first" : "Push seasonal base rates AND channel-equalizing markups so every month × every channel nets the target margin"}
+          title={!listingId ? "Select a Guesty listing in the dropdown at the top of the builder first" : "Push marked-up monthly base calendar rates to Guesty"}
         >
-          {busy ? "Pushing…" : `⚡⬆ Set up clean ${targetMarginPct}% margin pricing`}
-        </button>
-        <button
-          className="glb-btn"
-          onClick={autoCalculate}
-          disabled={busy || seasonalMonths.length === 0}
-          style={{ fontSize: 12 }}
-          data-testid="button-auto-calc-markups"
-          title="Fill in fee-differential markups only (doesn't push, doesn't change base rates)"
-        >
-          ⚡ Auto-fill markups only
-        </button>
-        <button
-          className="glb-btn"
-          onClick={pushSeasonalRates}
-          disabled={busy || !listingId || seasonalMonths.length === 0}
-          style={{ fontSize: 12 }}
-          data-testid="button-push-seasonal-rates"
-          title="Push only the per-month base calendar rates to Guesty (skip markups)"
-        >
-          🗓 Push seasonal rates only
-        </button>
-        <button
-          className="glb-btn"
-          onClick={() => pushMarkups()}
-          disabled={busy || !listingId}
-          style={{ fontSize: 12 }}
-          data-testid="button-push-channel-markups"
-        >
-          ⬆ Push markups only
+          {busy ? "Pushing…" : `⬆ Push marked-up ${targetMarginPct}% rates to Guesty`}
         </button>
       </div>
       {error && (
@@ -509,7 +490,7 @@ function ChannelMarkupCard({
       {seasonalPushResult && (
         <div style={{ marginTop: 10, padding: 8, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 4, fontSize: 11 }}>
           <div style={{ fontWeight: 600, color: "#166534", marginBottom: 4 }}>
-            ✓ Seasonal base rates pushed —{" "}
+            ✓ Marked-up Guesty rates pushed —{" "}
             <b>{seasonalPushResult.pushedDays}</b> days in{" "}
             <b>{seasonalPushResult.pushedRanges}</b> ranges;{" "}
             <b>{seasonalPushResult.verifiedDays}</b> verified against Guesty read-back.
@@ -522,8 +503,8 @@ function ChannelMarkupCard({
             const maxP = Math.max(...prices);
             return (
               <div style={{ fontSize: 11, color: "#166534" }}>
-                New rates: <b>${minP.toLocaleString()}/night</b> (low season) → <b>${maxP.toLocaleString()}/night</b> (high season).
-                {" "}If the table above still shows the old rate, hard-refresh the page (Cmd/Ctrl + Shift + R).
+                Pushed rates: <b>${minP.toLocaleString()}/night</b> (low season) → <b>${maxP.toLocaleString()}/night</b> (high season).
+                {" "}The table above now reflects this Guesty push.
               </div>
             );
           })()}
@@ -536,7 +517,7 @@ function ChannelMarkupCard({
                 {seasonalPushResult.plan.map((p: any) => (
                   <div key={p.yearMonth} style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
                     <span>{p.yearMonth}</span>
-                    <span>buy-in ${p.buyIn.toLocaleString()} → base ${p.price.toLocaleString()}</span>
+                    <span>buy-in ${p.buyIn.toLocaleString()} → Guesty ${p.price.toLocaleString()}</span>
                   </div>
                 ))}
               </div>
@@ -544,99 +525,65 @@ function ChannelMarkupCard({
           )}
         </div>
       )}
-      {result && (() => {
-        const r = result as any;
-        // Read the various shapes we inspect for stored values.
-        const savedMarkups = r?.saved?.markups ?? {};
-        const savedInt = r?.saved?.integrations ?? {};
-        const savedFlat = r?.saved?.priceMarkup ?? {};
-        const useAcct = r?.saved?.useAccountMarkups;
-
-        type Row = { label: string; keys: string[]; flat: string };
-        const rows: Row[] = [
-          { label: "Airbnb",     keys: ["airbnb2", "airbnb"],      flat: "airbnb" },
-          { label: "Vrbo",       keys: ["homeaway2", "homeaway", "vrbo"], flat: "vrbo" },
-          { label: "Booking.com",keys: ["bookingCom", "booking"],  flat: "booking" },
-          { label: "Direct",     keys: ["manual", "direct"],       flat: "direct" },
-        ];
-        const resolveValue = (row: Row): number | null => {
-          // Check `markups` object-with-percent shape first (0-100 scale)
-          for (const k of row.keys) {
-            const m = savedMarkups?.[k];
-            if (m && typeof m.percent === "number") return m.percent / 100;
-            if (typeof m === "number") return m;
-          }
-          // Then legacy integrations/priceMarkup
-          for (const k of row.keys) {
-            const v = savedInt?.[k]?.priceMarkup;
-            if (typeof v === "number") return v;
-          }
-          const flat = savedFlat?.[row.flat];
-          return typeof flat === "number" ? flat : null;
-        };
-        const anyStored = rows.some((row) => resolveValue(row) != null);
-        const apiAccepted = r?.success === true || (r?.attempts ?? []).some((a: any) => a.ok);
-        // "accepted but empty" — Guesty returned HTTP 200 on the PUT but
-        // read-back shows no stored values anywhere. This is the silent
-        // failure mode that makes push look successful in the toast but
-        // doesn't actually change anything on the channel.
-        const silentlyDiscarded = apiAccepted && !anyStored;
-
-        return (
-          <div style={{ marginTop: 10, fontSize: 11 }}>
-            {silentlyDiscarded ? (
-              <div style={{ padding: 10, background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 4 }}>
-                <div style={{ fontWeight: 600, color: "#92400e", marginBottom: 4 }}>
-                  ⚠ Guesty returned HTTP 200 but stored NO markup — Open API can't set channel markups on this account.
-                </div>
-                <div style={{ fontSize: 11, color: "#92400e", lineHeight: 1.5 }}>
-                  {useAcct === true && <>Detected <code>useAccountMarkups: true</code> — listing-level markups are disabled. </>}
-                  Set the per-channel markup manually in Guesty: <b>Channel Manager → each channel → Price adjustment</b>. The seasonal base rates we pushed to the calendar work correctly regardless; only the per-channel uplift needs to be configured on the Guesty side.
-                </div>
-              </div>
-            ) : (
-              <div style={{ padding: 8, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 4 }}>
-                <div style={{ fontWeight: 600, color: "#166534", marginBottom: 4 }}>
-                  ✓ Guesty accepted the push — verified channel-side:
-                </div>
-                {rows.map((row) => {
-                  const value = resolveValue(row);
-                  return (
-                    <div key={row.label} style={{ fontSize: 11, color: value != null ? "#166534" : "#6b7280" }}>
-                      {value != null ? "✓" : "—"} {row.label}:{" "}
-                      {value != null ? <b>+{(value * 100).toFixed(1)}% stored</b> : <span>not set / not sent</span>}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            <details style={{ marginTop: 6 }}>
-              <summary style={{ cursor: "pointer", color: silentlyDiscarded ? "#92400e" : "#166534", fontWeight: 600 }}>
-                Raw response (shapes tried, what stuck)
-              </summary>
-              <pre style={{ marginTop: 6, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 10, overflow: "auto", maxHeight: 260 }}>
-                {JSON.stringify(result, null, 2)}
-              </pre>
-            </details>
-          </div>
-        );
-      })()}
     </div>
   );
 }
 
-export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, onBuildComplete, onUpdateComplete }: Props) {
+export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, isSingleListing = false, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
   const [conn, setConn] = useState<ConnState>("checking");
   const [connError, setConnError] = useState<string | null>(null);
   const [listings, setListings] = useState<GuestyListing[]>([]);
   const [selectedId, setSelectedId] = useState("");
+  // Cached guesty-property-map. We fetch it for the auto-select effect
+  // and re-use it on dropdown change to navigate to the listing's
+  // mapped property (rather than just changing the push target while
+  // the rest of the page stays on the previous property's data).
+  const [propertyMap, setPropertyMap] = useState<Array<{ propertyId: number; guestyListingId: string }>>([]);
+  const autoMapAttemptRef = useRef<string | null>(null);
   const [channelStatus, setChannelStatus] = useState<GuestyChannelStatus | null>(null);
   const [loadingChannels, setLoadingChannels] = useState(false);
+  const [listingStateBusy, setListingStateBusy] = useState<"list" | "unlist" | null>(null);
   // Per-listing "Push Compliance" button state so multiple in-flight
   // compliance submits don't step on each other if the user switches
   // listings mid-request.
   const [complianceStateByListing, setComplianceStateByListing] = useState<Record<string, "idle" | "busy">>({});
+  const [complianceOverrides, setComplianceOverrides] = useState<Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>>({});
+  const [licenseLookupBusy, setLicenseLookupBusy] = useState(false);
+  const [tmkLookupBusy, setTmkLookupBusy] = useState(false);
+  const [tmkLookupResult, setTmkLookupResult] = useState<TmkLookupResult | null>(null);
+
+  const rememberPropertyMap = useCallback((propertyIdToMap: number, guestyListingId: string) => {
+    setPropertyMap((prev) => [
+      ...prev.filter((m) => m.propertyId !== propertyIdToMap),
+      { propertyId: propertyIdToMap, guestyListingId },
+    ]);
+    queryClient.invalidateQueries({ queryKey: ["/api/guesty-property-map"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/dashboard/channel-status"] });
+  }, [queryClient]);
+  const listingOptions = useMemo(() => {
+    if (!selectedId || listings.some((listing) => guestyListingId(listing) === selectedId)) return listings;
+    const mapped = propertyMap.find((m) => m.guestyListingId === selectedId);
+    const label = mapped?.propertyId === propertyId
+      ? propertyData?.nickname || propertyData?.title || propertyData?.descriptions?.title || selectedId
+      : selectedId;
+    return [{ _id: selectedId, nickname: label }, ...listings];
+  }, [listings, propertyMap, propertyData?.descriptions?.title, propertyData?.nickname, propertyData?.title, propertyId, selectedId]);
+  // Same idea, separate state for VRBO so the user can submit Airbnb and
+  // VRBO compliance back-to-back without one button's busy spinner
+  // blocking the other. Server-side, the VRBO push hits Guesty's UI via
+  // the rebrowser-playwright session helper at
+  // /api/admin/guesty/submit-vrbo-compliance — see AGENTS.md #28.
+  const [vrboComplianceStateByListing, setVrboComplianceStateByListing] = useState<Record<string, "idle" | "busy" | "done">>({});
+  // Per-listing per-channel "Publish to Channel" busy state. Three
+  // channels can be in flight independently (Airbnb / VRBO / Booking.com)
+  // because each runs in its own /api/admin/guesty/publish-channel
+  // request, so the state is keyed `${listingId}:${channel}`. Server-
+  // side this hits Guesty's Distribution page and clicks the publish-
+  // like button scoped to the channel's row — see AGENTS.md #29.
+  const [publishStateByListingChannel, setPublishStateByListingChannel] = useState<Record<string, "idle" | "busy">>({});
   const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability" | "bedding">("descriptions");
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -732,13 +679,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [propertyId]);
 
   // ── Booking rules state ────────────────────────────────────────────────────
+  // `advanceNotice: 60` is deliberate — the business model is "buy in
+  // after booking, then assign", and reliable buy-in inventory kicks in
+  // around the 60-day mark for the Poipu portfolio. 60 balances
+  // capturing mid-lead-time demand (30-60d out) with a safety buffer
+  // against inventory races. Tighten per-property in the Pricing tab's
+  // Booking Rules card if you want a specific listing to accept
+  // shorter-notice bookings.
+  //
+  // Cancellation is split per-channel because Airbnb, VRBO, and
+  // Booking.com each have their own enum of accepted policy IDs —
+  // the old single "flexible|moderate|..." field couldn't express
+  // channel-specific policies cleanly. Defaults hit the operator's
+  // requested floor: "30+ days notice for a full refund, 50%+ penalty
+  // for late cancellation."
   const [bookingRules, setBookingRules] = useState({
     minNights: 3,
     maxNights: 365,
-    advanceNotice: 1,   // days
+    advanceNotice: 60,  // days — see comment above
     preparationTime: 1, // days (cleaning buffer)
     instantBooking: true,
-    cancellationPolicy: "flexible",
+    cancellationPolicies: {
+      airbnb: "firm",     // 30d full refund · 14d 50% refund · <14d no refund
+      vrbo: "FIRM",       // 60d full refund · 30d 50% refund · <30d no refund
+      booking: "strict",  // One shape below "non_refundable" — the tightest Booking.com policy that still allows a limited refund window; exact day/percent thresholds are operator-configured in the Extranet
+    },
   });
   const [pushingBooking, setPushingBooking] = useState(false);
 
@@ -746,17 +711,231 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setEditableTitle(propertyData?.descriptions?.title ?? "");
   }, [propertyData?.descriptions?.title]);
 
+  useEffect(() => {
+    setComplianceOverrides({});
+    setTmkLookupResult(null);
+  }, [propertyId]);
+
   const effectivePropertyData = useMemo(() => {
     if (!propertyData) return null;
-    if (!propertyData.descriptions) return propertyData;
+    const withCompliance = { ...propertyData, ...complianceOverrides };
+    if (!propertyData.descriptions) return withCompliance;
     return {
-      ...propertyData,
+      ...withCompliance,
       descriptions: {
         ...propertyData.descriptions,
         title: editableTitle || propertyData.descriptions.title,
       },
     };
-  }, [propertyData, editableTitle]);
+  }, [propertyData, complianceOverrides, editableTitle]);
+
+  const complianceProfile = useMemo(() => {
+    return resolveLicenseComplianceProfile({
+      address: effectivePropertyData?.address?.full,
+      city: effectivePropertyData?.address?.city,
+      state: effectivePropertyData?.address?.state,
+    });
+  }, [effectivePropertyData?.address?.full, effectivePropertyData?.address?.city, effectivePropertyData?.address?.state]);
+
+  const complianceValueFor = useCallback((key: LicenseFieldKey): string | undefined => {
+    if (!effectivePropertyData) return undefined;
+    if (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction)) {
+      if (key === "dbprLicense") return effectivePropertyData.dbprLicense || effectivePropertyData.taxMapKey;
+      if (key === "touristTaxAccount") return effectivePropertyData.touristTaxAccount || effectivePropertyData.tatLicense;
+    }
+    return effectivePropertyData[key as keyof typeof effectivePropertyData] as string | undefined;
+  }, [effectivePropertyData, complianceProfile.jurisdiction]);
+
+  const complianceDisplayValue = useCallback((value?: string | null): string => {
+    return value && !isPlaceholderLicenseValue(value) ? value : "—";
+  }, []);
+
+  const canCopyComplianceValue = useCallback((value?: string | null): boolean => {
+    return Boolean(value && !isPlaceholderLicenseValue(value));
+  }, []);
+
+  const complianceSummaryValues = useMemo(() => {
+    const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
+    return {
+      title1: complianceValueFor(isFloridaProfile ? "dbprLicense" : "taxMapKey"),
+      title2: complianceValueFor("getLicense"),
+      title3: complianceValueFor(isFloridaProfile ? "touristTaxAccount" : "tatLicense"),
+      title4: complianceValueFor("strPermit"),
+    };
+  }, [complianceProfile.jurisdiction, complianceValueFor]);
+
+  const persistDraftComplianceValues = useCallback(async (
+    values: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>,
+  ) => {
+    if (!propertyId || propertyId >= 0) return;
+    const payload: Record<string, string> = {};
+    for (const [key, value] of Object.entries(values)) {
+      const text = String(value ?? "").trim();
+      if (text && !isPlaceholderLicenseValue(text)) payload[key] = text;
+    }
+    if (Object.keys(payload).length === 0) return;
+    const resp = await fetch(`/api/community/${Math.abs(propertyId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const error = await resp.json().catch(() => ({}));
+      throw new Error(error?.error || error?.message || `Save failed (${resp.status})`);
+    }
+    await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+  }, [propertyId, queryClient]);
+
+  const validateComplianceRequirement = useCallback((req: LicenseRequirement) => {
+    const value = complianceValueFor(req.key);
+    if (!value || isPlaceholderLicenseValue(value)) {
+      const description = req.key === "dbprLicense"
+        ? "Click the main requirements check to search Florida DBPR automatically. If DBPR has no confident public address/name match, this field stays blank instead of guessing."
+        : req.key === "touristTaxAccount"
+          ? "Paste the real Lee County Tourist Development Tax account/reference if you track it outside the OTA-collected taxes."
+          : `Paste the real ${req.shortLabel} before pushing compliance.`;
+      toast({ title: req.shortLabel, description });
+      return;
+    }
+    toast({
+      title: `${req.shortLabel} looks usable`,
+      description: "This is a real-looking value, not a sample placeholder, and it will be included when you push compliance.",
+    });
+  }, [complianceValueFor, toast]);
+
+  const pullLicenseRequirements = useCallback(async () => {
+    if (!effectivePropertyData?.address) return;
+    setLicenseLookupBusy(true);
+    try {
+      const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
+      const r = await fetch("/api/builder/resolve-license-requirements", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address: effectivePropertyData.address.full,
+          city: effectivePropertyData.address.city,
+          state: effectivePropertyData.address.state,
+          listingName: effectivePropertyData.title || effectivePropertyData.nickname || effectivePropertyData.descriptions?.title,
+          taxMapKey: effectivePropertyData.taxMapKey,
+          tatLicense: effectivePropertyData.tatLicense,
+          getLicense: effectivePropertyData.getLicense,
+          strPermit: effectivePropertyData.strPermit,
+          dbprLicense: effectivePropertyData.dbprLicense || (isFloridaProfile ? effectivePropertyData.taxMapKey : undefined),
+          touristTaxAccount: effectivePropertyData.touristTaxAccount || (isFloridaProfile ? effectivePropertyData.tatLicense : undefined),
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+      setComplianceOverrides((prev) => ({
+        ...prev,
+        ...(data.values?.taxMapKey ? { taxMapKey: data.values.taxMapKey } : {}),
+        ...(data.values?.tatLicense ? { tatLicense: data.values.tatLicense } : {}),
+        ...(data.values?.getLicense ? { getLicense: data.values.getLicense } : {}),
+        ...(data.values?.strPermit ? { strPermit: data.values.strPermit } : {}),
+        ...(data.values?.dbprLicense ? { dbprLicense: data.values.dbprLicense } : {}),
+        ...(data.values?.touristTaxAccount ? { touristTaxAccount: data.values.touristTaxAccount } : {}),
+      }));
+      await persistDraftComplianceValues(data.values ?? {});
+      const missingRequired = (data.profile?.requirements ?? [])
+        .filter((req: any) => req.required && isPlaceholderLicenseValue(data.values?.[req.key]))
+        .map((req: any) => req.shortLabel || req.label);
+      toast({
+        title: data.profile?.title ?? "License requirements loaded",
+        description: missingRequired.length
+          ? `${data.lookup?.note ? `${data.lookup.note} ` : ""}Still missing real values: ${missingRequired.join(", ")}`
+          : "All mapped required license values are present.",
+      });
+    } catch (e: any) {
+      toast({ title: "License lookup failed", description: e.message, variant: "destructive" });
+    } finally {
+      setLicenseLookupBusy(false);
+    }
+  }, [effectivePropertyData, complianceProfile.jurisdiction, persistDraftComplianceValues, toast]);
+
+  // Compliance card labels swap by state. The four data fields
+  // (taxMapKey / getLicense / tatLicense / strPermit) are reused
+  // across jurisdictions but represent different things — Hawaii
+  // ties to TMK / GE / TAT / per-county STR; Florida ties to DBPR
+  // VR License / Sales Tax / County TDT / LBTR. Detect from the
+  // address rather than from a separate flag so the labels stay
+  // in sync with whatever location the operator typed. The
+  // `address` field on GuestyPropertyData is an object
+  // ({full, city, state, …}) — earlier revision treated it as a
+  // string and crashed the page with "X.toLowerCase is not a
+  // function" on every render. Read .state first when present
+  // (cheapest, most accurate); fall back to scanning .full.
+  const complianceLabels = useMemo(() => {
+    const addr = effectivePropertyData?.address;
+    const stateField = (typeof addr === "object" && addr ? (addr as any).state : "") ?? "";
+    const fullField = (typeof addr === "object" && addr ? (addr as any).full : (typeof addr === "string" ? addr : "")) ?? "";
+    const blob = `${stateField} ${fullField}`.toLowerCase();
+    const isHawaii  = /\b(hawaii|hi)\b/.test(blob);
+    const isFlorida = /\b(florida|fl)\b/.test(blob);
+    if (isFlorida) {
+      return {
+        title1: "DBPR Vacation Rental License",
+        title2: "Florida Sales Tax Certificate",
+        title3: "Tourist Development Tax (County)",
+        title4: "Local Business Tax Receipt (LBTR)",
+        notesHint: "Florida tax compliance — DBPR license + DOR sales tax + county TDT + county LBTR",
+      };
+    }
+    if (isHawaii) {
+      return {
+        title1: "Tax Map Key (TMK)",
+        title2: "GET License (General Excise Tax)",
+        title3: "TAT License (Transient Accom. Tax)",
+        title4: "STR Permit Number",
+        notesHint: "Hawaii tax compliance — TMK + GE + TAT + per-county STR",
+      };
+    }
+    return {
+      title1: "Tax Map Key / Parcel ID",
+      title2: "Sales Tax / GE License",
+      title3: "Lodging / TAT License",
+      title4: "STR / Local Permit",
+      notesHint: "tax compliance — confirm the relevant jurisdiction fields",
+    };
+  }, [effectivePropertyData?.address]);
+
+  const isHawaiiCompliance = useMemo(() => {
+    const addr = effectivePropertyData?.address;
+    const stateField = (typeof addr === "object" && addr ? (addr as any).state : "") ?? "";
+    const fullField = (typeof addr === "object" && addr ? (addr as any).full : (typeof addr === "string" ? addr : "")) ?? "";
+    return /\b(hawaii|hi)\b/i.test(`${stateField} ${fullField}`);
+  }, [effectivePropertyData?.address]);
+
+  const pullRealTaxMapKey = useCallback(async () => {
+    if (!effectivePropertyData?.address) return;
+    const fullAddress = typeof effectivePropertyData.address === "object"
+      ? effectivePropertyData.address.full
+      : String(effectivePropertyData.address);
+    if (!fullAddress) {
+      toast({ title: "Missing Guesty address", description: "A full Hawaii Guesty listing address is needed before TMK lookup.", variant: "destructive" });
+      return;
+    }
+    setTmkLookupBusy(true);
+    setTmkLookupResult(null);
+    try {
+      const params = new URLSearchParams({
+        address: fullAddress,
+      });
+      const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || data?.message || "TMK lookup failed");
+      setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
+      await persistDraftComplianceValues({ taxMapKey: data.taxMapKey });
+      setTmkLookupResult(data as TmkLookupResult);
+      toast({
+        title: data.confidence === "unit-cpr" ? "Guesty-address unit TMK applied" : "Guesty-address parcel TMK applied",
+        description: data.note,
+      });
+    } catch (err: any) {
+      toast({ title: "TMK lookup failed", description: err?.message || String(err), variant: "destructive" });
+    } finally {
+      setTmkLookupBusy(false);
+    }
+  }, [effectivePropertyData?.address, persistDraftComplianceValues, toast]);
 
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
@@ -835,15 +1014,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setScanCompletedAt(new Date());
   }, [scanningAll, availWindows, scanWindow]);
 
-  // Auto-trigger scan when user first opens the Availability tab
-  const autoScanFired = useRef(false);
-  useEffect(() => {
-    if (activeTab === "availability" && !autoScanFired.current && !scanningAll && availWindows.length > 0 && propertyId) {
-      autoScanFired.current = true;
-      runScanAll(availWindows);
-    }
-  }, [activeTab, availWindows, scanningAll, propertyId, runScanAll]);
-
   const pushBlackouts = useCallback(async () => {
     if (!selectedId) return;
     const toBlock = availWindows.filter(w => w.status === "none" || w.status === "low");
@@ -875,7 +1045,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [normalizeScope, setNormalizeScope] = useState<"this" | "all">("this");
   const [normalizeCurrent, setNormalizeCurrent] = useState(0);
   const [normalizeTotal, setNormalizeTotal] = useState(0);
-  const [normalizeListingName, setNormalizeListingName] = useState<string>("");
+  const [normalizePhotoListingName, setNormalizePhotoListingName] = useState<string>("");
   const [normalizeFixed, setNormalizeFixed] = useState(0);
   const [normalizeSkipped, setNormalizeSkipped] = useState(0);
   const [normalizeFailed, setNormalizeFailed] = useState(0);
@@ -890,7 +1060,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setNormalizeScope(scope);
     setNormalizeCurrent(0);
     setNormalizeTotal(0);
-    setNormalizeListingName("");
+    setNormalizePhotoListingName("");
     setNormalizeFixed(0);
     setNormalizeSkipped(0);
     setNormalizeFailed(0);
@@ -929,7 +1099,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           if (evt.type === "start") {
             setNormalizeListingCount(evt.listingCount);
           } else if (evt.type === "listing-start") {
-            setNormalizeListingName(evt.name);
+            setNormalizePhotoListingName(evt.name);
             setNormalizeTotal(evt.photoCount);
             setNormalizeCurrent(0);
           } else if (evt.type === "photo") {
@@ -974,18 +1144,56 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [guestyPhotoCount, setGuestyPhotoCount] = useState<number | null>(null);
   const [guestyPhotoCountLoading, setGuestyPhotoCountLoading] = useState(false);
 
+  // The cover-collage picture URL on Guesty (by caption === "Cover Collage").
+  // Used to render the collage as a tile in the PhotoCurator so the
+  // operator can see what's currently set as the cover without leaving
+  // the Photos tab. Null when there's no collage on the listing.
+  const [guestyCoverCollageUrl, setGuestyCoverCollageUrl] = useState<string | null>(null);
+
+  // URLs successfully pushed in the most recent push-photos run, with
+  // captions preserved. The cover-collage push uses this (when non-
+  // empty) to prepend the collage on top of the caller's known-good
+  // list — side-stepping Guesty's read-after-write consistency lag on
+  // GET-after-PUT, which was losing ~3-5 photos in practice.
+  const [lastPushedPictures, setLastPushedPictures] = useState<Array<{ original: string; caption: string }>>([]);
+
   const savePushSummary = useCallback((summary: PushSummary) => {
     setLastPushSummary(summary);
     try { localStorage.setItem(`nexstay_push_${summary.listingId}`, JSON.stringify(summary)); } catch { /* non-fatal */ }
   }, []);
 
+  const readGuestyPictures = useCallback(async (listingId: string): Promise<{ pictures: any[]; collageUrl: string | null }> => {
+    const encodedId = encodeURIComponent(listingId);
+    const read = async (suffix: string) => {
+      const response = await fetch(`/api/guesty-proxy/listings/${encodedId}${suffix}`);
+      if (!response.ok) throw new Error(`Guesty listing read failed (${response.status})`);
+      return response.json();
+    };
+
+    let listing = await read("?fields=pictures");
+    let pictures: any[] = Array.isArray(listing?.pictures) ? listing.pictures : [];
+    if (!Array.isArray(listing?.pictures)) {
+      // Some Guesty responses omit fields when a projection is rejected or
+      // stale; fall back to the full listing before showing a zero count.
+      listing = await read("");
+      pictures = Array.isArray(listing?.pictures) ? listing.pictures : [];
+    }
+
+    const collage = pictures.find((p) => (p?.caption || "") === "Cover Collage");
+    return { pictures, collageUrl: collage?.original || collage?.url || null };
+  }, []);
+
   // Load persisted summary & fetch live photo count when listing selection changes
   useEffect(() => {
-    if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); setGuestyLiveAmenities(null); return; }
+    if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); setGuestyCoverCollageUrl(null); setLastPushedPictures([]); setGuestyLiveAmenities(null); return; }
     // Restore from localStorage
+    let storedSummary: PushSummary | null = null;
     try {
       const stored = localStorage.getItem(`nexstay_push_${selectedId}`);
-      if (stored) setLastPushSummary(JSON.parse(stored));
+      if (stored) {
+        storedSummary = JSON.parse(stored);
+        setLastPushSummary(storedSummary);
+      }
       else setLastPushSummary(null);
     } catch { setLastPushSummary(null); }
     // Fetch live listing data — photo count + current amenities
@@ -995,27 +1203,37 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setFetchingLiveAmenities(true);
     // Photo count comes from the listing; amenities from properties-api (Popular Amenities panel).
     Promise.all([
-      fetch(`/api/guesty-proxy/listings/${selectedId}`).then(r => r.json()).catch(() => null),
+      readGuestyPictures(selectedId).catch(() => null),
       fetch(`/api/builder/guesty-amenities?listingId=${selectedId}`).then(r => r.json()).catch(() => null),
     ])
-      .then(([listing, amen]) => {
-        setGuestyPhotoCount(listing?.pictures?.length ?? 0);
+      .then(([photoRead, amen]) => {
+        const liveCount = photoRead?.pictures.length ?? 0;
+        const fallbackCount = storedSummary?.successCount && storedSummary.successCount > 0
+          ? storedSummary.successCount
+          : null;
+        setGuestyPhotoCount(liveCount > 0 ? liveCount : fallbackCount);
+        setGuestyCoverCollageUrl(photoRead?.collageUrl ?? null);
         const canonical: string[] = Array.isArray(amen?.amenities) ? amen.amenities : [];
         const other: string[] = Array.isArray(amen?.otherAmenities) ? amen.otherAmenities : [];
         setGuestyLiveAmenities(guestyNamesToProfileKeys([...canonical, ...other]));
       })
-      .catch(() => { setGuestyPhotoCount(null); setGuestyLiveAmenities(new Set()); })
+      .catch(() => { setGuestyPhotoCount(null); setGuestyCoverCollageUrl(null); setGuestyLiveAmenities(new Set()); })
       .finally(() => { setGuestyPhotoCountLoading(false); setFetchingLiveAmenities(false); });
-  }, [selectedId, guestyNamesToProfileKeys]);
+  }, [selectedId, guestyNamesToProfileKeys, readGuestyPictures]);
 
-  // Refresh live count after a successful push
+  // Refresh live count + cover-collage URL after a successful push
   const refreshGuestyPhotoCount = useCallback(() => {
     if (!selectedId) return;
-    fetch(`/api/guesty-proxy/listings/${selectedId}`)
-      .then(r => r.json())
-      .then((d: any) => setGuestyPhotoCount(d?.pictures?.length ?? 0))
+    readGuestyPictures(selectedId)
+      .then(({ pictures, collageUrl }) => {
+        const fallbackCount = lastPushSummary?.listingId === selectedId && lastPushSummary.successCount > 0
+          ? lastPushSummary.successCount
+          : null;
+        setGuestyPhotoCount(pictures.length > 0 ? pictures.length : fallbackCount);
+        setGuestyCoverCollageUrl(collageUrl);
+      })
       .catch(() => {});
-  }, [selectedId]);
+  }, [selectedId, lastPushSummary, readGuestyPictures]);
 
   const cancelPush = useCallback(() => {
     pushAbortRef.current?.abort();
@@ -1028,7 +1246,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setUpscaleError(null);
   }, []);
 
-  // ── Cover collage: score labels → pick best outdoor + indoor → canvas → ImgBB → Guesty ──
+  // ── Cover collage: operator selects two photos → canvas → ImgBB → Guesty ──
   type CollagePhase = "idle" | "upscaling" | "generating" | "uploading" | "done" | "error";
   const [collagePhase, setCollagePhase] = useState<CollagePhase>("idle");
   const [collageError, setCollageError] = useState<string | null>(null);
@@ -1101,16 +1319,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return { community, patio };
   }
 
-  const generateCoverCollage = useCallback(async (allPhotos: GuestyPropertyData["photos"]) => {
+  const generateCoverCollage = useCallback(async (
+    allPhotos: GuestyPropertyData["photos"],
+    selection?: CoverCollageSelection,
+  ) => {
     if (!selectedId) return;
     setCollagePhase("upscaling");
     setCollageError(null);
     setCollagePreviewUrl(null);
     setCollagePicks(null);
 
-    const picks = pickCollagePhotos(allPhotos);
+    const picks = selection
+      ? {
+          community: selection.left as NonNullable<GuestyPropertyData["photos"]>[0],
+          patio: selection.right as NonNullable<GuestyPropertyData["photos"]>[0],
+        }
+      : pickCollagePhotos(allPhotos);
     if (!picks) { setCollageError("No photos available"); setCollagePhase("error"); return; }
-    setCollagePicks({ outdoor: picks.community.caption || picks.community.url, indoor: picks.patio.caption || picks.patio.url });
+    setCollagePicks({ community: picks.community.caption || picks.community.url, patio: picks.patio.caption || picks.patio.url });
 
     // Extract local path from URL (e.g. "/photos/kaha-lani-109/photo_00.jpg")
     const toLocalPath = (url: string): string => {
@@ -1187,10 +1413,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // Upload to ImgBB + set as Guesty cover
     setCollagePhase("uploading");
     try {
+      // Prefer passing the URLs we know were just pushed (race-free
+      // against Guesty read-after-write lag). When we have no recent
+      // push on record the server falls back to a fresh GET.
       const resp = await fetch("/api/builder/upload-collage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base64: dataUrl, listingId: selectedId }),
+        body: JSON.stringify({
+          base64: dataUrl,
+          listingId: selectedId,
+          existingPhotos: lastPushedPictures.length > 0 ? lastPushedPictures : undefined,
+        }),
       });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({})) as any;
@@ -1198,11 +1431,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
       const result = await resp.json() as any;
       setGuestyPhotoCount(result.totalPhotos);
+      if (result.collageUrl) setGuestyCoverCollageUrl(result.collageUrl);
       setCollagePhase("done");
     } catch (e: any) {
       setCollageError(e.message); setCollagePhase("error");
     }
-  }, [selectedId]);
+  }, [selectedId, lastPushedPictures]);
 
   const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean) => {
     if (!selectedId || !photos?.length) return;
@@ -1214,6 +1448,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setPushResults([]);
     setSavingToGuesty(false);
     setCheckpointCount(0);
+    // Reset the known-pushed-pictures list at the start of each push so
+    // a follow-up cover-collage operation only sees URLs from THIS run.
+    setLastPushedPictures([]);
 
     const origin = window.location.origin;
 
@@ -1264,7 +1501,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line) as {
-              type: "photo" | "checkpoint" | "saving" | "done";
+              type: "photo" | "checkpoint" | "saving" | "verify" | "done";
               index?: number;
               total?: number;
               saved?: number;
@@ -1274,8 +1511,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               wasUpscaled?: boolean;
               error?: string;
               successCount?: number;
+              verifiedCount?: number;
+              shortfall?: number;
               upscaledCount?: number;
               trimmed?: number;
+              maxPhotos?: number;
+              // "verify" event fields
+              attempt?: number;
+              expected?: number;
+              got?: number;
             };
 
             if (event.type === "photo") {
@@ -1286,11 +1530,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 success: event.success ?? false,
                 error: event.error,
               }]);
+              // Accumulate the ImgBB URL + its caption for the follow-up
+              // cover-collage flow. Preserving the same 1-based index the
+              // server emits keeps the ordering intact, which is the order
+              // the push PUTs to Guesty — so the collage prepend gets
+              // added to a list that matches what's actually live.
+              if (event.success && event.url && typeof event.index === "number") {
+                const caption = photos[event.index - 1]?.caption ?? "";
+                setLastPushedPictures(prev => [...prev, { original: event.url!, caption }]);
+              }
             } else if (event.type === "checkpoint") {
               // Intermediate save — update Guesty photo count so user can see progress
               setCheckpointCount(c => c + 1);
               refreshGuestyPhotoCount();
             } else if (event.type === "saving") {
+              setSavingToGuesty(true);
+            } else if (event.type === "verify") {
+              // The server re-checks Guesty after the final PUT and
+              // retries up to 3 times if pictures were silently dropped
+              // (ImgBB CDN propagation lag causes Guesty to strip URLs
+              // it can't fetch). Reflect that in-flight verification in
+              // the UI so the "saving" spinner stays honest.
               setSavingToGuesty(true);
             } else if (event.type === "done") {
               setSavingToGuesty(false);
@@ -1299,18 +1559,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               if (guestyError) setUpscaleError(`Guesty save failed: ${guestyError}`);
               const trimmed = event.trimmed ?? 0;
               if (trimmed > 0) {
+                const maxPhotos = event.maxPhotos ?? event.total ?? 50;
                 toast({
-                  title: `Trimmed to 40 photos`,
-                  description: `Kept the first 40 (community + units) and dropped ${trimmed} to stay under Booking.com's 40-photo cap.`,
+                  title: `Trimmed to ${maxPhotos} photos`,
+                  description: `Kept the first ${maxPhotos} photos (community + units) and dropped ${trimmed} lower-priority photos to stay within the Guesty master photo limit.`,
                   duration: 10000,
                 });
               }
-              const sc = event.successCount ?? 0;
+              // Use the server-verified count (what's actually on Guesty
+              // after retries) as the authoritative "succeeded" number,
+              // not the blind upload count. Falls back to successCount
+              // for backwards-compat with old server builds that don't
+              // emit verifiedCount.
+              const sc = event.verifiedCount ?? event.successCount ?? 0;
+              const shortfall = event.shortfall ?? 0;
               const tot = event.total ?? 0;
               const succeeded = sc > 0 && !guestyError;
+              if (!guestyError) setGuestyPhotoCount(sc);
               setUpscalePhase(sc === 0 && tot > 0 ? "error" : "done");
               if (sc === 0 && tot > 0 && !guestyError) {
                 setUpscaleError("All photos failed — check per-photo errors below");
+              }
+              if (shortfall > 0) {
+                toast({
+                  title: `Guesty dropped ${shortfall} photo${shortfall === 1 ? "" : "s"}`,
+                  description: `Uploaded ${event.successCount ?? sc}, but only ${sc} persisted on Guesty after 3 verify retries. Usually caused by ImgBB CDN lag — re-pushing in ~30s normally recovers them.`,
+                  variant: "destructive",
+                  duration: 12000,
+                });
               }
               // Persist summary to localStorage and refresh live count
               if (succeeded && selectedId) {
@@ -1348,55 +1624,278 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     async function init() {
       setConn("checking");
       setConnError(null);
-      const result = await guestyService.checkConnection();
-      if (cancelled) return;
-      if (result.connected) {
+      try {
+        const data = await guestyService.getListings(200, 0);
+        if (cancelled) return;
+        setListings(data.results || []);
         setConn("connected");
-        try {
-          const data = await guestyService.getListings(50, 0);
-          if (!cancelled) setListings(data.results || []);
-        } catch { /* non-fatal */ }
-      } else {
-        const isRateLimited = result.error === "RATE_LIMITED";
-        setConn(isRateLimited ? "rate-limited" : "disconnected");
-        setConnError(result.error || null);
+        return;
+      } catch (listError: any) {
+        if (cancelled) return;
+        const result = await guestyService.checkConnection();
+        if (cancelled) return;
+        if (result.connected) {
+          setConn("connected");
+        } else {
+          const isRateLimited = result.error === "RATE_LIMITED" || listError?.message === "RATE_LIMITED";
+          setConn(isRateLimited ? "rate-limited" : "disconnected");
+          setConnError(result.error || listError?.message || null);
+        }
       }
     }
     init();
     return () => { cancelled = true; };
   }, []);
 
-  // ── Auto-select the Guesty listing mapped to this property ─────────────────
-  // Users landing on the pricing tab from a specific property expect the
-  // correct listing to be pre-selected — not a blank dropdown. Pulls the
-  // guestyPropertyMap and matches on propertyId the first time both
-  // `listings` and `propertyId` are populated.
+  // ── Load the guesty-property-map once ──────────────────────────────────────
+  // Used both to pre-select the dropdown when the user lands on a
+  // property AND to navigate when the user picks a different listing
+  // from the dropdown (each Guesty listing maps to at most one
+  // propertyId). One fetch per mount, cached in state.
   useEffect(() => {
-    if (selectedId || !propertyId || listings.length === 0) return;
     let cancelled = false;
     fetch("/api/guesty-property-map")
       .then((r) => r.json())
       .then((maps: Array<{ propertyId: number; guestyListingId: string }>) => {
-        if (cancelled) return;
-        const match = maps.find((m) => m.propertyId === propertyId);
-        if (match && listings.some((l: any) => l._id === match.guestyListingId)) {
-          setSelectedId(match.guestyListingId);
+        if (!cancelled && Array.isArray(maps)) {
+          setPropertyMap(maps);
+          const match = propertyId ? maps.find((m) => m.propertyId === propertyId) : null;
+          if (match?.guestyListingId) {
+            setSelectedId(match.guestyListingId);
+            setConn((current) => current === "checking" || current === "rate-limited" ? "connected" : current);
+            setConnError((current) => current === "RATE_LIMITED" ? null : current);
+          }
         }
       })
-      .catch(() => { /* non-fatal */ });
+      .catch(() => { /* non-fatal — auto-select and dropdown-navigate degrade gracefully */ });
     return () => { cancelled = true; };
-  }, [propertyId, listings, selectedId]);
+  }, []);
+
+  // ── Sync the Guesty listing dropdown to the current property ───────────────
+  // Two responsibilities:
+  //   1. Pre-select the dropdown to whichever Guesty listing is mapped
+  //      to the current propertyId — users landing on a property's
+  //      builder expect the correct push target to be ready.
+  //   2. Reset the dropdown to "" when navigating to a property that
+  //      has no mapping. Without this reset, switching from a draft
+  //      (e.g. Caribe Cove, propertyId -1, no Guesty listing yet) to
+  //      another property left the dropdown stuck on the previously-
+  //      selected listing — and the property-keyed tabs (pricing,
+  //      bedding, photos) showed the new property's data while the
+  //      "push target" stayed pointed at the old one.
+  useEffect(() => {
+    if (!propertyId || propertyMap.length === 0) return;
+    const match = propertyMap.find((m) => m.propertyId === propertyId);
+    if (match?.guestyListingId) {
+      setSelectedId(match.guestyListingId);
+      if (conn === "checking" || conn === "rate-limited") {
+        setConn("connected");
+        setConnError(null);
+      }
+    } else {
+      setSelectedId("");
+    }
+  }, [conn, propertyId, propertyMap]);
+
+  // ── Repair old draft pages that have a matching Guesty listing but no usable map ──
+  // Earlier builds could import a just-created Guesty listing into a *new*
+  // draft and leave the builder's current draft unmapped. When we can prove
+  // there is exactly one Guesty listing with the same title/nickname, connect
+  // it automatically so the dropdown and dashboard green G recover together.
+  // Guesty commonly truncates listing nicknames around 40 chars, so recovery
+  // accepts a one-sided prefix match only when the shared prefix is long enough
+  // to remain unambiguous.
+  useEffect(() => {
+    if (!propertyId || propertyId >= 0 || listings.length === 0) return;
+    const existingMap = propertyMap.find((m) => m.propertyId === propertyId);
+    const existingMapIsValid = existingMap && listings.some((l) => guestyListingId(l) === existingMap.guestyListingId);
+    if (existingMapIsValid) return;
+    try {
+      const candidateNames = new Set<string>();
+      for (const name of [propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title]) {
+        const normalized = normalizeListingName(name);
+        if (normalized) candidateNames.add(normalized);
+      }
+      if (candidateNames.size === 0) return;
+      const isRecoverableNameMatch = (candidate: string, listingName: string) => {
+        if (!candidate || !listingName) return false;
+        if (candidate === listingName) return true;
+        const minLength = Math.min(candidate.length, listingName.length);
+        return minLength >= 32 && (candidate.startsWith(listingName) || listingName.startsWith(candidate));
+      };
+      const exactMatches: GuestyListing[] = [];
+      for (const listing of listings) {
+        for (const name of [listing.nickname, listing.title]) {
+          const normalized = normalizeListingName(name);
+          let matched = false;
+          for (const candidate of candidateNames) {
+            if (isRecoverableNameMatch(candidate, normalized)) {
+              matched = true;
+              break;
+            }
+          }
+          if (matched) {
+            exactMatches.push(listing);
+            break;
+          }
+        }
+      }
+      const uniqueMatches = Array.from(new Map(exactMatches.map((listing) => [guestyListingId(listing), listing])).values())
+        .filter((listing) => guestyListingId(listing));
+      if (uniqueMatches.length === 0) return;
+      if (uniqueMatches.length > 1) {
+        console.warn("[GuestyListingBuilder] multiple draft Guesty listing matches; using the first Guesty result", {
+          propertyId,
+          matches: uniqueMatches.map((listing) => ({ id: guestyListingId(listing), name: listing.nickname || listing.title || "" })),
+        });
+      }
+
+      const match = uniqueMatches[0];
+      const matchId = guestyListingId(match);
+      const attemptKey = `${propertyId}:${matchId}`;
+      if (autoMapAttemptRef.current === attemptKey) return;
+      autoMapAttemptRef.current = attemptKey;
+
+      fetch("/api/guesty-property-map", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ propertyId, guestyListingId: matchId }),
+      })
+        .then(async (resp) => {
+          if (!resp.ok) throw new Error("Guesty property map repair failed");
+          rememberPropertyMap(propertyId, matchId);
+          setSelectedId(matchId);
+          toast({
+            title: "Guesty listing matched",
+            description: "This builder draft is now connected to the matching Guesty listing.",
+            duration: 6000,
+          });
+        })
+        .catch(() => { /* non-fatal; the user can still select manually */ });
+    } catch (e) {
+      console.warn("[GuestyListingBuilder] draft auto-map skipped after unexpected data shape", e);
+    }
+  }, [propertyId, listings, propertyMap, propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title, rememberPropertyMap, toast]);
+
+  // Last-resort draft recovery for Guesty payloads whose name fields differ
+  // slightly from our local title but still share the distinctive opening
+  // phrase. This keeps promoted single listings from landing on a blank
+  // dropdown when Guesty truncates or strips the final "Sleeps N" suffix.
+  useEffect(() => {
+    if (!propertyId || propertyId >= 0 || selectedId || listings.length === 0) return;
+    const titleNorm = normalizeListingName(propertyData?.descriptions?.title || propertyData?.title || propertyData?.nickname);
+    const titlePrefix = titleNorm.split(" ").slice(0, 5).join(" ");
+    if (titlePrefix.length < 18) return;
+    const matches = listings.filter((listing) => {
+      const id = guestyListingId(listing);
+      const nameNorm = normalizeListingName(listing.nickname || listing.title);
+      return id && (nameNorm.startsWith(titlePrefix) || titleNorm.startsWith(nameNorm));
+    });
+    const uniqueMatches = Array.from(new Map(matches.map((listing) => [guestyListingId(listing), listing])).values());
+    if (uniqueMatches.length === 0) return;
+    const id = guestyListingId(uniqueMatches[0]);
+    if (!id) return;
+    rememberPropertyMap(propertyId, id);
+    setSelectedId(id);
+    fetch("/api/guesty-property-map", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ propertyId, guestyListingId: id }),
+    }).catch(() => { /* non-fatal; local selection is still useful */ });
+  }, [propertyId, selectedId, listings, propertyData?.nickname, propertyData?.title, propertyData?.descriptions?.title, rememberPropertyMap]);
 
   // ── Load channel status when selection changes ─────────────────────────────
   const refreshChannelStatus = useCallback(() => {
     if (!selectedId) { setChannelStatus(null); return; }
     setLoadingChannels(true);
     guestyService.getChannelStatus(selectedId)
-      .then(setChannelStatus)
-      .catch(() => setChannelStatus(null))
+      .then((status) => {
+        setChannelStatus(status);
+        setConn("connected");
+        setConnError(null);
+      })
+      .catch((e: any) => {
+        setChannelStatus((current) => current);
+        if (e?.message !== "RATE_LIMITED") {
+          setConnError(e?.message ?? "Failed to load channel status");
+        }
+      })
       .finally(() => setLoadingChannels(false));
   }, [selectedId]);
   useEffect(() => { refreshChannelStatus(); }, [refreshChannelStatus]);
+
+  const describeChannelVerification = useCallback((status: GuestyChannelStatus) => {
+    const names: Record<"airbnb" | "vrbo" | "bookingCom", string> = {
+      airbnb: "Airbnb",
+      vrbo: "VRBO",
+      bookingCom: "Booking.com",
+    };
+    const live = (["airbnb", "vrbo", "bookingCom"] as const)
+      .filter((key) => status[key]?.live)
+      .map((key) => names[key]);
+    const connectedBlocked = (["airbnb", "vrbo", "bookingCom"] as const)
+      .filter((key) => status[key]?.connected && !status[key]?.live)
+      .map((key) => `${names[key]} (${status[key]?.status || "connected, not live"})`);
+    const missing = (["airbnb", "vrbo", "bookingCom"] as const)
+      .filter((key) => !status[key]?.connected)
+      .map((key) => names[key]);
+
+    if (!status.isListed) return "Guesty still reports this listing as not listed/bookable.";
+    const parts = [`Guesty reports the listing is bookable${live.length ? `; live on ${live.join(", ")}` : ""}.`];
+    if (connectedBlocked.length) parts.push(`Connected but not live yet: ${connectedBlocked.join(", ")}.`);
+    if (missing.length) parts.push(`No connected channel account found for: ${missing.join(", ")}.`);
+    return parts.join(" ");
+  }, []);
+
+  const handleListOnChannels = useCallback(async () => {
+    if (!selectedId || listingStateBusy || building || conn !== "connected") return;
+    setListingStateBusy("list");
+    try {
+      const status = await guestyService.listOnChannelsAndVerify(selectedId);
+      setChannelStatus(status);
+      toast({
+        title: status.isListed ? "Listing marked bookable" : "Guesty did not confirm bookable",
+        description: describeChannelVerification(status),
+        variant: status.isListed ? undefined : "destructive",
+        duration: 8000,
+      });
+    } catch (e) {
+      toast({
+        title: "Could not mark listing bookable",
+        description: (e as Error).message,
+        variant: "destructive",
+        duration: 8000,
+      });
+      refreshChannelStatus();
+    } finally {
+      setListingStateBusy(null);
+    }
+  }, [selectedId, listingStateBusy, building, conn, toast, describeChannelVerification, refreshChannelStatus]);
+
+  const handleUnlistFromChannels = useCallback(async () => {
+    if (!selectedId || listingStateBusy || building || conn !== "connected") return;
+    setListingStateBusy("unlist");
+    try {
+      const status = await guestyService.unlistFromChannelsAndVerify(selectedId);
+      setChannelStatus(status);
+      toast({
+        title: status.isListed ? "Guesty still reports listed" : "Listing unlisted",
+        description: status.isListed ? "Guesty accepted the request but still reports isListed=true. Check Guesty for a channel-specific blocker." : "Guesty reports this listing is no longer globally bookable/listed.",
+        variant: status.isListed ? "destructive" : undefined,
+        duration: 8000,
+      });
+    } catch (e) {
+      toast({
+        title: "Could not unlist listing",
+        description: (e as Error).message,
+        variant: "destructive",
+        duration: 8000,
+      });
+      refreshChannelStatus();
+    } finally {
+      setListingStateBusy(null);
+    }
+  }, [selectedId, listingStateBusy, building, conn, toast, refreshChannelStatus]);
 
   // ── Build new listing ──────────────────────────────────────────────────────
   const handleBuild = useCallback(async () => {
@@ -1451,18 +1950,66 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       toast({ title: "Listing creation failed", description: msg, variant: "destructive" });
     } else {
       setBuildSuccess(true);
-      toast({ title: "✓ Listing created on Guesty!", description: `ID: ${result.listingId} — it now appears in the dropdown above as a draft.` });
-      const fresh = await guestyService.getListings(50, 0);
+      // The build sequence ends with list_on_channels (flips isListed:false →
+      // true), so the listing is live on connected channels by default. If
+      // that step failed, the build log shows it and the user can flip it
+      // manually in Guesty admin.
+      const listStep = result.steps.find((s) => s.step === "list_on_channels");
+      const listed = listStep?.status === "success";
+      toast({
+        title: "✓ Listing created on Guesty!",
+        description: listed
+          ? `ID: ${result.listingId} — listed on connected channels. It now appears in the dropdown above.`
+          : `ID: ${result.listingId} — created as a draft (list-on-channels step didn't complete, check the build log). It now appears in the dropdown above.`,
+      });
+      const fresh = await guestyService.getListings(200, 0);
       setListings(fresh.results || []);
       setSelectedId(result.listingId);
 
-      if (propertyId) {
+      let syncPropertyId = propertyId;
+      try {
+        const importRes = await fetch("/api/community/import-guesty-listing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ guestyListingId: result.listingId, propertyId }),
+        });
+        if (importRes.ok) {
+          const imported = await importRes.json().catch(() => null) as {
+            draft?: { id?: number; name?: string; listingTitle?: string | null };
+            mapping?: { propertyId?: number };
+            imported?: boolean;
+          } | null;
+          const importedDraftId = imported?.draft?.id;
+          if (typeof imported?.mapping?.propertyId === "number") {
+            syncPropertyId = imported.mapping.propertyId;
+          } else if (typeof importedDraftId === "number") {
+            syncPropertyId = -importedDraftId;
+          }
+          if (syncPropertyId) rememberPropertyMap(syncPropertyId, result.listingId);
+          await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+          if (imported?.imported) {
+            toast({
+              title: "Saved to dashboard",
+              description: `${imported.draft?.listingTitle || imported.draft?.name || "Guesty listing"} is now available on the dashboard.`,
+              duration: 7000,
+            });
+          }
+        } else {
+          const error = await importRes.json().catch(() => ({})) as { error?: string; message?: string };
+          console.warn("Guesty listing created but dashboard import failed", error);
+        }
+      } catch (e) {
+        console.warn("Guesty listing created but dashboard import failed", e);
+      }
+
+      if (syncPropertyId) {
         try {
           await fetch("/api/builder/schedule-sync", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ propertyId, guestyListingId: result.listingId, delayMinutes: 60 }),
+            body: JSON.stringify({ propertyId: syncPropertyId, guestyListingId: result.listingId, delayMinutes: 60 }),
           });
+          rememberPropertyMap(syncPropertyId, result.listingId);
           toast({ title: "Availability sync scheduled", description: "Blackout dates will be pushed to Guesty in ~1 hour.", duration: 6000 });
         } catch {
           // non-fatal
@@ -1470,7 +2017,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
     }
     onBuildComplete?.({ listingId: result.listingId });
-  }, [effectivePropertyData, building, conn, onBuildComplete, toast]);
+  }, [effectivePropertyData, building, conn, onBuildComplete, propertyId, queryClient, rememberPropertyMap, toast]);
 
   // ── Push updates ──────────────────────────────────────────────────────────
   const handleUpdate = useCallback(async () => {
@@ -1607,29 +2154,795 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const descriptions = effectivePropertyData?.descriptions;
   const pricing = propertyData?.pricing;
 
+  // Live per-property market-rate cache. Hydrated from
+  // GET /api/property/market-rates on mount and after a manual
+  // refresh (Refresh market rates button below). The version
+  // counter is the seasonalMonths useMemo's signal that the
+  // module-level live-buy-in cache changed and the per-channel
+  // floor formula should be recomputed against the new median.
+  const [marketRatesVersion, setMarketRatesVersion] = useState(0);
+  const [marketRatesRefreshing, setMarketRatesRefreshing] = useState(false);
+  // Live per-channel cheapest snapshot from the most recent refresh.
+  // Ephemeral (not persisted on the server, not in property_market_rates)
+  // — refresh response carries it; we render a card showing "Cheapest
+  // right now: airbnb $620 · vrbo $580 · booking $605 · pm $590" so the operator
+  // can see when one channel diverges materially from the median basis.
+  const [liveSnapshot, setLiveSnapshot] = useState<{
+    seasons: {
+      LOW:     { checkIn: string; checkOut: string; daemonOnline: boolean } | null;
+      HIGH:    { checkIn: string; checkOut: string; daemonOnline: boolean } | null;
+      HOLIDAY: { checkIn: string; checkOut: string; daemonOnline: boolean } | null;
+    };
+    region: "hawaii" | "florida" | null;
+    perBR: Array<{
+      bedrooms: number;
+      // Per-season basis from the multi-season scan. LOW always
+      // present (or 0 if the scan had no data); HIGH/HOLIDAY null
+      // when the scan didn't cover that season.
+      low: number;
+      high: number | null;
+      holiday: number | null;
+      basisSource: "static-buy-in" | "optimized-buy-in" | "live-multichannel-median" | "monthly-multichannel-median" | "season-band-multichannel-median" | "hybrid-airbnb-layered" | "airbnb" | "none";
+      channelCount: number;
+      // LOW-season per-channel breakdown. HIGH/HOLIDAY are persisted
+      // as basis numbers, but the compact chip row shows the LOW
+      // channel mix from the most recent scan.
+      channels: { airbnb: number | null; vrbo: number | null; booking: number | null; pm: number | null };
+    }>;
+  } | null>(null);
+
+  // Live progress state for the in-flight refresh — polled every
+  // 1.5s while marketRatesRefreshing is true.
+  //
+  // PR #311: also surface lastTickAt + daemonOnline so the UI can
+  // distinguish "scan still running, daemon alive, just queued behind
+  // other ops" from "scan actually frozen — daemon dead or wedged."
+  // Server emits a heartbeat tick every 15s during non-terminal
+  // phases so lastTickAt stays fresh even when no phase boundary
+  // passes for several minutes (typical during sidecar phases).
+  type ScanWarning = {
+    season: "LOW" | "HIGH" | "HOLIDAY";
+    channel: "airbnb" | "vrbo" | "booking" | "pm" | "engine";
+    kind: "captcha" | "blocked" | "rate-limit" | "timeout" | "network" | "unknown";
+    message: string;
+    reason?: string;
+  };
+  type MarketRefreshProgress = {
+    phase: string;
+    percent: number;
+    label: string;
+    startedAt?: number;
+    error?: string;
+    progressDone?: number;
+    progressTotal?: number;
+    progressCurrent?: number;
+    progressWindowLabel?: string;
+    progressWindowStartedAt?: number;
+    progressSubDone?: number;
+    progressSubTotal?: number;
+    progressSubLabel?: string;
+    progressSubChannel?: "airbnb" | "vrbo" | "booking" | "pm";
+    progressSubBedrooms?: number;
+    progressSubStartedAt?: number;
+    lastTickAt?: number;
+    daemonOnline?: boolean;
+    daemonLastPollAgeMs?: number | null;
+    warnings?: ScanWarning[];
+  };
+  type MarketRefreshNotice = {
+    propertyId: number;
+    status: "done" | "error";
+    finishedAt: number;
+    startedAt?: number;
+    label: string;
+    error?: string;
+  };
+  type ScannerScheduleSnapshot = {
+    targetMargin?: string | number | null;
+    lastGuestyRatePushAt?: string | null;
+    lastGuestyRatePushStatus?: string | null;
+    lastGuestyRatePushSummary?: string | null;
+  };
+  type PricingUpdateLog = {
+    id: number;
+    propertyId: number;
+    propertyName: string;
+    bedrooms: number;
+    triggerType: string;
+    oldRate: string | number | null;
+    newRate: string | number | null;
+    status: string;
+    notes?: string | null;
+    layersJson?: Array<Record<string, any>>;
+    calendarJson?: Record<string, any>;
+    createdAt: string;
+  };
+  const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
+  const refreshNoticeDismissKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.server-dismissed-at`;
+  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Start a fresh pricing update when the server is stable.";
+  const [refreshProgress, setRefreshProgress] = useState<MarketRefreshProgress | null>(null);
+  const [refreshNotice, setRefreshNotice] = useState<MarketRefreshNotice | null>(null);
+  const [pricingUpdateLogs, setPricingUpdateLogs] = useState<PricingUpdateLog[]>([]);
+  const [pricingLogsLoading, setPricingLogsLoading] = useState(false);
+  const [dismissedServerRefreshAt, setDismissedServerRefreshAt] = useState<number>(0);
+  const handledTerminalProgressRef = useRef<string | null>(null);
+  const marketRatesRefreshingRef = useRef(false);
+  const refreshProgressRef = useRef<MarketRefreshProgress | null>(null);
+  const missingProgressPollsRef = useRef(0);
+  const lostProgressRecordedRef = useRef(false);
+  const screenWakeLockRef = useRef<any>(null);
+  // 1Hz ticker so the elapsed-time display + staleness warning re-
+  // render between the 1.5s progress polls. Cheap (no network); keyed
+  // off marketRatesRefreshing so it stops when the scan ends.
+  const [nowTick, setNowTick] = useState(0);
+  useEffect(() => {
+    marketRatesRefreshingRef.current = marketRatesRefreshing;
+  }, [marketRatesRefreshing]);
+  useEffect(() => {
+    refreshProgressRef.current = refreshProgress;
+  }, [refreshProgress]);
+  useEffect(() => {
+    if (!marketRatesRefreshing) return;
+    const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [marketRatesRefreshing]);
+  useEffect(() => {
+    if (!marketRatesRefreshing || typeof navigator === "undefined" || typeof document === "undefined") return;
+    let cancelled = false;
+    const requestWakeLock = async () => {
+      try {
+        const wakeLock = (navigator as any).wakeLock;
+        if (!wakeLock?.request || document.visibilityState !== "visible") return;
+        screenWakeLockRef.current = await wakeLock.request("screen");
+      } catch (e: any) {
+        console.info(`[refresh-market-rates] screen wake lock unavailable: ${e?.message ?? e}`);
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (!cancelled && document.visibilityState === "visible" && !screenWakeLockRef.current) {
+        void requestWakeLock();
+      }
+    };
+    void requestWakeLock();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      const wakeLock = screenWakeLockRef.current;
+      screenWakeLockRef.current = null;
+      if (wakeLock?.release) {
+        void wakeLock.release().catch(() => undefined);
+      }
+    };
+  }, [marketRatesRefreshing]);
+  const [refreshStartedAt, setRefreshStartedAt] = useState<number | null>(null);
+  // AbortController for the in-flight pricing fetch. The server owns
+  // progress/lock state, so cancel also calls the server cleanup endpoint.
+  const refreshAbortRef = useRef<AbortController | null>(null);
+  const cancelRefresh = useCallback(() => {
+    if (!propertyId) return;
+    const startedAt = refreshProgressRef.current?.startedAt ?? refreshStartedAt ?? Date.now();
+    if (refreshAbortRef.current) {
+      console.info("[refresh-market-rates] operator cancelled");
+      refreshAbortRef.current.abort();
+      refreshAbortRef.current = null;
+    }
+    void fetch(`/api/property/${propertyId}/refresh-progress/cancel`, { method: "POST" }).catch(() => undefined);
+    const cancelledNotice: MarketRefreshNotice = {
+      propertyId,
+      status: "error",
+      finishedAt: Date.now(),
+      startedAt,
+      label: "Pricing refresh cancelled",
+      error: "Cancelled by operator",
+    };
+    setRefreshProgress({
+      phase: "error",
+      percent: 100,
+      label: "Pricing refresh cancelled",
+      error: "Cancelled by operator",
+      startedAt,
+    });
+    setRefreshNotice(cancelledNotice);
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(refreshNoticeKeyFor(propertyId), JSON.stringify(cancelledNotice));
+      }
+    } catch {}
+    setRefreshStartedAt(null);
+    setMarketRatesRefreshing(false);
+  }, [propertyId, refreshStartedAt]);
+  useEffect(() => {
+    handledTerminalProgressRef.current = null;
+    missingProgressPollsRef.current = 0;
+    lostProgressRecordedRef.current = false;
+    if (!propertyId || typeof window === "undefined") {
+      setRefreshNotice(null);
+      setDismissedServerRefreshAt(0);
+      return;
+    }
+    try {
+      const dismissedRaw = window.localStorage.getItem(refreshNoticeDismissKeyFor(propertyId));
+      const dismissedAt = dismissedRaw ? Number.parseInt(dismissedRaw, 10) : 0;
+      setDismissedServerRefreshAt(Number.isFinite(dismissedAt) && dismissedAt > 0 ? dismissedAt : 0);
+      const raw = window.localStorage.getItem(refreshNoticeKeyFor(propertyId));
+      if (!raw) {
+        setRefreshNotice(null);
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<MarketRefreshNotice>;
+      if (
+        parsed.propertyId === propertyId &&
+        (parsed.status === "done" || parsed.status === "error") &&
+        typeof parsed.finishedAt === "number" &&
+        Number.isFinite(parsed.finishedAt)
+      ) {
+        setRefreshNotice({
+          propertyId,
+          status: parsed.status,
+          finishedAt: parsed.finishedAt,
+          startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : undefined,
+          label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label : "Pricing update finished",
+          error: typeof parsed.error === "string" ? parsed.error : undefined,
+        });
+      } else {
+        window.localStorage.removeItem(refreshNoticeKeyFor(propertyId));
+        setRefreshNotice(null);
+      }
+    } catch {
+      window.localStorage.removeItem(refreshNoticeKeyFor(propertyId));
+      setRefreshNotice(null);
+    }
+  }, [propertyId]);
+  const recordRefreshNotice = useCallback((notice: Omit<MarketRefreshNotice, "propertyId">) => {
+    if (!propertyId) return;
+    const next: MarketRefreshNotice = { ...notice, propertyId };
+    setRefreshNotice(next);
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(refreshNoticeKeyFor(propertyId), JSON.stringify(next));
+      }
+    } catch {}
+  }, [propertyId]);
+  const dismissRefreshNotice = useCallback(() => {
+    setRefreshNotice(null);
+    try {
+      if (propertyId && typeof window !== "undefined") {
+        window.localStorage.removeItem(refreshNoticeKeyFor(propertyId));
+        const dismissedAt = Date.now();
+        window.localStorage.setItem(refreshNoticeDismissKeyFor(propertyId), String(dismissedAt));
+        setDismissedServerRefreshAt(dismissedAt);
+      }
+    } catch {}
+  }, [propertyId]);
+  const formatRefreshNoticeTime = useCallback((value: number) => {
+    if (!Number.isFinite(value)) return "unknown time";
+    try {
+      return new Date(value).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      });
+    } catch {
+      return new Date(value).toLocaleString();
+    }
+  }, []);
+  const recordLostRefreshTracking = useCallback(() => {
+    if (lostProgressRecordedRef.current) return;
+    lostProgressRecordedRef.current = true;
+    const previous = refreshProgressRef.current;
+    setMarketRatesRefreshing(false);
+    setRefreshStartedAt(null);
+    setRefreshProgress({
+      phase: "error",
+      percent: previous?.percent ?? 100,
+      label: "Refresh tracking interrupted",
+      error: REFRESH_TRACKING_LOST_MESSAGE,
+      startedAt: previous?.startedAt,
+      progressDone: previous?.progressDone,
+      progressTotal: previous?.progressTotal,
+      progressCurrent: previous?.progressCurrent,
+      progressWindowLabel: previous?.progressWindowLabel,
+      progressWindowStartedAt: previous?.progressWindowStartedAt,
+      progressSubDone: previous?.progressSubDone,
+      progressSubTotal: previous?.progressSubTotal,
+      progressSubLabel: previous?.progressSubLabel,
+      progressSubChannel: previous?.progressSubChannel,
+      progressSubBedrooms: previous?.progressSubBedrooms,
+      progressSubStartedAt: previous?.progressSubStartedAt,
+      lastTickAt: previous?.lastTickAt,
+      daemonOnline: previous?.daemonOnline,
+      daemonLastPollAgeMs: previous?.daemonLastPollAgeMs,
+      warnings: previous?.warnings,
+    });
+    recordRefreshNotice({
+      status: "error",
+      finishedAt: Date.now(),
+      startedAt: previous?.startedAt,
+      label: "Refresh tracking interrupted",
+      error: REFRESH_TRACKING_LOST_MESSAGE,
+    });
+  }, [recordRefreshNotice]);
+  const reloadMarketRates = useCallback(async () => {
+    try {
+      const r = await fetch("/api/property/market-rates");
+      if (!r.ok) return;
+      const rates = (await r.json()) as LivePropertyMarketRateInput[];
+      if (Array.isArray(rates)) {
+        setLivePropertyMarketRates(rates);
+        setMarketRatesVersion((v) => v + 1);
+      }
+    } catch (e: any) {
+      console.warn(`[GuestyListingBuilder] market-rates fetch failed: ${e?.message}`);
+    }
+  }, []);
+  useEffect(() => {
+    void reloadMarketRates();
+  }, [reloadMarketRates]);
+  const reloadPricingLogs = useCallback(async () => {
+    if (!propertyId) return;
+    setPricingLogsLoading(true);
+    try {
+      const r = await fetch(`/api/pricing/update-logs?propertyId=${propertyId}&limit=25`, { cache: "no-store" });
+      if (!r.ok) return;
+      const data = await r.json().catch(() => ({}));
+      setPricingUpdateLogs(Array.isArray(data?.logs) ? data.logs : []);
+    } catch (e: any) {
+      console.warn(`[GuestyListingBuilder] pricing logs fetch failed: ${e?.message}`);
+    } finally {
+      setPricingLogsLoading(false);
+    }
+  }, [propertyId]);
+  useEffect(() => {
+    void reloadPricingLogs();
+  }, [reloadPricingLogs, marketRatesVersion]);
+  type MarketRefreshProgressRead =
+    | { kind: "active"; progress: MarketRefreshProgress }
+    | { kind: "missing" }
+    | { kind: "failed"; message: string };
+  const readServerRefreshProgress = useCallback(async (): Promise<MarketRefreshProgressRead> => {
+    if (!propertyId) return { kind: "missing" };
+    const r = await fetch(`/api/property/${propertyId}/refresh-progress`, { cache: "no-store" });
+    if (r.status === 404) return { kind: "missing" };
+    if (!r.ok) return { kind: "failed", message: `HTTP ${r.status}` };
+    const p = await r.json() as MarketRefreshProgress;
+    const next: MarketRefreshProgress = {
+      phase: String(p.phase ?? ""),
+      percent: Number.isFinite(p.percent) ? p.percent : 0,
+      label: String(p.label ?? ""),
+      startedAt: typeof p.startedAt === "number" ? p.startedAt : undefined,
+      error: typeof p.error === "string" ? p.error : undefined,
+      progressDone: typeof p.progressDone === "number" ? p.progressDone : undefined,
+      progressTotal: typeof p.progressTotal === "number" ? p.progressTotal : undefined,
+      progressCurrent: typeof p.progressCurrent === "number" ? p.progressCurrent : undefined,
+      progressWindowLabel: typeof p.progressWindowLabel === "string" ? p.progressWindowLabel : undefined,
+      progressWindowStartedAt: typeof p.progressWindowStartedAt === "number" ? p.progressWindowStartedAt : undefined,
+      progressSubDone: typeof p.progressSubDone === "number" ? p.progressSubDone : undefined,
+      progressSubTotal: typeof p.progressSubTotal === "number" ? p.progressSubTotal : undefined,
+      progressSubLabel: typeof p.progressSubLabel === "string" ? p.progressSubLabel : undefined,
+      progressSubChannel: p.progressSubChannel === "airbnb" || p.progressSubChannel === "vrbo" || p.progressSubChannel === "booking" || p.progressSubChannel === "pm" ? p.progressSubChannel : undefined,
+      progressSubBedrooms: typeof p.progressSubBedrooms === "number" ? p.progressSubBedrooms : undefined,
+      progressSubStartedAt: typeof p.progressSubStartedAt === "number" ? p.progressSubStartedAt : undefined,
+      lastTickAt: typeof p.lastTickAt === "number" ? p.lastTickAt : undefined,
+      daemonOnline: typeof p.daemonOnline === "boolean" ? p.daemonOnline : undefined,
+      daemonLastPollAgeMs: typeof p.daemonLastPollAgeMs === "number" ? p.daemonLastPollAgeMs : null,
+      warnings: Array.isArray(p.warnings) ? p.warnings : undefined,
+    };
+    setRefreshProgress(next);
+    return { kind: "active", progress: next };
+  }, [propertyId]);
+  useEffect(() => {
+    if (!propertyId) return;
+    let cancelled = false;
+    const poll = async () => {
+      const result = await readServerRefreshProgress().catch((e: any) => ({ kind: "failed" as const, message: e?.message ?? "Progress check failed" }));
+      if (cancelled) return;
+      if (result.kind === "missing") {
+        const localProgress = refreshProgressRef.current;
+        const hadRunningLocalRefresh =
+          marketRatesRefreshingRef.current ||
+          (localProgress != null && localProgress.phase !== "done" && localProgress.phase !== "error");
+        if (hadRunningLocalRefresh) {
+          missingProgressPollsRef.current += 1;
+          if (missingProgressPollsRef.current >= 3) recordLostRefreshTracking();
+        }
+        return;
+      }
+      if (result.kind === "failed") return;
+      missingProgressPollsRef.current = 0;
+      lostProgressRecordedRef.current = false;
+      const p = result.progress;
+      const isTerminal = p.phase === "done" || p.phase === "error";
+      if (isTerminal) {
+        setMarketRatesRefreshing(false);
+        setRefreshStartedAt(null);
+        const terminalKey = `${propertyId}|${p.phase}|${p.startedAt ?? ""}|${p.error ?? ""}|${p.label ?? ""}`;
+        if (handledTerminalProgressRef.current !== terminalKey) {
+          handledTerminalProgressRef.current = terminalKey;
+          recordRefreshNotice({
+            status: p.phase === "error" ? "error" : "done",
+            finishedAt: Date.now(),
+            startedAt: p.startedAt,
+            label: p.phase === "error"
+              ? (p.label || "Pricing update failed")
+              : "Pricing update finished",
+            error: p.error,
+          });
+          if (p.phase === "done") {
+            await reloadMarketRates();
+            await reloadPricingLogs();
+          }
+        }
+        return;
+      }
+      handledTerminalProgressRef.current = null;
+      setRefreshNotice(null);
+      setMarketRatesRefreshing(true);
+      setRefreshStartedAt((current) => current ?? p.startedAt ?? Date.now());
+    };
+    void poll();
+    const timer = window.setInterval(poll, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [propertyId, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates, reloadPricingLogs]);
+
+  const refreshThisPropertyMarketRates = useCallback(async () => {
+    if (!propertyId || marketRatesRefreshing) return;
+    const startedAt = Date.now();
+    missingProgressPollsRef.current = 0;
+    lostProgressRecordedRef.current = false;
+    setMarketRatesRefreshing(true);
+    setRefreshNotice(null);
+    setRefreshStartedAt(startedAt);
+    setRefreshProgress({ phase: "starting", percent: 1, label: "Running SearchAPI Airbnb seasonal pricing…", startedAt });
+
+    // Poll progress endpoint while refresh is in flight. Static
+    // properties are positive ids; drafts/promoted drafts are negative
+    // ids, and the server stores progress under that same negative key.
+    // Poll both so draft refreshes don't sit on the local 0% placeholder.
+    let progressTimer: number | null = null;
+    const tickProgress = async () => {
+      await readServerRefreshProgress().catch(() => null);
+    };
+    void tickProgress();
+    progressTimer = window.setInterval(tickProgress, 1500);
+    const readProgress = async () => {
+      return readServerRefreshProgress();
+    };
+    const waitForBackgroundRefresh = async () => {
+      const deadline = Date.now() + 4 * 60 * 60 * 1000;
+      let transientProgressFailures = 0;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        const result = await readProgress().catch((e: any) => ({ kind: "failed" as const, message: e?.message ?? "Progress check failed" }));
+        if (result.kind === "missing") {
+          missingProgressPollsRef.current += 1;
+          if (missingProgressPollsRef.current >= 3) {
+            recordLostRefreshTracking();
+            throw new Error(REFRESH_TRACKING_LOST_MESSAGE);
+          }
+          continue;
+        }
+        if (result.kind === "failed") {
+          transientProgressFailures++;
+          const previous = refreshProgressRef.current;
+          setRefreshProgress({
+            ...(previous ?? { phase: "starting", percent: 1, label: "Reconnecting to pricing refresh…" }),
+            startedAt: previous?.startedAt ?? startedAt,
+            label: "Reconnecting to pricing refresh…",
+            error: result.message,
+          });
+          if (transientProgressFailures >= 20) {
+            recordLostRefreshTracking();
+            throw new Error(REFRESH_TRACKING_LOST_MESSAGE);
+          }
+          continue;
+        }
+        transientProgressFailures = 0;
+        missingProgressPollsRef.current = 0;
+        lostProgressRecordedRef.current = false;
+        const p = result.progress;
+        if (p.phase === "done") {
+          recordRefreshNotice({
+            status: "done",
+            finishedAt: Date.now(),
+            startedAt: p.startedAt ?? startedAt,
+            label: "Pricing update finished",
+          });
+          return;
+        }
+        if (p.phase === "error") throw new Error(p.error || p.label || "Refresh failed");
+      }
+      throw new Error("Refresh is still running after 90 minutes. You can refresh the page later to load any completed rates.");
+    };
+
+    try {
+      const path = `/api/property/${propertyId}/refresh-market-rates`;
+      const controller = new AbortController();
+      refreshAbortRef.current = controller;
+      let r: Response;
+      try {
+        r = await fetch(path, { method: "POST", signal: controller.signal });
+      } catch (e: any) {
+        if (e?.name === "AbortError") throw e;
+        // Railway/browser fetches can drop even after the server accepted
+        // the background refresh. Before showing a red failure, reconnect
+        // to the progress endpoint; if it is alive, keep waiting.
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+          const progress = await readProgress().catch(() => null);
+          if (progress?.kind === "active") {
+            await waitForBackgroundRefresh();
+            setLiveSnapshot(null);
+            await reloadMarketRates();
+            await reloadPricingLogs();
+            recordRefreshNotice({
+              status: "done",
+              finishedAt: Date.now(),
+              startedAt,
+              label: "Hybrid pricing update finished",
+            });
+            return;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        }
+        throw e;
+      }
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        const message = data?.error || `HTTP ${r.status}`;
+        setRefreshProgress({ phase: "error", percent: 100, label: "Refresh failed", error: message, startedAt });
+        recordRefreshNotice({
+          status: "error",
+          finishedAt: Date.now(),
+          startedAt,
+          label: "Hybrid pricing update failed",
+          error: message,
+        });
+        toast({ title: "Refresh failed", description: message, variant: "destructive" });
+        return;
+      }
+      const data = await r.json().catch(() => ({} as Record<string, unknown>));
+      if ((data as any)?.accepted === true) {
+        await waitForBackgroundRefresh();
+        setLiveSnapshot(null);
+        await reloadMarketRates();
+        await reloadPricingLogs();
+        recordRefreshNotice({
+          status: "done",
+          finishedAt: Date.now(),
+          startedAt,
+          label: "Pricing update finished",
+        });
+        toast({
+          duration: Infinity,
+          title: "Market rates refreshed",
+          description: (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="#16a34a"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                style={{ flexShrink: 0 }}
+              >
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+              Airbnb SearchAPI pricing basis updated
+            </span>
+          ),
+        });
+        return;
+      }
+      const persisted = (data as any)?.persisted;
+      const snapshot = (data as any)?.snapshot;
+      // Static-property endpoint (PR #282 onwards) returns
+      // snapshot.seasons; draft endpoint doesn't yet, so we no-op
+      // for drafts.
+      if (Array.isArray(persisted) && snapshot && typeof snapshot === "object" && snapshot.seasons) {
+        const region: "hawaii" | "florida" | null =
+          (snapshot as any).region === "hawaii" || (snapshot as any).region === "florida"
+            ? (snapshot as any).region
+            : null;
+        const parseSeason = (s: any) => s && typeof s === "object"
+          ? { checkIn: String(s.checkIn ?? ""), checkOut: String(s.checkOut ?? ""), daemonOnline: !!s.daemonOnline }
+          : null;
+        setLiveSnapshot({
+          seasons: {
+            LOW: parseSeason(snapshot.seasons.LOW),
+            HIGH: parseSeason(snapshot.seasons.HIGH),
+            HOLIDAY: parseSeason(snapshot.seasons.HOLIDAY),
+          },
+          region,
+          perBR: persisted.map((p: any) => ({
+            bedrooms: Number(p.bedrooms),
+            low: typeof p.low === "number" ? p.low : 0,
+            high: typeof p.high === "number" ? p.high : null,
+            holiday: typeof p.holiday === "number" ? p.holiday : null,
+            basisSource: (p.basisSource === "static-buy-in" || p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "monthly-multichannel-median" || p.basisSource === "season-band-multichannel-median" || p.basisSource === "hybrid-airbnb-layered" || p.basisSource === "airbnb")
+              ? p.basisSource
+              : "none",
+            channelCount: typeof p.channelCount === "number" ? p.channelCount : 0,
+            channels: {
+              airbnb: typeof p.channels?.airbnb === "number" ? p.channels.airbnb : null,
+              vrbo: typeof p.channels?.vrbo === "number" ? p.channels.vrbo : null,
+              booking: typeof p.channels?.booking === "number" ? p.channels.booking : null,
+              pm: typeof p.channels?.pm === "number" ? p.channels.pm : null,
+            },
+          })),
+        });
+      } else {
+        setLiveSnapshot(null);
+      }
+      await reloadMarketRates();
+        await reloadPricingLogs();
+      recordRefreshNotice({
+        status: "done",
+        finishedAt: Date.now(),
+        startedAt,
+        label: "Pricing update finished",
+      });
+      // Persistent green-check confirmation — only goes away when the
+      // user clicks the X (PR #305). Default Radix duration auto-
+      // dismisses at 5s; Infinity keeps it open until manual dismiss.
+      // The check goes in `description` (not `title`) because Radix
+      // Root extends HTMLAttributes whose `title: string` collapses
+      // the union back to string-only.
+      toast({
+        duration: Infinity,
+        title: "Market rates refreshed",
+        description: (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="#16a34a"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              style={{ flexShrink: 0 }}
+            >
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            Airbnb SearchAPI pricing basis updated
+          </span>
+        ),
+      });
+    } catch (e: any) {
+      // AbortError = operator cancelled, distinct copy.
+      if (e?.name === "AbortError") {
+        setRefreshProgress({ phase: "error", percent: 100, label: "Refresh cancelled", error: "Cancelled by operator", startedAt });
+        recordRefreshNotice({
+          status: "error",
+          finishedAt: Date.now(),
+          startedAt,
+          label: "Pricing update cancelled",
+          error: "Cancelled by operator",
+        });
+        toast({ title: "Refresh cancelled", description: "Pricing update was cancelled." });
+      } else {
+        setRefreshProgress({ phase: "error", percent: 100, label: "Refresh failed", error: e?.message, startedAt });
+        recordRefreshNotice({
+          status: "error",
+          finishedAt: Date.now(),
+          startedAt,
+          label: "Pricing update failed",
+          error: e?.message,
+        });
+        toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
+      }
+    } finally {
+      refreshAbortRef.current = null;
+      if (progressTimer) window.clearInterval(progressTimer);
+      setRefreshStartedAt(null);
+      setMarketRatesRefreshing(false);
+    }
+  }, [propertyId, marketRatesRefreshing, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates, reloadPricingLogs, toast]);
+
   // Aggregate monthly rates across all units for the 24-month seasonal table
   const seasonalMonths = useMemo(() => {
     if (!propertyId) return [];
     const propPricing = getPropertyPricing(propertyId);
     if (!propPricing || !propPricing.units.length) return [];
-    return propPricing.units[0].monthlyRates.map((row, i) => ({
-      month: row.month,
-      year: row.year,
-      yearMonth: row.yearMonth,
-      season: row.season,
-      totalBuyIn: propPricing.units.reduce((s, u) => s + u.monthlyRates[i].buyInRate, 0),
-      totalSell:  propPricing.units.reduce((s, u) => s + u.monthlyRates[i].sellRate, 0),
+    return propPricing.units[0].monthlyRates.map((row) => {
+      const monthlySampleRates = propPricing.units.map((u) => {
+        const sample = getLiveBuyIn(propertyId, u.bedrooms)?.monthlyRates[row.yearMonth]?.medianNightly;
+        return typeof sample === "number" && Number.isFinite(sample) && sample > 0 ? sample : null;
+      });
+      const monthlySampleComplete = monthlySampleRates.every((n) => n != null);
+      const monthlySampleTotal = monthlySampleComplete
+        ? Math.round(monthlySampleRates.reduce((s, n) => s + (n ?? 0), 0))
+        : null;
+      const currentUnitRates = propPricing.units.map((u) => {
+        const buyInRate = getBuyInRate(u.community, u.bedrooms, propertyId, row.season, row.yearMonth);
+        return {
+          buyInRate,
+          sellRate: cleanBaseRateFromBuyIn(buyInRate),
+        };
+      });
+      return {
+        month: row.month,
+        year: row.year,
+        yearMonth: row.yearMonth,
+        season: row.season,
+        totalBuyIn: currentUnitRates.reduce((s, u) => s + u.buyInRate, 0),
+        totalSell:  currentUnitRates.reduce((s, u) => s + u.sellRate, 0),
+        monthlySampleTotal,
+      };
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, marketRatesVersion]);
+  const displayedBasePrice = seasonalMonths[0]?.totalSell ?? pricing?.basePrice ?? null;
+
+  // Per-bedroom live-buy-in summary for the Pricing tab header. Pulls
+  // straight from the module-level cache so it reflects whatever
+  // setLivePropertyMarketRates wrote on the most recent reload.
+  const liveBuyInSummary = useMemo(() => {
+    if (!propertyId) return [];
+    const propPricing = getPropertyPricing(propertyId);
+    if (!propPricing) return [];
+    const seenBR = new Set<number>();
+    const bedrooms: number[] = [];
+    for (const u of propPricing.units) {
+      if (!seenBR.has(u.bedrooms)) { seenBR.add(u.bedrooms); bedrooms.push(u.bedrooms); }
+    }
+    bedrooms.sort((a, b) => a - b);
+    return bedrooms.map((br) => ({
+      bedrooms: br,
+      community: propPricing.units.find((u) => u.bedrooms === br)?.community ?? propPricing.units[0]?.community ?? "",
+      live: getLiveBuyIn(propertyId, br),
     }));
-  }, [propertyId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, marketRatesVersion]);
+
+  const latestServerMarketRateNotice = useMemo<MarketRefreshNotice | null>(() => {
+    if (!propertyId) return null;
+    let latest = 0;
+    for (const entry of liveBuyInSummary) {
+      const ms = entry.live?.refreshedAt ? Date.parse(entry.live.refreshedAt) : NaN;
+      if (Number.isFinite(ms) && ms > latest) latest = ms;
+    }
+    if (latest <= 0) return null;
+    return {
+      propertyId,
+      status: "done",
+      finishedAt: latest,
+      label: "Hybrid pricing basis saved from the server queue",
+    };
+  }, [propertyId, liveBuyInSummary]);
+
+  const effectiveRefreshNotice = useMemo<MarketRefreshNotice | null>(() => {
+    const serverNotice = latestServerMarketRateNotice &&
+      latestServerMarketRateNotice.finishedAt > dismissedServerRefreshAt
+      ? latestServerMarketRateNotice
+      : null;
+    if (!serverNotice) return refreshNotice;
+    if (!refreshNotice) return serverNotice;
+    return serverNotice.finishedAt > refreshNotice.finishedAt
+      ? serverNotice
+      : refreshNotice;
+  }, [dismissedServerRefreshAt, latestServerMarketRateNotice, refreshNotice]);
 
   // ── Guesty-confirmed monthly rates + channel-aware profit floor ──
-  // Fetches what Guesty is ACTUALLY charging per month so we can compare
-  // against our pricing sheet at a glance. Also surfaces the minimum rate
-  // needed to hit 20% margin given the selected channel's host fee.
-  const [selectedChannel, setSelectedChannel] = useState<ChannelKey>("airbnb");
-  const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>>({});
+  // Fetches what Guesty is charging per month so we can compare against
+  // our pricing sheet at a glance. The table also overlays the latest
+  // verified push recorded by the server so a just-run queue update is
+  // visible immediately, even if Guesty's calendar read endpoint lags.
+  const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, GuestyMonthlyRate>>({});
   const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
   const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
+  // Live market refresh state (from the new /refresh-market-rates endpoint)
+  const [liveMarket, setLiveMarket] = useState<any>(null);
+  const [marketRefreshing, setMarketRefreshing] = useState(false);
   // Merge the per-month rates we just pushed to Guesty directly into the
   // table's state. Sidesteps Guesty's eventually-consistent calendar GET,
   // which was returning stale rates immediately after the PUT.
@@ -1639,55 +2952,61 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       for (const { yearMonth, price } of plan) {
         const [y, m] = yearMonth.split("-").map(Number);
         const daysInMonth = new Date(y, m, 0).getDate();
-        next[yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth };
+        next[yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth, source: "last-push" };
       }
       return next;
     });
   };
-  // Per-channel markup (decimal form: 0.155 = +15.5%). Hoisted from
-  // ChannelMarkupCard so the profit columns in the pricing table can
-  // reflect the uplift in real time — not just after it's been pushed.
-  const [markupPct, setMarkupPct] = useState<Record<ChannelKey, number>>({
-    airbnb: 0, vrbo: 0, booking: 0, direct: 0,
-  });
+  const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
+  const pricingMarginTarget = isSingleListing ? targetMarginPct / 100 : MIN_PROFIT_MARGIN;
+  const [scannerSchedule, setScannerSchedule] = useState<ScannerScheduleSnapshot | null>(null);
 
-  // Hydrate markupPct from Guesty so saved values survive navigation.
   useEffect(() => {
-    if (!selectedId) return;
-    let cancelled = false;
-    fetch(`/api/guesty-proxy/listings/${selectedId}`)
+    if (!isSingleListing) setTargetMarginPct(MIN_PROFIT_MARGIN * 100);
+  }, [isSingleListing]);
+
+  const refreshScannerSchedule = useCallback(async () => {
+    if (!propertyId) {
+      setScannerSchedule(null);
+      return;
+    }
+    await fetch(`/api/availability/schedule/${propertyId}`)
       .then((r) => r.json())
       .then((data: any) => {
-        if (cancelled) return;
-        const m = (data?.markups ?? {}) as Record<string, any>;
-        const asDecimal = (platformKeys: string[]): number => {
-          for (const k of platformKeys) {
-            const v = m[k];
-            if (!v) continue;
-            if (typeof v === "number" && v > 0) return v <= 1 ? v : v / 100;
-            if (typeof v === "object" && typeof v.percent === "number" && v.percent > 0) {
-              return v.percent / 100;
-            }
-          }
-          return 0;
-        };
-        setMarkupPct({
-          airbnb:  asDecimal(["airbnb2", "airbnb"]),
-          vrbo:    asDecimal(["homeaway2", "homeaway", "vrbo"]),
-          booking: asDecimal(["bookingCom", "booking"]),
-          direct:  asDecimal(["manual", "direct"]),
-        });
+        const nextSchedule = (data?.schedule ?? null) as ScannerScheduleSnapshot | null;
+        setScannerSchedule(nextSchedule);
+        const margin = Number.parseFloat(String(data?.schedule?.targetMargin ?? ""));
+        if (isSingleListing && Number.isFinite(margin)) {
+          setTargetMarginPct(Math.max(-99, Math.min(100, margin * 100)));
+        }
       })
       .catch(() => {});
-    return () => { cancelled = true; };
-  }, [selectedId]);
+  }, [propertyId, isSingleListing]);
+
+  useEffect(() => {
+    void refreshScannerSchedule();
+  }, [refreshScannerSchedule]);
+
+  useEffect(() => {
+    if (!propertyId || !isSingleListing) return;
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/availability/schedule/${propertyId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetMargin: targetMarginPct / 100 }),
+      }).catch(() => {});
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [propertyId, isSingleListing, targetMarginPct]);
 
   useEffect(() => {
     if (!propertyId) return;
     let cancelled = false;
     setGuestyRatesLoading(true);
     setGuestyRatesError(null);
-    fetch(`/api/builder/guesty-monthly-rates/${propertyId}?months=24`)
+    const qs = new URLSearchParams({ months: "24" });
+    if (selectedId) qs.set("listingId", selectedId);
+    fetch(`/api/builder/guesty-monthly-rates/${propertyId}?${qs.toString()}`)
       .then(async (r) => {
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
@@ -1697,9 +3016,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       })
       .then((data: any) => {
         if (cancelled) return;
-        const byMonth: Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }> = {};
+        const byMonth: Record<string, GuestyMonthlyRate> = {};
         for (const m of data.months ?? []) {
-          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days };
+          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days, source: "guesty" };
         }
         setGuestyRatesByMonth(byMonth);
       })
@@ -1710,7 +3029,36 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         if (!cancelled) setGuestyRatesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [propertyId]);
+  }, [propertyId, selectedId]);
+
+  const latestPushedGuestyRatesByMonth = useMemo<Record<string, GuestyMonthlyRate>>(() => {
+    if (!scannerSchedule?.lastGuestyRatePushAt || scannerSchedule.lastGuestyRatePushStatus === "error") return {};
+    const pushMs = Date.parse(scannerSchedule.lastGuestyRatePushAt);
+    if (!Number.isFinite(pushMs)) return {};
+    if (latestServerMarketRateNotice?.finishedAt && pushMs + 1000 < latestServerMarketRateNotice.finishedAt) {
+      return {};
+    }
+    const next: Record<string, GuestyMonthlyRate> = {};
+    for (const row of seasonalMonths) {
+      if (row.totalBuyIn <= 0) continue;
+      const [y, m] = row.yearMonth.split("-").map(Number);
+      const daysInMonth = new Date(y, m, 0).getDate();
+      const price = cleanBaseRateFromBuyIn(row.totalBuyIn, pricingMarginTarget);
+      next[row.yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth, source: "last-push" };
+    }
+    return next;
+  }, [
+    scannerSchedule?.lastGuestyRatePushAt,
+    scannerSchedule?.lastGuestyRatePushStatus,
+    latestServerMarketRateNotice?.finishedAt,
+    seasonalMonths,
+    pricingMarginTarget,
+  ]);
+
+  const displayGuestyRatesByMonth = useMemo<Record<string, GuestyMonthlyRate>>(() => {
+    if (Object.keys(latestPushedGuestyRatesByMonth).length === 0) return guestyRatesByMonth;
+    return { ...guestyRatesByMonth, ...latestPushedGuestyRatesByMonth };
+  }, [guestyRatesByMonth, latestPushedGuestyRatesByMonth]);
 
   // ── Market comparables ─────────────────────────────────────────────────
   // Per-season distribution of area rates for properties with the SAME
@@ -1810,14 +3158,43 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           <select
             className="glb-sel"
             value={selectedId}
-            onChange={(e) => { setSelectedId(e.target.value); setGuestyLiveAmenities(null); }}
+            onChange={(e) => {
+              const newId = e.target.value;
+              setGuestyLiveAmenities(null);
+              // If the picked listing maps to a property that isn't the
+              // one currently in the URL, navigate there — otherwise the
+              // dropdown only retargets the push button while the
+              // property-keyed tabs (pricing schedule, bedding, photos)
+              // keep showing the previous property's data, which is
+              // exactly the bug the operator hit when switching from
+              // Caribe Cove to a Hawaii listing. The auto-select effect
+              // above will set selectedId on the new page.
+              if (newId) {
+                const mapped = propertyMap.find((m) => m.guestyListingId === newId);
+                if (mapped && mapped.propertyId !== propertyId) {
+                  navigate(`/builder/${mapped.propertyId}`);
+                  return;
+                }
+              }
+              setSelectedId(newId);
+              if (newId && propertyId < 0) {
+                rememberPropertyMap(propertyId, newId);
+                fetch("/api/guesty-property-map", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ propertyId, guestyListingId: newId }),
+                }).catch(() => { /* non-fatal; selection still works for this page */ });
+              }
+            }}
             data-testid="select-guesty-listing"
             disabled={conn !== "connected"}
           >
             <option value="">— Select an existing listing to view or update —</option>
-            {listings.map((l) => (
-              <option key={l._id} value={l._id}>{l.nickname || l.title || l._id}</option>
-            ))}
+            {listingOptions.map((l) => {
+              const id = guestyListingId(l);
+              if (!id) return null;
+              return <option key={id} value={id}>{l.nickname || l.title || id}</option>;
+            })}
           </select>
 
           {selectedId && propertyData && (
@@ -1839,9 +3216,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           )}
 
           {selectedId && (
-            <button className="glb-btn glb-btn-danger" onClick={() => guestyService.unlistFromChannels(selectedId)} disabled={building} data-testid="btn-unlist">
-              Unlist
-            </button>
+            channelStatus?.isListed === false ? (
+              <button
+                className="glb-btn glb-btn-secondary"
+                onClick={handleListOnChannels}
+                disabled={!!listingStateBusy || building || conn !== "connected"}
+                data-testid="btn-list-on-channels"
+                title="Set Guesty isListed=true, then verify live channel status"
+              >
+                {listingStateBusy === "list" ? "Verifying…" : "↑ List / Mark Bookable"}
+              </button>
+            ) : (
+              <button
+                className="glb-btn glb-btn-danger"
+                onClick={handleUnlistFromChannels}
+                disabled={!!listingStateBusy || building || conn !== "connected"}
+                data-testid="btn-unlist"
+                title="Set Guesty isListed=false, then verify listing status"
+              >
+                {listingStateBusy === "unlist" ? "Verifying…" : "Unlist"}
+              </button>
+            )
           )}
         </div>
 
@@ -1918,8 +3313,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
         {/* ── Channel Status Grid ───────────────────────────────── */}
         {selectedId && (
+          <BuilderSectionErrorBoundary
+            resetKey={`channel-status:${selectedId}`}
+            fallback={
+              <div className="glb-error-banner" style={{ marginBottom: 20 }}>
+                Channel status could not render for this Guesty listing, but the builder is still usable.
+              </div>
+            }
+          >
           <>
             <div className="glb-section-label">Channel Status</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", margin: "-4px 0 12px" }}>
+              <span className={`glb-badge ${channelStatus?.isListed ? "live" : "not-live"}`}>
+                {!loadingChannels && <span className="glb-badge-dot" />}
+                {loadingChannels ? "Checking Guesty…" : channelStatus?.isListed ? "Guesty Bookable" : "Guesty Not Bookable"}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                This is Guesty's global <code>isListed</code> status. Channel cards below show whether each OTA is connected and live.
+              </span>
+            </div>
             <div className="glb-channels">
               {(["airbnb", "vrbo", "bookingCom"] as const).map((ch) => {
                 const LABELS = { airbnb: "Airbnb", vrbo: "VRBO", bookingCom: "Booking.com" };
@@ -1927,23 +3339,161 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 const info = channelStatus?.[ch];
                 const isLive = info?.live;
                 const isConnected = info?.connected;
+                // Guesty reports the last sync operation's result in `status`.
+                // "FAILED" means the listing still exists on the channel but
+                // Guesty's most recent push errored out — the page is live
+                // but Guesty and the channel are out of sync until the user
+                // re-publishes from Guesty's Distribution page directly
+                // (our Push Updates writes data to Guesty but does NOT
+                // retry Guesty's queued channel sync, which is what has
+                // actually failed).
+                const lastSyncFailed = isLive && info?.status === "FAILED";
                 const cardClass = `glb-ch ${isLive ? "live" : isConnected ? "dead" : ""}`;
-                const badgeClass = `glb-badge ${isLive ? "live" : isConnected ? "not-live" : "no-account"}`;
-                const badgeLabel = loadingChannels ? "…" : isLive ? "LIVE" : isConnected ? "Not Live" : "No Account";
+                const badgeClass = `glb-badge ${isLive ? (lastSyncFailed ? "live-warn" : "live") : isConnected ? "not-live" : "no-account"}`;
+                const badgeLabel = loadingChannels
+                  ? "…"
+                  : isLive
+                    ? (lastSyncFailed ? "LIVE ⚠" : "LIVE")
+                    : isConnected ? "Not Live" : "No Account";
+                const badgeTitle = lastSyncFailed
+                  ? "Listing is on the channel, but Guesty's last sync to Airbnb failed. Fix: open app.guesty.com → this listing → Distribution → Airbnb row → click PUBLISH TO CHANNEL to retry. Push Updates here won't do it."
+                  : undefined;
+                // Click-to-open: when the listing is live AND we have a
+                // public URL (Airbnb: constructed from ID; VRBO/Booking:
+                // only when Guesty stamped listingUrl), the whole card
+                // opens the channel's public listing page in a new tab.
+                // Uses onClick on a <div> rather than wrapping in <a>
+                // because the Airbnb card has a nested <button> for the
+                // compliance push — <button> inside <a> is invalid HTML
+                // and the click conflict would fire both handlers. The
+                // compliance button calls stopPropagation so clicks on
+                // it don't bubble up and trigger the card navigation.
+                const publicUrl = isLive ? info?.publicUrl ?? null : null;
+                const interactive = !!publicUrl;
+                const openChannel = () => {
+                  if (publicUrl) window.open(publicUrl, "_blank", "noopener,noreferrer");
+                };
                 return (
-                  <div key={ch} className={cardClass} data-testid={`channel-card-${ch}`}>
+                  <div
+                    key={ch}
+                    className={cardClass}
+                    data-testid={`channel-card-${ch}`}
+                    onClick={interactive ? openChannel : undefined}
+                    onKeyDown={interactive ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openChannel(); } } : undefined}
+                    role={interactive ? "link" : undefined}
+                    tabIndex={interactive ? 0 : undefined}
+                    style={interactive ? { cursor: "pointer" } : undefined}
+                    title={interactive ? `Open ${LABELS[ch]} listing in a new tab` : undefined}
+                  >
                     <div className="glb-ch-hdr">
                       <span className="glb-ch-name">
                         <span className="glb-ch-icon">{ICONS[ch]}</span>
                         {LABELS[ch]}
                       </span>
-                      <span className={badgeClass}>
+                      <span className={badgeClass} title={badgeTitle}>
                         {!loadingChannels && <span className="glb-badge-dot" />}
                         {badgeLabel}
                       </span>
                     </div>
                     {info?.id && <div className="glb-ch-meta">ID: {info.id}</div>}
                     {info?.status && <div className="glb-ch-meta">Status: {info.status}</div>}
+                    {interactive && (
+                      <div className="glb-ch-meta" style={{ color: "#2563eb", fontWeight: 500, marginTop: 4 }}>
+                        ↗ View live listing
+                      </div>
+                    )}
+                    {isLive && !interactive && (
+                      <div className="glb-ch-meta" style={{ color: "#9ca3af", fontSize: 10, marginTop: 4 }}>
+                        Public URL not yet in Guesty payload — check the channel dashboard.
+                      </div>
+                    )}
+
+                    {/* Publish-to-channel button. Hits
+                        /api/admin/guesty/publish-channel which drives
+                        Guesty's Distribution page and clicks the publish-
+                        like button scoped to this channel's row. The
+                        same backend click works for both:
+                          * "Create listing" — channel is connected (OAuth
+                            done) but not yet listed → click creates the
+                            listing on the channel
+                          * "Re-publish" — channel is already listed →
+                            click pushes the latest Guesty state to the
+                            channel (same as the manual PUBLISH TO CHANNEL
+                            step the Airbnb compliance flow leaves to the
+                            operator)
+                        Hidden when no integration exists at all (`No
+                        Account` state) because there's nothing to
+                        publish — the operator needs to set up OAuth in
+                        Guesty UI first. See AGENTS.md #29. */}
+                    {isConnected && (() => {
+                      const publishKey = `${selectedId}:${ch}`;
+                      const publishBusy = publishStateByListingChannel[publishKey] === "busy";
+                      const buttonLabel = isLive
+                        ? `↑ Re-publish to ${LABELS[ch]}`
+                        : `+ Create listing on ${LABELS[ch]}`;
+                      const handlePublishChannel = async () => {
+                        if (!selectedId) return;
+                        setPublishStateByListingChannel((prev) => ({ ...prev, [publishKey]: "busy" }));
+                        try {
+                          const r = await fetch("/api/admin/guesty/publish-channel", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ listingId: selectedId, channel: ch }),
+                          });
+                          const data = await r.json();
+                          if (!r.ok || !data.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                          const clicked = !!data.clickResult?.clicked;
+                          // The most useful screenshot for the operator
+                          // is the post-click one — shows whether Guesty
+                          // accepted the publish or surfaced an error
+                          // toast.
+                          const shotPath: string | null =
+                            (typeof data.postClickShotUrl === "string" && data.postClickShotUrl) || null;
+                          const shotSuffix = shotPath ? ` · Screenshot: ${window.location.origin}${shotPath}` : "";
+                          toast({
+                            title: clicked
+                              ? `Clicked publish on ${LABELS[ch]}${data.modalConfirmed ? " + confirmed modal" : ""}`
+                              : `Couldn't find a publish button for ${LABELS[ch]}`,
+                            description: clicked
+                              ? `Label: "${data.clickResult?.label ?? "?"}" · Scope: ${data.clickResult?.scope ?? "?"}.${shotSuffix}`
+                              : `${data.clickResult?.reason ?? "no reason given"}. Verify the channel's OAuth is connected in Guesty's Distribution page.${shotSuffix}`,
+                            variant: clicked ? "default" : "destructive",
+                            duration: 20000,
+                          });
+                          refreshChannelStatus?.();
+                        } catch (e: any) {
+                          toast({ title: `Publish to ${LABELS[ch]} failed`, description: e.message, variant: "destructive" });
+                        } finally {
+                          setPublishStateByListingChannel((prev) => ({ ...prev, [publishKey]: "idle" }));
+                        }
+                      };
+                      return (
+                        <div style={{ marginTop: 8 }}>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              // Channel cards become click-to-open-listing
+                              // when live. Stop bubbling so this button
+                              // doesn't also fire that handler.
+                              e.stopPropagation();
+                              handlePublishChannel();
+                            }}
+                            disabled={publishBusy}
+                            style={{
+                              fontSize: 12, padding: "4px 10px", borderRadius: 4,
+                              border: "1px solid #16a34a",
+                              background: publishBusy ? "#dcfce7" : "#f0fdf4",
+                              color: "#14532d", cursor: publishBusy ? "wait" : "pointer", fontWeight: 500,
+                              width: "100%",
+                            }}
+                            data-testid={`btn-publish-channel-${ch}`}
+                            title={`Drive Guesty's Distribution page and click the publish-to-${LABELS[ch]} button. Same as the manual click in app.guesty.com → Distribution → ${LABELS[ch]} row.`}
+                          >
+                            {publishBusy ? `⏳ Driving Guesty…` : buttonLabel}
+                          </button>
+                        </div>
+                      );
+                    })()}
 
                     {/* Airbnb-only compliance sub-block. Appears once the listing
                         is live on Airbnb (so the regulations form page exists).
@@ -1972,12 +3522,36 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           });
                           const data = await r.json();
                           if (!r.ok || !data.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                          const airbnbErrors: string[] = Array.isArray(data.errorMessages) ? data.errorMessages : [];
+                          const screenshotUrl: string | null = typeof data.screenshotUrl === "string" ? data.screenshotUrl : null;
+                          const shotSuffix = screenshotUrl ? ` · Screenshot: ${window.location.origin}${screenshotUrl}` : "";
+                          // submissionComplete: Submit clicked on review page AND URL advanced
+                          // advanced:           Next clicked on step 1 AND URL advanced
+                          // Both false:         form filled but step 1 didn't advance
+                          const fullySubmitted = !!data.submissionComplete;
+                          const step1Only = !fullySubmitted && !!data.advanced;
+                          // On success Guesty won't auto-sync the regulation back — the
+                          // operator has to open Guesty's Distribution page and click
+                          // PUBLISH TO CHANNEL on the Airbnb row. Without that, permits
+                          // stay empty and the "Compliance not submitted" badge persists.
+                          const republishReminder = fullySubmitted
+                            ? " ⚠ NEXT STEP: open app.guesty.com → this listing → Distribution → Airbnb row → click PUBLISH TO CHANNEL. Guesty will NOT sync on its own."
+                            : "";
                           toast({
-                            title: data.advanced ? "Airbnb compliance submitted" : "Compliance form filled",
-                            description: data.advanced
-                              ? "Form accepted and advanced. Re-check Channel Status in a minute — Guesty will reflect the success status."
-                              : `Submitted but page didn't advance — there may be a validation error. Final URL: ${data.finalUrl}. Check your Airbnb dashboard manually.`,
-                            duration: 10000,
+                            title: fullySubmitted
+                              ? "Airbnb compliance submitted — now re-publish from Guesty"
+                              : step1Only
+                                ? "Stuck on review page"
+                                : "Compliance form filled",
+                            description: fullySubmitted
+                              ? `Both steps on Airbnb completed.${republishReminder}${shotSuffix}`
+                              : step1Only
+                                ? `Filled + advanced to Airbnb's review page, but Submit didn't finalize. Check the screenshot.${shotSuffix}`
+                                : airbnbErrors.length > 0
+                                  ? `Airbnb rejected the form: ${airbnbErrors.join(" · ")}${shotSuffix}`
+                                  : `Submitted but page didn't advance — no visible Airbnb error captured. Final URL: ${data.finalUrl}${shotSuffix}`,
+                            variant: fullySubmitted ? "default" : "destructive",
+                            duration: 20000,
                           });
                           // Kick a channel-status refresh so the badge flips if the status updated.
                           refreshChannelStatus?.();
@@ -2010,7 +3584,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </div>
                               <button
                                 type="button"
-                                onClick={handlePushCompliance}
+                                onClick={(e) => {
+                                  // Airbnb card becomes click-to-open-listing
+                                  // when live. Stop bubbling so clicking this
+                                  // button doesn't also fire that handler.
+                                  e.stopPropagation();
+                                  handlePushCompliance();
+                                }}
                                 disabled={complianceBusy || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense}
                                 style={{
                                   fontSize: 12, padding: "4px 10px", borderRadius: 4,
@@ -2020,6 +3600,232 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 data-testid="btn-push-airbnb-compliance"
                               >
                                 {complianceBusy ? "⏳ Submitting…" : "↗ Push Compliance to Airbnb"}
+                              </button>
+                              {/* Persistent reminder about the mandatory follow-up step.
+                                  Airbnb's compliance submission succeeds on its own, but
+                                  Guesty won't pull the new regulation state until the
+                                  operator re-publishes from Guesty Distribution. Without
+                                  this step the "Compliance not submitted" badge persists
+                                  indefinitely. */}
+                              <div style={{ marginTop: 8, fontSize: 10, color: "#92400e", lineHeight: 1.5, background: "#fef3c7", padding: "6px 8px", borderRadius: 4, border: "1px dashed #d97706" }}>
+                                <div style={{ fontWeight: 600, marginBottom: 2 }}>After this succeeds — one more manual step</div>
+                                Open <a href="https://app.guesty.com/" target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: "#92400e", textDecoration: "underline" }}>app.guesty.com</a> → this listing → Distribution → Airbnb row → click <strong>PUBLISH TO CHANNEL</strong>. Guesty won't re-sync on its own; this badge stays stuck until you do.
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* VRBO-only compliance sub-block. Sister to the Airbnb
+                        one above, but the underlying mechanic differs:
+                        Airbnb publishes a regulations form we drive
+                        directly with Playwright; VRBO has no equivalent,
+                        so /api/admin/guesty/submit-vrbo-compliance drives
+                        Guesty's UI (Owners & License → Vrbo license
+                        requirements → Edit → fill TMK/TAT/GET → Save),
+                        then navigates to Distribution and triggers the
+                        Publish-to-channel click on the VRBO row so Guesty
+                        re-syncs to VRBO. Step 4 is the equivalent of
+                        Airbnb's manual republish reminder being automated
+                        for VRBO. See AGENTS.md #28. */}
+                    {ch === "vrbo" && isLive && (() => {
+                      // Persistent VRBO compliance state lives on the
+                      // listing payload at channels.homeaway.{licenseNumber,
+                      // taxId, parcelNumber}. getChannelStatus surfaces it
+                      // as info.vrboLicense (null when nothing's set, else
+                      // an object with each field independently nullable).
+                      // We use that as the source of truth so the green
+                      // check survives page reloads — the session-local
+                      // "done" flag below is just a fast-path for the gap
+                      // between "click Submit" and "next channel-status
+                      // refresh lands".
+                      const vrboLicense = info?.vrboLicense ?? null;
+                      const expectedTat = effectivePropertyData?.tatLicense || null;
+                      const expectedGet = effectivePropertyData?.getLicense || null;
+                      const expectedTmk = effectivePropertyData?.taxMapKey || null;
+                      // "Complete" = every field the property record has
+                      // a value for is also set in Guesty. Property GET is
+                      // optional, so if it's blank we don't require Guesty
+                      // to have it either. Same logic the push endpoint
+                      // uses (only writes fields the caller provided).
+                      const guestyHasTat = !!vrboLicense?.licenseNumber;
+                      const guestyHasTmk = !!vrboLicense?.parcelNumber;
+                      const guestyHasGet = !!vrboLicense?.taxId;
+                      const guestyHasAny = guestyHasTat || guestyHasTmk || guestyHasGet;
+                      const guestyHasAllExpected =
+                        (!expectedTat || guestyHasTat) &&
+                        (!expectedTmk || guestyHasTmk) &&
+                        (!expectedGet || guestyHasGet);
+                      // "Stale" = Guesty has a value that doesn't match
+                      // the property record. Distinct from "missing":
+                      // missing is "we haven't pushed yet", stale is "we
+                      // pushed something old and the property record has
+                      // since changed".
+                      const isStale = guestyHasAny && (
+                        (!!expectedTat && guestyHasTat && vrboLicense?.licenseNumber !== expectedTat) ||
+                        (!!expectedTmk && guestyHasTmk && vrboLicense?.parcelNumber !== expectedTmk) ||
+                        (!!expectedGet && guestyHasGet && vrboLicense?.taxId !== expectedGet)
+                      );
+                      const localState = vrboComplianceStateByListing[selectedId] ?? "idle";
+                      const isVrboBusy = localState === "busy";
+                      // Show the "on file" state if either (a) we just
+                      // submitted this session OR (b) Guesty already has
+                      // every expected field AND nothing is stale.
+                      const isVrboDone = localState === "done" || (guestyHasAllExpected && guestyHasAny && !isStale);
+                      // Distinguish "Guesty has SOME data but not all /
+                      // not current" from "Guesty has nothing at all" —
+                      // they're different operator-facing prompts.
+                      const needsUpdate = !isVrboDone && (isStale || (guestyHasAny && !guestyHasAllExpected));
+                      const handlePushVrboCompliance = async () => {
+                        if (!selectedId || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense) {
+                          toast({ title: "Missing data", description: "Need both TMK and TAT to submit VRBO compliance.", variant: "destructive" });
+                          return;
+                        }
+                        setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "busy" }));
+                        try {
+                          const r = await fetch("/api/admin/guesty/submit-vrbo-compliance", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              // Server-side endpoint takes the GUESTY listing
+                              // ID (24-char hex) — unlike Airbnb which takes
+                              // the Airbnb numeric ID — because the
+                              // automation drives Guesty's own URL space.
+                              listingId: selectedId,
+                              taxMapKey: effectivePropertyData.taxMapKey,
+                              tatLicense: effectivePropertyData.tatLicense,
+                              getLicense: effectivePropertyData.getLicense,
+                            }),
+                          });
+                          const data = await r.json();
+                          if (!r.ok || !data.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+                          // Surface the most-relevant screenshot URL so the
+                          // operator can verify out-of-band — VRBO has no
+                          // Guesty API round-trip that confirms the channel
+                          // got the update.
+                          const shotPath: string | null =
+                            (typeof data.distributionShotUrl === "string" && data.distributionShotUrl) ||
+                            (typeof data.postSaveShotUrl === "string" && data.postSaveShotUrl) ||
+                            null;
+                          const shotSuffix = shotPath ? ` · Final screenshot: ${window.location.origin}${shotPath}` : "";
+                          const republished = !!data.republishResult?.clicked;
+                          const fieldsFilled: number = data.fillResult?.filled?.length ?? 0;
+                          toast({
+                            title: republished
+                              ? "VRBO compliance submitted + republished"
+                              : "VRBO compliance saved (republish not confirmed)",
+                            description: republished
+                              ? `Filled ${fieldsFilled} field(s) in Guesty's VRBO license form, clicked Save, then triggered a republish to VRBO from Distribution.${shotSuffix}`
+                              : `Filled ${fieldsFilled} field(s) and saved, but the Distribution republish button wasn't found. Open app.guesty.com → this listing → Distribution → VRBO row → click PUBLISH TO CHANNEL manually.${shotSuffix}`,
+                            variant: "default",
+                            duration: 20000,
+                          });
+                          setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "done" }));
+                          refreshChannelStatus?.();
+                        } catch (e: any) {
+                          // Surface the failure for long enough that the
+                          // operator actually catches it — Playwright runs
+                          // for 10-30s, so the default 3-5s toast often
+                          // disappears between when they click and when
+                          // they look back at the page. If the error looks
+                          // like a Guesty login failure (stale cookies →
+                          // Google SSO challenge, the most common failure
+                          // mode per AGENTS.md #28), append a remediation
+                          // hint instead of just the raw stack message.
+                          const msg: string = e?.message ?? String(e);
+                          const looksLikeLoginFailure = /google|cookie|password field|verify it's you|captcha|okta|session/i.test(msg);
+                          const description = looksLikeLoginFailure
+                            ? `${msg}\n\nFix: refresh GUESTY_SESSION_COOKIES + GUESTY_OKTA_TOKEN_STORAGE on Railway from a freshly-logged-in browser (Cookie-Editor extension on app.guesty.com).`
+                            : msg;
+                          toast({ title: "VRBO compliance failed", description, variant: "destructive", duration: 30000 });
+                          setVrboComplianceStateByListing((prev) => ({ ...prev, [selectedId]: "idle" }));
+                        }
+                      };
+                      // Compact masked summary of whatever Guesty already
+                      // has, so the operator can confirm at a glance
+                      // (without exposing the full bare TMK in case of
+                      // shoulder-surfing). Shows last-4 digits if present.
+                      const tail = (s: string | null | undefined) => (s && s.length > 4 ? `…${s.slice(-4)}` : (s || "—"));
+                      const guestyValuesLine = vrboLicense
+                        ? `TAT ${tail(vrboLicense.licenseNumber)} · TMK ${tail(vrboLicense.parcelNumber)}${vrboLicense.taxId ? ` · GET ${tail(vrboLicense.taxId)}` : ""}`
+                        : "";
+                      return (
+                        <div className="glb-ch-compliance" style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed rgba(0,0,0,0.1)", fontSize: 12 }}>
+                          {isVrboDone ? (
+                            <div style={{ color: "#16a34a", display: "flex", alignItems: "flex-start", gap: 6 }}>
+                              <span style={{ flexShrink: 0 }}>✓</span>
+                              <div>
+                                <div style={{ fontWeight: 600 }}>Compliance on file in Guesty</div>
+                                {guestyValuesLine && (
+                                  <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+                                    {guestyValuesLine}
+                                  </div>
+                                )}
+                                <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
+                                  {localState === "done"
+                                    ? "Just submitted this session — Guesty re-syncs to VRBO via Distribution."
+                                    : "Read from Guesty's listing payload. Re-push if the property record changes."}
+                                </div>
+                              </div>
+                            </div>
+                          ) : needsUpdate ? (
+                            <div>
+                              <div style={{ color: "#b45309", fontWeight: 600, marginBottom: 6 }}>
+                                ⚠ Compliance on file but {isStale ? "out of date" : "incomplete"}
+                              </div>
+                              {guestyValuesLine && (
+                                <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 6, fontFamily: "monospace" }}>
+                                  Currently in Guesty: {guestyValuesLine}
+                                </div>
+                              )}
+                              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
+                                {isStale
+                                  ? "Guesty's saved values don't match the property record. Re-push to refresh."
+                                  : "Guesty has some compliance fields but not all of the ones we'd push. Re-push to fill the rest."}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); handlePushVrboCompliance(); }}
+                                disabled={isVrboBusy || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense}
+                                style={{
+                                  fontSize: 12, padding: "4px 10px", borderRadius: 4,
+                                  border: "1px solid #d97706", background: isVrboBusy ? "#fef3c7" : "#fffbeb",
+                                  color: "#92400e", cursor: isVrboBusy ? "wait" : "pointer", fontWeight: 500,
+                                }}
+                                data-testid="btn-push-vrbo-compliance"
+                                title={!effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense ? "TMK and TAT must both be set on the property record." : undefined}
+                              >
+                                {isVrboBusy ? "⏳ Re-pushing via Guesty…" : "↻ Re-push Compliance to VRBO via Guesty"}
+                              </button>
+                            </div>
+                          ) : (
+                            <div>
+                              <div style={{ color: "#1d4ed8", fontWeight: 600, marginBottom: 6 }}>
+                                ⓘ VRBO compliance not yet in Guesty
+                              </div>
+                              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
+                                Pushes TMK / TAT / GET into Guesty's "Vrbo license requirements" form, then republishes to VRBO from Distribution — both steps automated.
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  // VRBO card opens the public listing on
+                                  // click when live; stopPropagation so the
+                                  // button click doesn't trigger that.
+                                  e.stopPropagation();
+                                  handlePushVrboCompliance();
+                                }}
+                                disabled={isVrboBusy || !effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense}
+                                style={{
+                                  fontSize: 12, padding: "4px 10px", borderRadius: 4,
+                                  border: "1px solid #1d4ed8", background: isVrboBusy ? "#dbeafe" : "#eff6ff",
+                                  color: "#1e3a8a", cursor: isVrboBusy ? "wait" : "pointer", fontWeight: 500,
+                                }}
+                                data-testid="btn-push-vrbo-compliance"
+                                title={!effectivePropertyData?.taxMapKey || !effectivePropertyData?.tatLicense ? "TMK and TAT must both be set on the property record." : undefined}
+                              >
+                                {isVrboBusy ? "⏳ Submitting via Guesty…" : "↗ Push Compliance to VRBO via Guesty"}
                               </button>
                             </div>
                           )}
@@ -2032,6 +3838,60 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             </div>
             <hr className="glb-divider" />
           </>
+          </BuilderSectionErrorBoundary>
+        )}
+
+        {/* ── Photo Sync Status (per channel) ──────────────────────
+            Shows whether each OTA channel (Airbnb / VRBO / Booking)
+            is on Guesty's master photo sync or has been isolated for
+            independent photo management. Lives next to the Re-publish
+            channel cards so all per-channel controls are one band.
+            communityFolder + bedrooms come from unit-builder-data so
+            the full Isolate + Replace + Disconnect flow can call
+            find-unit without the operator re-entering them. */}
+        {selectedId && (
+          <BuilderSectionErrorBoundary
+            resetKey={`photo-sync:${propertyId ?? "unknown"}:${selectedId}`}
+            fallback={
+              <div className="glb-error-banner" style={{ marginBottom: 20 }}>
+                Photo sync status could not render for this Guesty listing. The rest of the builder is still usable.
+              </div>
+            }
+          >
+        {(() => {
+          const builder = propertyId ? getUnitBuilderByPropertyId(propertyId) : undefined;
+          // Promoted drafts do not live in the static unit-builder map yet.
+          // The per-channel photo-isolation panel needs that canonical
+          // community folder to drive its replacement flow, so skip it for
+          // draft-only listings instead of letting an optional OTA panel
+          // take down the builder page.
+          if (!builder) return null;
+          const totalBedrooms = builder?.units.reduce((s, u) => s + (u.bedrooms ?? 0), 0);
+          // Pre-fill partnerListingRef from Guesty's per-channel
+          // identifiers — VRBO's advertiserId IS the partner-portal
+          // listing id; Booking's hotelId is the extranet id.
+          // channelStatus is already loaded by the existing channel-
+          // info effect.
+          // PR #319: pass per-unit bedroom counts so the panel can
+          // default the row-level Isolate+Replace+Disconnect modal
+          // to the largest unit (likely findable in the community)
+          // instead of the listing total (Pili Mai 5BR Townhomes
+          // = 6 listing total, but the resort has no 6BR units).
+          const unitBedroomCounts = (builder?.units ?? []).map((u) => u.bedrooms ?? 0).filter((n) => n > 0);
+          return (
+            <PhotoSyncStatusPanel
+              guestyListingId={selectedId}
+              communityFolder={builder?.communityPhotoFolder}
+              bedrooms={totalBedrooms && totalBedrooms > 0 ? totalBedrooms : undefined}
+              unitBedroomCounts={unitBedroomCounts}
+              channelIds={{
+                vrbo: channelStatus?.vrbo?.id ?? null,
+                booking: channelStatus?.bookingCom?.id ?? null,
+              }}
+            />
+          );
+        })()}
+          </BuilderSectionErrorBoundary>
         )}
 
         {/* ── Data Preview Panel ────────────────────────────────── */}
@@ -2044,7 +3904,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`}>
                     {t === "photos" ? (
                       <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                        {`Photos (${photos.length})`}
+                        {/* Tab badge reflects what the operator actually
+                            sees in the Photos tab: the local photo set
+                            (photos.length) PLUS the cover-collage tile
+                            when one is live on Guesty. Keeps the count
+                            honest — clicking "Auto-Set Cover Collage"
+                            bumps the badge by one, matching the extra
+                            tile that appears at the top of the grid. */}
+                        {`Photos (${photos.length + (guestyCoverCollageUrl ? 1 : 0)})`}
                         {selectedId && (
                           guestyPhotoCountLoading
                             ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d1d5db", display: "inline-block" }} title="Checking Guesty…" />
@@ -2164,18 +4031,44 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                       </div>
                     )}
 
-                    {/* Compliance & Registration Section */}
-                    {(effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense || effectivePropertyData?.getLicense || effectivePropertyData?.strPermit) && (
+                    {/* Compliance & Registration Section
+                        Field labels swap based on the property's state
+                        because the four slots represent different things
+                        per jurisdiction. Hawaii: TMK / GE / TAT / STR.
+                        Florida: DBPR Vacation Rental / Sales Tax Cert /
+                        County TDT / Local Business Tax Receipt. The
+                        underlying data field names stay HI-flavored
+                        (taxMapKey / getLicense / tatLicense / strPermit);
+                        only display labels change. */}
+                    {(complianceProfile.requirements.length > 0 || effectivePropertyData?.taxMapKey || effectivePropertyData?.tatLicense || effectivePropertyData?.getLicense || effectivePropertyData?.strPermit || effectivePropertyData?.dbprLicense || effectivePropertyData?.touristTaxAccount) && (
                       <div style={{ marginTop: 24, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
-                          <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
-                            <span>🏛</span> Compliance &amp; Registration
+                          <div style={{ fontSize: 13, fontWeight: 600, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+                            <span>🏛 {complianceProfile.title}</span>
+                            <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                              {complianceProfile.summary}
+                            </span>
                           </div>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          <button
+                            type="button"
+                            disabled={licenseLookupBusy}
+                            onClick={pullLicenseRequirements}
+                            style={{
+                              fontSize: 12, fontWeight: 600, padding: "6px 12px", borderRadius: 6,
+                              border: "1px solid var(--border)", cursor: licenseLookupBusy ? "wait" : "pointer",
+                              background: "#fff", color: "var(--text)",
+                            }}
+                            data-testid="btn-pull-license-requirements"
+                          >
+                            {licenseLookupBusy ? "Checking..." : "Check requirements / pull public licenses"}
+                          </button>
                           <button
                             disabled={!selectedId}
                             onClick={async () => {
                               if (!selectedId) return;
                               try {
+                                const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
                                 const res = await fetch("/api/builder/push-compliance", {
                                   method: "POST",
                                   headers: { "Content-Type": "application/json" },
@@ -2185,11 +4078,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     tatLicense: effectivePropertyData.tatLicense,
                                     getLicense: effectivePropertyData.getLicense,
                                     strPermit: effectivePropertyData.strPermit,
+                                    dbprLicense: effectivePropertyData.dbprLicense || (isFloridaProfile ? effectivePropertyData.taxMapKey : undefined),
+                                    touristTaxAccount: effectivePropertyData.touristTaxAccount || (isFloridaProfile ? effectivePropertyData.tatLicense : undefined),
                                   }),
                                 });
                                 const data = await res.json();
                                 if (data.success) {
-                                  const compTags = (data.savedTags || []).filter((t: string) => /^(TMK|TAT|GET):/.test(t)).join(", ");
+                                  const compTags = (data.savedTags || []).filter((t: string) => /^(TMK|TAT|GET|STR|DBPR|TDT):/.test(t)).join(", ");
                                   const licLine = data.licenseNumber?.ok === true
                                     ? `· License# field: ✓`
                                     : data.licenseNumber?.ok === false
@@ -2224,35 +4119,77 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           >
                             ↑ Push Compliance to Guesty
                           </button>
+                          </div>
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12 }}>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              Tax Map Key (TMK)
+                              {complianceLabels.title1}
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tmk-value">
-                              <span>{effectivePropertyData.taxMapKey ?? "—"}</span>
-                              {effectivePropertyData.taxMapKey && (
+                              <span>{complianceDisplayValue(complianceSummaryValues.title1)}</span>
+                              {canCopyComplianceValue(complianceSummaryValues.title1) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
-                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.taxMapKey!); toast({ title: "Copied TMK" }); }}
+                                  onClick={() => { navigator.clipboard.writeText(complianceSummaryValues.title1!); toast({ title: `Copied ${complianceLabels.title1}` }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
                             </div>
+                            {isHawaiiCompliance && (
+                              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={pullRealTaxMapKey}
+                                  disabled={tmkLookupBusy || !effectivePropertyData.address}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: tmkLookupBusy ? "var(--muted)" : "#fff",
+                                    color: "var(--text)",
+                                    cursor: tmkLookupBusy ? "wait" : "pointer",
+                                  }}
+                                  data-testid="button-pull-real-tmk"
+                                >
+                                  {tmkLookupBusy ? "Pulling Guesty-address TMK..." : "Pull real TMK from Guesty address"}
+                                </button>
+                                <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                  Uses the exact address that will be pushed to Guesty for Airbnb license verification.
+                                </div>
+                                {tmkLookupResult && (
+                                  <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                    {tmkLookupResult.confidence === "unit-cpr" ? "Guesty-address CPR match" : "Guesty-address parcel match"} · {tmkLookupResult.source}
+                                    {tmkLookupResult.sourceUrl && (
+                                      <>
+                                        {" · "}
+                                        <a href={tmkLookupResult.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "var(--primary)" }}>
+                                          source
+                                        </a>
+                                      </>
+                                    )}
+                                    <br />
+                                    {tmkLookupResult.note}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              GET License (General Excise Tax)
+                              {complianceLabels.title2}
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-get-value">
-                              <span>{effectivePropertyData.getLicense ?? "—"}</span>
-                              {effectivePropertyData.getLicense && (
+                              <span>{complianceDisplayValue(complianceSummaryValues.title2)}</span>
+                              {canCopyComplianceValue(complianceSummaryValues.title2) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
-                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.getLicense!); toast({ title: "Copied GET License" }); }}
+                                  onClick={() => { navigator.clipboard.writeText(complianceSummaryValues.title2!); toast({ title: `Copied ${complianceLabels.title2}` }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
@@ -2260,15 +4197,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              TAT License (Transient Accom. Tax)
+                              {complianceLabels.title3}
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-tat-value">
-                              <span>{effectivePropertyData.tatLicense ?? "—"}</span>
-                              {effectivePropertyData.tatLicense && (
+                              <span>{complianceDisplayValue(complianceSummaryValues.title3)}</span>
+                              {canCopyComplianceValue(complianceSummaryValues.title3) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
-                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.tatLicense!); toast({ title: "Copied TAT License" }); }}
+                                  onClick={() => { navigator.clipboard.writeText(complianceSummaryValues.title3!); toast({ title: `Copied ${complianceLabels.title3}` }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
@@ -2276,23 +4213,113 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
-                              STR Permit Number
+                              {complianceLabels.title4}
                             </div>
                             <div style={{ fontSize: 13, fontFamily: "monospace", background: "var(--muted)", padding: "6px 10px", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}
                               data-testid="text-str-permit-value">
-                              <span>{effectivePropertyData.strPermit ?? "—"}</span>
-                              {effectivePropertyData.strPermit && (
+                              <span>{complianceDisplayValue(complianceSummaryValues.title4)}</span>
+                              {canCopyComplianceValue(complianceSummaryValues.title4) && (
                                 <button
                                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
-                                  onClick={() => { navigator.clipboard.writeText(effectivePropertyData.strPermit!); toast({ title: "Copied STR Permit" }); }}
+                                  onClick={() => { navigator.clipboard.writeText(complianceSummaryValues.title4!); toast({ title: `Copied ${complianceLabels.title4}` }); }}
                                   title="Copy to clipboard"
                                 >📋</button>
                               )}
                             </div>
                           </div>
                         </div>
+                        {complianceProfile.requirements.length > 0 && (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12, marginTop: 14 }}>
+                            {complianceProfile.requirements.map((req) => {
+                              const value = complianceValueFor(req.key);
+                              const isPlaceholder = isPlaceholderLicenseValue(value);
+                              const inputValue = value && !isPlaceholder ? value : "";
+                              const canPublicPull = (complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit")
+                                || (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction) && req.key === "dbprLicense");
+                              return (
+                                <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
+                                  <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
+                                    {req.shortLabel}{req.required ? " Required" : ""}
+                                  </div>
+                                  <div style={{ fontSize: 13, fontFamily: "monospace", display: "flex", justifyContent: "space-between", gap: 8 }}>
+                                    <span>{value ? `${isPlaceholder ? "sample: " : ""}${value}` : `sample: ${req.sample}`}</span>
+                                    {value && !isPlaceholder && (
+                                      <button
+                                        style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11, color: "var(--muted-foreground)" }}
+                                        onClick={() => { navigator.clipboard.writeText(value); toast({ title: `Copied ${req.shortLabel}` }); }}
+                                        title="Copy to clipboard"
+                                      >📋</button>
+                                    )}
+                                  </div>
+                                  {isPlaceholder && (
+                                    <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
+                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? ` or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : "Fort Myers STR portal"}` : ""} before pushing compliance.
+                                    </div>
+                                  )}
+                                  <input
+                                    value={inputValue}
+                                    onChange={(event) => {
+                                      const next = event.target.value;
+                                      setComplianceOverrides((prev) => ({ ...prev, [req.key]: next }));
+                                    }}
+                                    onBlur={(event) => {
+                                      persistDraftComplianceValues({ [req.key]: event.target.value } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>)
+                                        .catch((err) => toast({ title: "License save failed", description: err.message, variant: "destructive" }));
+                                    }}
+                                    placeholder={req.sample}
+                                    style={{
+                                      width: "100%",
+                                      marginTop: 8,
+                                      fontSize: 12,
+                                      fontFamily: "monospace",
+                                      padding: "6px 8px",
+                                      borderRadius: 5,
+                                      border: "1px solid var(--border)",
+                                      background: "#fff",
+                                      color: "var(--text)",
+                                    }}
+                                    data-testid={`input-compliance-${req.key}`}
+                                  />
+                                  <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 5, lineHeight: 1.35 }}>
+                                    {req.helpText}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={licenseLookupBusy}
+                                    onClick={canPublicPull ? pullLicenseRequirements : () => validateComplianceRequirement(req)}
+                                    style={{
+                                      marginTop: 8,
+                                      fontSize: 11,
+                                      fontWeight: 600,
+                                      padding: "4px 8px",
+                                      borderRadius: 5,
+                                      border: "1px solid var(--border)",
+                                      background: "#fff",
+                                      color: "var(--text)",
+                                      cursor: licenseLookupBusy ? "wait" : "pointer",
+                                    }}
+                                    data-testid={`btn-pull-${req.key}`}
+                                  >
+                                    {canPublicPull
+                                      ? (value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`)
+                                      : `Validate pasted ${req.shortLabel}`}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {complianceProfile.sources.length > 0 && (
+                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10, fontSize: 11 }}>
+                            {complianceProfile.sources.map((source) => (
+                              <a key={source.url} href={source.url} target="_blank" rel="noreferrer" style={{ color: "#1e40af", textDecoration: "underline" }}>
+                                {source.label}
+                              </a>
+                            ))}
+                          </div>
+                        )}
                         <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 10, lineHeight: 1.6 }}>
-                          Push writes to <strong>4 destinations</strong>: (1) Guesty internal tags <code>GET:</code> / <code>TAT:</code> / <code>TMK:</code> — (2) <code>licenseNumber</code> field (TAT number → Guesty's "Registration Number") — (3) <code>taxId</code> field (GET number) — (4) <em>Notes</em> field with a structured Hawaii Tax Compliance block (the field VRBO reads for license compliance). VRBO channel compliance fields (<code>channels.homeaway</code>) are also attempted but only save once you connect VRBO OAuth in Guesty's channel settings. After pushing, the toast shows exactly what was accepted.
+                          Push writes to <strong>4 destinations</strong>: (1) Guesty internal tags <code>GET:</code> / <code>TAT:</code> / <code>TMK:</code> / <code>STR:</code> / <code>DBPR:</code> / <code>TDT:</code> — (2) <code>licenseNumber</code> field — (3) <code>taxId</code> field when available — (4) <em>Notes</em> field with a structured license compliance block. VRBO channel compliance fields (<code>channels.homeaway</code>) are also attempted but only save once you connect VRBO OAuth in Guesty's channel settings. After pushing, the toast shows exactly what was accepted.
                         </div>
                       </div>
                     )}
@@ -2526,7 +4553,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     ? <div>
                         <div className="glb-price-grid">
                           {[
-                            { label: "Base Price / Night", val: pricing.basePrice != null ? `$${pricing.basePrice.toLocaleString()}` : null },
+                            { label: "Base Price / Night", val: displayedBasePrice != null ? `$${displayedBasePrice.toLocaleString()}` : null },
                             { label: "Currency", val: pricing.currency || "USD" },
                           ].filter((r) => r.val != null).map((r) => (
                             <div key={r.label} className="glb-price-card">
@@ -2547,7 +4574,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     seasonal rates" has been run yet. */}
                                 {(() => {
                                   const total = seasonalMonths.length;
-                                  const synced = seasonalMonths.filter((r) => !!guestyRatesByMonth[r.yearMonth]).length;
+                                  const synced = seasonalMonths.filter((r) => !!displayGuestyRatesByMonth[r.yearMonth]).length;
                                   if (guestyRatesLoading) return <span style={{ color: "#9ca3af" }}>Loading Guesty rates…</span>;
                                   if (guestyRatesError) return <span style={{ color: "#dc2626" }} title={guestyRatesError}>Guesty rates unavailable</span>;
                                   if (total === 0) return null;
@@ -2557,11 +4584,465 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   const fg = allSynced ? "#166534" : noneSynced ? "#991b1b" : "#92400e";
                                   return (
                                     <span style={{ background: bg, color: fg, padding: "3px 8px", borderRadius: 4, fontWeight: 600 }}>
-                                      {allSynced ? "✓" : noneSynced ? "✗" : "⚠"} {synced} / {total} months in Guesty
+                                      {allSynced ? "✓" : noneSynced ? "✗" : "⚠"} {synced} / {total} months pushed to Guesty
                                     </span>
                                   );
                                 })()}
                               </div>
+                            </div>
+                            {/* Live buy-in summary. One badge per bedroom-count
+                                showing the persisted Airbnb SearchAPI layered
+                                basis for the market-rate tool. */}
+                            {liveBuyInSummary.length > 0 && (
+                              <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = Airbnb SearchAPI seasonal sample after specialized layered markups.">
+                                  Buy-in basis (Airbnb SearchAPI layered):
+                                </span>
+                                {liveBuyInSummary.map(({ bedrooms, live }) => {
+                                  if (!live) {
+                                    return (
+                                      <span key={bedrooms} title="No Airbnb SearchAPI layered rate has been saved for this bedroom count yet. Click 'Update Market Rates Now' to fetch."
+                                        style={{ background: "#f3f4f6", color: "#6b7280", padding: "2px 6px", borderRadius: 4, fontWeight: 500 }}>
+                                        {bedrooms}BR no rate
+                                      </span>
+                                    );
+                                  }
+                                  const ageDays = Math.max(0, Math.floor((Date.now() - new Date(live.refreshedAt).getTime()) / (24 * 60 * 60 * 1000)));
+                                  const stale = ageDays > 14;
+                                  const bg = stale ? "#fef3c7" : "#dbeafe";
+                                  const fg = stale ? "#92400e" : "#1e40af";
+                                  // Surface which methodology produced the
+                                  // basis: the multi-channel median is the
+                                  // intended path; an Airbnb-only basis means
+                                  // the other channels returned no usable rate.
+                                  const isMultichannel = live.source === "live-multichannel-median" || live.source === "season-band-multichannel-median";
+                                  const sourceLabel = live.source === "static-buy-in"
+                                    ? "legacy static buy-in basis"
+                                    : isMultichannel
+                                    ? live.source === "season-band-multichannel-median"
+                                      ? `season-band median across ${live.sampleCount} channel sample${live.sampleCount === 1 ? "" : "s"}`
+                                      : `median across ${live.sampleCount} channel${live.sampleCount === 1 ? "" : "s"}`
+                                    : live.source === "hybrid-airbnb-layered"
+                                      ? `layered Airbnb basis across ${live.sampleCount} Airbnb sample${live.sampleCount === 1 ? "" : "s"}`
+                                    : live.source === "airbnb"
+                                      ? "Airbnb-only channel basis"
+                                      : live.source === "monthly-multichannel-median"
+                                        ? "monthly channel median"
+                                      : live.source;
+                                  return (
+                                    <span key={bedrooms}
+                                      title={`${bedrooms}BR buy-in $${Math.round(live.medianNightly).toLocaleString()} · ${live.sampleCount} channel${live.sampleCount === 1 ? "" : "s"} · ${sourceLabel} · refreshed ${ageDays} day${ageDays === 1 ? "" : "s"} ago`}
+                                      style={{ background: bg, color: fg, padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>
+                                      {bedrooms}BR ${Math.round(live.medianNightly).toLocaleString()}
+                                      <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 4 }}>· {ageDays}d</span>
+                                    </span>
+                                  );
+                                })}
+                                <button
+                                  type="button"
+                                  onClick={refreshThisPropertyMarketRates}
+                                  disabled={marketRatesRefreshing}
+                                  style={{
+                                    marginLeft: "auto",
+                                    fontSize: 11,
+                                    fontWeight: 500,
+                                    padding: "3px 10px",
+                                    borderRadius: 4,
+                                    border: "1px solid #d1d5db",
+                                    background: marketRatesRefreshing ? "#f3f4f6" : "#ffffff",
+                                    color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
+                                    cursor: marketRatesRefreshing ? "wait" : "pointer",
+                                  }}
+                                      title="Refreshes Airbnb SearchAPI seasonal pricing and pushes marked-up base rates to Guesty."
+                                >
+                                  {marketRatesRefreshing ? "Refreshing…" : "↻ Update Market Rates Now"}
+                                </button>
+                              </div>
+                            )}
+                            {/* Inline progress bar for the server-owned pricing refresh. */}
+                            {marketRatesRefreshing && refreshProgress && (() => {
+                              // Computed values for freeze detection.
+                              // nowTick is unused-but-referenced so React
+                              // re-renders this block each second.
+                              void nowTick;
+                              const now = Date.now();
+                              const startedAtForDisplay = refreshStartedAt ?? refreshProgress.startedAt ?? null;
+                              const elapsedMs = startedAtForDisplay ? now - startedAtForDisplay : 0;
+                              const elapsedMin = Math.floor(elapsedMs / 60000);
+                              const elapsedSec = Math.floor((elapsedMs % 60000) / 1000);
+                              const elapsedStr = `${elapsedMin}:${String(elapsedSec).padStart(2, "0")}`;
+                              const ageSinceTickMs = refreshProgress.lastTickAt ? now - refreshProgress.lastTickAt : 0;
+                              const ageSinceTickSec = Math.round(ageSinceTickMs / 1000);
+                              // Stale if no server tick in 60s. The endpoint
+                              // is quick, so that usually means the request
+                              // was interrupted by a deploy/restart.
+                              const STALE_MS = 60_000;
+                              const isStale = !!refreshProgress.lastTickAt && ageSinceTickMs > STALE_MS;
+                              const daemonStatus = refreshProgress.daemonOnline === true
+                                ? { label: "Daemon online", color: "#15803d" }
+                                : refreshProgress.daemonOnline === false
+                                ? { label: "Daemon offline", color: "#b91c1c" }
+                                : null;
+                              const hasWindowProgress =
+                                typeof refreshProgress.progressDone === "number" &&
+                                typeof refreshProgress.progressTotal === "number" &&
+                                refreshProgress.progressTotal > 0;
+                              const completedWindows = hasWindowProgress
+                                ? Math.max(0, Math.min(refreshProgress.progressTotal!, refreshProgress.progressDone!))
+                                : 0;
+                              const totalWindows = hasWindowProgress ? refreshProgress.progressTotal! : 0;
+                              const currentWindow = hasWindowProgress && typeof refreshProgress.progressCurrent === "number"
+                                ? Math.max(1, Math.min(totalWindows, refreshProgress.progressCurrent))
+                                : null;
+                              const hasSubProgress =
+                                typeof refreshProgress.progressSubDone === "number" &&
+                                typeof refreshProgress.progressSubTotal === "number" &&
+                                refreshProgress.progressSubTotal > 0;
+                              const completedSubChecks = hasSubProgress
+                                ? Math.max(0, Math.min(refreshProgress.progressSubTotal!, refreshProgress.progressSubDone!))
+                                : 0;
+                              const totalSubChecks = hasSubProgress ? refreshProgress.progressSubTotal! : 0;
+                              const subWindowFraction = hasSubProgress
+                                ? Math.max(0, Math.min(1, completedSubChecks / totalSubChecks))
+                                : 0;
+                              const completedPercent = hasWindowProgress
+                                ? Math.round(((completedWindows + subWindowFraction) / totalWindows) * 100)
+                                : Math.max(0, Math.min(100, refreshProgress.percent));
+                              const activeWindowPercent = hasWindowProgress && currentWindow != null
+                                ? Math.round(((Math.max(0, currentWindow - 1) + Math.max(subWindowFraction, 0.05)) / totalWindows) * 100)
+                                : completedPercent;
+                              const currentWindowElapsedMs = refreshProgress.progressWindowStartedAt
+                                ? Math.max(0, now - refreshProgress.progressWindowStartedAt)
+                                : 0;
+                              const currentWindowElapsedMin = Math.floor(currentWindowElapsedMs / 60000);
+                              const currentWindowElapsedSec = Math.floor((currentWindowElapsedMs % 60000) / 1000);
+                              const currentWindowElapsedStr = `${currentWindowElapsedMin}:${String(currentWindowElapsedSec).padStart(2, "0")}`;
+                              const subElapsedMs = refreshProgress.progressSubStartedAt
+                                ? Math.max(0, now - refreshProgress.progressSubStartedAt)
+                                : 0;
+                              const subElapsedMin = Math.floor(subElapsedMs / 60000);
+                              const subElapsedSec = Math.floor((subElapsedMs % 60000) / 1000);
+                              const subElapsedStr = `${subElapsedMin}:${String(subElapsedSec).padStart(2, "0")}`;
+                              const progressText = hasWindowProgress
+                                ? `${currentWindow != null ? `window ${currentWindow}/${totalWindows}` : `${completedWindows}/${totalWindows} windows`}${hasSubProgress ? ` · ${completedSubChecks}/${totalSubChecks} checks` : ""} · ${completedPercent}%`
+                                : `${Math.max(0, Math.min(100, refreshProgress.percent))}%`;
+                              return (
+                                <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
+                                    <span style={{ fontWeight: 500 }}>Running SearchAPI Airbnb seasonal pricing…</span>
+                                    <span style={{ fontFamily: "ui-monospace, monospace" }}>{elapsedStr}</span>
+                                    <span style={{ fontFamily: "ui-monospace, monospace" }}>{progressText}</span>
+                                    <button
+                                      type="button"
+                                      onClick={cancelRefresh}
+                                      title="Cancel the in-flight pricing refresh and clear the server lock."
+                                      style={{
+                                        fontSize: 10,
+                                        padding: "1px 6px",
+                                        borderRadius: 3,
+                                        border: `1px solid ${isStale ? "#fca5a5" : "#93c5fd"}`,
+                                        background: "#ffffff",
+                                        color: isStale ? "#991b1b" : "#1e3a8a",
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                  <div style={{ position: "relative", height: 6, background: isStale ? "#fee2e2" : "#dbeafe", borderRadius: 3, overflow: "hidden" }}>
+                                    {hasWindowProgress && currentWindow != null && (
+                                      <div
+                                        style={{
+                                          position: "absolute",
+                                          left: 0,
+                                          top: 0,
+                                          width: `${Math.max(0, Math.min(100, activeWindowPercent))}%`,
+                                          height: "100%",
+                                          background: isStale ? "#fecaca" : "#bfdbfe",
+                                          transition: "width 250ms ease",
+                                        }}
+                                      />
+                                    )}
+                                    <div
+                                      style={{
+                                        position: "absolute",
+                                        left: 0,
+                                        top: 0,
+                                        width: `${Math.max(0, Math.min(100, completedPercent))}%`,
+                                        height: "100%",
+                                        background: isStale ? "#dc2626" : "#2563eb",
+                                        transition: "width 250ms ease",
+                                      }}
+                                    />
+                                  </div>
+                                  <div style={{ marginTop: 4, fontSize: 10, opacity: 0.85 }}>{refreshProgress.label}</div>
+                                  {hasWindowProgress && refreshProgress.progressWindowLabel && currentWindow != null && (
+                                    <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
+                                      Current window {currentWindow}/{totalWindows}: {refreshProgress.progressWindowLabel}
+                                      {refreshProgress.progressWindowStartedAt && ` · ${currentWindowElapsedStr} on this window`}
+                                    </div>
+                                  )}
+                                  {hasSubProgress && refreshProgress.progressSubLabel && (
+                                    <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
+                                      Latest completed check: {refreshProgress.progressSubLabel}
+                                      {refreshProgress.progressSubStartedAt && ` · ${subElapsedStr} since this update`}
+                                    </div>
+                                  )}
+                                  {hasWindowProgress && currentWindow != null && (
+                                    <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
+                                      The bar advances as Airbnb seasonal samples are saved and marked-up Guesty base rates are pushed.
+                                    </div>
+                                  )}
+                                  {/* Heartbeat row: confirms the server-side pricing request is still updating progress. */}
+                                  <div style={{ marginTop: 4, display: "flex", gap: 12, fontSize: 9, opacity: 0.85 }}>
+                                    {daemonStatus && <span style={{ color: daemonStatus.color, fontWeight: 500 }}>● {daemonStatus.label}</span>}
+                                    {refreshProgress.lastTickAt && (
+                                      <span style={{ opacity: 0.7 }}>
+                                        Heartbeat: {ageSinceTickSec}s ago
+                                      </span>
+                                    )}
+                                  </div>
+                                  {isStale && (
+                                    <div style={{ marginTop: 4, padding: "4px 6px", border: "1px solid #fca5a5", background: "#ffffff", borderRadius: 3, fontSize: 10, color: "#7f1d1d" }}>
+                                      No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry when the server is stable.
+                                    </div>
+                                  )}
+                                  {/* Per-window / per-channel warnings (CAPTCHA, bot wall, rate-limit, etc.). Yellow-amber banner so it stands apart from both the blue progress and the red staleness state. */}
+                                  {refreshProgress.warnings && refreshProgress.warnings.length > 0 && (
+                                    <div style={{ marginTop: 4 }}>
+                                      {refreshProgress.warnings.map((w, i) => {
+                                        const icon = w.kind === "captcha" ? "🤖" : w.kind === "blocked" ? "🚧" : w.kind === "rate-limit" ? "⏱" : w.kind === "timeout" ? "⌛" : w.kind === "network" ? "🌐" : "⚠";
+                                        return (
+                                          <div
+                                            key={`${w.season}|${w.channel}|${w.kind}|${i}`}
+                                            style={{ padding: "4px 6px", marginBottom: 3, border: "1px solid #fcd34d", background: "#fffbeb", borderRadius: 3, fontSize: 10, color: "#78350f" }}
+                                          >
+                                            <span style={{ marginRight: 4 }}>{icon}</span>
+                                            <strong>{w.season}</strong>: {w.message}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                  <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
+                                    Airbnb SearchAPI seasonal pricing refresh with layered markups.
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                            {!marketRatesRefreshing && effectiveRefreshNotice && (
+                              <div
+                                style={{
+                                  marginBottom: 8,
+                                  padding: "8px 10px",
+                                  border: `1px solid ${effectiveRefreshNotice.status === "done" ? "#bbf7d0" : "#fecaca"}`,
+                                  background: effectiveRefreshNotice.status === "done" ? "#f0fdf4" : "#fef2f2",
+                                  borderRadius: 4,
+                                  color: effectiveRefreshNotice.status === "done" ? "#14532d" : "#7f1d1d",
+                                  fontSize: 11,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  gap: 12,
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <div>
+                                  <div style={{ fontWeight: 600 }}>
+                                    {effectiveRefreshNotice.status === "done" ? "Finished last scan" : "Last scan failed"}: {formatRefreshNoticeTime(effectiveRefreshNotice.finishedAt)}
+                                  </div>
+                                  <div style={{ marginTop: 2, opacity: 0.82 }}>
+                                    {effectiveRefreshNotice.status === "done"
+                                      ? "Airbnb SearchAPI pricing basis has been saved. This notice stays here until you dismiss it."
+                                      : (effectiveRefreshNotice.error || effectiveRefreshNotice.label || "The pricing refresh did not complete.")}
+                                  </div>
+                                  {scannerSchedule?.lastGuestyRatePushAt && (
+                                    <div style={{ marginTop: 4, opacity: 0.88 }}>
+                                      Last Guesty rate push: <b>{fmtDateTime(scannerSchedule.lastGuestyRatePushAt)}</b>
+                                      {scannerSchedule.lastGuestyRatePushStatus === "error" ? " (needs review)" : ""}
+                                      {scannerSchedule.lastGuestyRatePushSummary ? ` · ${scannerSchedule.lastGuestyRatePushSummary}` : ""}
+                                    </div>
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={dismissRefreshNotice}
+                                  style={{
+                                    fontSize: 10,
+                                    padding: "3px 8px",
+                                    borderRadius: 4,
+                                    border: `1px solid ${effectiveRefreshNotice.status === "done" ? "#86efac" : "#fca5a5"}`,
+                                    background: "#ffffff",
+                                    color: effectiveRefreshNotice.status === "done" ? "#14532d" : "#7f1d1d",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  Dismiss
+                                </button>
+                              </div>
+                            )}
+                            {/* Per-season basis card — ALWAYS visible
+                                when there's persisted basis data for
+                                this property. Earlier this only rendered
+                                from `liveSnapshot` which is component
+                                state set after a successful refresh —
+                                meaning the card disappeared on page
+                                reload. Now we read primarily from
+                                `liveBuyInSummary` (loaded from the cache
+                                on mount) and overlay transient channel
+                                chips + window dates from `liveSnapshot`
+                                when a fresh refresh is available.
+                                Survives page reloads. */}
+                            {liveBuyInSummary.length > 0 && liveBuyInSummary.some(({ live }) => live != null) && (
+                              <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
+                                  <span style={{ fontWeight: 600 }}>
+                                    Airbnb SearchAPI layered basis
+                                    {liveSnapshot?.region && (
+                                      <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
+                                        ({liveSnapshot.region})
+                                      </span>
+                                    )}
+                                  </span>
+                                  <span style={{ fontSize: 10, color: "#6b7280" }} title="Rows use persisted 7-night samples from each contiguous season band over the 24-month calendar.">
+                                    Auto-refresh weekly · click ↻ to scan now
+                                  </span>
+                                </div>
+                                {/* Window labels — only shown after a
+                                    fresh refresh sets liveSnapshot. On
+                                    cold load the card still renders
+                                    without dates. */}
+                                {liveSnapshot && (
+                                  <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4 }}>
+                                    Sample windows:{" "}
+                                    {liveSnapshot.seasons.LOW && <>LOW {liveSnapshot.seasons.LOW.checkIn}→{liveSnapshot.seasons.LOW.checkOut}{liveSnapshot.seasons.LOW.daemonOnline ? " 🟢" : " ○"}</>}
+                                    {liveSnapshot.seasons.HIGH && <> · HIGH {liveSnapshot.seasons.HIGH.checkIn}→{liveSnapshot.seasons.HIGH.checkOut}</>}
+                                    {liveSnapshot.seasons.HOLIDAY && <> · HOLIDAY {liveSnapshot.seasons.HOLIDAY.checkIn}→{liveSnapshot.seasons.HOLIDAY.checkOut}</>}
+                                  </div>
+                                )}
+                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                  {liveBuyInSummary.map(({ bedrooms, community, live }) => {
+                                    // Prefer liveSnapshot.perBR row when fresh — it has channel breakdown.
+                                    // Otherwise build from cache (live) — no channel chips, just basis values.
+                                    const snapshotRow = liveSnapshot?.perBR.find((r) => r.bedrooms === bedrooms);
+                                    const low = snapshotRow?.low ?? live?.medianNightly ?? null;
+                                    const high = snapshotRow?.high ?? live?.medianNightlyHigh ?? null;
+                                    const holiday = snapshotRow?.holiday ?? live?.medianNightlyHoliday ?? null;
+                                    const basisSource = snapshotRow?.basisSource
+                                      ?? (live?.source === "static-buy-in" ? "static-buy-in" as const
+                                        : live?.source === "optimized-buy-in" ? "optimized-buy-in" as const
+                                        : live?.source === "live-multichannel-median" ? "live-multichannel-median" as const
+                                        : live?.source === "monthly-multichannel-median" ? "monthly-multichannel-median" as const
+                                        : live?.source === "season-band-multichannel-median" ? "season-band-multichannel-median" as const
+                                        : live?.source === "hybrid-airbnb-layered" ? "hybrid-airbnb-layered" as const
+                                        : live?.source === "airbnb" ? "airbnb" as const
+                                        : live ? "airbnb" as const : "none" as const);
+                                    const channelCount = snapshotRow?.channelCount ?? live?.sampleCount ?? 0;
+                                    const channels = snapshotRow?.channels ?? { airbnb: null, vrbo: null, booking: null, pm: null };
+                                    const fmtBasis = (n: number | null) => n != null && n > 0 ? `$${n.toLocaleString()}` : "—";
+                                    const fmtChip = (n: number | null) => n != null ? `$${n.toLocaleString()}` : "—";
+                                    const seasonChip = (season: "LOW" | "HIGH" | "HOLIDAY", value: number | null, color: string) => (
+                                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 9px", borderRadius: 4, background: value != null && value > 0 ? color : "#f3f4f6", color: value != null && value > 0 ? "#ffffff" : "#9ca3af", fontWeight: 600 }}>
+                                        <span style={{ fontSize: 9, opacity: 0.85 }}>{season}</span>
+                                        <span>{fmtBasis(value)}</span>
+                                      </span>
+                                    );
+                                    const miniChip = (label: string, value: number | null) => (
+                                      <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "1px 5px", borderRadius: 3, background: value != null ? "#e5e7eb" : "transparent", color: "#6b7280", fontSize: 10, fontWeight: 400 }}>
+                                        {label} {fmtChip(value)}
+                                      </span>
+                                    );
+                                    return (
+                                      <div key={bedrooms} style={{ borderTop: "1px dashed #e5e7eb", paddingTop: 6 }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                          <span style={{ fontWeight: 700, minWidth: 38 }}>{bedrooms}BR</span>
+                                          {seasonChip("LOW", low, "#059669")}
+                                          {seasonChip("HIGH", high, "#d97706")}
+                                          {seasonChip("HOLIDAY", holiday, "#dc2626")}
+                                          <span style={{ marginLeft: "auto", fontSize: 10, color: "#6b7280" }}>
+                                            {basisSource === "static-buy-in"
+                                              ? "legacy static buy-in cost basis"
+                                              : basisSource === "optimized-buy-in"
+                                              ? `LOW = median of ${channelCount} channels`
+                                              : basisSource === "monthly-multichannel-median"
+                                              ? `LOW = monthly median across ${channelCount} channel samples`
+                                              : basisSource === "hybrid-airbnb-layered"
+                                              ? `Layered Airbnb SearchAPI basis from ${channelCount} sample${channelCount === 1 ? "" : "s"}`
+                                              : basisSource === "season-band-multichannel-median"
+                                              ? `LOW = season-band median across ${channelCount} channel samples`
+                                              : basisSource === "live-multichannel-median"
+                                              ? `LOW = median of ${channelCount} channels`
+                                              : basisSource === "airbnb"
+                                                ? "LOW = Airbnb-only channel basis"
+                                                : "no data"}
+                                          </span>
+                                        </div>
+                                        {/* LOW per-channel mini chips */}
+                                        <div style={{ display: "flex", gap: 6, marginTop: 4, paddingLeft: 46, fontSize: 10 }}>
+                                          {miniChip("airbnb", channels.airbnb)}
+                                          {miniChip("vrbo", channels.vrbo)}
+                                          {miniChip("booking", channels.booking)}
+                                          {miniChip("pm", channels.pm)}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
+                                  Each month uses the persisted Airbnb SearchAPI LOW/HIGH/HOLIDAY basis after specialized layered markups.
+                                </div>
+                              </div>
+                            )}
+                            <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#ffffff", fontSize: 11, color: "#374151" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
+                                <span style={{ fontWeight: 700 }}>Pricing update logs</span>
+                                <button
+                                  type="button"
+                                  onClick={() => void reloadPricingLogs()}
+                                  style={{ fontSize: 10, padding: "2px 8px", border: "1px solid #d1d5db", borderRadius: 4, background: "#fff", cursor: "pointer" }}
+                                >
+                                  Refresh logs
+                                </button>
+                              </div>
+                              {pricingLogsLoading ? (
+                                <div style={{ color: "#6b7280" }}>Loading pricing logs...</div>
+                              ) : pricingUpdateLogs.length === 0 ? (
+                                <div style={{ color: "#6b7280" }}>No hybrid pricing updates have been logged for this property yet.</div>
+                              ) : (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                  {pricingUpdateLogs.slice(0, 8).map((log) => {
+                                    const oldRate = log.oldRate != null ? Number(log.oldRate) : null;
+                                    const newRate = log.newRate != null ? Number(log.newRate) : null;
+                                    const layers = Array.isArray(log.layersJson) ? log.layersJson : [];
+                                    const created = new Date(log.createdAt);
+                                    return (
+                                      <details key={log.id} style={{ borderTop: "1px dashed #e5e7eb", paddingTop: 6 }}>
+                                        <summary style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                          <span style={{ minWidth: 118, color: "#6b7280" }}>{Number.isNaN(created.getTime()) ? log.createdAt : created.toLocaleString()}</span>
+                                          <span style={{ fontWeight: 700 }}>{log.triggerType}</span>
+                                          <span>{log.bedrooms}BR</span>
+                                          <span>{oldRate ? `$${Math.round(oldRate).toLocaleString()}` : "none"} -&gt; {newRate ? `$${Math.round(newRate).toLocaleString()}` : "none"}</span>
+                                          <span style={{ padding: "1px 6px", borderRadius: 4, background: log.status === "ok" ? "#dcfce7" : "#fee2e2", color: log.status === "ok" ? "#166534" : "#991b1b", fontWeight: 700 }}>
+                                            {log.status}
+                                          </span>
+                                        </summary>
+                                        <div style={{ marginTop: 6, paddingLeft: 8, color: "#4b5563" }}>
+                                          {log.notes && <div style={{ marginBottom: 4 }}>{log.notes}</div>}
+                                          {layers.length > 0 && (
+                                            <div style={{ display: "grid", gap: 3 }}>
+                                              {layers.map((layer, idx) => (
+                                                <div key={idx} style={{ fontFamily: "ui-monospace, monospace", fontSize: 10 }}>
+                                                  L{String(layer.layer ?? idx + 1)} {String(layer.name ?? "Layer")}: x{Number(layer.multiplier ?? 1).toFixed(2)} -&gt; ${Number(layer.after ?? 0).toLocaleString()}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </details>
+                                    );
+                                  })}
+                                </div>
+                              )}
                             </div>
                             {marketComps && (
                               <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8, lineHeight: 1.6 }}>
@@ -2652,11 +5133,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <th>Month</th>
                                   <th>Season</th>
                                   <th>Buy-In / Night</th>
-                                  <th>Sheet Rate / Night</th>
-                                  <th>Guesty Rate / Night</th>
+                                  <th>Sheet Base / Night</th>
+                                  <th>Guesty Base / Night</th>
                                   <th>Market Position</th>
                                   <th colSpan={4} style={{ textAlign: "center", borderLeft: "1px solid #e5e7eb" }}>
-                                    Net Profit per Channel (at Guesty rate) — {(MIN_PROFIT_MARGIN * 100).toFixed(0)}% floor target
+                                    Estimated Channel Sell Rate + Net Profit — Guesty handles channel rules
                                   </th>
                                 </tr>
                                 <tr>
@@ -2678,18 +5159,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </thead>
                               <tbody>
                                 {seasonalMonths.map((row) => {
-                                  const guesty = guestyRatesByMonth[row.yearMonth];
+                                  const guesty = displayGuestyRatesByMonth[row.yearMonth];
                                   const sheet = row.totalSell;
                                   const buyIn = row.totalBuyIn;
-                                  // For each channel, compute what the host actually nets
-                                  // at the current Guesty rate, and whether it meets the 20% floor.
+                                  // Guesty now owns channel-level pricing adjustments. For
+                                  // display, estimate the sell rate each channel needs to
+                                  // clear the margin floor after its host fee.
                                   const channelCells = (["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]).map((ch) => {
-                                    if (!guesty) return { ch, profit: null, margin: null, ok: null, min: minProfitableRate(buyIn, ch), mk: 0 };
-                                    // Apply per-channel markup — what the guest actually pays
-                                    // on this channel is Guesty base rate * (1 + markup).
-                                    // Host then nets that * (1 - channel fee).
-                                    const mk = markupPct[ch] ?? 0;
-                                    const channelRate = guesty.avgRate * (1 + mk);
+                                    const min = minProfitableRate(buyIn, ch, pricingMarginTarget);
+                                    if (!guesty) return { ch, sellRate: null, profit: null, margin: null, ok: null, min };
+                                    const channelRate = ch === "direct"
+                                      ? guesty.avgRate
+                                      : Math.max(guesty.avgRate, min);
                                     const netGross = netPayoutAfterChannelFee(channelRate, ch);
                                     // Compute margin from the UN-rounded profit, then round
                                     // profit only for display. Rounding first made cells with
@@ -2701,8 +5182,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     const profit = Math.round(rawProfit);
                                     // 0.5bp tolerance so 19.9995% rounds up to "clears the
                                     // floor" instead of flipping cells red on dust.
-                                    const ok = margin >= MIN_PROFIT_MARGIN - 0.0005;
-                                    return { ch, profit, margin, ok, min: minProfitableRate(buyIn, ch), mk };
+                                    const ok = margin >= pricingMarginTarget - 0.0005;
+                                    return { ch, sellRate: Math.round(channelRate), profit, margin, ok, min };
                                   });
                                   return (
                                     <tr key={row.yearMonth}>
@@ -2712,7 +5193,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           {getSeasonLabel(row.season)}
                                         </span>
                                       </td>
-                                      <td>${buyIn.toLocaleString()}</td>
+                                      <td>
+                                        ${buyIn.toLocaleString()}
+                                        {row.monthlySampleTotal != null && Math.abs(row.monthlySampleTotal - buyIn) >= 1 && (
+                                          <div
+                                            style={{ fontSize: 9, color: "#9ca3af", marginTop: 2 }}
+                                            title="Saved monthly scraper sample is retained for diagnostics; the pricing table now uses the canonical season-band basis for this season."
+                                          >
+                                            sample ${row.monthlySampleTotal.toLocaleString()} ignored
+                                          </div>
+                                        )}
+                                      </td>
                                       <td style={{ fontWeight: 600 }}>${sheet.toLocaleString()}</td>
                                       <td style={{ fontWeight: 600 }}>
                                         {guesty ? (
@@ -2725,9 +5216,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                             )}
                                             <div
                                               style={{ display: "inline-block", marginTop: 2, background: "#dcfce7", color: "#166534", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
-                                              title={`Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
+                                              title={guesty.source === "last-push"
+                                                ? `Most recent verified Guesty push set ${guesty.days} day${guesty.days === 1 ? "" : "s"} for this month.`
+                                                : `Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
                                             >
-                                              ✓ in Guesty
+                                              {guesty.source === "last-push" ? "✓ pushed to Guesty" : "✓ in Guesty"}
                                             </div>
                                           </>
                                         ) : (
@@ -2735,7 +5228,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                             <span style={{ color: "#9ca3af" }}>—</span>
                                             <div
                                               style={{ display: "inline-block", marginTop: 2, background: "#fee2e2", color: "#991b1b", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
-                                              title="No rate published to Guesty's calendar for this month. Click 'Push seasonal rates' below to populate."
+                                              title="No rate published to Guesty's calendar for this month. Click the Guesty rate push button below to populate."
                                             >
                                               ✗ not synced
                                             </div>
@@ -2837,11 +5330,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         }
                                         const bg = c.ok ? "#dcfce7" : "#fee2e2";
                                         const textColor = c.ok ? "#166534" : "#991b1b";
-                                        const mkPct = (c.mk * 100).toFixed(1);
                                         const hoverText =
-                                          `Need ≥ $${c.min.toLocaleString()}/night at 0% markup to hit 20% on ${c.ch}.`
-                                          + (c.mk > 0 ? ` Markup +${mkPct}% → channel rate $${Math.round(guesty!.avgRate * (1 + c.mk)).toLocaleString()}.` : "")
-                                          + ` Current net: $${c.profit.toLocaleString()} (${(c.margin! * 100).toFixed(0)}%).`;
+                                          `Estimated ${c.ch} sell rate after Guesty's channel rules: $${c.sellRate!.toLocaleString()}/night.`
+                                          + ` Pushed Guesty base rate: $${guesty!.avgRate.toLocaleString()}/night.`
+                                          + ` Floor to hit ${(pricingMarginTarget * 100).toFixed(0)}% on ${c.ch}: $${c.min.toLocaleString()}/night.`
+                                          + ` Estimated net profit: $${c.profit.toLocaleString()} (${(c.margin! * 100).toFixed(0)}%).`;
                                         return (
                                           <td
                                             key={c.ch}
@@ -2856,10 +5349,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                               whiteSpace: "nowrap",
                                             }}
                                           >
-                                            ${c.profit.toLocaleString()}
+                                            <div style={{ fontSize: 12, fontWeight: 700 }}>
+                                              Sell ${c.sellRate!.toLocaleString()}
+                                            </div>
+                                            <div style={{ fontSize: 9, fontWeight: 600, opacity: 0.9 }}>
+                                              Net ${c.profit.toLocaleString()} · {(c.margin! * 100).toFixed(0)}%
+                                            </div>
                                             <div style={{ fontSize: 9, fontWeight: 400, opacity: 0.75 }}>
-                                              {(c.margin! * 100).toFixed(0)}% · min ${c.min.toLocaleString()}
-                                              {c.mk > 0 && <> · <b>+{mkPct}%</b> mk</>}
+                                              base ${guesty!.avgRate.toLocaleString()} · floor ${c.min.toLocaleString()}
                                             </div>
                                           </td>
                                         );
@@ -2870,10 +5367,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </tbody>
                             </table>
                             <div style={{ marginTop: 10, fontSize: 11, color: "#6b7280", lineHeight: 1.5 }}>
-                              <b>Legend.</b> Each channel cell shows <b>net profit per night</b> at Guesty's current rate (after subtracting that channel's host fee).
-                              <span style={{ background: "#dcfce7", color: "#166534", padding: "0 4px", borderRadius: 3, marginLeft: 4 }}>Green</span> = clears 20% floor.
-                              {" "}<span style={{ background: "#fee2e2", color: "#991b1b", padding: "0 4px", borderRadius: 3 }}>Red</span> = below floor on that channel — <b>raise the rate or add a channel markup</b>.
-                              {" "}Second line shows actual margin % and the minimum rate needed on that channel. Hover a cell for the full breakdown.
+                              <b>Legend.</b> <b>Guesty Base</b> is the marked-up calendar rate pushed to Guesty. Guesty handles channel pricing rules after this base rate is stored. Channel cells show the estimated sell rate needed to clear that channel's host fee.
+                              <span style={{ background: "#dcfce7", color: "#166534", padding: "0 4px", borderRadius: 3, marginLeft: 4 }}>Green</span> = clears {(pricingMarginTarget * 100).toFixed(0)}% floor.
+                              {" "}<span style={{ background: "#fee2e2", color: "#991b1b", padding: "0 4px", borderRadius: 3 }}>Red</span> = below floor on that channel — <b>raise the marked-up Guesty rate</b>.
+                              {" "}<b>Floor</b> is the minimum guest sell rate needed on that channel. Hover a cell for the full breakdown.
                             </div>
                           </>
                         )}
@@ -2881,15 +5378,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     : <div className="glb-empty">No pricing data</div>
                 )}
 
-                {/* ── Channel markup push card ───────────────────────────── */}
+                {/* ── Guesty rate push card ──────────────────────────────── */}
                 {activeTab === "pricing" && (
-                  <ChannelMarkupCard
+                  <GuestyRatePushCard
                     listingId={selectedId}
-                    markupPct={markupPct}
-                    setMarkupPct={setMarkupPct}
+                    propertyId={propertyId}
                     seasonalMonths={seasonalMonths}
-                    guestyRatesByMonth={guestyRatesByMonth}
                     applyPushedRates={applyPushedRates}
+                    targetMarginPct={targetMarginPct}
+                    setTargetMarginPct={setTargetMarginPct}
+                    allowCustomMargin={isSingleListing}
+                    lastGuestyRatePushAt={scannerSchedule?.lastGuestyRatePushAt ?? null}
+                    lastGuestyRatePushStatus={scannerSchedule?.lastGuestyRatePushStatus ?? null}
+                    lastGuestyRatePushSummary={scannerSchedule?.lastGuestyRatePushSummary ?? null}
+                    onGuestyRatePushRecorded={refreshScannerSchedule}
                   />
                 )}
 
@@ -2910,7 +5412,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               advanceNotice: bookingRules.advanceNotice,
                               preparationTime: bookingRules.preparationTime,
                               instantBooking: bookingRules.instantBooking,
-                              cancellationPolicy: bookingRules.cancellationPolicy,
+                              cancellationPolicies: bookingRules.cancellationPolicies,
                             });
                             toast({
                               title: "Booking rules pushed to Guesty",
@@ -2996,26 +5498,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>365 = no cap</span>
                       </label>
 
-                      {/* Cancellation policy */}
-                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
-                          Cancellation Policy
-                        </span>
-                        <select
-                          value={bookingRules.cancellationPolicy}
-                          onChange={e => setBookingRules(r => ({ ...r, cancellationPolicy: e.target.value }))}
-                          style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 13, background: "var(--background)", width: "100%" }}
-                          data-testid="select-cancellation-policy"
-                        >
-                          <option value="flexible">Flexible (full refund 24h before)</option>
-                          <option value="moderate">Moderate (full refund 5 days before)</option>
-                          <option value="strict">Strict (50% refund up to 1 week)</option>
-                          <option value="super_strict_30">Super Strict 30 days</option>
-                          <option value="super_strict_60">Super Strict 60 days</option>
-                          <option value="non_refundable">Non-refundable</option>
-                        </select>
-                      </label>
-
                       {/* Instant booking toggle */}
                       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                         <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>
@@ -3041,6 +5523,78 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         </div>
                         <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>Off = guests must request, you approve</span>
                       </label>
+                    </div>
+
+                    {/* Cancellation policies — one per channel.
+                        Airbnb / VRBO / Booking.com each have their own
+                        enum of accepted policy IDs. The defaults hit
+                        "30+ days notice for full refund, 50%+ penalty
+                        for late cancellation" where each channel's
+                        vocabulary allows it (see state defaults above). */}
+                    <div style={{ marginTop: 14, padding: "12px 14px", background: "var(--muted)", borderRadius: 6, border: "1px solid var(--border)" }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-foreground)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                        Cancellation policies by channel
+                      </div>
+                      <div style={{ fontSize: 10, color: "#92400e", marginBottom: 10, fontStyle: "italic" }}>
+                        ⚠ Only the Airbnb policy syncs to Guesty via this button.
+                        VRBO &amp; Booking.com per-channel values are captured here
+                        for your records — set them in Guesty's own Booking-Rules
+                        UI to actually apply per-channel.
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+                        {/* Airbnb */}
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#FF385C" }}>Airbnb</span>
+                          <select
+                            value={bookingRules.cancellationPolicies.airbnb}
+                            onChange={e => setBookingRules(r => ({ ...r, cancellationPolicies: { ...r.cancellationPolicies, airbnb: e.target.value } }))}
+                            style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 12, background: "var(--background)", width: "100%" }}
+                            data-testid="select-cancellation-policy-airbnb"
+                          >
+                            <option value="flexible">Flexible — full refund 24h before</option>
+                            <option value="moderate">Moderate — full refund 5 days before</option>
+                            <option value="firm">Firm — 30d full / 14d 50% / &lt;14d none</option>
+                            <option value="strict">Strict — 50% up to 7 days / no refund after</option>
+                            <option value="super_strict_30">Super Strict 30 — 50% up to 30 days / none after</option>
+                            <option value="super_strict_60">Super Strict 60 — 50% up to 60 days / none after</option>
+                            <option value="non_refundable">Non-refundable</option>
+                          </select>
+                        </label>
+
+                        {/* VRBO */}
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#245ABC" }}>VRBO</span>
+                          <select
+                            value={bookingRules.cancellationPolicies.vrbo}
+                            onChange={e => setBookingRules(r => ({ ...r, cancellationPolicies: { ...r.cancellationPolicies, vrbo: e.target.value } }))}
+                            style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 12, background: "var(--background)", width: "100%" }}
+                            data-testid="select-cancellation-policy-vrbo"
+                          >
+                            <option value="RELAXED">Relaxed — 14d full / 7d 50%</option>
+                            <option value="MODERATE">Moderate — 30d full / 14d 50%</option>
+                            <option value="FIRM">Firm — 60d full / 30d 50% / &lt;30d none</option>
+                            <option value="STRICT">Strict — 60d full / 30d 50% / &lt;30d none (stricter enforcement)</option>
+                            <option value="NO_REFUND">No refund</option>
+                          </select>
+                        </label>
+
+                        {/* Booking.com */}
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#003580" }}>Booking.com</span>
+                          <select
+                            value={bookingRules.cancellationPolicies.booking}
+                            onChange={e => setBookingRules(r => ({ ...r, cancellationPolicies: { ...r.cancellationPolicies, booking: e.target.value } }))}
+                            style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px", fontSize: 12, background: "var(--background)", width: "100%" }}
+                            data-testid="select-cancellation-policy-booking"
+                          >
+                            <option value="flexible">Flexible — free cancellation until X days</option>
+                            <option value="moderate">Moderate — partial refund</option>
+                            <option value="strict">Strict — limited refund</option>
+                            <option value="non_refundable">Non-refundable</option>
+                          </select>
+                          <span style={{ fontSize: 10, color: "var(--muted-foreground)" }}>Exact day thresholds are configured in the Booking Extranet — this picks the shape.</span>
+                        </label>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -3130,7 +5684,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     <div style={{ fontSize: 12, color: "#92400e" }}>
                                       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
                                         <span>
-                                          ⏳ {normalizeScope === "all" ? `${normalizeListingName || "starting…"} — ` : ""}
+                                          ⏳ {normalizeScope === "all" ? `${normalizePhotoListingName || "starting…"} — ` : ""}
                                           photo {normalizeCurrent}/{normalizeTotal}
                                         </span>
                                         <span style={{ fontSize: 11, color: "#15803d" }}>✓ {normalizeFixed} fixed</span>
@@ -3233,8 +5787,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   : checkpointCount > 0
                                   ? `✓ ${checkpointCount * 5} photos already saved to Guesty — uploading remainder…`
                                   : doUpscale
-                                  ? "Upscaling + hosting on ImgBB — ~30s per photo. Progress saved to Guesty every 5 photos."
-                                  : "Hosting on ImgBB — a few seconds per photo. Progress saved to Guesty every 5 photos."}
+                                  ? "Upscaling + hosting for Guesty — ~30s per photo. Progress saved to Guesty every 5 photos."
+                                  : "Hosting for Guesty — a few seconds per photo. Progress saved to Guesty every 5 photos."}
                               </div>
                               {/* Live per-photo results */}
                               {pushResults.length > 0 && (
@@ -3260,15 +5814,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         )}
 
                         {/* Curation grid — simple tiles in Zillow's order,
-                            with an "Auto-Set Cover Collage" banner at the top
-                            that stitches the best community + best patio
-                            photo into a single 2-up cover and sets it as the
-                            Guesty listing cover. */}
+                            with a cover-collage banner at the top that lets
+                            the operator choose two photos, stitches them into
+                            a single 2-up cover, and sets it as the Guesty
+                            listing cover. */}
                         <PhotoCurator
                           photos={photos}
                           sourceUrlsByFolder={sourceUrlsByFolder}
-                          coverCollageEnabled={!!selectedId && photos.length >= 2}
-                          onRequestCoverCollage={() => { setCollagePhase("idle"); generateCoverCollage(photos); }}
+                          onOverridesChanged={onPhotoOverridesChanged}
+                          coverCollageEnabled={photos.length >= 2}
+                          coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}
+                          coverCollageCurrentUrl={guestyCoverCollageUrl}
+                          onRequestCoverCollage={(selection) => { setCollagePhase("idle"); generateCoverCollage(photos, selection); }}
                           coverCollageStatus={{
                             phase: collagePhase === "upscaling" ? "generating" : collagePhase,
                             error: collageError,

@@ -1,0 +1,494 @@
+// Generic vrp_main inventory + rate scraper.
+//
+// vrp_main (a.k.a. "vrpjax") is a WordPress vacation-rental plugin used
+// by multiple PMs we care about — Parrish Kauai, CB Island Vacations,
+// and other independent shops in Hawaii / Mountain West. Every site
+// using it exposes the SAME structure:
+//
+//   Sitemap:
+//     {baseUrl}/?vrpsitemap=1
+//     <urlset>...{baseUrl}/vrp/unit/<slug>...</urlset>
+//
+//   Unit page metadata (data-* attributes on #unit-data div):
+//     data-unit-id         (numeric, used for getUnitRates)
+//     data-unit-slug       (used for getUnitBookedDates `par=`)
+//     data-unit-name       (display name)
+//     data-unit-beds       (bedroom count) ← key field
+//     data-unit-baths
+//     data-unit-sleeps
+//     data-unit-city / state / zip
+//
+//   Rate endpoint:
+//     GET {baseUrl}/?vrpjax=1&act=getUnitRates&unitId={id}
+//     Returns { "YYYY-MM-DD": { amount, chargebasis, ... }, ... }
+//                                                          (or "null")
+//     NOTE: this is base rent only. For buy-in pricing, use the
+//     checkavailability quote endpoint below so required fees + taxes
+//     are included in TotalCost.
+//
+//   Availability endpoint:
+//     GET {baseUrl}/?vrpjax=1&act=getUnitBookedDates&par={slug}
+//     Returns {
+//       bookedDates: ["M-D-YYYY", ...],
+//       noCheckin:   ["M-D-YYYY", ...],
+//       minLOS:      number,
+//       minNights:   [{ start, end, minLOS }, ...]
+//     }
+//
+// 3 GETs per matching unit; with 8-wide concurrency a typical 30-unit
+// 3BR shortlist completes in ~5s warm. First call after deploy warms
+// the metadata cache (~15-50s depending on inventory size, cached 7d).
+//
+// Adding a new vrp PM = one config block in `VRP_SITES` at the bottom
+// of this file plus a call site in routes.ts.
+
+const HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/javascript, */*; q=0.01",
+};
+
+export type VrpSiteConfig = {
+  /** Display label surfaced in the candidate's `sourceLabel`. */
+  label: string;
+  /** Base URL — no trailing slash. e.g. "https://www.parrishkauai.com" */
+  baseUrl: string;
+};
+
+type VrpUnitMeta = {
+  url: string;
+  slug: string;
+  unitId: string;
+  name: string;
+  bedrooms: number;
+  city: string;
+  resortHaystack: string;
+};
+
+type CacheEntry<T> = { value: T; expiresAt: number };
+
+// Per-site caches keyed by baseUrl. Module-scoped so multiple find-buy-in
+// calls share warmed metadata.
+const sitemapCacheBySite = new Map<string, CacheEntry<string[]>>();
+const unitMetaCacheBySite = new Map<string, Map<string, CacheEntry<VrpUnitMeta | null>>>();
+const SITEMAP_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const META_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7d
+
+function unitMetaCache(baseUrl: string): Map<string, CacheEntry<VrpUnitMeta | null>> {
+  let cache = unitMetaCacheBySite.get(baseUrl);
+  if (!cache) {
+    cache = new Map();
+    unitMetaCacheBySite.set(baseUrl, cache);
+  }
+  return cache;
+}
+
+async function fetchSitemapUnitUrls(site: VrpSiteConfig): Promise<string[]> {
+  const cached = sitemapCacheBySite.get(site.baseUrl);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  try {
+    const r = await fetch(`${site.baseUrl}/?vrpsitemap=1`, {
+      headers: { "User-Agent": HEADERS["User-Agent"] },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) {
+      console.warn(`[vrp-discovery:${site.label}] sitemap fetch HTTP ${r.status}`);
+      return cached?.value ?? [];
+    }
+    const xml = await r.text();
+    const unitPathRe = new RegExp(
+      `^${escapeRe(site.baseUrl)}/vrp/unit/[A-Za-z0-9_-]+-\\d+-\\d+$`,
+    );
+    const urls = Array.from(xml.matchAll(/<loc>([^<]+)<\/loc>/g))
+      .map((m) => m[1].trim())
+      .filter((u) => unitPathRe.test(u));
+    const deduped = Array.from(new Set(urls));
+    sitemapCacheBySite.set(site.baseUrl, {
+      value: deduped,
+      expiresAt: Date.now() + SITEMAP_TTL_MS,
+    });
+    return deduped;
+  } catch (e: any) {
+    console.warn(`[vrp-discovery:${site.label}] sitemap error: ${e?.message ?? e}`);
+    return cached?.value ?? [];
+  }
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function pickAttr(html: string, attr: string): string | null {
+  const re = new RegExp(`data-${attr}=["']([^"']+)["']`);
+  const m = html.match(re);
+  return m ? m[1] : null;
+}
+
+function pickHiddenInputValue(html: string, namePattern: RegExp): string | null {
+  const inputs = html.match(/<input\b[^>]*>/gi) ?? [];
+  for (const input of inputs) {
+    const name = input.match(/\bname=["']([^"']+)["']/i)?.[1] ?? "";
+    if (!namePattern.test(name)) continue;
+    const value = input.match(/\bvalue=["']([^"']+)["']/i)?.[1];
+    if (value) return value;
+  }
+  return null;
+}
+
+async function fetchUnitMeta(site: VrpSiteConfig, url: string): Promise<VrpUnitMeta | null> {
+  const cache = unitMetaCache(site.baseUrl);
+  const cached = cache.get(url);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  try {
+    const r = await fetch(url, {
+      headers: { "User-Agent": HEADERS["User-Agent"] },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) {
+      cache.set(url, { value: null, expiresAt: Date.now() + 60 * 60 * 1000 });
+      return null;
+    }
+    const html = await r.text();
+    const unitId = pickAttr(html, "unit-id") ?? pickHiddenInputValue(html, /(?:^|[\[_-])unit[_-]?id(?:\]|$)/i);
+    const slug = pickAttr(html, "unit-slug") ?? new URL(url).pathname.match(/\/vrp\/unit\/([^/?#]+)/i)?.[1] ?? null;
+    const name = pickAttr(html, "unit-name") ?? "";
+    const beds = pickAttr(html, "unit-beds");
+    const city = pickAttr(html, "unit-city") ?? "";
+    if (!unitId || !slug || !beds) {
+      cache.set(url, { value: null, expiresAt: Date.now() + 60 * 60 * 1000 });
+      return null;
+    }
+    const bedrooms = parseInt(beds, 10);
+    if (!Number.isFinite(bedrooms) || bedrooms <= 0) {
+      cache.set(url, { value: null, expiresAt: Date.now() + 60 * 60 * 1000 });
+      return null;
+    }
+    const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+    const pageTitle = (titleMatch?.[1] ?? "").trim();
+    const metaDescMatch = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)/i);
+    const metaDesc = (metaDescMatch?.[1] ?? "").trim();
+    const meta: VrpUnitMeta = {
+      url,
+      slug,
+      unitId,
+      name,
+      bedrooms,
+      city,
+      resortHaystack: `${name} ${pageTitle} ${metaDesc} ${city}`,
+    };
+    cache.set(url, { value: meta, expiresAt: Date.now() + META_TTL_MS });
+    return meta;
+  } catch {
+    cache.set(url, { value: null, expiresAt: Date.now() + 60 * 60 * 1000 });
+    return null;
+  }
+}
+
+async function withConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function isoToMdYyyy(iso: string): string {
+  const [y, m, d] = iso.split("-").map((p) => parseInt(p, 10));
+  return `${m}-${d}-${y}`;
+}
+
+function enumerateNights(checkIn: string, checkOut: string): string[] {
+  const result: string[] = [];
+  const start = new Date(checkIn + "T12:00:00Z").getTime();
+  const end = new Date(checkOut + "T12:00:00Z").getTime();
+  for (let t = start; t < end; t += 86400000) {
+    const d = new Date(t);
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(d.getUTCDate()).padStart(2, "0");
+    result.push(`${y}-${m}-${day}`);
+  }
+  return result;
+}
+
+function roundCents(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+function parseMoney(v: unknown): number {
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  if (typeof v === "string") {
+    const n = Number(v.replace(/[^0-9.-]/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function displayDate(iso: string): string {
+  const d = new Date(`${iso}T12:00:00Z`);
+  if (!Number.isFinite(d.getTime())) return iso;
+  return d.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+type VrpQuote = {
+  totalPrice: number;
+  nightlyPrice: number;
+  rentTotal: number;
+  taxTotal: number;
+  dueToday: number;
+};
+
+async function fetchVrpQuoteTotal(
+  site: VrpSiteConfig,
+  meta: VrpUnitMeta,
+  checkIn: string,
+  checkOut: string,
+  stayLength: number,
+): Promise<VrpQuote | null> {
+  const params = new URLSearchParams();
+  params.set("check-availability-arrival-date", displayDate(checkIn));
+  params.set("obj[Arrival]", checkIn);
+  params.set("check-availability-departure-date", displayDate(checkOut));
+  params.set("obj[Departure]", checkOut);
+  params.set("obj[Adults]", "2");
+  params.set("obj[Children]", "0");
+  params.set("obj[Vendor]", "Track");
+  params.set("obj[PropID]", meta.unitId);
+  params.set("obj[v2]", "1");
+
+  const r = await fetch(`${site.baseUrl}/?vrpjax=1&act=checkavailability&par=1&${params.toString()}`, {
+    headers: {
+      ...HEADERS,
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) return null;
+  const text = await r.text();
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (data?.Error) return null;
+  const total = parseMoney(data?.TotalCost ?? data?.TheTotalCost ?? data?.TheCost);
+  if (!(total > 0)) return null;
+  const quoteNights = Number(data?.nights);
+  if (Number.isFinite(quoteNights) && quoteNights > 0 && Math.round(quoteNights) !== stayLength) {
+    return null;
+  }
+  return {
+    totalPrice: roundCents(total),
+    nightlyPrice: roundCents(total / stayLength),
+    rentTotal: roundCents(parseMoney(data?.TheRentalRate) || parseMoney(data?.Charges?.find?.((c: any) => c?.Description === "Rent")?.Amount)),
+    taxTotal: roundCents(parseMoney(data?.TotalTax)),
+    dueToday: roundCents(parseMoney(data?.DueToday)),
+  };
+}
+
+export type VrpAvailableUnit = {
+  url: string;
+  name: string;
+  bedrooms: number;
+  totalPrice: number;
+  nightlyPrice: number;
+  unitId: string;
+  /** Display label of the source PM (e.g. "Parrish Kauai"). */
+  sourceLabel: string;
+  /** True when totalPrice is the full bookable quote including required fees/taxes. */
+  includesFees: boolean;
+};
+
+export async function findAvailableVrpUnits(opts: {
+  site: VrpSiteConfig;
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  resortName: string;
+  /** Optional cap on number of priced units returned. Default 8. */
+  limit?: number;
+}): Promise<VrpAvailableUnit[]> {
+  const { site, bedrooms, checkIn, checkOut, resortName, limit = 8 } = opts;
+
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const resortTokens = normalize(resortName).split(" ").filter((t) => t.length >= 3);
+  const matchesResort = (haystack: string): boolean => {
+    if (resortTokens.length === 0) return true;
+    const n = normalize(haystack);
+    return resortTokens.every((t) => n.includes(t));
+  };
+
+  const startedAt = Date.now();
+  const urls = await fetchSitemapUnitUrls(site);
+  if (urls.length === 0) {
+    console.warn(`[vrp-discovery:${site.label}] sitemap returned 0 units`);
+    return [];
+  }
+  const resortUrlMatches = resortTokens.length > 0
+    ? urls.filter((url) => matchesResort(url))
+    : urls;
+  const urlsToFetch = resortUrlMatches.length > 0 ? resortUrlMatches : urls;
+
+  // PR #337: bumped concurrency 8 → 24. Parrish Kauai's sitemap walks
+  // ~370 unit pages on cold cache; at concurrency 8 that ran ~105s,
+  // tripping the 30s per-source wall budget in routes.ts and surfacing
+  // 0 candidates to the operator even when units WERE available. With
+  // concurrency 24 the cold-cache walk drops to ~30-40s; subsequent
+  // calls hit the 7d meta cache and complete in <1s.
+  const metas = await withConcurrency(urlsToFetch, 24, (url) => fetchUnitMeta(site, url));
+  const matchingBedrooms = metas.filter(
+    (m): m is VrpUnitMeta => m !== null && m.bedrooms === bedrooms,
+  );
+  const matchingResort = matchingBedrooms.filter((m) => matchesResort(m.resortHaystack));
+
+  console.log(
+    `[vrp-discovery:${site.label}] sitemap=${urls.length} prefiltered=${urlsToFetch.length} metaResolved=${metas.filter(Boolean).length} ` +
+    `matchingBedrooms=${matchingBedrooms.length} matchingResort=${matchingResort.length} ` +
+    `(target=${bedrooms}BR @ "${resortName}")`,
+  );
+
+  if (matchingResort.length === 0) return [];
+
+  const stayNights = enumerateNights(checkIn, checkOut);
+  const stayNightsMD = new Set(stayNights.map((iso) => isoToMdYyyy(iso)));
+  const checkInMD = isoToMdYyyy(checkIn);
+  const rateEndpoint = `${site.baseUrl}/?vrpjax=1&act=getUnitRates&unitId=`;
+  const bookedEndpoint = `${site.baseUrl}/?vrpjax=1&act=getUnitBookedDates&par=`;
+
+  const priceOne = async (meta: VrpUnitMeta): Promise<VrpAvailableUnit | null> => {
+    try {
+      const [ratesResp, bookedResp] = await Promise.all([
+        fetch(`${rateEndpoint}${encodeURIComponent(meta.unitId)}`, {
+          headers: HEADERS,
+          signal: AbortSignal.timeout(10000),
+        }),
+        fetch(`${bookedEndpoint}${encodeURIComponent(meta.slug)}`, {
+          headers: HEADERS,
+          signal: AbortSignal.timeout(10000),
+        }),
+      ]);
+      if (!ratesResp.ok || !bookedResp.ok) return null;
+      const ratesText = await ratesResp.text();
+      const bookedText = await bookedResp.text();
+      let rates: Record<string, { amount?: string }> = {};
+      let booked: { bookedDates?: string[]; noCheckin?: string[]; minLOS?: number; minNights?: Array<{ start: string; end: string; minLOS: number }> } = {};
+      try { rates = JSON.parse(ratesText); } catch { return null; }
+      try { booked = JSON.parse(bookedText); } catch { return null; }
+      // `null` body — the PM doesn't publish public rates for this unit.
+      if (rates === null || rates === undefined) return null;
+
+      const bookedSet = new Set(booked.bookedDates ?? []);
+      for (const md of Array.from(stayNightsMD)) {
+        if (bookedSet.has(md)) return null;
+      }
+      const noCheckinSet = new Set(booked.noCheckin ?? []);
+      if (noCheckinSet.has(checkInMD)) return null;
+
+      const stayLength = stayNights.length;
+      let requiredMinLOS = booked.minLOS ?? 1;
+      if (Array.isArray(booked.minNights)) {
+        for (const w of booked.minNights) {
+          if (checkIn >= w.start && checkIn <= w.end) {
+            requiredMinLOS = Math.max(requiredMinLOS, w.minLOS);
+          }
+        }
+      }
+      if (stayLength < requiredMinLOS) return null;
+
+      let total = 0;
+      let pricedNights = 0;
+      for (const iso of stayNights) {
+        const r = rates[iso];
+        const amt = r ? parseFloat(String(r.amount ?? "0")) : 0;
+        if (Number.isFinite(amt) && amt > 0) {
+          total += amt;
+          pricedNights++;
+        }
+      }
+      if (pricedNights < Math.ceil(stayLength * 0.8)) return null;
+      if (!(total > 0)) return null;
+
+      const quote = await fetchVrpQuoteTotal(site, meta, checkIn, checkOut, stayLength).catch(() => null);
+      if (quote) {
+        return {
+          url: meta.url,
+          name: meta.name,
+          bedrooms: meta.bedrooms,
+          totalPrice: quote.totalPrice,
+          nightlyPrice: quote.nightlyPrice,
+          unitId: meta.unitId,
+          sourceLabel: site.label,
+          includesFees: true,
+        };
+      }
+
+      return {
+        url: meta.url,
+        name: meta.name,
+        bedrooms: meta.bedrooms,
+        totalPrice: roundCents(total),
+        nightlyPrice: roundCents(total / stayLength),
+        unitId: meta.unitId,
+        sourceLabel: site.label,
+        includesFees: false,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  // PR #337: priced batch concurrency 8 → 16 (smaller pool than the
+  // metadata walk because each priceOne does 3 GETs to the rate API
+  // — too aggressive risks rate-limiting on the PM's hosting tier).
+  const priced = await withConcurrency(matchingResort, 16, priceOne);
+  const available = priced
+    .filter((u): u is VrpAvailableUnit => u !== null)
+    .sort((a, b) => a.totalPrice - b.totalPrice)
+    .slice(0, limit);
+
+  console.log(
+    `[vrp-discovery:${site.label}] ${matchingResort.length} ${bedrooms}BR @ "${resortName}" units checked, ` +
+    `${available.length} available for ${checkIn}→${checkOut} (${Date.now() - startedAt}ms)`,
+  );
+  return available;
+}
+
+// Registered vrp_main-powered PM sites. Adding a new one = one config
+// block here plus a discovery promise in routes.ts find-buy-in.
+export const VRP_SITES = {
+  parrishKauai: {
+    label: "Parrish Kauai",
+    baseUrl: "https://www.parrishkauai.com",
+  },
+  cbIslandVacations: {
+    label: "CB Island Vacations",
+    baseUrl: "https://www.cbislandvacations.com",
+  },
+  pikoProperties: {
+    label: "Piko Properties",
+    baseUrl: "https://pikoproperties.com",
+  },
+  // PR #310: discovered via /api/admin/pm-discovery on Pili Mai —
+  // sitemap probe returned 8 /vrp/unit/ entries, fingerprint match.
+  // Sample URL: https://evrhi.com/vrp/unit/Pili_Mai_11I/
+  evrhi: {
+    label: "EVR Hawaii",
+    baseUrl: "https://evrhi.com",
+  },
+} as const satisfies Record<string, VrpSiteConfig>;

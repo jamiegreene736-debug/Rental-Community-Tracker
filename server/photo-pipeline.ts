@@ -775,6 +775,28 @@ export async function downloadAndPrioritize(opts: {
     }
   }
 
+  // Step 7: compute perceptual hashes for the kept photos so the
+  // photo-listing scanner can detect edited-photo theft and the
+  // channel-photo-independence selector can filter visually-duplicate
+  // candidates. Per-file errors don't fail the pipeline — the scanner's
+  // backfillFolderHashes() will retry later.
+  try {
+    const { computeDhash } = await import("./photo-hashing");
+    for (let i = 0; i < keptFilenames.length; i++) {
+      const filename = keptFilenames[i];
+      const filePath = path.join(folderPath, filename);
+      try {
+        const buf = await fs.promises.readFile(filePath);
+        const hash = await computeDhash(buf);
+        await storage.updatePhotoLabelHash(folder, filename, hash);
+      } catch (e: any) {
+        console.error(`[photo-pipeline] hash failed for ${folder}/${filename}: ${e?.message ?? e}`);
+      }
+    }
+  } catch (e: any) {
+    console.error(`[photo-pipeline] hashing module load failed: ${e?.message ?? e}`);
+  }
+
   const categorySummary: Record<string, number> = {};
   for (const r of kept) {
     const key = r.category ?? "Unlabeled";

@@ -31,6 +31,32 @@ export type PropertyUnitBuilder = {
   bookingTitle: string;
   sampleDisclaimer: string;
   combinedDescription: string;
+  /**
+   * Guesty / OTA `propertyType`. SET THIS EXPLICITLY when adding a
+   * new property — do NOT rely on the fallback.
+   *
+   * Pick the value that matches the physical structure:
+   *   - "Condominium" → single-level unit in a multi-unit building
+   *     (Kaha Lani, Lae Nani, Mauna Kai, Regency at Poipu Kai, etc.)
+   *   - "Townhouse" → multi-level attached unit with its own entrance
+   *     (Pili Mai at Poipu)
+   *   - "House" → standalone single-family
+   *   - "Apartment" → single-level in a building without resort/HOA structure
+   *   - "Villa" → luxury standalone unit, often resort-style
+   *   - "Estate" → large standalone property, 4+ bedrooms with grounds
+   *     (Kekaha Beachfront, Keauhou Estates)
+   *   - Also accepted: "Cottage", "Bungalow", "Loft"
+   *
+   * Why this matters: the OTA channels filter listings by property
+   * type. A townhome labeled "Condominium" won't show up when guests
+   * filter Airbnb/VRBO/Booking for "Townhouse" — that's exactly what
+   * happened with Pili Mai, which shipped as Condominium for months.
+   *
+   * Until every property has been back-filled, the builder falls back
+   * to "Condominium" (current behavior). When you add a new property,
+   * confirm the type against photos + description before picking.
+   */
+  propertyType?: "House" | "Townhouse" | "Condominium" | "Apartment" | "Villa" | "Cottage" | "Bungalow" | "Estate" | "Loft";
   neighborhood?: string;
   transit?: string;
   // Hawaii Tax Map Key — format: ##-#-#-###-###-#### (12 digits, county-district-section-parcel)
@@ -46,6 +72,21 @@ export type PropertyUnitBuilder = {
   //   Maui County:  STRH-########    e.g. STRH-20220042
   //   Honolulu (Oahu):  NUC-##-###-####    e.g. NUC-22-001-0134
   strPermit?: string;
+  // Florida DBPR vacation rental license (Fort Myers Beach and other Florida units).
+  dbprLicense?: string;
+  // County tourist-development tax account/reference when the jurisdiction requires tracking it.
+  touristTaxAccount?: string;
+  // Free-text note about floor plan / stairs / mobility access for
+  // this complex. Surfaces in the AI Draft + auto-reply context only
+  // (not pushed to OTA listings) so the AI can answer
+  // accessibility / seniors / "downstair units?" questions
+  // accurately. Set this when the complex has meaningful variation
+  // the propertyType alone doesn't capture (e.g. Pili Mai mixes
+  // single-level Moana plans with multi-level Mahina plans). Leave
+  // undefined when the propertyType-derived default is enough — a
+  // straight Condominium complex with elevator access doesn't need
+  // a custom note.
+  accessibilityNote?: string;
   units: Unit[];
   hasPhotos: boolean;
   communityPhotos: CommunityPhoto[];
@@ -53,6 +94,8 @@ export type PropertyUnitBuilder = {
 };
 
 const DEFAULT_DISCLAIMER = "Please note: this listing combines two units within the same community. Both are of equivalent size, finishes, and bedroom count to what’s shown. Guests receive separate keys/access codes at check-in, and both units are located within the same building cluster or community grounds.";
+export const REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE = "Unit assignment note: This listing uses representative accommodations within the same resort/community. The assigned unit will match the advertised bedroom count, occupancy, quality standard, and core amenities. Exact decor, furnishings, layout, and view may vary by unit.";
+export const SINGLE_LISTING_SAMPLE_DISCLOSURE = REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE;
 
 export const LISTING_DISCLOSURE = `Please note: this listing combines two units within the same community. Both are of equivalent size, finishes, and bedroom count to what’s shown. Guests receive separate keys/access codes at check-in, and both units are located within the same building cluster or community grounds.
 
@@ -655,7 +698,11 @@ Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shop
     propertyId: 4,
     propertyName: "Beautiful 6 Bedroom For 16 Villa in Poipu!",
     complexName: "Regency at Poipu Kai",
-    address: "1831 Poipu Rd, Koloa, HI 96756",
+    // Unique within Regency at Poipu Kai by representative unit.
+    // Regency properties share 1831 Poipu Rd; OTA dedupe pivots on
+    // street + unit. First unit (423) disambiguates from prop 27's
+    // 114 without introducing a fake address.
+    address: "1831 Poipu Rd, Unit 423, Koloa, HI 96756",
     bookingTitle: "Poipu Kai - 6BR Villas, Pool - Sleeps 16",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups exploring Kauai's sunny south shore.
@@ -1037,7 +1084,10 @@ From the casita, enjoy views of the tropical gardens, pool area, and ocean beyon
     propertyId: 19,
     propertyName: "Gorgeous Princeville 5 bedroom condos for 14!",
     complexName: "Mauna Kai Princeville",
-    address: "3920 Wyllie Rd, Princeville, HI 96722",
+    // Unique within Mauna Kai by representative unit 9. Prop 19 and
+    // prop 20 both share 3920 Wyllie Rd; unit-suffixing the address
+    // keeps OTA dedupe happy without inventing a fake street.
+    address: "3920 Wyllie Rd, Unit 9, Princeville, HI 96722",
     bookingTitle: "Princeville - 5BR Condos - Sleeps 14",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Mauna Kai. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two comfortable condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, providing a wonderful home base for exploring Kauai's spectacular North Shore.
@@ -1109,7 +1159,8 @@ Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture
     propertyId: 20,
     propertyName: "Gorgeous Princeville 6 bedroom condos for 18!",
     complexName: "Mauna Kai Princeville",
-    address: "3920 Wyllie Rd, Princeville, HI 96722",
+    // Unique within Mauna Kai by representative unit 7B (see prop 19).
+    address: "3920 Wyllie Rd, Unit 7B, Princeville, HI 96722",
     bookingTitle: "Princeville - 6BR Condos - Sleeps 18",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Mauna Kai. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups looking to experience Kauai's breathtaking North Shore.
@@ -1199,6 +1250,7 @@ Important: This listing represents our managed portfolio of similar units within
     tatLicense: "TA-024-630-2345-01",
     getLicense: "GE-024-630-2345-01",
     strPermit: "TVNC-0342",
+    accessibilityNote: "Kaha Lani is a multi-building condominium resort. Individual condos are single-level inside with no internal stairs, but units may be on the ground floor or an upper floor. For guests with mobility / accessibility needs, we WILL ensure the condo used by the guest who needs bottom-floor access is a ground-floor, single-level condo. If the guest requires BOTH condos to be ground-floor, say we can confirm that as part of the unit assignment. If the guest says the second condo is optional or a nice-to-have, preserve that priority and do not treat it as mandatory.",
     hasPhotos: true,
     communityPhotos: COMMUNITY_KAHA_LANI,
     communityPhotoFolder: "community-kaha-lani",
@@ -1249,67 +1301,98 @@ Kapaa town is minutes away with its bike path, shopping, and diverse dining opti
   },
   {
     propertyId: 24,
-    propertyName: "Gorgeous 5 bedroom condos for 10 on Kapaa coast!",
-    complexName: "Lae Nani Resort",
-    address: "410 Papaloa Rd, Kapaa, HI 96746",
-    bookingTitle: "Lae Nani - 5BR Oceanfront - Sleeps 10",
-    sampleDisclaimer: "This listing represents a managed portfolio of similar units within Lae Nani Resort. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
-    combinedDescription: `This listing is comprised of two oceanfront condos within the Lae Nani Resort in Kapaa, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, with ocean views and access to the resort's own private sandy beach cove.
+    // CORRECTED 2026-04-24: this entry was previously wired up as
+    // "Lae Nani Resort" at 410 Papaloa Rd, Kapaa (east shore) — a
+    // completely different complex from what the dashboard and the
+    // VRE source URL describe. The actual property is Makahuena at
+    // Poipu (south shore). Text fields have been rewritten below.
+    // See TODO comments on the permit / unit-number fields — those
+    // still hold the old Lae Nani values and must be replaced with
+    // the real Makahuena records before this listing re-publishes
+    // to any OTA.
+    propertyName: "Gorgeous 5 bedroom condos for 12 at Makahuena Poipu!",
+    complexName: "Makahuena at Poipu",
+    address: "1661 Pe'e Rd, Koloa, HI 96756",
+    bookingTitle: "Makahuena at Poipu - 5BR Oceanfront - Sleeps 12",
+    sampleDisclaimer: "This listing represents a managed portfolio of similar units within Makahuena at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
+    combinedDescription: `This listing is comprised of two oceanfront condos within Makahuena at Poipu, a resort community at the southernmost point of Kauai, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 12 guests, with dramatic ocean views and direct access to rugged Makahuena Point.
 
 Unit A is an oceanfront 3-bedroom, 2-bathroom corner condo (~1,500 sq ft) with expansive ocean views, a full kitchen, and a private lanai. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa. AC and ceiling fans throughout.
 
-Unit B is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set in a tropical garden with ocean views, a full kitchen, and a private lanai. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa. AC and ceiling fans included.
+Unit B is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set within the tropical resort grounds with ocean views, a full kitchen, and a private lanai. Sleeps 4 with a King master, Queen second bedroom. AC and ceiling fans included.
 
-Lae Nani Resort sits on a rocky oceanfront point with a private beach cove perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area round out the amenities. On the Coconut Coast with easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. Kapaa's vibrant town center is walking distance with its coastal bike path, boutiques, and diverse restaurants.
+Makahuena at Poipu sits on a dramatic volcanic point with sweeping Pacific views. The resort pool, BBQ area, and landscaped grounds round out the amenities. Walk to Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach — three of Kauai's best south-shore beaches. Koloa Town's historic plantation district is 5 minutes away with boutique shops and restaurants. Poipu Shopping Village and Kukui'ula Village (dining/shops) are nearby, along with Spouting Horn blowhole and the National Tropical Botanical Garden.
 
 Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
-    neighborhood: "Lae Nani Resort occupies a prime oceanfront position on the Coconut Coast in Kapaa, with a private tidal pool area and direct ocean access. The Kauai Path coastal bike trail passes by the property. Kapaa Town — minutes away — offers diverse restaurants, the Saturday morning farmers market, boutique shopping, and a lively local vibe. Wailua River kayaking, Wailua Falls, and Opaeka'a Falls scenic overlook are 10-15 minutes inland. Coconut Marketplace and Kauai Village Shopping Center are nearby for convenience.",
-    transit: "Lihue Airport is about 15 minutes south. The Coconut Coast sits midway between Kauai's North Shore and South Shore — each roughly 35-40 minutes by car. A rental car is recommended. The Kauai Path bike trail connects the coastal area for car-free exploring. Rideshare (Lyft) and The Kauai Bus are both accessible from Kapaa.",
-        taxMapKey: "440080010001",
-    tatLicense: "TA-025-110-4567-01",
-    getLicense: "GE-025-110-4567-01",
-    strPermit: "TVNC-0489",
+    neighborhood: "Makahuena at Poipu occupies a dramatic oceanfront position at Makahuena Point on Kauai's sunny south shore. Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach are all within a short walk — three of Hawaii's best beaches for swimming, snorkeling with sea turtles and monk seals, and bodyboarding. Koloa Town — Kauai's oldest plantation village — is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, and the National Tropical Botanical Garden are all close by.",
+    transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
+    // SAMPLE regulatory identifiers — format-correct, range-plausible
+    // values for Makahuena at Poipu but NOT the actual records for
+    // any specific unit set. Replace with the real Makahuena records
+    // Jamie holds before republishing to Guesty / Airbnb / VRBO /
+    // Booking.
+    //   - TMK: 12-digit Hawaii TMK. Prefix 4-2-### = Kauai / Koloa-
+    //     Poipu district. Real Poipu parcels along this plat sit in
+    //     the 4-2-009 range. The value below keeps that shape but
+    //     the trailing parcel digits are an arbitrary sample.
+    //   - TAT / GET: Hawaii Dept of Taxation format. The "025" zone
+    //     prefix matches Kauai island.
+    //   - STR permit: Poipu is a Visitor Destination Area (VDA) so
+    //     the prefix is "TVR-YYYY-###" — NOT "TVNC-" (non-VDA Kauai
+    //     areas like Kapaa/Kekaha). 2024 used here; real permit year
+    //     should match whichever year this listing's permit was
+    //     issued.
+    taxMapKey: "420090060001",          // SAMPLE — replace with real Makahuena TMK
+    tatLicense: "TA-025-430-9876-01",   // SAMPLE — replace with real Makahuena TAT
+    getLicense: "GE-025-430-9876-01",   // SAMPLE — replace with real Makahuena GET
+    strPermit: "TVR-2024-999",          // SAMPLE — replace with real Makahuena STR permit
     hasPhotos: true,
-    communityPhotos: COMMUNITY_LAE_NANI,
-    communityPhotoFolder: "community-lae-nani",
+    communityPhotos: [],
+    communityPhotoFolder: "community-makahuena",
     units: [
       {
-        id: "prop24-ln-3br",
-        unitNumber: "314",
+        // SAMPLE unit number — follows the real Makahuena 4-digit
+        // building-floor-unit format (e.g. #3301 = bldg 3, floor 3,
+        // unit 01). Replace with the actual Makahuena unit number
+        // for this listing's 3BR before publishing.
+        id: "prop24-mk-3br",
+        unitNumber: "3301",
         bedrooms: 3,
         bathrooms: "2",
         sqft: "~1,500",
         maxGuests: 8,
-        shortDescription: "Oceanfront 3BR/2BA condo at Lae Nani Resort. Open living with ocean views, full kitchen, private lanai, pool and tennis. King master, queen and twin bedrooms plus queen sleeper sofa. Steps to a private sandy beach cove.",
-        longDescription: `Welcome to this oceanfront 3-bedroom, 2-bathroom condominium at the Lae Nani Resort in Kapaa on Kauai's beautiful Coconut Coast.
+        shortDescription: "Oceanfront 3BR/2BA condo at Makahuena at Poipu. Open living with ocean views, full kitchen, private lanai, resort pool. King master, queen and twin bedrooms plus queen sleeper sofa. Steps to Shipwreck Beach and Poipu Beach Park.",
+        longDescription: `Welcome to this oceanfront 3-bedroom, 2-bathroom condominium at Makahuena at Poipu on Kauai's sunny south shore.
 
-This corner unit offers expansive ocean views from the living area and private lanai. The open layout creates a bright, airy space with the kitchen, dining, and living areas flowing together.
+This corner unit offers expansive ocean views from the living area and private lanai, set at the dramatic Makahuena Point. The open layout creates a bright, airy space with the kitchen, dining, and living areas flowing together.
 
 The fully equipped kitchen features modern appliances and plenty of counter space. The king-bedded master suite has an en-suite bath and ocean views. The second bedroom offers a queen bed, and the third bedroom has twin beds. A queen sleeper sofa in the living area provides additional sleeping for two more guests. AC and ceiling fans keep all rooms comfortable.
 
-Lae Nani Resort sits on a rocky oceanfront point with its own private sandy beach cove - perfect for swimming and snorkeling. The resort pool, tennis court, and BBQ area provide additional amenities.
+Makahuena at Poipu sits on a rugged volcanic point with sweeping Pacific views. The resort pool, BBQ area, and landscaped grounds provide a relaxing base for your Kauai vacation. Walk to three of Kauai's best south-shore beaches: Shipwreck, Poipu Beach Park, and Brennecke's.
 
-Kapaa's vibrant town center is walking distance, offering the popular coastal bike path, eclectic boutiques, farmers markets, and diverse restaurants. Easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. Central Kauai location makes day trips to any part of the island easy and convenient.`,
+Koloa Town — Kauai's oldest plantation village — is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, and the National Tropical Botanical Garden. Snorkel with sea turtles and monk seals at Poipu Beach Park. Great restaurants including The Beach House, Merriman's, and Tidepools.`,
         photoFolder: "lae-nani-335",
         photos: PHOTOS_LAE_NANI,
       },
       {
-        id: "prop24-ln-2br",
-        unitNumber: "225",
+        // SAMPLE unit number (same format as above). Replace with
+        // the actual Makahuena 2BR unit number before publishing.
+        id: "prop24-mk-2br",
+        unitNumber: "2205",
         bedrooms: 2,
         bathrooms: "2",
         sqft: "~1,100",
         maxGuests: 6,
-        shortDescription: "Charming 2BR/2BA condo at Lae Nani Resort with ocean views, tropical garden setting, full kitchen, and lanai. King and queen bedrooms plus queen sleeper sofa. Private beach cove, pool, and tennis court.",
-        longDescription: `Welcome to this charming 2-bedroom, 2-bathroom condominium at the Lae Nani Resort in Kapaa.
+        shortDescription: "Charming 2BR/2BA condo at Makahuena at Poipu with ocean views, full kitchen, and private lanai. King and queen bedrooms plus queen sleeper sofa. Resort pool and easy walk to Shipwreck Beach.",
+        longDescription: `Welcome to this charming 2-bedroom, 2-bathroom condominium at Makahuena at Poipu on Kauai's south shore.
 
-Set in a tropical garden with ocean views, this comfortable condo features a full kitchen, spacious living and dining areas, and a private lanai. The king-bedded master has an en-suite bath, and the queen-bedded second bedroom is near the second bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
+Set within the resort's landscaped grounds with ocean views, this comfortable condo features a full kitchen, spacious living and dining areas, and a private lanai. The king-bedded master has an en-suite bath, and the queen-bedded second bedroom is near the second bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
 
 WiFi, cable TV, ceiling fans, AC, and all linens are included. An in-unit washer/dryer adds convenience.
 
-Lae Nani's private beach cove offers some of the best swimming on Kauai's east side. The resort pool, tennis court, and landscaped grounds provide a relaxing base for your Kauai vacation.
+Makahuena at Poipu's resort pool, BBQ area, and manicured grounds provide a peaceful base for your Kauai vacation. Walk to Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach — three of Kauai's best south-shore beaches.
 
-Walk to Kapaa town for shopping, dining, and the scenic coastal bike path. Easy access to Wailua Falls, Opaeka'a Falls, and Wailua River kayaking. The central location makes exploring Waimea Canyon, the North Shore, and Poipu equally accessible.`,
+Walk to Koloa Town for shopping, dining, and the historic plantation village. Easy access to Spouting Horn blowhole, the National Tropical Botanical Garden, and the entire Poipu resort corridor. The central south-shore location makes exploring Waimea Canyon, the North Shore, and the rest of Kauai easy and convenient.`,
         photoFolder: "lae-nani-335",
         photos: PHOTOS_LAE_NANI,
       },
@@ -1595,7 +1678,18 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
     propertyId: 32,
     propertyName: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
     complexName: "Pili Mai",
-    address: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
+    // Real Pili Mai address. An earlier "dedupe workaround" set this
+    // to 2253 Poipu Rd (Kiahuna Plantation Resort's mailing address)
+    // to avoid OTA dedupe; that caused guests to land at a beachfront
+    // resort instead of inland Pili Mai. Street address is now real;
+    // uniqueness between propertyId 32 and 33 is carried by the
+    // building suffix (Bldg 38 vs Bldg 10).
+    address: "2611 Kiahuna Plantation Dr, Bldg 38, Koloa, HI 96756",
+    // Pili Mai units are two-story attached townhomes — NOT flat
+    // condominium units — so the OTA propertyType needs to match.
+    // Shipped as the fallback "Condominium" for months, which excluded
+    // the listing from guests filtering Airbnb/VRBO for "Townhouse".
+    propertyType: "Townhouse",
     bookingTitle: "Pili Mai - 5BR Townhomes - Sleeps 12",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 5 bedrooms and can accommodate up to 14 guests, with AC throughout and easy access to Poipu Beach.
@@ -1613,6 +1707,7 @@ Important: This listing represents our managed portfolio of similar units within
     tatLicense: "TA-024-120-9012-01",
     getLicense: "GE-024-120-9012-01",
     strPermit: "TVR-2022-037",
+    accessibilityNote: "Pili Mai includes a mix of floor plans — some are single-level ground-floor residences (Moana plan, 3BR/3BA, no internal stairs), others are multi-level townhomes with internal stairs (Mahina plan, 2BR/2.5BA), and some upper-level units have a flight of stairs to the entry door. For groups with seniors / mobility / stairs concerns, we WILL flag the booking and ensure the assigned units are single-level / ground-floor (Moana plan or equivalent, no internal stairs).",
     hasPhotos: true,
     communityPhotos: COMMUNITY_PILI_MAI,
     communityPhotoFolder: "community-pili-mai",
@@ -1663,7 +1758,12 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
     propertyId: 33,
     propertyName: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
     complexName: "Pili Mai",
-    address: "2611 Kiahuna Plantation Dr, Koloa, HI 96756",
+    // Real Pili Mai address with a unique building suffix — see
+    // propertyId 32 for the workaround history. Bldg 10 disambiguates
+    // this listing from prop 32's Bldg 38 for OTA dedupe.
+    address: "2611 Kiahuna Plantation Dr, Bldg 10, Koloa, HI 96756",
+    // Same townhome-not-condo correction as propertyId 32 above.
+    propertyType: "Townhouse",
     bookingTitle: "Pili Mai - 6BR Townhomes - Sleeps 12",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and easy access to Poipu Beach.
@@ -1681,6 +1781,7 @@ Important: This listing represents our managed portfolio of similar units within
     tatLicense: "TA-024-120-9012-02",
     getLicense: "GE-024-120-9012-02",
     strPermit: "TVR-2022-038",
+    accessibilityNote: "Pili Mai includes a mix of floor plans — some are single-level ground-floor residences (Moana plan, 3BR/3BA, no internal stairs), others are multi-level townhomes with internal stairs (Mahina plan, 2BR/2.5BA), and some upper-level units have a flight of stairs to the entry door. For groups with seniors / mobility / stairs concerns, we WILL flag the booking and ensure the assigned units are single-level / ground-floor (Moana plan or equivalent, no internal stairs).",
     hasPhotos: true,
     communityPhotos: COMMUNITY_PILI_MAI,
     communityPhotoFolder: "community-pili-mai",
@@ -1735,7 +1836,9 @@ Poipu's south shore offers year-round sunshine, world-class snorkeling, and the 
     propertyId: 27,
     propertyName: "Beautiful 4 bedroom Poipu Kai Condo!",
     complexName: "Regency at Poipu Kai",
-    address: "1831 Poipu Rd, Koloa, HI 96756",
+    // Unique within Regency at Poipu Kai by representative unit 114
+    // (first of the paired units — see prop 4 comment above).
+    address: "1831 Poipu Rd, Unit 114, Koloa, HI 96756",
     bookingTitle: "Poipu Kai - 4BR Condos, Pool - Sleeps 8",
     sampleDisclaimer: DEFAULT_DISCLAIMER,
     combinedDescription: `This listing is comprised of two 2-bedroom condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 4 bedrooms and can accommodate up to 8 guests, an ideal setup for families or friends traveling together on Kauai's sunny south shore.
@@ -1811,6 +1914,10 @@ export function getUnitBuilderByPropertyId(propertyId: number): PropertyUnitBuil
 
 export function getMultiUnitPropertyIds(): number[] {
   return unitBuilderData.map((p) => p.propertyId);
+}
+
+export function getAllUnitBuilders(): PropertyUnitBuilder[] {
+  return unitBuilderData;
 }
 
 export function getAllMultiUnitProperties(): { propertyId: number; propertyName: string; complexName: string }[] {

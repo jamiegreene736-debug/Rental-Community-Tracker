@@ -6,7 +6,7 @@
 // Batches fetches by folder and dedupes — safe to call with duplicate
 // folders across units. Each folder is queried once per component lifetime.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type LabelMeta = {
   label: string;
@@ -18,6 +18,12 @@ type LabelMeta = {
 };
 type FolderLabels = Record<string, LabelMeta>;
 type LabelsMap = Record<string, FolderLabels>;
+type AutoLabelStatus = {
+  queued?: boolean;
+  missing?: number;
+  total?: number;
+  skippedReason?: string;
+};
 
 export function usePhotoLabels(folders: readonly string[]): {
   labels: LabelsMap;
@@ -30,6 +36,13 @@ export function usePhotoLabels(folders: readonly string[]): {
   labelFor: (folder: string, filename: string) => string | null;
   /** True when the user marked this photo as hidden in the curator. */
   isHidden: (folder: string, filename: string) => boolean;
+  /**
+   * Re-fetch labels for the currently-tracked folders. Callers (e.g. the
+   * PhotoCurator delete button) invoke this after a server-side mutation
+   * so the builder's `isHidden` lookup reflects the new state without
+   * requiring a full page reload.
+   */
+  refresh: () => void;
 } {
   const [labels, setLabels] = useState<LabelsMap>({});
   const [loading, setLoading] = useState(false);
@@ -39,32 +52,53 @@ export function usePhotoLabels(folders: readonly string[]): {
   const sortedUniqueFolders = Array.from(new Set(folders.filter(Boolean))).sort();
   const key = sortedUniqueFolders.join("|");
 
+  // Bumped by `refresh()` to force the effect to re-run without needing
+  // the folder set to change. Lets callers pull fresh server state after
+  // mutating a label (hide/restore/rename).
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refresh = useCallback(() => setRefreshTick((t) => t + 1), []);
+
   useEffect(() => {
     if (sortedUniqueFolders.length === 0) return;
     let cancelled = false;
+    let retryTimer: number | undefined;
     setLoading(true);
     Promise.all(
       sortedUniqueFolders.map(async (folder) => {
         try {
-          const r = await fetch(`/api/photo-labels/${encodeURIComponent(folder)}`);
-          if (!r.ok) return [folder, {}] as const;
-          const data = await r.json() as { labels?: FolderLabels };
-          return [folder, data.labels ?? {}] as const;
+          const r = await fetch(`/api/photo-labels/${encodeURIComponent(folder)}?auto=missing`);
+          if (!r.ok) return [folder, {}, null] as const;
+          const data = await r.json() as { labels?: FolderLabels; autoLabel?: AutoLabelStatus };
+          return [folder, data.labels ?? {}, data.autoLabel ?? null] as const;
         } catch {
-          return [folder, {}] as const;
+          return [folder, {}, null] as const;
         }
       }),
     ).then((results) => {
       if (cancelled) return;
       const next: LabelsMap = {};
-      for (const [folder, map] of results) next[folder] = map;
+      let shouldRefetch = false;
+      for (const [folder, map, autoLabel] of results) {
+        next[folder] = map;
+        if (autoLabel?.queued && (autoLabel.missing ?? 0) > 0) {
+          shouldRefetch = true;
+        }
+      }
       setLabels(next);
+      if (shouldRefetch) {
+        retryTimer = window.setTimeout(() => {
+          if (!cancelled) setRefreshTick((t) => t + 1);
+        }, 12_000);
+      }
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, refreshTick]);
 
   const labelFor = (folder: string, filename: string): string | null => {
     const row = labels[folder]?.[filename];
@@ -75,5 +109,5 @@ export function usePhotoLabels(folders: readonly string[]): {
     return !!labels[folder]?.[filename]?.hidden;
   };
 
-  return { labels, loading, labelFor, isHidden };
+  return { labels, loading, labelFor, isHidden, refresh };
 }

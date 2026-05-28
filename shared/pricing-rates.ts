@@ -11,6 +11,8 @@
 // which would inflate our target by ~80%. Treat live engine numbers as
 // telemetry only.
 
+import { resolveBuyInMarket } from "./buy-in-market";
+
 export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
 export type RegionType = "hawaii" | "florida";
 
@@ -27,18 +29,60 @@ export const BUY_IN_RATES: Record<string, CommunityRate> = {
   "Poipu Oceanfront":  { "2BR": 630, "3BR": 792, "4BR": 936,  region: "hawaii" },
   "Poipu Brenneckes":  { "2BR": 510, "3BR": 618, "4BR": 864,  region: "hawaii" },
   "Pili Mai":          { "2BR": 576, "3BR": 744, "4BR": 840,  region: "hawaii" },
-  "Kapaa Beachfront":  { "2BR": 588, "3BR": 840, "4BR": 1020, region: "hawaii" },
+  // 3BR re-set 2026-04-28 from $840 to $615 to match the live-data
+  // methodology operator chose to keep. The live Airbnb-engine
+  // backfill landed Kapaa Beachfront 2BR at $430/n=4 (vs the prior
+  // static $588 — 27% drop), but Kapaa proper has no 3BR condo comps
+  // in the operator's COMMUNITY_BOUNDS zone, so the per-property
+  // refresh persists no 3BR row and the Pricing tab falls through to
+  // this static value for unit A on prop 23. Extrapolation: $430 ×
+  // 1.43 (the prior static 3BR/2BR ratio for this community) = $615 —
+  // keeps prop 23's 3BR component consistent with the rest of the
+  // live-data table.
+  "Kapaa Beachfront":  { "2BR": 588, "3BR": 615, "4BR": 1020, region: "hawaii" },
   "Princeville":       { "2BR": 492, "3BR": 744, "4BR": 858,  region: "hawaii" },
   "Kekaha Beachfront": { "2BR": 540, "3BR": 810, "4BR": 1080, region: "hawaii" },
   "Keauhou":           { "2BR": 312,                          region: "hawaii" },
-  "Southern Dunes":    {            "3BR": 192, "4BR": 200,   region: "florida" },
-  "Windsor Hills":     {            "3BR": 210, "4BR": 294,   region: "florida" },
+  "Southern Dunes":    { "2BR":  85, "3BR": 192, "4BR": 200,  region: "florida" },
+  "Windsor Hills":     { "2BR": 150, "3BR": 210, "4BR": 294,  region: "florida" },
+  "Bonita National":   { "2BR": 160,                          region: "florida" },
+  // Internal fallback key for Florida single-listing/community drafts
+  // whose exact resort has no static buy-in row yet. Keeps live
+  // season-band scans on Florida multipliers instead of falling through
+  // to the Hawaii default.
+  "Florida Generic":   {                                      region: "florida" },
+  // Caribe Cove (Kissimmee, FL) — older mid-tier resort ~5mi from Disney.
+  // 2BR base of $125 reflects what the unit actually rents for on
+  // Airbnb/VRBO including taxes + fees (operator-validated 2026-04, see
+  // PR that introduced this entry). Lower than Windsor Hills which is a
+  // newer, more amenitied build. 3BR set proportionally — refresh
+  // empirically once we have a real 3BR draft to compare against.
+  "Caribe Cove":       { "2BR": 125, "3BR": 175,              region: "florida" },
 };
-const FALLBACK_RATE_PER_BEDROOM = 270;
+
+// Region-aware fallback for areas not in BUY_IN_RATES. Hawaii's $270/BR
+// matches the average 2BR cost basis across our Kauai inventory; Florida's
+// $80/BR matches the Disney-area condo cost basis (Caribe Cove 2BR ≈
+// $62/BR, Southern Dunes 3BR ≈ $64/BR). Using the Hawaii number for a
+// Florida draft inflates the dashboard buy-in by ~3.5×. See the note in
+// `getBuyInRate` for how the fallback is selected.
+const FALLBACK_RATE_PER_BEDROOM: Record<RegionType, number> = {
+  hawaii:  270,
+  florida:  80,
+};
 
 export const SEASON_MULTIPLIERS: Record<RegionType, Record<SeasonType, number>> = {
   hawaii:  { LOW: 0.80, HIGH: 1.30, HOLIDAY: 1.80 },
   florida: { LOW: 0.75, HIGH: 1.25, HOLIDAY: 1.70 },
+};
+
+// Per-season markup to correct Airbnb's typical under-pricing vs VRBO/Booking.com medians.
+// Applied to the exact-BR median *before* combo handling and the final 20% business markup.
+// Tunable; conservative values from historical spread observations.
+export const AIRBNB_TO_MARKET_MARKUPS: Record<SeasonType, number> = {
+  LOW: 1.16,      // shoulder/low: biggest Airbnb discount vs reality
+  HIGH: 1.09,     // peak summer: smaller gap
+  HOLIDAY: 1.05,  // holiday spikes: Airbnb closer to other channels
 };
 
 const HAWAII_SEASONS: Record<string, SeasonType> = {
@@ -64,12 +108,293 @@ export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
 }
 
-export function getBuyInRate(community: string, bedrooms: number): number {
+// Suggest a BUY_IN_RATES key for a draft. Used by the Add a New
+// Community wizard's pricing-area picker as the default selection —
+// operator can override. Returns "" when nothing matches; the dashboard
+// treats that as "no pricing area" and falls back to the per-bedroom
+// rate for the region.
+//
+// `communityName` (optional) lets us pin specific named complexes to
+// their own tier when one exists in BUY_IN_RATES. This matters because
+// city/state alone can't distinguish "Caribe Cove" (older mid-tier,
+// ~$125/night per 2BR) from "Windsor Hills" (newer premium, ~$210+
+// for 3BR) — both are in Kissimmee. The name match runs first so a
+// known complex always lands on its own tier.
+export function suggestPricingArea(
+  city: string,
+  state: string,
+  communityName?: string,
+): string {
+  const name = (communityName || "").toLowerCase();
+  if (name) {
+    // Match against every BUY_IN_RATES key. A community draft named
+    // "Caribe Cove Resort" should resolve to "Caribe Cove"; allowing
+    // a substring match handles "Resort" / "Condos" suffixes that
+    // operators add to the name field.
+    for (const key of Object.keys(BUY_IN_RATES)) {
+      if (name.includes(key.toLowerCase())) return key;
+    }
+  }
+  const resolvedMarket = resolveBuyInMarket({ name: communityName, city, state });
+  if (resolvedMarket && BUY_IN_RATES[resolvedMarket]) return resolvedMarket;
+  const c = (city || "").toLowerCase();
+  const s = (state || "").toLowerCase();
+  if (s === "hawaii" || s === "hi") {
+    if (/\b(poipu|koloa|kalaheo)\b/.test(c)) return "Poipu Kai";
+    if (/\b(princeville|hanalei|haena)\b/.test(c)) return "Princeville";
+    if (/\b(kapaa|wailua|lihue|anahola)\b/.test(c)) return "Kapaa Beachfront";
+    if (/\b(kekaha|waimea|hanapepe)\b/.test(c)) return "Kekaha Beachfront";
+    if (/\b(kona|kailua-kona|keauhou|hilo|waikoloa|kohala)\b/.test(c)) return "Keauhou";
+    return "";
+  }
+  if (s === "florida" || s === "fl") {
+    // Named FL keys in BUY_IN_RATES — Southern Dunes (Haines City /
+    // Davenport, ~15-25mi from Disney, lower buy-in), Caribe Cove
+    // (older Kissimmee resort), and Windsor Hills (Disney-proximate
+    // newer-build tier). Kissimmee is broad but most STR-eligible
+    // communities there are within ~5mi of the parks, so default to
+    // Windsor Hills tier when no specific name matched above and let
+    // the operator downshift to Caribe Cove or Southern Dunes if the
+    // build is older or further out.
+    if (/\b(haines city|davenport)\b/.test(c)) return "Southern Dunes";
+    if (/\b(bonita springs|estero|naples)\b/.test(c)) return "Bonita National";
+    if (/\b(orlando|kissimmee)\b/.test(c)) return "Windsor Hills";
+    return "Florida Generic";
+  }
+  return "";
+}
+
+// Live per-(propertyId, bedrooms) buy-in cache. Hydrated client-side
+// from `GET /api/property/market-rates` at app mount via
+// `setLivePropertyMarketRates`. Empty on the server (server reads
+// `property_market_rates` directly from the DB) — that's fine; this
+// file is shared but the cache only lives in process memory and the
+// only callers that need it run client-side.
+//
+// Lookup key: `${propertyId}::${bedrooms}`. Negative propertyIds are
+// drafts (the synthetic `-draftId` convention used everywhere on the
+// dashboard); positive ids are static properties from
+// `unit-builder-data.ts`. One cache covers both.
+type LiveBuyInKey = string;
+type LiveBuyInEntry = {
+  // LOW-season basis — primary value the formula uses when called
+  // without a season argument (and the field every existing reader
+  // already expects). Always present.
+  medianNightly: number;
+  // Per-season basis added in PR #282. Populated when the multi-
+  // season scan ran for that property; null when the scan was
+  // legacy single-window OR the season window was unreachable.
+  medianNightlyHigh: number | null;
+  medianNightlyHoliday: number | null;
+  monthlyRates: Record<string, MonthlyMarketRate>;
+  sampleCount: number;
+  refreshedAt: string;
+  source: string;
+};
+const _liveBuyIns = new Map<LiveBuyInKey, LiveBuyInEntry>();
+const liveKey = (propertyId: number, bedrooms: number): LiveBuyInKey => `${propertyId}::${bedrooms}`;
+
+export type MonthlyMarketRate = {
+  medianNightly: number;
+  season?: SeasonType;
+  checkIn?: string;
+  checkOut?: string;
+  channelCount?: number;
+  sampleCount?: number;
+  demandClass?: "standard" | "high" | "peak" | "ultra";
+  seasonTierId?: string;
+  seasonTierLabel?: string;
+  channels?: { airbnb?: number | null; vrbo?: number | null; booking?: number | null; pm?: number | null };
+  hybrid?: {
+    baseAirbnbMedian?: number;
+    finalRate?: number;
+    layers?: Array<Record<string, unknown>>;
+    notes?: string[];
+  };
+};
+
+export type LivePropertyMarketRateInput = {
+  propertyId: number;
+  bedrooms: number;
+  medianNightly: number | string;
+  medianNightlyHigh?: number | string | null;
+  medianNightlyHoliday?: number | string | null;
+  monthlyRates?: Record<string, MonthlyMarketRate> | null;
+  sampleCount: number;
+  refreshedAt: string;
+  source: string;
+};
+
+function parseNullableRate(v: number | string | null | undefined): number | null {
+  if (v == null) return null;
+  const n = typeof v === "number" ? v : parseFloat(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function parseMonthlyRates(input: unknown): Record<string, MonthlyMarketRate> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const parsed: Record<string, MonthlyMarketRate> = {};
+  for (const [yearMonth, raw] of Object.entries(input as Record<string, any>)) {
+    if (!/^\d{4}-\d{2}$/.test(yearMonth)) continue;
+    if (!raw || typeof raw !== "object") continue;
+    const medianNightly = parseNullableRate(raw.medianNightly);
+    if (medianNightly == null) continue;
+    const season = raw.season === "HIGH" || raw.season === "LOW" || raw.season === "HOLIDAY"
+      ? raw.season
+      : undefined;
+    parsed[yearMonth] = {
+      medianNightly,
+      season,
+      checkIn: typeof raw.checkIn === "string" ? raw.checkIn : undefined,
+      checkOut: typeof raw.checkOut === "string" ? raw.checkOut : undefined,
+      channelCount: typeof raw.channelCount === "number" ? raw.channelCount : undefined,
+      sampleCount: typeof raw.sampleCount === "number" ? raw.sampleCount : undefined,
+      demandClass: raw.demandClass === "standard" || raw.demandClass === "high" || raw.demandClass === "peak" || raw.demandClass === "ultra"
+        ? raw.demandClass
+        : undefined,
+      seasonTierId: typeof raw.seasonTierId === "string" ? raw.seasonTierId : undefined,
+      seasonTierLabel: typeof raw.seasonTierLabel === "string" ? raw.seasonTierLabel : undefined,
+      channels: raw.channels && typeof raw.channels === "object" ? {
+        airbnb: parseNullableRate(raw.channels.airbnb),
+        vrbo: parseNullableRate(raw.channels.vrbo),
+        booking: parseNullableRate(raw.channels.booking),
+        pm: parseNullableRate(raw.channels.pm),
+      } : undefined,
+      hybrid: raw.hybrid && typeof raw.hybrid === "object" ? raw.hybrid : undefined,
+    };
+  }
+  return parsed;
+}
+
+export function setLivePropertyMarketRates(rates: LivePropertyMarketRateInput[]): void {
+  _liveBuyIns.clear();
+  for (const r of rates) {
+    const median = typeof r.medianNightly === "number" ? r.medianNightly : parseFloat(r.medianNightly);
+    if (!Number.isFinite(median) || median <= 0) continue;
+    _liveBuyIns.set(liveKey(r.propertyId, r.bedrooms), {
+      medianNightly: median,
+      medianNightlyHigh: parseNullableRate(r.medianNightlyHigh),
+      medianNightlyHoliday: parseNullableRate(r.medianNightlyHoliday),
+      monthlyRates: parseMonthlyRates(r.monthlyRates),
+      sampleCount: r.sampleCount,
+      refreshedAt: r.refreshedAt,
+      source: r.source,
+    });
+  }
+}
+
+export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEntry | null {
+  return _liveBuyIns.get(liveKey(propertyId, bedrooms)) ?? null;
+}
+
+function fallbackSeasonBasisFromLow(
+  community: string,
+  lowBasis: number | null,
+  season: "HIGH" | "HOLIDAY",
+): number | null {
+  if (lowBasis == null || lowBasis <= 0) return null;
+  const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+  return Math.round(lowBasis * SEASON_MULTIPLIERS[region][season]);
+}
+
+export function normalizeSeasonalBasis(
+  community: string,
+  lowBasis: number,
+  highBasis: number | null,
+  holidayBasis: number | null,
+): { low: number; high: number | null; holiday: number | null } {
+  const highFloor = fallbackSeasonBasisFromLow(community, lowBasis, "HIGH");
+  const high = highFloor == null
+    ? highBasis
+    : Math.max(highBasis ?? highFloor, highFloor);
+  const holidayFloorBase = fallbackSeasonBasisFromLow(community, lowBasis, "HOLIDAY");
+  const holidayFloor = Math.max(holidayFloorBase ?? 0, high ?? 0) || null;
+  const holiday = holidayFloor == null
+    ? holidayBasis
+    : Math.max(holidayBasis ?? holidayFloor, holidayFloor);
+  return { low: lowBasis, high, holiday };
+}
+
+// Fallback chain (highest → lowest priority):
+//   1. Live per-season basis for (propertyId, bedrooms, season) when a
+//      season is supplied AND the multi-season scan populated it.
+//   2. Live LOW basis × SEASON_MULTIPLIERS for the season (legacy
+//      multiplier model when per-season basis is absent).
+//   3. BUY_IN_RATES[community][${BR}BR] — operator-validated static.
+//   4. FALLBACK_RATE_PER_BEDROOM[region] × bedrooms — per-region
+//      default for areas not in the static table.
+//
+// `season` is optional: when omitted, returns the LOW basis directly
+// (the legacy single-value behavior). When supplied, returns the
+// season-specific basis from the multi-season scan when available,
+// otherwise applies the multiplier to the LOW basis.
+//
+// `yearMonth` is accepted for API compatibility with callers that also
+// surface saved monthly scrape samples. Those monthly samples are
+// diagnostic evidence only; they do not override the canonical seasonal
+// basis used for pricing or Guesty pushes.
+export function getBuyInRate(
+  community: string,
+  bedrooms: number,
+  propertyId?: number,
+  season?: SeasonType,
+  yearMonth?: string,
+): number {
+  if (propertyId != null) {
+    const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
+    if (live) {
+      const normalized = normalizeSeasonalBasis(
+        community,
+        live.medianNightly,
+        live.medianNightlyHigh,
+        live.medianNightlyHoliday,
+      );
+      // Season-specific basis when available + requested.
+      if (season === "HIGH" && normalized.high != null) return normalized.high;
+      if (season === "HOLIDAY" && normalized.holiday != null) return normalized.holiday;
+      // LOW or unknown-season → use base. When the caller supplied
+      // HIGH/HOLIDAY but per-season basis isn't populated, apply the
+      // multiplier so the formula still varies seasonally.
+      if (season && season !== "LOW") {
+        const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+        const multiplier = SEASON_MULTIPLIERS[region][season];
+        return Math.round(live.medianNightly * multiplier);
+      }
+      return live.medianNightly;
+    }
+  }
   const entry = BUY_IN_RATES[community];
   const key = `${bedrooms}BR` as keyof CommunityRate;
   const rate = entry?.[key];
-  if (typeof rate === "number") return rate;
-  return FALLBACK_RATE_PER_BEDROOM * bedrooms;
+  if (typeof rate === "number") {
+    // Static-table values are an annual BASELINE (not pre-calibrated
+    // to any specific season). Legacy callers pre-PR #282 always
+    // applied SEASON_MULTIPLIERS on top, including the 0.80 LOW
+    // multiplier. PR #283 accidentally skipped the LOW multiplier
+    // when a season was explicitly passed, inflating LOW-month
+    // totals for properties relying on the static fallback (3BR
+    // Kaha Lani: was $615 raw, should be $615 × 0.80 = $492).
+    // Restore: apply multiplier for ALL seasons including LOW when
+    // a season is supplied. Legacy seasonless callers still get
+    // the raw baseline back.
+    if (season) {
+      const region = entry?.region ?? getCommunityRegion(community);
+      const multiplier = SEASON_MULTIPLIERS[region][season];
+      return Math.round(rate * multiplier);
+    }
+    return rate;
+  }
+  // No exact rate. Fall back per region — Florida and Hawaii cost
+  // bases differ by ~3.5×, so a global per-BR fallback would inflate
+  // one market or under-price the other. If the community isn't in
+  // the table at all, getCommunityRegion defaults to hawaii.
+  const region = entry?.region ?? getCommunityRegion(community);
+  const fallback = FALLBACK_RATE_PER_BEDROOM[region] * bedrooms;
+  if (season) {
+    const multiplier = SEASON_MULTIPLIERS[region][season];
+    return Math.round(fallback * multiplier);
+  }
+  return fallback;
 }
 
 export function getSeasonForMonth(yearMonth: string, region: RegionType): SeasonType {
@@ -115,17 +440,101 @@ export const CHANNEL_TO_GUESTY_KEY: Record<ChannelKey, string> = {
 
 // Total nightly buy-in cost for a property's full set of unit slots in
 // a given month. Used as the cost floor for the seasonal rate push.
+//
+// PR #282: when a per-season basis is populated for the (propertyId,
+// bedrooms) pair, getBuyInRate(community, br, propertyId, season)
+// returns it directly — no multiplier applied. Falls back to LOW ×
+// multiplier when the per-season basis is missing.
 export function totalNightlyBuyInForMonth(
   community: string,
   unitSlots: Array<{ bedrooms: number }>,
   yearMonth: string,
+  propertyId?: number,
 ): number {
   const region = getCommunityRegion(community);
   const season = getSeasonForMonth(yearMonth, region);
-  const multiplier = SEASON_MULTIPLIERS[region][season];
   let total = 0;
   for (const slot of unitSlots) {
-    total += Math.round(getBuyInRate(community, slot.bedrooms) * multiplier);
+    total += getBuyInRate(community, slot.bedrooms, propertyId, season, yearMonth);
   }
   return total;
+}
+
+// ─────────────────────────────────────────────────────────────
+// RANDOM 7-NIGHT SEASONAL SAMPLER (for live market-rate refreshes)
+// Picks a *random* 7-night window inside the *next* season occurrence
+// within a hard 10-month lookahead cap. Never returns 2028+ dates
+// that have no Airbnb calendar data yet. Used by scheduler + manual
+// Pricing tab refresh to avoid the "no usable exact-2BR LOW samples"
+// failure for far-future windows.
+// ─────────────────────────────────────────────────────────────
+
+export type SeasonKey = SeasonType;
+
+export function pickRandom7NightInSeason(
+  region: RegionType,
+  season: SeasonKey,
+  maxLookaheadMonths = 10,
+): { checkIn: string; checkOut: string } | null {
+  const seasonMap = region === "florida" ? FLORIDA_SEASONS : HAWAII_SEASONS;
+  const ymd = (d: Date) => d.toISOString().slice(0, 10);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const maxFuture = new Date(today.getTime() + maxLookaheadMonths * 30 * 86_400_000);
+
+  // For HOLIDAY use the existing holiday ranges (first future one within cap)
+  if (season === "HOLIDAY") {
+    const holidays: Array<{ sm: number; sd: number; em: number; ed: number }> = [
+      { sm: 12, sd: 20, em: 1, ed: 5 },
+      { sm: 7, sd: 1, em: 7, ed: 7 },
+      { sm: 11, sd: 22, em: 11, ed: 30 },
+      { sm: 3, sd: 15, em: 4, ed: 5 },
+      { sm: 2, sd: 14, em: 2, ed: 17 },
+    ];
+    for (const yearOffset of [0, 1]) {
+      for (const h of holidays) {
+        const year = today.getFullYear() + yearOffset;
+        const ci = new Date(year, h.sm - 1, h.sd + 2);
+        if (ci > today && ci < maxFuture) {
+          const co = new Date(ci.getTime() + 7 * 86_400_000);
+          return { checkIn: ymd(ci), checkOut: ymd(co) };
+        }
+      }
+    }
+    return null;
+  }
+
+  // LOW / HIGH: walk forward month-by-month (capped), find first match,
+  // then pick a *random* day 4-21 for check-in (true random 7-night inside season month).
+  for (let offset = 1; offset <= maxLookaheadMonths; offset++) {
+    const target = new Date(today.getFullYear(), today.getMonth() + offset, 1);
+    if (target > maxFuture) break;
+    const ym = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}`;
+    if (seasonMap[ym] === season) {
+      // Random day in 4..21 to avoid 1st/31st edge cases in pricing calendars
+      const day = 4 + Math.floor(Math.random() * 18);
+      const ci = new Date(target.getFullYear(), target.getMonth(), day);
+      if (ci > today) {
+        const co = new Date(ci.getTime() + 7 * 86_400_000);
+        return { checkIn: ymd(ci), checkOut: ymd(co) };
+      }
+    }
+  }
+  return null;
+}
+
+// Apply per-season Airbnb bias correction, then combo adjustment, then caller adds final 20%.
+export function applyAirbnbBiasAndCombo(
+  median: number,
+  season: SeasonKey,
+  unitCount: number,   // 1 for single listing, 2+ for combo (two physical units behind one Guesty listing)
+  sameBrCount = false, // when true and unitCount===2, user spec allows explicit double
+): number {
+  const bias = AIRBNB_TO_MARKET_MARKUPS[season] ?? 1.10;
+  let adjusted = Math.round(median * bias);
+  if (unitCount > 1) {
+    // Combo: either explicit double (identical BRs) or sum (different BRs). Caller passes effective count.
+    adjusted = sameBrCount && unitCount === 2 ? adjusted * 2 : adjusted * unitCount;
+  }
+  return Math.round(adjusted);
 }

@@ -1,9 +1,40 @@
 import { storage } from "./storage";
 import { log } from "./index";
 import { getGuestyToken } from "./guesty-token";
+import {
+  BUY_IN_MARKET_BOUNDS,
+  searchLocationForBuyInMarket,
+} from "@shared/buy-in-market";
+
+let guestyRequestGate: Promise<void> = Promise.resolve();
+let nextGuestyRequestAt = 0;
+let guestyRateLimitPauseUntil = 0;
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 120000);
+  const dateMs = Date.parse(value);
+  if (Number.isFinite(dateMs)) return Math.max(0, Math.min(dateMs - Date.now(), 120000));
+  return null;
+}
+
+async function waitForGuestyRequestSlot() {
+  const minGapMs = Math.max(0, Number(process.env.GUESTY_REQUEST_MIN_GAP_MS ?? 500));
+  const previous = guestyRequestGate.catch(() => undefined);
+  const current = previous.then(async () => {
+    const now = Date.now();
+    const waitMs = Math.max(0, nextGuestyRequestAt - now, guestyRateLimitPauseUntil - now);
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    nextGuestyRequestAt = Date.now() + minGapMs;
+  });
+  guestyRequestGate = current;
+  await current;
+}
 
 export async function guestyRequest(method: string, endpoint: string, body?: unknown) {
   const token = await getGuestyToken();
+  await waitForGuestyRequestSlot();
   const res = await fetch(`https://open-api.guesty.com/v1${endpoint}`, {
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
@@ -25,10 +56,37 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
       || rawText.slice(0, 500)
       || `(no body)`;
     log(`[guesty] ${method} ${endpoint} → ${res.status}: ${message.slice(0, 300)}`, "guesty-error");
-    throw new Error(`Guesty ${res.status} on ${method} ${endpoint}: ${message}`);
+    const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+    if (res.status === 429) {
+      guestyRateLimitPauseUntil = Math.max(guestyRateLimitPauseUntil, Date.now() + (retryAfterMs ?? 15000));
+    }
+    const err = new Error(`Guesty ${res.status} on ${method} ${endpoint}: ${message}`) as Error & {
+      status?: number;
+      method?: string;
+      endpoint?: string;
+      rateLimited?: boolean;
+      retryAfterMs?: number;
+    };
+    err.status = res.status;
+    err.method = method;
+    err.endpoint = endpoint;
+    err.rateLimited = res.status === 429 || /rate.?limit|too many requests/i.test(message);
+    err.retryAfterMs = retryAfterMs ?? undefined;
+    throw err;
   }
   if (res.status === 204) return { success: true };
-  return res.json();
+
+  // Guesty action endpoints sometimes return 200 with an empty body
+  // after the action succeeds. Calling res.json() on that response
+  // throws "Unexpected end of JSON input", which made successful
+  // Airbnb pre-approvals look like failures in the inbox.
+  const rawText = await res.text().catch(() => "");
+  if (!rawText.trim()) return { success: true };
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    return { success: true, raw: rawText.slice(0, 500) };
+  }
 }
 
 const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {
@@ -56,27 +114,7 @@ const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms
   34: { community: "Poipu Kai",         units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
 };
 
-const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = {
-  "Poipu Kai":         "Regency at Poipu Kai, Koloa, Kauai, Hawaii",
-  "Kekaha Beachfront": "Kekaha, Kauai, Hawaii",
-  "Keauhou":           "Keauhou, Kailua-Kona, Big Island, Hawaii",
-  "Princeville":       "Princeville, Kauai, Hawaii",
-  "Kapaa Beachfront":  "Kapaa, Kauai, Hawaii",
-  "Poipu Oceanfront":  "Poipu Beach, Koloa, Kauai, Hawaii",
-  "Poipu Brenneckes":  "Brenneckes Beach, Poipu, Kauai, Hawaii",
-  "Pili Mai":          "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
-};
-
-const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = {
-  "Poipu Kai":        { sw_lat: 21.875, sw_lng: -159.478, ne_lat: 21.895, ne_lng: -159.458 },
-  "Pili Mai":         { sw_lat: 21.882, sw_lng: -159.483, ne_lat: 21.899, ne_lng: -159.468 },
-  "Poipu Brenneckes": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
-  "Poipu Oceanfront": { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
-  "Princeville":      { sw_lat: 22.210, sw_lng: -159.498, ne_lat: 22.235, ne_lng: -159.468 },
-  "Kapaa Beachfront": { sw_lat: 22.060, sw_lng: -159.333, ne_lat: 22.085, ne_lng: -159.308 },
-  "Kekaha Beachfront":{ sw_lat: 21.955, sw_lng: -159.758, ne_lat: 21.978, ne_lng: -159.733 },
-  "Keauhou":          { sw_lat: 19.528, sw_lng: -155.992, ne_lat: 19.558, ne_lng: -155.966 },
-};
+const COMMUNITY_BOUNDS: Record<string, { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number }> = BUY_IN_MARKET_BOUNDS;
 
 function formatDate(d: Date) { return d.toISOString().split("T")[0]; }
 
@@ -105,7 +143,7 @@ async function scanWindow(propertyId: number, checkIn: string, checkOut: string)
   if (!config) throw new Error(`Property ${propertyId} not in config`);
 
   const bounds = COMMUNITY_BOUNDS[config.community];
-  const location = COMMUNITY_SEARCH_LOCATIONS[config.community] || `${config.community}, Hawaii`;
+  const location = searchLocationForBuyInMarket(config.community) || `${config.community}, Hawaii`;
 
   const bedroomCounts: Record<number, number> = {};
   for (const u of config.units) bedroomCounts[u.bedrooms] = (bedroomCounts[u.bedrooms] || 0) + 1;
@@ -126,10 +164,7 @@ async function scanWindow(propertyId: number, checkIn: string, checkOut: string)
       q: location,
     });
     if (bounds) {
-      params.set("sw_lat", String(bounds.sw_lat));
-      params.set("sw_lng", String(bounds.sw_lng));
-      params.set("ne_lat", String(bounds.ne_lat));
-      params.set("ne_lng", String(bounds.ne_lng));
+      params.set("bounding_box", `[[${bounds.ne_lat},${bounds.ne_lng}],[${bounds.sw_lat},${bounds.sw_lng}]]`);
     }
 
     const res = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);

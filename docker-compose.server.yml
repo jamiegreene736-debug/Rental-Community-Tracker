@@ -1,0 +1,108 @@
+# Remote server Chrome sidecars.
+#
+# Run on an Ubuntu/Debian server with Docker installed:
+#   ./scripts/start-server-sidecars.sh 4
+#
+# App/daemon configuration from your Mac:
+#   export SERVER_CHROME_HOST=<SERVER_IP_OR_DNS>
+#   export SERVER_CHROME_BASE_PORT=9223
+#   export SERVER_CHROME_BASE_WEBDRIVER_PORT=4445
+#   export SERVER_CHROME_BASE_NOVNC_PORT=7901
+#   export MAX_SERVER_INSTANCES=4
+#
+# Each service exposes:
+#   CDP:       http://SERVER_IP:9223, 9224, ...
+#   WebDriver: http://SERVER_IP:4445, 4446, ...
+#   VNC:       SERVER_IP:5901, 5902, ...
+#   noVNC:     http://SERVER_IP:7901, 7902, ...
+
+x-chrome-server-base: &chrome-server-base
+  image: selenium/standalone-chrome-debug:latest
+  shm_size: 2gb
+  environment:
+    SE_NODE_MAX_SESSIONS: "1"
+    SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+    SE_START_XVFB: "true"
+    SE_SCREEN_WIDTH: "1600"
+    SE_SCREEN_HEIGHT: "1000"
+    SE_SCREEN_DEPTH: "24"
+    SE_BROWSER_ARGS_REMOTE_DEBUGGING_ADDRESS: "--remote-debugging-address=0.0.0.0"
+    SE_BROWSER_ARGS_REMOTE_DEBUGGING_PORT: "--remote-debugging-port=9222"
+    SE_BROWSER_ARGS_NO_SANDBOX: "--no-sandbox"
+    SE_BROWSER_ARGS_DISABLE_SETUID_SANDBOX: "--disable-setuid-sandbox"
+    SE_BROWSER_ARGS_DISABLE_DEV_SHM_USAGE: "--disable-dev-shm-usage"
+    SE_BROWSER_ARGS_DISABLE_GPU: "--disable-gpu"
+  restart: unless-stopped
+
+services:
+  chrome-server-1:
+    <<: *chrome-server-base
+    container_name: rct-chrome-server-1
+    ports:
+      - "9223:9222"
+      - "4445:4444"
+      - "5901:5900"
+      - "7901:7900"
+
+  chrome-server-2:
+    <<: *chrome-server-base
+    container_name: rct-chrome-server-2
+    ports:
+      - "9224:9222"
+      - "4446:4444"
+      - "5902:5900"
+      - "7902:7900"
+
+  chrome-server-3:
+    <<: *chrome-server-base
+    container_name: rct-chrome-server-3
+    ports:
+      - "9225:9222"
+      - "4447:4444"
+      - "5903:5900"
+      - "7903:7900"
+
+  chrome-server-4:
+    <<: *chrome-server-base
+    container_name: rct-chrome-server-4
+    ports:
+      - "9226:9222"
+      - "4448:4444"
+      - "5904:5900"
+      - "7904:7900"
+
+  chrome-server-5:
+    <<: *chrome-server-base
+    container_name: rct-chrome-server-5
+    ports:
+      - "9227:9222"
+      - "4449:4444"
+      - "5905:5900"
+      - "7905:7900"
+
+  chrome-server-6:
+    <<: *chrome-server-base
+    container_name: rct-chrome-server-6
+    ports:
+      - "9228:9222"
+      - "4450:4444"
+      - "5906:5900"
+      - "7906:7900"
+
+  chrome-server-7:
+    <<: *chrome-server-base
+    container_name: rct-chrome-server-7
+    ports:
+      - "9229:9222"
+      - "4451:4444"
+      - "5907:5900"
+      - "7907:7900"
+
+  chrome-server-8:
+    <<: *chrome-server-base
+    container_name: rct-chrome-server-8
+    ports:
+      - "9230:9222"
+      - "4452:4444"
+      - "5908:5900"
+      - "7908:7900"

@@ -1,11 +1,33 @@
 // ─────────────────────────────────────────────────────────────
 // PRICING DATA — Redesigned Methodology
 // Season Types: LOW / HIGH / HOLIDAY
-// Sell Rate = Buy-In Cost × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP)
+// Builder sheet rate = Buy-In Cost with a clean target margin after the
+// Direct/Stripe host fee. Guesty handles channel-specific pricing rules after
+// the marked-up base calendar rate is pushed.
 // ─────────────────────────────────────────────────────────────
 
-export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
-export type RegionType = "hawaii" | "florida";
+import {
+  BUY_IN_RATES,
+  SEASON_MULTIPLIERS,
+  getBuyInRate,
+  getCommunityRegion,
+  getLiveBuyIn,
+  getSeasonForMonth,
+  setLivePropertyMarketRates,
+  type LivePropertyMarketRateInput,
+  type RegionType,
+  type SeasonType,
+} from "@shared/pricing-rates";
+import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+
+export {
+  getBuyInRate,
+  getCommunityRegion,
+  getLiveBuyIn,
+  getSeasonForMonth,
+  setLivePropertyMarketRates,
+};
+export type { LivePropertyMarketRateInput, RegionType, SeasonType };
 
 export type MonthRate = {
   month: string;
@@ -34,8 +56,11 @@ export type PropertyPricing = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// TRANSPARENT MARKUP FORMULA
-// Sell Rate = Buy-In × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP)
+// LEGACY BUY-IN TRACKER MARKUP FORMULA
+// Some older buy-in views still show the historical split:
+// Sell Rate = Buy-In × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP).
+// The Builder Pricing tab uses `cleanBaseRateFromBuyIn` below instead so
+// "Sheet Rate / Night" matches the marked-up Guesty calendar push.
 // ─────────────────────────────────────────────────────────────
 
 export const PLATFORM_FEE = 0.15;      // 15% — covers Booking.com / Airbnb guest service fees
@@ -69,9 +94,20 @@ export const MIN_PROFIT_MARGIN = 0.20; // 20% — floor we want after channel fe
  *
  * Example: buyIn=$1,172 on Airbnb → 1.20 × 1172 / 0.845 = $1,664.85
  */
-export function minProfitableRate(buyIn: number, channel: ChannelKey): number {
+export function minProfitableRate(
+  buyIn: number,
+  channel: ChannelKey,
+  targetMargin: number = MIN_PROFIT_MARGIN,
+): number {
   const fee = CHANNEL_HOST_FEE[channel] ?? 0;
-  return Math.ceil(((1 + MIN_PROFIT_MARGIN) * buyIn) / (1 - fee));
+  return Math.ceil(((1 + targetMargin) * buyIn) / (1 - fee));
+}
+
+export function cleanBaseRateFromBuyIn(
+  buyIn: number,
+  targetMargin: number = MIN_PROFIT_MARGIN,
+): number {
+  return minProfitableRate(buyIn, "direct", targetMargin);
 }
 
 /**
@@ -99,6 +135,14 @@ export function actualMarginPct(sellRate: number, buyIn: number, channel: Channe
 const SEASON_MULTIPLIERS: Record<RegionType, Record<SeasonType, number>> = {
   hawaii:  { LOW: 0.80, HIGH: 1.30, HOLIDAY: 1.80 },
   florida: { LOW: 0.75, HIGH: 1.25, HOLIDAY: 1.70 },
+};
+
+// Per-season markup to correct Airbnb's typical under-pricing vs VRBO/Booking.com medians.
+// Mirrors shared/pricing-rates.ts for client-side preview in Pricing tab.
+export const AIRBNB_TO_MARKET_MARKUPS: Record<SeasonType, number> = {
+  LOW: 1.16,
+  HIGH: 1.09,
+  HOLIDAY: 1.05,
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -144,126 +188,10 @@ export function isHolidayDate(date: Date): boolean {
   return getHolidayLabel(date) !== null;
 }
 
-// ─────────────────────────────────────────────────────────────
-// MONTHLY SEASON MAPS — LOW or HIGH only
-// (HOLIDAY is detected at the day level and takes priority)
-// ─────────────────────────────────────────────────────────────
-
-const HAWAII_SEASONS: Record<string, SeasonType> = {
-  "2026-04": "HIGH",   // Spring Break / Easter
-  "2026-05": "LOW",
-  "2026-06": "HIGH",
-  "2026-07": "HIGH",
-  "2026-08": "HIGH",
-  "2026-09": "LOW",
-  "2026-10": "LOW",
-  "2026-11": "LOW",
-  "2026-12": "HIGH",   // Holiday detected within at day level
-  "2027-01": "HIGH",   // Holiday detected within at day level
-  "2027-02": "LOW",
-  "2027-03": "HIGH",   // Spring Break
-  "2027-04": "HIGH",
-  "2027-05": "LOW",
-  "2027-06": "HIGH",
-  "2027-07": "HIGH",
-  "2027-08": "HIGH",
-  "2027-09": "LOW",
-  "2027-10": "LOW",
-  "2027-11": "LOW",
-  "2027-12": "HIGH",
-  "2028-01": "HIGH",
-  "2028-02": "LOW",
-  "2028-03": "HIGH",
-  "2028-04": "HIGH",
-};
-
-const FLORIDA_SEASONS: Record<string, SeasonType> = {
-  "2026-04": "HIGH",
-  "2026-05": "LOW",
-  "2026-06": "HIGH",
-  "2026-07": "HIGH",
-  "2026-08": "HIGH",
-  "2026-09": "LOW",
-  "2026-10": "LOW",
-  "2026-11": "LOW",
-  "2026-12": "HIGH",
-  "2027-01": "LOW",
-  "2027-02": "LOW",
-  "2027-03": "HIGH",
-  "2027-04": "HIGH",
-  "2027-05": "LOW",
-  "2027-06": "HIGH",
-  "2027-07": "HIGH",
-  "2027-08": "HIGH",
-  "2027-09": "LOW",
-  "2027-10": "LOW",
-  "2027-11": "LOW",
-  "2027-12": "HIGH",
-  "2028-01": "LOW",
-  "2028-02": "LOW",
-  "2028-03": "HIGH",
-  "2028-04": "HIGH",
-};
-
-// ─────────────────────────────────────────────────────────────
-// BASE BUY-IN RATES — per community, per bedroom count
-// Source: Airbnb & VRBO live listings · May 2026 · nightly, pre-fees
-// ─────────────────────────────────────────────────────────────
-
-type CommunityRate = {
-  "2BR"?: number;
-  "3BR"?: number;
-  "4BR"?: number;
-  "5BR"?: number;
-  region: RegionType;
-};
-
-const BUY_IN_RATES: Record<string, CommunityRate> = {
-  // Kauai – South Shore
-  "Poipu Kai":        { "2BR": 516, "3BR": 636, "4BR": 858,            region: "hawaii" },
-  "Poipu Oceanfront": { "2BR": 630, "3BR": 792, "4BR": 936,            region: "hawaii" },
-  "Poipu Brenneckes": { "2BR": 510, "3BR": 618, "4BR": 864,            region: "hawaii" },
-  "Pili Mai":         { "2BR": 576, "3BR": 744, "4BR": 840,            region: "hawaii" },
-  // Kauai – East Shore
-  "Kapaa Beachfront": { "2BR": 588, "3BR": 840, "4BR": 1020,           region: "hawaii" },
-  // Kauai – North Shore
-  "Princeville":      { "2BR": 492, "3BR": 744, "4BR": 858,            region: "hawaii" },
-  // Kauai – West Shore
-  "Kekaha Beachfront":{ "2BR": 540, "3BR": 810, "4BR": 1080,           region: "hawaii" },
-  // Big Island – Kona Coast
-  "Keauhou":          { "2BR": 312,                                     region: "hawaii" },
-  // Florida – Orlando Area
-  "Southern Dunes":   {            "3BR": 192, "4BR": 200,             region: "florida" },
-  "Windsor Hills":    {            "3BR": 210, "4BR": 294,             region: "florida" },
-};
-
-const FALLBACK_RATE_PER_BEDROOM = 270;
-
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ];
-
-// ─────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────
-
-export function getCommunityRegion(community: string): RegionType {
-  return BUY_IN_RATES[community]?.region ?? "hawaii";
-}
-
-function getBuyInRate(community: string, bedrooms: number): number {
-  const entry = BUY_IN_RATES[community];
-  const key = `${bedrooms}BR` as keyof CommunityRate;
-  const rate = entry?.[key];
-  if (typeof rate === "number") return rate;
-  return FALLBACK_RATE_PER_BEDROOM * bedrooms;
-}
-
-function getSeasonForMonth(yearMonth: string, region: RegionType): SeasonType {
-  const map = region === "florida" ? FLORIDA_SEASONS : HAWAII_SEASONS;
-  return map[yearMonth] ?? "LOW";
-}
 
 // Get season for a specific calendar date (holiday detection takes priority)
 export function getSeasonForDate(date: Date, region: RegionType): SeasonType {
@@ -311,13 +239,33 @@ const RATE_SCHEDULE_MONTHS: { yearMonth: string; monthIndex: number; year: numbe
   return months;
 })();
 
-function generateMonthlyRates(baseBuyIn: number, community: string): MonthRate[] {
+function generateMonthlyRates(
+  baseBuyIn: number,
+  community: string,
+  // PR #282: when supplied, each month's buy-in is read directly via
+  // getBuyInRate(community, br, propertyId, season) — picks up the
+  // per-season basis from the live cache when populated. Falls back
+  // to baseBuyIn × multiplier when the cache has no per-season data
+  // for that BR (legacy single-window scan or static BUY_IN_RATES).
+  propertyId?: number,
+  bedrooms?: number,
+): MonthRate[] {
   const region = getCommunityRegion(community);
   return RATE_SCHEDULE_MONTHS.map(({ yearMonth, monthIndex, year }) => {
     const season = getSeasonForMonth(yearMonth, region);
-    const multiplier = SEASON_MULTIPLIERS[region][season];
-    const buyInRate = Math.round(baseBuyIn * multiplier);
-    const sellRate = Math.round(buyInRate * MARKUP);
+    let buyInRate: number;
+    if (propertyId != null && bedrooms != null) {
+      // getBuyInRate reads per-season basis from live cache when
+      // available; falls through to LOW × multiplier internally
+      // when not.
+      buyInRate = getBuyInRate(community, bedrooms, propertyId, season, yearMonth);
+    } else {
+      // Legacy callers (no propertyId/bedrooms): apply multiplier
+      // to the base.
+      const multiplier = SEASON_MULTIPLIERS[region][season];
+      buyInRate = Math.round(baseBuyIn * multiplier);
+    }
+    const sellRate = cleanBaseRateFromBuyIn(buyInRate);
     return { month: MONTH_NAMES[monthIndex], year, yearMonth, season, buyInRate, sellRate };
   });
 }
@@ -344,7 +292,7 @@ export function calcSellRateFromBuyIn(buyInCost: number): {
 
 // ─────────────────────────────────────────────────────────────
 // SEASONAL RATE REFERENCE — what you'd charge per season for a property
-// Based on community BUY_IN_RATES × season multiplier × MARKUP
+// Based on community BUY_IN_RATES × season multiplier × marked-up base rate
 // ─────────────────────────────────────────────────────────────
 
 export type SeasonalRateRef = {
@@ -366,10 +314,9 @@ export function getSeasonalRateReference(
     const multiplier = SEASON_MULTIPLIERS[region][season];
     let nightlyBuyIn = 0;
     for (const unit of config.units) {
-      const base = getBuyInRate(config.community, unit.bedrooms);
-      nightlyBuyIn += Math.round(base * multiplier);
+      nightlyBuyIn += getBuyInRate(config.community, unit.bedrooms, propertyId, season);
     }
-    const nightlySell = Math.round(nightlyBuyIn * MARKUP);
+    const nightlySell = cleanBaseRateFromBuyIn(nightlyBuyIn);
     return { season, nightly: nightlySell, multiplier };
   });
 
@@ -377,48 +324,37 @@ export function getSeasonalRateReference(
 }
 
 // ─────────────────────────────────────────────────────────────
-// PROPERTY → UNIT CONFIGURATION
-// ─────────────────────────────────────────────────────────────
-
-type UnitConfig = {
-  unitId: string;
-  unitLabel: string;
-  bedrooms: number;
-};
-
-// CONDO / TOWNHOME ONLY — mirrors shared/property-units.ts. No villas, detached
-// houses, or single-family dwellings. Properties 7, 10, 12, 14, 21, 26, 28, 31,
-// 36 were removed 2026-04 as part of a business-model pivot.
-const PROPERTY_UNIT_CONFIGS: Record<number, { community: string; units: UnitConfig[] }> = {
-  1:  { community: "Poipu Kai",         units: [{ unitId: "924", unitLabel: "Unit 924", bedrooms: 3 }, { unitId: "114", unitLabel: "Unit 114", bedrooms: 2 }, { unitId: "911", unitLabel: "Unit 911", bedrooms: 2 }] },
-  4:  { community: "Poipu Kai",         units: [{ unitId: "721", unitLabel: "Unit 721", bedrooms: 3 }, { unitId: "812", unitLabel: "Unit 812", bedrooms: 3 }] },
-  8:  { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
-  9:  { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
-  18: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
-  19: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 }] },
-  20: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 }] },
-  23: { community: "Kapaa Beachfront",  units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
-  24: { community: "Poipu Oceanfront",  units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
-  27: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 2 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 2 }] },
-  29: { community: "Princeville",       units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 4 }] },
-  32: { community: "Pili Mai",          units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 2 }] },
-  33: { community: "Pili Mai",          units: [{ unitId: "A", unitLabel: "Townhome A", bedrooms: 3 }, { unitId: "B", unitLabel: "Townhome B", bedrooms: 3 }] },
-  34: { community: "Poipu Kai",         units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }, { unitId: "B", unitLabel: "Unit B", bedrooms: 3 }] },
-  37: { community: "Windsor Hills",     units: [{ unitId: "main", unitLabel: "Main Condo", bedrooms: 3 }] },
-};
-
-// ─────────────────────────────────────────────────────────────
 // EXPORTED FUNCTIONS
 // ─────────────────────────────────────────────────────────────
 
+// Cache of draft-derived pricing populated by the builder page when it
+// loads a community-draft property (propertyId < 0). The Pricing tab
+// inside GuestyListingBuilder calls getPropertyPricing(propertyId)
+// directly, so the parent page can't just pass pricing through props
+// — we register it here ahead of render and the helper checks the
+// cache first for negative propertyIds. Same pattern as
+// registerDraftBeddingDefaults() in bedding-config.ts.
+const draftPricingCache = new Map<number, PropertyPricing>();
+export function registerDraftPropertyPricing(
+  propertyId: number,
+  pricing: PropertyPricing,
+): void {
+  draftPricingCache.set(propertyId, pricing);
+}
+
 export function getPropertyPricing(propertyId: number): PropertyPricing | null {
+  // Promoted-draft fast path: the builder page registered pricing for
+  // this negative propertyId before any tab rendered.
+  if (propertyId < 0) {
+    return draftPricingCache.get(propertyId) ?? null;
+  }
   const config = PROPERTY_UNIT_CONFIGS[propertyId];
   if (!config) return null;
 
   const units: UnitPricing[] = config.units.map((unit) => {
-    const baseBuyIn = getBuyInRate(config.community, unit.bedrooms);
-    const baseSellRate = Math.round(baseBuyIn * MARKUP);
-    const monthlyRates = generateMonthlyRates(baseBuyIn, config.community);
+    const baseBuyIn = getBuyInRate(config.community, unit.bedrooms, propertyId);
+    const baseSellRate = cleanBaseRateFromBuyIn(baseBuyIn);
+    const monthlyRates = generateMonthlyRates(baseBuyIn, config.community, propertyId, unit.bedrooms);
     return { unitId: unit.unitId, unitLabel: unit.unitLabel, bedrooms: unit.bedrooms, community: config.community, baseBuyIn, baseSellRate, monthlyRates };
   });
 
@@ -464,9 +400,9 @@ export function getAllUnitPricings(): { propertyId: number; community: string; u
   for (const [id, config] of Object.entries(PROPERTY_UNIT_CONFIGS)) {
     const propertyId = parseInt(id, 10);
     for (const unitCfg of config.units) {
-      const baseBuyIn = getBuyInRate(config.community, unitCfg.bedrooms);
-      const baseSellRate = Math.round(baseBuyIn * MARKUP);
-      const monthlyRates = generateMonthlyRates(baseBuyIn, config.community);
+      const baseBuyIn = getBuyInRate(config.community, unitCfg.bedrooms, propertyId);
+      const baseSellRate = cleanBaseRateFromBuyIn(baseBuyIn);
+      const monthlyRates = generateMonthlyRates(baseBuyIn, config.community, propertyId, unitCfg.bedrooms);
       results.push({
         propertyId,
         community: config.community,
@@ -495,14 +431,13 @@ export function calculateStaySellRate(
   const current = new Date(start);
   while (current < end) {
     const season = getSeasonForDate(current, region);
-    const multiplier = SEASON_MULTIPLIERS[region][season];
+    const yearMonth = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}`;
 
     let nightlyBuyIn = 0;
     for (const unit of config.units) {
-      const baseBuyIn = getBuyInRate(config.community, unit.bedrooms);
-      nightlyBuyIn += Math.round(baseBuyIn * multiplier);
+      nightlyBuyIn += getBuyInRate(config.community, unit.bedrooms, propertyId, season, yearMonth);
     }
-    const nightlySellRate = Math.round(nightlyBuyIn * MARKUP);
+    const nightlySellRate = cleanBaseRateFromBuyIn(nightlyBuyIn);
 
     nightlyBreakdown.push({ date: current.toISOString().split("T")[0], sellRate: nightlySellRate, season });
     totalSellRate += nightlySellRate;

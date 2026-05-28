@@ -1,16 +1,77 @@
 import { useEffect, useMemo, useState } from "react";
 import { fallbackWalkForResort, type WalkResult } from "@shared/walking-distance";
 import { useParams, useLocation } from "wouter";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import GuestyListingBuilder from "@/components/GuestyListingBuilder";
-import { getUnitBuilderByPropertyId, LISTING_DISCLOSURE } from "@/data/unit-builder-data";
-import { getPropertyPricing } from "@/data/pricing-data";
+import {
+  getUnitBuilderByPropertyId,
+  LISTING_DISCLOSURE,
+  REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
+  SINGLE_LISTING_SAMPLE_DISCLOSURE,
+  type PropertyUnitBuilder,
+} from "@/data/unit-builder-data";
+import { getPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
 import { getGuestyAmenities } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import { usePhotoLabels } from "@/hooks/use-photo-labels";
+import { loadDraftFullDataByNegativeId } from "@/data/adapt-draft";
 import type { GuestyPropertyData } from "@/services/guestyService";
+import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+
+type BuilderUnitSwap = {
+  oldUnitId: string;
+  newUnitLabel: string;
+  newAddress: string;
+  newBedrooms?: number | null;
+  newSourceUrl: string;
+  committed?: boolean;
+  photoFolder?: string;
+};
+
+const SUMMARY_SEPARATOR = "\n\n---\n\n";
+const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
+function isComboUnitDisclosure(text: string): boolean {
+  return /combines\s+two\s+units\s+within\s+the\s+same\s+community/i.test(text);
+}
+
+function isRepresentativePhotoDisclosure(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes("photos are representative")
+    || lower.includes("sample unit")
+    || lower.includes("representative accommodations")
+    || lower.includes("unit assignment note")
+    || lower.includes("specific unit assigned")
+    || lower.includes("specific accommodation");
+}
+
+function stripDisclosureParagraphs(text: string): string {
+  return String(text ?? "")
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .filter((paragraph) => !/^-{3,}$/.test(paragraph))
+    .filter((paragraph) => !isComboUnitDisclosure(paragraph))
+    .filter((paragraph) => !isRepresentativePhotoDisclosure(paragraph))
+    .join("\n\n")
+    .replace(/^(?:\s*-{3,}\s*)+/, "")
+    .trim();
+}
+
+function buildGuestySummary(property: PropertyUnitBuilder, units: PropertyUnitBuilder["units"]): string {
+  const body = stripDisclosureParagraphs(property.combinedDescription);
+  const isSingle = units.length === 1;
+  const bottomDisclosure = isSingle
+    ? SINGLE_LISTING_SAMPLE_DISCLOSURE
+    : REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE;
+
+  return [
+    !isSingle ? COMBO_TOP_DISCLOSURE : "",
+    body,
+    bottomDisclosure,
+  ].filter(Boolean).join(SUMMARY_SEPARATOR);
+}
 
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
 function parseAddress(addr: string) {
@@ -26,8 +87,13 @@ function parseAddress(addr: string) {
     if (stateZip.length >= 2) {
       state = stateZip[0];
       zipcode = stateZip[1];
+    } else if (stateZip.length === 1) {
+      state = stateZip[0];
     }
     city = parts[parts.length - 2].replace(/^(bldg|unit|apt|#)\s*\d+/i, "").trim() || parts[parts.length - 2];
+  } else if (parts.length === 2) {
+    city = parts[0];
+    state = parts[1];
   }
 
   return { full, city, state, zipcode, country: "US" };
@@ -40,8 +106,91 @@ export default function Builder() {
   const { toast } = useToast();
 
   const propertyId = parseInt(pidStr ?? "0", 10);
-  const property = getUnitBuilderByPropertyId(propertyId);
-  const pricing = getPropertyPricing(propertyId);
+  const staticProperty = getUnitBuilderByPropertyId(propertyId);
+
+  // Promoted-draft fallback: when the static lookup misses AND id is
+  // negative (the synthetic -draftId convention from the dashboard),
+  // fetch /api/community/drafts and adapt the matching draft into the
+  // PropertyUnitBuilder shape + draft-derived pricing + bedding
+  // defaults. Mirrors the pattern in builder-preflight.tsx so "Continue
+  // to Builder" doesn't dead-end on "Property #-N not found".
+  const [draftProperty, setDraftProperty] = useState<PropertyUnitBuilder | null>(null);
+  const [draftPricing, setDraftPricing] = useState<PropertyPricing | null>(null);
+  const [draftLoading, setDraftLoading] = useState<boolean>(!staticProperty && propertyId < 0);
+  useEffect(() => {
+    if (staticProperty || propertyId >= 0) return;
+    setDraftLoading(true);
+    loadDraftFullDataByNegativeId(propertyId)
+      .then((data) => {
+        if (data) {
+          setDraftProperty(data.property);
+          setDraftPricing(data.pricing);
+        }
+      })
+      .catch(() => { /* leave draftProperty null → renders the not-found state */ })
+      .finally(() => setDraftLoading(false));
+  }, [propertyId, staticProperty]);
+  const baseProperty = staticProperty ?? draftProperty;
+  const [unitSwaps, setUnitSwaps] = useState<Record<string, BuilderUnitSwap>>({});
+  useEffect(() => {
+    if (!baseProperty || !Number.isFinite(propertyId) || propertyId < 0) {
+      setUnitSwaps({});
+      return;
+    }
+
+    let cancelled = false;
+    fetch(`/api/unit-swaps/${propertyId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { swaps?: BuilderUnitSwap[] } | null) => {
+        if (cancelled) return;
+        const next: Record<string, BuilderUnitSwap> = {};
+        for (const swap of data?.swaps ?? []) {
+          if (!swap?.oldUnitId || swap.committed === false) continue;
+          if (next[swap.oldUnitId]) continue;
+          next[swap.oldUnitId] = swap;
+        }
+        setUnitSwaps(next);
+      })
+      .catch(() => {
+        if (!cancelled) setUnitSwaps({});
+      });
+    return () => { cancelled = true; };
+  }, [baseProperty, propertyId]);
+
+  const property = useMemo<PropertyUnitBuilder | null>(() => {
+    if (!baseProperty) return null;
+    if (!Object.keys(unitSwaps).length) return baseProperty;
+
+    return {
+      ...baseProperty,
+      units: baseProperty.units.map((unit) => {
+        const swap = unitSwaps[unit.id];
+        if (!swap) return unit;
+        const unitNumber = swap.newUnitLabel.replace(/^Unit\s*#?/i, "").trim() || unit.unitNumber;
+        return {
+          ...unit,
+          unitNumber,
+          bedrooms: swap.newBedrooms ?? unit.bedrooms,
+          photoFolder: swap.photoFolder ?? replacementPhotoFolderForUnit(propertyId, unit.id),
+          photos: [],
+        };
+      }),
+    };
+  }, [baseProperty, propertyId, unitSwaps]);
+
+  // For active properties, pricing comes from the static
+  // PROPERTY_UNIT_CONFIGS-based generator. For promoted drafts, the
+  // 24-month schedule is generated from the draft's pricingArea (or
+  // estimatedLowRate fallback) so the Pricing tab renders something
+  // editable instead of being blank. The Pricing tab inside
+  // GuestyListingBuilder additionally hydrates a per-(property,
+  // bedrooms) live-buy-in cache and re-derives the seasonal rates
+  // from it — so the value here is the day-zero render, and live
+  // medians take over once the fetch lands. See `marketRatesVersion`
+  // inside the component.
+  const pricing = staticProperty
+    ? getPropertyPricing(propertyId)
+    : draftPricing;
 
   // Pull Claude-generated labels for every photo folder we'll render.
   // Override the static unit-builder-data.ts labels with these when present;
@@ -53,7 +202,7 @@ export default function Builder() {
     for (const u of property.units) if (u.photoFolder) folders.add(u.photoFolder);
     return Array.from(folders);
   }, [property]);
-  const { labelFor, isHidden } = usePhotoLabels(allFolders);
+  const { labelFor, isHidden, refresh: refreshPhotoLabels } = usePhotoLabels(allFolders);
 
   // Walking-distance between units. Only meaningful for multi-unit
   // properties. Uses the shared fallback (per-resort minute defaults)
@@ -134,10 +283,15 @@ export default function Builder() {
   const propertyData = useMemo<GuestyPropertyData | null>(() => {
     if (!property) return null;
 
-    const totalGuests = property.units.reduce((s, u) => s + u.maxGuests, 0);
-    const totalSqft = property.units.reduce((s, u) => s + parseSqft(u.sqft), 0);
-    const totalBedrooms = property.units.reduce((s, u) => s + u.bedrooms, 0);
-    const totalBathrooms = property.units.reduce((s, u) => s + parseFloat(u.bathrooms), 0);
+    const units = Array.isArray(property.units) ? property.units : [];
+    const communityPhotos = Array.isArray(property.communityPhotos) ? property.communityPhotos : [];
+    const getLabel = typeof labelFor === "function" ? labelFor : (() => null);
+    const hidden = typeof isHidden === "function" ? isHidden : (() => false);
+
+    const totalGuests = units.reduce((s, u) => s + (Number(u.maxGuests) || 0), 0);
+    const totalSqft = units.reduce((s, u) => s + parseSqft(String(u.sqft ?? "")), 0);
+    const totalBedrooms = units.reduce((s, u) => s + (Number(u.bedrooms) || 0), 0);
+    const totalBathrooms = units.reduce((s, u) => s + (parseFloat(String(u.bathrooms ?? "")) || 0), 0);
     const listingRooms = buildListingRooms(propertyId);
 
     const basePrice = pricing?.totalBaseSellRate ?? 0;
@@ -149,11 +303,12 @@ export default function Builder() {
     // that were in the original static list. New rescraped photos rely on
     // Claude labels via labelFor().
     const staticLabelFor = (folder: string, filename: string): string | undefined => {
-      const inCommunity = property.communityPhotos.find((p) => p.filename === filename && folder === property.communityPhotoFolder);
+      const inCommunity = communityPhotos.find((p) => p.filename === filename && folder === property.communityPhotoFolder);
       if (inCommunity) return inCommunity.label;
-      for (const u of property.units) {
+      for (const u of units) {
         if (u.photoFolder !== folder) continue;
-        const hit = u.photos.find((p) => p.filename === filename);
+        const unitPhotos = Array.isArray(u.photos) ? u.photos : [];
+        const hit = unitPhotos.find((p) => p.filename === filename);
         if (hit) return hit.label;
       }
       return undefined;
@@ -165,11 +320,14 @@ export default function Builder() {
     // position hint (when we have one) and partition the "begin" list so we
     // can thread one community tile between each unit's run — the published
     // channels render better with a visual break between unit A and unit B.
-    const communityFiles = folderFiles[property.communityPhotoFolder] ?? property.communityPhotos.map((p) => p.filename);
-    const knownComm = new Map(property.communityPhotos.map((p) => [p.filename, p]));
+    const communityFolderFiles = folderFiles[property.communityPhotoFolder];
+    const communityFiles = Array.isArray(communityFolderFiles)
+      ? communityFolderFiles
+      : communityPhotos.map((p) => p.filename);
+    const knownComm = new Map(communityPhotos.map((p) => [p.filename, p]));
     const communityBeginAll = communityFiles.filter((f) => (knownComm.get(f)?.position ?? "beginning") === "beginning");
     const communityEnd      = communityFiles.filter((f) =>  knownComm.get(f)?.position === "end");
-    const communityBeginVisible = communityBeginAll.filter((f) => !isHidden(property.communityPhotoFolder, f));
+    const communityBeginVisible = communityBeginAll.filter((f) => !hidden(property.communityPhotoFolder, f));
 
     // Reserve N-1 tiles to sit between units (one separator per gap), and
     // put the rest up-front as the "community opener" block. For the common
@@ -183,7 +341,7 @@ export default function Builder() {
     const pushCommunity = (filename: string, bandLabel: string) => {
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
-        caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
+        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
         source: bandLabel,
       });
     };
@@ -193,30 +351,34 @@ export default function Builder() {
       pushCommunity(filename, `Community — ${property.complexName}`);
     }
 
-    property.units.forEach((u, i) => {
+    units.forEach((u, i) => {
       // Prefer the live folder listing (what's actually on disk after any
       // rescrape), fall back to the static u.photos array.
-      const files = folderFiles[u.photoFolder] ?? u.photos.map((p) => p.filename);
+      const unitFolderFiles = folderFiles[u.photoFolder];
+      const unitPhotos = Array.isArray(u.photos) ? u.photos : [];
+      const files = Array.isArray(unitFolderFiles)
+        ? unitFolderFiles
+        : unitPhotos.map((p) => p.filename);
       for (const filename of files) {
-        if (isHidden(u.photoFolder, filename)) continue;
+        if (hidden(u.photoFolder, filename)) continue;
         photos.push({
           url: `${origin}/photos/${u.photoFolder}/${filename}`,
-          caption: labelFor(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? "Photo",
+          caption: getLabel(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? "Photo",
           source: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
         });
       }
       // After each unit (except the last one), insert one community
       // separator so the published feed has a visual break between units.
-      if (i < property.units.length - 1 && communitySeparators[i]) {
+      if (i < units.length - 1 && communitySeparators[i]) {
         pushCommunity(communitySeparators[i], `Community — ${property.complexName}`);
       }
     });
 
     for (const filename of communityEnd) {
-      if (isHidden(property.communityPhotoFolder, filename)) continue;
+      if (hidden(property.communityPhotoFolder, filename)) continue;
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
-        caption: labelFor(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
+        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
         source: `Community — ${property.complexName}`,
       });
     }
@@ -236,7 +398,13 @@ export default function Builder() {
       accommodates: totalGuests,
       bedrooms: totalBedrooms || undefined,
       bathrooms: totalBathrooms || undefined,
-      propertyType: "Condominium",
+      // Pull from per-property config in unit-builder-data.ts. Fallback
+      // "Condominium" preserves behavior for older properties that haven't
+      // been explicitly typed yet — Pili Mai (32, 33) set it to
+      // "Townhouse" explicitly because they're two-story townhomes, not
+      // flat condos. The TSDoc on `PropertyUnitBuilder.propertyType`
+      // tells future onboards to set this deliberately per property.
+      propertyType: property.propertyType ?? "Condominium",
       roomType: "Entire home/apt",
       otaRoomType: "Holiday home",
       amenities: guestyAmenities,
@@ -249,21 +417,25 @@ export default function Builder() {
       tatLicense: property.tatLicense,
       getLicense: property.getLicense,
       strPermit: property.strPermit,
+      dbprLicense: property.dbprLicense,
+      touristTaxAccount: property.touristTaxAccount,
       descriptions: {
         title: property.bookingTitle,
-        summary: `${LISTING_DISCLOSURE}\n\n${property.combinedDescription}`,
+        summary: buildGuestySummary(property, units),
         space: [
-          property.units
+          units
             .map((u, i) => `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR): ${u.longDescription}`)
             .join("\n\n"),
-          property.units.length >= 2 && walkResult
+          units.length >= 2 && walkResult
             ? `\n\n${walkResult.description}`
             : "",
         ].join(""),
         neighborhood: property.neighborhood,
         transit: property.transit,
         houseRules:
-          "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am. Two separate unit keys provided at check-in.",
+          units.length === 1
+            ? "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am."
+            : "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am. Two separate unit keys provided at check-in.",
       },
       photos,
       pricing: {
@@ -273,13 +445,34 @@ export default function Builder() {
       bookingSettings: {
         minNights: 4,
         maxNights: 60,
-        cancellationPolicy: "moderate",
+        // 60-day advance notice: matches the portfolio's buy-in safety
+        // window. Must match the default in GuestyListingBuilder's
+        // bookingRules state so the Pricing-tab form and the full-build
+        // push can't diverge.
+        advanceNotice: 60,
+        // Per-channel cancellation policies — must match the defaults in
+        // GuestyListingBuilder's bookingRules state. "30+ days notice for
+        // full refund, 50%+ penalty for late cancellation" where each
+        // channel's vocabulary allows it.
+        cancellationPolicies: {
+          airbnb: "firm",
+          vrbo: "FIRM",
+          booking: "strict",
+        },
         instantBooking: true,
       },
     };
   }, [property, pricing, propertyId, labelFor, isHidden, folderFiles, walkResult]);
 
   if (!property) {
+    if (draftLoading) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-screen gap-3">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          <p className="text-muted-foreground text-sm">Loading promoted draft…</p>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center min-h-screen gap-4">
         <p className="text-muted-foreground">Property #{propertyId} not found.</p>
@@ -312,6 +505,8 @@ export default function Builder() {
         propertyData={propertyData}
         propertyId={propertyId}
         sourceUrlsByFolder={sourceUrlsByFolder}
+        isSingleListing={property.units.length === 1}
+        onPhotoOverridesChanged={refreshPhotoLabels}
         onBuildComplete={(result) => {
           if (result.listingId) {
             toast({
