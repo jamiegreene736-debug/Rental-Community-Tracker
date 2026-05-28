@@ -1102,6 +1102,7 @@ function AdminDashboard() {
   const [bulkAvailabilityStarting, setBulkAvailabilityStarting] = useState(false);
   const [bulkAvailabilityAction, setBulkAvailabilityAction] = useState<"clear" | "pause" | "resume" | "cancel" | null>(null);
   const [bulkAvailabilityQueue, setBulkAvailabilityQueue] = useState<BulkAvailabilityQueue | null>(null);
+  const [photoScanPollUntil, setPhotoScanPollUntil] = useState(0);
   const [selectedCancellationId, setSelectedCancellationId] = useState<number | null>(null);
 
   // Pull community drafts up here (early in the render) because
@@ -1728,6 +1729,7 @@ function AdminDashboard() {
     queryKey: ["/api/photo-listing-check"],
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
+    refetchInterval: () => Date.now() < photoScanPollUntil ? 10_000 : false,
   });
 
   // PR #318: photo-listing alerts UI moved into the listing builder's
@@ -2127,9 +2129,8 @@ function AdminDashboard() {
       return r.json() as Promise<{ started: boolean; folders: string[] }>;
     },
     onSuccess: (data) => {
+      setPhotoScanPollUntil(Date.now() + Math.max(3 * 60_000, data.folders.length * 45_000));
       queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
-      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] }), 45_000);
-      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] }), 90_000);
       toast({
         title: "Photo scan started",
         description: `${data.folders.length} folder${data.folders.length === 1 ? "" : "s"} queued. The badges will refresh as Lens finishes.`,

@@ -10,6 +10,7 @@ import { researchCommunitiesForCity } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "../shared/community-addresses";
 import { checkCommunityType } from "../shared/community-type";
+import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "../server/photo-match-guardrails";
 
 // ---------- Import the internals we want to test ----------
 // The sanity check and fact extractors aren't exported, so we
@@ -139,6 +140,51 @@ assert.equal(
   "master suite should pass",
 );
 console.log("  ✓ Master Suite passes");
+
+// ---------- Photo match guardrails ----------
+console.log("\nphoto match guardrail suite");
+
+assert.equal(
+  isStrongLensMatch({ position: 1 }, "visual", 1),
+  true,
+  "top visual Lens result should be considered strong when SearchAPI omits explicit confidence",
+);
+assert.equal(
+  isStrongLensMatch({ position: 4 }, "visual", 4),
+  false,
+  "lower-ranked visual Lens results should not count as strong duplicate-photo proof",
+);
+assert.equal(
+  isStrongLensMatch({ score: "82%" }, "organic", 18),
+  true,
+  "explicit SearchAPI confidence should override source/position fallback",
+);
+assert.equal(
+  lensMatchConfidence({ position: 3 }, "visual", 3),
+  0.8,
+  "visual result position 3 is the hard edge of the strong-match threshold",
+);
+assert.equal(
+  isCommunityOrSharedPhotoCandidate({
+    folder: "unit-721",
+    filename: "pool.jpg",
+    category: "Pool",
+    label: "Resort pool",
+  }),
+  true,
+  "shared amenity photos should be excluded from photo-match evidence",
+);
+assert.equal(
+  isCommunityOrSharedPhotoCandidate({
+    folder: "unit-721",
+    filename: "14-bedroom-detail.jpg",
+    category: "Bedrooms",
+    label: "Guest bedroom",
+  }),
+  false,
+  "private bedroom photos should remain eligible for Lens checks",
+);
+console.log("  ✓ SearchAPI Lens rows are scored and shared photos are filtered");
 
 // ---------- Tests for extractFactsFromJsonLd ----------
 // (copied from server/routes.ts for the fixture test)
