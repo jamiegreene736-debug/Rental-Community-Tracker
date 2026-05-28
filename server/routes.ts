@@ -709,7 +709,7 @@ async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: s
     bedroomCounts,
     unitCount: unitSlots.length || 1,
     triggerType: "Manual Update",
-    notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal layered pricing.",
+    notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal medians (no hybrid markup layers).",
   });
 }
 
@@ -745,7 +745,7 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string, c
     : await refreshHybridPricingForProperty({
       propertyId,
       triggerType: "Manual Update",
-      notes: "Pricing tab manual refresh from SearchAPI Airbnb seasonal layered pricing.",
+      notes: "Pricing tab manual refresh from SearchAPI Airbnb seasonal medians (no hybrid markup layers).",
     });
 
   assertPricingRefreshNotCancelled(propertyId, cancelGeneration);
@@ -792,7 +792,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     : await refreshHybridPricingForProperty({
       propertyId: item.propertyId,
       triggerType: "Manual Update",
-      notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal layered pricing.",
+      notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal medians (no hybrid markup layers).",
     });
   item.progress = {
     phase: "searchapi-airbnb",

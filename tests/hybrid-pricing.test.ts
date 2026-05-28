@@ -181,8 +181,13 @@ try {
 
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
-  hybridPricingSource.includes('source: "hybrid-airbnb-layered"'),
-  "pricing refresh should persist the Airbnb SearchAPI layered basis",
+  hybridPricingSource.includes('source: "airbnb"'),
+  "pricing refresh should persist raw SearchAPI medians without hybrid markup layers",
+);
+assert.equal(
+  hybridPricingSource.includes("calculateBlendedRate({"),
+  false,
+  "market-rate refresh must not run hybrid layered markup on sampled medians",
 );
 assert.ok(
   hybridPricingSource.includes("pickRandom7NightInSeason(pricingRegion, season as SeasonKey, 10)"),

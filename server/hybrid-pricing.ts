@@ -453,6 +453,12 @@ function demandClassMatchesLegacySeason(demandClass: HybridDemandClass, season: 
   return legacySeasonForDemandClass(demandClass) === season;
 }
 
+function demandClassFromLegacySeason(season: LegacySeason): HybridDemandClass {
+  if (season === "LOW") return "standard";
+  if (season === "HIGH") return "high";
+  return "peak";
+}
+
 export function hybridPricingWindowForMonth(
   asOf: Date,
   monthOffset: number,
@@ -551,7 +557,6 @@ export async function refreshHybridPricingForTarget(args: {
       HOLIDAY: null,
     };
     let totalSamples = 0;
-    let lastResult: HybridCalculationResult | null = null;
 
     for (const season of ["LOW", "HIGH", "HOLIDAY"] as const) {
       let airbnb: Awaited<ReturnType<typeof fetchAirbnbMedianNightly>> | null = null;
@@ -582,36 +587,26 @@ export async function refreshHybridPricingForTarget(args: {
           `${window.checkIn} to ${window.checkOut}; static fallback is disabled for market-rate refreshes.`
         );
       }
-      const result = calculateBlendedRate({
-        airbnbMedianNightly: airbnb.medianNightly,
-        checkIn: window.checkIn,
-        checkOut: window.checkOut,
-        bedrooms,
-        unitCount: args.unitCount,
-        isMultiUnit: args.unitCount > 1,
-        asOf,
-      });
-      lastResult = result;
+      const basis = airbnb.medianNightly;
       totalSamples += airbnb.sampleCount;
       seasonalRates[season] = {
-        medianNightly: result.finalRate,
+        medianNightly: basis,
         season,
         checkIn: window.checkIn,
         checkOut: window.checkOut,
         channelCount: 1,
         sampleCount: airbnb.sampleCount,
-        demandClass: result.demandClass,
-        seasonTierId: result.seasonTierId,
-        seasonTierLabel: result.seasonTierLabel,
-        channels: { airbnb: airbnb.medianNightly, vrbo: null, booking: null, pm: null },
+        demandClass: demandClassFromLegacySeason(season),
+        seasonTierId: season.toLowerCase(),
+        seasonTierLabel: `${season} season sample`,
+        channels: { airbnb: basis, vrbo: null, booking: null, pm: null },
         hybrid: {
-          baseAirbnbMedian: result.baseAirbnbMedian,
-          finalRate: result.finalRate,
-          layers: result.layers,
+          baseAirbnbMedian: basis,
+          finalRate: basis,
+          layers: [],
           notes: [
             ...airbnb.notes,
-            ...result.notes,
-            `SearchAPI Airbnb ${season} basis uses ${window.checkIn} to ${window.checkOut}.`,
+            `Stored raw SearchAPI median (no hybrid markup layers). ${season} window ${window.checkIn} to ${window.checkOut}.`,
             args.unitCount > 1
               ? `Property has ${args.unitCount} configured unit slot(s); Guesty combo pushes sum the matching unit bases.`
               : "Single-unit pricing basis.",
@@ -650,7 +645,7 @@ export async function refreshHybridPricingForTarget(args: {
       lowNightly: String(Math.min(...monthlyValues, holidayRate.medianNightly)),
       highNightly: String(Math.max(...monthlyValues, holidayRate.medianNightly)),
       sampleCount: totalSamples,
-      source: "hybrid-airbnb-layered",
+      source: "airbnb",
     });
     rows.push(row);
     logs.push(await storage.createPricingUpdateLog({
@@ -661,17 +656,17 @@ export async function refreshHybridPricingForTarget(args: {
       oldRate: previous?.medianNightly ?? null,
       newRate: String(lowRate.medianNightly),
       status: "ok",
-      notes: args.notes || "SearchAPI Airbnb seasonal pricing refreshed; static buy-in fallback is disabled for market-rate refreshes.",
-      layersJson: lastResult?.layers ?? [],
+      notes: args.notes || "SearchAPI Airbnb seasonal medians saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.",
+      layersJson: [],
       calendarJson: monthlyRates,
     }));
-    console.info("[hybrid-pricing] applied Airbnb seasonal layered pricing", JSON.stringify({
+    console.info("[hybrid-pricing] applied raw Airbnb seasonal medians", JSON.stringify({
       propertyId: args.propertyId,
       propertyName: args.propertyName,
       community: args.community,
       bedrooms,
       triggerType: args.triggerType,
-      source: "hybrid-airbnb-layered",
+      source: "airbnb",
       searchName,
       unitCount: args.unitCount,
       sampleCount: totalSamples,
@@ -696,7 +691,7 @@ export async function refreshHybridPricingForTarget(args: {
       lowNightly: Math.min(...monthlyValues, holidayRate.medianNightly),
       highNightly: Math.max(...monthlyValues, holidayRate.medianNightly),
       monthlyPreview: summarizeMonthlyHybridRates(monthlyRates),
-      layers: summarizeHybridLayers(lastResult),
+      layers: [],
     }));
   }
   return { propertyId: args.propertyId, rows, logs };
