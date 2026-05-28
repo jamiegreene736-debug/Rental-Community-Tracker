@@ -609,7 +609,9 @@ async function setVrboChallengeHighlight(targetPage = page, enabled = true, labe
   await targetPage.evaluate(({ enabled }) => {
     const styleId = "rct-vrbo-challenge-alert-style";
     const bannerId = "rct-vrbo-challenge-alert-banner";
+    const borderId = "rct-vrbo-challenge-alert-border";
     if (!enabled) {
+      document.getElementById(borderId)?.remove();
       document.getElementById(bannerId)?.remove();
       document.getElementById(styleId)?.remove();
       return;
@@ -635,6 +637,14 @@ async function setVrboChallengeHighlight(targetPage = page, enabled = true, labe
         }
         html { outline: 8px solid #facc15 !important; outline-offset: -8px !important; }
         body { padding-top: 58px !important; }
+        #${borderId} {
+          position: fixed;
+          z-index: 2147483646;
+          inset: 0;
+          border: 12px solid #facc15;
+          box-shadow: inset 0 0 0 4px #f59e0b;
+          pointer-events: none;
+        }
       `;
       document.documentElement.appendChild(style);
     }
@@ -645,6 +655,11 @@ async function setVrboChallengeHighlight(targetPage = page, enabled = true, labe
       banner.setAttribute("role", "alert");
       banner.textContent = "VRBO BOT / NOT verification needs manual clearing";
       document.documentElement.appendChild(banner);
+    }
+    if (!document.getElementById(borderId)) {
+      const border = document.createElement("div");
+      border.id = borderId;
+      document.documentElement.appendChild(border);
     }
   }, { enabled }).catch((e) => {
     log(`${label} ${id}: VRBO challenge highlight ${enabled ? "apply" : "remove"} skipped: ${e?.message ?? e}`);

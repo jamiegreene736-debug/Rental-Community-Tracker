@@ -68,7 +68,7 @@ import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProx
 import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
 import {
   acquireSidecarLane,
-  cancelActiveSidecarLane,
+  clearActiveSidecarLane,
   getSidecarLaneStatus,
   isSidecarLaneCancellationRequested,
   isSidecarLaneOwner,
@@ -18088,7 +18088,7 @@ Return ONLY compact JSON with this exact shape:
     const reason = typeof body.reason === "string" && body.reason.trim()
       ? body.reason.trim().slice(0, 200)
       : "stopped by operator from Operations UI";
-    const laneCancelResult = cancelActiveSidecarLane(reason);
+    const laneCancelResult = clearActiveSidecarLane(reason);
     const scannerCancelResult = requestAvailabilityScannerCancel(reason);
     const { cancelActiveAndPendingRequests, pauseQueue } = await import("./vrbo-sidecar-queue");
     const cancelResult = cancelActiveAndPendingRequests(reason);
@@ -18110,7 +18110,7 @@ Return ONLY compact JSON with this exact shape:
     const reason = typeof body.reason === "string" && body.reason.trim()
       ? body.reason.trim().slice(0, 200)
       : "cleared by operator from Operations UI";
-    const laneCancelResult = cancelActiveSidecarLane(reason);
+    const laneCancelResult = clearActiveSidecarLane(reason);
     const scannerCancelResult = requestAvailabilityScannerCancel(reason);
     const { clearSidecarQueue, pauseQueue } = await import("./vrbo-sidecar-queue");
     const pauseResult = pauseQueue(reason);

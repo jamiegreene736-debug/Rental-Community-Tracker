@@ -119,6 +119,16 @@ export function cancelActiveSidecarLane(reason = "sidecar lane cancelled by oper
   return { cancelled: true, owner: cloneOwner(owner) };
 }
 
+export function clearActiveSidecarLane(reason = "sidecar lane cleared by operator"): {
+  cancelled: boolean;
+  owner: SidecarLaneOwner | null;
+} {
+  const result = cancelActiveSidecarLane(reason);
+  owner = null;
+  waiters = [];
+  return result;
+}
+
 export async function acquireSidecarLane(options: AcquireSidecarLaneOptions): Promise<{
   acquiredAt: number;
   heartbeat: () => void;
