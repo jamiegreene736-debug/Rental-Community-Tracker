@@ -710,7 +710,6 @@ async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: s
     unitCount: unitSlots.length || 1,
     triggerType: "Manual Update",
     notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal layered pricing.",
-    searchName: String(draft.name || draft.listingTitle || community),
   });
 }
 

@@ -279,28 +279,40 @@ export function isSearchApiAirbnbNoResultsError(error: unknown): boolean {
   return /airbnb.*(?:didn'?t|did not).*return.*(?:any )?results|no .*airbnb.*results|no results/i.test(text);
 }
 
-export async function fetchAirbnbMedianNightly(args: {
+/** Curated resort queries first — draft marketing titles must not override these. */
+export function curatedAirbnbSearchQueries(community: string, hint?: string): string[] {
+  const market = BUY_IN_MARKETS[community];
+  const location = BUY_IN_MARKET_LOCATIONS[community];
+  const ordered = [
+    market?.platformSearch?.airbnb,
+    market?.searchLocation,
+    location?.searchName,
+    community,
+    hint?.trim() || null,
+  ].filter((q): q is string => !!q);
+  return [...new Set(ordered)];
+}
+
+async function fetchAirbnbMedianNightlyForQuery(args: {
   community: string;
   bedrooms: number;
   checkIn: string;
   checkOut: string;
-  searchName?: string;
-}): Promise<{ medianNightly: number | null; sampleCount: number; notes: string[] }> {
-  const apiKey = process.env.SEARCHAPI_API_KEY;
-  if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
-  const nights = nightsBetween(args.checkIn, args.checkOut);
-  const market = BUY_IN_MARKETS[args.community];
+  query: string;
+  apiKey: string;
+  nights: number;
+}): Promise<{ rates: number[]; noResultsError: string | null }> {
   const bounds = BUY_IN_MARKET_BOUNDS[args.community];
   const params: Record<string, string> = {
     engine: "airbnb",
-    q: args.searchName || market?.platformSearch?.airbnb || market?.searchLocation || args.community,
+    q: args.query,
     check_in_date: args.checkIn,
     check_out_date: args.checkOut,
     adults: "2",
     bedrooms: String(args.bedrooms),
     type_of_place: "entire_home",
     currency: "USD",
-    api_key: apiKey,
+    api_key: args.apiKey,
   };
   if (bounds) {
     params.bounding_box = `[[${bounds.ne_lat},${bounds.ne_lng}],[${bounds.sw_lat},${bounds.sw_lng}]]`;
@@ -311,11 +323,7 @@ export async function fetchAirbnbMedianNightly(args: {
   if (data?.error) {
     const message = `SearchAPI Airbnb: ${data.error}`;
     if (isSearchApiAirbnbNoResultsError(message)) {
-      return {
-        medianNightly: null,
-        sampleCount: 0,
-        notes: [`${message}; no static fallback is allowed for market-rate refreshes.`],
-      };
+      return { rates: [], noResultsError: message };
     }
     throw new Error(message);
   }
@@ -325,13 +333,56 @@ export async function fetchAirbnbMedianNightly(args: {
     if (!(total > 0)) continue;
     const parsedBedrooms = extractBedrooms(candidate);
     if (parsedBedrooms != null && parsedBedrooms !== args.bedrooms) continue;
-    rates.push(Math.round(total / nights));
+    rates.push(Math.round(total / args.nights));
   }
-  return {
-    medianNightly: median(rates),
-    sampleCount: rates.length,
-    notes: [`SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s).`],
-  };
+  return { rates, noResultsError: null };
+}
+
+export async function fetchAirbnbMedianNightly(args: {
+  community: string;
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  searchName?: string;
+}): Promise<{ medianNightly: number | null; sampleCount: number; notes: string[] }> {
+  const apiKey = process.env.SEARCHAPI_API_KEY;
+  if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
+  const nights = nightsBetween(args.checkIn, args.checkOut);
+  const queries = curatedAirbnbSearchQueries(args.community, args.searchName);
+  const notes: string[] = [];
+  let lastNoResults: string | null = null;
+
+  for (const query of queries) {
+    const { rates, noResultsError } = await fetchAirbnbMedianNightlyForQuery({
+      community: args.community,
+      bedrooms: args.bedrooms,
+      checkIn: args.checkIn,
+      checkOut: args.checkOut,
+      query,
+      apiKey,
+      nights,
+    });
+    if (noResultsError) {
+      lastNoResults = noResultsError;
+      notes.push(`${noResultsError} (q="${query}")`);
+      continue;
+    }
+    if (rates.length > 0) {
+      return {
+        medianNightly: median(rates),
+        sampleCount: rates.length,
+        notes: [
+          `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}".`,
+        ],
+      };
+    }
+    notes.push(`q="${query}" returned 0 usable exact-${args.bedrooms}BR priced samples`);
+  }
+
+  if (lastNoResults) {
+    notes.push("no static fallback is allowed for market-rate refreshes.");
+  }
+  return { medianNightly: null, sampleCount: 0, notes };
 }
 
 function monthStart(base: Date, offset: number): Date {
@@ -443,13 +494,8 @@ export async function refreshHybridPricingForTarget(args: {
 }): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const { storage } = await import("./storage");
   const asOf = args.asOf ?? new Date();
-  const market = BUY_IN_MARKETS[args.community];
-  const location = BUY_IN_MARKET_LOCATIONS[args.community];
-  const searchName = args.searchName
-    || market?.platformSearch?.airbnb
-    || location?.searchName
-    || market?.searchLocation
-    || args.community;
+  const searchQueries = curatedAirbnbSearchQueries(args.community, args.searchName);
+  const searchName = searchQueries[0] || args.community;
   const pricingRegion = getCommunityRegion(args.community);
   const rows: any[] = [];
   const logs: any[] = [];

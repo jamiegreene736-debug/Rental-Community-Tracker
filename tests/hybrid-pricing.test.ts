@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   calculateBlendedRate,
   fetchAirbnbMedianNightly,
+  curatedAirbnbSearchQueries,
   hybridPricingWindowForMonth,
   hybridPricingWindowForSeason,
   isSearchApiAirbnbNoResultsError,
@@ -89,6 +90,28 @@ assert.equal(holidaySeasonWindow.checkIn, "2026-06-28");
 assert.equal(holidaySeasonWindow.checkOut, "2026-07-05");
 
 assert.equal(isSearchApiAirbnbNoResultsError("SearchAPI Airbnb: Airbnb didn't return any results."), true);
+
+const bonitaQueries = curatedAirbnbSearchQueries(
+  "Bonita National",
+  "Sunny 2BR Condo at Bonita National Golf & Country Club Condominiums",
+);
+assert.equal(
+  bonitaQueries[0],
+  "Bonita National Golf and Country Club, Bonita Springs, FL",
+  "market Airbnb query must beat draft marketing title",
+);
+assert.equal(
+  bonitaQueries.at(-1),
+  "Sunny 2BR Condo at Bonita National Golf & Country Club Condominiums",
+  "draft marketing title may only be used as a last-resort Airbnb query",
+);
+
+const routesSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+assert.equal(
+  routesSource.includes("searchName: String(draft.name || draft.listingTitle || community)"),
+  false,
+  "draft market pricing refresh must not pass listing marketing title as Airbnb q=",
+);
 
 const originalFetch = globalThis.fetch;
 const originalSearchApiKey = process.env.SEARCHAPI_API_KEY;
