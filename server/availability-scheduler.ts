@@ -10,13 +10,9 @@
 
 import { storage } from "./storage";
 import { guestyRequest } from "./guesty-sync";
-import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
-import {
-  totalNightlyBuyInForMonth,
-  computeChannelMarkups,
-  CHANNEL_TO_GUESTY_KEY,
-  type ChannelKey,
-} from "@shared/pricing-rates";
+import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
+import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
+import { resolveBuyInMarket } from "@shared/buy-in-market";
 import {
   countAirbnbCandidates,
   computeSetsFromCounts,
@@ -36,6 +32,186 @@ let _tickRunning = false;
 
 export function getScannerSchedulerStatus() {
   return { lastTickAt: _lastTickAt, running: _tickRunning };
+}
+
+function positiveDraftInteger(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function firstNonEmptyString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function numberFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/[^\d.-]/g, ""));
+    if (Number.isFinite(parsed)) return Math.trunc(parsed);
+  }
+  return null;
+}
+
+function inferBedroomsFromGuestyListing(listing: any): number | null {
+  const direct = numberFromUnknown(
+    listing?.bedrooms ?? listing?.bedroomsCount ?? listing?.bedroomCount ?? listing?.beds,
+  );
+  if (direct && direct > 0) return direct;
+  const text = firstNonEmptyString(listing?.nickname, listing?.title, listing?.name);
+  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  return match ? positiveDraftInteger(match[1]) : null;
+}
+
+function communityKeyForAvailabilityDraft(draft: any): string {
+  const pricingArea = typeof draft?.pricingArea === "string" ? draft.pricingArea.trim() : "";
+  const resolved = resolveBuyInMarket({
+    marketKey: pricingArea,
+    name: draft?.name,
+    listingTitle: draft?.listingTitle,
+    bookingTitle: draft?.bookingTitle,
+    streetAddress: draft?.streetAddress,
+    unit1Address: draft?.unit1Address,
+    unit2Address: draft?.unit2Address,
+    city: draft?.city,
+    state: draft?.state,
+    sourceUrl: draft?.sourceUrl,
+  });
+  if (resolved) return resolved;
+  if (pricingArea) return pricingArea;
+  return draft?.name ?? "Poipu Kai";
+}
+
+function configFromGuestyListing(listing: any): PropertyUnitConfig | null {
+  const title = firstNonEmptyString(listing?.nickname, listing?.title, listing?.name);
+  const address = listing?.address ?? {};
+  const community = resolveBuyInMarket({
+    name: title,
+    listingTitle: listing?.title,
+    bookingTitle: listing?.nickname,
+    streetAddress: firstNonEmptyString(address?.full, address?.formatted, address?.display, address?.street, address?.streetAddress),
+    city: address?.city,
+    state: address?.state,
+  });
+  const bedrooms = inferBedroomsFromGuestyListing(listing);
+  if (!community || !bedrooms) return null;
+  return {
+    community,
+    units: [{
+      unitId: "main",
+      unitLabel: title || `${bedrooms}BR Guesty listing`,
+      bedrooms,
+    }],
+  };
+}
+
+async function configFromMappedGuestyListing(propertyId: number): Promise<PropertyUnitConfig | null> {
+  const listingId = await storage.getGuestyListingId(propertyId).catch(() => null);
+  if (!listingId) return null;
+  try {
+    const fields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.formatted address.display address.city address.state address.street address.streetAddress");
+    const listing = await guestyRequest("GET", `/listings/${listingId}?fields=${fields}`) as any;
+    return configFromGuestyListing(listing);
+  } catch {
+    return null;
+  }
+}
+
+function inferAvailabilityDraftBedrooms(draft: any, unitKey: "unit1" | "unit2"): number | null {
+  const stored = unitKey === "unit1" ? draft?.unit1Bedrooms : draft?.unit2Bedrooms;
+  const combined = draft?.singleListing === true ? draft?.combinedBedrooms : null;
+  const fromStructured = positiveDraftInteger(stored) ?? positiveDraftInteger(combined);
+  if (fromStructured) return fromStructured;
+
+  const text = [
+    unitKey === "unit1" ? draft?.unit1Description : draft?.unit2Description,
+    unitKey === "unit1" ? draft?.unit1Bedding : draft?.unit2Bedding,
+    draft?.listingTitle,
+    draft?.bookingTitle,
+    draft?.name,
+    draft?.unitTypes,
+  ].filter(Boolean).join(" ");
+  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  if (!match) return null;
+  const n = Number.parseInt(match[1], 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function unitLabelFromDraftAddress(address: unknown, fallback: string): string {
+  if (typeof address !== "string" || !address.trim()) return fallback;
+  const match = address.match(/(?:#|unit|apt|apartment|suite|ste)\s*([A-Za-z]?\d{1,5}[A-Za-z]?)/i);
+  return match?.[1] ? `Unit ${match[1]}` : fallback;
+}
+
+function configFromAvailabilityDraft(draft: any): PropertyUnitConfig | null {
+  const community = communityKeyForAvailabilityDraft(draft);
+  const isSingle = draft?.singleListing === true;
+  const combinedBedrooms = positiveDraftInteger(draft?.combinedBedrooms);
+  const unit1Bedrooms = inferAvailabilityDraftBedrooms(draft, "unit1") ?? (isSingle ? combinedBedrooms : null);
+  let unit2Bedrooms = isSingle ? null : inferAvailabilityDraftBedrooms(draft, "unit2");
+
+  if (!isSingle && !unit2Bedrooms && combinedBedrooms && unit1Bedrooms && combinedBedrooms > unit1Bedrooms) {
+    unit2Bedrooms = combinedBedrooms - unit1Bedrooms;
+  }
+
+  if (isSingle) {
+    const bedrooms = unit1Bedrooms ?? combinedBedrooms;
+    return bedrooms
+      ? {
+          community,
+          units: [{
+            unitId: "main",
+            unitLabel: unitLabelFromDraftAddress(draft?.unit1Address, `${bedrooms}BR Guesty listing`),
+            bedrooms,
+          }],
+        }
+      : null;
+  }
+
+  let unitBedrooms = [unit1Bedrooms, unit2Bedrooms]
+    .filter((bedrooms): bedrooms is number => !!bedrooms && bedrooms > 0);
+  if (unitBedrooms.length === 0 && combinedBedrooms) {
+    unitBedrooms = combinedBedrooms % 2 === 0
+      ? [combinedBedrooms / 2, combinedBedrooms / 2]
+      : [Math.ceil(combinedBedrooms / 2), Math.floor(combinedBedrooms / 2)];
+  }
+  if (unitBedrooms.length === 1 && combinedBedrooms && combinedBedrooms > unitBedrooms[0]) {
+    unitBedrooms.push(combinedBedrooms - unitBedrooms[0]);
+  }
+  if (unitBedrooms.length === 0) return null;
+
+  return {
+    community,
+    units: unitBedrooms.map((bedrooms, index) => ({
+      unitId: index === 0 ? "unit-a" : "unit-b",
+      unitLabel: unitLabelFromDraftAddress(
+        index === 0 ? draft?.unit1Address : draft?.unit2Address,
+        index === 0 ? "Unit A" : "Unit B",
+      ),
+      bedrooms,
+    })),
+  };
+}
+
+export async function resolveAvailabilityPropertyConfig(propertyId: number): Promise<PropertyUnitConfig | null> {
+  if (!Number.isFinite(propertyId)) return null;
+  if (propertyId > 0) return PROPERTY_UNIT_CONFIGS[propertyId] ?? null;
+  const draft = await storage.getCommunityDraft(Math.abs(propertyId)).catch(() => null);
+  const draftConfig = draft ? configFromAvailabilityDraft(draft) : null;
+  return draftConfig ?? await configFromMappedGuestyListing(propertyId);
+}
+
+export async function getAvailabilitySchedulerUnsupportedReason(propertyId: number): Promise<string | null> {
+  if (!Number.isFinite(propertyId)) return "invalid property id";
+  const config = await resolveAvailabilityPropertyConfig(propertyId);
+  if (!config) {
+    return propertyId <= 0
+      ? "draft-backed property is missing bedroom/community data for availability scans"
+      : "property not in availability config";
+  }
+  return null;
 }
 
 // Pick a *random* 7-night inside the next season occurrence (capped 10mo).
@@ -91,8 +267,11 @@ export async function runFullScanForProperty(
   const apiKey = process.env.SEARCHAPI_API_KEY;
   if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
 
-  const config = PROPERTY_UNIT_CONFIGS[propertyId];
-  if (!config) throw new Error(`Property ${propertyId} not in config`);
+  const unsupportedReason = await getAvailabilitySchedulerUnsupportedReason(propertyId);
+  if (unsupportedReason) return `${SKIP_PREFIX} ${unsupportedReason}`;
+
+  const config = await resolveAvailabilityPropertyConfig(propertyId);
+  if (!config) return `${SKIP_PREFIX} property not in availability config`;
 
   const guestyListingId = await storage.getGuestyListingId(propertyId);
   if (!guestyListingId) {
@@ -277,32 +456,6 @@ export async function runFullScanForProperty(
       } catch { /* continue */ }
     }
     summaries.push(`rates ${pushedRanges}/${ranges.length} months`);
-
-    // ── Channel markup push ──
-    // The base rate above nets targetMargin% on Direct only. Each OTA
-    // has a higher host fee, so we layer per-channel markups on top so
-    // Airbnb/VRBO/Booking also net targetMargin% after their fees.
-    // Formula (from shared/pricing-rates.ts): m_ch = (1 - feeDirect)/(1 - fee_ch) - 1.
-    try {
-      const markups = computeChannelMarkups();
-      const markupsByPlatform: Record<string, { percent: number; active: boolean }> = {};
-      for (const ch of ["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]) {
-        markupsByPlatform[CHANNEL_TO_GUESTY_KEY[ch]] = {
-          percent: markups[ch] * 100,
-          active: true,
-        };
-      }
-      await guestyRequest("PUT", `/listings/${guestyListingId}`, {
-        useAccountMarkups: false,
-        markups: markupsByPlatform,
-      });
-      const labels = (["airbnb", "vrbo", "booking"] as ChannelKey[])
-        .map((ch) => `${ch[0]}${(markups[ch] * 100).toFixed(1)}%`)
-        .join("/");
-      summaries.push(`markups ${labels}`);
-    } catch (e: any) {
-      summaries.push(`markups FAILED: ${(e?.message ?? "unknown").slice(0, 40)}`);
-    }
   }
 
   return summaries.join(" · ");

@@ -23859,11 +23859,7 @@ Return ONLY compact JSON with this exact shape:
           continue;
         }
 
-        const platformAddress = source === "vrbo" ? address : communityAddress;
-        const platformResort = source === "vrbo" && channelScopedSourceAliases.length > 0
-          ? channelScopedSourceAliases[0]
-          : communityName;
-        let platformCheck = await checkAllPlatforms(platformAddress, platformResort, unitNumber, source === "vrbo");
+        let platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
         console.error(
           `[find-unit] [${source}] ${sourceUrl} platform check: airbnb=${platformCheck.airbnb}, vrbo=${platformCheck.vrbo}, booking=${platformCheck.bookingCom}`,
         );
