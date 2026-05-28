@@ -1,11 +1,7 @@
-// Availability / inventory scanner UI — phase 1+2 rewrite (Apr 2026).
+// Availability lead-time policy UI.
 //
-// Replaces the old "shopping list of buy-ins" UX with a safety-guarantee
-// availability scan: 48 real 14-night windows are checked through the
-// sidecar-backed multi-channel buy-in engine across the 24-month Guesty
-// horizon. Windows where we cannot
-// verify enough independent complete buy-in sets can be pushed as unavailable
-// blocks to Guesty's calendar so they cannot be oversold.
+// Fixed rules replace live OTA inventory blackouts: standard arrivals need
+// 45 days, high season 75, major holidays 90, and ultra-peak 120.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -43,7 +39,7 @@ type WindowResult = {
 };
 
 type CandidatesEvent = {
-  mode?: "seasonal-sidecar" | "legacy-static-airbnb";
+  mode?: "policy" | "seasonal-sidecar" | "legacy-static-airbnb";
   countsByBR: Record<string, number>;
   channelCountsByBR?: Record<string, AvailabilityChannelCounts>;
   samplesByBR: Record<string, CandidateListing[]>;
@@ -61,7 +57,7 @@ type CandidatesEvent = {
 type Unit = { unitId: string; unitLabel: string; bedrooms: number };
 
 type ScanContext = {
-  mode?: "seasonal-sidecar" | "legacy-static-airbnb";
+  mode?: "policy" | "seasonal-sidecar" | "legacy-static-airbnb";
   propertyId: number;
   guestyListingId: string | null;
   community: string;
@@ -77,6 +73,7 @@ type ScanContext = {
   reliabilityFactor?: number;
   autoBlockNearTermDays?: number;
   autoBlockHolidayDays?: number;
+  autoBlockUltraPeakDays?: number;
 };
 
 function verdictColor(v: Verdict): { bg: string; fg: string; border: string } {
@@ -97,13 +94,14 @@ function fmtShort(iso: string): string {
 // UI can render as individual badges. The scheduler builds this string
 // in `server/availability-scheduler.ts` by joining segments with ` · `:
 //
-//   inventory 3 sets (tight) · market-snapshot 3/3 seasons ·
+//   policy 80 open/0 tight/24 blocked · market-snapshot 3/3 seasons ·
 //   blocks +2/-1/×0 · rates 24/24 months
 //
 // Any segment can be missing if the operator disabled that phase (e.g.
 // `runInventory: false`). Anything we don't recognize stays in `raw`
 // so nothing is silently lost — it just renders as plain text.
 type RunBadges = {
+  policy?: { open: number; tight: number; blocked: number };
   inventory?: { sets: number; verdict: "open" | "tight" | "blocked" };
   weeklyWindows?: { open: number; tight: number; blocked: number };
   marketSnapshot?: { seen: number; total: number };
@@ -117,7 +115,9 @@ function parseScanSummary(summary: string | null | undefined): RunBadges {
   const parts = summary.split(" · ").map((s) => s.trim()).filter(Boolean);
   for (const p of parts) {
     let m;
-    if ((m = p.match(/^inventory\s+(\d+)\s+sets\s+\((open|tight|blocked)\)$/i))) {
+    if ((m = p.match(/^policy\s+(\d+)\s+open\/(\d+)\s+tight\/(\d+)\s+blocked$/i))) {
+      out.policy = { open: parseInt(m[1], 10), tight: parseInt(m[2], 10), blocked: parseInt(m[3], 10) };
+    } else if ((m = p.match(/^inventory\s+(\d+)\s+sets\s+\((open|tight|blocked)\)$/i))) {
       out.inventory = { sets: parseInt(m[1], 10), verdict: m[2].toLowerCase() as "open" | "tight" | "blocked" };
     } else if ((m = p.match(/^(?:windows|weekly-windows|season-windows)\s+(\d+)\s+open\/(\d+)\s+tight\/(\d+)\s+blocked$/i))) {
       out.weeklyWindows = { open: parseInt(m[1], 10), tight: parseInt(m[2], 10), blocked: parseInt(m[3], 10) };
@@ -384,7 +384,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     setCtx(null);
     setCandidates(null);
     setError(null);
-    setScanPhase("Starting 24-month sidecar scan");
+    setScanPhase("Applying fixed lead-time policy");
     setProgress(null);
     setSelectedIdx(null);
     setSyncResult(null);
@@ -393,7 +393,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
 
     try {
       const resp = await fetch(
-        `/api/availability/scan/${propertyId}?mode=seasonal-sidecar&weeks=${weeks}&minSets=${minSets}`,
+        `/api/availability/scan/${propertyId}?mode=policy&weeks=${weeks}&minSets=${minSets}`,
         { signal: controller.signal },
       );
       if (!resp.ok || !resp.body) {
@@ -435,6 +435,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               reliabilityFactor: evt.reliabilityFactor,
               autoBlockNearTermDays: evt.autoBlockNearTermDays,
               autoBlockHolidayDays: evt.autoBlockHolidayDays,
+              autoBlockUltraPeakDays: evt.autoBlockUltraPeakDays,
             });
             setProgress({ done: 0, total });
           } else if (evt.type === "candidates") {
@@ -454,7 +455,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             collected.push(evt as WindowResult);
             setResults([...collected]);
             setProgress({ done, total });
-            setScanPhase(evt.season ? `${evt.season} window scanned` : "Scanning");
+            setScanPhase(evt.season ? `${evt.season} policy window evaluated` : "Applying policy");
           } else if (evt.type === "error") {
             setError(evt.error ?? "Scan failed");
           } else if (evt.type === "done") {
@@ -697,6 +698,15 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                 v === "open" ? "#166534" : v === "tight" ? "#92400e" : "#991b1b";
               return (
                 <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {b.policy && (
+                    <span style={chipStyle}>
+                      Policy: <b style={{ color: "#166534" }}>{b.policy.open}</b> open
+                      {" / "}
+                      <b style={{ color: "#92400e" }}>{b.policy.tight}</b> tight
+                      {" / "}
+                      <b style={{ color: "#991b1b" }}>{b.policy.blocked}</b> blocked
+                    </span>
+                  )}
                   {b.inventory && (
                     <span style={{ ...chipStyle, background: verdictChipBg(b.inventory.verdict), color: verdictChipColor(b.inventory.verdict), borderColor: "transparent" }}>
                       Inventory: <b>{b.inventory.sets}</b> sets · {b.inventory.verdict}
@@ -858,11 +868,12 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                         <span style={{ color: "#6b7280", fontStyle: "italic" }}>{r.summary}</span>
                       ) : (
                         <span style={{ color: "#6b7280" }}>
+                          {parsed.policy && <>policy <b style={{ color: "#166534" }}>{parsed.policy.open}</b>/<b style={{ color: "#92400e" }}>{parsed.policy.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.policy.blocked}</b> · </>}
                           {parsed.inventory && <>inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
                           {parsed.weeklyWindows && <>windows <b style={{ color: "#166534" }}>{parsed.weeklyWindows.open}</b>/<b style={{ color: "#92400e" }}>{parsed.weeklyWindows.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.weeklyWindows.blocked}</b> · </>}
                           {parsed.blocks && <>blocks <b style={{ color: "#166534" }}>+{parsed.blocks.added}</b>/<b style={{ color: "#991b1b" }}>−{parsed.blocks.removed}</b> · </>}
                           {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
-                          {!parsed.inventory && !parsed.weeklyWindows && !parsed.blocks && !parsed.rates && r.summary}
+                          {!parsed.policy && !parsed.inventory && !parsed.weeklyWindows && !parsed.blocks && !parsed.rates && r.summary}
                         </span>
                       )}
                     </td>
@@ -928,20 +939,17 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       {/* ── Controls ─────────────────────────────────────────── */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 12 }}>
         <span style={{ fontSize: 12, color: "#6b7280" }}>
-          14-night windows: <b>2 per month</b> · <b>24 months</b> · <b>48 scans</b>
+          Weekly arrival bands: <b>{weeks}</b> weeks · fixed lead-time policy
         </span>
         <label style={{ fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6 }}>
-          Target backup sets:
+          Policy horizon:
           <select
             value={minSets}
             onChange={(e) => setMinSets(parseInt(e.target.value, 10))}
             disabled={scanning}
             style={{ padding: "4px 8px", fontSize: 12, border: "1px solid #e5e7eb", borderRadius: 4 }}
           >
-            <option value={2}>2</option>
-            <option value={3}>3 (recommended)</option>
-            <option value={4}>4</option>
-            <option value={5}>5</option>
+            <option value={3}>standard fixed rules</option>
           </select>
         </label>
         <button
@@ -950,7 +958,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           disabled={scanning}
           style={{ fontSize: 12 }}
         >
-          {scanning ? "Scanning…" : results.length > 0 ? "↺ Re-scan" : "▶ Run 48-window scan"}
+          {scanning ? "Applying…" : results.length > 0 ? "↺ Re-apply policy" : "▶ Apply policy"}
         </button>
         {scanning && (
           <button className="glb-btn" onClick={stopScan} style={{ fontSize: 12 }}>
@@ -979,22 +987,15 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, lineHeight: 1.6 }}>
           Scanning <b>{ctx.resortName ?? ctx.community}</b> —{" "}
           needed units: {ctx.units.map((u) => `${u.bedrooms}BR`).join(" + ")}.
-          {" "}A "set" = one listing per unit slot (no reuse). Each scan window is <b>{ctx.windowNights ?? 14} nights</b>, sampled <b>{ctx.windowsPerMonth ?? 2}</b>x/month for <b>{ctx.months ?? 24}</b> months.
-          {" "}Windows are <b>blocked</b> only when fewer than <b>{ctx.blockMinSets ?? 1}</b> complete set is proven, and only within <b>{ctx.autoBlockNearTermDays ?? 60}</b> days of arrival or <b>{ctx.autoBlockHolidayDays ?? 120}</b> days for holiday windows. Below <b>{ctx.openMinSets ?? ctx.minSets}</b> sets is <b>tight</b>, not an auto-blackout.
+          {" "}Each policy window is <b>{ctx.windowNights ?? 7} nights</b>. Windows are <b>blocked</b> by fixed lead-time rules only:
+          standard <b>{ctx.autoBlockNearTermDays ?? 45}</b> days, high season <b>75</b> days, major holiday <b>{ctx.autoBlockHolidayDays ?? 90}</b> days, ultra-peak <b>{ctx.autoBlockUltraPeakDays ?? 120}</b> days.
         </div>
       )}
       {candidates && (
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, lineHeight: 1.6 }}>
-          <b>Lowest verified 14-night inventory</b> — {Object.entries(candidates.countsByBR).map(([br, n]) => (
-            <span key={br} style={{ marginRight: 12 }}>{br}BR: <b>{n}</b> proven options</span>
-          ))} · max independent sets: <b>{candidates.baselineSets}</b>
-          {candidates.baselineSets < (ctx?.blockMinSets ?? 1) && (
-            <span style={{ color: "#991b1b", marginLeft: 8 }}>
-              (below {(ctx?.blockMinSets ?? 1)}-set block floor)
-            </span>
-          )}
+          <b>Policy summary</b> — fixed lead-time rules are the source of truth for availability blackouts.
           <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>
-            Counts combine SearchAPI Airbnb, supplemental Google Hotels, and dated VRBO / Booking.com sidecar searches. Re-scans automatically clear scanner-created Guesty blocks when the current window is open or tight.
+            This no longer uses SearchAPI, Airbnb, VRBO, Booking.com, or sidecar availability evidence to decide calendar blackouts.
           </div>
         </div>
       )}

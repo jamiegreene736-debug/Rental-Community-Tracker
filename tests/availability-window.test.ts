@@ -5,14 +5,18 @@ process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 const {
   AVAILABILITY_RELIABILITY_FACTOR,
   AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS,
+  AVAILABILITY_AUTO_BLOCK_ULTRA_PEAK_DAYS,
   AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS,
   AVAILABILITY_WINDOW_NIGHTS,
+  AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS,
   availabilityAutoBlockAllowed,
   availabilityBlockingQualityIssue,
+  availabilityLeadDaysForPolicyBand,
   availabilityVerdictForScan,
   availabilityWindowCountForWeeks,
   computeAvailabilityThresholds,
   effectiveAvailabilityCount,
+  generateWeeklyAvailabilityPolicyWindows,
   generateTwiceMonthlyAvailabilityWindows,
 } = await import("../server/seasonal-availability");
 
@@ -29,9 +33,24 @@ assert.equal(windows[0].checkOut, "2026-06-15", "windows should run 14 nights");
 assert.equal(windows[0].nights, AVAILABILITY_WINDOW_NIGHTS);
 assert.equal(availabilityWindowCountForWeeks(104), 48);
 assert.equal(AVAILABILITY_RELIABILITY_FACTOR, 1, "availability scan should use proven raw inventory without a haircut");
-assert.equal(AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS, 60, "normal auto-block horizon should stay near-term only");
-assert.equal(AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS, 120, "holiday auto-block horizon should be bounded");
+assert.equal(AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS, 45, "standard policy horizon should be 45 days");
+assert.equal(AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS, 75, "high-season policy horizon should be 75 days");
+assert.equal(AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS, 90, "major-holiday policy horizon should be 90 days");
+assert.equal(AVAILABILITY_AUTO_BLOCK_ULTRA_PEAK_DAYS, 120, "ultra-peak policy horizon should be 120 days");
 console.log("  ✓ generates 48 future 14-night windows");
+
+const policyWindows = generateWeeklyAvailabilityPolicyWindows({
+  weeks: 4,
+  now: new Date("2026-05-27T12:00:00Z"),
+});
+assert.equal(policyWindows.length, 4, "policy should generate weekly arrival bands");
+assert.equal(policyWindows[0].checkIn, "2026-05-27");
+assert.equal(policyWindows[0].checkOut, "2026-06-03");
+assert.equal(availabilityLeadDaysForPolicyBand("standard"), 45);
+assert.equal(availabilityLeadDaysForPolicyBand("high"), 75);
+assert.equal(availabilityLeadDaysForPolicyBand("majorHoliday"), 90);
+assert.equal(availabilityLeadDaysForPolicyBand("ultraPeak"), 120);
+console.log("  ✓ exposes deterministic policy lead times");
 
 const thresholds = computeAvailabilityThresholds([
   { unitId: "A", unitLabel: "Unit A", bedrooms: 3 },
@@ -52,10 +71,10 @@ const conservativeThresholds = computeAvailabilityThresholds([
 assert.equal(conservativeThresholds.blockMinSets, 1, "higher open targets should not raise the hard blackout floor");
 assert.equal(
   availabilityVerdictForScan(1, conservativeThresholds, { daemonOnline: true, warnings: [] }),
-  "tight",
-  "one complete set should stay bookable even when the open target is conservative",
+  "open",
+  "inventory counts no longer drive blackout decisions",
 );
-console.log("  ✓ conservative targets do not create broad blackout bands");
+console.log("  ✓ availability counts no longer create blackout bands");
 
 assert.equal(
   effectiveAvailabilityCount({ airbnb: 1, vrbo: 0, booking: 0, pm: 0, total: 1 }),
@@ -84,8 +103,8 @@ assert.equal(
     checkIn: "2026-11-15",
     now: new Date("2026-05-27T12:00:00Z"),
   }),
-  "tight",
-  "far-future low-season zero inventory should not auto-blackout",
+  "open",
+  "far-future standard-season arrivals should stay open by policy",
 );
 assert.equal(
   availabilityVerdictForScan(0, thresholds, { daemonOnline: true, warnings: [] }, {
@@ -93,8 +112,8 @@ assert.equal(
     checkIn: "2026-11-22",
     now: new Date("2026-05-27T12:00:00Z"),
   }),
-  "tight",
-  "holiday scarcity outside the bounded holiday horizon should stay review-only",
+  "open",
+  "major holiday arrivals outside the 90-day policy horizon should stay open",
 );
 assert.equal(
   availabilityAutoBlockAllowed({
@@ -120,8 +139,8 @@ assert.equal(
     checkIn: "2026-06-15",
     now: new Date("2026-05-27T12:00:00Z"),
   }),
-  "tight",
-  "provider failures should not create automatic blocks",
+  "blocked",
+  "provider failures no longer affect fixed policy blocks",
 );
 assert.match(
   availabilityBlockingQualityIssue({
@@ -148,8 +167,8 @@ assert.equal(
     }],
   }),
   "open",
-  "provider warnings should only downgrade automatic blocks, not hide sufficient inventory",
+  "provider warnings are diagnostic only under fixed policy",
 );
-console.log("  ✓ refuses to auto-block from incomplete provider evidence");
+console.log("  ✓ provider availability evidence no longer controls blackouts");
 
 console.log("availability window suite passed");

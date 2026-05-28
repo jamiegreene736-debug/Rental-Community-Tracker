@@ -1,7 +1,7 @@
-// Per-listing availability scanner scheduler (Phase 4).
+// Per-listing availability policy scheduler.
 //
 // Every few minutes, walk the scanner_schedule table and run the full
-// pipeline (inventory → pricing → block sync → rate push) for any rows
+// pipeline (lead-time policy → pricing → block sync → rate push) for any rows
 // whose `lastRunAt` is older than their configured `intervalHours`.
 //
 // The pipeline reuses the same in-process helpers and Guesty writers
@@ -65,9 +65,6 @@ export async function runFullScanForProperty(
   const config = PROPERTY_UNIT_CONFIGS[propertyId];
   if (!config) return `${SKIP_PREFIX} property not in availability config`;
 
-  const apiKey = process.env.SEARCHAPI_API_KEY;
-  if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
-
   const guestyListingId = await storage.getGuestyListingId(propertyId);
   if (!guestyListingId) {
     // Graceful skip: scheduler auto-enables on Availability-tab load
@@ -109,8 +106,7 @@ export async function runFullScanForProperty(
     const open = seasonalWindows.filter((w) => w.verdict === "open").length;
     const tight = seasonalWindows.filter((w) => w.verdict === "tight").length;
     const blocked = seasonalWindows.filter((w) => w.verdict === "blocked").length;
-    summaries.push(`inventory ${worst?.maxSets ?? 0} sets (${worst?.verdict ?? "blocked"})`);
-    summaries.push(`windows ${open} open/${tight} tight/${blocked} blocked`);
+    summaries.push(`policy ${open} open/${tight} tight/${blocked} blocked`);
   }
 
   if (opts.runSyncBlocks && opts.runInventory && seasonalWindows.length > 0) {
@@ -328,7 +324,7 @@ export function startAvailabilityScheduler() {
   // first (the two paths share the SearchAPI key).
   setTimeout(() => { maybeRefreshMarketRates().catch(() => {}); }, 5 * 60 * 1000);
   setInterval(() => { maybeRefreshMarketRates().catch(() => {}); }, TICK_MS);
-  console.log(`[availability-scheduler] started (tick every ${TICK_MS / 60000} min, market-rates every ${MARKET_RATE_INTERVAL_MS / (24 * 60 * 60 * 1000)} days)`);
+  console.log(`[availability-scheduler] started (policy tick every ${TICK_MS / 60000} min, market-rates every ${MARKET_RATE_INTERVAL_MS / (24 * 60 * 60 * 1000)} days)`);
 }
 
 // Exposed so the UI's "Run now" button can force a sync without waiting.

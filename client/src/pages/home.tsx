@@ -2984,7 +2984,7 @@ function AdminDashboard() {
                     type="button"
                     size="sm"
                     variant="outline"
-                    className="h-8 gap-1.5"
+                    className="hidden h-8 gap-1.5"
                     disabled={selectedBulkAvailabilityCount === 0}
                     data-testid="button-bulk-availability-scan"
                   >

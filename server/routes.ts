@@ -65,7 +65,7 @@ import {
   requestAvailabilityScannerCancel,
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
-import { scheduleGuestySync, syncPropertyToGuesty, guestyRequest } from "./guesty-sync";
+import { guestyRequest } from "./guesty-sync";
 import {
   acquireSidecarLane,
   clearActiveSidecarLane,
@@ -125,6 +125,7 @@ import {
   computeAvailabilityThresholds,
   AVAILABILITY_RELIABILITY_FACTOR,
   AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS,
+  AVAILABILITY_AUTO_BLOCK_ULTRA_PEAK_DAYS,
   AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS,
   AVAILABILITY_WINDOW_NIGHTS,
   AVAILABILITY_WINDOWS_PER_MONTH,
@@ -15886,13 +15887,10 @@ export async function registerRoutes(
   // AVAILABILITY / INVENTORY SCANNER  (Phase 1+2)
   // ===========================================================
   //
-  // The dashboard's Availability tab used to surface individual buy-in
-  // candidates to click. That's not the job — the real goal is a
-  // booking-safety guarantee: sample LOW, HIGH, and HOLIDAY season
-  // windows through the same sidecar-backed buy-in engine, make sure
-  // we can find enough independent complete buy-in SETS (one listing
-  // per unit slot, no reuse across sets), and block only windows where
-  // verified availability is genuinely below the block floor.
+  // The dashboard's Availability tab uses fixed lead-time policy for
+  // booking safety. It no longer blackouts from live OTA inventory scans:
+  // standard arrivals need 45 days, high season 75, major holidays 90,
+  // and ultra-peak arrivals 120.
   //
   // Two endpoints:
   //   GET  /api/availability/scan/:propertyId         streams per-window verdicts
@@ -15904,9 +15902,6 @@ export async function registerRoutes(
   // touches blocks placed by humans or other integrations.
 
   app.get("/api/availability/scan/:propertyId", async (req: Request, res: Response) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
     const weeks = Math.min(Math.max(parseInt((req.query.weeks as string) ?? "52", 10) || 52, 4), 104);
@@ -15966,10 +15961,9 @@ export async function registerRoutes(
 
     if (mode !== "legacy-static-airbnb") {
       const thresholds = computeAvailabilityThresholds(config.units, minSets);
-      const windowCount = availabilityWindowCountForWeeks(weeks);
       emit({
         type: "start",
-        mode: "seasonal-sidecar",
+        mode: "policy",
         propertyId,
         guestyListingId,
         community,
@@ -15978,13 +15972,14 @@ export async function registerRoutes(
         minSets: thresholds.blockMinSets,
         openMinSets: thresholds.openMinSets,
         blockMinSets: thresholds.blockMinSets,
-        weeks: windowCount,
-        months: Math.round(windowCount / AVAILABILITY_WINDOWS_PER_MONTH),
-        windowNights: AVAILABILITY_WINDOW_NIGHTS,
-        windowsPerMonth: AVAILABILITY_WINDOWS_PER_MONTH,
+        weeks,
+        months: Math.round(weeks / 4.345),
+        windowNights: 7,
+        windowsPerMonth: null,
         reliabilityFactor: AVAILABILITY_RELIABILITY_FACTOR,
         autoBlockNearTermDays: AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS,
         autoBlockHolidayDays: AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS,
+        autoBlockUltraPeakDays: AVAILABILITY_AUTO_BLOCK_ULTRA_PEAK_DAYS,
       });
 
       const applyOverride = (window: SeasonalAvailabilityWindow): SeasonalAvailabilityWindow & Record<string, unknown> => {
@@ -16031,7 +16026,7 @@ export async function registerRoutes(
         const aggregate = aggregateSeasonalCandidates(finalWindows as SeasonalAvailabilityWindow[]);
         emit({
           type: "candidates",
-          mode: "seasonal-sidecar",
+          mode: "policy",
           countsByBR: aggregate.countsByBR,
           channelCountsByBR: aggregate.channelCountsByBR,
           samplesByBR: {},
@@ -16067,7 +16062,7 @@ export async function registerRoutes(
         }
         emit({
           type: "done",
-          mode: "seasonal-sidecar",
+          mode: "policy",
           weeks: result.windows.length,
           baselineSets: aggregate.baselineSets,
           baselineVerdict: aggregate.baselineVerdict,
@@ -20310,9 +20305,13 @@ Return ONLY compact JSON with this exact shape:
 
     await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
     const delayMs = Math.min(delayMinutes, 180) * 60 * 1000;
-    scheduleGuestySync(propertyId, guestyListingId, delayMs);
+    setTimeout(() => {
+      runFullScanNow(propertyId).catch((err) => {
+        console.error(`[availability-policy] scheduled sync failed for property ${propertyId}:`, err?.message ?? err);
+      });
+    }, delayMs);
 
-    res.json({ ok: true, syncScheduledInMinutes: Math.round(delayMs / 60000) });
+    res.json({ ok: true, policySyncScheduledInMinutes: Math.round(delayMs / 60000) });
   });
 
   // ── Manual Guesty sync trigger (for testing / admin use) ───────────────────
@@ -20321,11 +20320,32 @@ Return ONLY compact JSON with this exact shape:
     if (!propertyId || !guestyListingId) return res.status(400).json({ error: "propertyId and guestyListingId required" });
 
     try {
-      const result = await syncPropertyToGuesty(propertyId, guestyListingId);
-      res.json({ ok: true, ...result });
+      await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
+      const result = await runFullScanNow(propertyId);
+      res.json({ ok: result.status !== "error", ...result });
     } catch (err: any) {
       res.status(500).json({ error: "Sync failed", message: err.message });
     }
+  });
+
+  app.post("/api/availability/apply-policy-all", async (_req, res) => {
+    const mappings = await storage.getGuestyPropertyMap();
+    const results: Array<{ propertyId: number; guestyListingId: string; status: string; summary: string }> = [];
+    for (const mapping of mappings) {
+      const result = await runFullScanNow(mapping.propertyId);
+      results.push({
+        propertyId: mapping.propertyId,
+        guestyListingId: mapping.guestyListingId,
+        status: result.status,
+        summary: result.summary,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    res.json({
+      ok: results.every((r) => r.status !== "error"),
+      total: results.length,
+      results,
+    });
   });
 
   // ========== AVAILABILITY / RECOMMENDATIONS ==========
@@ -20633,88 +20653,46 @@ Return ONLY compact JSON with this exact shape:
   });
 
   app.get("/api/scanner/properties", async (_req, res) => {
-    res.json(getScannableProperties());
+    res.json([]);
   });
 
   app.post("/api/scanner/run", async (req, res) => {
-    if (isScannerRunning() || isBulkAvailabilityQueueRunning()) {
-      return res.status(409).json({ error: "A scan is already running" });
-    }
-    let propertyId: number | undefined;
-    if (req.body?.propertyId) {
-      propertyId = parseInt(req.body.propertyId);
-      if (isNaN(propertyId)) {
-        return res.status(400).json({ error: "Invalid propertyId" });
-      }
-      const validIds = getScannableProperties().map(p => p.id);
-      if (!validIds.includes(propertyId)) {
-        return res.status(400).json({ error: `Property ${propertyId} is not a scannable listing` });
-      }
-    }
-    const weeksAhead = 52;
-    runAvailabilityScan(weeksAhead, propertyId).catch(err => {
-      console.error("Scanner run error:", err);
-    });
-    const label = propertyId ? getPropertyName(propertyId) : "all properties";
-    res.json({ message: `Scan started for ${label}`, weeksAhead, propertyId });
+    res.status(410).json({ error: "Availability scanner has been replaced by fixed lead-time policy." });
   });
 
   app.post("/api/scanner/bulk-run", async (req, res) => {
-    try {
-      const rawPropertyIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : undefined;
-      const propertyIds = rawPropertyIds
-        ?.map((value: unknown) => Number(value))
-        .filter((value: number) => Number.isInteger(value));
-      const weeksAhead = Math.min(Math.max(Number(req.body?.weeksAhead) || 52, 4), 104);
-      const queue = startBulkAvailabilityQueue(propertyIds, weeksAhead);
-      res.json(queue);
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
-      const status = message.includes("already running") ? 409 : 400;
-      res.status(status).json({ error: message });
-    }
+    res.status(410).json({ error: "Bulk availability queue has been removed. Use fixed lead-time policy sync." });
   });
 
   app.get("/api/scanner/bulk-status", async (_req, res) => {
-    res.json({ queue: getBulkAvailabilityQueueStatus() });
+    res.json({ queue: null });
   });
 
   app.post("/api/scanner/bulk-clear", async (_req, res) => {
-    const result = clearBulkAvailabilityQueue();
-    if (!result.ok) return res.status(409).json(result);
-    res.json(result);
+    res.json({ ok: true, queue: null });
   });
 
   app.post("/api/scanner/bulk-pause", async (req, res) => {
-    const reason = typeof req.body?.reason === "string" && req.body.reason.trim()
-      ? req.body.reason.trim().slice(0, 200)
-      : "paused by operator";
-    const result = pauseBulkAvailabilityQueue(reason);
-    if (!result.ok) return res.status(409).json(result);
-    res.json(result);
+    res.status(410).json({ error: "Bulk availability queue has been removed." });
   });
 
   app.post("/api/scanner/bulk-resume", async (_req, res) => {
-    const result = resumeBulkAvailabilityQueue();
-    if (!result.ok) return res.status(409).json(result);
-    res.json(result);
+    res.status(410).json({ error: "Bulk availability queue has been removed." });
   });
 
   app.post("/api/scanner/bulk-cancel", async (req, res) => {
-    const reason = typeof req.body?.reason === "string" && req.body.reason.trim()
-      ? req.body.reason.trim().slice(0, 200)
-      : "cancelled by operator";
-    const result = await cancelBulkAvailabilityQueue(reason);
-    res.json(result);
+    res.json({ ok: true, queue: null, cancelled: 0 });
   });
 
   app.get("/api/scanner/status", async (_req, res) => {
     try {
       const latest = await storage.getLatestScannerRun();
       res.json({
-        running: isScannerRunning(),
-        currentPropertyId: getCurrentScanPropertyId(),
+        running: false,
+        currentPropertyId: null,
         latestRun: latest || null,
+        disabled: true,
+        message: "Availability scanner has been replaced by fixed lead-time policy.",
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

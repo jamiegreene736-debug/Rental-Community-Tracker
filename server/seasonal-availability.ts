@@ -22,6 +22,7 @@ export type AvailabilityChannelCounts = {
 
 export type SeasonalAvailabilityWindow = {
   season: SeasonKey;
+  policyBand: AvailabilityPolicyBand;
   startDate: string;
   endDate: string;
   nights: number;
@@ -33,6 +34,8 @@ export type SeasonalAvailabilityWindow = {
   listingCounts: Record<number, number>;
   channelCounts: Record<number, AvailabilityChannelCounts>;
   daemonOnline: boolean;
+  daysUntilArrival: number;
+  requiredLeadDays: number;
   reason: string;
 };
 
@@ -63,23 +66,24 @@ export type AvailabilityThresholds = {
   blockMinSets: number;
 };
 
-const SEASONS: SeasonKey[] = ["LOW", "HIGH", "HOLIDAY"];
-const SEASON_SCAN_HEARTBEAT_MS = 12_000;
+export type AvailabilityPolicyBand = "standard" | "high" | "majorHoliday" | "ultraPeak";
+
+export const AVAILABILITY_POLICY_STANDARD_LEAD_DAYS = 45;
+export const AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS = 75;
+export const AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS = 90;
+export const AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS = 120;
 export const AVAILABILITY_SCAN_MONTHS = 24;
 export const AVAILABILITY_WINDOWS_PER_MONTH = 2;
 export const AVAILABILITY_WINDOW_NIGHTS = 14;
 export const AVAILABILITY_RELIABILITY_FACTOR = 1;
-export const AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS = 60;
-export const AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS = 120;
-
-let seasonalScanQueue: Promise<unknown> = Promise.resolve();
-let seasonalScanActive: { propertyId: number; startedAt: number } | null = null;
-let seasonalScanQueued = 0;
+export const AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS = AVAILABILITY_POLICY_STANDARD_LEAD_DAYS;
+export const AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS = AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS;
+export const AVAILABILITY_AUTO_BLOCK_ULTRA_PEAK_DAYS = AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS;
 
 export function getSeasonalAvailabilityQueueStatus() {
   return {
-    active: seasonalScanActive,
-    queued: seasonalScanQueued,
+    active: null,
+    queued: 0,
   };
 }
 
@@ -118,6 +122,24 @@ function nightsBetween(checkIn: string, checkOut: string): number {
   return Math.max(1, Math.round((end - start) / 86_400_000));
 }
 
+export function generateWeeklyAvailabilityPolicyWindows(args: {
+  weeks?: number;
+  now?: Date;
+}): Array<{ checkIn: string; checkOut: string; nights: number }> {
+  const weeks = Math.min(Math.max(Math.round(args.weeks ?? 104), 1), 104);
+  const windows: Array<{ checkIn: string; checkOut: string; nights: number }> = [];
+  const now = args.now ? new Date(args.now) : new Date();
+  now.setUTCHours(12, 0, 0, 0);
+  for (let i = 0; i < weeks; i++) {
+    const checkIn = new Date(now);
+    checkIn.setUTCDate(checkIn.getUTCDate() + i * 7);
+    const checkOut = new Date(checkIn);
+    checkOut.setUTCDate(checkOut.getUTCDate() + 7);
+    windows.push({ checkIn: ymd(checkIn), checkOut: ymd(checkOut), nights: 7 });
+  }
+  return windows;
+}
+
 export function generateTwiceMonthlyAvailabilityWindows(args: {
   weeks?: number;
   now?: Date;
@@ -148,68 +170,6 @@ function throwIfAborted(signal?: AbortSignal): void {
   const err = new Error("seasonal availability scan cancelled");
   err.name = "AbortError";
   throw err;
-}
-
-function formatElapsed(ms: number): string {
-  const seconds = Math.max(1, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const rem = seconds % 60;
-  return rem ? `${minutes}m ${rem}s` : `${minutes}m`;
-}
-
-function enqueueSeasonalScan<T>(
-  args: {
-    propertyId: number;
-    signal?: AbortSignal;
-    onPhase?: (label: string) => void;
-  },
-  run: () => Promise<T>,
-): Promise<T> {
-  const queuedAhead = seasonalScanQueued + (seasonalScanActive ? 1 : 0);
-  seasonalScanQueued++;
-
-  let waitHeartbeat: NodeJS.Timeout | null = null;
-  const queuedAt = Date.now();
-  const laneOwnerId = `seasonal-availability:${args.propertyId}:${queuedAt}`;
-  const laneLabel = `Availability sidecar scan for property ${args.propertyId}`;
-  if (queuedAhead > 0) {
-    args.onPhase?.(`Waiting for sidecar scan slot (${queuedAhead} ahead)`);
-    waitHeartbeat = setInterval(() => {
-      args.onPhase?.(`Waiting for sidecar scan slot (${formatElapsed(Date.now() - queuedAt)})`);
-    }, SEASON_SCAN_HEARTBEAT_MS);
-  }
-
-  const task = seasonalScanQueue.then(async () => {
-    if (waitHeartbeat) clearInterval(waitHeartbeat);
-    seasonalScanQueued = Math.max(0, seasonalScanQueued - 1);
-    throwIfAborted(args.signal);
-    seasonalScanActive = { propertyId: args.propertyId, startedAt: Date.now() };
-    const lane = await acquireSidecarLane({
-      ownerType: "availability-scan",
-      ownerId: laneOwnerId,
-      label: laneLabel,
-      pollMs: 1_000,
-      shouldCancel: async () =>
-        Boolean(args.signal?.aborted) ||
-        isSidecarLaneCancellationRequested("availability-scan", laneOwnerId),
-      onWait: async (owner) => {
-        args.onPhase?.(`Waiting for Chrome sidecar lane held by ${owner.label}`);
-      },
-    });
-    const laneHeartbeat = setInterval(() => lane.heartbeat(), 30_000);
-    try {
-      args.onPhase?.("Chrome sidecar lane acquired for availability scan");
-      return await run();
-    } finally {
-      clearInterval(laneHeartbeat);
-      lane.release();
-      seasonalScanActive = null;
-    }
-  });
-
-  seasonalScanQueue = task.catch(() => undefined);
-  return task;
 }
 
 function hashString(input: string): number {
@@ -357,17 +317,11 @@ export function availabilityVerdictForScan(
     now?: Date;
   },
 ): SeasonalAvailabilityWindow["verdict"] {
-  const verdict =
-    maxSets < thresholds.blockMinSets ? "blocked"
-    : maxSets < thresholds.openMinSets ? "tight"
-    : "open";
-  // Only auto-block from a clean, complete sidecar scan. Provider CAPTCHA,
-  // bot walls, timeouts, rate limits, network errors, and offline daemon
-  // states can all look like "0 inventory"; keep those visible as tight
-  // instead of writing a calendar blackout from incomplete evidence.
-  if (verdict === "blocked" && availabilityBlockingQualityIssue(scan)) return "tight";
-  if (verdict === "blocked" && context && !availabilityAutoBlockAllowed(context)) return "tight";
-  return verdict;
+  void maxSets;
+  void thresholds;
+  void scan;
+  if (!context) return "open";
+  return availabilityAutoBlockAllowed(context) ? "blocked" : "open";
 }
 
 export function availabilityAutoBlockAllowed(context: {
@@ -375,103 +329,34 @@ export function availabilityAutoBlockAllowed(context: {
   checkIn: string;
   now?: Date;
 }): boolean {
-  const now = context.now ? new Date(context.now) : new Date();
-  now.setUTCHours(12, 0, 0, 0);
-  const checkIn = new Date(`${context.checkIn}T12:00:00Z`);
-  const daysUntilArrival = Math.floor((checkIn.getTime() - now.getTime()) / 86_400_000);
-  if (daysUntilArrival <= AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS) return true;
-  return context.season === "HOLIDAY" && daysUntilArrival <= AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS;
-}
-
-function buildWindowFromScan(args: {
-  season: SeasonKey;
-  window: { checkIn: string; checkOut: string; nights: number };
-  scan: MultiChannelBuyInResult;
-  units: PropertyUnitConfig["units"];
-  thresholds: AvailabilityThresholds;
-  now?: Date;
-}): SeasonalAvailabilityWindow {
-  const channelCounts: SeasonalAvailabilityWindow["channelCounts"] = {};
-  const effectiveCountsByBR: Record<number, number> = {};
-  for (const br of Object.keys(args.thresholds.requiredByBR).map(Number)) {
-    const raw = args.scan.channelAvailableCountsByBR[br] ?? { airbnb: 0, vrbo: 0, booking: 0, pm: 0, total: 0 };
-    const counts = { ...raw, effective: effectiveAvailabilityCount(raw) };
-    channelCounts[br] = counts;
-    effectiveCountsByBR[br] = counts.effective;
-  }
-  const maxSets = computeSetsFromCounts(args.units, effectiveCountsByBR);
-  const qualityIssue = availabilityBlockingQualityIssue(args.scan);
-  const autoBlockAllowed = availabilityAutoBlockAllowed({
-    season: args.season,
-    checkIn: args.window.checkIn,
-    now: args.now,
+  const policy = availabilityPolicyForWindow({
+    region: "hawaii",
+    checkIn: context.checkIn,
+    checkOut: context.checkIn,
+    nights: 1,
+    now: context.now,
+    season: context.season,
   });
-  const verdict = availabilityVerdictForScan(maxSets, args.thresholds, args.scan, {
-    season: args.season,
-    checkIn: args.window.checkIn,
-    now: args.now,
-  });
-  const reason = qualityIssue && maxSets < args.thresholds.blockMinSets
-    ? `${args.season} sample found ${maxSets} effective set(s), but ${qualityIssue}; not auto-blocking from incomplete provider evidence.`
-    : !autoBlockAllowed && maxSets < args.thresholds.blockMinSets
-    ? `${args.season} ${args.window.nights}-night window found ${maxSets} effective set(s), but check-in is outside the auto-block horizon (${AVAILABILITY_AUTO_BLOCK_NEAR_TERM_DAYS} days, or ${AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS} days for holidays); leaving tight for review instead of blacking out.`
-    : args.scan.daemonOnline
-    ? `${args.season} ${args.window.nights}-night window found ${maxSets} proven set(s); block below ${args.thresholds.blockMinSets}, tight below ${args.thresholds.openMinSets}, open at ${args.thresholds.openMinSets}+.`
-    : `${args.season} sample only partially verified because the sidecar was offline; not auto-blocking from incomplete data.`;
-  return {
-    season: args.season,
-    startDate: args.window.checkIn,
-    endDate: args.window.checkOut,
-    nights: args.window.nights,
-    verdict,
-    maxSets,
-    minSets: args.thresholds.blockMinSets,
-    openMinSets: args.thresholds.openMinSets,
-    blockMinSets: args.thresholds.blockMinSets,
-    listingCounts: effectiveCountsByBR,
-    channelCounts,
-    daemonOnline: args.scan.daemonOnline,
-    reason,
-  };
+  return policy.shouldBlock;
 }
 
-function buildErrorWindow(args: {
-  season: SeasonKey;
-  window: { checkIn: string; checkOut: string; nights: number };
-  units: PropertyUnitConfig["units"];
-  thresholds: AvailabilityThresholds;
-  error: unknown;
-}): SeasonalAvailabilityWindow {
-  const channelCounts: SeasonalAvailabilityWindow["channelCounts"] = {};
-  const effectiveCountsByBR: Record<number, number> = {};
-  for (const br of Object.keys(args.thresholds.requiredByBR).map(Number)) {
-    channelCounts[br] = { airbnb: 0, vrbo: 0, booking: 0, pm: 0, total: 0, effective: 0 };
-    effectiveCountsByBR[br] = 0;
-  }
-  const message = args.error instanceof Error ? args.error.message : String(args.error);
-  return {
-    season: args.season,
-    startDate: args.window.checkIn,
-    endDate: args.window.checkOut,
-    nights: args.window.nights,
-    verdict: "tight",
-    maxSets: 0,
-    minSets: args.thresholds.blockMinSets,
-    openMinSets: args.thresholds.openMinSets,
-    blockMinSets: args.thresholds.blockMinSets,
-    listingCounts: effectiveCountsByBR,
-    channelCounts,
-    daemonOnline: false,
-    reason: `${args.season} scan failed (${message.slice(0, 120)}); not auto-blocking from a failed scan.`,
-  };
+function daysUntilArrival(checkIn: string, now?: Date): number {
+  const anchor = now ? new Date(now) : new Date();
+  anchor.setUTCHours(12, 0, 0, 0);
+  const arrival = new Date(`${checkIn}T12:00:00Z`);
+  return Math.floor((arrival.getTime() - anchor.getTime()) / 86_400_000);
 }
 
-function holidayDate(d: Date): boolean {
+function ultraPeakDate(d: Date): boolean {
   const month = d.getUTCMonth() + 1;
   const day = d.getUTCDate();
-  return (month === 12 && day >= 20)
-    || (month === 1 && day <= 5)
-    || (month === 7 && day >= 1 && day <= 7)
+  return (month === 12 && day >= 20) || (month === 1 && day <= 5);
+}
+
+function majorHolidayDate(d: Date): boolean {
+  const month = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  return (month === 7 && day >= 1 && day <= 7)
     || (month === 11 && day >= 22 && day <= 30)
     || (month === 3 && day >= 15)
     || (month === 4 && day <= 5)
@@ -482,43 +367,115 @@ export function seasonForWindow(region: RegionKey, start: Date, nights: number):
   for (let i = 0; i < nights; i++) {
     const d = new Date(start);
     d.setUTCDate(d.getUTCDate() + i);
-    if (holidayDate(d)) return "HOLIDAY";
+    if (ultraPeakDate(d) || majorHolidayDate(d)) return "HOLIDAY";
   }
   const yearMonth = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, "0")}`;
   return seasonForMonth(region, yearMonth);
 }
 
-function expandSeasonSamplesToWeekly(args: {
-  samples: SeasonalAvailabilityWindow[];
+export function availabilityPolicyBandForWindow(args: {
   region: RegionKey;
-  weeks: number;
-  now?: Date;
-}): SeasonalAvailabilityWindow[] {
-  const bySeason = new Map<SeasonKey, SeasonalAvailabilityWindow>();
-  for (const sample of args.samples) bySeason.set(sample.season, sample);
-
-  const start = args.now ? new Date(args.now) : new Date();
-  start.setUTCHours(12, 0, 0, 0);
-
-  const windows: SeasonalAvailabilityWindow[] = [];
-  for (let i = 0; i < args.weeks; i++) {
-    const checkIn = new Date(start);
-    checkIn.setUTCDate(checkIn.getUTCDate() + i * 7);
-    const checkOut = new Date(checkIn);
-    checkOut.setUTCDate(checkOut.getUTCDate() + 7);
-    const season = seasonForWindow(args.region, checkIn, 7);
-    const template = bySeason.get(season);
-    if (!template) continue;
-    windows.push({
-      ...template,
-      season,
-      startDate: ymd(checkIn),
-      endDate: ymd(checkOut),
-      nights: 7,
-      reason: `${season} sidecar sample ${template.startDate}→${template.endDate} found ${template.maxSets} de-duped set(s); applied to this 7-night week. Block below ${template.blockMinSets}, tight below ${template.openMinSets}, open at ${template.openMinSets}+.`,
-    });
+  checkIn: string;
+  nights: number;
+  season?: SeasonKey;
+}): AvailabilityPolicyBand {
+  const start = new Date(`${args.checkIn}T12:00:00Z`);
+  for (let i = 0; i < args.nights; i++) {
+    const d = new Date(start);
+    d.setUTCDate(d.getUTCDate() + i);
+    if (ultraPeakDate(d)) return "ultraPeak";
   }
-  return windows;
+  for (let i = 0; i < args.nights; i++) {
+    const d = new Date(start);
+    d.setUTCDate(d.getUTCDate() + i);
+    if (majorHolidayDate(d)) return "majorHoliday";
+  }
+  const season = args.season ?? seasonForWindow(args.region, start, args.nights);
+  return season === "HIGH" ? "high" : "standard";
+}
+
+export function availabilityLeadDaysForPolicyBand(band: AvailabilityPolicyBand): number {
+  switch (band) {
+    case "ultraPeak": return AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS;
+    case "majorHoliday": return AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS;
+    case "high": return AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS;
+    case "standard": return AVAILABILITY_POLICY_STANDARD_LEAD_DAYS;
+  }
+}
+
+export function availabilityPolicyForWindow(args: {
+  region: RegionKey;
+  checkIn: string;
+  checkOut: string;
+  nights: number;
+  now?: Date;
+  season?: SeasonKey;
+}): { band: AvailabilityPolicyBand; leadDays: number; daysUntilArrival: number; shouldBlock: boolean } {
+  const band = availabilityPolicyBandForWindow(args);
+  const leadDays = availabilityLeadDaysForPolicyBand(band);
+  const days = daysUntilArrival(args.checkIn, args.now);
+  return {
+    band,
+    leadDays,
+    daysUntilArrival: days,
+    shouldBlock: days <= leadDays,
+  };
+}
+
+function policyBandLabel(band: AvailabilityPolicyBand): string {
+  switch (band) {
+    case "ultraPeak": return "ultra-peak";
+    case "majorHoliday": return "major holiday";
+    case "high": return "high season";
+    case "standard": return "standard season";
+  }
+}
+
+function buildWindowFromPolicy(args: {
+  region: RegionKey;
+  season: SeasonKey;
+  window: { checkIn: string; checkOut: string; nights: number };
+  thresholds: AvailabilityThresholds;
+  now?: Date;
+}): SeasonalAvailabilityWindow {
+  const policy = availabilityPolicyForWindow({
+    region: args.region,
+    checkIn: args.window.checkIn,
+    checkOut: args.window.checkOut,
+    nights: args.window.nights,
+    now: args.now,
+    season: args.season,
+  });
+  const verdict: SeasonalAvailabilityWindow["verdict"] = policy.shouldBlock ? "blocked" : "open";
+  const listingCounts: Record<number, number> = {};
+  const channelCounts: SeasonalAvailabilityWindow["channelCounts"] = {};
+  for (const br of Object.keys(args.thresholds.requiredByBR).map(Number)) {
+    const effective = policy.shouldBlock ? 0 : args.thresholds.openCandidatesByBR[br] ?? args.thresholds.openMinSets;
+    listingCounts[br] = effective;
+    channelCounts[br] = { airbnb: 0, vrbo: 0, booking: 0, pm: 0, total: effective, effective };
+  }
+  const maxSets = policy.shouldBlock ? 0 : args.thresholds.openMinSets;
+  const label = policyBandLabel(policy.band);
+  return {
+    season: args.season,
+    policyBand: policy.band,
+    startDate: args.window.checkIn,
+    endDate: args.window.checkOut,
+    nights: args.window.nights,
+    verdict,
+    maxSets,
+    minSets: args.thresholds.blockMinSets,
+    openMinSets: args.thresholds.openMinSets,
+    blockMinSets: args.thresholds.blockMinSets,
+    listingCounts,
+    channelCounts,
+    daemonOnline: true,
+    daysUntilArrival: policy.daysUntilArrival,
+    requiredLeadDays: policy.leadDays,
+    reason: policy.shouldBlock
+      ? `Blocked by fixed booking-window policy: ${label} arrivals require more than ${policy.leadDays} days lead time; this arrival is ${policy.daysUntilArrival} day(s) away.`
+      : `Allowed by fixed booking-window policy: ${label} arrivals require ${policy.leadDays} days lead time; this arrival is ${policy.daysUntilArrival} day(s) away.`,
+  };
 }
 
 export async function scanSeasonalAvailabilityCapacity(args: {
@@ -532,7 +489,7 @@ export async function scanSeasonalAvailabilityCapacity(args: {
   onPhase?: (label: string) => void;
   onWindow?: (window: SeasonalAvailabilityWindow) => void;
 }): Promise<SeasonalAvailabilityResult> {
-  return enqueueSeasonalScan(args, () => runSeasonalAvailabilityCapacity(args));
+  return runSeasonalAvailabilityCapacity(args);
 }
 
 async function runSeasonalAvailabilityCapacity(args: {
@@ -550,17 +507,9 @@ async function runSeasonalAvailabilityCapacity(args: {
   const loc = resolveAvailabilityLocation(args.config.community, args.resortName);
   const region = inferRegion(loc.city, loc.state);
   const thresholds = computeAvailabilityThresholds(args.config.units, args.manualMinSets ?? 1);
-  const bedroomCounts = Object.keys(thresholds.requiredByBR).map(Number).sort((a, b) => a - b);
   const weeks = Math.min(Math.max(args.weeks ?? 104, 1), 104);
-  const sidecarStopGeneration = getSidecarStopGeneration();
-  const assertSidecarRunCurrent = () => {
-    if (hasSidecarStopGenerationChanged(sidecarStopGeneration)) {
-      const err = new Error("sidecar run cancelled by operator stop");
-      err.name = "SidecarRunCancelledError";
-      throw err;
-    }
-  };
-  const windows = generateTwiceMonthlyAvailabilityWindows({ weeks, now: args.now }).map((window) => ({
+  args.onPhase?.("Applying fixed availability lead-time policy");
+  const windows = generateWeeklyAvailabilityPolicyWindows({ weeks, now: args.now }).map((window) => ({
     season: seasonForWindow(region, new Date(`${window.checkIn}T12:00:00Z`), window.nights),
     window,
   }));
@@ -569,36 +518,9 @@ async function runSeasonalAvailabilityCapacity(args: {
   for (let idx = 0; idx < windows.length; idx++) {
     const { season, window } = windows[idx];
     throwIfAborted(args.signal);
-    assertSidecarRunCurrent();
-    args.onPhase?.(`Scanning ${season} 14-night window ${idx + 1}/${windows.length} (${window.checkIn} to ${window.checkOut})`);
-    const seasonStartedAt = Date.now();
-    const heartbeat = setInterval(() => {
-      args.onPhase?.(`Still scanning ${season} window ${idx + 1}/${windows.length} (${formatElapsed(Date.now() - seasonStartedAt)})`);
-    }, SEASON_SCAN_HEARTBEAT_MS);
-    try {
-      const scan = await fetchMultiChannelBuyInByBR({
-        community: loc.searchName,
-        city: loc.city,
-        state: loc.state,
-        streetAddress: loc.streetAddress,
-        bboxCenterOverride: loc.lat != null && loc.lng != null ? { lat: loc.lat, lng: loc.lng } : undefined,
-        searchName: loc.searchName,
-        bedroomCounts,
-        dateOverride: { checkIn: window.checkIn, checkOut: window.checkOut },
-        sidecarStopGeneration,
-      });
-      assertSidecarRunCurrent();
-      const result = buildWindowFromScan({ season, window, scan, units: args.config.units, thresholds, now: args.now });
-      sampleResults.push(result);
-      args.onWindow?.(result);
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") throw error;
-      const result = buildErrorWindow({ season, window, units: args.config.units, thresholds, error });
-      sampleResults.push(result);
-      args.onWindow?.(result);
-    } finally {
-      clearInterval(heartbeat);
-    }
+    const result = buildWindowFromPolicy({ region, season, window, thresholds, now: args.now });
+    sampleResults.push(result);
+    args.onWindow?.(result);
   }
 
   return {
