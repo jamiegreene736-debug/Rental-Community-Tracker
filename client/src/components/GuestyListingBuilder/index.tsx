@@ -2573,7 +2573,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setMarketRatesRefreshing(true);
     setRefreshNotice(null);
     setRefreshStartedAt(startedAt);
-    setRefreshProgress({ phase: "starting", percent: 1, label: "Refreshing static buy-in pricing basis…", startedAt });
+    setRefreshProgress({ phase: "starting", percent: 1, label: "Running SearchAPI Airbnb seasonal pricing…", startedAt });
 
     // Poll progress endpoint while refresh is in flight. Static
     // properties are positive ids; drafts/promoted drafts are negative
@@ -2712,7 +2712,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               >
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              Static buy-in pricing basis updated
+              Airbnb SearchAPI pricing basis updated
             </span>
           ),
         });
@@ -2791,7 +2791,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             >
               <polyline points="20 6 9 17 4 12" />
             </svg>
-            Static buy-in pricing basis updated
+            Airbnb SearchAPI pricing basis updated
           </span>
         ),
       });
@@ -4566,22 +4566,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </div>
                             </div>
                             {/* Live buy-in summary. One badge per bedroom-count
-                                showing the persisted static/operator buy-in
-                                basis. "fallback" badges mean we haven't
-                                refreshed for that BR yet — the Pricing tab
-                                falls through to BUY_IN_RATES until the
-                                operator clicks Refresh. */}
+                                showing the persisted Airbnb SearchAPI layered
+                                basis for the market-rate tool. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = operator/static nightly cost. OTA retail samples are telemetry only and do not drive this cost basis.">
-                                  Buy-in basis (median, all-in):
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = Airbnb SearchAPI seasonal sample after specialized layered markups.">
+                                  Buy-in basis (Airbnb SearchAPI layered):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
                                   if (!live) {
                                     return (
-                                      <span key={bedrooms} title="No live rate yet — Pricing tab is using the BUY_IN_RATES static fallback for this bedroom count. Click 'Update Market Rates Now' to fetch."
+                                      <span key={bedrooms} title="No Airbnb SearchAPI layered rate has been saved for this bedroom count yet. Click 'Update Market Rates Now' to fetch."
                                         style={{ background: "#f3f4f6", color: "#6b7280", padding: "2px 6px", borderRadius: 4, fontWeight: 500 }}>
-                                        {bedrooms}BR fallback
+                                        {bedrooms}BR no rate
                                       </span>
                                     );
                                   }
@@ -4595,7 +4592,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   // the other channels returned no usable rate.
                                   const isMultichannel = live.source === "live-multichannel-median" || live.source === "season-band-multichannel-median";
                                   const sourceLabel = live.source === "static-buy-in"
-                                    ? "operator/static buy-in cost basis"
+                                    ? "legacy static buy-in basis"
                                     : isMultichannel
                                     ? live.source === "season-band-multichannel-median"
                                       ? `season-band median across ${live.sampleCount} channel sample${live.sampleCount === 1 ? "" : "s"}`
@@ -4631,7 +4628,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                      title="Refreshes the operator/static buy-in basis and pushes marked-up base rates to Guesty. OTA retail samples are telemetry only."
+                                      title="Refreshes Airbnb SearchAPI seasonal pricing and pushes marked-up base rates to Guesty."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Update Market Rates Now"}
                                 </button>
@@ -4707,7 +4704,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               return (
                                 <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                                    <span style={{ fontWeight: 500 }}>Refreshing static buy-in pricing basis…</span>
+                                    <span style={{ fontWeight: 500 }}>Running SearchAPI Airbnb seasonal pricing…</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{elapsedStr}</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{progressText}</span>
                                     <button
@@ -4768,7 +4765,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   )}
                                   {hasWindowProgress && currentWindow != null && (
                                     <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
-                                      The bar advances as static buy-in pricing is saved and marked-up Guesty base rates are pushed.
+                                      The bar advances as Airbnb seasonal samples are saved and marked-up Guesty base rates are pushed.
                                     </div>
                                   )}
                                   {/* Heartbeat row: confirms the server-side pricing request is still updating progress. */}
@@ -4803,7 +4800,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     </div>
                                   )}
                                   <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
-                                    Static buy-in pricing refresh; OTA retail samples are telemetry only.
+                                    Airbnb SearchAPI seasonal pricing refresh with layered markups.
                                   </div>
                                 </div>
                               );
@@ -4831,7 +4828,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   <div style={{ marginTop: 2, opacity: 0.82 }}>
                                     {effectiveRefreshNotice.status === "done"
-                                      ? "Static buy-in pricing basis has been saved. This notice stays here until you dismiss it."
+                                      ? "Airbnb SearchAPI pricing basis has been saved. This notice stays here until you dismiss it."
                                       : (effectiveRefreshNotice.error || effectiveRefreshNotice.label || "The pricing refresh did not complete.")}
                                   </div>
                                   {scannerSchedule?.lastGuestyRatePushAt && (
@@ -4875,7 +4872,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
                                   <span style={{ fontWeight: 600 }}>
-                                    Static buy-in pricing basis
+                                    Airbnb SearchAPI layered basis
                                     {liveSnapshot?.region && (
                                       <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
                                         ({liveSnapshot.region})
@@ -4904,10 +4901,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     // Otherwise build from cache (live) — no channel chips, just basis values.
                                     const snapshotRow = liveSnapshot?.perBR.find((r) => r.bedrooms === bedrooms);
                                     const low = snapshotRow?.low ?? live?.medianNightly ?? null;
-                                    const high = snapshotRow?.high
-                                      ?? (live && community ? getBuyInRate(community, bedrooms, propertyId, "HIGH") : null);
-                                    const holiday = snapshotRow?.holiday
-                                      ?? (live && community ? getBuyInRate(community, bedrooms, propertyId, "HOLIDAY") : null);
+                                    const high = snapshotRow?.high ?? live?.medianNightlyHigh ?? null;
+                                    const holiday = snapshotRow?.holiday ?? live?.medianNightlyHoliday ?? null;
                                     const basisSource = snapshotRow?.basisSource
                                       ?? (live?.source === "static-buy-in" ? "static-buy-in" as const
                                         : live?.source === "optimized-buy-in" ? "optimized-buy-in" as const
@@ -4941,13 +4936,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           {seasonChip("HOLIDAY", holiday, "#dc2626")}
                                           <span style={{ marginLeft: "auto", fontSize: 10, color: "#6b7280" }}>
                                             {basisSource === "static-buy-in"
-                                              ? "LOW = static buy-in cost basis"
+                                              ? "legacy static buy-in cost basis"
                                               : basisSource === "optimized-buy-in"
                                               ? `LOW = median of ${channelCount} channels`
                                               : basisSource === "monthly-multichannel-median"
                                               ? `LOW = monthly median across ${channelCount} channel samples`
                                               : basisSource === "hybrid-airbnb-layered"
-                                              ? `Layered median from Airbnb and ${channelCount} sample${channelCount === 1 ? "" : "s"}`
+                                              ? `Layered Airbnb SearchAPI basis from ${channelCount} sample${channelCount === 1 ? "" : "s"}`
                                               : basisSource === "season-band-multichannel-median"
                                               ? `LOW = season-band median across ${channelCount} channel samples`
                                               : basisSource === "live-multichannel-median"
@@ -4969,7 +4964,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   })}
                                 </div>
                                 <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
-                                  Each month uses the persisted static buy-in basis and configured seasonal multipliers; OTA retail samples are telemetry only.
+                                  Each month uses the persisted Airbnb SearchAPI LOW/HIGH/HOLIDAY basis after specialized layered markups.
                                 </div>
                               </div>
                             )}

@@ -709,7 +709,7 @@ async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: s
     bedroomCounts,
     unitCount: unitSlots.length || 1,
     triggerType: "Manual Update",
-    notes: "Bulk market pricing refresh from static buy-in cost basis.",
+    notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal layered pricing.",
     searchName: String(draft.name || draft.listingTitle || community),
   });
 }
@@ -730,7 +730,7 @@ function pricingRowsForClient(rows: any[]): Array<{
       low,
       high: parsePositivePricingRate(row?.medianNightlyHigh),
       holiday: parsePositivePricingRate(row?.medianNightlyHoliday),
-      basisSource: low > 0 ? (row?.source ?? "static-buy-in") : "none",
+      basisSource: low > 0 ? (row?.source ?? "hybrid-airbnb-layered") : "none",
       channels: { airbnb: low > 0 ? low : null, vrbo: null, booking: null, pm: null },
       channelCount: low > 0 ? 1 : 0,
     };
@@ -746,7 +746,7 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string, c
     : await refreshHybridPricingForProperty({
       propertyId,
       triggerType: "Manual Update",
-      notes: "Pricing tab manual refresh from static buy-in cost basis.",
+      notes: "Pricing tab manual refresh from SearchAPI Airbnb seasonal layered pricing.",
     });
 
   assertPricingRefreshNotCancelled(propertyId, cancelGeneration);
@@ -784,7 +784,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     return;
   }
 
-  item.progress = { phase: "pricing-basis", percent: 10, label: "Refreshing static buy-in pricing basis" };
+  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb seasonal pricing" };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
 
@@ -793,17 +793,17 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     : await refreshHybridPricingForProperty({
       propertyId: item.propertyId,
       triggerType: "Manual Update",
-      notes: "Bulk market pricing refresh from static buy-in cost basis.",
+      notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal layered pricing.",
     });
   item.progress = {
-    phase: "pricing-basis",
+    phase: "searchapi-airbnb",
     percent: 80,
-    label: `Static buy-in pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
+    label: `SearchAPI Airbnb seasonal pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
     rows: pricingResult.rows.length,
   };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
-  await topQueueEvent("bulk-pricing", job.id, "item-pricing-basis-completed", `Static buy-in pricing completed for ${item.label}`, {
+  await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb seasonal pricing completed for ${item.label}`, {
     itemKey: item.id,
     meta: { propertyId: item.propertyId, rows: pricingResult.rows.length },
   });
@@ -28471,7 +28471,7 @@ Return ONLY compact JSON with this exact shape:
     try {
       const result = await runHybridPricingForAllProperties(trigger as HybridTriggerType);
       console.log(`[hybrid-pricing] refresh-all ${result.succeeded}/${result.total} succeeded`);
-      res.json({ ok: true, mode: "static-buy-in", ...result });
+      res.json({ ok: true, mode: "hybrid-airbnb-layered", ...result });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? String(e) });
     }
@@ -28504,7 +28504,7 @@ Return ONLY compact JSON with this exact shape:
       clearRefreshProgress: clearQuickRefreshProgress,
     } = await import("./multichannel-buy-in");
     const quickStartedAt = Date.now();
-    const quickLockClaim = claimPricingRefreshLock(quickPropertyKey, `draft ${id} static buy-in pricing refresh`);
+    const quickLockClaim = claimPricingRefreshLock(quickPropertyKey, `draft ${id} SearchAPI Airbnb pricing refresh`);
     if (!quickLockClaim.claimed) {
       return res.status(202).json({
         ok: true,
@@ -28519,9 +28519,9 @@ Return ONLY compact JSON with this exact shape:
       setQuickRefreshProgress({
         propertyId: quickPropertyKey,
         startedAt: quickStartedAt,
-        phase: "pricing-basis",
+        phase: "searchapi-airbnb",
         percent: 10,
-        label: "Refreshing static buy-in pricing basis",
+        label: "Running SearchAPI Airbnb seasonal pricing",
       });
       const { pricingResult, guestyPush } = await refreshPricingTabMarketRates(
         quickPropertyKey,
@@ -28534,8 +28534,8 @@ Return ONLY compact JSON with this exact shape:
         phase: "done",
         percent: 100,
         label: guestyPush.skipped
-          ? `Static buy-in pricing saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`
-          : "Static buy-in pricing saved and marked-up Guesty base rates pushed",
+          ? `SearchAPI Airbnb seasonal pricing saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`
+          : "SearchAPI Airbnb seasonal pricing saved and marked-up Guesty base rates pushed",
       });
       setTimeout(() => clearQuickRefreshProgress(quickPropertyKey), 5 * 60 * 1000);
       const rates = await storage.getPropertyMarketRates(quickPropertyKey);
@@ -28547,7 +28547,7 @@ Return ONLY compact JSON with this exact shape:
       return res.json({
         ok: true,
         propertyId: quickPropertyKey,
-        mode: "static-buy-in",
+        mode: "hybrid-airbnb-layered",
         estimatedLowRate,
         estimatedHighRate,
         persisted: pricingRowsForClient(pricingResult.rows),
@@ -28561,7 +28561,7 @@ Return ONLY compact JSON with this exact shape:
         startedAt: quickStartedAt,
         phase: "error",
         percent: 100,
-        label: cancelled ? "Static buy-in pricing refresh cancelled" : "Static buy-in pricing refresh failed",
+        label: cancelled ? "SearchAPI Airbnb pricing refresh cancelled" : "SearchAPI Airbnb pricing refresh failed",
         error: cancelled ? "Cancelled by operator" : e?.message ?? String(e),
       });
       if (cancelled) clearQuickRefreshProgress(quickPropertyKey);
@@ -28871,7 +28871,7 @@ Return ONLY compact JSON with this exact shape:
       clearRefreshProgress: clearQuickRefreshProgress,
     } = await import("./multichannel-buy-in");
     const quickStartedAt = Date.now();
-    const quickLockClaim = claimPricingRefreshLock(propertyId, `property ${propertyId} static buy-in pricing refresh`);
+    const quickLockClaim = claimPricingRefreshLock(propertyId, `property ${propertyId} SearchAPI Airbnb pricing refresh`);
     if (!quickLockClaim.claimed) {
       return res.status(202).json({
         ok: true,
@@ -28886,9 +28886,9 @@ Return ONLY compact JSON with this exact shape:
       setQuickRefreshProgress({
         propertyId,
         startedAt: quickStartedAt,
-        phase: "pricing-basis",
+        phase: "searchapi-airbnb",
         percent: 10,
-        label: "Refreshing static buy-in pricing basis",
+        label: "Running SearchAPI Airbnb seasonal pricing",
       });
       const { pricingResult, guestyPush } = await refreshPricingTabMarketRates(
         propertyId,
@@ -28901,8 +28901,8 @@ Return ONLY compact JSON with this exact shape:
         phase: "done",
         percent: 100,
         label: guestyPush.skipped
-          ? `Static buy-in pricing saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`
-          : "Static buy-in pricing saved and marked-up Guesty base rates pushed",
+          ? `SearchAPI Airbnb seasonal pricing saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`
+          : "SearchAPI Airbnb seasonal pricing saved and marked-up Guesty base rates pushed",
       });
       setTimeout(() => clearQuickRefreshProgress(propertyId), 5 * 60 * 1000);
       releasePricingRefreshLock(quickRefreshLock);
@@ -28910,7 +28910,7 @@ Return ONLY compact JSON with this exact shape:
         ok: true,
         propertyId,
         community: PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? PROPERTY_UNIT_NEEDS[propertyId]?.community ?? null,
-        mode: "static-buy-in",
+        mode: "hybrid-airbnb-layered",
         persisted: pricingRowsForClient(pricingResult.rows),
         guestyPush,
       });
@@ -28921,7 +28921,7 @@ Return ONLY compact JSON with this exact shape:
         startedAt: quickStartedAt,
         phase: "error",
         percent: 100,
-        label: cancelled ? "Static buy-in pricing refresh cancelled" : "Static buy-in pricing refresh failed",
+        label: cancelled ? "SearchAPI Airbnb pricing refresh cancelled" : "SearchAPI Airbnb pricing refresh failed",
         error: cancelled ? "Cancelled by operator" : e?.message ?? String(e),
       });
       if (cancelled) clearQuickRefreshProgress(propertyId);

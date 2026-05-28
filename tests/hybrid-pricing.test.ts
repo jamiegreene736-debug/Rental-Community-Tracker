@@ -3,6 +3,7 @@ import {
   calculateBlendedRate,
   fetchAirbnbMedianNightly,
   hybridPricingWindowForMonth,
+  hybridPricingWindowForSeason,
   isSearchApiAirbnbNoResultsError,
 } from "../server/hybrid-pricing";
 import { readFileSync } from "node:fs";
@@ -71,6 +72,21 @@ const decemberHolidayWindow = hybridPricingWindowForMonth(new Date("2026-05-27T2
 assert.equal(decemberHolidayWindow.yearMonth, "2026-12");
 assert.equal(decemberHolidayWindow.checkIn, "2026-12-15");
 assert.equal(decemberHolidayWindow.checkOut, "2026-12-22");
+
+const lowSeasonWindow = hybridPricingWindowForSeason(new Date("2026-05-27T23:47:00Z"), "LOW", 7, () => 0);
+assert.equal(lowSeasonWindow.season, "LOW");
+assert.equal(lowSeasonWindow.checkIn, "2026-05-29");
+assert.equal(lowSeasonWindow.checkOut, "2026-06-05");
+
+const highSeasonWindow = hybridPricingWindowForSeason(new Date("2026-05-27T23:47:00Z"), "HIGH", 7, () => 0);
+assert.equal(highSeasonWindow.season, "HIGH");
+assert.equal(highSeasonWindow.checkIn, "2026-06-01");
+assert.equal(highSeasonWindow.checkOut, "2026-06-08");
+
+const holidaySeasonWindow = hybridPricingWindowForSeason(new Date("2026-05-27T23:47:00Z"), "HOLIDAY", 7, () => 0);
+assert.equal(holidaySeasonWindow.season, "HOLIDAY");
+assert.equal(holidaySeasonWindow.checkIn, "2026-06-28");
+assert.equal(holidaySeasonWindow.checkOut, "2026-07-05");
 
 assert.equal(isSearchApiAirbnbNoResultsError("SearchAPI Airbnb: Airbnb didn't return any results."), true);
 
@@ -142,13 +158,21 @@ try {
 
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
-  hybridPricingSource.includes('source: "static-buy-in"'),
-  "pricing refresh should persist the static buy-in basis, not Airbnb retail medians",
+  hybridPricingSource.includes('source: "hybrid-airbnb-layered"'),
+  "pricing refresh should persist the Airbnb SearchAPI layered basis",
 );
 assert.ok(
-  hybridPricingSource.indexOf("const fallback = staticFallbackMonthlyRates({") <
-    hybridPricingSource.indexOf('source: "static-buy-in"'),
-  "static seasonal basis should be built before property_market_rates is persisted",
+  hybridPricingSource.includes("hybridPricingWindowForSeason(asOf, season)"),
+  "market-rate refresh should sample a random 7-night Airbnb window per season",
+);
+assert.equal(
+  hybridPricingSource.includes("staticFallbackMonthlyRates"),
+  false,
+  "market-rate refresh must not fall back to static buy-in rates",
+);
+assert.ok(
+  hybridPricingSource.includes("deletePropertyMarketRate(args.propertyId, bedrooms)"),
+  "empty Airbnb SearchAPI samples should clear stale market-rate rows instead of retaining static or old data",
 );
 assert.ok(
   !hybridPricingSource.includes("sampled once"),

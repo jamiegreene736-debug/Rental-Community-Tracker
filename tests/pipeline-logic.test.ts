@@ -1100,12 +1100,12 @@ assert.equal(
   "bulk market pricing should not require sidecar heartbeat",
 );
 assert.ok(
-  routeSource.includes('label: "Refreshing static buy-in pricing basis"'),
-  "pricing-tab market-rate refresh should enter the static buy-in pricing path used by the dashboard queue",
+  routeSource.includes('label: "Running SearchAPI Airbnb seasonal pricing"'),
+  "pricing-tab market-rate refresh should enter the SearchAPI Airbnb seasonal pricing path used by the dashboard queue",
 );
 assert.ok(
-  routeSource.indexOf('label: "Refreshing static buy-in pricing basis"') < routeSource.indexOf('fetchMultiChannelBuyInBySeason({'),
-  "pricing-tab refresh route should hit static buy-in pricing before any legacy sidecar season-band code",
+  routeSource.indexOf('label: "Running SearchAPI Airbnb seasonal pricing"') < routeSource.indexOf('fetchMultiChannelBuyInBySeason({'),
+  "pricing-tab refresh route should hit SearchAPI Airbnb seasonal pricing before any legacy sidecar season-band code",
 );
 assert.ok(
   routeSource.includes("releasePricingRefreshLockForProperty(propertyId);"),
@@ -1125,7 +1125,7 @@ assert.equal(
   false,
   "Pricing tab refresh button should not request the old season-band mode",
 );
-console.log("  ✓ bulk and Pricing tab market pricing stay on static buy-in path, not sidecar");
+console.log("  ✓ bulk and Pricing tab market pricing stay on SearchAPI Airbnb path, not sidecar");
 
 assert.equal(
   routeSource.includes("/api/builder/push-channel-markups"),
