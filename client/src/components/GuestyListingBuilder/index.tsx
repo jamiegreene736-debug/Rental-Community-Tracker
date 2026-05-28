@@ -541,6 +541,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     queryClient.invalidateQueries({ queryKey: ["/api/guesty-property-map"] });
     queryClient.invalidateQueries({ queryKey: ["/api/dashboard/channel-status"] });
   }, [queryClient]);
+  const listingOptions = useMemo(() => {
+    if (!selectedId || listings.some((listing) => guestyListingId(listing) === selectedId)) return listings;
+    const mapped = propertyMap.find((m) => m.guestyListingId === selectedId);
+    const label = mapped?.propertyId === propertyId
+      ? propertyData?.nickname || propertyData?.title || propertyData?.descriptions?.title || selectedId
+      : selectedId;
+    return [{ _id: selectedId, nickname: label }, ...listings];
+  }, [listings, propertyMap, propertyData?.descriptions?.title, propertyData?.nickname, propertyData?.title, propertyId, selectedId]);
   // Same idea, separate state for VRBO so the user can submit Airbnb and
   // VRBO compliance back-to-back without one button's busy spinner
   // blocking the other. Server-side, the VRBO push hits Guesty's UI via
@@ -1594,18 +1602,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     async function init() {
       setConn("checking");
       setConnError(null);
-      const result = await guestyService.checkConnection();
-      if (cancelled) return;
-      if (result.connected) {
+      try {
+        const data = await guestyService.getListings(200, 0);
+        if (cancelled) return;
+        setListings(data.results || []);
         setConn("connected");
-        try {
-          const data = await guestyService.getListings(200, 0);
-          if (!cancelled) setListings(data.results || []);
-        } catch { /* non-fatal */ }
-      } else {
-        const isRateLimited = result.error === "RATE_LIMITED";
-        setConn(isRateLimited ? "rate-limited" : "disconnected");
-        setConnError(result.error || null);
+        return;
+      } catch (listError: any) {
+        if (cancelled) return;
+        const result = await guestyService.checkConnection();
+        if (cancelled) return;
+        if (result.connected) {
+          setConn("connected");
+        } else {
+          const isRateLimited = result.error === "RATE_LIMITED" || listError?.message === "RATE_LIMITED";
+          setConn(isRateLimited ? "rate-limited" : "disconnected");
+          setConnError(result.error || listError?.message || null);
+        }
       }
     }
     init();
@@ -1622,7 +1635,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     fetch("/api/guesty-property-map")
       .then((r) => r.json())
       .then((maps: Array<{ propertyId: number; guestyListingId: string }>) => {
-        if (!cancelled && Array.isArray(maps)) setPropertyMap(maps);
+        if (!cancelled && Array.isArray(maps)) {
+          setPropertyMap(maps);
+          const match = propertyId ? maps.find((m) => m.propertyId === propertyId) : null;
+          if (match?.guestyListingId) {
+            setSelectedId(match.guestyListingId);
+            setConn((current) => current === "checking" || current === "rate-limited" ? "connected" : current);
+            setConnError((current) => current === "RATE_LIMITED" ? null : current);
+          }
+        }
       })
       .catch(() => { /* non-fatal — auto-select and dropdown-navigate degrade gracefully */ });
     return () => { cancelled = true; };
@@ -1641,14 +1662,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   //      bedding, photos) showed the new property's data while the
   //      "push target" stayed pointed at the old one.
   useEffect(() => {
-    if (!propertyId || listings.length === 0) return;
+    if (!propertyId || propertyMap.length === 0) return;
     const match = propertyMap.find((m) => m.propertyId === propertyId);
-    if (match && listings.some((l) => guestyListingId(l) === match.guestyListingId)) {
+    if (match?.guestyListingId) {
       setSelectedId(match.guestyListingId);
+      if (conn === "checking" || conn === "rate-limited") {
+        setConn("connected");
+        setConnError(null);
+      }
     } else {
       setSelectedId("");
     }
-  }, [propertyId, listings, propertyMap]);
+  }, [conn, propertyId, propertyMap]);
 
   // ── Repair old draft pages that have a matching Guesty listing but no usable map ──
   // Earlier builds could import a just-created Guesty listing into a *new*
@@ -1762,8 +1787,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!selectedId) { setChannelStatus(null); return; }
     setLoadingChannels(true);
     guestyService.getChannelStatus(selectedId)
-      .then(setChannelStatus)
-      .catch(() => setChannelStatus(null))
+      .then((status) => {
+        setChannelStatus(status);
+        setConn("connected");
+        setConnError(null);
+      })
+      .catch((e: any) => {
+        setChannelStatus((current) => current);
+        if (e?.message !== "RATE_LIMITED") {
+          setConnError(e?.message ?? "Failed to load channel status");
+        }
+      })
       .finally(() => setLoadingChannels(false));
   }, [selectedId]);
   useEffect(() => { refreshChannelStatus(); }, [refreshChannelStatus]);
@@ -3106,7 +3140,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             disabled={conn !== "connected"}
           >
             <option value="">— Select an existing listing to view or update —</option>
-            {listings.map((l) => {
+            {listingOptions.map((l) => {
               const id = guestyListingId(l);
               if (!id) return null;
               return <option key={id} value={id}>{l.nickname || l.title || id}</option>;

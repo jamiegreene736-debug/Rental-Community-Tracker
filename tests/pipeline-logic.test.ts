@@ -1158,6 +1158,21 @@ assert.equal(
 console.log("  ✓ availability scheduler supports mapped draft-backed listings");
 
 assert.ok(
+  builderSource.includes("const listingOptions = useMemo"),
+  "Builder should synthesize the mapped Guesty listing option before the full dropdown fetch finishes",
+);
+assert.ok(
+  builderSource.includes('current === "checking" || current === "rate-limited" ? "connected" : current'),
+  "Builder should let persisted Guesty mappings override transient first-load rate-limit state",
+);
+assert.equal(
+  builderSource.includes("if (!propertyId || listings.length === 0) return;"),
+  false,
+  "Builder should not wait for the full Guesty listing dropdown before selecting the mapped listing",
+);
+console.log("  ✓ builder hydrates mapped Guesty listings before dropdown listing fetch completes");
+
+assert.ok(
   builderSource.includes("?fields=pictures"),
   "Photos tab should read Guesty pictures with an explicit fields=pictures projection",
 );
