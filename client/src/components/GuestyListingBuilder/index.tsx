@@ -5198,9 +5198,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         {row.monthlySampleTotal != null && Math.abs(row.monthlySampleTotal - buyIn) >= 1 && (
                                           <div
                                             style={{ fontSize: 9, color: "#9ca3af", marginTop: 2 }}
-                                            title="Saved monthly scraper sample is retained for diagnostics; the pricing table now uses the canonical season-band basis for this season."
+                                            title="Monthly SearchAPI sample total differs from the buy-in shown — reload market rates or check for a partial unit sample."
                                           >
-                                            sample ${row.monthlySampleTotal.toLocaleString()} ignored
+                                            sample ${row.monthlySampleTotal.toLocaleString()} vs buy-in ${buyIn.toLocaleString()}
                                           </div>
                                         )}
                                       </td>

@@ -483,15 +483,20 @@ setLivePropertyMarketRates([{
 }]);
 assert.equal(
   getBuyInRate("Windsor Hills", 2, 900001, "HIGH", "2026-07"),
-  150,
-  "canonical HIGH basis should drive pricing even when a monthly sample is lower",
+  60,
+  "live monthly median should drive pricing when yearMonth is supplied",
 );
 assert.equal(
-  getBuyInRate("Windsor Hills", 2, 900001, "LOW", "2026-07"),
-  100,
-  "canonical LOW basis should drive pricing even when monthly sample metadata exists",
+  getBuyInRate("Windsor Hills", 2, 900001, "HIGH", "2026-06"),
+  150,
+  "seasonal HIGH basis should be used when no monthly sample exists for that month",
 );
-console.log("  ✓ monthly samples do not override canonical season basis");
+assert.equal(
+  getBuyInRate("Windsor Hills", 2, 900001, "LOW"),
+  100,
+  "seasonless callers still use canonical LOW basis",
+);
+console.log("  ✓ monthly samples override season basis when yearMonth is supplied");
 
 // suggestPricingArea: a Kissimmee draft named "Caribe Cove" should
 // resolve to "Caribe Cove" via the new community-name match — not to

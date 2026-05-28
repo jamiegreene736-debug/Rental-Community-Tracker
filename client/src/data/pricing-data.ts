@@ -242,11 +242,9 @@ const RATE_SCHEDULE_MONTHS: { yearMonth: string; monthIndex: number; year: numbe
 function generateMonthlyRates(
   baseBuyIn: number,
   community: string,
-  // PR #282: when supplied, each month's buy-in is read directly via
-  // getBuyInRate(community, br, propertyId, season) — picks up the
-  // per-season basis from the live cache when populated. Falls back
-  // to baseBuyIn × multiplier when the cache has no per-season data
-  // for that BR (legacy single-window scan or static BUY_IN_RATES).
+  // When propertyId + bedrooms are supplied, each month uses
+  // getBuyInRate(..., season, yearMonth) — live monthly medians first,
+  // then per-season basis, then LOW × multiplier / static BUY_IN_RATES.
   propertyId?: number,
   bedrooms?: number,
 ): MonthRate[] {
