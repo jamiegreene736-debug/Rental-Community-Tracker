@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS } from "@shared/buy-in-market";
+import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKETS } from "@shared/buy-in-market";
 import { getBuyInRate, getCommunityRegion, getSeasonForMonth } from "@shared/pricing-rates";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 
@@ -454,9 +454,6 @@ export async function refreshHybridPricingForTarget(args: {
   asOf?: Date;
 }): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const { storage } = await import("./storage");
-  const market = BUY_IN_MARKETS[args.community];
-  const location = BUY_IN_MARKET_LOCATIONS[args.community];
-  const searchName = args.searchName || market?.platformSearch?.airbnb || location?.searchName || market?.searchLocation || args.community;
   const asOf = args.asOf ?? new Date();
   const rows: any[] = [];
   const logs: any[] = [];
@@ -466,127 +463,24 @@ export async function refreshHybridPricingForTarget(args: {
 
   for (const bedrooms of bedroomCounts) {
     const previous = (await storage.getPropertyMarketRates(args.propertyId)).find((r) => r.bedrooms === bedrooms);
-    const monthlyRates: Record<string, HybridMonthlyRate> = {};
-    const allFinalRates: number[] = [];
-    const highRates: number[] = [];
-    const holidayRates: number[] = [];
-    let totalSamples = 0;
-    let lastResult: HybridCalculationResult | null = null;
-    for (let m = 0; m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths; m++) {
-      const { checkIn, checkOut, yearMonth } = hybridPricingWindowForMonth(asOf, m);
-      const airbnb = await fetchAirbnbMedianNightly({
-        community: args.community,
-        bedrooms,
-        checkIn,
-        checkOut,
-        searchName,
-      });
-      totalSamples += airbnb.sampleCount;
-      const waitBeforeNextMonth = async () => {
-        if (m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths - 1) {
-          await sleep(HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs);
-        }
-      };
-      if (airbnb.medianNightly == null) {
-        await waitBeforeNextMonth();
-        continue;
-      }
-      const result = calculateBlendedRate({
-        airbnbMedianNightly: airbnb.medianNightly,
-        checkIn,
-        checkOut,
-        bedrooms,
-        unitCount: args.unitCount,
-        isMultiUnit: args.unitCount > 1,
-        asOf,
-      });
-      lastResult = result;
-      allFinalRates.push(result.finalRate);
-      if (result.demandClass === "high") highRates.push(result.finalRate);
-      if (result.demandClass === "peak" || result.demandClass === "ultra") holidayRates.push(result.finalRate);
-      monthlyRates[yearMonth] = {
-        medianNightly: result.finalRate,
-        season: toLegacySeason(result.demandClass),
-        checkIn,
-        checkOut,
-        channelCount: 1,
-        sampleCount: airbnb.sampleCount,
-        demandClass: result.demandClass,
-        seasonTierId: result.seasonTierId,
-        seasonTierLabel: result.seasonTierLabel,
-        channels: { airbnb: airbnb.medianNightly, vrbo: null, booking: null, pm: null },
-        hybrid: {
-          baseAirbnbMedian: result.baseAirbnbMedian,
-          finalRate: result.finalRate,
-          layers: result.layers,
-          notes: [
-            ...airbnb.notes,
-            `Airbnb median sampled for this ${yearMonth} pricing row from ${checkIn} to ${checkOut}; SearchAPI total checkout price was amortized by ${nightsBetween(checkIn, checkOut)} nights.`,
-            ...result.notes,
-          ],
-        },
-      };
-      await waitBeforeNextMonth();
-    }
-
-    const medianNightly = median(allFinalRates);
-    if (medianNightly == null) {
-      const fallback = staticFallbackMonthlyRates({
-        propertyId: args.propertyId,
-        community: args.community,
-        bedrooms,
-        asOf,
-      });
-      const fallbackValues = Object.values(fallback.monthlyRates).map((rate) => rate.medianNightly);
-      const row = await storage.upsertPropertyMarketRate({
-        propertyId: args.propertyId,
-        bedrooms,
-        medianNightly: String(fallback.low),
-        medianNightlyHigh: String(fallback.high),
-        medianNightlyHoliday: String(fallback.holiday),
-        monthlyRates: fallback.monthlyRates,
-        lowNightly: String(Math.min(...fallbackValues)),
-        highNightly: String(Math.max(...fallbackValues)),
-        sampleCount: 0,
-        source: "static-buy-in-fallback",
-      });
-      rows.push(row);
-      logs.push(await storage.createPricingUpdateLog({
-        propertyId: args.propertyId,
-        propertyName: args.propertyName,
-        bedrooms,
-        triggerType: args.triggerType,
-        oldRate: previous?.medianNightly ?? null,
-        newRate: String(fallback.low),
-        status: "ok",
-        notes: "No usable Airbnb samples returned by SearchAPI; used the operator-maintained static buy-in fallback.",
-        layersJson: [],
-        calendarJson: fallback.monthlyRates,
-      }));
-      console.warn("[hybrid-pricing] used static fallback", JSON.stringify({
-        propertyId: args.propertyId,
-        propertyName: args.propertyName,
-        community: args.community,
-        bedrooms,
-        triggerType: args.triggerType,
-        reason: "no_usable_airbnb_samples",
-        months: Object.keys(fallback.monthlyRates).length,
-        source: "static-buy-in-fallback",
-      }));
-      continue;
-    }
-
+    const fallback = staticFallbackMonthlyRates({
+      propertyId: args.propertyId,
+      community: args.community,
+      bedrooms,
+      asOf,
+    });
+    const fallbackValues = Object.values(fallback.monthlyRates).map((rate) => rate.medianNightly);
     const row = await storage.upsertPropertyMarketRate({
       propertyId: args.propertyId,
       bedrooms,
-      medianNightly: String(medianNightly),
-      medianNightlyHigh: String(median(highRates) ?? medianNightly),
-      medianNightlyHoliday: String(median(holidayRates) ?? median(highRates) ?? medianNightly),
-      monthlyRates,
-      lowNightly: String(Math.min(...allFinalRates)),
-      highNightly: String(Math.max(...allFinalRates)),
-      sampleCount: totalSamples,
-      source: "hybrid-airbnb-layered",
+      medianNightly: String(fallback.low),
+      medianNightlyHigh: String(fallback.high),
+      medianNightlyHoliday: String(fallback.holiday),
+      monthlyRates: fallback.monthlyRates,
+      lowNightly: String(Math.min(...fallbackValues)),
+      highNightly: String(Math.max(...fallbackValues)),
+      sampleCount: 0,
+      source: "static-buy-in",
     });
     rows.push(row);
     logs.push(await storage.createPricingUpdateLog({
@@ -595,30 +489,25 @@ export async function refreshHybridPricingForTarget(args: {
       bedrooms,
       triggerType: args.triggerType,
       oldRate: previous?.medianNightly ?? null,
-      newRate: String(medianNightly),
+      newRate: String(fallback.low),
       status: "ok",
-      notes: args.notes || `Hybrid Airbnb layered pricing refreshed for ${Object.keys(monthlyRates).length} month(s).`,
-      layersJson: lastResult?.layers ?? [],
-      calendarJson: monthlyRates,
+      notes: args.notes || "Static buy-in pricing refreshed. OTA retail samples are telemetry only and are not persisted as cost basis.",
+      layersJson: [],
+      calendarJson: fallback.monthlyRates,
     }));
-    console.info("[hybrid-pricing] applied layered pricing", JSON.stringify({
+    console.info("[hybrid-pricing] applied static buy-in pricing", JSON.stringify({
       propertyId: args.propertyId,
       propertyName: args.propertyName,
       community: args.community,
       bedrooms,
       triggerType: args.triggerType,
-      source: "hybrid-airbnb-layered",
-      months: Object.keys(monthlyRates).length,
-      searchApiSamples: totalSamples,
-      medianNightly,
-      medianNightlyHigh: median(highRates) ?? medianNightly,
-      medianNightlyHoliday: median(holidayRates) ?? median(highRates) ?? medianNightly,
-      lowNightly: Math.min(...allFinalRates),
-      highNightly: Math.max(...allFinalRates),
-      lastBaseAirbnbMedian: lastResult?.baseAirbnbMedian ?? null,
-      lastFinalRate: lastResult?.finalRate ?? null,
-      layers: summarizeHybridLayers(lastResult),
-      sampleMonths: summarizeMonthlyHybridRates(monthlyRates),
+      source: "static-buy-in",
+      months: Object.keys(fallback.monthlyRates).length,
+      medianNightly: fallback.low,
+      medianNightlyHigh: fallback.high,
+      medianNightlyHoliday: fallback.holiday,
+      lowNightly: Math.min(...fallbackValues),
+      highNightly: Math.max(...fallbackValues),
     }));
   }
   return { propertyId: args.propertyId, rows, logs };

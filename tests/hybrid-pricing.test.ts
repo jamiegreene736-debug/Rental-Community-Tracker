@@ -142,10 +142,13 @@ try {
 
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
-  hybridPricingSource.includes("for (let m = 0; m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths; m++)") &&
-    hybridPricingSource.indexOf("for (let m = 0; m < HYBRID_PRICING_CONFIG.scanSettings.horizonMonths; m++)") <
-      hybridPricingSource.indexOf("const airbnb = await fetchAirbnbMedianNightly({"),
-  "hybrid pricing should make one Airbnb SearchAPI request per monthly pricing row",
+  hybridPricingSource.includes('source: "static-buy-in"'),
+  "pricing refresh should persist the static buy-in basis, not Airbnb retail medians",
+);
+assert.ok(
+  hybridPricingSource.indexOf("const fallback = staticFallbackMonthlyRates({") <
+    hybridPricingSource.indexOf('source: "static-buy-in"'),
+  "static seasonal basis should be built before property_market_rates is persisted",
 );
 assert.ok(
   !hybridPricingSource.includes("sampled once"),

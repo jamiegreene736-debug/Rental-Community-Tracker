@@ -2160,7 +2160,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       low: number;
       high: number | null;
       holiday: number | null;
-      basisSource: "optimized-buy-in" | "live-multichannel-median" | "monthly-multichannel-median" | "season-band-multichannel-median" | "hybrid-airbnb-layered" | "airbnb" | "none";
+      basisSource: "static-buy-in" | "optimized-buy-in" | "live-multichannel-median" | "monthly-multichannel-median" | "season-band-multichannel-median" | "hybrid-airbnb-layered" | "airbnb" | "none";
       channelCount: number;
       // LOW-season per-channel breakdown. HIGH/HOLIDAY are persisted
       // as basis numbers, but the compact chip row shows the LOW
@@ -2717,7 +2717,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             low: typeof p.low === "number" ? p.low : 0,
             high: typeof p.high === "number" ? p.high : null,
             holiday: typeof p.holiday === "number" ? p.holiday : null,
-            basisSource: (p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "monthly-multichannel-median" || p.basisSource === "season-band-multichannel-median" || p.basisSource === "hybrid-airbnb-layered" || p.basisSource === "airbnb")
+            basisSource: (p.basisSource === "static-buy-in" || p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "monthly-multichannel-median" || p.basisSource === "season-band-multichannel-median" || p.basisSource === "hybrid-airbnb-layered" || p.basisSource === "airbnb")
               ? p.basisSource
               : "none",
             channelCount: typeof p.channelCount === "number" ? p.channelCount : 0,
@@ -4548,7 +4548,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = SearchAPI Airbnb median adjusted by configured platform blend, season, property complexity, stay-pattern, and lead-time layers. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = operator/static nightly cost. OTA retail samples are telemetry only and do not drive this cost basis.">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
@@ -4569,7 +4569,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   // intended path; an Airbnb-only basis means
                                   // the other channels returned no usable rate.
                                   const isMultichannel = live.source === "live-multichannel-median" || live.source === "season-band-multichannel-median";
-                                  const sourceLabel = isMultichannel
+                                  const sourceLabel = live.source === "static-buy-in"
+                                    ? "operator/static buy-in cost basis"
+                                    : isMultichannel
                                     ? live.source === "season-band-multichannel-median"
                                       ? `hybrid layered median across ${live.sampleCount} channel sample${live.sampleCount === 1 ? "" : "s"}`
                                       : `median across ${live.sampleCount} channel${live.sampleCount === 1 ? "" : "s"}`
@@ -4604,7 +4606,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Runs the hybrid pricing model now: SearchAPI Airbnb medians plus the configured platform blend, season, property complexity, stay pattern, and lead-time layers. Auto-refreshes weekly via the scheduler."
+                                      title="Refreshes the operator/static buy-in basis and pushes marked-up base rates to Guesty. OTA retail samples are telemetry only."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Update Market Rates Now"}
                                 </button>
@@ -4882,7 +4884,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     const holiday = snapshotRow?.holiday
                                       ?? (live && community ? getBuyInRate(community, bedrooms, propertyId, "HOLIDAY") : null);
                                     const basisSource = snapshotRow?.basisSource
-                                      ?? (live?.source === "optimized-buy-in" ? "optimized-buy-in" as const
+                                      ?? (live?.source === "static-buy-in" ? "static-buy-in" as const
+                                        : live?.source === "optimized-buy-in" ? "optimized-buy-in" as const
                                         : live?.source === "live-multichannel-median" ? "live-multichannel-median" as const
                                         : live?.source === "monthly-multichannel-median" ? "monthly-multichannel-median" as const
                                         : live?.source === "season-band-multichannel-median" ? "season-band-multichannel-median" as const
@@ -4912,7 +4915,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           {seasonChip("HIGH", high, "#d97706")}
                                           {seasonChip("HOLIDAY", holiday, "#dc2626")}
                                           <span style={{ marginLeft: "auto", fontSize: 10, color: "#6b7280" }}>
-                                            {basisSource === "optimized-buy-in"
+                                            {basisSource === "static-buy-in"
+                                              ? "LOW = static buy-in cost basis"
+                                              : basisSource === "optimized-buy-in"
                                               ? `LOW = median of ${channelCount} channels`
                                               : basisSource === "monthly-multichannel-median"
                                               ? `LOW = monthly median across ${channelCount} channel samples`
