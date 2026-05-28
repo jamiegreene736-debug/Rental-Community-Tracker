@@ -224,6 +224,31 @@ function median(values: number[]): number | null {
   return Math.round(clean.length % 2 ? clean[mid] : (clean[mid - 1] + clean[mid]) / 2);
 }
 
+function summarizeMonthlyHybridRates(monthlyRates: Record<string, HybridMonthlyRate>) {
+  return Object.entries(monthlyRates)
+    .slice(0, 4)
+    .map(([yearMonth, rate]) => ({
+      yearMonth,
+      checkIn: rate.checkIn,
+      checkOut: rate.checkOut,
+      demandClass: rate.demandClass,
+      seasonTierId: rate.seasonTierId,
+      baseAirbnbMedian: rate.hybrid.baseAirbnbMedian,
+      finalRate: rate.hybrid.finalRate,
+      appliedRules: rate.hybrid.layers.map((layer) => layer.ruleId),
+    }));
+}
+
+function summarizeHybridLayers(result: HybridCalculationResult | null) {
+  return result?.layers.map((layer) => ({
+    layer: layer.layer,
+    ruleId: layer.ruleId,
+    multiplier: layer.multiplier,
+    before: layer.before,
+    after: layer.after,
+  })) ?? [];
+}
+
 function priceNumber(value: unknown): number {
   if (typeof value === "number") return value;
   if (typeof value === "string") return Number.parseFloat(value.replace(/[^0-9.]/g, ""));
@@ -538,6 +563,16 @@ export async function refreshHybridPricingForTarget(args: {
         layersJson: [],
         calendarJson: fallback.monthlyRates,
       }));
+      console.warn("[hybrid-pricing] used static fallback", JSON.stringify({
+        propertyId: args.propertyId,
+        propertyName: args.propertyName,
+        community: args.community,
+        bedrooms,
+        triggerType: args.triggerType,
+        reason: "no_usable_airbnb_samples",
+        months: Object.keys(fallback.monthlyRates).length,
+        source: "static-buy-in-fallback",
+      }));
       continue;
     }
 
@@ -565,6 +600,25 @@ export async function refreshHybridPricingForTarget(args: {
       notes: args.notes || `Hybrid Airbnb layered pricing refreshed for ${Object.keys(monthlyRates).length} month(s).`,
       layersJson: lastResult?.layers ?? [],
       calendarJson: monthlyRates,
+    }));
+    console.info("[hybrid-pricing] applied layered pricing", JSON.stringify({
+      propertyId: args.propertyId,
+      propertyName: args.propertyName,
+      community: args.community,
+      bedrooms,
+      triggerType: args.triggerType,
+      source: "hybrid-airbnb-layered",
+      months: Object.keys(monthlyRates).length,
+      searchApiSamples: totalSamples,
+      medianNightly,
+      medianNightlyHigh: median(highRates) ?? medianNightly,
+      medianNightlyHoliday: median(holidayRates) ?? median(highRates) ?? medianNightly,
+      lowNightly: Math.min(...allFinalRates),
+      highNightly: Math.max(...allFinalRates),
+      lastBaseAirbnbMedian: lastResult?.baseAirbnbMedian ?? null,
+      lastFinalRate: lastResult?.finalRate ?? null,
+      layers: summarizeHybridLayers(lastResult),
+      sampleMonths: summarizeMonthlyHybridRates(monthlyRates),
     }));
   }
   return { propertyId: args.propertyId, rows, logs };

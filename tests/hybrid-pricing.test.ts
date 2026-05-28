@@ -35,6 +35,20 @@ assert.equal(december.seasonTierId, "ultra_holiday");
 assert.equal(december.layers.some((layer) => layer.ruleId === "multi_unit"), true);
 assert.equal(december.finalRate, 939);
 
+const rawAirbnbMedian = 450;
+const layeredPeakRate = calculateBlendedRate({
+  airbnbMedianNightly: rawAirbnbMedian,
+  checkIn: "2026-07-01",
+  checkOut: "2026-07-08",
+  bedrooms: 3,
+  unitCount: 2,
+  asOf: new Date("2026-05-27T00:00:00Z"),
+});
+assert.ok(layeredPeakRate.finalRate > rawAirbnbMedian);
+assert.equal(layeredPeakRate.layers.some((layer) => layer.ruleId === "platform_peak"), true);
+assert.equal(layeredPeakRate.layers.some((layer) => layer.ruleId === "peak_july_fourth"), true);
+assert.equal(layeredPeakRate.layers.some((layer) => layer.ruleId === "multi_unit"), true);
+
 const mayWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 0, 7, () => 0);
 assert.equal(mayWindow.checkIn, "2026-05-29");
 assert.equal(mayWindow.checkOut, "2026-06-05");
