@@ -285,10 +285,12 @@ type PricingRefreshLock = {
   propertyKey: number;
   label: string;
   startedAt: number;
+  cancelGeneration: number;
 };
 
 const PRICING_REFRESH_LOCK_TTL_MS = 4 * 60 * 60 * 1000;
 const pricingRefreshLocks = new Map<number, PricingRefreshLock>();
+const pricingRefreshCancelGenerations = new Map<number, number>();
 
 type BulkPricingItemStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 type BulkPricingJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -735,7 +737,7 @@ function pricingRowsForClient(rows: any[]): Array<{
   });
 }
 
-async function refreshPricingTabMarketRates(propertyId: number, label: string): Promise<{
+async function refreshPricingTabMarketRates(propertyId: number, label: string, cancelGeneration?: number): Promise<{
   pricingResult: { propertyId: number; rows: any[]; logs: any[] };
   guestyPush: Awaited<ReturnType<typeof pushBulkGuestyPricingAfterRefresh>>;
 }> {
@@ -746,6 +748,8 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string): 
       triggerType: "Manual Update",
       notes: "Pricing tab manual refresh from static buy-in cost basis.",
     });
+
+  assertPricingRefreshNotCancelled(propertyId, cancelGeneration);
 
   let guestyPush: Awaited<ReturnType<typeof pushBulkGuestyPricingAfterRefresh>>;
   try {
@@ -1035,6 +1039,7 @@ function claimPricingRefreshLock(
     propertyKey,
     label,
     startedAt: Date.now(),
+    cancelGeneration: pricingRefreshCancelGenerations.get(propertyKey) ?? 0,
   };
   pricingRefreshLocks.set(propertyKey, lock);
   return { claimed: true, lock };
@@ -1046,6 +1051,20 @@ function releasePricingRefreshLock(lock: PricingRefreshLock | null | undefined):
   if (current?.token === lock.token) {
     pricingRefreshLocks.delete(lock.propertyKey);
   }
+}
+
+function releasePricingRefreshLockForProperty(propertyKey: number): boolean {
+  return pricingRefreshLocks.delete(propertyKey);
+}
+
+function requestPricingRefreshCancel(propertyKey: number): void {
+  pricingRefreshCancelGenerations.set(propertyKey, (pricingRefreshCancelGenerations.get(propertyKey) ?? 0) + 1);
+  releasePricingRefreshLockForProperty(propertyKey);
+}
+
+function assertPricingRefreshNotCancelled(propertyKey: number, cancelGeneration: number | null | undefined): void {
+  if ((pricingRefreshCancelGenerations.get(propertyKey) ?? 0) <= (cancelGeneration ?? 0)) return;
+  throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
 }
 
 function isImgBbRateLimit(status: number, body: string): boolean {
@@ -28507,6 +28526,7 @@ Return ONLY compact JSON with this exact shape:
       const { pricingResult, guestyPush } = await refreshPricingTabMarketRates(
         quickPropertyKey,
         String(draft.name || draft.listingTitle || `Draft ${id}`),
+        quickRefreshLock.cancelGeneration,
       );
       setQuickRefreshProgress({
         propertyId: quickPropertyKey,
@@ -28535,17 +28555,19 @@ Return ONLY compact JSON with this exact shape:
         draft: updated,
       });
     } catch (e: any) {
+      const cancelled = e?.cancelled === true;
       setQuickRefreshProgress({
         propertyId: quickPropertyKey,
         startedAt: quickStartedAt,
         phase: "error",
         percent: 100,
-        label: "Static buy-in pricing refresh failed",
-        error: e?.message ?? String(e),
+        label: cancelled ? "Static buy-in pricing refresh cancelled" : "Static buy-in pricing refresh failed",
+        error: cancelled ? "Cancelled by operator" : e?.message ?? String(e),
       });
-      setTimeout(() => clearQuickRefreshProgress(quickPropertyKey), 5 * 60 * 1000);
+      if (cancelled) clearQuickRefreshProgress(quickPropertyKey);
+      else setTimeout(() => clearQuickRefreshProgress(quickPropertyKey), 5 * 60 * 1000);
       releasePricingRefreshLock(quickRefreshLock);
-      return res.status(500).json({ error: e?.message ?? String(e) });
+      return res.status(cancelled ? 409 : 500).json({ error: cancelled ? "Cancelled by operator" : e?.message ?? String(e), cancelled });
     }
     // PR #298: drafts get the same OTA sidecar + per-season scan
     // treatment as static properties. Previously this route only queried
@@ -28871,6 +28893,7 @@ Return ONLY compact JSON with this exact shape:
       const { pricingResult, guestyPush } = await refreshPricingTabMarketRates(
         propertyId,
         `Property ${propertyId}`,
+        quickRefreshLock.cancelGeneration,
       );
       setQuickRefreshProgress({
         propertyId,
@@ -28892,17 +28915,19 @@ Return ONLY compact JSON with this exact shape:
         guestyPush,
       });
     } catch (e: any) {
+      const cancelled = e?.cancelled === true;
       setQuickRefreshProgress({
         propertyId,
         startedAt: quickStartedAt,
         phase: "error",
         percent: 100,
-        label: "Static buy-in pricing refresh failed",
-        error: e?.message ?? String(e),
+        label: cancelled ? "Static buy-in pricing refresh cancelled" : "Static buy-in pricing refresh failed",
+        error: cancelled ? "Cancelled by operator" : e?.message ?? String(e),
       });
-      setTimeout(() => clearQuickRefreshProgress(propertyId), 5 * 60 * 1000);
+      if (cancelled) clearQuickRefreshProgress(propertyId);
+      else setTimeout(() => clearQuickRefreshProgress(propertyId), 5 * 60 * 1000);
       releasePricingRefreshLock(quickRefreshLock);
-      return res.status(500).json({ error: e?.message ?? String(e) });
+      return res.status(cancelled ? 409 : 500).json({ error: cancelled ? "Cancelled by operator" : e?.message ?? String(e), cancelled });
     }
 
     const config = PROPERTY_UNIT_NEEDS[propertyId];
@@ -29851,17 +29876,29 @@ Return ONLY compact JSON with this exact shape:
           ...state,
           phase: "error" as const,
           label: "Refresh tracking interrupted",
-          error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The SearchAPI pricing request likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh market-rate refresh after the server is stable.`,
+          error: `No refresh heartbeat for ${Math.round(heartbeatAgeMs / 1000)}s. The pricing refresh likely stopped during a deploy/restart, computer sleep, or worker interruption. Start a fresh pricing refresh after the server is stable.`,
           lastTickAt: state.lastTickAt,
         };
         setRefreshProgress(interrupted);
         clearRefreshProgress(propertyId);
+        releasePricingRefreshLockForProperty(propertyId);
         res.setHeader("Cache-Control", "no-store");
         return res.json(interrupted);
       }
     }
     res.setHeader("Cache-Control", "no-store");
     return res.json(state);
+  });
+
+  app.post("/api/property/:id/refresh-progress/cancel", async (req, res) => {
+    const propertyId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid id" });
+    const { clearRefreshProgress } = await import("./multichannel-buy-in");
+    const hadLock = pricingRefreshLocks.has(propertyId);
+    requestPricingRefreshCancel(propertyId);
+    clearRefreshProgress(propertyId);
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({ ok: true, propertyId, cancelled: true, lockReleased: hadLock });
   });
 
   // POST /api/pricing/bulk-refresh

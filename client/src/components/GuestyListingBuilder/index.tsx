@@ -2237,7 +2237,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   };
   const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
   const refreshNoticeDismissKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.server-dismissed-at`;
-  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Start a fresh hybrid pricing update when the server is stable.";
+  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Start a fresh pricing update when the server is stable.";
   const [refreshProgress, setRefreshProgress] = useState<MarketRefreshProgress | null>(null);
   const [refreshNotice, setRefreshNotice] = useState<MarketRefreshNotice | null>(null);
   const [pricingUpdateLogs, setPricingUpdateLogs] = useState<PricingUpdateLog[]>([]);
@@ -2294,16 +2294,42 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
   }, [marketRatesRefreshing]);
   const [refreshStartedAt, setRefreshStartedAt] = useState<number | null>(null);
-  // AbortController for the in-flight hybrid pricing fetch. The active
-  // pricing path no longer queues Chrome sidecar work.
+  // AbortController for the in-flight pricing fetch. The server owns
+  // progress/lock state, so cancel also calls the server cleanup endpoint.
   const refreshAbortRef = useRef<AbortController | null>(null);
   const cancelRefresh = useCallback(() => {
+    if (!propertyId) return;
+    const startedAt = refreshProgressRef.current?.startedAt ?? refreshStartedAt ?? Date.now();
     if (refreshAbortRef.current) {
       console.info("[refresh-market-rates] operator cancelled");
       refreshAbortRef.current.abort();
       refreshAbortRef.current = null;
     }
-  }, []);
+    void fetch(`/api/property/${propertyId}/refresh-progress/cancel`, { method: "POST" }).catch(() => undefined);
+    const cancelledNotice: MarketRefreshNotice = {
+      propertyId,
+      status: "error",
+      finishedAt: Date.now(),
+      startedAt,
+      label: "Pricing refresh cancelled",
+      error: "Cancelled by operator",
+    };
+    setRefreshProgress({
+      phase: "error",
+      percent: 100,
+      label: "Pricing refresh cancelled",
+      error: "Cancelled by operator",
+      startedAt,
+    });
+    setRefreshNotice(cancelledNotice);
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(refreshNoticeKeyFor(propertyId), JSON.stringify(cancelledNotice));
+      }
+    } catch {}
+    setRefreshStartedAt(null);
+    setMarketRatesRefreshing(false);
+  }, [propertyId, refreshStartedAt]);
   useEffect(() => {
     handledTerminalProgressRef.current = null;
     missingProgressPollsRef.current = 0;
@@ -2334,7 +2360,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: parsed.status,
           finishedAt: parsed.finishedAt,
           startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : undefined,
-          label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label : "Hybrid pricing update finished",
+          label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label : "Pricing update finished",
           error: typeof parsed.error === "string" ? parsed.error : undefined,
         });
       } else {
@@ -2515,8 +2541,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             finishedAt: Date.now(),
             startedAt: p.startedAt,
             label: p.phase === "error"
-              ? (p.label || "Hybrid pricing update failed")
-              : "Hybrid pricing update finished",
+              ? (p.label || "Pricing update failed")
+              : "Pricing update finished",
             error: p.error,
           });
           if (p.phase === "done") {
@@ -2547,7 +2573,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setMarketRatesRefreshing(true);
     setRefreshNotice(null);
     setRefreshStartedAt(startedAt);
-    setRefreshProgress({ phase: "starting", percent: 1, label: "Running hybrid Airbnb layered pricing…", startedAt });
+    setRefreshProgress({ phase: "starting", percent: 1, label: "Refreshing static buy-in pricing basis…", startedAt });
 
     // Poll progress endpoint while refresh is in flight. Static
     // properties are positive ids; drafts/promoted drafts are negative
@@ -2580,9 +2606,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           transientProgressFailures++;
           const previous = refreshProgressRef.current;
           setRefreshProgress({
-            ...(previous ?? { phase: "starting", percent: 1, label: "Reconnecting to market-rate scan…" }),
+            ...(previous ?? { phase: "starting", percent: 1, label: "Reconnecting to pricing refresh…" }),
             startedAt: previous?.startedAt ?? startedAt,
-            label: "Reconnecting to market-rate scan…",
+            label: "Reconnecting to pricing refresh…",
             error: result.message,
           });
           if (transientProgressFailures >= 20) {
@@ -2600,7 +2626,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             status: "done",
             finishedAt: Date.now(),
             startedAt: p.startedAt ?? startedAt,
-            label: "Hybrid pricing update finished",
+            label: "Pricing update finished",
           });
           return;
         }
@@ -2665,7 +2691,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: "done",
           finishedAt: Date.now(),
           startedAt,
-          label: "Hybrid pricing update finished",
+          label: "Pricing update finished",
         });
         toast({
           duration: Infinity,
@@ -2686,7 +2712,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               >
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              Hybrid layered pricing basis updated
+              Static buy-in pricing basis updated
             </span>
           ),
         });
@@ -2738,7 +2764,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         status: "done",
         finishedAt: Date.now(),
         startedAt,
-        label: "Hybrid pricing update finished",
+        label: "Pricing update finished",
       });
       // Persistent green-check confirmation — only goes away when the
       // user clicks the X (PR #305). Default Radix duration auto-
@@ -2765,30 +2791,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             >
               <polyline points="20 6 9 17 4 12" />
             </svg>
-            Hybrid layered pricing basis updated
+            Static buy-in pricing basis updated
           </span>
         ),
       });
     } catch (e: any) {
-      // AbortError = operator cancelled, distinct copy. The pricing
-      // refresh is SearchAPI-only and does not enqueue Chrome sidecar work.
+      // AbortError = operator cancelled, distinct copy.
       if (e?.name === "AbortError") {
         setRefreshProgress({ phase: "error", percent: 100, label: "Refresh cancelled", error: "Cancelled by operator", startedAt });
         recordRefreshNotice({
           status: "error",
           finishedAt: Date.now(),
           startedAt,
-          label: "Hybrid pricing update cancelled",
+          label: "Pricing update cancelled",
           error: "Cancelled by operator",
         });
-        toast({ title: "Refresh cancelled", description: "Hybrid pricing update was cancelled." });
+        toast({ title: "Refresh cancelled", description: "Pricing update was cancelled." });
       } else {
         setRefreshProgress({ phase: "error", percent: 100, label: "Refresh failed", error: e?.message, startedAt });
         recordRefreshNotice({
           status: "error",
           finishedAt: Date.now(),
           startedAt,
-          label: "Hybrid pricing update failed",
+          label: "Pricing update failed",
           error: e?.message,
         });
         toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
@@ -4541,7 +4566,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </div>
                             </div>
                             {/* Live buy-in summary. One badge per bedroom-count
-                                showing the persisted hybrid Airbnb layered
+                                showing the persisted static/operator buy-in
                                 basis. "fallback" badges mean we haven't
                                 refreshed for that BR yet — the Pricing tab
                                 falls through to BUY_IN_RATES until the
@@ -4573,10 +4598,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     ? "operator/static buy-in cost basis"
                                     : isMultichannel
                                     ? live.source === "season-band-multichannel-median"
-                                      ? `hybrid layered median across ${live.sampleCount} channel sample${live.sampleCount === 1 ? "" : "s"}`
+                                      ? `season-band median across ${live.sampleCount} channel sample${live.sampleCount === 1 ? "" : "s"}`
                                       : `median across ${live.sampleCount} channel${live.sampleCount === 1 ? "" : "s"}`
                                     : live.source === "hybrid-airbnb-layered"
-                                      ? `hybrid Airbnb layered basis across ${live.sampleCount} Airbnb sample${live.sampleCount === 1 ? "" : "s"}`
+                                      ? `layered Airbnb basis across ${live.sampleCount} Airbnb sample${live.sampleCount === 1 ? "" : "s"}`
                                     : live.source === "airbnb"
                                       ? "Airbnb-only channel basis"
                                       : live.source === "monthly-multichannel-median"
@@ -4612,7 +4637,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 </button>
                               </div>
                             )}
-                            {/* Inline progress bar for the SearchAPI-only market-rate refresh. */}
+                            {/* Inline progress bar for the server-owned pricing refresh. */}
                             {marketRatesRefreshing && refreshProgress && (() => {
                               // Computed values for freeze detection.
                               // nowTick is unused-but-referenced so React
@@ -4682,13 +4707,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               return (
                                 <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                                    <span style={{ fontWeight: 500 }}>Scanning Hybrid layered pricing basis…</span>
+                                    <span style={{ fontWeight: 500 }}>Refreshing static buy-in pricing basis…</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{elapsedStr}</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{progressText}</span>
                                     <button
                                       type="button"
                                       onClick={cancelRefresh}
-                                      title="Cancel the in-flight SearchAPI pricing request."
+                                      title="Cancel the in-flight pricing refresh and clear the server lock."
                                       style={{
                                         fontSize: 10,
                                         padding: "1px 6px",
@@ -4743,10 +4768,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   )}
                                   {hasWindowProgress && currentWindow != null && (
                                     <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
-                                      The bar advances as the hybrid pricing request completes. The active pricing flow uses Airbnb SearchAPI data plus configured rate-management layers.
+                                      The bar advances as static buy-in pricing is saved and marked-up Guesty base rates are pushed.
                                     </div>
                                   )}
-                                  {/* Heartbeat row: confirms the server-side SearchAPI request is still updating progress. */}
+                                  {/* Heartbeat row: confirms the server-side pricing request is still updating progress. */}
                                   <div style={{ marginTop: 4, display: "flex", gap: 12, fontSize: 9, opacity: 0.85 }}>
                                     {daemonStatus && <span style={{ color: daemonStatus.color, fontWeight: 500 }}>● {daemonStatus.label}</span>}
                                     {refreshProgress.lastTickAt && (
@@ -4778,7 +4803,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     </div>
                                   )}
                                   <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
-                                    Hybrid Airbnb layered pricing; no VRBO or Booking.com browser sidecar is used for active market-rate updates.
+                                    Static buy-in pricing refresh; OTA retail samples are telemetry only.
                                   </div>
                                 </div>
                               );
@@ -4806,8 +4831,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   <div style={{ marginTop: 2, opacity: 0.82 }}>
                                     {effectiveRefreshNotice.status === "done"
-                                      ? "Hybrid pricing basis has been saved. This notice stays here until you dismiss it."
-                                      : (effectiveRefreshNotice.error || effectiveRefreshNotice.label || "The Hybrid layered pricing refresh did not complete.")}
+                                      ? "Static buy-in pricing basis has been saved. This notice stays here until you dismiss it."
+                                      : (effectiveRefreshNotice.error || effectiveRefreshNotice.label || "The pricing refresh did not complete.")}
                                   </div>
                                   {scannerSchedule?.lastGuestyRatePushAt && (
                                     <div style={{ marginTop: 4, opacity: 0.88 }}>
@@ -4850,7 +4875,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
                                   <span style={{ fontWeight: 600 }}>
-                                    Hybrid Airbnb layered basis
+                                    Static buy-in pricing basis
                                     {liveSnapshot?.region && (
                                       <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
                                         ({liveSnapshot.region})
@@ -4922,9 +4947,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                               : basisSource === "monthly-multichannel-median"
                                               ? `LOW = monthly median across ${channelCount} channel samples`
                                               : basisSource === "hybrid-airbnb-layered"
-                                              ? `Hybrid layered median from Airbnb and ${channelCount} sample${channelCount === 1 ? "" : "s"}`
+                                              ? `Layered median from Airbnb and ${channelCount} sample${channelCount === 1 ? "" : "s"}`
                                               : basisSource === "season-band-multichannel-median"
-                                              ? `LOW = hybrid layered median across ${channelCount} channel samples`
+                                              ? `LOW = season-band median across ${channelCount} channel samples`
                                               : basisSource === "live-multichannel-median"
                                               ? `LOW = median of ${channelCount} channels`
                                               : basisSource === "airbnb"
@@ -4944,7 +4969,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   })}
                                 </div>
                                 <div style={{ marginTop: 6, fontSize: 10, color: "#6b7280" }}>
-                                  Each month uses the persisted 7-night sample for its contiguous season band when available. LOW/HIGH/HOLIDAY chips summarize the saved band samples; missing months still fall back to the previous seasonal/static basis so the table always has a price.
+                                  Each month uses the persisted static buy-in basis and configured seasonal multipliers; OTA retail samples are telemetry only.
                                 </div>
                               </div>
                             )}

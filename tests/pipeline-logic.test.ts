@@ -1078,6 +1078,11 @@ assert.equal(
   "property market pricing should only register one route",
 );
 assert.equal(
+  countLiteral(routeSource, 'app.post("/api/property/:id/refresh-progress/cancel"'),
+  1,
+  "pricing refresh should expose one server-owned cancel route",
+);
+assert.equal(
   countLiteral(routeSource, 'app.post("/api/community/:id/refresh-pricing"'),
   1,
   "draft market pricing should only register one route",
@@ -1101,6 +1106,14 @@ assert.ok(
 assert.ok(
   routeSource.indexOf('label: "Refreshing static buy-in pricing basis"') < routeSource.indexOf('fetchMultiChannelBuyInBySeason({'),
   "pricing-tab refresh route should hit static buy-in pricing before any legacy sidecar season-band code",
+);
+assert.ok(
+  routeSource.includes("releasePricingRefreshLockForProperty(propertyId);"),
+  "stale pricing progress must clear the duplicate-refresh lock",
+);
+assert.ok(
+  builderSource.includes("refresh-progress/cancel"),
+  "Pricing tab Cancel should clear the server progress lock, not only abort the browser fetch",
 );
 assert.equal(
   builderSource.includes("refresh-pricing?mode=banded"),
