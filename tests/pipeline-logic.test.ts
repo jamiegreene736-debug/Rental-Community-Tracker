@@ -1095,6 +1095,24 @@ assert.equal(
 );
 console.log("  ✓ bulk market pricing stays on SearchAPI Airbnb path, not sidecar");
 
+assert.equal(
+  routeSource.includes("/api/builder/push-channel-markups"),
+  false,
+  "bulk/manual Guesty pricing should push marked-up base rates only; Guesty owns channel pricing rules",
+);
+assert.equal(
+  routeSource.includes("computeChannelMarkups"),
+  false,
+  "bulk pricing route should not compute or push per-channel price adjustments",
+);
+const schedulerSource = readFileSync(new URL("../server/availability-scheduler.ts", import.meta.url), "utf8");
+assert.equal(
+  schedulerSource.includes("computeChannelMarkups"),
+  false,
+  "scheduler rate push should not compute or push per-channel price adjustments",
+);
+console.log("  ✓ Guesty pricing pushes marked-up base rates only");
+
 const schemaMaintenanceSource = readFileSync(new URL("../server/schema-maintenance.ts", import.meta.url), "utf8");
 for (const col of ["single_listing", "booking_title", "property_type", "unit1_bathrooms", "unit2_bathrooms"]) {
   assert.ok(

@@ -88,14 +88,12 @@ import {
 import {
   BUY_IN_RATES,
   CHANNEL_HOST_FEE,
-  computeChannelMarkups,
   getCommunityRegion,
   getBuyInRate,
   getSeasonForMonth,
   normalizeSeasonalBasis,
   suggestPricingArea,
   SEASON_MULTIPLIERS,
-  type ChannelKey,
   type SeasonType,
 } from "@shared/pricing-rates";
 import {
@@ -638,7 +636,6 @@ async function pushBulkGuestyPricingAfterRefresh(
   listingId?: string;
   targetMargin?: number;
   seasonal?: any;
-  markups?: any;
 }> {
   const schedule = await storage.getScannerSchedule(propertyId).catch(() => null);
   const configuredMargin = parseTargetMargin(schedule?.targetMargin);
@@ -666,35 +663,17 @@ async function pushBulkGuestyPricingAfterRefresh(
     throw new Error(seasonal?.error || `Guesty seasonal-rate push failed with HTTP ${seasonalResponse.status}`);
   }
 
-  const markups = computeChannelMarkups();
-  const markupPayload = Object.fromEntries(
-    (Object.entries(markups) as Array<[ChannelKey, number]>).filter(([, value]) => value > 0),
-  );
-  let markupResult: any = null;
-  if (Object.keys(markupPayload).length > 0) {
-    const markupResponse = await fetch(`${base}/api/builder/push-channel-markups`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ listingId: plan.listingId, markups: markupPayload }),
-    });
-    markupResult = await markupResponse.json().catch(() => ({}));
-    if (!markupResponse.ok) {
-      throw new Error(markupResult?.error || `Guesty channel-markup push failed with HTTP ${markupResponse.status}`);
-    }
-  }
-
   return {
     skipped: false,
     listingId: plan.listingId,
     targetMargin,
     seasonal,
-    markups: markupResult,
   };
 }
 
 function isGuestyPushSoftFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error || "");
-  return /429|too many requests|rate.?limit|Guesty seasonal-rate push failed|Guesty channel-markup push failed|read-back only matched|stored nothing/i.test(message);
+  return /429|too many requests|rate.?limit|Guesty seasonal-rate push failed|read-back only matched|stored nothing/i.test(message);
 }
 
 async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: string): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
@@ -759,7 +738,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   item.progress = {
     phase: "searchapi-airbnb",
     percent: 80,
-    label: `SearchAPI Airbnb pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing clean-margin pricing to Guesty`,
+    label: `SearchAPI Airbnb pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
     rows: pricingResult.rows.length,
   };
   item.heartbeatAt = Date.now();
@@ -775,7 +754,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
   }
 
-  await topQueueEvent("bulk-pricing", job.id, "item-pushing-guesty", `Pushing clean-margin Guesty pricing for ${item.label}`, {
+  await topQueueEvent("bulk-pricing", job.id, "item-pushing-guesty", `Pushing marked-up Guesty base rates for ${item.label}`, {
     itemKey: item.id,
     meta: { propertyId: item.propertyId },
   });
@@ -817,10 +796,10 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     item.progress = {
       phase: "done",
       percent: 100,
-      label: `Market rates saved and Guesty pricing pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
+      label: `Market rates saved and marked-up Guesty base rates pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
       guestyPush,
     };
-    await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed clean-margin Guesty pricing for ${item.label}`, {
+    await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed marked-up Guesty base rates for ${item.label}`, {
       itemKey: item.id,
       meta: {
         propertyId: item.propertyId,
@@ -14581,179 +14560,6 @@ export async function registerRoutes(
     } catch (e: any) {
       res.status(500).json({ error: "Guesty update failed", message: e.message });
     }
-  });
-
-  // POST /api/builder/push-descriptions
-  // POST /api/builder/push-channel-markups
-  // Sets per-channel price adjustments on a Guesty listing, so the rate the
-  // guest sees on Booking.com / Vrbo / Airbnb is ± X% vs the base rate.
-  // Typically used to offset higher channel host-fees — e.g. +17% on
-  // Booking.com to recover their commission.
-  //
-  // Body: { listingId: string, markups: { airbnb?: number, vrbo?: number, booking?: number, direct?: number } }
-  //   Each markup is a decimal (0.05 = +5%). Negative decreases the rate.
-  //
-  // Guesty's schema for channel markup has drifted — we try a few known paths:
-  //   1. PUT /listings/{id} body { priceMarkup: {airbnb: 0.05, ...} }
-  //   2. PUT /listings/{id} body { integrations: {airbnb2: {priceMarkup: 0.05}, ...} }
-  //   3. PUT /listings/{id} body { channels: {airbnb2: {priceMarkup: 0.05}, ...} }
-  //   4. PUT /listings/{id}/channel-commissions body { channel: "airbnb", markup }
-  // We POST all of them in a single PUT with both shape variants merged so whichever
-  // Guesty cares about gets applied.
-  app.post("/api/builder/push-channel-markups", async (req: Request, res: Response) => {
-    const { listingId, markups } = req.body as {
-      listingId?: string;
-      markups?: Partial<Record<"airbnb" | "vrbo" | "booking" | "direct", number>>;
-    };
-    if (!listingId) return res.status(400).json({ error: "listingId required" });
-    if (!markups || typeof markups !== "object") return res.status(400).json({ error: "markups object required" });
-
-    // Map our logical channel keys to Guesty's integration platform keys.
-    // Confirmed from a real listing read-back on 2026-04-21:
-    //   Airbnb  → airbnb2     (legacy `airbnb` kept as fallback)
-    //   Vrbo    → homeaway2   (Vrbo uses the HomeAway-2 integration slug;
-    //                          `homeaway`/`vrbo` are NOT accepted)
-    //   Booking → bookingCom
-    //   Direct  → no integration record in Guesty — handled via base rate
-    const channelToGuesty: Record<string, string[]> = {
-      airbnb: ["airbnb2", "airbnb"],
-      vrbo: ["homeaway2", "homeaway", "vrbo"],
-      booking: ["bookingCom", "booking"],
-      direct: ["manual", "direct"],
-    };
-
-    // Build PUT body that targets every known shape Guesty might accept
-    const priceMarkupFlat: Record<string, number> = {};
-    const integrationsPatch: Record<string, { priceMarkup?: number; priceAdjustment?: number }> = {};
-    const channelsPatch: Record<string, { priceMarkup?: number }> = {};
-
-    for (const [key, value] of Object.entries(markups)) {
-      if (typeof value !== "number" || isNaN(value)) continue;
-      priceMarkupFlat[key] = value;
-      for (const guestyKey of channelToGuesty[key] ?? [key]) {
-        integrationsPatch[guestyKey] = { priceMarkup: value, priceAdjustment: value };
-        channelsPatch[guestyKey] = { priceMarkup: value };
-      }
-    }
-
-    console.log(`[push-channel-markups] listing ${listingId}`, priceMarkupFlat);
-
-    // Based on inspecting a live Guesty listing:
-    //   - There's a top-level `markups: {}` field. That's the real target.
-    //   - `integrations` is an ARRAY of {platform, ...}, not an object —
-    //     so the old {integrations: {airbnb2: ...}} body was malformed.
-    //   - `useAccountMarkups: true` flag forces Guesty to use account-level
-    //     markups and IGNORE listing-level ones. We must flip it to false
-    //     alongside the markup write or the push is silently thrown away.
-    //
-    // Guesty's exact schema for `markups` isn't documented (at least not
-    // in the Open API reference) so we still try a few candidate shapes
-    // and let the read-back confirm which one Guesty honors.
-    type ShapeAttempt = {
-      shape: string;
-      body: Record<string, unknown>;
-      ok: boolean;
-      error?: string;
-    };
-    const attempts: ShapeAttempt[] = [];
-
-    const tryShape = async (shape: string, body: Record<string, unknown>) => {
-      try {
-        await guestyRequest("PUT", `/listings/${listingId}`, body);
-        attempts.push({ shape, body, ok: true });
-        return true;
-      } catch (e: any) {
-        attempts.push({ shape, body, ok: false, error: e?.message ?? String(e) });
-        return false;
-      }
-    };
-
-    // Helper: snapshot the listing AFTER a push to see what Guesty actually
-    // stored. The UI shows this so the operator knows which field path
-    // (if any) got through.
-    const readbackSaved = async () => {
-      try {
-        const fetched = await guestyRequest("GET", `/listings/${listingId}`) as any;
-        return {
-          markups: fetched?.markups ?? null,
-          useAccountMarkups: fetched?.useAccountMarkups ?? null,
-          priceMarkup: fetched?.priceMarkup ?? null,
-        };
-      } catch (e: any) {
-        return { markups: null, useAccountMarkups: null, priceMarkup: null, readError: e?.message };
-      }
-    };
-
-    // Convert our channel keys to Guesty platform keys for the `markups` body.
-    const markupsByPlatform: Record<string, number> = {};
-    const markupsByPlatformObj: Record<string, { percent: number; active: boolean }> = {};
-    for (const [key, value] of Object.entries(priceMarkupFlat)) {
-      for (const guestyKey of channelToGuesty[key] ?? [key]) {
-        markupsByPlatform[guestyKey] = value;
-        markupsByPlatformObj[guestyKey] = { percent: value * 100, active: true };
-      }
-    }
-
-    // IMPORTANT: always flip useAccountMarkups off — listing-level markups
-    // are ignored when the account-level toggle is true.
-    let anySucceeded = false;
-    if (!anySucceeded && Object.keys(markupsByPlatform).length > 0) {
-      // Shape A: markups: { airbnb2: 0.148, ... } — flat decimals under `markups`
-      anySucceeded = await tryShape("markups-flat-decimal", {
-        useAccountMarkups: false,
-        markups: markupsByPlatform,
-      });
-      if (anySucceeded) {
-        const rb = await readbackSaved();
-        if (rb.markups && typeof rb.markups === "object" && Object.keys(rb.markups).length > 0) {
-          return res.json({ success: true, sent: markups, saved: rb, attempts, storedShape: "markups-flat-decimal" });
-        }
-        // Stored empty again — keep trying other shapes.
-        anySucceeded = false;
-      }
-    }
-    if (!anySucceeded && Object.keys(markupsByPlatformObj).length > 0) {
-      // Shape B: markups: { airbnb2: { percent: 14.8, active: true }, ... }
-      anySucceeded = await tryShape("markups-object-percent", {
-        useAccountMarkups: false,
-        markups: markupsByPlatformObj,
-      });
-      if (anySucceeded) {
-        const rb = await readbackSaved();
-        if (rb.markups && typeof rb.markups === "object" && Object.keys(rb.markups).length > 0) {
-          return res.json({ success: true, sent: markups, saved: rb, attempts, storedShape: "markups-object-percent" });
-        }
-        anySucceeded = false;
-      }
-    }
-    if (!anySucceeded) {
-      // Shape C: legacy priceMarkup flat (old code path — kept as fallback).
-      anySucceeded = await tryShape("priceMarkup-flat", { priceMarkup: priceMarkupFlat });
-      if (anySucceeded) {
-        const rb = await readbackSaved();
-        if (rb.priceMarkup && Object.keys(rb.priceMarkup).length > 0) {
-          return res.json({ success: true, sent: markups, saved: rb, attempts, storedShape: "priceMarkup-flat" });
-        }
-        anySucceeded = false;
-      }
-    }
-
-    // Every attempt "succeeded" at HTTP level but Guesty stored nothing.
-    // Tell the client honestly — they'll need to set markups in the
-    // Guesty UI or at account level since the Open API path isn't honoring
-    // any of the body shapes we've tried for this account.
-    const saved = await readbackSaved();
-    return res.json({
-      success: false,
-      sent: markups,
-      saved,
-      attempts,
-      error:
-        "Guesty accepted each PUT with HTTP 200 but stored nothing. Most likely cause: "
-        + "listing-level channel markups aren't exposed via the Open API on this account. "
-        + "Set them manually in the Guesty UI (Channel Manager → per-channel markup), "
-        + "or we need a real documented field path.",
-    });
   });
 
   // POST /api/builder/resolve-license-requirements — returns mapped jurisdiction
@@ -29805,7 +29611,7 @@ Return ONLY compact JSON with this exact shape:
   //
   // Operator-facing queue for refreshing selected dashboard rows. The queue is
   // intentionally sequential: each item runs the SearchAPI Airbnb hybrid
-  // pricing engine, then pushes the clean-margin Guesty prices before the next
+  // pricing engine, then pushes the marked-up Guesty base prices before the next
   // row starts. Pricing does not acquire the Chrome sidecar lane.
   app.post("/api/pricing/bulk-refresh", async (req, res) => {
     cleanupBulkPricingJobs();

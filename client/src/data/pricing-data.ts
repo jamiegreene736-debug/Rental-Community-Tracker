@@ -2,8 +2,8 @@
 // PRICING DATA — Redesigned Methodology
 // Season Types: LOW / HIGH / HOLIDAY
 // Builder sheet rate = Buy-In Cost with a clean target margin after the
-// Direct/Stripe host fee. OTA channel fee differences are handled separately
-// through channel markups, not baked into the base calendar rate.
+// Direct/Stripe host fee. Guesty handles channel-specific pricing rules after
+// the marked-up base calendar rate is pushed.
 // ─────────────────────────────────────────────────────────────
 
 export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
@@ -40,7 +40,7 @@ export type PropertyPricing = {
 // Some older buy-in views still show the historical split:
 // Sell Rate = Buy-In × (1 + PLATFORM_FEE) × (1 + BUSINESS_MARKUP).
 // The Builder Pricing tab uses `cleanBaseRateFromBuyIn` below instead so
-// "Sheet Rate / Night" matches the clean-margin calendar push.
+// "Sheet Rate / Night" matches the marked-up Guesty calendar push.
 // ─────────────────────────────────────────────────────────────
 
 export const PLATFORM_FEE = 0.15;      // 15% — covers Booking.com / Airbnb guest service fees
@@ -381,7 +381,7 @@ export function calcSellRateFromBuyIn(buyInCost: number): {
 
 // ─────────────────────────────────────────────────────────────
 // SEASONAL RATE REFERENCE — what you'd charge per season for a property
-// Based on community BUY_IN_RATES × season multiplier × clean-margin base rate
+// Based on community BUY_IN_RATES × season multiplier × marked-up base rate
 // ─────────────────────────────────────────────────────────────
 
 export type SeasonalRateRef = {

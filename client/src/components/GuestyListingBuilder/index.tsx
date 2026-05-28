@@ -260,18 +260,21 @@ function guestyListingId(listing: GuestyListing | null | undefined): string {
   return String(listing?._id ?? listing?.id ?? "").trim();
 }
 
+type GuestyMonthlyRate = {
+  avgRate: number;
+  minRate: number;
+  maxRate: number;
+  days: number;
+  source?: "guesty" | "last-push";
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
-// Channel markup push card. Lets the user set a per-channel price uplift
-// (e.g. +17% on Booking.com to recover the commission) and pushes it to
-// Guesty. Guesty's schema for channel markup differs across accounts so
-// the server tries multiple field shapes and reports which one stuck.
-function ChannelMarkupCard({
+// Pushes the marked-up base calendar rates to Guesty. Guesty owns any
+// downstream channel pricing adjustments.
+function GuestyRatePushCard({
   listingId,
   propertyId,
-  markupPct,
-  setMarkupPct,
   seasonalMonths,
-  guestyRatesByMonth,
   applyPushedRates,
   targetMarginPct,
   setTargetMarginPct,
@@ -283,11 +286,7 @@ function ChannelMarkupCard({
 }: {
   listingId: string | null;
   propertyId?: number;
-  // Decimal form: { airbnb: 0.155, vrbo: 0, ... }. Inputs below translate to/from %.
-  markupPct: Record<ChannelKey, number>;
-  setMarkupPct: (m: Record<ChannelKey, number>) => void;
   seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number }>;
-  guestyRatesByMonth: Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>;
   // Called with the per-month rates we just pushed so the parent table
   // shows them instantly, without depending on Guesty's calendar GET
   // catching up (which is eventually-consistent and was returning stale
@@ -302,7 +301,6 @@ function ChannelMarkupCard({
   onGuestyRatePushRecorded?: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [seasonalPushResult, setSeasonalPushResult] = useState<any>(null);
   const [targetMarginInput, setTargetMarginInput] = useState(String(targetMarginPct));
@@ -328,35 +326,9 @@ function ChannelMarkupCard({
     setTargetMarginInput(String(next));
   };
 
-  // Fee-differential markups: make every channel net the same as Direct
-  // after that channel's fee. Result is a FLAT per-channel markup that
-  // doesn't depend on the current Guesty rate or the buy-in — so it
-  // equalizes channels instead of inflating low-season profit.
-  //
-  //   base * (1 + m) * (1 - fee_ch) = base * (1 - fee_direct)
-  //   ⇒ m_ch = (1 - fee_direct) / (1 - fee_ch) - 1
-  //
-  // Pair this with per-month seasonal base rates (below) and every month
-  // × every channel lands at exactly targetMargin%.
-  const computeAutoMarkups = (): Record<ChannelKey, number> => {
-    const feeDirect = CHANNEL_HOST_FEE.direct ?? 0;
-    const result: Record<ChannelKey, number> = { airbnb: 0, vrbo: 0, booking: 0, direct: 0 };
-    for (const ch of ["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]) {
-      const fee = CHANNEL_HOST_FEE[ch] ?? 0;
-      const raw = (1 - feeDirect) / (1 - fee) - 1;
-      // Round UP to the next 0.1% so the resulting margin stays AT or
-      // ABOVE 20% (rounding to nearest occasionally pushed channels
-      // like Vrbo down to ~19.96%, which was enough to flip cells red
-      // even though they mathematically should clear).
-      result[ch] = Math.max(0, Math.ceil(raw * 1000) / 1000);
-    }
-    return result;
-  };
-
-  // Seasonal base-rate plan: what Guesty's calendar SHOULD charge per night
-  // so the Direct channel nets targetMargin% after Stripe's fee. Every
-  // channel with the fee-differential markup above then lands at the same
-  // margin. Returns one rate per month — server expands to daily.
+  // Marked-up base-rate plan: what Guesty's calendar should charge per night
+  // after applying the target margin to the saved buy-in basis. Guesty
+  // handles channel-specific adjustments after this base rate lands.
   const computeSeasonalRates = (): Array<{ yearMonth: string; price: number; buyIn: number }> => {
     const m = targetMarginPct / 100;
     return seasonalMonths
@@ -371,20 +343,7 @@ function ChannelMarkupCard({
       }));
   };
 
-  const autoCalculate = () => {
-    const next = computeAutoMarkups();
-    setMarkupPct(next);
-    setResult(null);
-    setError(null);
-  };
-
-  const autoCalculateAndPush = async () => {
-    const next = computeAutoMarkups();
-    setMarkupPct(next);
-    await pushMarkups(next);
-  };
-
-  const pushSeasonalRates = async () => {
+  const pushMarkedUpRates = async () => {
     if (!listingId) return;
     setBusy(true);
     setError(null);
@@ -421,11 +380,9 @@ function ChannelMarkupCard({
     }
   };
 
-  // One-click: push seasonal base rates AND channel-equalizing markups.
-  // After this, every month × every channel should land at targetMargin%.
   const setUpCleanMargin = async () => {
     // eslint-disable-next-line no-console
-    console.log("[ChannelMarkupCard] setUpCleanMargin clicked", { listingId, seasonalMonths: seasonalMonths.length });
+    console.log("[GuestyRatePushCard] setUpCleanMargin clicked", { listingId, seasonalMonths: seasonalMonths.length });
     if (!listingId) {
       setError("No Guesty listing selected. Pick one in the dropdown at the top of the builder first.");
       return;
@@ -434,69 +391,10 @@ function ChannelMarkupCard({
       setError("No pricing data loaded for this property.");
       return;
     }
-    const markups = computeAutoMarkups();
-    // eslint-disable-next-line no-console
-    console.log("[ChannelMarkupCard] computed markups", markups);
-    setMarkupPct(markups);
     setError(null);
-    await pushSeasonalRates();
-    await pushMarkups(markups);
+    await pushMarkedUpRates();
   };
 
-  const pushMarkups = async (override?: Record<ChannelKey, number>) => {
-    if (!listingId) return;
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    const source = override ?? markupPct;
-    // The server expects decimals (0.155 = +15.5%). We skip channels at 0
-    // so Guesty doesn't reset a previously-set markup we intentionally
-    // wanted to keep — callers pass 0 explicitly when they mean "clear it".
-    const body = {
-      listingId,
-      markups: {
-        airbnb: source.airbnb > 0 ? source.airbnb : undefined,
-        vrbo: source.vrbo > 0 ? source.vrbo : undefined,
-        booking: source.booking > 0 ? source.booking : undefined,
-        direct: source.direct > 0 ? source.direct : undefined,
-      },
-    };
-    try {
-      const r = await fetch("/api/builder/push-channel-markups", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-      setResult(data);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const updateChannel = (ch: ChannelKey, input: string) => {
-    const n = parseFloat(input);
-    setMarkupPct({ ...markupPct, [ch]: isNaN(n) ? 0 : n / 100 });
-  };
-
-  // Show live "would-push" markup % per channel in the inputs (0 renders empty)
-  const asInput = (v: number) => (v > 0 ? (v * 100).toFixed(1) : "");
-
-  // Preview the auto-calc so the user can see what it WOULD set before clicking.
-  const autoPreview = useMemo(() => computeAutoMarkups(), [seasonalMonths, guestyRatesByMonth]);
-  const anyGapExists = (Object.keys(autoPreview) as ChannelKey[]).some((ch) => autoPreview[ch] > (markupPct[ch] ?? 0));
-
-  const channelRows: Array<{ key: ChannelKey; label: string }> = [
-    { key: "airbnb",  label: "Airbnb" },
-    { key: "vrbo",    label: "Vrbo" },
-    { key: "booking", label: "Booking.com" },
-    { key: "direct",  label: "Direct" },
-  ];
-
-  // Preview the seasonal base rates for the banner / summary.
   const seasonalPlan = useMemo(() => computeSeasonalRates(), [seasonalMonths, targetMarginPct]);
   const seasonalPriceRange = seasonalPlan.length > 0
     ? { min: Math.min(...seasonalPlan.map((p) => p.price)), max: Math.max(...seasonalPlan.map((p) => p.price)) }
@@ -505,13 +403,11 @@ function ChannelMarkupCard({
   return (
     <div style={{ marginTop: 20, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
-        💵 Clean-margin pricing — seasonal base rates + channel markups
+        💵 Guesty rate push — marked-up base calendar rates
       </div>
       <p style={{ fontSize: 11, color: "#6b7280", marginBottom: 12, maxWidth: 760 }}>
-        Two things together deliver a steady margin across all 24 months:
-        (1) Guesty's <b>base calendar rate scales with season</b> so low months aren't wildly over-profitable,
-        (2) each channel's <b>markup covers only its fee differential vs Direct</b>. Click the one-click button
-        below and Guesty will end up with the same target margin on every month × every channel.
+        Pushes the <b>buy-in cost plus target margin</b> to Guesty's base calendar rate for each month.
+        Guesty will apply its channel pricing rules after this base rate is stored.
       </p>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <label style={{ fontSize: 11, color: "#6b7280" }}>
@@ -537,7 +433,7 @@ function ChannelMarkupCard({
         )}
         {seasonalPriceRange && (
           <span style={{ fontSize: 11, color: "#6b7280" }}>
-            Seasonal base rates will range <b>${seasonalPriceRange.min.toLocaleString()}</b>–<b>${seasonalPriceRange.max.toLocaleString()}</b> per night.
+            Marked-up Guesty rates will range <b>${seasonalPriceRange.min.toLocaleString()}</b>–<b>${seasonalPriceRange.max.toLocaleString()}</b> per night.
           </span>
         )}
         {lastGuestyRatePushAt && (
@@ -547,38 +443,9 @@ function ChannelMarkupCard({
           </span>
         )}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 10 }}>
-        {channelRows.map(({ key, label }) => {
-          const needed = autoPreview[key];
-          const current = markupPct[key] ?? 0;
-          const shortfall = needed > current + 1e-6;
-          return (
-            <label key={key} style={{ fontSize: 11, color: "#6b7280" }}>
-              {label}
-              {" "}
-              <span style={{ color: "#9ca3af" }}>({(CHANNEL_HOST_FEE[key] * 100).toFixed(1)}% fee)</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
-                <input
-                  type="number"
-                  step="0.5"
-                  value={asInput(current)}
-                  onChange={(e) => updateChannel(key, e.target.value)}
-                  placeholder="0"
-                  style={{ padding: "4px 8px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: "100%" }}
-                  data-testid={`input-markup-${key}`}
-                />
-                <span style={{ fontSize: 11, color: "#6b7280" }}>%</span>
-              </div>
-              <div style={{ fontSize: 10, marginTop: 2, color: shortfall ? "#b45309" : "#6b7280" }}>
-                fee-differential vs Direct: <b>{(needed * 100).toFixed(1)}%</b>
-              </div>
-            </label>
-          );
-        })}
-      </div>
       {!listingId && (
         <div style={{ marginBottom: 10, padding: "8px 12px", background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 4, fontSize: 11, color: "#92400e" }}>
-          ⚠ <b>Select a Guesty listing</b> in the dropdown at the top of the builder before pushing rates or markups. None of the push buttons will work until a listing is selected.
+          ⚠ <b>Select a Guesty listing</b> in the dropdown at the top of the builder before pushing rates.
         </div>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -588,38 +455,9 @@ function ChannelMarkupCard({
           disabled={busy || !listingId || seasonalMonths.length === 0}
           style={{ fontSize: 12 }}
           data-testid="button-set-up-clean-margin"
-          title={!listingId ? "Select a Guesty listing in the dropdown at the top of the builder first" : "Push seasonal base rates AND channel-equalizing markups so every month × every channel nets the target margin"}
+          title={!listingId ? "Select a Guesty listing in the dropdown at the top of the builder first" : "Push marked-up monthly base calendar rates to Guesty"}
         >
-          {busy ? "Pushing…" : `⚡⬆ Set up clean ${targetMarginPct}% margin pricing`}
-        </button>
-        <button
-          className="glb-btn"
-          onClick={autoCalculate}
-          disabled={busy || seasonalMonths.length === 0}
-          style={{ fontSize: 12 }}
-          data-testid="button-auto-calc-markups"
-          title="Fill in fee-differential markups only (doesn't push, doesn't change base rates)"
-        >
-          ⚡ Auto-fill markups only
-        </button>
-        <button
-          className="glb-btn"
-          onClick={pushSeasonalRates}
-          disabled={busy || !listingId || seasonalMonths.length === 0}
-          style={{ fontSize: 12 }}
-          data-testid="button-push-seasonal-rates"
-          title="Push only the per-month base calendar rates to Guesty (skip markups)"
-        >
-          🗓 Push seasonal rates only
-        </button>
-        <button
-          className="glb-btn"
-          onClick={() => pushMarkups()}
-          disabled={busy || !listingId}
-          style={{ fontSize: 12 }}
-          data-testid="button-push-channel-markups"
-        >
-          ⬆ Push markups only
+          {busy ? "Pushing…" : `⬆ Push marked-up ${targetMarginPct}% rates to Guesty`}
         </button>
       </div>
       {error && (
@@ -630,7 +468,7 @@ function ChannelMarkupCard({
       {seasonalPushResult && (
         <div style={{ marginTop: 10, padding: 8, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 4, fontSize: 11 }}>
           <div style={{ fontWeight: 600, color: "#166534", marginBottom: 4 }}>
-            ✓ Seasonal base rates pushed —{" "}
+            ✓ Marked-up Guesty rates pushed —{" "}
             <b>{seasonalPushResult.pushedDays}</b> days in{" "}
             <b>{seasonalPushResult.pushedRanges}</b> ranges;{" "}
             <b>{seasonalPushResult.verifiedDays}</b> verified against Guesty read-back.
@@ -643,8 +481,8 @@ function ChannelMarkupCard({
             const maxP = Math.max(...prices);
             return (
               <div style={{ fontSize: 11, color: "#166534" }}>
-                New rates: <b>${minP.toLocaleString()}/night</b> (low season) → <b>${maxP.toLocaleString()}/night</b> (high season).
-                {" "}If the table above still shows the old rate, hard-refresh the page (Cmd/Ctrl + Shift + R).
+                Pushed rates: <b>${minP.toLocaleString()}/night</b> (low season) → <b>${maxP.toLocaleString()}/night</b> (high season).
+                {" "}The table above now reflects this Guesty push.
               </div>
             );
           })()}
@@ -657,7 +495,7 @@ function ChannelMarkupCard({
                 {seasonalPushResult.plan.map((p: any) => (
                   <div key={p.yearMonth} style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
                     <span>{p.yearMonth}</span>
-                    <span>buy-in ${p.buyIn.toLocaleString()} → base ${p.price.toLocaleString()}</span>
+                    <span>buy-in ${p.buyIn.toLocaleString()} → Guesty ${p.price.toLocaleString()}</span>
                   </div>
                 ))}
               </div>
@@ -665,83 +503,6 @@ function ChannelMarkupCard({
           )}
         </div>
       )}
-      {result && (() => {
-        const r = result as any;
-        // Read the various shapes we inspect for stored values.
-        const savedMarkups = r?.saved?.markups ?? {};
-        const savedInt = r?.saved?.integrations ?? {};
-        const savedFlat = r?.saved?.priceMarkup ?? {};
-        const useAcct = r?.saved?.useAccountMarkups;
-
-        type Row = { label: string; keys: string[]; flat: string };
-        const rows: Row[] = [
-          { label: "Airbnb",     keys: ["airbnb2", "airbnb"],      flat: "airbnb" },
-          { label: "Vrbo",       keys: ["homeaway2", "homeaway", "vrbo"], flat: "vrbo" },
-          { label: "Booking.com",keys: ["bookingCom", "booking"],  flat: "booking" },
-          { label: "Direct",     keys: ["manual", "direct"],       flat: "direct" },
-        ];
-        const resolveValue = (row: Row): number | null => {
-          // Check `markups` object-with-percent shape first (0-100 scale)
-          for (const k of row.keys) {
-            const m = savedMarkups?.[k];
-            if (m && typeof m.percent === "number") return m.percent / 100;
-            if (typeof m === "number") return m;
-          }
-          // Then legacy integrations/priceMarkup
-          for (const k of row.keys) {
-            const v = savedInt?.[k]?.priceMarkup;
-            if (typeof v === "number") return v;
-          }
-          const flat = savedFlat?.[row.flat];
-          return typeof flat === "number" ? flat : null;
-        };
-        const anyStored = rows.some((row) => resolveValue(row) != null);
-        const apiAccepted = r?.success === true || (r?.attempts ?? []).some((a: any) => a.ok);
-        // "accepted but empty" — Guesty returned HTTP 200 on the PUT but
-        // read-back shows no stored values anywhere. This is the silent
-        // failure mode that makes push look successful in the toast but
-        // doesn't actually change anything on the channel.
-        const silentlyDiscarded = apiAccepted && !anyStored;
-
-        return (
-          <div style={{ marginTop: 10, fontSize: 11 }}>
-            {silentlyDiscarded ? (
-              <div style={{ padding: 10, background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 4 }}>
-                <div style={{ fontWeight: 600, color: "#92400e", marginBottom: 4 }}>
-                  ⚠ Guesty returned HTTP 200 but stored NO markup — Open API can't set channel markups on this account.
-                </div>
-                <div style={{ fontSize: 11, color: "#92400e", lineHeight: 1.5 }}>
-                  {useAcct === true && <>Detected <code>useAccountMarkups: true</code> — listing-level markups are disabled. </>}
-                  Set the per-channel markup manually in Guesty: <b>Channel Manager → each channel → Price adjustment</b>. The seasonal base rates we pushed to the calendar work correctly regardless; only the per-channel uplift needs to be configured on the Guesty side.
-                </div>
-              </div>
-            ) : (
-              <div style={{ padding: 8, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 4 }}>
-                <div style={{ fontWeight: 600, color: "#166534", marginBottom: 4 }}>
-                  ✓ Guesty accepted the push — verified channel-side:
-                </div>
-                {rows.map((row) => {
-                  const value = resolveValue(row);
-                  return (
-                    <div key={row.label} style={{ fontSize: 11, color: value != null ? "#166534" : "#6b7280" }}>
-                      {value != null ? "✓" : "—"} {row.label}:{" "}
-                      {value != null ? <b>+{(value * 100).toFixed(1)}% stored</b> : <span>not set / not sent</span>}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            <details style={{ marginTop: 6 }}>
-              <summary style={{ cursor: "pointer", color: silentlyDiscarded ? "#92400e" : "#166534", fontWeight: 600 }}>
-                Raw response (shapes tried, what stuck)
-              </summary>
-              <pre style={{ marginTop: 6, padding: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 10, overflow: "auto", maxHeight: 260 }}>
-                {JSON.stringify(result, null, 2)}
-              </pre>
-            </details>
-          </div>
-        );
-      })()}
     </div>
   );
 }
@@ -3073,11 +2834,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [dismissedServerRefreshAt, latestServerMarketRateNotice, refreshNotice]);
 
   // ── Guesty-confirmed monthly rates + channel-aware profit floor ──
-  // Fetches what Guesty is ACTUALLY charging per month so we can compare
-  // against our pricing sheet at a glance. Also surfaces the minimum rate
-  // needed to hit 20% margin given the selected channel's host fee.
-  const [selectedChannel, setSelectedChannel] = useState<ChannelKey>("airbnb");
-  const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }>>({});
+  // Fetches what Guesty is charging per month so we can compare against
+  // our pricing sheet at a glance. The table also overlays the latest
+  // verified push recorded by the server so a just-run queue update is
+  // visible immediately, even if Guesty's calendar read endpoint lags.
+  const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, GuestyMonthlyRate>>({});
   const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
   const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
   // Merge the per-month rates we just pushed to Guesty directly into the
@@ -3089,17 +2850,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       for (const { yearMonth, price } of plan) {
         const [y, m] = yearMonth.split("-").map(Number);
         const daysInMonth = new Date(y, m, 0).getDate();
-        next[yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth };
+        next[yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth, source: "last-push" };
       }
       return next;
     });
   };
-  // Per-channel markup (decimal form: 0.155 = +15.5%). Hoisted from
-  // ChannelMarkupCard so the profit columns in the pricing table can
-  // reflect the uplift in real time — not just after it's been pushed.
-  const [markupPct, setMarkupPct] = useState<Record<ChannelKey, number>>({
-    airbnb: 0, vrbo: 0, booking: 0, direct: 0,
-  });
   const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
   const pricingMarginTarget = isSingleListing ? targetMarginPct / 100 : MIN_PROFIT_MARGIN;
   const [scannerSchedule, setScannerSchedule] = useState<ScannerScheduleSnapshot | null>(null);
@@ -3142,37 +2897,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return () => window.clearTimeout(timer);
   }, [propertyId, isSingleListing, targetMarginPct]);
 
-  // Hydrate markupPct from Guesty so saved values survive navigation.
-  useEffect(() => {
-    if (!selectedId) return;
-    let cancelled = false;
-    fetch(`/api/guesty-proxy/listings/${selectedId}`)
-      .then((r) => r.json())
-      .then((data: any) => {
-        if (cancelled) return;
-        const m = (data?.markups ?? {}) as Record<string, any>;
-        const asDecimal = (platformKeys: string[]): number => {
-          for (const k of platformKeys) {
-            const v = m[k];
-            if (!v) continue;
-            if (typeof v === "number" && v > 0) return v <= 1 ? v : v / 100;
-            if (typeof v === "object" && typeof v.percent === "number" && v.percent > 0) {
-              return v.percent / 100;
-            }
-          }
-          return 0;
-        };
-        setMarkupPct({
-          airbnb:  asDecimal(["airbnb2", "airbnb"]),
-          vrbo:    asDecimal(["homeaway2", "homeaway", "vrbo"]),
-          booking: asDecimal(["bookingCom", "booking"]),
-          direct:  asDecimal(["manual", "direct"]),
-        });
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [selectedId]);
-
   useEffect(() => {
     if (!propertyId) return;
     let cancelled = false;
@@ -3190,9 +2914,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       })
       .then((data: any) => {
         if (cancelled) return;
-        const byMonth: Record<string, { avgRate: number; minRate: number; maxRate: number; days: number }> = {};
+        const byMonth: Record<string, GuestyMonthlyRate> = {};
         for (const m of data.months ?? []) {
-          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days };
+          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days, source: "guesty" };
         }
         setGuestyRatesByMonth(byMonth);
       })
@@ -3204,6 +2928,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       });
     return () => { cancelled = true; };
   }, [propertyId, selectedId]);
+
+  const latestPushedGuestyRatesByMonth = useMemo<Record<string, GuestyMonthlyRate>>(() => {
+    if (!scannerSchedule?.lastGuestyRatePushAt || scannerSchedule.lastGuestyRatePushStatus === "error") return {};
+    const pushMs = Date.parse(scannerSchedule.lastGuestyRatePushAt);
+    if (!Number.isFinite(pushMs)) return {};
+    if (latestServerMarketRateNotice?.finishedAt && pushMs + 1000 < latestServerMarketRateNotice.finishedAt) {
+      return {};
+    }
+    const next: Record<string, GuestyMonthlyRate> = {};
+    for (const row of seasonalMonths) {
+      if (row.totalBuyIn <= 0) continue;
+      const [y, m] = row.yearMonth.split("-").map(Number);
+      const daysInMonth = new Date(y, m, 0).getDate();
+      const price = cleanBaseRateFromBuyIn(row.totalBuyIn, pricingMarginTarget);
+      next[row.yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth, source: "last-push" };
+    }
+    return next;
+  }, [
+    scannerSchedule?.lastGuestyRatePushAt,
+    scannerSchedule?.lastGuestyRatePushStatus,
+    latestServerMarketRateNotice?.finishedAt,
+    seasonalMonths,
+    pricingMarginTarget,
+  ]);
+
+  const displayGuestyRatesByMonth = useMemo<Record<string, GuestyMonthlyRate>>(() => {
+    if (Object.keys(latestPushedGuestyRatesByMonth).length === 0) return guestyRatesByMonth;
+    return { ...guestyRatesByMonth, ...latestPushedGuestyRatesByMonth };
+  }, [guestyRatesByMonth, latestPushedGuestyRatesByMonth]);
 
   // ── Market comparables ─────────────────────────────────────────────────
   // Per-season distribution of area rates for properties with the SAME
@@ -4719,7 +4472,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     seasonal rates" has been run yet. */}
                                 {(() => {
                                   const total = seasonalMonths.length;
-                                  const synced = seasonalMonths.filter((r) => !!guestyRatesByMonth[r.yearMonth]).length;
+                                  const synced = seasonalMonths.filter((r) => !!displayGuestyRatesByMonth[r.yearMonth]).length;
                                   if (guestyRatesLoading) return <span style={{ color: "#9ca3af" }}>Loading Guesty rates…</span>;
                                   if (guestyRatesError) return <span style={{ color: "#dc2626" }} title={guestyRatesError}>Guesty rates unavailable</span>;
                                   if (total === 0) return null;
@@ -4729,7 +4482,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   const fg = allSynced ? "#166534" : noneSynced ? "#991b1b" : "#92400e";
                                   return (
                                     <span style={{ background: bg, color: fg, padding: "3px 8px", borderRadius: 4, fontWeight: 600 }}>
-                                      {allSynced ? "✓" : noneSynced ? "✗" : "⚠"} {synced} / {total} months in Guesty
+                                      {allSynced ? "✓" : noneSynced ? "✗" : "⚠"} {synced} / {total} months pushed to Guesty
                                     </span>
                                   );
                                 })()}
@@ -5287,7 +5040,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <th>Guesty Base / Night</th>
                                   <th>Market Position</th>
                                   <th colSpan={4} style={{ textAlign: "center", borderLeft: "1px solid #e5e7eb" }}>
-                                    Guest Sell Rate + Net Profit per Channel — {(pricingMarginTarget * 100).toFixed(0)}% floor target
+                                    Estimated Channel Sell Rate + Net Profit — Guesty handles channel rules
                                   </th>
                                 </tr>
                                 <tr>
@@ -5309,18 +5062,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </thead>
                               <tbody>
                                 {seasonalMonths.map((row) => {
-                                  const guesty = guestyRatesByMonth[row.yearMonth];
+                                  const guesty = displayGuestyRatesByMonth[row.yearMonth];
                                   const sheet = row.totalSell;
                                   const buyIn = row.totalBuyIn;
-                                  // For each channel, compute what the host actually nets
-                                  // at the current Guesty rate, and whether it meets the active floor.
+                                  // Guesty now owns channel-level pricing adjustments. For
+                                  // display, estimate the sell rate each channel needs to
+                                  // clear the margin floor after its host fee.
                                   const channelCells = (["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]).map((ch) => {
-                                    if (!guesty) return { ch, sellRate: null, profit: null, margin: null, ok: null, min: minProfitableRate(buyIn, ch, pricingMarginTarget), mk: 0 };
-                                    // Apply per-channel markup — what the guest actually pays
-                                    // on this channel is Guesty base rate * (1 + markup).
-                                    // Host then nets that * (1 - channel fee).
-                                    const mk = markupPct[ch] ?? 0;
-                                    const channelRate = guesty.avgRate * (1 + mk);
+                                    const min = minProfitableRate(buyIn, ch, pricingMarginTarget);
+                                    if (!guesty) return { ch, sellRate: null, profit: null, margin: null, ok: null, min };
+                                    const channelRate = ch === "direct"
+                                      ? guesty.avgRate
+                                      : Math.max(guesty.avgRate, min);
                                     const netGross = netPayoutAfterChannelFee(channelRate, ch);
                                     // Compute margin from the UN-rounded profit, then round
                                     // profit only for display. Rounding first made cells with
@@ -5333,7 +5086,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     // 0.5bp tolerance so 19.9995% rounds up to "clears the
                                     // floor" instead of flipping cells red on dust.
                                     const ok = margin >= pricingMarginTarget - 0.0005;
-                                    return { ch, sellRate: Math.round(channelRate), profit, margin, ok, min: minProfitableRate(buyIn, ch, pricingMarginTarget), mk };
+                                    return { ch, sellRate: Math.round(channelRate), profit, margin, ok, min };
                                   });
                                   return (
                                     <tr key={row.yearMonth}>
@@ -5366,9 +5119,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                             )}
                                             <div
                                               style={{ display: "inline-block", marginTop: 2, background: "#dcfce7", color: "#166534", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
-                                              title={`Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
+                                              title={guesty.source === "last-push"
+                                                ? `Most recent verified Guesty push set ${guesty.days} day${guesty.days === 1 ? "" : "s"} for this month.`
+                                                : `Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
                                             >
-                                              ✓ in Guesty
+                                              {guesty.source === "last-push" ? "✓ pushed to Guesty" : "✓ in Guesty"}
                                             </div>
                                           </>
                                         ) : (
@@ -5376,7 +5131,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                             <span style={{ color: "#9ca3af" }}>—</span>
                                             <div
                                               style={{ display: "inline-block", marginTop: 2, background: "#fee2e2", color: "#991b1b", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
-                                              title="No rate published to Guesty's calendar for this month. Click 'Push seasonal rates' below to populate."
+                                              title="No rate published to Guesty's calendar for this month. Click the Guesty rate push button below to populate."
                                             >
                                               ✗ not synced
                                             </div>
@@ -5478,11 +5233,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         }
                                         const bg = c.ok ? "#dcfce7" : "#fee2e2";
                                         const textColor = c.ok ? "#166534" : "#991b1b";
-                                        const mkPct = (c.mk * 100).toFixed(1);
                                         const hoverText =
-                                          `Guest-facing ${c.ch} sell rate: $${c.sellRate!.toLocaleString()}/night.`
-                                          + ` Guesty base rate: $${guesty!.avgRate.toLocaleString()}/night.`
-                                          + (c.mk > 0 ? ` Channel markup: +${mkPct}%.` : " No channel markup.")
+                                          `Estimated ${c.ch} sell rate after Guesty's channel rules: $${c.sellRate!.toLocaleString()}/night.`
+                                          + ` Pushed Guesty base rate: $${guesty!.avgRate.toLocaleString()}/night.`
                                           + ` Floor to hit ${(pricingMarginTarget * 100).toFixed(0)}% on ${c.ch}: $${c.min.toLocaleString()}/night.`
                                           + ` Estimated net profit: $${c.profit.toLocaleString()} (${(c.margin! * 100).toFixed(0)}%).`;
                                         return (
@@ -5507,7 +5260,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                             </div>
                                             <div style={{ fontSize: 9, fontWeight: 400, opacity: 0.75 }}>
                                               base ${guesty!.avgRate.toLocaleString()} · floor ${c.min.toLocaleString()}
-                                              {c.mk > 0 && <> · <b>+{mkPct}%</b> mk</>}
                                             </div>
                                           </td>
                                         );
@@ -5518,9 +5270,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </tbody>
                             </table>
                             <div style={{ marginTop: 10, fontSize: 11, color: "#6b7280", lineHeight: 1.5 }}>
-                              <b>Legend.</b> <b>Guesty Base</b> is the calendar rate stored in Guesty. Each channel cell starts with the <b>guest-facing sell rate</b> after that channel's markup, then the estimated net profit after that channel's host fee.
+                              <b>Legend.</b> <b>Guesty Base</b> is the marked-up calendar rate pushed to Guesty. Guesty handles channel pricing rules after this base rate is stored. Channel cells show the estimated sell rate needed to clear that channel's host fee.
                               <span style={{ background: "#dcfce7", color: "#166534", padding: "0 4px", borderRadius: 3, marginLeft: 4 }}>Green</span> = clears {(pricingMarginTarget * 100).toFixed(0)}% floor.
-                              {" "}<span style={{ background: "#fee2e2", color: "#991b1b", padding: "0 4px", borderRadius: 3 }}>Red</span> = below floor on that channel — <b>raise the rate or add a channel markup</b>.
+                              {" "}<span style={{ background: "#fee2e2", color: "#991b1b", padding: "0 4px", borderRadius: 3 }}>Red</span> = below floor on that channel — <b>raise the marked-up Guesty rate</b>.
                               {" "}<b>Floor</b> is the minimum guest sell rate needed on that channel. Hover a cell for the full breakdown.
                             </div>
                           </>
@@ -5529,15 +5281,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     : <div className="glb-empty">No pricing data</div>
                 )}
 
-                {/* ── Channel markup push card ───────────────────────────── */}
+                {/* ── Guesty rate push card ──────────────────────────────── */}
                 {activeTab === "pricing" && (
-                  <ChannelMarkupCard
+                  <GuestyRatePushCard
                     listingId={selectedId}
                     propertyId={propertyId}
-                    markupPct={markupPct}
-                    setMarkupPct={setMarkupPct}
                     seasonalMonths={seasonalMonths}
-                    guestyRatesByMonth={guestyRatesByMonth}
                     applyPushedRates={applyPushedRates}
                     targetMarginPct={targetMarginPct}
                     setTargetMarginPct={setTargetMarginPct}
