@@ -6349,6 +6349,79 @@ export async function registerRoutes(
     }
   });
 
+  function oceanfrontComparableBuyInMarket(community: string | null | undefined): boolean {
+    const key = String(community ?? "").toLowerCase();
+    return /\b(oceanfront|beachfront|brennecke|poipu kai)\b/.test(key);
+  }
+
+  function twoUnitReplacementPlans(preferredBedrooms: number[]): number[][] {
+    const total = preferredBedrooms.reduce((sum, n) => sum + (Number.isFinite(n) ? n : 0), 0);
+    if (total <= 0) return [];
+    const plans: number[][] = [];
+    const seen = new Set<string>();
+    const add = (plan: number[]) => {
+      if (plan.length !== 2 || plan.some((n) => !Number.isFinite(n) || n <= 0)) return;
+      if (plan.reduce((sum, n) => sum + n, 0) !== total) return;
+      const normalized = [...plan].sort((a, b) => b - a);
+      const key = normalized.join("+");
+      if (seen.has(key)) return;
+      seen.add(key);
+      plans.push(normalized);
+    };
+
+    add(preferredBedrooms);
+    const minLegBedrooms = total >= 4 ? 2 : 1;
+    for (let high = total - minLegBedrooms; high >= Math.ceil(total / 2); high--) {
+      add([high, total - high]);
+    }
+    return plans;
+  }
+
+  function uniqueReplacementBedrooms(plans: number[][]): number[] {
+    return Array.from(new Set(plans.flat())).sort((a, b) => b - a);
+  }
+
+  function replacementPlanPasses(plan: number[], countsByBedroom: Record<string, number>, minPerLeg: number): boolean {
+    const required = new Map<number, number>();
+    for (const bedrooms of plan) required.set(bedrooms, (required.get(bedrooms) ?? 0) + 1);
+    for (const [bedrooms, count] of Array.from(required.entries())) {
+      if ((countsByBedroom[String(bedrooms)] ?? 0) < Math.max(count, minPerLeg)) return false;
+    }
+    return true;
+  }
+
+  function airbnbScoutRowQualifiesForBedroom(p: any, bedrooms: number, bounds: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number } | undefined): boolean {
+    const listedBedrooms = Number(p?.bedrooms ?? p?.bedroom_count ?? p?.bedrooms_count);
+    if (Number.isFinite(listedBedrooms) && Math.round(listedBedrooms) !== bedrooms) return false;
+    if (bounds) {
+      const lat = Number(p?.gps_coordinates?.latitude ?? p?.gpsCoordinates?.latitude);
+      const lng = Number(p?.gps_coordinates?.longitude ?? p?.gpsCoordinates?.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        if (lat < bounds.sw_lat || lat > bounds.ne_lat || lng < bounds.sw_lng || lng > bounds.ne_lng) return false;
+      }
+    }
+    const text = `${p?.property_type ?? ""} ${p?.room_type ?? ""} ${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`.toLowerCase();
+    if (/\b(villa|estate|single[- ]family|detached|private home|mansion)\b/.test(text)) return false;
+    return true;
+  }
+
+  function flattenScoutSamplesForPlan(samplesByBedroom: Record<string, any[]>, plan: number[] | null): any[] {
+    const bedrooms = plan?.length ? plan : uniqueReplacementBedrooms(Object.keys(samplesByBedroom).map(Number).filter(Number.isFinite).map((n) => [n]));
+    const samples: any[] = [];
+    for (const bedroomCount of bedrooms) {
+      const bedroomSamples = samplesByBedroom[String(bedroomCount)] ?? [];
+      samples.push(...bedroomSamples.slice(0, Math.max(1, bedrooms.filter((n) => n === bedroomCount).length)));
+    }
+    return samples.slice(0, 6);
+  }
+
+  function formatBedroomCounts(countsByBedroom: Record<string, number>): string {
+    const entries = Object.entries(countsByBedroom)
+      .sort(([a], [b]) => Number(b) - Number(a))
+      .map(([bedrooms, count]) => `${bedrooms}BR=${count}`);
+    return entries.length ? entries.join(", ") : "no qualifying rows";
+  }
+
   app.post("/api/operations/alternative-buy-in-scout", async (req, res) => {
     try {
       const apiKey = process.env.SEARCHAPI_API_KEY;
@@ -6363,63 +6436,109 @@ export async function registerRoutes(
       if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
         return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
       }
-      const baseCommunity = requestedCommunity || PROPERTY_UNIT_NEEDS[propertyId]?.community || "Poipu Kai";
+      const propertyConfig = PROPERTY_UNIT_NEEDS[propertyId];
+      const baseCommunity = requestedCommunity || propertyConfig?.community || "Poipu Kai";
+      const sourceRequiresOceanfront = oceanfrontComparableBuyInMarket(baseCommunity);
       const similar = (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
+        .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community))
         .slice(0, 5);
-      const minAirbnbResults = Math.max(2, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "4"), 10) || 4));
+      const replacementPlans = twoUnitReplacementPlans(propertyConfig?.units?.map((unit) => unit.bedrooms) ?? [bedrooms]);
+      const minAirbnbResults = Math.max(1, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "1"), 10) || 1));
       const results = await Promise.all(similar.map(async (community) => {
         const loc = BUY_IN_MARKET_LOCATIONS[community];
+        const bounds = BUY_IN_MARKET_BOUNDS[community];
         const terms = BUY_IN_MARKET_PLATFORM_SEARCH_TERMS[community] ?? {};
         const q = terms.airbnb ?? loc?.searchName ?? searchLocationForBuyInMarket(community) ?? community;
-        const params: Record<string, string> = {
-          engine: "airbnb",
-          q,
-          check_in_date: checkIn,
-          check_out_date: checkOut,
-          adults: "2",
-          bedrooms: String(bedrooms),
-          type_of_place: "entire_home",
-          currency: "USD",
-          api_key: apiKey,
-        };
-        if (loc) {
-          params.lat = String(loc.lat);
-          params.lng = String(loc.lng);
-        }
         const startedAt = Date.now();
         try {
-          const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
-          if (!response.ok) {
-            return { community, searchTerm: q, status: "error", count: 0, raw: 0, recommended: false, reason: `SearchAPI HTTP ${response.status}`, durationMs: Date.now() - startedAt, samples: [] };
+          const countsByBedroom: Record<string, number> = {};
+          const samplesByBedroom: Record<string, any[]> = {};
+          const errors: string[] = [];
+
+          for (const bedroomCount of uniqueReplacementBedrooms(replacementPlans)) {
+            const params: Record<string, string> = {
+              engine: "airbnb",
+              q,
+              check_in_date: checkIn,
+              check_out_date: checkOut,
+              adults: "2",
+              bedrooms: String(bedroomCount),
+              type_of_place: "entire_home",
+              currency: "USD",
+              api_key: apiKey,
+            };
+            if (bounds) {
+              params.bounding_box = `[[${bounds.ne_lat},${bounds.ne_lng}],[${bounds.sw_lat},${bounds.sw_lng}]]`;
+            } else if (loc) {
+              params.lat = String(loc.lat);
+              params.lng = String(loc.lng);
+            }
+
+            const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
+            if (!response.ok) {
+              errors.push(`${bedroomCount}BR SearchAPI HTTP ${response.status}`);
+              countsByBedroom[String(bedroomCount)] = 0;
+              samplesByBedroom[String(bedroomCount)] = [];
+              continue;
+            }
+            const data = await response.json() as any;
+            const rows = Array.isArray(data?.properties) ? data.properties : [];
+            const qualifyingRows = rows.filter((p: any) => airbnbScoutRowQualifiesForBedroom(p, bedroomCount, bounds));
+            countsByBedroom[String(bedroomCount)] = qualifyingRows.length;
+            samplesByBedroom[String(bedroomCount)] = qualifyingRows.slice(0, 5).map((p: any) => ({
+              title: String(p?.name ?? p?.title ?? `${community} Airbnb`).slice(0, 140),
+              url: String(p?.link ?? p?.url ?? (p?.id ? `https://www.airbnb.com/rooms/${p.id}` : "")),
+              image: String(p?.images?.[0] ?? p?.thumbnail ?? p?.picture_url ?? ""),
+              totalPrice: Number(p?.price?.total?.extracted_value ?? p?.price?.extracted_total_price ?? p?.total_price?.extracted_value ?? p?.price?.extracted_value ?? 0) || null,
+              sourceLabel: "Airbnb scout",
+              bedrooms: bedroomCount,
+            }));
           }
-          const data = await response.json() as any;
-          const rows = Array.isArray(data?.properties) ? data.properties : [];
-          const samples = rows.slice(0, 5).map((p: any) => ({
-            title: String(p?.name ?? p?.title ?? `${community} Airbnb`).slice(0, 140),
-            url: String(p?.link ?? p?.url ?? (p?.id ? `https://www.airbnb.com/rooms/${p.id}` : "")),
-            image: String(p?.images?.[0] ?? p?.thumbnail ?? p?.picture_url ?? ""),
-            totalPrice: Number(p?.price?.total?.extracted_value ?? p?.total_price?.extracted_value ?? p?.price?.extracted_value ?? 0) || null,
-            sourceLabel: "Airbnb scout",
-          }));
+
+          const passingPlans = replacementPlans.filter((plan) => replacementPlanPasses(plan, countsByBedroom, minAirbnbResults));
+          const bestPlan = passingPlans[0] ?? null;
+          const maxPlanCount = Math.max(0, ...Object.values(countsByBedroom));
+          const samples = flattenScoutSamplesForPlan(samplesByBedroom, bestPlan ?? replacementPlans[0]);
           return {
             community,
             searchTerm: q,
-            status: "ok",
-            count: rows.length,
-            raw: rows.length,
-            recommended: rows.length >= minAirbnbResults,
-            reason: rows.length >= minAirbnbResults
-              ? `${rows.length} Airbnb result(s) visible; full sidecar search recommended.`
-              : `${rows.length} Airbnb result(s), below ${minAirbnbResults} threshold.`,
+            status: errors.length === replacementPlans.length ? "error" : "ok",
+            count: maxPlanCount,
+            raw: Object.values(countsByBedroom).reduce((sum, count) => sum + count, 0),
+            recommended: passingPlans.length > 0,
+            reason: passingPlans.length > 0
+              ? `Airbnb scout passed ${bestPlan!.join("+")}BR replacement proof (${formatBedroomCounts(countsByBedroom)}).`
+              : `Airbnb scout could not prove a complete replacement combo (${replacementPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")}; ${formatBedroomCounts(countsByBedroom)}).`,
+            countsByBedroom,
+            passingPlans,
+            replacementPlans,
+            oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
+            errors,
             durationMs: Date.now() - startedAt,
             samples,
           };
         } catch (err: any) {
-          return { community, searchTerm: q, status: "error", count: 0, raw: 0, recommended: false, reason: err?.message ?? String(err), durationMs: Date.now() - startedAt, samples: [] };
+          return {
+            community,
+            searchTerm: q,
+            status: "error",
+            count: 0,
+            raw: 0,
+            recommended: false,
+            reason: err?.message ?? String(err),
+            countsByBedroom: {},
+            passingPlans: [],
+            replacementPlans,
+            oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
+            errors: [err?.message ?? String(err)],
+            durationMs: Date.now() - startedAt,
+            samples: [],
+          };
         }
       }));
       results.sort((a, b) => Number(b.recommended) - Number(a.recommended) || b.count - a.count);
+      const recommended = results.filter((r) => r.recommended);
       return res.json({
         propertyId,
         baseCommunity,
@@ -6427,8 +6546,11 @@ export async function registerRoutes(
         checkIn,
         checkOut,
         threshold: minAirbnbResults,
-        results,
-        recommended: results.filter((r) => r.recommended),
+        requiresOceanfrontComparable: sourceRequiresOceanfront,
+        replacementPlans,
+        results: recommended,
+        recommended,
+        rejected: results.filter((r) => !r.recommended),
         generatedAt: new Date().toISOString(),
       });
     } catch (err: any) {

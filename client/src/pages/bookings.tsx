@@ -307,6 +307,11 @@ type AlternativeScoutResult = {
   raw: number;
   recommended: boolean;
   reason: string;
+  countsByBedroom?: Record<string, number>;
+  passingPlans?: number[][];
+  replacementPlans?: number[][];
+  oceanfrontComparable?: boolean;
+  errors?: string[];
   durationMs?: number;
   samples: AlternativeScoutSample[];
 };
@@ -318,8 +323,11 @@ type AlternativeScoutResponse = {
   checkIn: string;
   checkOut: string;
   threshold: number;
+  requiresOceanfrontComparable?: boolean;
+  replacementPlans?: number[][];
   results: AlternativeScoutResult[];
   recommended: AlternativeScoutResult[];
+  rejected?: AlternativeScoutResult[];
   generatedAt: string;
 };
 
@@ -1835,14 +1843,22 @@ function AlternativeBuyInWorkflowPanel({
   const sidecarResults = workflow?.sidecarResults ?? {};
   const communities = workflow?.scout?.results ?? [];
   const hasSidecarCandidate = Object.values(sidecarResults).some((result) => (result.cheapest?.length ?? 0) > 0);
+  const replacementPlanText = workflow?.scout?.replacementPlans?.length
+    ? workflow.scout.replacementPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")
+    : null;
   return (
     <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-950">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="font-semibold">Alternative buy-in workflow</p>
           <p className="text-[11px] opacity-80">
-            Scout nearby communities with SearchAPI Airbnb first, then run the full sidecar search for promising options.
+            Scout nearby communities with SearchAPI Airbnb first, then run the full sidecar search for communities that prove a complete replacement combo.
           </p>
+          {replacementPlanText && (
+            <p className="mt-0.5 text-[11px] opacity-80">
+              Airbnb proof required: {replacementPlanText}{workflow?.scout?.requiresOceanfrontComparable ? " · oceanfront comparable only" : ""}
+            </p>
+          )}
         </div>
         <Button size="sm" variant="outline" className="h-7 bg-white" onClick={onScout} disabled={active === "scouting"}>
           {active === "scouting" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
@@ -1860,7 +1876,7 @@ function AlternativeBuyInWorkflowPanel({
                   <div>
                     <p className="font-semibold">{result.community}</p>
                     <p className="text-[11px] text-muted-foreground">
-                      Airbnb scout: {result.count} result{result.count === 1 ? "" : "s"} · {result.recommended ? "recommended" : "below threshold"}
+                      Airbnb scout: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} passed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
                     </p>
                     <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.reason}</p>
                   </div>
@@ -5516,7 +5532,7 @@ export default function Bookings() {
         checkIn,
         checkOut,
         community: PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? reservation.slots.find((slot) => slot.community)?.community ?? undefined,
-        minAirbnbResults: advice.score >= 85 ? 3 : 4,
+        minAirbnbResults: 1,
       }).then((r) => r.json()) as AlternativeScoutResponse;
       updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
       toast({
