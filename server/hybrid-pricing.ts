@@ -4,6 +4,7 @@ import path from "node:path";
 import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS } from "@shared/buy-in-market";
 import { getCommunityRegion, getSeasonForMonth, pickRandom7NightInSeason, type SeasonKey } from "@shared/pricing-rates";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
+import { extractBedroomsFromListing, fetchAmortizedNightlyByBR } from "./community-research";
 
 export type HybridDemandClass = "standard" | "high" | "peak" | "ultra";
 export type HybridTriggerType = "Weekly Automated Scan" | "Manual Update" | "Admin Backfill";
@@ -257,17 +258,22 @@ function priceNumber(value: unknown): number {
   return NaN;
 }
 
-function extractBedrooms(candidate: any): number | null {
-  if (typeof candidate?.bedrooms === "number" && Number.isFinite(candidate.bedrooms)) return candidate.bedrooms;
-  const text = [
-    candidate?.name,
-    candidate?.title,
-    candidate?.description,
-    candidate?.snippet,
-    candidate?.subtitle,
-  ].filter(Boolean).join(" ");
-  const match = text.match(/\b(\d+)\s*(?:br|bed|bedroom|bedrooms)\b/i);
-  return match ? Number(match[1]) : null;
+function nightlyRateFromListing(candidate: any, nights: number): number | null {
+  const perQualifier = Math.round(priceNumber(candidate?.price?.extracted_price_per_qualifier));
+  if (perQualifier > 0) return perQualifier;
+  const total = Math.round(priceNumber(candidate?.price?.extracted_total_price));
+  if (total > 0) return Math.round(total / nights);
+  return null;
+}
+
+function listingMatchesBedrooms(candidate: any, bedrooms: number): boolean {
+  const parsed = typeof candidate?.bedrooms === "number" && Number.isFinite(candidate.bedrooms)
+    ? candidate.bedrooms
+    : extractBedroomsFromListing(candidate);
+  // SearchAPI already filters by bedrooms= — when the engine omits BR in the
+  // payload, trust the query rather than dropping every priced listing.
+  if (Number.isNaN(parsed)) return true;
+  return parsed === bedrooms;
 }
 
 export function isSearchApiAirbnbNoResultsError(error: unknown): boolean {
@@ -302,6 +308,7 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
   apiKey: string;
   nights: number;
 }): Promise<{ rates: number[]; noResultsError: string | null }> {
+  const location = BUY_IN_MARKET_LOCATIONS[args.community];
   const bounds = BUY_IN_MARKET_BOUNDS[args.community];
   const params: Record<string, string> = {
     engine: "airbnb",
@@ -314,7 +321,13 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
     currency: "USD",
     api_key: args.apiKey,
   };
-  if (bounds) {
+  if (location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) {
+    const halfDeg = 0.02;
+    params.sw_lat = String(location.lat - halfDeg);
+    params.sw_lng = String(location.lng - halfDeg);
+    params.ne_lat = String(location.lat + halfDeg);
+    params.ne_lng = String(location.lng + halfDeg);
+  } else if (bounds) {
     params.bounding_box = `[[${bounds.ne_lat},${bounds.ne_lng}],[${bounds.sw_lat},${bounds.sw_lng}]]`;
   }
   const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
@@ -329,11 +342,10 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
   }
   const rates: number[] = [];
   for (const candidate of Array.isArray(data?.properties) ? data.properties : []) {
-    const total = Math.round(priceNumber(candidate?.price?.extracted_total_price));
-    if (!(total > 0)) continue;
-    const parsedBedrooms = extractBedrooms(candidate);
-    if (parsedBedrooms != null && parsedBedrooms !== args.bedrooms) continue;
-    rates.push(Math.round(total / args.nights));
+    if (!listingMatchesBedrooms(candidate, args.bedrooms)) continue;
+    const nightly = nightlyRateFromListing(candidate, args.nights);
+    if (nightly == null || nightly < 50 || nightly > 3000) continue;
+    rates.push(nightly);
   }
   return { rates, noResultsError: null };
 }
@@ -377,6 +389,34 @@ export async function fetchAirbnbMedianNightly(args: {
       };
     }
     notes.push(`q="${query}" returned 0 usable exact-${args.bedrooms}BR priced samples`);
+  }
+
+  const location = BUY_IN_MARKET_LOCATIONS[args.community];
+  if (location) {
+    const amortized = await fetchAmortizedNightlyByBR(
+      location.searchName,
+      location.city,
+      location.state,
+      location.streetAddress,
+      { lat: location.lat, lng: location.lng },
+      { checkIn: args.checkIn, checkOut: args.checkOut },
+      { bedrooms: args.bedrooms, bboxScale: 2 },
+    );
+    const brRates = amortized.ratesByBR[args.bedrooms] ?? [];
+    if (brRates.length > 0) {
+      return {
+        medianNightly: median(brRates),
+        sampleCount: brRates.length,
+        notes: [
+          `SearchAPI amortized path returned ${brRates.length} exact-${args.bedrooms}BR sample(s) for ${location.searchName}.`,
+        ],
+      };
+    }
+    if (amortized.drops?.engineCount) {
+      notes.push(
+        `amortized geo fallback saw ${amortized.drops.engineCount} engine listing(s) but 0 priced ${args.bedrooms}BR`,
+      );
+    }
   }
 
   if (lastNoResults) {
@@ -514,24 +554,28 @@ export async function refreshHybridPricingForTarget(args: {
     let lastResult: HybridCalculationResult | null = null;
 
     for (const season of ["LOW", "HIGH", "HOLIDAY"] as const) {
-      // Cap lookahead at 10 months — hybridPricingWindowForSeason walks the full
-      // 24-month config horizon and can land on 2028+ dates with zero Airbnb inventory.
-      const sampled = pickRandom7NightInSeason(pricingRegion, season as SeasonKey, 10);
-      if (!sampled) {
+      let airbnb: Awaited<ReturnType<typeof fetchAirbnbMedianNightly>> | null = null;
+      let window = { checkIn: "", checkOut: "" };
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const sampled = pickRandom7NightInSeason(pricingRegion, season as SeasonKey, 10);
+        if (!sampled) break;
+        window = { checkIn: sampled.checkIn, checkOut: sampled.checkOut };
+        airbnb = await fetchAirbnbMedianNightly({
+          community: args.community,
+          bedrooms,
+          checkIn: window.checkIn,
+          checkOut: window.checkOut,
+          searchName,
+        });
+        if (airbnb.medianNightly != null) break;
+      }
+      if (!window.checkIn) {
         await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
         throw new Error(
           `No eligible ${season} 7-night Airbnb pricing window exists within 10 months for ${searchName}`,
         );
       }
-      const window = { checkIn: sampled.checkIn, checkOut: sampled.checkOut };
-      const airbnb = await fetchAirbnbMedianNightly({
-        community: args.community,
-        bedrooms,
-        checkIn: window.checkIn,
-        checkOut: window.checkOut,
-        searchName,
-      });
-      if (airbnb.medianNightly == null) {
+      if (!airbnb || airbnb.medianNightly == null) {
         await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
         throw new Error(
           `SearchAPI Airbnb returned no usable exact-${bedrooms}BR ${season} samples for ${searchName} ` +

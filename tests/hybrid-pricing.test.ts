@@ -166,8 +166,8 @@ try {
     checkIn: "2026-06-01",
     checkOut: "2026-06-08",
   });
-  assert.equal(poipuMedian.medianNightly, 450);
-  assert.equal(poipuMedian.sampleCount, 2);
+  assert.equal(poipuMedian.medianNightly, 250);
+  assert.equal(poipuMedian.sampleCount, 3);
   assert.equal(requestedSearchApiUrls.length, 1);
   const params = new URL(requestedSearchApiUrls[0]).searchParams;
   assert.equal(params.get("engine"), "airbnb");
@@ -187,6 +187,10 @@ assert.ok(
 assert.ok(
   hybridPricingSource.includes("pickRandom7NightInSeason(pricingRegion, season as SeasonKey, 10)"),
   "market-rate refresh should sample a random 7-night Airbnb window per season within 10 months",
+);
+assert.ok(
+  hybridPricingSource.includes("fetchAmortizedNightlyByBR("),
+  "market-rate refresh should fall back to the amortized geo Airbnb path when direct queries are empty",
 );
 assert.equal(
   hybridPricingSource.includes("staticFallbackMonthlyRates"),
