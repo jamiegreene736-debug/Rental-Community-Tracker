@@ -26,13 +26,27 @@ import { syncScannerBlocksForProperty } from "./sync-scanner-blocks";
 import { HYBRID_PRICING_CONFIG, runHybridPricingForAllProperties } from "./hybrid-pricing";
 
 const TICK_MS = 10 * 60 * 1000; // every 10 min
+const DAILY_POLICY_TIME_ZONE = "America/New_York";
+const DAILY_POLICY_HOUR = 1;
 
 let _timer: NodeJS.Timeout | null = null;
 let _lastTickAt: Date | null = null;
 let _tickRunning = false;
+let _dailyPolicyRunning = false;
+let _lastDailyPolicyDate: string | null = null;
 
 export function getScannerSchedulerStatus() {
-  return { lastTickAt: _lastTickAt, running: _tickRunning, seasonalQueue: getSeasonalAvailabilityQueueStatus() };
+  return {
+    lastTickAt: _lastTickAt,
+    running: _tickRunning,
+    dailyPolicy: {
+      timeZone: DAILY_POLICY_TIME_ZONE,
+      hour: DAILY_POLICY_HOUR,
+      running: _dailyPolicyRunning,
+      lastRunDate: _lastDailyPolicyDate,
+    },
+    seasonalQueue: getSeasonalAvailabilityQueueStatus(),
+  };
 }
 
 export function getAvailabilitySchedulerUnsupportedReason(propertyId: number): string | null {
@@ -300,10 +314,91 @@ async function maybeRefreshMarketRates() {
   }
 }
 
+function easternNowParts(now = new Date()): { dateKey: string; hour: number } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: DAILY_POLICY_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return {
+    dateKey: `${get("year")}-${get("month")}-${get("day")}`,
+    hour: Number(get("hour")),
+  };
+}
+
+async function maybeRunDailyPolicySync() {
+  if (_dailyPolicyRunning) return;
+  const { dateKey, hour } = easternNowParts();
+  if (hour !== DAILY_POLICY_HOUR) return;
+  if (_lastDailyPolicyDate === dateKey) return;
+  _dailyPolicyRunning = true;
+  try {
+    const mappings = await storage.getGuestyPropertyMap();
+    let ok = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const mapping of mappings) {
+      if (mapping.propertyId <= 0) {
+        skipped++;
+        continue;
+      }
+      const startedAt = Date.now();
+      try {
+        const summary = await runFullScanForProperty(mapping.propertyId, {
+          minSets: 3,
+          targetMargin: 0.2,
+          runInventory: true,
+          runPricing: false,
+          runSyncBlocks: true,
+        });
+        const status: "ok" | "skipped" = summary.startsWith(SKIP_PREFIX) ? "skipped" : "ok";
+        if (status === "ok") ok++;
+        else skipped++;
+        await storage.markScannerScheduleRan(mapping.propertyId, status, summary).catch(() => {});
+        await storage.recordScannerRun({
+          propertyId: mapping.propertyId,
+          status,
+          summary,
+          durationMs: Date.now() - startedAt,
+          trigger: "scheduled",
+        }).catch(() => {});
+        console.log(`[availability-scheduler] daily policy property ${mapping.propertyId} ${status} · ${summary}`);
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      } catch (e: any) {
+        failed++;
+        const msg = e?.message ?? String(e);
+        await storage.markScannerScheduleRan(mapping.propertyId, "error", msg.slice(0, 200)).catch(() => {});
+        await storage.recordScannerRun({
+          propertyId: mapping.propertyId,
+          status: "error",
+          summary: msg.slice(0, 200),
+          durationMs: Date.now() - startedAt,
+          trigger: "scheduled",
+        }).catch(() => {});
+        console.error(`[availability-scheduler] daily policy property ${mapping.propertyId} FAILED: ${msg}`);
+      }
+    }
+    _lastDailyPolicyDate = dateKey;
+    console.log(`[availability-scheduler] daily policy sync complete for ${dateKey}: ${ok} ok, ${skipped} skipped, ${failed} failed`);
+  } finally {
+    _dailyPolicyRunning = false;
+  }
+}
+
 export function startAvailabilityScheduler() {
   // First tick after 2 minutes so server startup has time to settle.
   setTimeout(() => { tick().catch(() => {}); }, 2 * 60 * 1000);
   _timer = setInterval(() => { tick().catch(() => {}); }, TICK_MS);
+  // Daily policy-only safety pass around 1 AM Eastern. This advances the
+  // rolling lead-time blackout window every day even if a per-property
+  // scheduler row was manually disabled or lastRunAt was shifted by a
+  // manual action. Pricing remains on its separate cadence.
+  setTimeout(() => { maybeRunDailyPolicySync().catch(() => {}); }, 3 * 60 * 1000);
+  setInterval(() => { maybeRunDailyPolicySync().catch(() => {}); }, TICK_MS);
   // Hybrid market-rates run on their own weekly/configurable cadence.
   // Checked every tick but no-op until the interval has elapsed. First check
   // is delayed 5 minutes so the initial availability tick finishes
