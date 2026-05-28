@@ -48,6 +48,16 @@ assert.equal(lateJuneWindow.yearMonth, "2026-06");
 assert.equal(lateJuneWindow.checkIn, "2026-06-24");
 assert.equal(lateJuneWindow.checkOut, "2026-07-01");
 
+const julyPeakWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 2, 7, () => 0);
+assert.equal(julyPeakWindow.yearMonth, "2026-07");
+assert.equal(julyPeakWindow.checkIn, "2026-07-01");
+assert.equal(julyPeakWindow.checkOut, "2026-07-08");
+
+const decemberHolidayWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 7, 7, () => 0);
+assert.equal(decemberHolidayWindow.yearMonth, "2026-12");
+assert.equal(decemberHolidayWindow.checkIn, "2026-12-15");
+assert.equal(decemberHolidayWindow.checkOut, "2026-12-22");
+
 assert.equal(isSearchApiAirbnbNoResultsError("SearchAPI Airbnb: Airbnb didn't return any results."), true);
 
 const originalFetch = globalThis.fetch;

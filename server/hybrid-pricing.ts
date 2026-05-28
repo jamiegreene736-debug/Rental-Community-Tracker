@@ -316,6 +316,15 @@ function randomIntInclusive(min: number, max: number, rng: () => number): number
   return min + Math.floor(rng() * (max - min + 1));
 }
 
+function demandRank(demandClass: HybridDemandClass): number {
+  switch (demandClass) {
+    case "ultra": return 3;
+    case "peak": return 2;
+    case "high": return 1;
+    case "standard": return 0;
+  }
+}
+
 export function hybridPricingWindowForMonth(
   asOf: Date,
   monthOffset: number,
@@ -333,7 +342,15 @@ export function hybridPricingWindowForMonth(
   const firstEligibleMs = firstEligibleDate.getTime();
   const latestCheckInMs = latestCheckInDate.getTime();
   const spanDays = Math.max(0, Math.floor((latestCheckInMs - firstEligibleMs) / MS_PER_DAY));
-  const checkInDate = addDays(firstEligibleDate, randomIntInclusive(0, spanDays, rng));
+  const candidates: Array<{ date: Date; rank: number }> = [];
+  for (let offset = 0; offset <= spanDays; offset += 1) {
+    const date = addDays(firstEligibleDate, offset);
+    candidates.push({ date, rank: demandRank(resolveSeasonTier(dateOnly(date)).demandClass) });
+  }
+  const bestRank = candidates.reduce((max, candidate) => Math.max(max, candidate.rank), 0);
+  const bestCandidates = candidates.filter((candidate) => candidate.rank === bestRank);
+  const chosen = bestCandidates[randomIntInclusive(0, bestCandidates.length - 1, rng)] ?? candidates[0];
+  const checkInDate = chosen.date;
   const checkIn = dateOnly(checkInDate);
   return {
     yearMonth: dateOnly(start).slice(0, 7),
