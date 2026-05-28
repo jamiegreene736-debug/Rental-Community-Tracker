@@ -23,6 +23,7 @@ import {
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
 import { syncScannerBlocksForProperty } from "./sync-scanner-blocks";
+import { HYBRID_PRICING_CONFIG, runHybridPricingForAllProperties } from "./hybrid-pricing";
 
 const TICK_MS = 10 * 60 * 1000; // every 10 min
 
@@ -241,21 +242,11 @@ async function tick() {
   }
 }
 
-// Monthly market-rate refresh. Calls the in-process
-// /api/admin/refresh-all-market-rates endpoint, which walks every
-// active static property in PROPERTY_UNIT_NEEDS plus every saved
-// community draft and re-runs the sidecar-backed monthly website-
-// search lookup. Result is one upserted row per (propertyId,
-// bedrooms) in `property_market_rates` — the cost-basis that the
-// Pricing tab feeds into the per-channel floor formula
-// `(buyIn × 1.20) ÷ (1 − channel_fee)`.
-//
-// Cadence: once per 30 days. The sidecar serializes all browser work
-// through one Chrome instance; monthly is the right balance between
-// freshness and queue contention. Operators who need a faster refresh
-// can hit `/api/property/:id/refresh-market-rates` directly from the
-// Pricing tab.
-const MARKET_RATE_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000;
+// Weekly hybrid market-rate refresh. This no longer talks to the local
+// Chrome sidecar. It pulls Airbnb medians through SearchAPI, applies the
+// config-driven layered pricing model, and stores both the 24-month calendar
+// and an audit log row for each property/BR basis.
+const MARKET_RATE_INTERVAL_MS = Math.max(1, HYBRID_PRICING_CONFIG.scanSettings.intervalHours) * 60 * 60 * 1000;
 let _marketRateRefreshRunning = false;
 
 // PR #300: persistence-by-DB-query. Earlier this used in-memory
@@ -290,25 +281,20 @@ async function getMostRecentMarketRateRefreshAt(): Promise<number> {
 
 async function maybeRefreshMarketRates() {
   if (_marketRateRefreshRunning) return;
+  if (!HYBRID_PRICING_CONFIG.scanSettings.enabled) return;
   if (!process.env.SEARCHAPI_API_KEY) return;
   const lastRefreshAt = await getMostRecentMarketRateRefreshAt();
   if (lastRefreshAt > 0 && Date.now() - lastRefreshAt < MARKET_RATE_INTERVAL_MS) {
-    const ageDays = Math.round((Date.now() - lastRefreshAt) / (24 * 60 * 60 * 1000) * 10) / 10;
-    console.log(`[availability-scheduler] market-rates skip — last refresh ${ageDays}d ago, interval is ${MARKET_RATE_INTERVAL_MS / (24 * 60 * 60 * 1000)}d`);
+    const ageHours = Math.round((Date.now() - lastRefreshAt) / (60 * 60 * 1000) * 10) / 10;
+    console.log(`[availability-scheduler] hybrid market-rates skip — last refresh ${ageHours}h ago, interval is ${HYBRID_PRICING_CONFIG.scanSettings.intervalHours}h`);
     return;
   }
   _marketRateRefreshRunning = true;
   try {
-    const port = process.env.PORT || "5000";
-    const r = await fetch(`http://127.0.0.1:${port}/api/admin/refresh-all-market-rates`, { method: "POST" });
-    const data = (await r.json().catch(() => ({}))) as { ok?: boolean; succeeded?: number; total?: number };
-    if (data.ok) {
-      console.log(`[availability-scheduler] market-rates refreshed ${data.succeeded}/${data.total}`);
-    } else {
-      console.warn(`[availability-scheduler] market-rates refresh returned !ok`);
-    }
+    const data = await runHybridPricingForAllProperties("Weekly Automated Scan");
+    console.log(`[availability-scheduler] hybrid market-rates refreshed ${data.succeeded}/${data.total}`);
   } catch (e: any) {
-    console.error(`[availability-scheduler] market-rates refresh failed: ${e?.message ?? e}`);
+    console.error(`[availability-scheduler] hybrid market-rates refresh failed: ${e?.message ?? e}`);
   } finally {
     _marketRateRefreshRunning = false;
   }
@@ -318,13 +304,13 @@ export function startAvailabilityScheduler() {
   // First tick after 2 minutes so server startup has time to settle.
   setTimeout(() => { tick().catch(() => {}); }, 2 * 60 * 1000);
   _timer = setInterval(() => { tick().catch(() => {}); }, TICK_MS);
-  // Market-rates run on their own monthly cadence — checked every
-  // tick but no-ops until the 30-day interval has elapsed. First check
+  // Hybrid market-rates run on their own weekly/configurable cadence.
+  // Checked every tick but no-op until the interval has elapsed. First check
   // is delayed 5 minutes so the initial availability tick finishes
   // first (the two paths share the SearchAPI key).
   setTimeout(() => { maybeRefreshMarketRates().catch(() => {}); }, 5 * 60 * 1000);
   setInterval(() => { maybeRefreshMarketRates().catch(() => {}); }, TICK_MS);
-  console.log(`[availability-scheduler] started (policy tick every ${TICK_MS / 60000} min, market-rates every ${MARKET_RATE_INTERVAL_MS / (24 * 60 * 60 * 1000)} days)`);
+  console.log(`[availability-scheduler] started (policy tick every ${TICK_MS / 60000} min, hybrid market-rates every ${HYBRID_PRICING_CONFIG.scanSettings.intervalHours} hours)`);
 }
 
 // Exposed so the UI's "Run now" button can force a sync without waiting.

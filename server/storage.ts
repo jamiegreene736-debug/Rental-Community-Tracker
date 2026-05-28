@@ -27,8 +27,9 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, autoReplyStyleExamples, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates,
+  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, autoReplyStyleExamples, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
   type PropertyMarketRate, type InsertPropertyMarketRate,
+  type PricingUpdateLog, type InsertPricingUpdateLog,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -170,6 +171,8 @@ export interface IStorage {
   deletePropertyMarketRate(propertyId: number, bedrooms: number): Promise<void>;
   getPropertyMarketRates(propertyId: number): Promise<PropertyMarketRate[]>;
   getAllPropertyMarketRates(): Promise<PropertyMarketRate[]>;
+  createPricingUpdateLog(input: InsertPricingUpdateLog): Promise<PricingUpdateLog>;
+  getPricingUpdateLogs(filters?: { propertyId?: number; limit?: number }): Promise<PricingUpdateLog[]>;
 
   getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]>;
   upsertLodgifyPropertyId(propertyId: number, lodgifyPropertyId: string): Promise<LodgifyPropertyMap>;
@@ -638,7 +641,7 @@ export class DatabaseStorage implements IStorage {
         eq(propertyMarketRates.propertyId, input.propertyId),
         eq(propertyMarketRates.bedrooms, input.bedrooms),
       ));
-    const [row] = await db.insert(propertyMarketRates).values(input).returning();
+    const [row] = await db.insert(propertyMarketRates).values(input as typeof propertyMarketRates.$inferInsert).returning();
     return row;
   }
 
@@ -671,6 +674,28 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(propertyMarketRates)
       .orderBy(propertyMarketRates.propertyId, propertyMarketRates.bedrooms);
+  }
+
+  async createPricingUpdateLog(input: InsertPricingUpdateLog): Promise<PricingUpdateLog> {
+    const [row] = await db.insert(pricingUpdateLogs).values(input as typeof pricingUpdateLogs.$inferInsert).returning();
+    return row;
+  }
+
+  async getPricingUpdateLogs(filters: { propertyId?: number; limit?: number } = {}): Promise<PricingUpdateLog[]> {
+    const limit = Math.min(Math.max(filters.limit ?? 50, 1), 250);
+    if (typeof filters.propertyId === "number" && Number.isFinite(filters.propertyId)) {
+      return db
+        .select()
+        .from(pricingUpdateLogs)
+        .where(eq(pricingUpdateLogs.propertyId, filters.propertyId))
+        .orderBy(desc(pricingUpdateLogs.createdAt))
+        .limit(limit);
+    }
+    return db
+      .select()
+      .from(pricingUpdateLogs)
+      .orderBy(desc(pricingUpdateLogs.createdAt))
+      .limit(limit);
   }
 
   async getLodgifyPropertyMap(): Promise<LodgifyPropertyMap[]> {

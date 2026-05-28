@@ -661,7 +661,16 @@ export const propertyMarketRates = pgTable("property_market_rates", {
     checkOut?: string;
     channelCount?: number;
     sampleCount?: number;
+    demandClass?: "standard" | "high" | "peak" | "ultra";
+    seasonTierId?: string;
+    seasonTierLabel?: string;
     channels?: { airbnb?: number | null; vrbo?: number | null; booking?: number | null; pm?: number | null };
+    hybrid?: {
+      baseAirbnbMedian?: number;
+      finalRate?: number;
+      layers?: Array<Record<string, unknown>>;
+      notes?: string[];
+    };
   }>>().default(sql`'{}'::jsonb`).notNull(),
   lowNightly: numeric("low_nightly", { precision: 10, scale: 2 }),
   highNightly: numeric("high_nightly", { precision: 10, scale: 2 }),
@@ -677,6 +686,29 @@ export const insertPropertyMarketRateSchema = createInsertSchema(propertyMarketR
 
 export type InsertPropertyMarketRate = z.infer<typeof insertPropertyMarketRateSchema>;
 export type PropertyMarketRate = typeof propertyMarketRates.$inferSelect;
+
+export const pricingUpdateLogs = pgTable("pricing_update_logs", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  propertyName: text("property_name").notNull(),
+  bedrooms: integer("bedrooms").notNull(),
+  triggerType: text("trigger_type").notNull(),
+  oldRate: numeric("old_rate", { precision: 10, scale: 2 }),
+  newRate: numeric("new_rate", { precision: 10, scale: 2 }),
+  layersJson: jsonb("layers_json").$type<Array<Record<string, unknown>>>().default(sql`'[]'::jsonb`).notNull(),
+  calendarJson: jsonb("calendar_json").$type<Record<string, unknown>>().default(sql`'{}'::jsonb`).notNull(),
+  status: text("status").notNull().default("ok"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertPricingUpdateLogSchema = createInsertSchema(pricingUpdateLogs).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertPricingUpdateLog = z.infer<typeof insertPricingUpdateLogSchema>;
+export type PricingUpdateLog = typeof pricingUpdateLogs.$inferSelect;
 
 export const lodgifyPropertyMap = pgTable("lodgify_property_map", {
   id: serial("id").primaryKey(),

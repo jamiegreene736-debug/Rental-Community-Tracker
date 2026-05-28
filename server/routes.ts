@@ -118,6 +118,7 @@ import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommu
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
+import { refreshHybridPricingForProperty, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
 import { runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
@@ -28181,6 +28182,119 @@ Return ONLY compact JSON with this exact shape:
     const ok = await storage.deleteCommunityDraft(id);
     if (!ok) return res.status(404).json({ error: "Not found" });
     res.json({ success: true });
+  });
+
+  // Hybrid layered pricing replaces the old active market-pricing flow.
+  // It uses SearchAPI Airbnb medians only, then applies the config-driven
+  // blended OTA uplift and rate-management layers in server/hybrid-pricing.ts.
+  app.post("/api/property/:id/refresh-market-rates", async (req, res) => {
+    const propertyId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid id" });
+    if (propertyId < 0) {
+      return res.status(400).json({
+        error: "Draft hybrid pricing is not available until the draft is promoted",
+        message: "Promote this draft to a property before running the 24-month hybrid pricing scan.",
+      });
+    }
+    try {
+      const result = await refreshHybridPricingForProperty({
+        propertyId,
+        triggerType: "Manual Update",
+        notes: "Manual Update from Pricing tab",
+      });
+      res.json({
+        ok: true,
+        mode: "hybrid-airbnb-layered",
+        propertyId,
+        persisted: result.rows,
+        logs: result.logs,
+        snapshot: {
+          persisted: result.rows.map((row: any) => ({
+            bedrooms: row.bedrooms,
+            medianNightly: Number(row.medianNightly),
+            medianNightlyHigh: row.medianNightlyHigh != null ? Number(row.medianNightlyHigh) : null,
+            medianNightlyHoliday: row.medianNightlyHoliday != null ? Number(row.medianNightlyHoliday) : null,
+            monthlyRates: row.monthlyRates ?? {},
+            basisSource: row.source,
+            sampleCount: row.sampleCount,
+          })),
+        },
+      });
+    } catch (e: any) {
+      console.error(`[hybrid-pricing] property ${propertyId} failed:`, e?.message ?? e);
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.post("/api/pricing/hybrid/run", async (req, res) => {
+    const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
+    const propertyIds = rawIds
+      .map((id: unknown) => Number(id))
+      .filter((id): id is number => Number.isInteger(id) && id > 0);
+    if (propertyIds.length === 0) return res.status(400).json({ error: "Select at least one promoted property" });
+    const results: Array<{ id: number; ok: boolean; rows?: number; error?: string }> = [];
+    for (const id of Array.from(new Set<number>(propertyIds))) {
+      try {
+        const result = await refreshHybridPricingForProperty({ propertyId: id, triggerType: "Manual Update" });
+        results.push({ id, ok: true, rows: result.rows.length });
+      } catch (e: any) {
+        results.push({ id, ok: false, error: e?.message ?? String(e) });
+      }
+    }
+    res.json({ ok: true, total: results.length, succeeded: results.filter((r) => r.ok).length, results });
+  });
+
+  app.get("/api/pricing/update-logs", async (req, res) => {
+    const propertyId = req.query.propertyId != null ? Number(req.query.propertyId) : undefined;
+    const limit = req.query.limit != null ? Number(req.query.limit) : 50;
+    const logs = await storage.getPricingUpdateLogs({
+      propertyId: typeof propertyId === "number" && Number.isFinite(propertyId) ? propertyId : undefined,
+      limit: Number.isFinite(limit) ? limit : 50,
+    });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, logs });
+  });
+
+  app.post("/api/admin/refresh-all-market-rates", async (req, res) => {
+    const trigger = String(req.query.trigger ?? "") === "scheduled"
+      ? "Weekly Automated Scan"
+      : "Admin Backfill";
+    try {
+      const result = await runHybridPricingForAllProperties(trigger as HybridTriggerType);
+      console.log(`[hybrid-pricing] refresh-all ${result.succeeded}/${result.total} succeeded`);
+      res.json({ ok: true, mode: "hybrid-airbnb-layered", ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.post("/api/pricing/bulk-refresh", async (req, res) => {
+    const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
+    const propertyIds = rawIds
+      .map((id: unknown) => Number(id))
+      .filter((id): id is number => Number.isInteger(id) && id > 0);
+    if (propertyIds.length === 0) return res.status(400).json({ error: "Select at least one promoted property" });
+    const results: Array<{ id: number; ok: boolean; rows?: number; error?: string }> = [];
+    for (const id of Array.from(new Set<number>(propertyIds))) {
+      try {
+        const result = await refreshHybridPricingForProperty({ propertyId: id, triggerType: "Manual Update" });
+        results.push({ id, ok: true, rows: result.rows.length });
+      } catch (e: any) {
+        results.push({ id, ok: false, error: e?.message ?? String(e) });
+      }
+    }
+    res.status(202).json({
+      ok: true,
+      mode: "hybrid-airbnb-layered",
+      job: {
+        id: `hybrid_${Date.now()}`,
+        status: results.every((r) => r.ok) ? "completed" : "failed",
+        completed: results.filter((r) => r.ok).length,
+        failed: results.filter((r) => !r.ok).length,
+        total: results.length,
+        items: results,
+      },
+    });
   });
 
   // Re-run the sidecar-backed 7-night market-rate lookup for a saved draft

@@ -2340,7 +2340,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       low: number;
       high: number | null;
       holiday: number | null;
-      basisSource: "optimized-buy-in" | "live-multichannel-median" | "monthly-multichannel-median" | "season-band-multichannel-median" | "airbnb" | "none";
+      basisSource: "optimized-buy-in" | "live-multichannel-median" | "monthly-multichannel-median" | "season-band-multichannel-median" | "hybrid-airbnb-layered" | "airbnb" | "none";
       channelCount: number;
       // LOW-season per-channel breakdown. HIGH/HOLIDAY are persisted
       // as basis numbers, but the compact chip row shows the LOW
@@ -2401,11 +2401,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     lastGuestyRatePushStatus?: string | null;
     lastGuestyRatePushSummary?: string | null;
   };
+  type PricingUpdateLog = {
+    id: number;
+    propertyId: number;
+    propertyName: string;
+    bedrooms: number;
+    triggerType: string;
+    oldRate: string | number | null;
+    newRate: string | number | null;
+    status: string;
+    notes?: string | null;
+    layersJson?: Array<Record<string, any>>;
+    calendarJson?: Record<string, any>;
+    createdAt: string;
+  };
   const refreshNoticeKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.notice`;
   const refreshNoticeDismissKeyFor = (id: number) => `nexstay.market-rate-refresh.${id}.server-dismissed-at`;
-  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Start a fresh season-band refresh after the sidecar goes quiet.";
+  const REFRESH_TRACKING_LOST_MESSAGE = "Refresh tracking was interrupted, likely by a deploy, server restart, or computer sleep. Start a fresh hybrid pricing update when the server is stable.";
   const [refreshProgress, setRefreshProgress] = useState<MarketRefreshProgress | null>(null);
   const [refreshNotice, setRefreshNotice] = useState<MarketRefreshNotice | null>(null);
+  const [pricingUpdateLogs, setPricingUpdateLogs] = useState<PricingUpdateLog[]>([]);
+  const [pricingLogsLoading, setPricingLogsLoading] = useState(false);
   const [dismissedServerRefreshAt, setDismissedServerRefreshAt] = useState<number>(0);
   const handledTerminalProgressRef = useRef<string | null>(null);
   const marketRatesRefreshingRef = useRef(false);
@@ -2458,30 +2474,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
   }, [marketRatesRefreshing]);
   const [refreshStartedAt, setRefreshStartedAt] = useState<number | null>(null);
-  // AbortController for the in-flight refresh fetch. Lets the operator
-  // cancel a long multi-season scan without freezing the tab. Cancellation
-  // also stops queued/running sidecar work so Chrome does not keep scanning
-  // after the UI has entered a terminal state.
+  // AbortController for the in-flight hybrid pricing fetch. The active
+  // pricing path no longer queues Chrome sidecar work.
   const refreshAbortRef = useRef<AbortController | null>(null);
-  const stopSidecarPricingWork = useCallback(async (reason: string) => {
-    try {
-      await fetch("/api/vrbo-sidecar/cancel", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason }),
-      });
-    } catch (e: any) {
-      console.warn(`[refresh-market-rates] sidecar cancel failed: ${e?.message}`);
-    }
-  }, []);
   const cancelRefresh = useCallback(() => {
     if (refreshAbortRef.current) {
       console.info("[refresh-market-rates] operator cancelled");
       refreshAbortRef.current.abort();
       refreshAbortRef.current = null;
     }
-    void stopSidecarPricingWork(`pricing refresh cancelled by operator for property ${propertyId ?? "unknown"}`);
-  }, [propertyId, stopSidecarPricingWork]);
+  }, []);
   useEffect(() => {
     handledTerminalProgressRef.current = null;
     missingProgressPollsRef.current = 0;
@@ -2512,7 +2514,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: parsed.status,
           finishedAt: parsed.finishedAt,
           startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : undefined,
-          label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label : "Season-band market-rate scan finished",
+          label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label : "Hybrid pricing update finished",
           error: typeof parsed.error === "string" ? parsed.error : undefined,
         });
       } else {
@@ -2591,8 +2593,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       label: "Refresh tracking interrupted",
       error: REFRESH_TRACKING_LOST_MESSAGE,
     });
-    void stopSidecarPricingWork(`pricing refresh tracking interrupted for property ${propertyId ?? "unknown"}`);
-  }, [propertyId, recordRefreshNotice, stopSidecarPricingWork]);
+  }, [recordRefreshNotice]);
   const reloadMarketRates = useCallback(async () => {
     try {
       const r = await fetch("/api/property/market-rates");
@@ -2609,6 +2610,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     void reloadMarketRates();
   }, [reloadMarketRates]);
+  const reloadPricingLogs = useCallback(async () => {
+    if (!propertyId) return;
+    setPricingLogsLoading(true);
+    try {
+      const r = await fetch(`/api/pricing/update-logs?propertyId=${propertyId}&limit=25`, { cache: "no-store" });
+      if (!r.ok) return;
+      const data = await r.json().catch(() => ({}));
+      setPricingUpdateLogs(Array.isArray(data?.logs) ? data.logs : []);
+    } catch (e: any) {
+      console.warn(`[GuestyListingBuilder] pricing logs fetch failed: ${e?.message}`);
+    } finally {
+      setPricingLogsLoading(false);
+    }
+  }, [propertyId]);
+  useEffect(() => {
+    void reloadPricingLogs();
+  }, [reloadPricingLogs, marketRatesVersion]);
   type MarketRefreshProgressRead =
     | { kind: "active"; progress: MarketRefreshProgress }
     | { kind: "missing" }
@@ -2677,12 +2695,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             finishedAt: Date.now(),
             startedAt: p.startedAt,
             label: p.phase === "error"
-              ? (p.label || "Season-band market-rate scan failed")
-              : "Season-band market-rate scan finished",
+              ? (p.label || "Hybrid pricing update failed")
+              : "Hybrid pricing update finished",
             error: p.error,
           });
           if (p.phase === "done") {
             await reloadMarketRates();
+            await reloadPricingLogs();
           }
         }
         return;
@@ -2698,7 +2717,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [propertyId, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates]);
+  }, [propertyId, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates, reloadPricingLogs]);
 
   const refreshThisPropertyMarketRates = useCallback(async () => {
     if (!propertyId || marketRatesRefreshing) return;
@@ -2708,7 +2727,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setMarketRatesRefreshing(true);
     setRefreshNotice(null);
     setRefreshStartedAt(startedAt);
-    setRefreshProgress({ phase: "starting", percent: 1, label: "Queueing season-band scan…", startedAt });
+    setRefreshProgress({ phase: "starting", percent: 1, label: "Running hybrid Airbnb layered pricing…", startedAt });
 
     // Poll progress endpoint while refresh is in flight. Static
     // properties are positive ids; drafts/promoted drafts are negative
@@ -2761,7 +2780,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             status: "done",
             finishedAt: Date.now(),
             startedAt: p.startedAt ?? startedAt,
-            label: "Season-band market-rate scan finished",
+            label: "Hybrid pricing update finished",
           });
           return;
         }
@@ -2796,11 +2815,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             await waitForBackgroundRefresh();
             setLiveSnapshot(null);
             await reloadMarketRates();
+            await reloadPricingLogs();
             recordRefreshNotice({
               status: "done",
               finishedAt: Date.now(),
               startedAt,
-              label: "Season-band market-rate scan finished",
+              label: "Hybrid pricing update finished",
             });
             return;
           }
@@ -2816,7 +2836,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: "error",
           finishedAt: Date.now(),
           startedAt,
-          label: "Season-band market-rate scan failed",
+          label: "Hybrid pricing update failed",
           error: message,
         });
         toast({ title: "Refresh failed", description: message, variant: "destructive" });
@@ -2827,11 +2847,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         await waitForBackgroundRefresh();
         setLiveSnapshot(null);
         await reloadMarketRates();
+        await reloadPricingLogs();
         recordRefreshNotice({
           status: "done",
           finishedAt: Date.now(),
           startedAt,
-          label: "Season-band market-rate scan finished",
+          label: "Hybrid pricing update finished",
         });
         toast({
           duration: Infinity,
@@ -2852,7 +2873,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               >
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              Season-band market-rate basis updated
+              Hybrid layered pricing basis updated
             </span>
           ),
         });
@@ -2883,7 +2904,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             low: typeof p.low === "number" ? p.low : 0,
             high: typeof p.high === "number" ? p.high : null,
             holiday: typeof p.holiday === "number" ? p.holiday : null,
-            basisSource: (p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "monthly-multichannel-median" || p.basisSource === "season-band-multichannel-median" || p.basisSource === "airbnb")
+            basisSource: (p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "monthly-multichannel-median" || p.basisSource === "season-band-multichannel-median" || p.basisSource === "hybrid-airbnb-layered" || p.basisSource === "airbnb")
               ? p.basisSource
               : "none",
             channelCount: typeof p.channelCount === "number" ? p.channelCount : 0,
@@ -2899,11 +2920,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         setLiveSnapshot(null);
       }
       await reloadMarketRates();
+        await reloadPricingLogs();
       recordRefreshNotice({
         status: "done",
         finishedAt: Date.now(),
         startedAt,
-        label: "Season-band market-rate scan finished",
+        label: "Hybrid pricing update finished",
       });
       // Persistent green-check confirmation — only goes away when the
       // user clicks the X (PR #305). Default Radix duration auto-
@@ -2930,7 +2952,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             >
               <polyline points="20 6 9 17 4 12" />
             </svg>
-            Season-band market-rate basis updated
+            Hybrid layered pricing basis updated
           </span>
         ),
       });
@@ -2943,17 +2965,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           status: "error",
           finishedAt: Date.now(),
           startedAt,
-          label: "Season-band market-rate scan cancelled",
+          label: "Hybrid pricing update cancelled",
           error: "Cancelled by operator",
         });
-        toast({ title: "Refresh cancelled", description: "Queued sidecar work has been cancelled." });
+        toast({ title: "Refresh cancelled", description: "Hybrid pricing update was cancelled." });
       } else {
         setRefreshProgress({ phase: "error", percent: 100, label: "Refresh failed", error: e?.message, startedAt });
         recordRefreshNotice({
           status: "error",
           finishedAt: Date.now(),
           startedAt,
-          label: "Season-band market-rate scan failed",
+          label: "Hybrid pricing update failed",
           error: e?.message,
         });
         toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
@@ -2964,7 +2986,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setRefreshStartedAt(null);
       setMarketRatesRefreshing(false);
     }
-  }, [propertyId, marketRatesRefreshing, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates, toast]);
+  }, [propertyId, marketRatesRefreshing, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates, reloadPricingLogs, toast]);
 
   // Aggregate monthly rates across all units for the 24-month seasonal table
   const seasonalMonths = useMemo(() => {
@@ -3034,7 +3056,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       propertyId,
       status: "done",
       finishedAt: latest,
-      label: "Season-band market-rate basis saved from the server queue",
+      label: "Hybrid pricing basis saved from the server queue",
     };
   }, [propertyId, liveBuyInSummary]);
 
@@ -4714,22 +4736,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </div>
                             </div>
                             {/* Live buy-in summary. One badge per bedroom-count
-                                showing the median nightly the sidecar-backed
-                                LOW-season website search found
-                                (the cost basis the per-channel floor formula
-                                feeds on). "fallback" badges mean we haven't
+                                showing the persisted hybrid Airbnb layered
+                                basis. "fallback" badges mean we haven't
                                 refreshed for that BR yet — the Pricing tab
                                 falls through to BUY_IN_RATES until the
                                 operator clicks Refresh. */}
                             {liveBuyInSummary.length > 0 && (
                               <div style={{ marginTop: 6, marginBottom: 8, fontSize: 11, color: "#6b7280", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = median of usable all-in nightly channel rates from Airbnb, VRBO, Booking.com, and PM/direct websites. When a channel omits taxes, cleaning, or required fees, the scanner estimates them before saving the basis. OTA rates are scanned for each contiguous season date band. PM/direct websites are sampled once for LOW, HIGH, and HOLIDAY, then reused across matching bands. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
+                                <span style={{ color: "#374151", fontWeight: 600 }} title="Buy-in basis = SearchAPI Airbnb median adjusted by configured platform blend, season, property complexity, stay-pattern, and lead-time layers. Drives the per-channel sell-rate floor: (basis × 1.20) ÷ (1 − channelFee).">
                                   Buy-in basis (median, all-in):
                                 </span>
                                 {liveBuyInSummary.map(({ bedrooms, live }) => {
                                   if (!live) {
                                     return (
-                                      <span key={bedrooms} title="No live rate yet — Pricing tab is using the BUY_IN_RATES static fallback for this bedroom count. Click 'Refresh season-band market rates' to fetch."
+                                      <span key={bedrooms} title="No live rate yet — Pricing tab is using the BUY_IN_RATES static fallback for this bedroom count. Click 'Update Market Rates Now' to fetch."
                                         style={{ background: "#f3f4f6", color: "#6b7280", padding: "2px 6px", borderRadius: 4, fontWeight: 500 }}>
                                         {bedrooms}BR fallback
                                       </span>
@@ -4746,8 +4766,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   const isMultichannel = live.source === "live-multichannel-median" || live.source === "season-band-multichannel-median";
                                   const sourceLabel = isMultichannel
                                     ? live.source === "season-band-multichannel-median"
-                                      ? `season-band median across ${live.sampleCount} channel sample${live.sampleCount === 1 ? "" : "s"}`
+                                      ? `hybrid layered median across ${live.sampleCount} channel sample${live.sampleCount === 1 ? "" : "s"}`
                                       : `median across ${live.sampleCount} channel${live.sampleCount === 1 ? "" : "s"}`
+                                    : live.source === "hybrid-airbnb-layered"
+                                      ? `hybrid Airbnb layered basis across ${live.sampleCount} Airbnb sample${live.sampleCount === 1 ? "" : "s"}`
                                     : live.source === "airbnb"
                                       ? "Airbnb-only channel basis"
                                       : live.source === "monthly-multichannel-median"
@@ -4777,9 +4799,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                  title="Season-band multi-channel scan. Pulls one 7-night OTA sample for each contiguous LOW/HIGH band in the 24-month calendar, plus each holiday band. PM/direct sites are sampled once per LOW/HIGH/HOLIDAY type and reused across matching bands. SearchAPI is only used to discover PM company domains before the sidecar searches those PM websites. Drives Guesty sell rate via (band basis × 1.20) ÷ (1 − channelFee). Auto-refreshes monthly via the scheduler."
+                                  title="Runs the hybrid pricing model now: SearchAPI Airbnb medians plus the configured platform blend, season, property complexity, stay pattern, and lead-time layers. Auto-refreshes weekly via the scheduler."
                                 >
-                                  {marketRatesRefreshing ? "Refreshing…" : "↻ Refresh season-band market rates"}
+                                  {marketRatesRefreshing ? "Refreshing…" : "↻ Update Market Rates Now"}
                                 </button>
                               </div>
                             )}
@@ -4858,7 +4880,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               return (
                                 <div style={{ marginBottom: 8, padding: "6px 10px", border: `1px solid ${isStale ? "#fca5a5" : "#cfe2ff"}`, background: isStale ? "#fef2f2" : "#eef4ff", borderRadius: 4, fontSize: 11, color: isStale ? "#7f1d1d" : "#1e3a8a" }}>
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                                    <span style={{ fontWeight: 500 }}>Scanning season-band market-rate basis…</span>
+                                    <span style={{ fontWeight: 500 }}>Scanning Hybrid layered pricing basis…</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{elapsedStr}</span>
                                     <span style={{ fontFamily: "ui-monospace, monospace" }}>{progressText}</span>
                                     <button
@@ -4919,7 +4941,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   )}
                                   {hasWindowProgress && currentWindow != null && (
                                     <div style={{ marginTop: 2, fontSize: 9, opacity: 0.7 }}>
-                                      The bar advances as channel stages finish. PM/direct is sampled once per LOW/HIGH/HOLIDAY season type and reused; Airbnb, VRBO, and Booking.com still run for each date band.
+                                      The bar advances as the hybrid pricing request completes. The active pricing flow uses Airbnb SearchAPI data plus configured rate-management layers.
                                     </div>
                                   )}
                                   {/* Heartbeat row: daemon status + last-tick age. Tells the operator the scan is alive even when the percent hasn't moved. */}
@@ -4933,7 +4955,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isStale && (
                                     <div style={{ marginTop: 4, padding: "4px 6px", border: "1px solid #fca5a5", background: "#ffffff", borderRadius: 3, fontSize: 10, color: "#7f1d1d" }}>
-                                      No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry after the sidecar goes quiet.
+                                      No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry when the server is stable.
                                     </div>
                                   )}
                                   {/* Per-window / per-channel warnings (CAPTCHA, bot wall, rate-limit, etc.). Yellow-amber banner so it stands apart from both the blue progress and the red staleness state. */}
@@ -4954,7 +4976,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     </div>
                                   )}
                                   <div style={{ marginTop: 2, fontSize: 9, opacity: 0.6 }}>
-                                    Season-band multi-channel scan; the daemon serializes through one Chrome instance, so the latest completed check can stay unchanged while the next queued check is running.
+                                    Hybrid Airbnb layered pricing; no VRBO or Booking.com browser sidecar is used for active market-rate updates.
                                   </div>
                                 </div>
                               );
@@ -4982,8 +5004,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   <div style={{ marginTop: 2, opacity: 0.82 }}>
                                     {effectiveRefreshNotice.status === "done"
-                                      ? "Season-band market-rate basis has been saved. This notice stays here until you dismiss it."
-                                      : (effectiveRefreshNotice.error || effectiveRefreshNotice.label || "The season-band market-rate refresh did not complete.")}
+                                      ? "Hybrid pricing basis has been saved. This notice stays here until you dismiss it."
+                                      : (effectiveRefreshNotice.error || effectiveRefreshNotice.label || "The Hybrid layered pricing refresh did not complete.")}
                                   </div>
                                   {scannerSchedule?.lastGuestyRatePushAt && (
                                     <div style={{ marginTop: 4, opacity: 0.88 }}>
@@ -5026,7 +5048,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#fafafa", fontSize: 11, color: "#374151" }}>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
                                   <span style={{ fontWeight: 600 }}>
-                                    Season-band buy-in basis
+                                    Hybrid Airbnb layered basis
                                     {liveSnapshot?.region && (
                                       <span style={{ fontSize: 10, fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>
                                         ({liveSnapshot.region})
@@ -5034,7 +5056,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     )}
                                   </span>
                                   <span style={{ fontSize: 10, color: "#6b7280" }} title="Rows use persisted 7-night samples from each contiguous season band over the 24-month calendar.">
-                                    Auto-refresh every 30 days · click ↻ to scan now
+                                    Auto-refresh weekly · click ↻ to scan now
                                   </span>
                                 </div>
                                 {/* Window labels — only shown after a
@@ -5064,6 +5086,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         : live?.source === "live-multichannel-median" ? "live-multichannel-median" as const
                                         : live?.source === "monthly-multichannel-median" ? "monthly-multichannel-median" as const
                                         : live?.source === "season-band-multichannel-median" ? "season-band-multichannel-median" as const
+                                        : live?.source === "hybrid-airbnb-layered" ? "hybrid-airbnb-layered" as const
                                         : live?.source === "airbnb" ? "airbnb" as const
                                         : live ? "airbnb" as const : "none" as const);
                                     const channelCount = snapshotRow?.channelCount ?? live?.sampleCount ?? 0;
@@ -5093,8 +5116,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                               ? `LOW = median of ${channelCount} channels`
                                               : basisSource === "monthly-multichannel-median"
                                               ? `LOW = monthly median across ${channelCount} channel samples`
+                                              : basisSource === "hybrid-airbnb-layered"
+                                              ? `Hybrid layered median from Airbnb and ${channelCount} sample${channelCount === 1 ? "" : "s"}`
                                               : basisSource === "season-band-multichannel-median"
-                                              ? `LOW = season-band median across ${channelCount} channel samples`
+                                              ? `LOW = hybrid layered median across ${channelCount} channel samples`
                                               : basisSource === "live-multichannel-median"
                                               ? `LOW = median of ${channelCount} channels`
                                               : basisSource === "airbnb"
@@ -5118,6 +5143,57 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 </div>
                               </div>
                             )}
+                            <div style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid #e5e7eb", borderRadius: 6, background: "#ffffff", fontSize: 11, color: "#374151" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
+                                <span style={{ fontWeight: 700 }}>Pricing update logs</span>
+                                <button
+                                  type="button"
+                                  onClick={() => void reloadPricingLogs()}
+                                  style={{ fontSize: 10, padding: "2px 8px", border: "1px solid #d1d5db", borderRadius: 4, background: "#fff", cursor: "pointer" }}
+                                >
+                                  Refresh logs
+                                </button>
+                              </div>
+                              {pricingLogsLoading ? (
+                                <div style={{ color: "#6b7280" }}>Loading pricing logs...</div>
+                              ) : pricingUpdateLogs.length === 0 ? (
+                                <div style={{ color: "#6b7280" }}>No hybrid pricing updates have been logged for this property yet.</div>
+                              ) : (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                  {pricingUpdateLogs.slice(0, 8).map((log) => {
+                                    const oldRate = log.oldRate != null ? Number(log.oldRate) : null;
+                                    const newRate = log.newRate != null ? Number(log.newRate) : null;
+                                    const layers = Array.isArray(log.layersJson) ? log.layersJson : [];
+                                    const created = new Date(log.createdAt);
+                                    return (
+                                      <details key={log.id} style={{ borderTop: "1px dashed #e5e7eb", paddingTop: 6 }}>
+                                        <summary style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                          <span style={{ minWidth: 118, color: "#6b7280" }}>{Number.isNaN(created.getTime()) ? log.createdAt : created.toLocaleString()}</span>
+                                          <span style={{ fontWeight: 700 }}>{log.triggerType}</span>
+                                          <span>{log.bedrooms}BR</span>
+                                          <span>{oldRate ? `$${Math.round(oldRate).toLocaleString()}` : "none"} -&gt; {newRate ? `$${Math.round(newRate).toLocaleString()}` : "none"}</span>
+                                          <span style={{ padding: "1px 6px", borderRadius: 4, background: log.status === "ok" ? "#dcfce7" : "#fee2e2", color: log.status === "ok" ? "#166534" : "#991b1b", fontWeight: 700 }}>
+                                            {log.status}
+                                          </span>
+                                        </summary>
+                                        <div style={{ marginTop: 6, paddingLeft: 8, color: "#4b5563" }}>
+                                          {log.notes && <div style={{ marginBottom: 4 }}>{log.notes}</div>}
+                                          {layers.length > 0 && (
+                                            <div style={{ display: "grid", gap: 3 }}>
+                                              {layers.map((layer, idx) => (
+                                                <div key={idx} style={{ fontFamily: "ui-monospace, monospace", fontSize: 10 }}>
+                                                  L{String(layer.layer ?? idx + 1)} {String(layer.name ?? "Layer")}: x{Number(layer.multiplier ?? 1).toFixed(2)} -&gt; ${Number(layer.after ?? 0).toLocaleString()}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </details>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
                             {marketComps && (
                               <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8, lineHeight: 1.6 }}>
                                 <div>

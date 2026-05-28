@@ -192,7 +192,16 @@ export type MonthlyMarketRate = {
   checkOut?: string;
   channelCount?: number;
   sampleCount?: number;
+  demandClass?: "standard" | "high" | "peak" | "ultra";
+  seasonTierId?: string;
+  seasonTierLabel?: string;
   channels?: { airbnb?: number | null; vrbo?: number | null; booking?: number | null; pm?: number | null };
+  hybrid?: {
+    baseAirbnbMedian?: number;
+    finalRate?: number;
+    layers?: Array<Record<string, unknown>>;
+    notes?: string[];
+  };
 };
 
 export type LivePropertyMarketRateInput = {
@@ -231,12 +240,18 @@ function parseMonthlyRates(input: unknown): Record<string, MonthlyMarketRate> {
       checkOut: typeof raw.checkOut === "string" ? raw.checkOut : undefined,
       channelCount: typeof raw.channelCount === "number" ? raw.channelCount : undefined,
       sampleCount: typeof raw.sampleCount === "number" ? raw.sampleCount : undefined,
+      demandClass: raw.demandClass === "standard" || raw.demandClass === "high" || raw.demandClass === "peak" || raw.demandClass === "ultra"
+        ? raw.demandClass
+        : undefined,
+      seasonTierId: typeof raw.seasonTierId === "string" ? raw.seasonTierId : undefined,
+      seasonTierLabel: typeof raw.seasonTierLabel === "string" ? raw.seasonTierLabel : undefined,
       channels: raw.channels && typeof raw.channels === "object" ? {
         airbnb: parseNullableRate(raw.channels.airbnb),
         vrbo: parseNullableRate(raw.channels.vrbo),
         booking: parseNullableRate(raw.channels.booking),
         pm: parseNullableRate(raw.channels.pm),
       } : undefined,
+      hybrid: raw.hybrid && typeof raw.hybrid === "object" ? raw.hybrid : undefined,
     };
   }
   return parsed;
