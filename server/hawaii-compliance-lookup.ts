@@ -315,6 +315,16 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
 
 const HAWAII_TAT_PATTERN = /\bTA-\d{3}-\d{3}-\d{4}-\d{2}\b/i;
 const HAWAII_GET_PATTERN = /\bGE-\d{3}-\d{3}-\d{4}-\d{2}\b/i;
+const HAWAII_STR_PATTERN = /\b(?:TVR-\d{4}-\d{2,4}|TVNC-\d{4}|STVR-\d{4}-\d{6}|STRH-\d{8}|NUC-\d{2}-\d{3}-\d{4})\b/i;
+
+const classifyTopLevelLicense = (value: unknown): "tat" | "get" | "str" | null => {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  if (HAWAII_TAT_PATTERN.test(raw)) return "tat";
+  if (HAWAII_GET_PATTERN.test(raw)) return "get";
+  if (HAWAII_STR_PATTERN.test(raw)) return "str";
+  return null;
+};
 
 const tagValue = (tags: string[], prefix: string): string | null => {
   const match = tags.find((tag) => tag.toUpperCase().startsWith(prefix.toUpperCase()));
@@ -388,8 +398,23 @@ export function extractHawaiiComplianceFromGuestyListing(listing: Record<string,
   };
 
   const homeaway = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
-  const fromTopLevelTat = usableLicenseValue(listing.licenseNumber);
-  const fromTopLevelGet = usableLicenseValue(listing.taxId);
+  const licenseNumberKind = classifyTopLevelLicense(listing.licenseNumber);
+  const taxIdKind = classifyTopLevelLicense(listing.taxId);
+  const fromTopLevelTat = licenseNumberKind === "tat"
+    ? usableLicenseValue(listing.licenseNumber)
+    : taxIdKind === "tat"
+      ? usableLicenseValue(listing.taxId)
+      : null;
+  const fromTopLevelGet = taxIdKind === "get"
+    ? usableLicenseValue(listing.taxId)
+    : licenseNumberKind === "get"
+      ? usableLicenseValue(listing.licenseNumber)
+      : null;
+  const fromTopLevelStr = licenseNumberKind === "str"
+    ? usableLicenseValue(listing.licenseNumber)
+    : taxIdKind === "str"
+      ? usableLicenseValue(listing.taxId)
+      : null;
   const fromHomeawayTat = usableLicenseValue(homeaway.licenseNumber);
   const fromHomeawayGet = usableLicenseValue(homeaway.taxId);
   const fromHomeawayTmk = usableLicenseValue(homeaway.parcelNumber);
@@ -417,7 +442,7 @@ export function extractHawaiiComplianceFromGuestyListing(listing: Record<string,
     taxMapKey: tagValue(tags, "TMK:") || contentValue("tmk_number") || fromHomeawayTmk,
     tatLicense,
     getLicense,
-    strPermit: tagValue(tags, "STR:") || contentValue("permit_number") || strFromNotes,
+    strPermit: tagValue(tags, "STR:") || fromTopLevelStr || contentValue("permit_number") || strFromNotes,
   };
 }
 

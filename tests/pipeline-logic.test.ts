@@ -846,6 +846,15 @@ assert.equal(extracted.tatLicense, "TA-024-120-9012-01");
 assert.equal(extracted.getLicense, "GE-024-120-9012-01");
 assert.equal(extracted.strPermit, "TVR-2022-037");
 
+const strOnLicenseNumber = extractHawaiiComplianceFromGuestyListing({
+  licenseNumber: "TVR-2022-037",
+  taxId: "GE-024-120-9012-01",
+  tags: [],
+});
+assert.equal(strOnLicenseNumber.strPermit, "TVR-2022-037");
+assert.equal(strOnLicenseNumber.getLicense, "GE-024-120-9012-01");
+assert.equal(strOnLicenseNumber.tatLicense, null);
+
 const fromHomeaway = extractHawaiiComplianceFromGuestyListing({
   tags: [],
   channels: {

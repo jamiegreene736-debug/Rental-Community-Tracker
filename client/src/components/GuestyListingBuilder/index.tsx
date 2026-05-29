@@ -735,6 +735,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setStrLookupBusy(false);
     setTmkLookupBusy(false);
     setLicenseLookupBusy(false);
+    if (!propertyId) return;
+    let cancelled = false;
+    fetch(`/api/builder/compliance/${propertyId}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.values) return;
+        const loaded: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">> = {};
+        for (const [key, value] of Object.entries(data.values)) {
+          const text = String(value ?? "").trim();
+          if (text && !isPlaceholderLicenseValue(text)) {
+            loaded[key as keyof typeof loaded] = text;
+          }
+        }
+        if (Object.keys(loaded).length > 0) setComplianceOverrides(loaded);
+      })
+      .catch(() => { /* non-fatal — builder still works from static property data */ });
+    return () => { cancelled = true; };
   }, [propertyId]);
 
   const effectivePropertyData = useMemo(() => {
@@ -785,17 +802,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
   }, [complianceProfile.jurisdiction, complianceValueFor]);
 
-  const persistDraftComplianceValues = useCallback(async (
+  const persistComplianceValues = useCallback(async (
     values: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>,
   ) => {
-    if (!propertyId || propertyId >= 0) return;
+    if (!propertyId) return;
     const payload: Record<string, string> = {};
     for (const [key, value] of Object.entries(values)) {
       const text = String(value ?? "").trim();
       if (text && !isPlaceholderLicenseValue(text)) payload[key] = text;
     }
     if (Object.keys(payload).length === 0) return;
-    const resp = await fetch(`/api/community/${Math.abs(propertyId)}`, {
+    const url = propertyId < 0
+      ? `/api/community/${Math.abs(propertyId)}`
+      : `/api/builder/compliance/${propertyId}`;
+    const resp = await fetch(url, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -804,7 +824,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const error = await resp.json().catch(() => ({}));
       throw new Error(error?.error || error?.message || `Save failed (${resp.status})`);
     }
-    await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+    if (propertyId < 0) {
+      await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+    }
   }, [propertyId, queryClient]);
 
   const validateComplianceRequirement = useCallback((req: LicenseRequirement) => {
@@ -856,7 +878,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ...(data.values?.dbprLicense ? { dbprLicense: data.values.dbprLicense } : {}),
         ...(data.values?.touristTaxAccount ? { touristTaxAccount: data.values.touristTaxAccount } : {}),
       }));
-      await persistDraftComplianceValues(data.values ?? {});
+      await persistComplianceValues(data.values ?? {});
       const missingRequired = (data.profile?.requirements ?? [])
         .filter((req: any) => req.required && isPlaceholderLicenseValue(data.values?.[req.key]))
         .map((req: any) => req.shortLabel || req.label);
@@ -871,7 +893,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setLicenseLookupBusy(false);
     }
-  }, [effectivePropertyData, complianceProfile.jurisdiction, persistDraftComplianceValues, toast]);
+  }, [effectivePropertyData, complianceProfile.jurisdiction, persistComplianceValues, toast]);
 
   // Compliance card labels swap by state. The four data fields
   // (taxMapKey / getLicense / tatLicense / strPermit) are reused
@@ -949,7 +971,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || data?.message || "TMK lookup failed");
       setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
-      void persistDraftComplianceValues({ taxMapKey: data.taxMapKey }).catch((err) => {
+      void persistComplianceValues({ taxMapKey: data.taxMapKey }).catch((err) => {
         toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
       });
       setTmkLookupResult(data as TmkLookupResult);
@@ -969,7 +991,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setTmkLookupBusy(false);
     }
-  }, [effectivePropertyData?.address, persistDraftComplianceValues, toast]);
+  }, [effectivePropertyData?.address, persistComplianceValues, toast]);
 
   const pullHawaiiComplianceField = useCallback(async (options: {
     field: "getLicense" | "tatLicense" | "strPermit";
@@ -1015,7 +1037,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         && !isPlaceholderLicenseValue(previous)
         && previous.replace(/\W/g, "").toLowerCase() === value.replace(/\W/g, "").toLowerCase();
       setComplianceOverrides((prev) => ({ ...prev, [options.field]: value }));
-      void persistDraftComplianceValues({ [options.field]: value }).catch((err) => {
+      void persistComplianceValues({ [options.field]: value }).catch((err) => {
         toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
       });
       options.setResult(data as ComplianceLookupResult);
@@ -1039,7 +1061,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       options.setBusy(false);
     }
-  }, [complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistDraftComplianceValues, propertyId, selectedId, toast]);
+  }, [complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistComplianceValues, propertyId, selectedId, toast]);
 
   const pullRealGetLicense = useCallback(async () => {
     await pullHawaiiComplianceField({
@@ -4498,7 +4520,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       setComplianceOverrides((prev) => ({ ...prev, [req.key]: next }));
                                     }}
                                     onBlur={(event) => {
-                                      persistDraftComplianceValues({ [req.key]: event.target.value } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>)
+                                      persistComplianceValues({ [req.key]: event.target.value } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>)
                                         .catch((err) => toast({ title: "License save failed", description: err.message, variant: "destructive" }));
                                     }}
                                     placeholder={req.sample}

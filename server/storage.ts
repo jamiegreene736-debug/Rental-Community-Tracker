@@ -31,6 +31,7 @@ import {
   type PropertyMarketRate, type InsertPropertyMarketRate,
   type PricingUpdateLog, type InsertPricingUpdateLog,
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
+  propertyComplianceOverrides,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
@@ -193,6 +194,26 @@ export interface IStorage {
   getGuestyPropertyMap(): Promise<GuestyPropertyMap[]>;
   getGuestyListingId(propertyId: number): Promise<string | null>;
   updateGuestyLastSynced(propertyId: number): Promise<void>;
+
+  getPropertyComplianceOverrides(propertyId: number): Promise<{
+    taxMapKey: string | null;
+    tatLicense: string | null;
+    getLicense: string | null;
+    strPermit: string | null;
+    dbprLicense: string | null;
+    touristTaxAccount: string | null;
+  } | null>;
+  upsertPropertyComplianceOverrides(
+    propertyId: number,
+    values: Partial<{
+      taxMapKey: string | null;
+      tatLicense: string | null;
+      getLicense: string | null;
+      strPermit: string | null;
+      dbprLicense: string | null;
+      touristTaxAccount: string | null;
+    }>,
+  ): Promise<void>;
 
   getMessageTemplates(): Promise<MessageTemplate[]>;
   getMessageTemplate(id: number): Promise<MessageTemplate | undefined>;
@@ -813,6 +834,69 @@ export class DatabaseStorage implements IStorage {
 
   async updateGuestyLastSynced(propertyId: number): Promise<void> {
     await db.update(guestyPropertyMap).set({ lastSyncedAt: new Date() }).where(eq(guestyPropertyMap.propertyId, propertyId));
+  }
+
+  async getPropertyComplianceOverrides(propertyId: number) {
+    const [row] = await db
+      .select()
+      .from(propertyComplianceOverrides)
+      .where(eq(propertyComplianceOverrides.propertyId, propertyId));
+    if (!row) return null;
+    return {
+      taxMapKey: row.taxMapKey ?? null,
+      tatLicense: row.tatLicense ?? null,
+      getLicense: row.getLicense ?? null,
+      strPermit: row.strPermit ?? null,
+      dbprLicense: row.dbprLicense ?? null,
+      touristTaxAccount: row.touristTaxAccount ?? null,
+    };
+  }
+
+  async upsertPropertyComplianceOverrides(
+    propertyId: number,
+    values: Partial<{
+      taxMapKey: string | null;
+      tatLicense: string | null;
+      getLicense: string | null;
+      strPermit: string | null;
+      dbprLicense: string | null;
+      touristTaxAccount: string | null;
+    }>,
+  ): Promise<void> {
+    const patch: Record<string, string | null> = {};
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) continue;
+      const text = value == null ? null : String(value).trim() || null;
+      patch[key] = text;
+    }
+    if (Object.keys(patch).length === 0) return;
+
+    const existing = await this.getPropertyComplianceOverrides(propertyId);
+    const merged = { ...(existing ?? {}), ...patch };
+    await db
+      .insert(propertyComplianceOverrides)
+      .values({
+        propertyId,
+        taxMapKey: merged.taxMapKey ?? null,
+        tatLicense: merged.tatLicense ?? null,
+        getLicense: merged.getLicense ?? null,
+        strPermit: merged.strPermit ?? null,
+        dbprLicense: merged.dbprLicense ?? null,
+        touristTaxAccount: merged.touristTaxAccount ?? null,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: propertyComplianceOverrides.propertyId,
+        set: {
+          taxMapKey: merged.taxMapKey ?? null,
+          tatLicense: merged.tatLicense ?? null,
+          getLicense: merged.getLicense ?? null,
+          strPermit: merged.strPermit ?? null,
+          dbprLicense: merged.dbprLicense ?? null,
+          touristTaxAccount: merged.touristTaxAccount ?? null,
+          updatedAt: new Date(),
+        },
+      });
   }
 
   async getMessageTemplates(): Promise<MessageTemplate[]> {

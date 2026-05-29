@@ -322,4 +322,18 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS payment_url text
   `);
   console.log("[schema] ensured guest_phone_overrides table");
+
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS property_compliance_overrides (
+      property_id integer PRIMARY KEY,
+      tax_map_key text,
+      tat_license text,
+      get_license text,
+      str_permit text,
+      dbpr_license text,
+      tourist_tax_account text,
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured property_compliance_overrides table");
 }

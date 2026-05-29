@@ -37,7 +37,7 @@ import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
-import { isFloridaLicenseJurisdiction, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
+import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
 // below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
@@ -5447,15 +5447,9 @@ export async function registerRoutes(
   };
 
   const fetchGuestyListingForCompliance = async (listingId: string): Promise<Record<string, unknown>> => {
-    const fields = [
-      "tags",
-      "licenseNumber",
-      "taxId",
-      "channels",
-      "publicDescription",
-    ].join("%20");
+    // Full listing read — partial `fields=` responses omit nested channel/license data.
     return await withComplianceLookupTimeout(
-      guestyRequest("GET", `/listings/${listingId}?fields=${fields}`) as Promise<Record<string, unknown>>,
+      guestyRequest("GET", `/listings/${listingId}`) as Promise<Record<string, unknown>>,
       "Guesty listing compliance fetch",
     );
   };
@@ -5534,6 +5528,96 @@ export async function registerRoutes(
 
   // GET /api/builder/str-permit-lookup — pull real STR from Guesty or Kauai TVR registry.
   app.get("/api/builder/str-permit-lookup", handleHawaiiLicenseLookup("strPermit", "STR permit"));
+
+  const sanitizeCompliancePayload = (body: Record<string, unknown>) => {
+    const keys = ["taxMapKey", "tatLicense", "getLicense", "strPermit", "dbprLicense", "touristTaxAccount"] as const;
+    const out: Partial<Record<typeof keys[number], string | null>> = {};
+    for (const key of keys) {
+      if (!(key in body)) continue;
+      const text = String(body[key] ?? "").trim();
+      out[key] = text && !isPlaceholderLicenseValue(text) ? text : null;
+    }
+    return out;
+  };
+
+  // GET /api/builder/compliance/:propertyId — persisted builder compliance values.
+  app.get("/api/builder/compliance/:propertyId", async (req, res) => {
+    const propertyId = Number(req.params.propertyId);
+    if (!Number.isInteger(propertyId) || propertyId === 0) {
+      return res.status(400).json({ error: "Invalid propertyId" });
+    }
+    try {
+      if (propertyId < 0) {
+        const draft = await storage.getCommunityDraft(Math.abs(propertyId));
+        if (!draft) return res.status(404).json({ error: "Draft not found" });
+        return res.json({
+          values: {
+            taxMapKey: usableLicenseValue(draft.taxMapKey),
+            tatLicense: usableLicenseValue(draft.tatLicense),
+            getLicense: usableLicenseValue(draft.getLicense),
+            strPermit: usableLicenseValue(draft.strPermit),
+            dbprLicense: usableLicenseValue(draft.dbprLicense),
+            touristTaxAccount: usableLicenseValue(draft.touristTaxAccount),
+          },
+        });
+      }
+      const row = await storage.getPropertyComplianceOverrides(propertyId);
+      return res.json({
+        values: {
+          taxMapKey: usableLicenseValue(row?.taxMapKey),
+          tatLicense: usableLicenseValue(row?.tatLicense),
+          getLicense: usableLicenseValue(row?.getLicense),
+          strPermit: usableLicenseValue(row?.strPermit),
+          dbprLicense: usableLicenseValue(row?.dbprLicense),
+          touristTaxAccount: usableLicenseValue(row?.touristTaxAccount),
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // PATCH /api/builder/compliance/:propertyId — save pulled/edited compliance values.
+  app.patch("/api/builder/compliance/:propertyId", async (req, res) => {
+    const propertyId = Number(req.params.propertyId);
+    if (!Number.isInteger(propertyId) || propertyId === 0) {
+      return res.status(400).json({ error: "Invalid propertyId" });
+    }
+    const patch = sanitizeCompliancePayload((req.body ?? {}) as Record<string, unknown>);
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: "No compliance values to save" });
+    }
+    try {
+      if (propertyId < 0) {
+        const draft = await storage.updateCommunityDraft(Math.abs(propertyId), patch as any);
+        if (!draft) return res.status(404).json({ error: "Draft not found" });
+        return res.json({
+          values: {
+            taxMapKey: usableLicenseValue(draft.taxMapKey),
+            tatLicense: usableLicenseValue(draft.tatLicense),
+            getLicense: usableLicenseValue(draft.getLicense),
+            strPermit: usableLicenseValue(draft.strPermit),
+            dbprLicense: usableLicenseValue(draft.dbprLicense),
+            touristTaxAccount: usableLicenseValue(draft.touristTaxAccount),
+          },
+        });
+      }
+      await storage.upsertPropertyComplianceOverrides(propertyId, patch);
+      const row = await storage.getPropertyComplianceOverrides(propertyId);
+      return res.json({
+        values: {
+          taxMapKey: usableLicenseValue(row?.taxMapKey),
+          tatLicense: usableLicenseValue(row?.tatLicense),
+          getLicense: usableLicenseValue(row?.getLicense),
+          strPermit: usableLicenseValue(row?.strPermit),
+          dbprLicense: usableLicenseValue(row?.dbprLicense),
+          touristTaxAccount: usableLicenseValue(row?.touristTaxAccount),
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
 
   // POST /api/guesty-property-map — connect a propertyId (positive for
   // hardcoded units, negative `-draftId` for promoted drafts) to an
