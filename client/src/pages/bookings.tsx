@@ -1684,6 +1684,12 @@ function buyInCancellationTier(score: number): BuyInCancellationTier {
   return "do_not_cancel";
 }
 
+function shouldShowAlternativeBuyInWorkflow(advice: BuyInCancellationAdvice | null): boolean {
+  if (!advice) return false;
+  if (advice.basis === "no_inventory" || advice.basis === "insufficient_coverage") return true;
+  return advice.score >= 50;
+}
+
 function buyInCancellationTitle(tier: BuyInCancellationTier): string {
   switch (tier) {
     case "cancel": return "Cancel likely justified";
@@ -7621,7 +7627,7 @@ export default function Bookings() {
 	                          return (
 	                            <div className="space-y-2">
 	                              <BuyInCancellationAdviceCard advice={advice} />
-	                              {advice && advice.score >= 70 && (
+	                              {shouldShowAlternativeBuyInWorkflow(advice) && (
 	                                <AlternativeBuyInWorkflowPanel
 	                                  workflow={alternativeWorkflows[r._id]}
 	                                  onScout={() => scoutAlternativeCommunities(r, advice)}
@@ -7822,6 +7828,10 @@ export default function Bookings() {
                                 slot={slot}
                                 listingId={selectedListingId}
                                 enableGroundFloorRequirement={selectedHasBuyInConfig}
+                                alternativeWorkflow={alternativeWorkflows[r._id]}
+                                onScoutAlternatives={(advice) => scoutAlternativeCommunities(r, advice)}
+                                onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(r, community)}
+                                onDraftAlternativeMessage={() => draftAlternativeGuestMessage(r)}
                               />
                             </div>
                           )}
@@ -8504,6 +8514,10 @@ export default function Bookings() {
               slot={picker.slot}
               listingId={selectedListingId}
               enableGroundFloorRequirement={selectedHasBuyInConfig}
+              alternativeWorkflow={alternativeWorkflows[picker.reservation._id]}
+              onScoutAlternatives={(advice) => scoutAlternativeCommunities(picker.reservation, advice)}
+              onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(picker.reservation, community)}
+              onDraftAlternativeMessage={() => draftAlternativeGuestMessage(picker.reservation)}
             />
           )}
         </DialogContent>
@@ -8889,12 +8903,20 @@ function CandidateList({
   slot,
   listingId,
   enableGroundFloorRequirement = true,
+  alternativeWorkflow,
+  onScoutAlternatives,
+  onRunAlternativeCommunity,
+  onDraftAlternativeMessage,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
   listingId?: string | null;
   enableGroundFloorRequirement?: boolean;
+  alternativeWorkflow?: AlternativeWorkflowState;
+  onScoutAlternatives?: (advice: BuyInCancellationAdvice) => void;
+  onRunAlternativeCommunity?: (community: string) => void;
+  onDraftAlternativeMessage?: () => void;
 }) {
   // Existing-buy-ins picker was removed (was here historically): when
   // auto-fill creates buy-in records and the operator detaches them,
@@ -8914,6 +8936,10 @@ function CandidateList({
         slot={slot}
         listingId={listingId}
         enableGroundFloorRequirement={enableGroundFloorRequirement}
+        alternativeWorkflow={alternativeWorkflow}
+        onScoutAlternatives={onScoutAlternatives}
+        onRunAlternativeCommunity={onRunAlternativeCommunity}
+        onDraftAlternativeMessage={onDraftAlternativeMessage}
       />
     </div>
   );
@@ -10068,12 +10094,20 @@ function LiveSearchSection({
   slot,
   listingId,
   enableGroundFloorRequirement = true,
+  alternativeWorkflow,
+  onScoutAlternatives,
+  onRunAlternativeCommunity,
+  onDraftAlternativeMessage,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
   listingId?: string | null;
   enableGroundFloorRequirement?: boolean;
+  alternativeWorkflow?: AlternativeWorkflowState;
+  onScoutAlternatives?: (advice: BuyInCancellationAdvice) => void;
+  onRunAlternativeCommunity?: (community: string) => void;
+  onDraftAlternativeMessage?: () => void;
 }) {
   const { toast } = useToast();
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
@@ -10744,6 +10778,14 @@ function LiveSearchSection({
       )}
 
       <BuyInCancellationAdviceCard advice={singleSearchCancellationAdvice} />
+      {shouldShowAlternativeBuyInWorkflow(singleSearchCancellationAdvice) && onScoutAlternatives && (
+        <AlternativeBuyInWorkflowPanel
+          workflow={alternativeWorkflow}
+          onScout={() => onScoutAlternatives(singleSearchCancellationAdvice!)}
+          onRunCommunity={(community) => onRunAlternativeCommunity?.(community)}
+          onDraftMessage={() => onDraftAlternativeMessage?.()}
+        />
+      )}
 
       {/* Cheapest callout — gated server-side on verified=yes (real
           availability + real per-night rate confirmed for these dates).
