@@ -613,19 +613,23 @@ async function buildBulkGuestySeasonalPlan(
   const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
   const monthlyRates = build24MonthPricingWindow().map(({ yearMonth }) => {
     const season = getSeasonForMonth(yearMonth, region);
-    const buyIn = units.reduce((sum, unit) => sum + marketRateBasisForMonth({
-      community,
-      bedrooms: unit.bedrooms,
-      propertyId,
-      yearMonth,
-      season,
-      row: rowByBR.get(unit.bedrooms),
-    }), 0);
-    return {
-      yearMonth,
-      buyIn,
-      price: cleanBaseRateFromBuyInServer(buyIn, targetMargin),
-    };
+    let buyIn = 0;
+    let price = 0;
+    for (const unit of units) {
+      const unitBuyIn = marketRateBasisForMonth({
+        community,
+        bedrooms: unit.bedrooms,
+        propertyId,
+        yearMonth,
+        season,
+        row: rowByBR.get(unit.bedrooms),
+      });
+      if (unitBuyIn <= 0) continue;
+      buyIn += unitBuyIn;
+      // Match the pricing table: ceil margin per unit, then sum (not ceil on combined buy-in).
+      price += cleanBaseRateFromBuyInServer(unitBuyIn, targetMargin);
+    }
+    return { yearMonth, buyIn, price };
   }).filter((row) => row.buyIn > 0 && row.price > 0);
 
   return { listingId, monthlyRates, units, targetMargin };

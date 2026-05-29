@@ -273,7 +273,6 @@ type GuestyMonthlyRate = {
   minRate: number;
   maxRate: number;
   days: number;
-  source?: "guesty" | "last-push";
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -283,7 +282,6 @@ function GuestyRatePushCard({
   listingId,
   propertyId,
   seasonalMonths,
-  applyPushedRates,
   targetMarginPct,
   setTargetMarginPct,
   allowCustomMargin,
@@ -291,15 +289,11 @@ function GuestyRatePushCard({
   lastGuestyRatePushStatus,
   lastGuestyRatePushSummary,
   onGuestyRatePushRecorded,
+  refetchGuestyRates,
 }: {
   listingId: string | null;
   propertyId?: number;
-  seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number }>;
-  // Called with the per-month rates we just pushed so the parent table
-  // shows them instantly, without depending on Guesty's calendar GET
-  // catching up (which is eventually-consistent and was returning stale
-  // rates in practice).
-  applyPushedRates?: (rates: Array<{ yearMonth: string; price: number }>) => void;
+  seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number; totalSell: number }>;
   targetMarginPct: number;
   setTargetMarginPct: (value: number) => void;
   allowCustomMargin: boolean;
@@ -307,6 +301,8 @@ function GuestyRatePushCard({
   lastGuestyRatePushStatus?: string | null;
   lastGuestyRatePushSummary?: string | null;
   onGuestyRatePushRecorded?: () => void | Promise<void>;
+  /** Re-read Guesty calendar after a verified push (eventual consistency). */
+  refetchGuestyRates?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -344,10 +340,8 @@ function GuestyRatePushCard({
       .map((row) => ({
         yearMonth: row.yearMonth,
         buyIn: row.totalBuyIn,
-        // Direct channel: price × (1 - feeDirect) = (1 + m) × buyIn.
-        // Use the same helper as the pricing table so "Sheet Rate" and
-        // the pushed Guesty base calendar rate stay in lockstep.
-        price: cleanBaseRateFromBuyIn(row.totalBuyIn, m),
+        // Match the pricing table's Sheet Base column (per-unit ceil, then sum).
+        price: row.totalSell > 0 ? row.totalSell : cleanBaseRateFromBuyIn(row.totalBuyIn, m),
       }));
   };
 
@@ -375,12 +369,9 @@ function GuestyRatePushCard({
         throw new Error(data.error || `Guesty calendar push did not fully verify.${failed}`.trim());
       }
       setSeasonalPushResult({ ...data, plan });
-      // Apply the pushed plan directly to the parent's Guesty-rates state
-      // so the 24-month table updates immediately. We don't trust a
-      // re-fetch because Guesty's calendar GET was returning stale rates
-      // right after the PUT (eventual consistency on their side).
-      applyPushedRates?.(plan);
       await onGuestyRatePushRecorded?.();
+      refetchGuestyRates?.();
+      window.setTimeout(() => refetchGuestyRates?.(), 4000);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -3124,29 +3115,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   // ── Guesty-confirmed monthly rates + channel-aware profit floor ──
   // Fetches what Guesty is charging per month so we can compare against
-  // our pricing sheet at a glance. The table also overlays the latest
-  // verified push recorded by the server so a just-run queue update is
-  // visible immediately, even if Guesty's calendar read endpoint lags.
+  // our pricing sheet at a glance (never overlay computed "intent" rates).
   const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, GuestyMonthlyRate>>({});
   const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
   const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
   // Live market refresh state (from the new /refresh-market-rates endpoint)
   const [liveMarket, setLiveMarket] = useState<any>(null);
   const [marketRefreshing, setMarketRefreshing] = useState(false);
-  // Merge the per-month rates we just pushed to Guesty directly into the
-  // table's state. Sidesteps Guesty's eventually-consistent calendar GET,
-  // which was returning stale rates immediately after the PUT.
-  const applyPushedRates = (plan: Array<{ yearMonth: string; price: number }>) => {
-    setGuestyRatesByMonth((prev) => {
-      const next = { ...prev };
-      for (const { yearMonth, price } of plan) {
-        const [y, m] = yearMonth.split("-").map(Number);
-        const daysInMonth = new Date(y, m, 0).getDate();
-        next[yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth, source: "last-push" };
-      }
-      return next;
-    });
-  };
   const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
   const pricingMarginTarget = isSingleListing ? targetMarginPct / 100 : MIN_PROFIT_MARGIN;
   const [scannerSchedule, setScannerSchedule] = useState<ScannerScheduleSnapshot | null>(null);
@@ -3189,9 +3164,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return () => window.clearTimeout(timer);
   }, [propertyId, isSingleListing, targetMarginPct]);
 
-  useEffect(() => {
+  const refetchGuestyRates = useCallback(() => {
     if (!propertyId) return;
-    let cancelled = false;
     setGuestyRatesLoading(true);
     setGuestyRatesError(null);
     const qs = new URLSearchParams({ months: "24" });
@@ -3205,50 +3179,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         return r.json();
       })
       .then((data: any) => {
-        if (cancelled) return;
         const byMonth: Record<string, GuestyMonthlyRate> = {};
         for (const m of data.months ?? []) {
-          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days, source: "guesty" };
+          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days };
         }
         setGuestyRatesByMonth(byMonth);
       })
       .catch((e: any) => {
-        if (!cancelled) setGuestyRatesError(e.message || "Failed to fetch Guesty rates");
+        setGuestyRatesError(e.message || "Failed to fetch Guesty rates");
       })
       .finally(() => {
-        if (!cancelled) setGuestyRatesLoading(false);
+        setGuestyRatesLoading(false);
       });
-    return () => { cancelled = true; };
   }, [propertyId, selectedId]);
 
-  const latestPushedGuestyRatesByMonth = useMemo<Record<string, GuestyMonthlyRate>>(() => {
-    if (!scannerSchedule?.lastGuestyRatePushAt || scannerSchedule.lastGuestyRatePushStatus === "error") return {};
-    const pushMs = Date.parse(scannerSchedule.lastGuestyRatePushAt);
-    if (!Number.isFinite(pushMs)) return {};
-    if (latestServerMarketRateNotice?.finishedAt && pushMs + 1000 < latestServerMarketRateNotice.finishedAt) {
-      return {};
-    }
-    const next: Record<string, GuestyMonthlyRate> = {};
-    for (const row of seasonalMonths) {
-      if (row.totalBuyIn <= 0) continue;
-      const [y, m] = row.yearMonth.split("-").map(Number);
-      const daysInMonth = new Date(y, m, 0).getDate();
-      const price = cleanBaseRateFromBuyIn(row.totalBuyIn, pricingMarginTarget);
-      next[row.yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth, source: "last-push" };
-    }
-    return next;
-  }, [
-    scannerSchedule?.lastGuestyRatePushAt,
-    scannerSchedule?.lastGuestyRatePushStatus,
-    latestServerMarketRateNotice?.finishedAt,
-    seasonalMonths,
-    pricingMarginTarget,
-  ]);
+  useEffect(() => {
+    refetchGuestyRates();
+  }, [refetchGuestyRates]);
 
-  const displayGuestyRatesByMonth = useMemo<Record<string, GuestyMonthlyRate>>(() => {
-    if (Object.keys(latestPushedGuestyRatesByMonth).length === 0) return guestyRatesByMonth;
-    return { ...guestyRatesByMonth, ...latestPushedGuestyRatesByMonth };
-  }, [guestyRatesByMonth, latestPushedGuestyRatesByMonth]);
+  useEffect(() => {
+    if (!propertyId || marketRatesVersion < 1) return;
+    refetchGuestyRates();
+    const t = window.setTimeout(refetchGuestyRates, 6000);
+    return () => window.clearTimeout(t);
+  }, [marketRatesVersion, propertyId, refetchGuestyRates]);
 
   // ── Market comparables ─────────────────────────────────────────────────
   // Per-season distribution of area rates for properties with the SAME
@@ -4846,7 +4800,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     seasonal rates" has been run yet. */}
                                 {(() => {
                                   const total = seasonalMonths.length;
-                                  const synced = seasonalMonths.filter((r) => !!displayGuestyRatesByMonth[r.yearMonth]).length;
+                                  const synced = seasonalMonths.filter((r) => !!guestyRatesByMonth[r.yearMonth]).length;
                                   if (guestyRatesLoading) return <span style={{ color: "#9ca3af" }}>Loading Guesty rates…</span>;
                                   if (guestyRatesError) return <span style={{ color: "#dc2626" }} title={guestyRatesError}>Guesty rates unavailable</span>;
                                   if (total === 0) return null;
@@ -5431,9 +5385,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </thead>
                               <tbody>
                                 {seasonalMonths.map((row) => {
-                                  const guesty = displayGuestyRatesByMonth[row.yearMonth];
+                                  const guesty = guestyRatesByMonth[row.yearMonth];
                                   const sheet = row.totalSell;
                                   const buyIn = row.totalBuyIn;
+                                  const guestyDrift = guesty && Math.abs(guesty.avgRate - sheet) >= 2;
                                   // Guesty now owns channel-level pricing adjustments. For
                                   // display, estimate the sell rate each channel needs to
                                   // clear the margin floor after its host fee.
@@ -5486,14 +5441,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                                 ${guesty.minRate.toLocaleString()}–${guesty.maxRate.toLocaleString()}
                                               </div>
                                             )}
-                                            <div
-                                              style={{ display: "inline-block", marginTop: 2, background: "#dcfce7", color: "#166534", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
-                                              title={guesty.source === "last-push"
-                                                ? `Most recent verified Guesty push set ${guesty.days} day${guesty.days === 1 ? "" : "s"} for this month.`
-                                                : `Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
-                                            >
-                                              {guesty.source === "last-push" ? "✓ pushed to Guesty" : "✓ in Guesty"}
-                                            </div>
+                                            {guestyDrift ? (
+                                              <div
+                                                style={{ display: "inline-block", marginTop: 2, background: "#fef3c7", color: "#92400e", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
+                                                title={`Guesty calendar shows $${guesty.avgRate.toLocaleString()}/night but the sheet base is $${sheet.toLocaleString()}. Push marked-up rates below to sync.`}
+                                              >
+                                                ⚠ drift vs sheet (${sheet.toLocaleString()} target)
+                                              </div>
+                                            ) : (
+                                              <div
+                                                style={{ display: "inline-block", marginTop: 2, background: "#dcfce7", color: "#166534", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
+                                                title={`Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
+                                              >
+                                                ✓ in Guesty
+                                              </div>
+                                            )}
                                           </>
                                         ) : (
                                           <>
@@ -5656,7 +5618,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     listingId={selectedId}
                     propertyId={propertyId}
                     seasonalMonths={seasonalMonths}
-                    applyPushedRates={applyPushedRates}
                     targetMarginPct={targetMarginPct}
                     setTargetMarginPct={setTargetMarginPct}
                     allowCustomMargin={isSingleListing}
@@ -5664,6 +5625,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     lastGuestyRatePushStatus={scannerSchedule?.lastGuestyRatePushStatus ?? null}
                     lastGuestyRatePushSummary={scannerSchedule?.lastGuestyRatePushSummary ?? null}
                     onGuestyRatePushRecorded={refreshScannerSchedule}
+                    refetchGuestyRates={refetchGuestyRates}
                   />
                 )}
 
