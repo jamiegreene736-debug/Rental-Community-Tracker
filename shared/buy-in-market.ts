@@ -1,3 +1,5 @@
+import { haversineFeet } from "./walking-distance";
+
 export type BuyInPlatformSearchTerms = {
   airbnb?: string;
   booking?: string;
@@ -123,11 +125,15 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Southern Dunes",
     aliases: [/\b(?:southern\s+dunes|haines\s+city|davenport)\b/i],
     searchLocation: "Southern Dunes, Haines City, Florida",
+    location: { searchName: "Southern Dunes Resort", city: "Haines City", state: "Florida", streetAddress: "1450 Southern Dunes Blvd", lat: 28.0995, lng: -81.5892 },
+    bounds: { sw_lat: 28.085, sw_lng: -81.605, ne_lat: 28.115, ne_lng: -81.572 },
   },
   "Caribe Cove": {
     key: "Caribe Cove",
     aliases: [/\bcaribe\s+cove\b/i],
     searchLocation: "Caribe Cove Resort, Kissimmee, Florida",
+    location: { searchName: "Caribe Cove Resort", city: "Kissimmee", state: "Florida", streetAddress: "9000 Treasure Trove Ln", lat: 28.3365, lng: -81.6045 },
+    bounds: { sw_lat: 28.325, sw_lng: -81.618, ne_lat: 28.348, ne_lng: -81.590 },
   },
   "Florida Generic": {
     key: "Florida Generic",
@@ -218,4 +224,69 @@ export function resolveBuyInMarket(input: {
 
 export function searchLocationForBuyInMarket(marketKey: string): string | null {
   return BUY_IN_MARKET_SEARCH_LOCATIONS[marketKey] || null;
+}
+
+/**
+ * Estimate driving time in minutes between two lat/lng points.
+ * Uses haversine straight-line, applies road detour factor, and region-specific
+ * average effective speeds (Kauai resorts: winding/slower ~30mph; Florida: ~40mph).
+ * This is a lightweight proxy — good enough to decide "within 15 min drive" for
+ * alternative buy-in community scouting without burning Google Distance Matrix credits.
+ */
+export function estimateDriveMinutes(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number,
+  region: "hawaii" | "florida" = "hawaii"
+): number {
+  const feet = haversineFeet(lat1, lng1, lat2, lng2);
+  const miles = feet / 5280;
+  const roadFactor = 1.28; // typical non-straight local resort access roads
+  const avgMph = region === "florida" ? 40 : 30;
+  const minutes = (miles * roadFactor / avgMph) * 60;
+  return Math.max(2, Math.ceil(minutes));
+}
+
+function inferRegionForCommunity(community: string): "hawaii" | "florida" {
+  const fl = /florida|kissimmee|davenport|haines|bonita|naples|estero|windsor|caribe|southern dunes/i.test(community);
+  return fl ? "florida" : "hawaii";
+}
+
+/**
+ * Returns other buy-in communities whose center is estimated to be within
+ * maxDriveMinutes drive of the reference point (or the base community's center).
+ * Used to replace/augment the old static SIMILAR_BUY_IN_MARKETS list so the
+ * alternative buy-in workflow and buy-in tools surface any plausible nearby
+ * option (15 min drive by default) rather than being capped at 2-3 curated ones.
+ */
+export function getNearbyBuyInCommunities(
+  baseCommunity: string,
+  maxDriveMinutes = 15,
+  reference?: { lat: number; lng: number }
+): string[] {
+  const baseLoc = BUY_IN_MARKET_LOCATIONS[baseCommunity];
+  const refLat = reference?.lat ?? baseLoc?.lat;
+  const refLng = reference?.lng ?? baseLoc?.lng;
+  if (!refLat || !refLng) {
+    // Fallback to the old curated list if we have no coords for this base
+    return (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? []).filter((k) => k !== baseCommunity);
+  }
+  const region = inferRegionForCommunity(baseCommunity);
+  const nearby: Array<{ key: string; driveMin: number }> = [];
+  for (const [key, loc] of Object.entries(BUY_IN_MARKET_LOCATIONS)) {
+    if (key === baseCommunity) continue;
+    const mins = estimateDriveMinutes(refLat, refLng, loc.lat, loc.lng, region);
+    if (mins <= maxDriveMinutes) {
+      nearby.push({ key, driveMin: mins });
+    }
+  }
+  nearby.sort((a, b) => a.driveMin - b.driveMin || a.key.localeCompare(b.key));
+  if (nearby.length === 0) {
+    // No one within the strict drive radius — fall back to the curated "same area"
+    // links (e.g. Kapaa <-> Princeville) so the alternative workflow still has
+    // something useful instead of an empty list.
+    return (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? []).filter((k) => k !== baseCommunity);
+  }
+  return nearby.map((n) => n.key);
 }

@@ -106,6 +106,8 @@ import {
   SIMILAR_BUY_IN_MARKETS,
   resolveBuyInMarket,
   searchLocationForBuyInMarket,
+  getNearbyBuyInCommunities,
+  estimateDriveMinutes,
 } from "@shared/buy-in-market";
 import { draftPhotoFolderRef, isScannableFolder, replacementPhotoFolderRef, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import {
@@ -6378,10 +6380,16 @@ export async function registerRoutes(
   });
 
   const validBuyInMarketKeys = () => Object.keys(BUY_IN_MARKETS).filter((key) => key !== "Florida Generic").sort();
-  const defaultBuyInMarketsFor = (baseCommunity: string): string[] =>
-    (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
+  const defaultBuyInMarketsFor = (baseCommunity: string): string[] => {
+    // Prefer dynamic 15-min drive radius (any community the operator could plausibly
+    // drive a guest to in ~15 minutes). Falls back to static curated list only if
+    // the base has no coordinates.
+    const dynamic = getNearbyBuyInCommunities(baseCommunity, 15);
+    if (dynamic.length > 0) return dynamic.slice(0, 6);
+    return (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
       .filter((market) => !!BUY_IN_MARKETS[market] && market !== baseCommunity)
       .slice(0, 3);
+  };
   const sanitizeRecommendedBuyInMarkets = (baseCommunity: string, raw: unknown): string[] => {
     if (!Array.isArray(raw)) throw new Error("markets must be an array");
     const seen = new Set<string>();
@@ -6673,11 +6681,16 @@ export async function registerRoutes(
       const savedMarketConfig = await storage.getPropertyBuyInMarkets(propertyId).catch(() => undefined);
       const configuredSimilar = Array.isArray(savedMarketConfig?.recommendedMarkets) && savedMarketConfig.recommendedMarkets.length > 0
         ? savedMarketConfig.recommendedMarkets
-        : SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [];
-      const similar = configuredSimilar
+        : null;
+      // When no operator-saved recommended markets, use 15-min drive radius from the
+      // community's center (or precise address if we resolve one). This is what makes
+      // the alternative buy-in workflow and related buy-in tools show *all* plausible
+      // communities within a short drive instead of being stuck at 2-3 static entries.
+      const baseSimilar = configuredSimilar ?? getNearbyBuyInCommunities(baseCommunity, 15);
+      const similar = baseSimilar
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
         .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community))
-        .slice(0, 5);
+        .slice(0, 8);  // allow more now that radius is explicit and drive-based
       const replacementPlans = twoUnitReplacementPlans(propertyConfig?.units?.map((unit) => unit.bedrooms) ?? [bedrooms]);
       const minAirbnbResults = Math.max(1, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "1"), 10) || 1));
       const results = await Promise.all(similar.map(async (community) => {
