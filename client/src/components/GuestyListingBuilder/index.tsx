@@ -11,6 +11,7 @@ import AvailabilityTab from "./AvailabilityTab";
 import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { sampleLicensesForLocation } from "@/data/adapt-draft";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 
@@ -829,22 +830,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
   }, [propertyId, queryClient]);
 
-  const validateComplianceRequirement = useCallback((req: LicenseRequirement) => {
-    const value = complianceValueFor(req.key);
-    if (!value || isPlaceholderLicenseValue(value)) {
-      const description = req.key === "dbprLicense"
-        ? "Click the main requirements check to search Florida DBPR automatically. If DBPR has no confident public address/name match, this field stays blank instead of guessing."
-        : req.key === "touristTaxAccount"
-          ? "Paste the real Lee County Tourist Development Tax account/reference if you track it outside the OTA-collected taxes."
-          : `Paste the real ${req.shortLabel} before pushing compliance.`;
-      toast({ title: req.shortLabel, description });
-      return;
+  const generateSampleForRequirement = useCallback(async (req: LicenseRequirement) => {
+    const city = effectivePropertyData?.address?.city ?? "";
+    const state = effectivePropertyData?.address?.state ?? "";
+    const samples = sampleLicensesForLocation(city, state);
+    const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
+    const sample = isFloridaProfile
+      ? req.key === "dbprLicense" ? samples.taxMapKey
+        : req.key === "touristTaxAccount" ? samples.tatLicense
+          : req.key === "getLicense" ? samples.getLicense
+            : req.key === "strPermit" ? samples.strPermit
+              : undefined
+      : req.key === "taxMapKey" ? samples.taxMapKey
+        : req.key === "tatLicense" ? samples.tatLicense
+          : req.key === "getLicense" ? samples.getLicense
+            : req.key === "strPermit" ? samples.strPermit
+              : undefined;
+    if (!sample) return;
+    setComplianceOverrides((prev) => ({ ...prev, [req.key]: sample }));
+    try {
+      await persistComplianceValues({ [req.key]: sample } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>);
+      toast({
+        title: `Sample ${req.shortLabel} applied`,
+        description: "County/state-shaped placeholder — replace with the real license before publishing, or pull the real value from Guesty/public records above.",
+      });
+    } catch (err: any) {
+      toast({ title: "Sample save failed", description: err?.message || String(err), variant: "destructive" });
     }
-    toast({
-      title: `${req.shortLabel} looks usable`,
-      description: "This is a real-looking value, not a sample placeholder, and it will be included when you push compliance.",
-    });
-  }, [complianceValueFor, toast]);
+  }, [complianceProfile.jurisdiction, effectivePropertyData?.address?.city, effectivePropertyData?.address?.state, persistComplianceValues, toast]);
 
   const pullLicenseRequirements = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
@@ -4511,7 +4524,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isPlaceholder && (
                                     <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
-                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? ` or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : req.key === "taxMapKey" ? "county GIS" : "Fort Myers STR portal"}` : ""} before pushing compliance.
+                                      Sample value only. Enter the real {req.shortLabel}, generate a sample placeholder below{canPublicPull ? `, or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : req.key === "taxMapKey" ? "county GIS" : "Fort Myers STR portal"}` : ""} before pushing compliance.
                                     </div>
                                   )}
                                   <input
@@ -4544,7 +4557,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <button
                                     type="button"
                                     disabled={licenseLookupBusy}
-                                    onClick={canPublicPull && req.key === "taxMapKey" && isHawaiiCompliance ? pullRealTaxMapKey : (canPublicPull ? pullLicenseRequirements : () => validateComplianceRequirement(req))}
+                                    onClick={canPublicPull && req.key === "taxMapKey" && isHawaiiCompliance ? pullRealTaxMapKey : (canPublicPull ? pullLicenseRequirements : () => { void generateSampleForRequirement(req); })}
                                     style={{
                                       marginTop: 8,
                                       fontSize: 11,
@@ -4560,7 +4573,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   >
                                     {canPublicPull
                                       ? (value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`)
-                                      : `Validate pasted ${req.shortLabel}`}
+                                      : `Generate sample ${req.shortLabel}`}
                                   </button>
                                 </div>
                               );

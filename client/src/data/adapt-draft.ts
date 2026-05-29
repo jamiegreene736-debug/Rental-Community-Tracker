@@ -173,7 +173,7 @@ function floridaSamples(c: ReturnType<typeof floridaCountyFromCity>): FloridaSam
   }
 }
 
-function sampleLicensesForLocation(city: string, state: string): LicenseSamples {
+export function sampleLicensesForLocation(city: string, state: string): LicenseSamples {
   const s = (state || "").toLowerCase();
   if (s === "hawaii" || s === "hi") {
     return {
