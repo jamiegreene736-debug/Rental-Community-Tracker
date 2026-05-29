@@ -727,6 +727,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     setComplianceOverrides({});
     setTmkLookupResult(null);
+    setGetLookupResult(null);
+    setTatLookupResult(null);
+    setStrLookupResult(null);
+    setGetLookupBusy(false);
+    setTatLookupBusy(false);
+    setStrLookupBusy(false);
+    setTmkLookupBusy(false);
+    setLicenseLookupBusy(false);
   }, [propertyId]);
 
   const effectivePropertyData = useMemo(() => {
@@ -918,6 +926,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return /\b(hawaii|hi)\b/i.test(`${stateField} ${fullField}`);
   }, [effectivePropertyData?.address]);
 
+  const COMPLIANCE_FETCH_TIMEOUT_MS = 28_000;
+
   const pullRealTaxMapKey = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
     const fullAddress = typeof effectivePropertyData.address === "object"
@@ -933,18 +943,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const params = new URLSearchParams({
         address: fullAddress,
       });
-      const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`);
+      const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`, {
+        signal: AbortSignal.timeout(COMPLIANCE_FETCH_TIMEOUT_MS),
+      });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || data?.message || "TMK lookup failed");
       setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
-      await persistDraftComplianceValues({ taxMapKey: data.taxMapKey });
+      void persistDraftComplianceValues({ taxMapKey: data.taxMapKey }).catch((err) => {
+        toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
+      });
       setTmkLookupResult(data as TmkLookupResult);
       toast({
         title: data.confidence === "unit-cpr" ? "Guesty-address unit TMK applied" : "Guesty-address parcel TMK applied",
         description: data.note,
       });
     } catch (err: any) {
-      toast({ title: "TMK lookup failed", description: err?.message || String(err), variant: "destructive" });
+      const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+      toast({
+        title: "TMK lookup failed",
+        description: timedOut
+          ? "Kauai TMK lookup timed out. Try again in a moment."
+          : err?.message || String(err),
+        variant: "destructive",
+      });
     } finally {
       setTmkLookupBusy(false);
     }
@@ -977,7 +998,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       if (selectedId) params.set("listingId", selectedId);
       if (propertyId) params.set("propertyId", String(propertyId));
       if (effectivePropertyData.taxMapKey) params.set("taxMapKey", effectivePropertyData.taxMapKey);
-      const resp = await fetch(`${options.endpoint}?${params.toString()}`);
+      const resp = await fetch(`${options.endpoint}?${params.toString()}`, {
+        signal: AbortSignal.timeout(COMPLIANCE_FETCH_TIMEOUT_MS),
+      });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || data?.message || `${options.label} lookup failed`);
       const value = String(data.value || data[options.field] || "").trim();
@@ -992,7 +1015,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         && !isPlaceholderLicenseValue(previous)
         && previous.replace(/\W/g, "").toLowerCase() === value.replace(/\W/g, "").toLowerCase();
       setComplianceOverrides((prev) => ({ ...prev, [options.field]: value }));
-      await persistDraftComplianceValues({ [options.field]: value });
+      void persistDraftComplianceValues({ [options.field]: value }).catch((err) => {
+        toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
+      });
       options.setResult(data as ComplianceLookupResult);
       if (unchanged) {
         toast({
@@ -1003,7 +1028,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         toast({ title: `${options.label} applied`, description: data.note });
       }
     } catch (err: any) {
-      toast({ title: `${options.label} lookup failed`, description: err?.message || String(err), variant: "destructive" });
+      const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+      toast({
+        title: `${options.label} lookup failed`,
+        description: timedOut
+          ? `${options.label} lookup timed out (Guesty or county registry may be slow). Try again in a moment.`
+          : err?.message || String(err),
+        variant: "destructive",
+      });
     } finally {
       options.setBusy(false);
     }

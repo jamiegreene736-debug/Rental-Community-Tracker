@@ -39,6 +39,7 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(Math.max(5_000, Number(process.env.GUESTY_REQUEST_TIMEOUT_MS ?? 25_000))),
   });
   if (!res.ok) {
     // Guesty error responses are inconsistent — sometimes JSON with message,

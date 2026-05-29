@@ -95,6 +95,7 @@ const normalizeAddressText = (value: unknown): string => {
 const queryKauaiParcels = async (params: URLSearchParams): Promise<KauaiParcelAttributes[]> => {
   const resp = await fetch(`${KAUAI_PARCEL_LAYER}?${params.toString()}`, {
     headers: { "User-Agent": "NexStay/1.0" },
+    signal: AbortSignal.timeout(20_000),
   });
   if (!resp.ok) throw new Error(`Kauai parcel query failed (${resp.status})`);
   const data = await resp.json() as any;
@@ -209,7 +210,10 @@ export async function fetchKauaiTvrRecords(): Promise<KauaiTvrRecord[]> {
   if (kauaiTvrCache && Date.now() - kauaiTvrCache.loadedAt < oneDay) {
     return kauaiTvrCache.records;
   }
-  const resp = await fetch(KAUAI_TVR_PDF_URL, { headers: { "User-Agent": "NexStay/1.0" } });
+  const resp = await fetch(KAUAI_TVR_PDF_URL, {
+    headers: { "User-Agent": "NexStay/1.0" },
+    signal: AbortSignal.timeout(60_000),
+  });
   if (!resp.ok) throw new Error(`Kauai TVR registry download failed (${resp.status})`);
   const parsed = await pdf(Buffer.from(await resp.arrayBuffer()));
   const records = parseKauaiTvrPdfText(parsed.text || "");
@@ -227,6 +231,7 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
   });
   const geocodeResp = await fetch(`${ARCGIS_GEOCODER}?${geocodeParams.toString()}`, {
     headers: { "User-Agent": "NexStay/1.0" },
+    signal: AbortSignal.timeout(20_000),
   });
   if (!geocodeResp.ok) throw new Error(`Address geocode failed (${geocodeResp.status})`);
   const geocodeData = await geocodeResp.json() as any;

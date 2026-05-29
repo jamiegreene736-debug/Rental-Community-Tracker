@@ -5428,16 +5428,36 @@ export async function registerRoutes(
     }
   });
 
+  const COMPLIANCE_GUESTY_TIMEOUT_MS = 20_000;
+  const withComplianceLookupTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`${label} timed out after ${COMPLIANCE_GUESTY_TIMEOUT_MS / 1000}s`)),
+            COMPLIANCE_GUESTY_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
   const fetchGuestyListingForCompliance = async (listingId: string): Promise<Record<string, unknown>> => {
     const fields = [
       "tags",
       "licenseNumber",
       "taxId",
-      "integrations",
       "channels",
       "publicDescription",
     ].join("%20");
-    return await guestyRequest("GET", `/listings/${listingId}?fields=${fields}`) as Record<string, unknown>;
+    return await withComplianceLookupTimeout(
+      guestyRequest("GET", `/listings/${listingId}?fields=${fields}`) as Promise<Record<string, unknown>>,
+      "Guesty listing compliance fetch",
+    );
   };
 
   const loadPropertyComplianceValues = async (propertyIdRaw: unknown) => {
@@ -5499,7 +5519,10 @@ export async function registerRoutes(
         if (/No real .* license was found|Select a connected Guesty listing|No Kauai County TVR/i.test(message)) {
           return res.status(404).json({ error: message, searchedAddress: address, listingId });
         }
-        res.status(500).json({ error: `${failureLabel} lookup failed`, message });
+        if (/timed out/i.test(message)) {
+          return res.status(504).json({ error: message, searchedAddress: address, listingId });
+        }
+        return res.status(500).json({ error: `${failureLabel} lookup failed`, message });
       }
     };
 
