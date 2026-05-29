@@ -142,15 +142,6 @@ export function resolveLicenseComplianceProfile(input: {
           helpText: "Parcel identifier verified from the address that is sent to Guesty.",
         },
         {
-          key: "tatLicense",
-          label: "Transient Accommodations Tax License",
-          shortLabel: "TAT License",
-          required: true,
-          requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
-          sample: "TA-023-450-1234-01",
-          helpText: "Hawaii transient accommodations tax license.",
-        },
-        {
           key: "getLicense",
           label: "General Excise Tax License",
           shortLabel: "GET License",
@@ -158,6 +149,15 @@ export function resolveLicenseComplianceProfile(input: {
           requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
           sample: "GE-023-450-1234-01",
           helpText: "Hawaii general excise tax license.",
+        },
+        {
+          key: "tatLicense",
+          label: "Transient Accommodations Tax License",
+          shortLabel: "TAT License",
+          required: true,
+          requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
+          sample: "TA-023-450-1234-01",
+          helpText: "Hawaii transient accommodations tax license.",
         },
         {
           key: "strPermit",

@@ -745,7 +745,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         const loaded: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">> = {};
         for (const [key, value] of Object.entries(data.values)) {
           const text = String(value ?? "").trim();
-          if (text && !isPlaceholderLicenseValue(text)) {
+          if (text) {
             loaded[key as keyof typeof loaded] = text;
           }
         }
@@ -786,11 +786,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [effectivePropertyData, complianceProfile.jurisdiction]);
 
   const complianceDisplayValue = useCallback((value?: string | null): string => {
-    return value && !isPlaceholderLicenseValue(value) ? value : "—";
+    const raw = String(value ?? "").trim();
+    return raw || "—";
   }, []);
 
   const canCopyComplianceValue = useCallback((value?: string | null): boolean => {
-    return Boolean(value && !isPlaceholderLicenseValue(value));
+    return Boolean(String(value ?? "").trim());
   }, []);
 
   const complianceSummaryValues = useMemo(() => {
@@ -810,7 +811,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const payload: Record<string, string> = {};
     for (const [key, value] of Object.entries(values)) {
       const text = String(value ?? "").trim();
-      if (text && !isPlaceholderLicenseValue(text)) payload[key] = text;
+      if (text) payload[key] = text;
     }
     if (Object.keys(payload).length === 0) return;
     const url = propertyId < 0
@@ -4503,7 +4504,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             {complianceProfile.requirements.map((req) => {
                               const value = complianceValueFor(req.key);
                               const isPlaceholder = isPlaceholderLicenseValue(value);
-                              const inputValue = value && !isPlaceholder ? value : "";
+                              const inputValue = String(value ?? "").trim();
                               const canPublicPull = (complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit")
                                 || (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction) && req.key === "dbprLicense")
                                 || (isHawaiiCompliance && req.key === "taxMapKey");
