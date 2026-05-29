@@ -1395,3 +1395,25 @@ function testMarketPicker() {
 }
 
 testMarketPicker();
+
+import {
+  driveMinutesBetweenBuyInMarkets,
+  nearbyBuyInMarketsForScout,
+  oceanfrontComparableBuyInMarket,
+} from "../shared/buy-in-market";
+
+assert.equal(oceanfrontComparableBuyInMarket("Kapaa Beachfront"), true);
+assert.equal(oceanfrontComparableBuyInMarket("Poipu Kai"), true);
+assert.equal(oceanfrontComparableBuyInMarket("Princeville"), false);
+
+const poipuToOceanfront = driveMinutesBetweenBuyInMarkets("Poipu Kai", "Poipu Oceanfront");
+assert.ok(poipuToOceanfront !== null && poipuToOceanfront <= 20, "Poipu Oceanfront should be within 20 min of Poipu Kai");
+
+const poipuToKapaa = driveMinutesBetweenBuyInMarkets("Poipu Kai", "Kapaa Beachfront");
+assert.ok(poipuToKapaa !== null && poipuToKapaa > 20, "Kapaa should be outside the 20 min drive scout radius from Poipu Kai");
+
+const poipuNearby = nearbyBuyInMarketsForScout("Poipu Kai", { maxDriveMinutes: 20, oceanfrontOnly: true });
+assert.ok(poipuNearby.includes("Poipu Oceanfront"), "oceanfront scout should include Poipu Oceanfront");
+assert.ok(poipuNearby.includes("Poipu Brenneckes"), "Poipu Brenneckes counts as oceanfront-comparable");
+assert.ok(!poipuNearby.includes("Kapaa Beachfront"), "Kapaa should be excluded at 20 min for Poipu Kai oceanfront scout");
+console.log("[test] nearby buy-in markets by drive: PASS");

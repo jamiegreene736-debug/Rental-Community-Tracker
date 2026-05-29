@@ -104,6 +104,9 @@ import {
   BUY_IN_MARKET_PLATFORM_SEARCH_TERMS,
   BUY_IN_MARKET_SEARCH_LOCATIONS,
   SIMILAR_BUY_IN_MARKETS,
+  driveMinutesBetweenBuyInMarkets,
+  nearbyBuyInMarketsForScout,
+  oceanfrontComparableBuyInMarket,
   resolveBuyInMarket,
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
@@ -6379,9 +6382,11 @@ export async function registerRoutes(
 
   const validBuyInMarketKeys = () => Object.keys(BUY_IN_MARKETS).filter((key) => key !== "Florida Generic").sort();
   const defaultBuyInMarketsFor = (baseCommunity: string): string[] =>
-    (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
-      .filter((market) => !!BUY_IN_MARKETS[market] && market !== baseCommunity)
-      .slice(0, 3);
+    nearbyBuyInMarketsForScout(baseCommunity, {
+      maxDriveMinutes: 20,
+      oceanfrontOnly: oceanfrontComparableBuyInMarket(baseCommunity),
+      limit: 3,
+    });
   const sanitizeRecommendedBuyInMarkets = (baseCommunity: string, raw: unknown): string[] => {
     if (!Array.isArray(raw)) throw new Error("markets must be an array");
     const seen = new Set<string>();
@@ -6577,11 +6582,6 @@ export async function registerRoutes(
     }
   });
 
-  function oceanfrontComparableBuyInMarket(community: string | null | undefined): boolean {
-    const key = String(community ?? "").toLowerCase();
-    return /\b(oceanfront|beachfront|brennecke|poipu kai)\b/.test(key);
-  }
-
   function twoUnitReplacementPlans(preferredBedrooms: number[]): number[][] {
     const total = preferredBedrooms.reduce((sum, n) => sum + (Number.isFinite(n) ? n : 0), 0);
     if (total <= 0) return [];
@@ -6673,8 +6673,14 @@ export async function registerRoutes(
       const savedMarketConfig = await storage.getPropertyBuyInMarkets(propertyId).catch(() => undefined);
       const configuredSimilar = Array.isArray(savedMarketConfig?.recommendedMarkets) && savedMarketConfig.recommendedMarkets.length > 0
         ? savedMarketConfig.recommendedMarkets
-        : SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [];
-      const similar = configuredSimilar
+        : [];
+      const driveNearby = nearbyBuyInMarketsForScout(baseCommunity, {
+        maxDriveMinutes: 20,
+        oceanfrontOnly: sourceRequiresOceanfront,
+        limit: 5,
+      });
+      const similar = Array.from(new Set([...configuredSimilar, ...driveNearby]))
+        .filter((community) => community !== baseCommunity)
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
         .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community))
         .slice(0, 5);
@@ -6735,6 +6741,7 @@ export async function registerRoutes(
           const bestPlan = passingPlans[0] ?? null;
           const maxPlanCount = Math.max(0, ...Object.values(countsByBedroom));
           const samples = flattenScoutSamplesForPlan(samplesByBedroom, bestPlan ?? replacementPlans[0]);
+          const driveMinutesFromBase = driveMinutesBetweenBuyInMarkets(baseCommunity, community);
           return {
             community,
             searchTerm: q,
@@ -6743,12 +6750,13 @@ export async function registerRoutes(
             raw: Object.values(countsByBedroom).reduce((sum, count) => sum + count, 0),
             recommended: passingPlans.length > 0,
             reason: passingPlans.length > 0
-              ? `Airbnb scout passed ${bestPlan!.join("+")}BR replacement proof (${formatBedroomCounts(countsByBedroom)}).`
-              : `Airbnb scout could not prove a complete replacement combo (${replacementPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")}; ${formatBedroomCounts(countsByBedroom)}).`,
+              ? `Airbnb scout passed ${bestPlan!.join("+")}BR replacement proof (${formatBedroomCounts(countsByBedroom)}${driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : ""}).`
+              : `Airbnb scout could not prove a complete replacement combo (${replacementPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")}; ${formatBedroomCounts(countsByBedroom)}${driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : ""}).`,
             countsByBedroom,
             passingPlans,
             replacementPlans,
             oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
+            driveMinutesFromBase,
             errors,
             durationMs: Date.now() - startedAt,
             samples,
@@ -7961,7 +7969,8 @@ export async function registerRoutes(
     expiresAt: number;
   };
   const buyInListingSitesCache = new Map<string, BuyInListingSitesCacheEntry>();
-  const FIND_BUY_IN_TTL_MS = 5 * 60_000;
+  // Buy-in scans must always hit live SearchAPI + sidecar work — no HTTP result cache.
+  const FIND_BUY_IN_TTL_MS = 0;
   const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
   // Railway's edge can return "Application failed to respond" when a
   // long handler stays silent. find-buy-in is allowed to run longer
@@ -9082,7 +9091,7 @@ export async function registerRoutes(
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
     const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v3-strict|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
-    const noCache = req.query.nocache === "1";
+    const noCache = req.query.nocache === "1" || FIND_BUY_IN_TTL_MS <= 0;
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
     let findBuyInLaneHeartbeat: ReturnType<typeof setInterval> | null = null;
@@ -10047,6 +10056,7 @@ export async function registerRoutes(
       listingTitle: listingTitle ?? undefined,
       propertyId,
       detail: `${providerLabel}: scanning ${bedrooms}BR unit · ${sidecarQueueDateLabel} · ${(resortName || community).trim()}`,
+      skipResultCache: true,
     });
     const airbnbSidecarAbort = makeSidecarAbort("airbnb-searchapi");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
@@ -12352,7 +12362,7 @@ export async function registerRoutes(
     // them is how Auto-fill can immediately replay a stale "0 scanned rows"
     // result after the sidecar has already recovered.
     evictExpiredFindBuyIn();
-    const cacheTtlMs = scanComplete
+    const cacheTtlMs = scanComplete && FIND_BUY_IN_TTL_MS > 0
       ? (priced.length > 0 ? FIND_BUY_IN_TTL_MS : 30_000)
       : 0;
     if (cacheTtlMs > 0) {

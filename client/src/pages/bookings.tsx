@@ -1923,7 +1923,7 @@ function AlternativeBuyInWorkflowPanel({
         <div>
           <p className="font-semibold">Alternative buy-in workflow</p>
           <p className="text-[11px] opacity-80">
-            Scout nearby communities with SearchAPI Airbnb first, then run the full sidecar search for communities that prove a complete replacement combo.
+            Scout nearby communities within ~20 minutes drive (beachfront/oceanfront sources stay waterfront), then run the full sidecar search for communities that prove a complete replacement combo.
           </p>
           {replacementPlanText && (
             <p className="mt-0.5 text-[11px] opacity-80">
