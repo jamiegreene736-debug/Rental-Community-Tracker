@@ -9819,7 +9819,12 @@ export async function registerRoutes(
       if (pricePlausibilityReason(c)) return false;
       if (targetIsRegencyPoipuKai) {
         if (!visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c) && !strongRegencyProof) return false;
-      } else if (!searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) {
+      } else if (
+        !searchProofCanCarryTarget
+        && !pricePlausibleSearchProof
+        && !candidateIsPoipuKaiCondoLike(c)
+        && !(normalizedResortName === "poipu kai" && mentionsPoipuKai(hay))
+      ) {
         return false;
       }
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
@@ -9864,7 +9869,13 @@ export async function registerRoutes(
       if (targetIsRegencyPoipuKai && !visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c) && !strongRegencyProof) {
         return "no Regency-specific proof";
       }
-      if (!targetIsRegencyPoipuKai && !searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) {
+      if (
+        !targetIsRegencyPoipuKai
+        && !searchProofCanCarryTarget
+        && !pricePlausibleSearchProof
+        && !candidateIsPoipuKaiCondoLike(c)
+        && !(normalizedResortName === "poipu kai" && mentionsPoipuKai(hay))
+      ) {
         return "not condo-like for target";
       }
       if (c.source === "pm" && !isDetailUrl("pm", c.url)) return "PM URL is not a detail page";
@@ -10135,6 +10146,7 @@ export async function registerRoutes(
             verified: "yes",
             verifiedNightlyPrice: Math.round(nightly),
             verifiedReason: "SearchAPI Airbnb engine returned this date-specific priced result for the resort, dates, and bedroom filter",
+            inTargetBounds: airbnbCoordsInBounds(p, bounds, 0.01),
           };
         });
       } catch (e: any) {

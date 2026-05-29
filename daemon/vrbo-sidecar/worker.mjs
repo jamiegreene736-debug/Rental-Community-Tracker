@@ -2072,8 +2072,47 @@ async function ensureBrowser() {
   }
   log(`connecting to Chrome via CDP (${allocation.label})…`);
   await verifyActiveChromeHealth("before connect");
-  browser = await chromium.connectOverCDP(allocation.cdpUrl);
-  context = browser.contexts()[0] ?? (await browser.newContext());
+  try {
+    browser = await chromium.connectOverCDP(allocation.cdpUrl);
+  } catch (e) {
+    const message = e?.message ?? String(e);
+    if (!HEADLESS_FALLBACK_ENABLED || !/setDownloadBehavior|context management is not supported/i.test(message)) {
+      throw e;
+    }
+    log(`CDP connect failed (${message}); falling back to headless Chromium`);
+    activeChromeAllocation = {
+      type: "headless",
+      label: WORKER_ROLE === "server" ? "Railway headless Chromium fallback" : "headless Chromium fallback",
+      cdpUrl: null,
+      noVncUrl: null,
+      ephemeral: false,
+      release: async () => {},
+    };
+    return ensureHeadlessBrowser();
+  }
+  // Never call browser.newContext() over CDP: Playwright issues Browser.setDownloadBehavior,
+  // which headed server Chrome rejects ("Browser context management is not supported").
+  const existingContexts = browser.contexts();
+  if (!existingContexts.length) {
+    await browser.close().catch(() => {});
+    browser = null;
+    if (HEADLESS_FALLBACK_ENABLED) {
+      log("CDP Chrome has no browser contexts; falling back to headless Chromium");
+      activeChromeAllocation = {
+        type: "headless",
+        label: WORKER_ROLE === "server" ? "Railway headless Chromium fallback" : "headless Chromium fallback",
+        cdpUrl: null,
+        noVncUrl: null,
+        ephemeral: false,
+        release: async () => {},
+      };
+      return ensureHeadlessBrowser();
+    }
+    throw new Error(
+      "CDP Chrome has no browser contexts — ensure the sidecar profile launches with at least one tab",
+    );
+  }
+  context = existingContexts[0];
   activeBrowserFingerprint = browserFingerprintForRequest(activeRuntimeRequest);
   await installFingerprintInitScript(context, activeBrowserFingerprint);
   if (activeBrowserFingerprint) {
