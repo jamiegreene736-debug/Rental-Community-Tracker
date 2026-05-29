@@ -68,11 +68,17 @@ dropdown, filters visible suggestions by the community token policy and
 city/location guard, then runs each accepted suggestion as a separate
 provider search. Results are deduped before returning to the web app.
 
-Provider URL policy:
+Provider URL policy (CRITICAL for buy-in / live search flows):
 
-- **VRBO:** no constructed `/search` URL injection. VRBO must use the
-  visible dropdown, visible date controls, and visible Search button.
-  Constructed VRBO result URLs trigger CAPTCHA too aggressively.
+- **VRBO (strict):** 100% sight + clicking only. NO constructed `/search` URL
+  injection **ever**, including in variants, fallbacks, vision paths, or recovery.
+  Must start at bare https://www.vrbo.com/ homepage, type into the visible
+  destination field (or vision click+type), select visible autocomplete
+  suggestion, use visible date controls, then click the visible Search button.
+  Direct or pre-built VRBO search URLs (even "realistic" ones) are the #1
+  trigger for slider CAPTCHA that often remains blocking after manual solve.
+  The worker has a hard runtime `assertSafeVrboNavigation` guard that will
+  throw on any attempt. Buy-in flows must never bypass this.
 - **Airbnb and Booking.com:** after the destination has been confirmed
   from the visible provider dropdown, the worker may use provider
   results URLs with query parameters for dates, bedrooms, and the

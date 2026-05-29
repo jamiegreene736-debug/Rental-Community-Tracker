@@ -28,6 +28,33 @@ to open a fix PR via Claude Code or accept the original decision.
 - **Before writing code**, scan the Load-Bearing Decisions. If your
   change contradicts one of them, pause and ask the human before
   proceeding.
+
+## VRBO / OTA Buy-In Search Policy (Load-Bearing)
+
+**Never inject a pre-constructed `vrbo.com/search?...` URL (or any
+parameterized deep link) when driving VRBO for buy-in, replacement,
+alternative unit scouting, or live pricing flows.**
+
+- VRBO flows must be 100% "sight + clicking": start at bare homepage,
+  type into visible destination field (or vision-assisted click+type),
+  select visible autocomplete suggestion, interact with visible date
+  controls, click the visible Search button.
+- Direct URL navigation for VRBO (even "realistic" ones via Apify,
+  ScrapingBee, Browserbase, or manual `page.goto`) is the primary
+  trigger for slider CAPTCHA that frequently remains blocking even
+  after manual solve.
+- The sidecar worker (`daemon/vrbo-sidecar/worker.mjs`) contains a hard
+  runtime guard `assertSafeVrboNavigation` that will throw on any
+  violation. All buy-in paths (find-buy-in, alternative-buy-in-scout
+  fallbacks, replacement flows, etc.) must route VRBO exclusively
+  through the sidecar visible-interaction path.
+- Airbnb and Booking.com may use post-dropdown confirmed results URLs
+  with date params (per historical policy), but VRBO is special-cased
+  as zero-tolerance.
+
+If a legacy scraper or debug tool (`apify-vrbo`, `browserbase-vrbo-search`,
+etc.) is still reachable from a buy-in UI path, refactor it to the
+sidecar or mark it explicitly deprecated for VRBO.
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
   wrong because…"* rather than *"this code has a bug"*.
