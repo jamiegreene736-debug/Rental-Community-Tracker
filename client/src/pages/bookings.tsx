@@ -1252,7 +1252,11 @@ function buyInProviderSearchStatus(
 ) {
   const config = BUY_IN_SEARCH_PROVIDER_CONFIG.find((provider) => provider.key === key)!;
   const stats = buyInProviderStats(summary, diagnostics, key);
-  const hardFailed = stats.status === "error" || stats.status === "timeout";
+  const hardFailed = stats.status === "error"
+    || stats.status === "timeout"
+    || /setDownloadBehavior|context management is not supported/i.test(
+      `${stats.diagnostic?.failureReason ?? ""} ${stats.diagnostic?.reason ?? ""} ${stats.diagnostic?.message ?? ""}`,
+    );
   const searched = stats.searched || stats.raw > 0;
   const passed = !hardFailed && stats.status === "ok" && searched && stats.raw > 0;
   const warned = !passed && !hardFailed && searched;
@@ -1684,10 +1688,27 @@ function buyInCancellationTier(score: number): BuyInCancellationTier {
   return "do_not_cancel";
 }
 
-function shouldShowAlternativeBuyInWorkflow(advice: BuyInCancellationAdvice | null): boolean {
+function shouldShowAlternativeBuyInWorkflow(
+  advice: BuyInCancellationAdvice | null,
+  opts?: { noCompleteCombo?: boolean },
+): boolean {
   if (!advice) return false;
+  if (opts?.noCompleteCombo) return true;
   if (advice.basis === "no_inventory" || advice.basis === "insufficient_coverage") return true;
   return advice.score >= 50;
+}
+
+function countAttachableBuyInCandidates(audits: AutoFillSearchAudit[]): number {
+  return audits.flatMap((audit) => audit.candidates).filter((candidate) => {
+    if (candidate.verified !== "yes") return false;
+    if (candidate.source === "airbnb") return false;
+    return true;
+  }).length;
+}
+
+function providerSidecarProtocolFailed(status: ReturnType<typeof buyInProviderSearchStatus>): boolean {
+  const hay = `${status.failureReason ?? ""} ${status.message ?? ""} ${status.stats.diagnostic?.reason ?? ""}`;
+  return /setDownloadBehavior|context management is not supported/i.test(hay);
 }
 
 function buyInCancellationTitle(tier: BuyInCancellationTier): string {
@@ -1735,6 +1756,8 @@ function buildBuyInCancellationAdvice(args: {
   audits: AutoFillSearchAudit[];
   proposedCost?: number | null;
   currentSlotId?: string;
+  noCompleteCombo?: boolean;
+  attachableVerifiedCount?: number;
 }): BuyInCancellationAdvice | null {
   const audits = args.audits.filter(Boolean);
   if (audits.length === 0) return null;
@@ -1749,12 +1772,18 @@ function buildBuyInCancellationAdvice(args: {
     providerKey === key && status.hardFailed,
   );
   const providerClean = (key: BuyInSearchProviderKey) => providerStatuses.some(({ key: providerKey, status }) =>
-    providerKey === key && status.stats.searched && status.stats.status === "ok" && !status.hardFailed,
+    providerKey === key
+    && status.stats.searched
+    && status.stats.status === "ok"
+    && !status.hardFailed
+    && !providerSidecarProtocolFailed(status),
   );
   const providersSearched = BUY_IN_OTA_PROVIDER_KEYS.filter(providerWasSearched).length;
   const providersClean = BUY_IN_OTA_PROVIDER_KEYS.filter(providerClean).length;
   const providersHardFailed = BUY_IN_OTA_PROVIDER_KEYS.filter(providerHardFailed).length;
-  const verifiedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.verified, 0);
+  const providerVerifiedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.verified, 0);
+  const attachableVerifiedCount = args.attachableVerifiedCount ?? countAttachableBuyInCandidates(audits);
+  const verifiedCount = attachableVerifiedCount;
   const pricedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.priced, 0);
   const diagnosticsHardError = audits.some((audit) => audit.diagnostics?.severity === "error");
   const completedEnough = providersClean >= 2 && providersHardFailed === 0 && !diagnosticsHardError;
@@ -1764,13 +1793,18 @@ function buildBuyInCancellationAdvice(args: {
       ? "medium"
       : "low";
 
-  const candidateCost = args.proposedCost && args.proposedCost > 0
-    ? args.proposedCost
-    : audits
-      .flatMap((audit) => audit.candidates)
-      .map((candidate) => candidate.totalPrice)
-      .filter((price) => Number.isFinite(price) && price > 0)
-      .sort((a, b) => a - b)[0] ?? null;
+  const candidateCost = args.noCompleteCombo
+    ? null
+    : args.proposedCost && args.proposedCost > 0
+      ? args.proposedCost
+      : attachableVerifiedCount > 0
+        ? audits
+          .flatMap((audit) => audit.candidates)
+          .filter((candidate) => candidate.verified === "yes" && candidate.source !== "airbnb")
+          .map((candidate) => candidate.totalPrice)
+          .filter((price) => Number.isFinite(price) && price > 0)
+          .sort((a, b) => a - b)[0] ?? null
+        : null;
 
   const existingCost = args.reservation.slots.reduce((sum, slot) => {
     if (args.currentSlotId && slot.unitId === args.currentSlotId) return sum;
@@ -1784,20 +1818,25 @@ function buildBuyInCancellationAdvice(args: {
   let basis: BuyInCancellationAdvice["basis"];
   const evidence: string[] = [];
 
-  if (candidateCost == null || verifiedCount === 0) {
+  if (candidateCost == null || verifiedCount === 0 || args.noCompleteCombo) {
     basis = completedEnough ? "no_inventory" : "insufficient_coverage";
-    // A no-inventory scan is important, but it is still a negative signal
-    // from volatile OTA searches. Do not let one scan say "cancel
-    // recommended" unless there is also a verified replacement-cost loss.
     score = providersClean >= 3 && providersHardFailed === 0 ? 84 : providersClean >= 2 && providersHardFailed === 0 ? 68 : 45;
-    summary = providersClean >= 3
-      ? "All three OTA checks completed cleanly and found no verified bookable inventory. Treat this as a strong warning, then re-run or manually confirm before canceling."
-      : completedEnough
-        ? "No verified bookable inventory was kept, but only two OTA checks completed cleanly. Treat this as manual-review evidence, not a cancel decision."
-        : "No verified bookable inventory was kept, and provider coverage was not strong enough for a cancellation call.";
-    evidence.push(`${verifiedCount} verified bookable rows across ${providersClean}/3 clean OTA provider checks (${providersSearched}/3 searched).`);
+    if (args.noCompleteCombo) {
+      score = Math.max(score, providersClean >= 2 ? 78 : 68);
+    }
+    summary = args.noCompleteCombo
+      ? "No complete two-unit buy-in combination was verified for this resort and stay. Consider canceling after scouting nearby communities or re-running per-slot searches."
+      : providersClean >= 3
+        ? "All three OTA checks completed cleanly and found no attachable bookable inventory. Treat this as a strong warning, then re-run or manually confirm before canceling."
+        : completedEnough
+          ? "No attachable bookable inventory was kept, but only two OTA checks completed cleanly. Treat this as manual-review evidence, not a cancel decision."
+          : "No attachable bookable inventory was kept, and provider coverage was not strong enough for a cancellation call.";
+    evidence.push(`${verifiedCount} attachable verified row${verifiedCount === 1 ? "" : "s"} across ${providersClean}/3 clean OTA provider checks (${providersSearched}/3 searched).`);
+    if (providerVerifiedCount > verifiedCount) {
+      evidence.push(`${providerVerifiedCount - verifiedCount} additional Airbnb-priced row${providerVerifiedCount - verifiedCount === 1 ? "" : "s"} could not be attached without a direct booking link.`);
+    }
     if (pricedCount > 0) {
-      evidence.push(`${pricedCount} priced row${pricedCount === 1 ? "" : "s"} appeared, but none survived verification/identity/availability checks.`);
+      evidence.push(`${pricedCount} priced row${pricedCount === 1 ? "" : "s"} appeared, but none survived attachable verification/identity checks.`);
     }
   } else {
     basis = "verified_cost";
@@ -7678,15 +7717,18 @@ export default function Bookings() {
 	                            .map((option) => option.totalCost)
 	                            .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
 	                            .sort((a, b) => a - b)[0] ?? null;
+	                          const noCompleteCombo = comboOptions.length > 0 && completeComboOptions.length === 0;
 	                          const advice = buildBuyInCancellationAdvice({
 	                            reservation: r,
 	                            audits: searchAudits,
-	                            proposedCost: selectedCombo?.totalCost ?? fallbackCost,
+	                            proposedCost: noCompleteCombo ? null : selectedCombo?.totalCost ?? fallbackCost,
+	                            noCompleteCombo,
+	                            attachableVerifiedCount: countAttachableBuyInCandidates(searchAudits),
 	                          });
 	                          return (
 	                            <div className="space-y-2">
 	                              <BuyInCancellationAdviceCard advice={advice} />
-	                              {shouldShowAlternativeBuyInWorkflow(advice) && (
+	                              {shouldShowAlternativeBuyInWorkflow(advice, { noCompleteCombo }) && (
 	                                <AlternativeBuyInWorkflowPanel
 	                                  workflow={alternativeWorkflows[r._id]}
 	                                  onScout={() => scoutAlternativeCommunities(r, advice)}
@@ -10598,12 +10640,19 @@ function LiveSearchSection({
       .filter((price) => Number.isFinite(price) && price > 0)
       .sort((a, b) => a - b)[0] ?? null
     : null;
+  const singleSearchAttachableCount = confirmationAudit
+    ? countAttachableBuyInCandidates([confirmationAudit])
+    : 0;
   const singleSearchCancellationAdvice = buildBuyInCancellationAdvice({
     reservation,
     audits: confirmationAudit ? [confirmationAudit] : [],
-    proposedCost: focusedUnitCheapestPrice ?? availableCheapest[0]?.totalPrice ?? null,
+    proposedCost: singleSearchAttachableCount > 0
+      ? focusedUnitCheapestPrice ?? availableCheapest[0]?.totalPrice ?? null
+      : null,
     currentSlotId: slot.unitId,
+    attachableVerifiedCount: singleSearchAttachableCount,
   });
+  const singleSearchNoBookableReplacement = singleSearchAttachableCount === 0 && !!confirmationAudit;
 
   // Map a unit's primary listing back to a LiveCandidate so the existing
   // record-buy-in dialog can keep its current contract. PRs #275+ will
@@ -10837,7 +10886,7 @@ function LiveSearchSection({
       )}
 
       <BuyInCancellationAdviceCard advice={singleSearchCancellationAdvice} />
-      {shouldShowAlternativeBuyInWorkflow(singleSearchCancellationAdvice) && onScoutAlternatives && (
+      {shouldShowAlternativeBuyInWorkflow(singleSearchCancellationAdvice, { noCompleteCombo: singleSearchNoBookableReplacement }) && onScoutAlternatives && (
         <AlternativeBuyInWorkflowPanel
           workflow={alternativeWorkflow}
           onScout={() => onScoutAlternatives(singleSearchCancellationAdvice!)}
