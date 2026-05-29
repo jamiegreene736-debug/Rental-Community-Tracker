@@ -4492,7 +4492,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const isPlaceholder = isPlaceholderLicenseValue(value);
                               const inputValue = value && !isPlaceholder ? value : "";
                               const canPublicPull = (complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit")
-                                || (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction) && req.key === "dbprLicense");
+                                || (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction) && req.key === "dbprLicense")
+                                || (isHawaiiCompliance && req.key === "taxMapKey");
                               return (
                                 <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
                                   <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -4510,7 +4511,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isPlaceholder && (
                                     <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
-                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? ` or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : "Fort Myers STR portal"}` : ""} before pushing compliance.
+                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? ` or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : req.key === "taxMapKey" ? "county GIS" : "Fort Myers STR portal"}` : ""} before pushing compliance.
                                     </div>
                                   )}
                                   <input
@@ -4543,7 +4544,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <button
                                     type="button"
                                     disabled={licenseLookupBusy}
-                                    onClick={canPublicPull ? pullLicenseRequirements : () => validateComplianceRequirement(req)}
+                                    onClick={canPublicPull && req.key === "taxMapKey" && isHawaiiCompliance ? pullRealTaxMapKey : (canPublicPull ? pullLicenseRequirements : () => validateComplianceRequirement(req))}
                                     style={{
                                       marginTop: 8,
                                       fontSize: 11,

@@ -14754,7 +14754,9 @@ export async function registerRoutes(
   });
 
   // POST /api/builder/resolve-license-requirements — returns mapped jurisdiction
-  // rules and any already-known values. This does not guess license numbers.
+  // rules and any already-known values. Real public auto-lookup only exists for
+  // certain Florida fields today; Hawaii taxMapKey is pulled via the dedicated
+  // /api/builder/tmk-lookup (county ArcGIS) from the client.
   app.post("/api/builder/resolve-license-requirements", async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as {
       city?: string;
