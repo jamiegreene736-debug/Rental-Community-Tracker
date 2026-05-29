@@ -461,22 +461,6 @@ export async function lookupHawaiiComplianceField(options: {
     }
   }
 
-  if (propertyValues) {
-    const propertyValue = resolveTaxField(field, propertyValues);
-    if (propertyValue) {
-      const paired = !usableLicenseValue(propertyValues[field]);
-      return {
-        value: propertyValue,
-        confidence: paired ? "paired-tax-license" : "property-record",
-        note: paired
-          ? `Derived the ${label} license from the paired ${field === "getLicense" ? "TAT" : "GET"} value on this property record.`
-          : `Pulled the real ${label} value from this property record.`,
-        searchedAddress,
-        source: "Property compliance record",
-      };
-    }
-  }
-
   if (field === "strPermit") {
     const effectiveTmk = usableLicenseValue(taxMapKey) || (await lookupKauaiTmkFromAddress(searchedAddress)).taxMapKey;
     const records = await fetchKauaiTvrRecords();
@@ -497,7 +481,7 @@ export async function lookupHawaiiComplianceField(options: {
 
   throw new Error(
     listingId
-      ? `No real ${label} license was found on the connected Guesty listing or this property record. Push compliance after you have the official Hawaii ${label} license, or paste it manually.`
-      : `Select a connected Guesty listing to pull the real ${label} license from Guesty or this property record, or paste it manually.`,
+      ? `No real ${label} license was found on the connected Guesty listing. Push compliance to Guesty after you have the official Hawaii ${label} license, or paste it manually.`
+      : `Select a connected Guesty listing to pull the real ${label} license from Guesty compliance fields, or paste it manually.`,
   );
 }

@@ -980,18 +980,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const resp = await fetch(`${options.endpoint}?${params.toString()}`);
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || data?.message || `${options.label} lookup failed`);
-      const value = data.value || data[options.field];
+      const value = String(data.value || data[options.field] || "").trim();
       if (!value) throw new Error(`${options.label} lookup returned no value`);
+      if (isPlaceholderLicenseValue(value)) {
+        throw new Error(
+          `The ${options.label} returned is still a sample/placeholder. Connect a Guesty listing with real Hawaii compliance fields, or enter the official ${options.label} manually.`,
+        );
+      }
+      const previous = complianceValueFor(options.field);
+      const unchanged = previous
+        && !isPlaceholderLicenseValue(previous)
+        && previous.replace(/\W/g, "").toLowerCase() === value.replace(/\W/g, "").toLowerCase();
       setComplianceOverrides((prev) => ({ ...prev, [options.field]: value }));
       await persistDraftComplianceValues({ [options.field]: value });
       options.setResult(data as ComplianceLookupResult);
-      toast({ title: `${options.label} applied`, description: data.note });
+      if (unchanged) {
+        toast({
+          title: `${options.label} unchanged`,
+          description: `Already set to ${value}. ${data.note || ""}`.trim(),
+        });
+      } else {
+        toast({ title: `${options.label} applied`, description: data.note });
+      }
     } catch (err: any) {
       toast({ title: `${options.label} lookup failed`, description: err?.message || String(err), variant: "destructive" });
     } finally {
       options.setBusy(false);
     }
-  }, [effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistDraftComplianceValues, propertyId, selectedId, toast]);
+  }, [complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistDraftComplianceValues, propertyId, selectedId, toast]);
 
   const pullRealGetLicense = useCallback(async () => {
     await pullHawaiiComplianceField({
@@ -4322,7 +4338,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   {getLookupBusy ? "Pulling real GET..." : "Pull real GET license"}
                                 </button>
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
-                                  Uses the connected Guesty listing when available, otherwise this property record.
+                                  Pulls from the connected Guesty listing compliance fields only (not static sample data).
                                 </div>
                                 {renderComplianceLookupMeta(getLookupResult)}
                               </div>
@@ -4365,7 +4381,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   {tatLookupBusy ? "Pulling real TAT..." : "Pull real TAT license"}
                                 </button>
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
-                                  Uses the connected Guesty listing when available, otherwise this property record.
+                                  Pulls from the connected Guesty listing compliance fields only (not static sample data).
                                 </div>
                                 {renderComplianceLookupMeta(tatLookupResult)}
                               </div>

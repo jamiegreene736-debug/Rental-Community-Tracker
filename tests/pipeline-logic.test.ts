@@ -859,6 +859,12 @@ const fromHomeaway = extractHawaiiComplianceFromGuestyListing({
 assert.equal(fromHomeaway.tatLicense, "TA-024-630-2345-01");
 assert.equal(fromHomeaway.getLicense, "GE-024-630-2345-01");
 assert.equal(pairHawaiiTaxLicense("TA-024-120-9012-01", "getLicense"), "GE-024-120-9012-01");
+
+import { isPlaceholderLicenseValue } from "../shared/license-compliance";
+assert.ok(isPlaceholderLicenseValue("GE-025-430-9876-01"), "Makahuena sample GET");
+assert.ok(isPlaceholderLicenseValue("TA-025-430-9876-01"), "Makahuena sample TAT");
+assert.ok(isPlaceholderLicenseValue("TVR-2024-999"), "Makahuena sample STR");
+assert.ok(isPlaceholderLicenseValue("420090060001"), "Makahuena sample TMK");
 console.log("  ✓ Hawaii compliance extraction + Kauai TVR parsing");
 
 // ---------- Guesty session cache layered read ----------
