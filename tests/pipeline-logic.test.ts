@@ -803,6 +803,49 @@ console.log("\nVRBO compliance detection suite");
   console.log("  ✓ Tags still win priority when top-level fields also exist");
 }
 
+// ---------- Hawaii compliance lookup helpers ----------
+console.log("\nHawaii compliance lookup suite");
+import {
+  extractHawaiiComplianceFromGuestyListing,
+  formatKauaiCountyPermit,
+  matchKauaiStrPermit,
+  parseKauaiTvrPdfText,
+  tmkMatchKeys,
+} from "../server/hawaii-compliance-lookup";
+
+assert.equal(formatKauaiCountyPermit("218"), "TVNC-0218");
+assert.equal(formatKauaiCountyPermit("TVR-2022-037"), "TVR-2022-037");
+
+const sampleTvrText = [
+  "1317",
+  "12006014",
+  "Ishihara Cottage9730 'Oi'oi Rd., Waimea",
+  "Active",
+  "X",
+  "31-Jul",
+].join("\n");
+const parsedTvr = parseKauaiTvrPdfText(sampleTvrText);
+assert.equal(parsedTvr.length, 1);
+assert.equal(parsedTvr[0]?.permitNumber, "TVNC-1317");
+assert.equal(parsedTvr[0]?.tmkKey, "12006014");
+
+const tmkMatch = matchKauaiStrPermit(parsedTvr, "412006014000", "Waimea");
+assert.equal(tmkMatch?.value, "TVNC-1317");
+assert.ok(tmkMatchKeys("412006014000").includes("412006014"));
+
+const extracted = extractHawaiiComplianceFromGuestyListing({
+  tags: ["TMK:420140050001", "TAT:TA-024-120-9012-01", "GET:GE-024-120-9012-01", "STR:TVR-2022-037"],
+  licenseNumber: "SHOULD-NOT-WIN",
+  taxId: "SHOULD-NOT-WIN",
+  publicDescription: {
+    notes: "=== Rental License Compliance ===\nShort-Term Rental Registration / Permit: NOTES-STR",
+  },
+});
+assert.equal(extracted.tatLicense, "TA-024-120-9012-01");
+assert.equal(extracted.getLicense, "GE-024-120-9012-01");
+assert.equal(extracted.strPermit, "TVR-2022-037");
+console.log("  ✓ Hawaii compliance extraction + Kauai TVR parsing");
+
 // ---------- Guesty session cache layered read ----------
 // Locks in the priority order the cache layer uses for the cookie /
 // Okta-token resolvers. Pure logic — no Browserbase, no Playwright.

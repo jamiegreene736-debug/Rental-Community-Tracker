@@ -67,6 +67,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
+import { lookupHawaiiComplianceField, lookupKauaiTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
   clearActiveSidecarLane,
@@ -4950,29 +4951,6 @@ export async function registerRoutes(
     }
   });
 
-  type KauaiParcelAttributes = {
-    TMK?: number;
-    COTMK?: number;
-    PARTXT?: string;
-    CPR_UNIT?: string;
-    PLAT?: string;
-    PARCEL?: string;
-    OWN1?: string;
-    ALTID?: string;
-    LINKQ?: string;
-    TYPE?: string;
-  };
-
-  const KAUAI_PARCEL_LAYER =
-    "https://maps.kauai.gov/server/rest/services/Parcels_and_CPRs_WGS84_Degrees/FeatureServer/0/query";
-  const ARCGIS_GEOCODER =
-    "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates";
-
-  const normalizeTmkText = (value: unknown): string | null => {
-    const digits = String(value ?? "").replace(/\D/g, "");
-    return digits.length === 12 ? digits : null;
-  };
-
   const normalizeUnitToken = (value: unknown): string => {
     return String(value ?? "")
       .toUpperCase()
@@ -4984,17 +4962,6 @@ export async function registerRoutes(
   const extractUnitTokenFromAddress = (address: string): string => {
     const match = address.match(/\b(?:unit|apt|apartment|suite|ste|#)\s*([A-Z0-9-]+)\b/i);
     return normalizeUnitToken(match?.[1]);
-  };
-
-  const queryKauaiParcels = async (params: URLSearchParams): Promise<KauaiParcelAttributes[]> => {
-    const resp = await fetch(`${KAUAI_PARCEL_LAYER}?${params.toString()}`, {
-      headers: { "User-Agent": "NexStay/1.0" },
-    });
-    if (!resp.ok) throw new Error(`Kauai parcel query failed (${resp.status})`);
-    const data = await resp.json() as any;
-    return Array.isArray(data?.features)
-      ? data.features.map((f: any) => f?.attributes ?? {}).filter(Boolean)
-      : [];
   };
 
   type DeckardLicenseNode = {
@@ -5430,20 +5397,6 @@ export async function registerRoutes(
     };
   };
 
-  const scoreKauaiParcel = (row: KauaiParcelAttributes, unitToken: string): number => {
-    const type = String(row.TYPE ?? "").toLowerCase();
-    const cpr = normalizeUnitToken(row.CPR_UNIT);
-    const partxt = normalizeTmkText(row.PARTXT);
-    let score = 0;
-    if (type.includes("cpr")) score += 20;
-    if (type.includes("parcel")) score += 5;
-    if (unitToken && cpr && cpr === unitToken) score += 100;
-    if (unitToken && partxt && normalizeUnitToken(partxt.slice(-4)) === unitToken) score += 60;
-    if (!unitToken && !type.includes("cpr")) score += 40;
-    if (!unitToken && type.includes("cpr")) score -= 20;
-    return score;
-  };
-
   // GET /api/builder/tmk-lookup
   //
   // Pulls a real Hawaii/Kauai Tax Map Key from official public data instead
@@ -5464,102 +5417,67 @@ export async function registerRoutes(
     }
 
     try {
-      const searchedAddress = address;
-      const geocodeParams = new URLSearchParams({
-        f: "json",
-        SingleLine: searchedAddress,
-        outFields: "Match_addr,Addr_type,Score",
-        maxLocations: "3",
-      });
-      const geocodeResp = await fetch(`${ARCGIS_GEOCODER}?${geocodeParams.toString()}`, {
-        headers: { "User-Agent": "NexStay/1.0" },
-      });
-      if (!geocodeResp.ok) throw new Error(`Address geocode failed (${geocodeResp.status})`);
-      const geocodeData = await geocodeResp.json() as any;
-      const geocodeCandidates = Array.isArray(geocodeData?.candidates) ? geocodeData.candidates : [];
-      const bestGeocode = geocodeCandidates.find((c: any) => Number(c?.score ?? 0) >= 80 && c?.location?.x && c?.location?.y);
-      if (!bestGeocode) {
-        return res.status(404).json({ error: "No geocoded Hawaii address found", searchedAddress });
-      }
-
-      const pointParams = new URLSearchParams({
-        f: "json",
-        where: "1=1",
-        geometry: `${bestGeocode.location.x},${bestGeocode.location.y}`,
-        geometryType: "esriGeometryPoint",
-        inSR: "4326",
-        spatialRel: "esriSpatialRelIntersects",
-        outFields: "TMK,COTMK,PARTXT,CPR_UNIT,PLAT,PARCEL,OWN1,ALTID,LINKQ,TYPE",
-        returnGeometry: "false",
-      });
-      const pointRows = await queryKauaiParcels(pointParams);
-
-      const cotmkValues = Array.from(new Set(
-        pointRows.map((row) => Number(row.COTMK)).filter((n) => Number.isFinite(n)),
-      ));
-      const relatedRows: KauaiParcelAttributes[] = [];
-      for (const cotmk of cotmkValues.slice(0, 3)) {
-        const relatedParams = new URLSearchParams({
-          f: "json",
-          where: `COTMK=${cotmk}`,
-          outFields: "TMK,COTMK,PARTXT,CPR_UNIT,PLAT,PARCEL,OWN1,ALTID,LINKQ,TYPE",
-          returnGeometry: "false",
-          resultRecordCount: "2000",
-        });
-        relatedRows.push(...await queryKauaiParcels(relatedParams));
-      }
-
-      const unitToken = extractUnitTokenFromAddress(searchedAddress);
-      const rows = [...pointRows, ...relatedRows]
-        .filter((row, idx, all) => {
-          const key = normalizeTmkText(row.PARTXT) ?? `${row.COTMK}-${row.CPR_UNIT}-${idx}`;
-          return all.findIndex((r, i) => (normalizeTmkText(r.PARTXT) ?? `${r.COTMK}-${r.CPR_UNIT}-${i}`) === key) === idx;
-        })
-        .sort((a, b) => scoreKauaiParcel(b, unitToken) - scoreKauaiParcel(a, unitToken));
-
-      const selected = rows.find((row) => normalizeTmkText(row.PARTXT));
-      const taxMapKey = normalizeTmkText(selected?.PARTXT);
-      if (!selected || !taxMapKey) {
-        return res.status(404).json({
-          error: "No Kauai parcel TMK found for this address",
-          searchedAddress,
-          geocodedAddress: bestGeocode.address,
-        });
-      }
-
-      const selectedType = String(selected.TYPE ?? "");
-      const selectedCpr = normalizeUnitToken(selected.CPR_UNIT);
-      const isUnitCpr = Boolean(unitToken) && selectedType.toLowerCase().includes("cpr") && (selectedCpr === unitToken || normalizeUnitToken(taxMapKey.slice(-4)) === unitToken);
-      const hasAnyCprRows = rows.some((row) => String(row.TYPE ?? "").toLowerCase().includes("cpr"));
-      const note = isUnitCpr
-        ? `Matched County of Kauai CPR unit ${String(selected.CPR_UNIT ?? "").trim() || taxMapKey.slice(-4)} from the exact Guesty listing address.`
-        : hasAnyCprRows
-          ? "Matched the official parcel for the exact Guesty listing address, but not an individual CPR row. Verify the qPublic link before pushing if Airbnb requires unit-level CPR."
-          : "Matched the official County of Kauai master parcel for the exact Guesty listing address. The public GIS layer does not expose individual CPR units for this address.";
-
-      res.json({
-        taxMapKey,
-        confidence: isUnitCpr ? "unit-cpr" : "master-parcel",
-        note,
-        searchedAddress,
-        geocodedAddress: bestGeocode.address,
-        source: "County of Kauai ArcGIS Parcels and CPRs",
-        sourceUrl: selected.LINKQ || "https://maps.kauai.gov/server/rest/services/Parcels_and_CPRs_WGS84_Degrees/FeatureServer/0",
-        parcel: selected,
-        candidates: rows.slice(0, 8).map((row) => ({
-          taxMapKey: normalizeTmkText(row.PARTXT),
-          cprUnit: String(row.CPR_UNIT ?? "").trim(),
-          owner: row.OWN1 ?? null,
-          project: row.ALTID ?? null,
-          type: row.TYPE ?? null,
-          sourceUrl: row.LINKQ ?? null,
-        })),
-      });
+      res.json(await lookupKauaiTmkFromAddress(address));
     } catch (err: any) {
-      console.error("[tmk-lookup] failed:", err?.message || err);
-      res.status(500).json({ error: "TMK lookup failed", message: err?.message || String(err) });
+      const message = err?.message || String(err);
+      console.error("[tmk-lookup] failed:", message);
+      if (/No geocoded Hawaii address found|No Kauai parcel TMK found/i.test(message)) {
+        return res.status(404).json({ error: message, searchedAddress: address });
+      }
+      res.status(500).json({ error: "TMK lookup failed", message });
     }
   });
+
+  const fetchGuestyListingForCompliance = async (listingId: string): Promise<Record<string, unknown>> => {
+    return await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+  };
+
+  const handleHawaiiLicenseLookup = (field: "getLicense" | "tatLicense" | "strPermit", failureLabel: string) =>
+    async (req: Request, res: Response) => {
+      const address = String(req.query.address ?? "").trim();
+      const listingId = String(req.query.listingId ?? "").trim() || null;
+      const taxMapKey = String(req.query.taxMapKey ?? "").trim() || null;
+      if (!address) return res.status(400).json({ error: "address is required" });
+      if (!/\b(HI|Hawaii)\b/i.test(address)) {
+        return res.status(400).json({ error: "Only Hawaii license lookup is currently supported" });
+      }
+      try {
+        const result = await lookupHawaiiComplianceField({
+          field,
+          address,
+          listingId,
+          taxMapKey,
+          fetchGuestyListing: fetchGuestyListingForCompliance,
+        });
+        res.json({
+          [field]: result.value,
+          value: result.value,
+          confidence: result.confidence,
+          note: result.note,
+          searchedAddress: result.searchedAddress,
+          geocodedAddress: result.geocodedAddress,
+          taxMapKey: result.taxMapKey,
+          source: result.source,
+          sourceUrl: result.sourceUrl,
+        });
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        console.error(`[${field}-lookup] failed:`, message);
+        if (/does not have a real|Select a connected Guesty listing|No Kauai County TVR/i.test(message)) {
+          return res.status(404).json({ error: message, searchedAddress: address, listingId });
+        }
+        res.status(500).json({ error: `${failureLabel} lookup failed`, message });
+      }
+    };
+
+  // GET /api/builder/get-lookup — pull real GET from Guesty listing compliance fields.
+  app.get("/api/builder/get-lookup", handleHawaiiLicenseLookup("getLicense", "GET license"));
+
+  // GET /api/builder/tat-lookup — pull real TAT from Guesty listing compliance fields.
+  app.get("/api/builder/tat-lookup", handleHawaiiLicenseLookup("tatLicense", "TAT license"));
+
+  // GET /api/builder/str-permit-lookup — pull real STR from Guesty or Kauai TVR registry.
+  app.get("/api/builder/str-permit-lookup", handleHawaiiLicenseLookup("strPermit", "STR permit"));
 
   // POST /api/guesty-property-map — connect a propertyId (positive for
   // hardcoded units, negative `-draftId` for promoted drafts) to an

@@ -167,14 +167,21 @@ const CSS = `
 type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
 type GuestyListing = { _id?: string; id?: string; nickname?: string; title?: string };
 type LogEntry = BuildStepEntry & { icon: string };
-type TmkLookupResult = {
-  taxMapKey: string;
-  confidence: "unit-cpr" | "master-parcel";
+type ComplianceLookupResult = {
+  value: string;
+  confidence: string;
   note: string;
-  searchedAddress: string;
-  geocodedAddress: string;
+  searchedAddress?: string;
+  geocodedAddress?: string;
+  taxMapKey?: string;
   source: string;
   sourceUrl?: string;
+};
+type TmkLookupResult = ComplianceLookupResult & {
+  taxMapKey: string;
+  confidence: "unit-cpr" | "master-parcel";
+  searchedAddress: string;
+  geocodedAddress: string;
 };
 
 type Props = {
@@ -554,6 +561,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [licenseLookupBusy, setLicenseLookupBusy] = useState(false);
   const [tmkLookupBusy, setTmkLookupBusy] = useState(false);
   const [tmkLookupResult, setTmkLookupResult] = useState<TmkLookupResult | null>(null);
+  const [getLookupBusy, setGetLookupBusy] = useState(false);
+  const [getLookupResult, setGetLookupResult] = useState<ComplianceLookupResult | null>(null);
+  const [tatLookupBusy, setTatLookupBusy] = useState(false);
+  const [tatLookupResult, setTatLookupResult] = useState<ComplianceLookupResult | null>(null);
+  const [strLookupBusy, setStrLookupBusy] = useState(false);
+  const [strLookupResult, setStrLookupResult] = useState<ComplianceLookupResult | null>(null);
 
   const rememberPropertyMap = useCallback((propertyIdToMap: number, guestyListingId: string) => {
     setPropertyMap((prev) => [
@@ -936,6 +949,99 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setTmkLookupBusy(false);
     }
   }, [effectivePropertyData?.address, persistDraftComplianceValues, toast]);
+
+  const pullHawaiiComplianceField = useCallback(async (options: {
+    field: "getLicense" | "tatLicense" | "strPermit";
+    endpoint: string;
+    label: string;
+    setBusy: (busy: boolean) => void;
+    setResult: (result: ComplianceLookupResult | null) => void;
+    requiresListing?: boolean;
+  }) => {
+    if (!effectivePropertyData?.address) return;
+    const fullAddress = typeof effectivePropertyData.address === "object"
+      ? effectivePropertyData.address.full
+      : String(effectivePropertyData.address);
+    if (!fullAddress) {
+      toast({ title: "Missing Guesty address", description: `A full Hawaii Guesty listing address is needed before ${options.label} lookup.`, variant: "destructive" });
+      return;
+    }
+    if (options.requiresListing && !selectedId) {
+      toast({ title: "Select a Guesty listing", description: `Connect/select a Guesty listing first so ${options.label} can be pulled from Guesty compliance fields.`, variant: "destructive" });
+      return;
+    }
+    options.setBusy(true);
+    options.setResult(null);
+    try {
+      const params = new URLSearchParams({ address: fullAddress });
+      if (selectedId) params.set("listingId", selectedId);
+      if (effectivePropertyData.taxMapKey) params.set("taxMapKey", effectivePropertyData.taxMapKey);
+      const resp = await fetch(`${options.endpoint}?${params.toString()}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || data?.message || `${options.label} lookup failed`);
+      const value = data.value || data[options.field];
+      if (!value) throw new Error(`${options.label} lookup returned no value`);
+      setComplianceOverrides((prev) => ({ ...prev, [options.field]: value }));
+      await persistDraftComplianceValues({ [options.field]: value });
+      options.setResult(data as ComplianceLookupResult);
+      toast({ title: `${options.label} applied`, description: data.note });
+    } catch (err: any) {
+      toast({ title: `${options.label} lookup failed`, description: err?.message || String(err), variant: "destructive" });
+    } finally {
+      options.setBusy(false);
+    }
+  }, [effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistDraftComplianceValues, selectedId, toast]);
+
+  const pullRealGetLicense = useCallback(async () => {
+    await pullHawaiiComplianceField({
+      field: "getLicense",
+      endpoint: "/api/builder/get-lookup",
+      label: "GET license",
+      setBusy: setGetLookupBusy,
+      setResult: setGetLookupResult,
+      requiresListing: true,
+    });
+  }, [pullHawaiiComplianceField]);
+
+  const pullRealTatLicense = useCallback(async () => {
+    await pullHawaiiComplianceField({
+      field: "tatLicense",
+      endpoint: "/api/builder/tat-lookup",
+      label: "TAT license",
+      setBusy: setTatLookupBusy,
+      setResult: setTatLookupResult,
+      requiresListing: true,
+    });
+  }, [pullHawaiiComplianceField]);
+
+  const pullRealStrPermit = useCallback(async () => {
+    await pullHawaiiComplianceField({
+      field: "strPermit",
+      endpoint: "/api/builder/str-permit-lookup",
+      label: "STR permit",
+      setBusy: setStrLookupBusy,
+      setResult: setStrLookupResult,
+    });
+  }, [pullHawaiiComplianceField]);
+
+  const renderComplianceLookupMeta = (result: ComplianceLookupResult | null) => {
+    if (!result) return null;
+    return (
+      <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+        {result.confidence.replace(/-/g, " ")} · {result.source}
+        {result.sourceUrl && (
+          <>
+            {" · "}
+            <a href={result.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "var(--primary)" }}>
+              source
+            </a>
+          </>
+        )}
+        <br />
+        {result.note}
+      </div>
+    );
+  };
 
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
@@ -4195,6 +4301,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {isHawaiiCompliance && (
+                              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={pullRealGetLicense}
+                                  disabled={getLookupBusy || !effectivePropertyData.address || !selectedId}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: getLookupBusy ? "var(--muted)" : "#fff",
+                                    color: "var(--text)",
+                                    cursor: getLookupBusy ? "wait" : "pointer",
+                                  }}
+                                  data-testid="button-pull-real-get"
+                                >
+                                  {getLookupBusy ? "Pulling real GET..." : "Pull real GET from Guesty listing"}
+                                </button>
+                                <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                  Reads the connected Guesty listing tags / taxId / notes for the real GET license.
+                                </div>
+                                {renderComplianceLookupMeta(getLookupResult)}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -4211,6 +4344,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {isHawaiiCompliance && (
+                              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={pullRealTatLicense}
+                                  disabled={tatLookupBusy || !effectivePropertyData.address || !selectedId}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: tatLookupBusy ? "var(--muted)" : "#fff",
+                                    color: "var(--text)",
+                                    cursor: tatLookupBusy ? "wait" : "pointer",
+                                  }}
+                                  data-testid="button-pull-real-tat"
+                                >
+                                  {tatLookupBusy ? "Pulling real TAT..." : "Pull real TAT from Guesty listing"}
+                                </button>
+                                <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                  Reads the connected Guesty listing tags / licenseNumber / notes for the real TAT license.
+                                </div>
+                                {renderComplianceLookupMeta(tatLookupResult)}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -4227,6 +4387,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {isHawaiiCompliance && (
+                              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={pullRealStrPermit}
+                                  disabled={strLookupBusy || !effectivePropertyData.address}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: strLookupBusy ? "var(--muted)" : "#fff",
+                                    color: "var(--text)",
+                                    cursor: strLookupBusy ? "wait" : "pointer",
+                                  }}
+                                  data-testid="button-pull-real-str"
+                                >
+                                  {strLookupBusy ? "Pulling real STR permit..." : "Pull real STR permit from Guesty address"}
+                                </button>
+                                <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                  Uses the connected Guesty listing when available, otherwise matches the Kauai County TVR registry by TMK.
+                                </div>
+                                {renderComplianceLookupMeta(strLookupResult)}
+                              </div>
+                            )}
                           </div>
                         </div>
                         {complianceProfile.requirements.length > 0 && (
