@@ -126,7 +126,7 @@ value_from_env_or_railway() {
   printf '%s' "${fallback}"
 }
 
-SERVER_URL="${SIDECAR_SERVER:-https://rental-community-tracker-production.up.railway.app}"
+SERVER_URL="${SIDECAR_SERVER:-https://admin.vacationrentalexpertz.com}"
 MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES:-8}"
 # Prefer local macOS Chrome/CDP. Chrome stays visible in an external-monitor
 # grid; the Operations UI only flashes/focuses the relevant slot.

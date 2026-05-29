@@ -401,6 +401,7 @@ export type SidecarRequest = {
   error?: string;
   createdAt: number;
   claimedAt?: number;
+  claimedBy?: SidecarWorkerRuntime["source"];
   completedAt?: number;
   cancelled?: boolean;
   pausedReason?: string;
@@ -1134,10 +1135,22 @@ function isOtaBrowserOp(opType: SidecarOpType): boolean {
   );
 }
 
+function localWorkerHasActiveOtaClaim(): boolean {
+  for (const r of queue.values()) {
+    if (r.status !== "in_progress" || !isOtaBrowserOp(r.opType)) continue;
+    if (r.claimedBy === "local") return true;
+  }
+  return false;
+}
+
 function localWorkerIsPreferred(now = nowMs()): boolean {
+  // NOTE FOR CODEX: heartbeat-only polls must not block Railway workers.
+  // A LaunchAgent that is alive but not claiming (or a stale local tab)
+  // used to defer server OTA claims for 90s while buy-in looked hung.
   return Boolean(
     lastLocalWorkerPollAt !== null &&
-    now - lastLocalWorkerPollAt < LOCAL_WORKER_PREFERRED_WINDOW_MS,
+    now - lastLocalWorkerPollAt < LOCAL_WORKER_PREFERRED_WINDOW_MS &&
+    localWorkerHasActiveOtaClaim(),
   );
 }
 
@@ -1409,6 +1422,7 @@ function cleanup(): void {
     ) {
       r.status = "pending";
       r.claimedAt = undefined;
+      r.claimedBy = undefined;
     }
     if (
       (r.status === "completed" || r.status === "failed") &&
@@ -1640,6 +1654,7 @@ export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarReq
   if (!oldest) return null;
   oldest.status = "in_progress";
   oldest.claimedAt = nowMs();
+  oldest.claimedBy = normalizedRuntime?.source;
   return oldest;
 }
 
@@ -2912,8 +2927,13 @@ async function awaitOpResult(opts: {
           reason: r.pausedReason ? `request paused by operator: ${r.pausedReason}` : "request paused by operator",
         };
       }
-      if (r.status === "in_progress" && activeStartedAt === null) {
-        activeStartedAt = deduped ? now : (r.claimedAt ?? now);
+      if (r.status === "in_progress") {
+        if (activeStartedAt === null) {
+          activeStartedAt = deduped ? now : (r.claimedAt ?? now);
+        }
+      } else if (activeStartedAt !== null) {
+        // Reclaimed jobs return to pending; extend the wallet for the next claim.
+        activeStartedAt = null;
       }
       if (r.status === "pending" && now - startedAt >= queueBudgetMs) {
         const reason = `queue wait budget ${queueBudgetMs}ms exceeded waiting for worker`;
