@@ -2910,6 +2910,33 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
   return stateLooksLikeVrboHumanChallenge(state);
 }
 
+/**
+ * Hard runtime guard: VRBO buy-in / search flows must NEVER use direct
+ * constructed search URLs. Those entry vectors trigger aggressive bot
+ * detection + slider CAPTCHA that often remains blocking even after
+ * manual solve. All VRBO interaction must start from bare homepage +
+ * visible typing + visible clicks only ("100% sight and clicking").
+ */
+function assertSafeVrboNavigation(targetUrl, label = "vrbo", id = "") {
+  if (!targetUrl) return;
+  const u = String(targetUrl);
+  // Bare homepage or root is always allowed (the only permitted page.goto for VRBO form flows)
+  const isBareHome = /^https?:\/\/(www\.)?vrbo\.com\/?(?:\?|$|#|$)/i.test(u);
+  if (isBareHome) return;
+
+  // Any other vrbo.com URL that looks like a pre-constructed search (with destination, dates, q, etc. in query)
+  // or deep result path that was reached via automation goto rather than click is forbidden.
+  const looksLikeSearchInjection =
+    /vrbo\.com\/search/i.test(u) ||
+    /[?&](destination|q|checkin|checkout|d1|d2|adults|minBedrooms)=/i.test(u);
+
+  if (looksLikeSearchInjection) {
+    const msg = `${label} ${id}: ABORT — direct navigation to VRBO search/injected URL "${u.slice(0, 200)}" is FORBIDDEN. This triggers CAPTCHA that survives manual slider solve. Use only visible homepage form + typing + clicking.`;
+    log(msg);
+    throw new Error(msg);
+  }
+}
+
 async function screenshotSliderImageCandidates(scope) {
   const candidates = [];
   const locators = scope.locator('img, canvas, svg, [style*="background-image"]');
@@ -4085,6 +4112,9 @@ async function discoverOtaSearchVariants(homeUrl, searchTerm, destination, label
   if (mode.allowDiscovery === false && explicitVariants.length > 0) return explicitVariants;
   const isVrbo = /vrbo/i.test(label) || /vrbo\.com/i.test(homeUrl);
   try {
+    if (isVrbo) {
+      assertSafeVrboNavigation(homeUrl, label, requestId);
+    }
     await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
     await boundedPageDelay(page, 1_200);
     if (isVrbo) {
@@ -4241,6 +4271,9 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
     return false;
   };
   try {
+    if (isVrbo) {
+      assertSafeVrboNavigation(homeUrl, label, requestId);
+    }
     await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
     await boundedPageDelay(page, 1_200);
     await maybeClearVrboChallenge("after-homepage-load");
@@ -5201,6 +5234,19 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   throwIfBrightDataKycBlock(state, "vrbo_search", id);
   if (await stopVrboProviderIfBlocked(page, "vrbo_search", id, state)) {
     state = await dumpPageState("vrbo-after-manual-solve", { id, ...params });
+    // After manual slider solve, insert human-like "thinking + casual interaction" pause.
+    // This reduces secondary bot signals that can keep the session flagged even after the challenge clears.
+    log(`vrbo_search ${id}: post-manual-CAPTCHA human pause + jitter (5-12s)`);
+    await page.waitForTimeout(2000 + Math.random() * 3000).catch(() => {});
+    // Small human-like mouse jiggles and scroll to look alive
+    try {
+      const vp = page.viewportSize?.() ?? { width: 1200, height: 800 };
+      await page.mouse.move(vp.width * 0.3 + Math.random() * 200, vp.height * 0.4 + Math.random() * 150, { steps: 12 }).catch(() => {});
+      await page.waitForTimeout(800 + Math.random() * 1200).catch(() => {});
+      await page.mouse.move(vp.width * 0.6 + Math.random() * 150, vp.height * 0.55 + Math.random() * 120, { steps: 8 }).catch(() => {});
+      await page.evaluate(() => window.scrollBy(0, 80 + Math.random() * 120)).catch(() => {});
+      await page.waitForTimeout(1500 + Math.random() * 2000).catch(() => {});
+    } catch {}
   }
   throwIfVrboHardBlock(state, "vrbo_search", id);
   if (stateLooksLikeVrboHumanChallenge(state)) {

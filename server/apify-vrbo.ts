@@ -1,5 +1,13 @@
 import { resolveVrboRegion } from "./vrbo-region-resolver";
 
+// ⚠️ DEPRECATED FOR VRBO BUY-IN / LIVE SEARCH
+// Direct construction of vrbo.com/search URLs is the #1 cause of persistent
+// slider CAPTCHA (even after manual solve) in buy-in and replacement flows.
+// All production VRBO search for buy-in must go through the sidecar visible
+// "sight + click" path only (see AGENTS.md and daemon/vrbo-sidecar/README.md).
+// This module is retained only for narrow debug endpoints and must not be
+// called from find-buy-in, alternative buy-in, or unit replacement paths.
+
 // Vrbo search via Apify actor.
 //
 // Replaces the Google site:vrbo.com step in find-buy-in (which only

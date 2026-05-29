@@ -706,3 +706,61 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
     return { summary: msg, status: "error" };
   }
 }
+
+// ── Back-compat helpers for routes.ts (restored after refactor) ──
+// These were removed/renamed in recent main changes but are still
+// imported and used by several availability endpoints.
+export async function resolveAvailabilityPropertyConfig(propertyId: number): Promise<any | null> {
+  if (!Number.isFinite(propertyId)) return null;
+
+  if (propertyId > 0) {
+    // Static properties
+    return PROPERTY_UNIT_CONFIGS[propertyId] ?? null;
+  }
+
+  // Negative IDs → draft-backed properties
+  try {
+    const draft = await storage.getCommunityDraft(Math.abs(propertyId)).catch(() => null);
+    if (draft) {
+      const units: any[] = [];
+      if (draft.unit1Bedrooms) units.push({ unitId: "unit1", unitLabel: "Unit 1", bedrooms: draft.unit1Bedrooms });
+      if (draft.unit2Bedrooms) units.push({ unitId: "unit2", unitLabel: "Unit 2", bedrooms: draft.unit2Bedrooms });
+      if (units.length === 0 && draft.combinedBedrooms) {
+        units.push({ unitId: "main", unitLabel: "Combined", bedrooms: draft.combinedBedrooms });
+      }
+      return {
+        community: draft.community || draft.name || "unknown",
+        units,
+      };
+    }
+  } catch {}
+
+  // Last resort: try to resolve from mapped Guesty listing (the current main logic)
+  try {
+    return await (async () => {
+      const guestyId = await storage.getGuestyListingId(propertyId).catch(() => null);
+      if (!guestyId) return null;
+      const fields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds");
+      const listing = await guestyRequest("GET", `/listings/${guestyId}?fields=${fields}`) as any;
+      const br = listing?.bedrooms ?? listing?.bedroomsCount ?? listing?.bedroomCount ?? listing?.beds;
+      if (!br) return null;
+      return {
+        community: "unknown",
+        units: [{ unitId: "main", unitLabel: listing?.nickname || listing?.title || "Unit", bedrooms: Math.round(Number(br)) }],
+      };
+    })();
+  } catch {
+    return null;
+  }
+}
+
+export async function getAvailabilitySchedulerUnsupportedReason(propertyId: number): Promise<string | null> {
+  if (!Number.isFinite(propertyId)) return "invalid property id";
+  const config = await resolveAvailabilityPropertyConfig(propertyId);
+  if (!config) {
+    return propertyId <= 0
+      ? "draft-backed property is missing bedroom/community data for availability scans"
+      : "property not in availability config";
+  }
+  return null;
+}
