@@ -106,6 +106,7 @@ import {
   SIMILAR_BUY_IN_MARKETS,
   driveMinutesBetweenBuyInMarkets,
   nearbyBuyInMarketsForScout,
+  nearbyBuyInMarketsForScoutDetailed,
   oceanfrontComparableBuyInMarket,
   resolveBuyInMarket,
   searchLocationForBuyInMarket,
@@ -6674,16 +6675,16 @@ export async function registerRoutes(
       const configuredSimilar = Array.isArray(savedMarketConfig?.recommendedMarkets) && savedMarketConfig.recommendedMarkets.length > 0
         ? savedMarketConfig.recommendedMarkets
         : [];
-      const driveNearby = nearbyBuyInMarketsForScout(baseCommunity, {
+      const driveNearbyDetailed = nearbyBuyInMarketsForScoutDetailed(baseCommunity, {
         maxDriveMinutes: 20,
         oceanfrontOnly: sourceRequiresOceanfront,
-        limit: 5,
+        limit: 12,
       });
+      const driveNearby = driveNearbyDetailed.map((row) => row.community);
       const similar = Array.from(new Set([...configuredSimilar, ...driveNearby]))
         .filter((community) => community !== baseCommunity)
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
-        .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community))
-        .slice(0, 5);
+        .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community));
       const replacementPlans = twoUnitReplacementPlans(propertyConfig?.units?.map((unit) => unit.bedrooms) ?? [bedrooms]);
       const minAirbnbResults = Math.max(1, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "1"), 10) || 1));
       const results = await Promise.all(similar.map(async (community) => {
@@ -6791,9 +6792,11 @@ export async function registerRoutes(
         threshold: minAirbnbResults,
         requiresOceanfrontComparable: sourceRequiresOceanfront,
         replacementPlans,
+        nearbyWithinDriveMinutes: driveNearbyDetailed,
         results: recommended,
         recommended,
         rejected: results.filter((r) => !r.recommended),
+        scouted: results,
         generatedAt: new Date().toISOString(),
       });
     } catch (err: any) {
