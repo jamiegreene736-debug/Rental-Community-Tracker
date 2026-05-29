@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   calculateBlendedRate,
   fetchAirbnbMedianNightly,
+  curatedAirbnbSearchQueries,
   hybridPricingWindowForMonth,
   hybridPricingWindowForSeason,
   isSearchApiAirbnbNoResultsError,
@@ -90,6 +91,28 @@ assert.equal(holidaySeasonWindow.checkOut, "2026-07-05");
 
 assert.equal(isSearchApiAirbnbNoResultsError("SearchAPI Airbnb: Airbnb didn't return any results."), true);
 
+const bonitaQueries = curatedAirbnbSearchQueries(
+  "Bonita National",
+  "Sunny 2BR Condo at Bonita National Golf & Country Club Condominiums",
+);
+assert.equal(
+  bonitaQueries[0],
+  "Bonita National Golf and Country Club, Bonita Springs, FL",
+  "market Airbnb query must beat draft marketing title",
+);
+assert.equal(
+  bonitaQueries.at(-1),
+  "Sunny 2BR Condo at Bonita National Golf & Country Club Condominiums",
+  "draft marketing title may only be used as a last-resort Airbnb query",
+);
+
+const routesSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+assert.equal(
+  routesSource.includes("searchName: String(draft.name || draft.listingTitle || community)"),
+  false,
+  "draft market pricing refresh must not pass listing marketing title as Airbnb q=",
+);
+
 const originalFetch = globalThis.fetch;
 const originalSearchApiKey = process.env.SEARCHAPI_API_KEY;
 process.env.SEARCHAPI_API_KEY = "test-key";
@@ -143,8 +166,8 @@ try {
     checkIn: "2026-06-01",
     checkOut: "2026-06-08",
   });
-  assert.equal(poipuMedian.medianNightly, 450);
-  assert.equal(poipuMedian.sampleCount, 2);
+  assert.equal(poipuMedian.medianNightly, 250);
+  assert.equal(poipuMedian.sampleCount, 3);
   assert.equal(requestedSearchApiUrls.length, 1);
   const params = new URL(requestedSearchApiUrls[0]).searchParams;
   assert.equal(params.get("engine"), "airbnb");
@@ -158,12 +181,37 @@ try {
 
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
-  hybridPricingSource.includes('source: "hybrid-airbnb-layered"'),
-  "pricing refresh should persist the Airbnb SearchAPI layered basis",
+  hybridPricingSource.includes('source: "airbnb"'),
+  "pricing refresh should persist raw SearchAPI medians without hybrid markup layers",
+);
+assert.equal(
+  hybridPricingSource.includes("calculateBlendedRate({"),
+  false,
+  "market-rate refresh must not run hybrid layered markup on sampled medians",
 );
 assert.ok(
-  hybridPricingSource.includes("hybridPricingWindowForSeason(asOf, season)"),
-  "market-rate refresh should sample a random 7-night Airbnb window per season",
+  hybridPricingSource.includes("hybridPricingWindowForMonth(asOf, monthOffset, stayNights)"),
+  "market-rate refresh should run one SearchAPI Airbnb scan per calendar month",
+);
+assert.ok(
+  hybridPricingSource.includes("for (let monthOffset = 0; monthOffset < horizonMonths; monthOffset += 1)"),
+  "market-rate refresh should scan the configured pricing horizon month-by-month",
+);
+assert.ok(
+  hybridPricingSource.includes("seasonalMedians[legacySeasonForDemandClass(tier.demandClass)].push(basis)"),
+  "season summary medians must bucket by sampled stay demand tier, not calendar season map (Hawaii has no HOLIDAY months in HAWAII_SEASONS)",
+);
+assert.ok(
+  hybridPricingSource.includes('[hybrid-pricing] monthly scan ok'),
+  "each calendar month scan should log to Railway/server logs",
+);
+assert.ok(
+  hybridPricingSource.includes("scannedMonths.length !== horizonMonths"),
+  "market-rate refresh must fail when fewer than horizonMonths monthly medians were stored",
+);
+assert.ok(
+  hybridPricingSource.includes("fetchAmortizedNightlyByBR("),
+  "market-rate refresh should fall back to the amortized geo Airbnb path when direct queries are empty",
 );
 assert.equal(
   hybridPricingSource.includes("staticFallbackMonthlyRates"),

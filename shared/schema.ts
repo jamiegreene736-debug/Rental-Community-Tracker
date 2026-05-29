@@ -762,6 +762,18 @@ export const guestyPropertyMap = pgTable("guesty_property_map", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+/** Builder-pulled compliance values for hardcoded (positive) propertyIds. */
+export const propertyComplianceOverrides = pgTable("property_compliance_overrides", {
+  propertyId: integer("property_id").primaryKey(),
+  taxMapKey: text("tax_map_key"),
+  tatLicense: text("tat_license"),
+  getLicense: text("get_license"),
+  strPermit: text("str_permit"),
+  dbprLicense: text("dbpr_license"),
+  touristTaxAccount: text("tourist_tax_account"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const insertGuestyPropertyMapSchema = createInsertSchema(guestyPropertyMap).omit({
   id: true,
   updatedAt: true,

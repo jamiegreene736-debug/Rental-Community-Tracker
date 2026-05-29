@@ -189,6 +189,11 @@ function keepVisibleLocalChromeGrid() {
   return SIDE_CAR_CHROME_VISIBLE && !USE_HEADLESS_LOCAL_BROWSER && !USE_SERVER_BROWSER && CHROME_PRIMARY === "local";
 }
 
+async function surfaceVisibleOtaSearchWindow(targetPage = page, label = "sidecar", id = "") {
+  if (!keepVisibleLocalChromeGrid()) return false;
+  return snapSidecarWindowToGrid(targetPage, { focus: false, label, id }).catch(() => false);
+}
+
 function log(msg, ...rest) {
   const ts = new Date().toISOString();
   // eslint-disable-next-line no-console
@@ -4397,6 +4402,7 @@ async function runAirbnbSearchVariant(id, params, variant = null) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
+  await surfaceVisibleOtaSearchWindow(page, "airbnb_search", id);
   const primedDestination = await primeOtaHomepageSearch("https://www.airbnb.com/", effectiveSearchTerm, "airbnb_search", id, {
     inputTerm: typedQuery,
     targetSuggestion: variant?.suggestionText || null,
@@ -5160,6 +5166,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     `${checkIn}→${checkOut} ${bedrooms}BR${visibleAttempt ? ` retry=${visibleAttempt}` : ""}`,
   );
   await ensureBrowser();
+  await surfaceVisibleOtaSearchWindow(page, "vrbo_search", id);
   await clearOtaClientSearchState(
     "https://www.vrbo.com",
     visibleAttempt > 0 ? `vrbo_search ${id} retry ${visibleAttempt}` : `vrbo_search ${id} preflight`,
@@ -6235,6 +6242,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
+  await surfaceVisibleOtaSearchWindow(page, "booking_search", id);
   const primedDestination = await primeOtaHomepageSearch("https://www.booking.com/", effectiveSearchTerm, "booking_search", id, {
     inputTerm: typedQuery,
     targetSuggestion: variant?.suggestionText || null,

@@ -44,14 +44,21 @@ export function isPlaceholderLicenseValue(value: unknown): boolean {
 
   const knownSamples = new Set([
     "420150080001",
+    "420090060001",
     "ta 023 450 1234 01",
     "ge 023 450 1234 01",
+    "ta 025 430 9876 01",
+    "ge 025 430 9876 01",
     "tvr 2024 012 or tvnc 0342",
+    "tvr 2024 999",
     "cnd4600000 or dwe4600000",
     "19 0096",
     "19 0096 or lbtr 999999",
   ]);
-  return knownSamples.has(normalized);
+  if (knownSamples.has(normalized)) return true;
+  // Obvious demo permit numbers (e.g. Makahuena portfolio placeholders).
+  if (/^tvr 20\d{2} 999$/.test(normalized)) return true;
+  return false;
 }
 
 export function usableLicenseValue(value: unknown): string | null {
@@ -135,15 +142,6 @@ export function resolveLicenseComplianceProfile(input: {
           helpText: "Parcel identifier verified from the address that is sent to Guesty.",
         },
         {
-          key: "tatLicense",
-          label: "Transient Accommodations Tax License",
-          shortLabel: "TAT License",
-          required: true,
-          requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
-          sample: "TA-023-450-1234-01",
-          helpText: "Hawaii transient accommodations tax license.",
-        },
-        {
           key: "getLicense",
           label: "General Excise Tax License",
           shortLabel: "GET License",
@@ -151,6 +149,15 @@ export function resolveLicenseComplianceProfile(input: {
           requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
           sample: "GE-023-450-1234-01",
           helpText: "Hawaii general excise tax license.",
+        },
+        {
+          key: "tatLicense",
+          label: "Transient Accommodations Tax License",
+          shortLabel: "TAT License",
+          required: true,
+          requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
+          sample: "TA-023-450-1234-01",
+          helpText: "Hawaii transient accommodations tax license.",
         },
         {
           key: "strPermit",

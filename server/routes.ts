@@ -37,7 +37,7 @@ import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
-import { isFloridaLicenseJurisdiction, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
+import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
 // below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
@@ -67,6 +67,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
+import { lookupHawaiiComplianceField, lookupKauaiTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
   clearActiveSidecarLane,
@@ -118,8 +119,8 @@ import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommu
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
-import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridTriggerType } from "./hybrid-pricing";
-import { runFullScanForProperty, runFullScanNow, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason, resolveAvailabilityPropertyConfig } from "./availability-scheduler";
+import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
+import { runFullScanForProperty, runFullScanNow, runLeadTimePolicySyncForProperty, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason, resolveAvailabilityPropertyConfig } from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
   availabilityWindowCountForWeeks,
@@ -612,19 +613,23 @@ async function buildBulkGuestySeasonalPlan(
   const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
   const monthlyRates = build24MonthPricingWindow().map(({ yearMonth }) => {
     const season = getSeasonForMonth(yearMonth, region);
-    const buyIn = units.reduce((sum, unit) => sum + marketRateBasisForMonth({
-      community,
-      bedrooms: unit.bedrooms,
-      propertyId,
-      yearMonth,
-      season,
-      row: rowByBR.get(unit.bedrooms),
-    }), 0);
-    return {
-      yearMonth,
-      buyIn,
-      price: cleanBaseRateFromBuyInServer(buyIn, targetMargin),
-    };
+    let buyIn = 0;
+    let price = 0;
+    for (const unit of units) {
+      const unitBuyIn = marketRateBasisForMonth({
+        community,
+        bedrooms: unit.bedrooms,
+        propertyId,
+        yearMonth,
+        season,
+        row: rowByBR.get(unit.bedrooms),
+      });
+      if (unitBuyIn <= 0) continue;
+      buyIn += unitBuyIn;
+      // Match the pricing table: ceil margin per unit, then sum (not ceil on combined buy-in).
+      price += cleanBaseRateFromBuyInServer(unitBuyIn, targetMargin);
+    }
+    return { yearMonth, buyIn, price };
   }).filter((row) => row.buyIn > 0 && row.price > 0);
 
   return { listingId, monthlyRates, units, targetMargin };
@@ -688,7 +693,11 @@ function isGuestyPushSoftFailure(error: unknown): boolean {
   return /429|too many requests|rate.?limit|Guesty seasonal-rate push failed|read-back only matched|stored nothing/i.test(message);
 }
 
-async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: string): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
+async function refreshHybridPricingForDraft(
+  propertyId: number,
+  fallbackLabel: string,
+  onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>,
+): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const draftId = Math.abs(propertyId);
   const draft = await storage.getCommunityDraft(draftId);
   if (!draft) throw new Error(`Draft ${draftId} was not found`);
@@ -709,8 +718,8 @@ async function refreshHybridPricingForDraft(propertyId: number, fallbackLabel: s
     bedroomCounts,
     unitCount: unitSlots.length || 1,
     triggerType: "Manual Update",
-    notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal layered pricing.",
-    searchName: String(draft.name || draft.listingTitle || community),
+    notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly medians (no hybrid markup layers).",
+    onMonthScanned,
   });
 }
 
@@ -746,7 +755,7 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string, c
     : await refreshHybridPricingForProperty({
       propertyId,
       triggerType: "Manual Update",
-      notes: "Pricing tab manual refresh from SearchAPI Airbnb seasonal layered pricing.",
+      notes: "Pricing tab manual refresh from SearchAPI Airbnb monthly medians (no hybrid markup layers).",
     });
 
   assertPricingRefreshNotCancelled(propertyId, cancelGeneration);
@@ -784,26 +793,42 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     return;
   }
 
-  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb seasonal pricing" };
+  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb monthly pricing (starting month 1)" };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
 
+  const onMonthScanned = async (event: HybridMonthScannedEvent) => {
+    item.progress = {
+      phase: "searchapi-airbnb",
+      percent: Math.min(79, Math.round(10 + (70 * (event.monthOffset + 1)) / event.horizonMonths)),
+      label: `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) → $${event.medianNightly}/night`,
+      currentMonth: event.yearMonth,
+      monthsScanned: event.monthOffset + 1,
+      horizonMonths: event.horizonMonths,
+      bedrooms: event.bedrooms,
+      lastMedianNightly: event.medianNightly,
+    };
+    item.heartbeatAt = Date.now();
+    await persistBulkPricingJob(job);
+  };
+
   const pricingResult = item.propertyId < 0
-    ? await refreshHybridPricingForDraft(item.propertyId, item.label)
+    ? await refreshHybridPricingForDraft(item.propertyId, item.label, onMonthScanned)
     : await refreshHybridPricingForProperty({
       propertyId: item.propertyId,
       triggerType: "Manual Update",
-      notes: "Bulk market pricing refresh from SearchAPI Airbnb seasonal layered pricing.",
+      notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly medians (no hybrid markup layers).",
+      onMonthScanned,
     });
   item.progress = {
     phase: "searchapi-airbnb",
     percent: 80,
-    label: `SearchAPI Airbnb seasonal pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
+    label: `SearchAPI Airbnb monthly pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
     rows: pricingResult.rows.length,
   };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
-  await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb seasonal pricing completed for ${item.label}`, {
+  await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb monthly pricing completed for ${item.label}`, {
     itemKey: item.id,
     meta: { propertyId: item.propertyId, rows: pricingResult.rows.length },
   });
@@ -4930,29 +4955,6 @@ export async function registerRoutes(
     }
   });
 
-  type KauaiParcelAttributes = {
-    TMK?: number;
-    COTMK?: number;
-    PARTXT?: string;
-    CPR_UNIT?: string;
-    PLAT?: string;
-    PARCEL?: string;
-    OWN1?: string;
-    ALTID?: string;
-    LINKQ?: string;
-    TYPE?: string;
-  };
-
-  const KAUAI_PARCEL_LAYER =
-    "https://maps.kauai.gov/server/rest/services/Parcels_and_CPRs_WGS84_Degrees/FeatureServer/0/query";
-  const ARCGIS_GEOCODER =
-    "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates";
-
-  const normalizeTmkText = (value: unknown): string | null => {
-    const digits = String(value ?? "").replace(/\D/g, "");
-    return digits.length === 12 ? digits : null;
-  };
-
   const normalizeUnitToken = (value: unknown): string => {
     return String(value ?? "")
       .toUpperCase()
@@ -4964,17 +4966,6 @@ export async function registerRoutes(
   const extractUnitTokenFromAddress = (address: string): string => {
     const match = address.match(/\b(?:unit|apt|apartment|suite|ste|#)\s*([A-Z0-9-]+)\b/i);
     return normalizeUnitToken(match?.[1]);
-  };
-
-  const queryKauaiParcels = async (params: URLSearchParams): Promise<KauaiParcelAttributes[]> => {
-    const resp = await fetch(`${KAUAI_PARCEL_LAYER}?${params.toString()}`, {
-      headers: { "User-Agent": "NexStay/1.0" },
-    });
-    if (!resp.ok) throw new Error(`Kauai parcel query failed (${resp.status})`);
-    const data = await resp.json() as any;
-    return Array.isArray(data?.features)
-      ? data.features.map((f: any) => f?.attributes ?? {}).filter(Boolean)
-      : [];
   };
 
   type DeckardLicenseNode = {
@@ -5410,20 +5401,6 @@ export async function registerRoutes(
     };
   };
 
-  const scoreKauaiParcel = (row: KauaiParcelAttributes, unitToken: string): number => {
-    const type = String(row.TYPE ?? "").toLowerCase();
-    const cpr = normalizeUnitToken(row.CPR_UNIT);
-    const partxt = normalizeTmkText(row.PARTXT);
-    let score = 0;
-    if (type.includes("cpr")) score += 20;
-    if (type.includes("parcel")) score += 5;
-    if (unitToken && cpr && cpr === unitToken) score += 100;
-    if (unitToken && partxt && normalizeUnitToken(partxt.slice(-4)) === unitToken) score += 60;
-    if (!unitToken && !type.includes("cpr")) score += 40;
-    if (!unitToken && type.includes("cpr")) score -= 20;
-    return score;
-  };
-
   // GET /api/builder/tmk-lookup
   //
   // Pulls a real Hawaii/Kauai Tax Map Key from official public data instead
@@ -5444,100 +5421,185 @@ export async function registerRoutes(
     }
 
     try {
-      const searchedAddress = address;
-      const geocodeParams = new URLSearchParams({
-        f: "json",
-        SingleLine: searchedAddress,
-        outFields: "Match_addr,Addr_type,Score",
-        maxLocations: "3",
-      });
-      const geocodeResp = await fetch(`${ARCGIS_GEOCODER}?${geocodeParams.toString()}`, {
-        headers: { "User-Agent": "NexStay/1.0" },
-      });
-      if (!geocodeResp.ok) throw new Error(`Address geocode failed (${geocodeResp.status})`);
-      const geocodeData = await geocodeResp.json() as any;
-      const geocodeCandidates = Array.isArray(geocodeData?.candidates) ? geocodeData.candidates : [];
-      const bestGeocode = geocodeCandidates.find((c: any) => Number(c?.score ?? 0) >= 80 && c?.location?.x && c?.location?.y);
-      if (!bestGeocode) {
-        return res.status(404).json({ error: "No geocoded Hawaii address found", searchedAddress });
-      }
-
-      const pointParams = new URLSearchParams({
-        f: "json",
-        where: "1=1",
-        geometry: `${bestGeocode.location.x},${bestGeocode.location.y}`,
-        geometryType: "esriGeometryPoint",
-        inSR: "4326",
-        spatialRel: "esriSpatialRelIntersects",
-        outFields: "TMK,COTMK,PARTXT,CPR_UNIT,PLAT,PARCEL,OWN1,ALTID,LINKQ,TYPE",
-        returnGeometry: "false",
-      });
-      const pointRows = await queryKauaiParcels(pointParams);
-
-      const cotmkValues = Array.from(new Set(
-        pointRows.map((row) => Number(row.COTMK)).filter((n) => Number.isFinite(n)),
-      ));
-      const relatedRows: KauaiParcelAttributes[] = [];
-      for (const cotmk of cotmkValues.slice(0, 3)) {
-        const relatedParams = new URLSearchParams({
-          f: "json",
-          where: `COTMK=${cotmk}`,
-          outFields: "TMK,COTMK,PARTXT,CPR_UNIT,PLAT,PARCEL,OWN1,ALTID,LINKQ,TYPE",
-          returnGeometry: "false",
-          resultRecordCount: "2000",
-        });
-        relatedRows.push(...await queryKauaiParcels(relatedParams));
-      }
-
-      const unitToken = extractUnitTokenFromAddress(searchedAddress);
-      const rows = [...pointRows, ...relatedRows]
-        .filter((row, idx, all) => {
-          const key = normalizeTmkText(row.PARTXT) ?? `${row.COTMK}-${row.CPR_UNIT}-${idx}`;
-          return all.findIndex((r, i) => (normalizeTmkText(r.PARTXT) ?? `${r.COTMK}-${r.CPR_UNIT}-${i}`) === key) === idx;
-        })
-        .sort((a, b) => scoreKauaiParcel(b, unitToken) - scoreKauaiParcel(a, unitToken));
-
-      const selected = rows.find((row) => normalizeTmkText(row.PARTXT));
-      const taxMapKey = normalizeTmkText(selected?.PARTXT);
-      if (!selected || !taxMapKey) {
-        return res.status(404).json({
-          error: "No Kauai parcel TMK found for this address",
-          searchedAddress,
-          geocodedAddress: bestGeocode.address,
-        });
-      }
-
-      const selectedType = String(selected.TYPE ?? "");
-      const selectedCpr = normalizeUnitToken(selected.CPR_UNIT);
-      const isUnitCpr = Boolean(unitToken) && selectedType.toLowerCase().includes("cpr") && (selectedCpr === unitToken || normalizeUnitToken(taxMapKey.slice(-4)) === unitToken);
-      const hasAnyCprRows = rows.some((row) => String(row.TYPE ?? "").toLowerCase().includes("cpr"));
-      const note = isUnitCpr
-        ? `Matched County of Kauai CPR unit ${String(selected.CPR_UNIT ?? "").trim() || taxMapKey.slice(-4)} from the exact Guesty listing address.`
-        : hasAnyCprRows
-          ? "Matched the official parcel for the exact Guesty listing address, but not an individual CPR row. Verify the qPublic link before pushing if Airbnb requires unit-level CPR."
-          : "Matched the official County of Kauai master parcel for the exact Guesty listing address. The public GIS layer does not expose individual CPR units for this address.";
-
-      res.json({
-        taxMapKey,
-        confidence: isUnitCpr ? "unit-cpr" : "master-parcel",
-        note,
-        searchedAddress,
-        geocodedAddress: bestGeocode.address,
-        source: "County of Kauai ArcGIS Parcels and CPRs",
-        sourceUrl: selected.LINKQ || "https://maps.kauai.gov/server/rest/services/Parcels_and_CPRs_WGS84_Degrees/FeatureServer/0",
-        parcel: selected,
-        candidates: rows.slice(0, 8).map((row) => ({
-          taxMapKey: normalizeTmkText(row.PARTXT),
-          cprUnit: String(row.CPR_UNIT ?? "").trim(),
-          owner: row.OWN1 ?? null,
-          project: row.ALTID ?? null,
-          type: row.TYPE ?? null,
-          sourceUrl: row.LINKQ ?? null,
-        })),
-      });
+      res.json(await lookupKauaiTmkFromAddress(address));
     } catch (err: any) {
-      console.error("[tmk-lookup] failed:", err?.message || err);
-      res.status(500).json({ error: "TMK lookup failed", message: err?.message || String(err) });
+      const message = err?.message || String(err);
+      console.error("[tmk-lookup] failed:", message);
+      if (/No geocoded Hawaii address found|No Kauai parcel TMK found/i.test(message)) {
+        return res.status(404).json({ error: message, searchedAddress: address });
+      }
+      res.status(500).json({ error: "TMK lookup failed", message });
+    }
+  });
+
+  const COMPLIANCE_GUESTY_TIMEOUT_MS = 20_000;
+  const withComplianceLookupTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`${label} timed out after ${COMPLIANCE_GUESTY_TIMEOUT_MS / 1000}s`)),
+            COMPLIANCE_GUESTY_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  const fetchGuestyListingForCompliance = async (listingId: string): Promise<Record<string, unknown>> => {
+    // Full listing read — partial `fields=` responses omit nested channel/license data.
+    return await withComplianceLookupTimeout(
+      guestyRequest("GET", `/listings/${listingId}`) as Promise<Record<string, unknown>>,
+      "Guesty listing compliance fetch",
+    );
+  };
+
+  const loadPropertyComplianceValues = async (propertyIdRaw: unknown) => {
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId === 0) return null;
+    if (propertyId > 0) {
+      const property = getUnitBuilderByPropertyId(propertyId);
+      if (!property) return null;
+      return {
+        taxMapKey: property.taxMapKey ?? null,
+        tatLicense: property.tatLicense ?? null,
+        getLicense: property.getLicense ?? null,
+        strPermit: property.strPermit ?? null,
+      };
+    }
+    const draft = await storage.getCommunityDraft(Math.abs(propertyId));
+    if (!draft) return null;
+    return {
+      taxMapKey: draft.taxMapKey ?? null,
+      tatLicense: draft.tatLicense ?? null,
+      getLicense: draft.getLicense ?? null,
+      strPermit: draft.strPermit ?? null,
+    };
+  };
+
+  const handleHawaiiLicenseLookup = (field: "getLicense" | "tatLicense" | "strPermit", failureLabel: string) =>
+    async (req: Request, res: Response) => {
+      const address = String(req.query.address ?? "").trim();
+      const listingId = String(req.query.listingId ?? "").trim() || null;
+      const taxMapKey = String(req.query.taxMapKey ?? "").trim() || null;
+      if (!address) return res.status(400).json({ error: "address is required" });
+      if (!/\b(HI|Hawaii)\b/i.test(address)) {
+        return res.status(400).json({ error: "Only Hawaii license lookup is currently supported" });
+      }
+      try {
+        const propertyValues = await loadPropertyComplianceValues(req.query.propertyId);
+        const result = await lookupHawaiiComplianceField({
+          field,
+          address,
+          listingId,
+          taxMapKey,
+          propertyValues,
+          fetchGuestyListing: fetchGuestyListingForCompliance,
+        });
+        res.json({
+          [field]: result.value,
+          value: result.value,
+          confidence: result.confidence,
+          note: result.note,
+          searchedAddress: result.searchedAddress,
+          geocodedAddress: result.geocodedAddress,
+          taxMapKey: result.taxMapKey,
+          source: result.source,
+          sourceUrl: result.sourceUrl,
+        });
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        console.error(`[${field}-lookup] failed:`, message);
+        if (/No real .* license was found|Select a connected Guesty listing|No Kauai County TVR/i.test(message)) {
+          return res.status(404).json({ error: message, searchedAddress: address, listingId });
+        }
+        if (/timed out/i.test(message)) {
+          return res.status(504).json({ error: message, searchedAddress: address, listingId });
+        }
+        return res.status(500).json({ error: `${failureLabel} lookup failed`, message });
+      }
+    };
+
+  // GET /api/builder/get-lookup — pull real GET from Guesty listing compliance fields.
+  app.get("/api/builder/get-lookup", handleHawaiiLicenseLookup("getLicense", "GET license"));
+
+  // GET /api/builder/tat-lookup — pull real TAT from Guesty listing compliance fields.
+  app.get("/api/builder/tat-lookup", handleHawaiiLicenseLookup("tatLicense", "TAT license"));
+
+  // GET /api/builder/str-permit-lookup — pull real STR from Guesty or Kauai TVR registry.
+  app.get("/api/builder/str-permit-lookup", handleHawaiiLicenseLookup("strPermit", "STR permit"));
+
+  const sanitizeCompliancePayload = (body: Record<string, unknown>) => {
+    const keys = ["taxMapKey", "tatLicense", "getLicense", "strPermit", "dbprLicense", "touristTaxAccount"] as const;
+    const out: Partial<Record<typeof keys[number], string | null>> = {};
+    for (const key of keys) {
+      if (!(key in body)) continue;
+      const text = String(body[key] ?? "").trim();
+      out[key] = text || null;
+    }
+    return out;
+  };
+
+  const readStoredComplianceValues = (row: {
+    taxMapKey?: string | null;
+    tatLicense?: string | null;
+    getLicense?: string | null;
+    strPermit?: string | null;
+    dbprLicense?: string | null;
+    touristTaxAccount?: string | null;
+  } | null) => ({
+    taxMapKey: row?.taxMapKey?.trim() || null,
+    tatLicense: row?.tatLicense?.trim() || null,
+    getLicense: row?.getLicense?.trim() || null,
+    strPermit: row?.strPermit?.trim() || null,
+    dbprLicense: row?.dbprLicense?.trim() || null,
+    touristTaxAccount: row?.touristTaxAccount?.trim() || null,
+  });
+
+  // GET /api/builder/compliance/:propertyId — persisted builder compliance values.
+  app.get("/api/builder/compliance/:propertyId", async (req, res) => {
+    const propertyId = Number(req.params.propertyId);
+    if (!Number.isInteger(propertyId) || propertyId === 0) {
+      return res.status(400).json({ error: "Invalid propertyId" });
+    }
+    try {
+      if (propertyId < 0) {
+        const draft = await storage.getCommunityDraft(Math.abs(propertyId));
+        if (!draft) return res.status(404).json({ error: "Draft not found" });
+        return res.json({ values: readStoredComplianceValues(draft) });
+      }
+      const row = await storage.getPropertyComplianceOverrides(propertyId);
+      return res.json({ values: readStoredComplianceValues(row) });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // PATCH /api/builder/compliance/:propertyId — save pulled/edited compliance values.
+  app.patch("/api/builder/compliance/:propertyId", async (req, res) => {
+    const propertyId = Number(req.params.propertyId);
+    if (!Number.isInteger(propertyId) || propertyId === 0) {
+      return res.status(400).json({ error: "Invalid propertyId" });
+    }
+    const patch = sanitizeCompliancePayload((req.body ?? {}) as Record<string, unknown>);
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: "No compliance values to save" });
+    }
+    try {
+      if (propertyId < 0) {
+        const draft = await storage.updateCommunityDraft(Math.abs(propertyId), patch as any);
+        if (!draft) return res.status(404).json({ error: "Draft not found" });
+        return res.json({ values: readStoredComplianceValues(draft) });
+      }
+      await storage.upsertPropertyComplianceOverrides(propertyId, patch);
+      const row = await storage.getPropertyComplianceOverrides(propertyId);
+      return res.json({ values: readStoredComplianceValues(row) });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || String(err) });
     }
   });
 
@@ -14676,7 +14738,9 @@ export async function registerRoutes(
   });
 
   // POST /api/builder/resolve-license-requirements — returns mapped jurisdiction
-  // rules and any already-known values. This does not guess license numbers.
+  // rules and any already-known values. Real public auto-lookup only exists for
+  // certain Florida fields today; Hawaii taxMapKey is pulled via the dedicated
+  // /api/builder/tmk-lookup (county ArcGIS) from the client.
   app.post("/api/builder/resolve-license-requirements", async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as {
       city?: string;
@@ -20576,13 +20640,7 @@ Return ONLY compact JSON with this exact shape:
     await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
     const delayMs = Math.min(delayMinutes, 180) * 60 * 1000;
     setTimeout(() => {
-      runFullScanForProperty(propertyId, {
-        minSets: 3,
-        targetMargin: 0.2,
-        runInventory: true,
-        runPricing: false,
-        runSyncBlocks: true,
-      }).catch((err) => {
+      runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 }).catch((err) => {
         console.error(`[availability-policy] scheduled sync failed for property ${propertyId}:`, err?.message ?? err);
       });
     }, delayMs);
@@ -20597,13 +20655,7 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
-      const summary = await runFullScanForProperty(propertyId, {
-        minSets: 3,
-        targetMargin: 0.2,
-        runInventory: true,
-        runPricing: false,
-        runSyncBlocks: true,
-      });
+      const summary = await runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 });
       res.json({ ok: !summary.startsWith("skipped:"), status: summary.startsWith("skipped:") ? "skipped" : "ok", summary });
     } catch (err: any) {
       res.status(500).json({ error: "Sync failed", message: err.message });
@@ -20617,13 +20669,7 @@ Return ONLY compact JSON with this exact shape:
       let status = "ok";
       let summary = "";
       try {
-        summary = await runFullScanForProperty(mapping.propertyId, {
-          minSets: 3,
-          targetMargin: 0.2,
-          runInventory: true,
-          runPricing: false,
-          runSyncBlocks: true,
-        });
+        summary = await runLeadTimePolicySyncForProperty(mapping.propertyId, { minSets: 3 });
         status = summary.startsWith("skipped:") ? "skipped" : "ok";
       } catch (e: any) {
         status = "error";
@@ -23859,11 +23905,7 @@ Return ONLY compact JSON with this exact shape:
           continue;
         }
 
-        const platformAddress = source === "vrbo" ? address : communityAddress;
-        const platformResort = source === "vrbo" && channelScopedSourceAliases.length > 0
-          ? channelScopedSourceAliases[0]
-          : communityName;
-        let platformCheck = await checkAllPlatforms(platformAddress, platformResort, unitNumber, source === "vrbo");
+        let platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
         console.error(
           `[find-unit] [${source}] ${sourceUrl} platform check: airbnb=${platformCheck.airbnb}, vrbo=${platformCheck.vrbo}, booking=${platformCheck.bookingCom}`,
         );

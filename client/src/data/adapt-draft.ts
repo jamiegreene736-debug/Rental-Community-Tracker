@@ -70,14 +70,54 @@ function hawaiiCountyFromCity(city: string): "kauai-vda" | "kauai-non-vda" | "bi
 // expected shape is, not provide live license data. Format only:
 // every concrete digit string below is filler; nothing identifies a
 // real property or owner.
+// Hawaii GET/TAT share the same digit groups; only the TA- vs GE- prefix differs.
+// Shape matches Hawaii Tax Online: TA|GE-###-###-####-## (see unit-builder-data).
+function hawaiiTaxLicenseCore(city: string, county: ReturnType<typeof hawaiiCountyFromCity>): string {
+  const c = (city || "").toLowerCase();
+  switch (county) {
+    case "kauai-vda":
+      if (/princeville/.test(c)) return "026-780-7890-01";
+      if (/poipu|koloa/.test(c)) return "025-430-9876-01";
+      return "023-450-1234-09";
+    case "kauai-non-vda":
+      return "024-120-9012-01";
+    case "big-island":
+      return "018-920-3456-01";
+    case "maui":
+      return "022-560-7812-01";
+    case "oahu":
+      return "019-870-2345-01";
+    default:
+      return "023-450-1234-09";
+  }
+}
+
+function tatSampleHawaii(city: string): string {
+  return `TA-${hawaiiTaxLicenseCore(city, hawaiiCountyFromCity(city))}`;
+}
+
+function getSampleHawaii(city: string): string {
+  return `GE-${hawaiiTaxLicenseCore(city, hawaiiCountyFromCity(city))}`;
+}
+
 function strPermitSampleHawaii(city: string): string {
-  switch (hawaiiCountyFromCity(city)) {
-    case "kauai-vda":     return "TVR-2024-099";
-    case "kauai-non-vda": return "TVNC-0999";
-    case "big-island":    return "STVR-2024-009999";
-    case "maui":          return "STRH-99999999";
-    case "oahu":          return "NUC-24-999-9999";
-    default:              return "TVR-2024-099";
+  const c = (city || "").toLowerCase();
+  const county = hawaiiCountyFromCity(city);
+  switch (county) {
+    case "kauai-vda":
+      if (/princeville/.test(c)) return "TVR-2023-074";
+      return "TVR-2022-048";
+    case "kauai-non-vda":
+      if (/kekaha|waimea/.test(c)) return "TVNC-0218";
+      return "TVNC-0342";
+    case "big-island":
+      return "STVR-2019-003461";
+    case "maui":
+      return "STRH-20240042";
+    case "oahu":
+      return "NUC-24-001-0134";
+    default:
+      return "TVR-2022-048";
   }
 }
 
@@ -173,13 +213,13 @@ function floridaSamples(c: ReturnType<typeof floridaCountyFromCity>): FloridaSam
   }
 }
 
-function sampleLicensesForLocation(city: string, state: string): LicenseSamples {
+export function sampleLicensesForLocation(city: string, state: string): LicenseSamples {
   const s = (state || "").toLowerCase();
   if (s === "hawaii" || s === "hi") {
     return {
       taxMapKey:  tmkSampleHawaii(city),
-      getLicense: "GE-099-999-9999-99",
-      tatLicense: "TA-099-999-9999-99",
+      getLicense: getSampleHawaii(city),
+      tatLicense: tatSampleHawaii(city),
       strPermit:  strPermitSampleHawaii(city),
     };
   }

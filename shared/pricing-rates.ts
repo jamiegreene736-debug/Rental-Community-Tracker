@@ -287,6 +287,16 @@ export function getLiveBuyIn(propertyId: number, bedrooms: number): LiveBuyInEnt
   return _liveBuyIns.get(liveKey(propertyId, bedrooms)) ?? null;
 }
 
+export function getLiveMonthlyBuyIn(
+  propertyId: number,
+  bedrooms: number,
+  yearMonth: string,
+): number | null {
+  const monthly = getLiveBuyIn(propertyId, bedrooms)?.monthlyRates[yearMonth]?.medianNightly;
+  if (monthly == null || !Number.isFinite(monthly) || monthly <= 0) return null;
+  return Math.round(monthly);
+}
+
 function fallbackSeasonBasisFromLow(
   community: string,
   lowBasis: number | null,
@@ -329,10 +339,9 @@ export function normalizeSeasonalBasis(
 // season-specific basis from the multi-season scan when available,
 // otherwise applies the multiplier to the LOW basis.
 //
-// `yearMonth` is accepted for API compatibility with callers that also
-// surface saved monthly scrape samples. Those monthly samples are
-// diagnostic evidence only; they do not override the canonical seasonal
-// basis used for pricing or Guesty pushes.
+// When `yearMonth` is supplied and a live monthly median exists for that
+// month, it drives pricing (one SearchAPI sample per calendar month).
+// Otherwise fall back to per-season basis columns or LOW × multiplier.
 export function getBuyInRate(
   community: string,
   bedrooms: number,
@@ -343,6 +352,10 @@ export function getBuyInRate(
   if (propertyId != null) {
     const live = _liveBuyIns.get(liveKey(propertyId, bedrooms));
     if (live) {
+      if (yearMonth) {
+        const monthly = getLiveMonthlyBuyIn(propertyId, bedrooms, yearMonth);
+        if (monthly != null) return monthly;
+      }
       const normalized = normalizeSeasonalBasis(
         community,
         live.medianNightly,

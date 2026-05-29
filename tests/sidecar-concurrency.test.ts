@@ -96,4 +96,27 @@ assert.equal(blockedSameProviderClaim, null, "same-provider buy-in searches shou
 
 resetQueue();
 
+next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+
+enqueueOp({
+  opType: "vrbo_search",
+  params: {
+    destination: "Poipu Kai",
+    searchTerm: "Poipu Kai",
+    checkIn: "2026-07-10",
+    checkOut: "2026-07-17",
+    bedrooms: 3,
+    queueContext: { ...buyInQueueContext, providerLabel: "VRBO" },
+  },
+});
+
+const serverClaimAfterIdleLocalPoll = next({ slot: "2", workerRole: "server", browserMode: "cdp", chromePrimary: "server" });
+assert.equal(
+  serverClaimAfterIdleLocalPoll?.opType,
+  "vrbo_search",
+  "idle local heartbeat polls must not block Railway workers from claiming OTA work",
+);
+
+resetQueue();
+
 console.log("sidecar concurrency suite passed");

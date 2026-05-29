@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 
 process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 
+const { isDueForPolicyPass } = await import("../server/availability-scheduler");
+
 const {
   AVAILABILITY_RELIABILITY_FACTOR,
   AVAILABILITY_AUTO_BLOCK_HOLIDAY_DAYS,
@@ -170,5 +172,17 @@ assert.equal(
   "provider warnings are diagnostic only under fixed policy",
 );
 console.log("  ✓ provider availability evidence no longer controls blackouts");
+
+assert.equal(
+  isDueForPolicyPass(new Date("2026-05-28T04:30:00Z"), new Date("2026-05-28T05:30:00Z"), 24),
+  false,
+  "same Eastern day before 1 AM should not re-run",
+);
+assert.equal(
+  isDueForPolicyPass(new Date("2026-05-27T10:00:00Z"), new Date("2026-05-28T06:00:00Z"), 24),
+  true,
+  "after 1 AM Eastern on a new day should run",
+);
+console.log("  ✓ daily policy pass is due after 1 AM Eastern");
 
 console.log("availability window suite passed");

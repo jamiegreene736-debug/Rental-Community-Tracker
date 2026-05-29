@@ -483,15 +483,20 @@ setLivePropertyMarketRates([{
 }]);
 assert.equal(
   getBuyInRate("Windsor Hills", 2, 900001, "HIGH", "2026-07"),
-  150,
-  "canonical HIGH basis should drive pricing even when a monthly sample is lower",
+  60,
+  "live monthly median should drive pricing when yearMonth is supplied",
 );
 assert.equal(
-  getBuyInRate("Windsor Hills", 2, 900001, "LOW", "2026-07"),
-  100,
-  "canonical LOW basis should drive pricing even when monthly sample metadata exists",
+  getBuyInRate("Windsor Hills", 2, 900001, "HIGH", "2026-06"),
+  150,
+  "seasonal HIGH basis should be used when no monthly sample exists for that month",
 );
-console.log("  ✓ monthly samples do not override canonical season basis");
+assert.equal(
+  getBuyInRate("Windsor Hills", 2, 900001, "LOW"),
+  100,
+  "seasonless callers still use canonical LOW basis",
+);
+console.log("  ✓ monthly samples override season basis when yearMonth is supplied");
 
 // suggestPricingArea: a Kissimmee draft named "Caribe Cove" should
 // resolve to "Caribe Cove" via the new community-name match — not to
@@ -797,6 +802,87 @@ console.log("\nVRBO compliance detection suite");
   assert.equal(detected?.taxId, "GET-TAGS-WIN", "tags GET wins over top-level");
   console.log("  ✓ Tags still win priority when top-level fields also exist");
 }
+
+// ---------- Hawaii compliance lookup helpers ----------
+console.log("\nHawaii compliance lookup suite");
+import {
+  extractHawaiiComplianceFromGuestyListing,
+  formatKauaiCountyPermit,
+  matchKauaiStrPermit,
+  pairHawaiiTaxLicense,
+  parseKauaiTvrPdfText,
+  tmkMatchKeys,
+} from "../server/hawaii-compliance-lookup";
+
+assert.equal(formatKauaiCountyPermit("218"), "TVNC-0218");
+assert.equal(formatKauaiCountyPermit("TVR-2022-037"), "TVR-2022-037");
+
+const sampleTvrText = [
+  "1317",
+  "12006014",
+  "Ishihara Cottage9730 'Oi'oi Rd., Waimea",
+  "Active",
+  "X",
+  "31-Jul",
+].join("\n");
+const parsedTvr = parseKauaiTvrPdfText(sampleTvrText);
+assert.equal(parsedTvr.length, 1);
+assert.equal(parsedTvr[0]?.permitNumber, "TVNC-1317");
+assert.equal(parsedTvr[0]?.tmkKey, "12006014");
+
+const tmkMatch = matchKauaiStrPermit(parsedTvr, "412006014000", "Waimea");
+assert.equal(tmkMatch?.value, "TVNC-1317");
+assert.ok(tmkMatchKeys("412006014000").includes("412006014"));
+
+const extracted = extractHawaiiComplianceFromGuestyListing({
+  tags: ["TMK:420140050001", "TAT:TA-024-120-9012-01", "GET:GE-024-120-9012-01", "STR:TVR-2022-037"],
+  licenseNumber: "SHOULD-NOT-WIN",
+  taxId: "SHOULD-NOT-WIN",
+  publicDescription: {
+    notes: "=== Rental License Compliance ===\nShort-Term Rental Registration / Permit: NOTES-STR",
+  },
+});
+assert.equal(extracted.tatLicense, "TA-024-120-9012-01");
+assert.equal(extracted.getLicense, "GE-024-120-9012-01");
+assert.equal(extracted.strPermit, "TVR-2022-037");
+
+const strOnLicenseNumber = extractHawaiiComplianceFromGuestyListing({
+  licenseNumber: "TVR-2022-037",
+  taxId: "GE-024-120-9012-01",
+  tags: [],
+});
+assert.equal(strOnLicenseNumber.strPermit, "TVR-2022-037");
+assert.equal(strOnLicenseNumber.getLicense, "GE-024-120-9012-01");
+assert.equal(strOnLicenseNumber.tatLicense, null);
+
+const fromHomeaway = extractHawaiiComplianceFromGuestyListing({
+  tags: [],
+  channels: {
+    homeaway: {
+      licenseNumber: "TA-024-630-2345-01",
+      taxId: "GE-024-630-2345-01",
+      parcelNumber: "430150130001",
+    },
+  },
+});
+assert.equal(fromHomeaway.tatLicense, "TA-024-630-2345-01");
+assert.equal(fromHomeaway.getLicense, "GE-024-630-2345-01");
+assert.equal(pairHawaiiTaxLicense("TA-024-120-9012-01", "getLicense"), "GE-024-120-9012-01");
+
+import { isPlaceholderLicenseValue } from "../shared/license-compliance";
+assert.ok(isPlaceholderLicenseValue("GE-025-430-9876-01"), "Makahuena sample GET");
+assert.ok(isPlaceholderLicenseValue("TA-025-430-9876-01"), "Makahuena sample TAT");
+assert.ok(isPlaceholderLicenseValue("TVR-2024-999"), "Makahuena sample STR");
+assert.ok(isPlaceholderLicenseValue("420090060001"), "Makahuena sample TMK");
+
+import { sampleLicensesForLocation } from "../client/src/data/adapt-draft";
+const poipuSamples = sampleLicensesForLocation("Koloa", "HI");
+assert.equal(poipuSamples.tatLicense, "TA-025-430-9876-01");
+assert.equal(poipuSamples.getLicense, "GE-025-430-9876-01");
+assert.equal(poipuSamples.strPermit, "TVR-2022-048");
+const kauaiHomestay = sampleLicensesForLocation("Lihue", "Hawaii");
+assert.equal(kauaiHomestay.strPermit, "TVNC-0342");
+console.log("  ✓ Hawaii compliance extraction + Kauai TVR parsing");
 
 // ---------- Guesty session cache layered read ----------
 // Locks in the priority order the cache layer uses for the cookie /

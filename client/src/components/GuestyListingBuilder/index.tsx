@@ -11,6 +11,7 @@ import AvailabilityTab from "./AvailabilityTab";
 import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { sampleLicensesForLocation } from "@/data/adapt-draft";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 
@@ -167,14 +168,21 @@ const CSS = `
 type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
 type GuestyListing = { _id?: string; id?: string; nickname?: string; title?: string };
 type LogEntry = BuildStepEntry & { icon: string };
-type TmkLookupResult = {
-  taxMapKey: string;
-  confidence: "unit-cpr" | "master-parcel";
+type ComplianceLookupResult = {
+  value: string;
+  confidence: string;
   note: string;
-  searchedAddress: string;
-  geocodedAddress: string;
+  searchedAddress?: string;
+  geocodedAddress?: string;
+  taxMapKey?: string;
   source: string;
   sourceUrl?: string;
+};
+type TmkLookupResult = ComplianceLookupResult & {
+  taxMapKey: string;
+  confidence: "unit-cpr" | "master-parcel";
+  searchedAddress: string;
+  geocodedAddress: string;
 };
 
 type Props = {
@@ -265,7 +273,6 @@ type GuestyMonthlyRate = {
   minRate: number;
   maxRate: number;
   days: number;
-  source?: "guesty" | "last-push";
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -275,7 +282,6 @@ function GuestyRatePushCard({
   listingId,
   propertyId,
   seasonalMonths,
-  applyPushedRates,
   targetMarginPct,
   setTargetMarginPct,
   allowCustomMargin,
@@ -283,15 +289,11 @@ function GuestyRatePushCard({
   lastGuestyRatePushStatus,
   lastGuestyRatePushSummary,
   onGuestyRatePushRecorded,
+  refetchGuestyRates,
 }: {
   listingId: string | null;
   propertyId?: number;
-  seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number }>;
-  // Called with the per-month rates we just pushed so the parent table
-  // shows them instantly, without depending on Guesty's calendar GET
-  // catching up (which is eventually-consistent and was returning stale
-  // rates in practice).
-  applyPushedRates?: (rates: Array<{ yearMonth: string; price: number }>) => void;
+  seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number; totalSell: number }>;
   targetMarginPct: number;
   setTargetMarginPct: (value: number) => void;
   allowCustomMargin: boolean;
@@ -299,6 +301,8 @@ function GuestyRatePushCard({
   lastGuestyRatePushStatus?: string | null;
   lastGuestyRatePushSummary?: string | null;
   onGuestyRatePushRecorded?: () => void | Promise<void>;
+  /** Re-read Guesty calendar after a verified push (eventual consistency). */
+  refetchGuestyRates?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -336,10 +340,8 @@ function GuestyRatePushCard({
       .map((row) => ({
         yearMonth: row.yearMonth,
         buyIn: row.totalBuyIn,
-        // Direct channel: price × (1 - feeDirect) = (1 + m) × buyIn.
-        // Use the same helper as the pricing table so "Sheet Rate" and
-        // the pushed Guesty base calendar rate stay in lockstep.
-        price: cleanBaseRateFromBuyIn(row.totalBuyIn, m),
+        // Match the pricing table's Sheet Base column (per-unit ceil, then sum).
+        price: row.totalSell > 0 ? row.totalSell : cleanBaseRateFromBuyIn(row.totalBuyIn, m),
       }));
   };
 
@@ -367,12 +369,9 @@ function GuestyRatePushCard({
         throw new Error(data.error || `Guesty calendar push did not fully verify.${failed}`.trim());
       }
       setSeasonalPushResult({ ...data, plan });
-      // Apply the pushed plan directly to the parent's Guesty-rates state
-      // so the 24-month table updates immediately. We don't trust a
-      // re-fetch because Guesty's calendar GET was returning stale rates
-      // right after the PUT (eventual consistency on their side).
-      applyPushedRates?.(plan);
       await onGuestyRatePushRecorded?.();
+      refetchGuestyRates?.();
+      window.setTimeout(() => refetchGuestyRates?.(), 4000);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -554,6 +553,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [licenseLookupBusy, setLicenseLookupBusy] = useState(false);
   const [tmkLookupBusy, setTmkLookupBusy] = useState(false);
   const [tmkLookupResult, setTmkLookupResult] = useState<TmkLookupResult | null>(null);
+  const [getLookupBusy, setGetLookupBusy] = useState(false);
+  const [getLookupResult, setGetLookupResult] = useState<ComplianceLookupResult | null>(null);
+  const [tatLookupBusy, setTatLookupBusy] = useState(false);
+  const [tatLookupResult, setTatLookupResult] = useState<ComplianceLookupResult | null>(null);
+  const [strLookupBusy, setStrLookupBusy] = useState(false);
+  const [strLookupResult, setStrLookupResult] = useState<ComplianceLookupResult | null>(null);
 
   const rememberPropertyMap = useCallback((propertyIdToMap: number, guestyListingId: string) => {
     setPropertyMap((prev) => [
@@ -714,6 +719,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     setComplianceOverrides({});
     setTmkLookupResult(null);
+    setGetLookupResult(null);
+    setTatLookupResult(null);
+    setStrLookupResult(null);
+    setGetLookupBusy(false);
+    setTatLookupBusy(false);
+    setStrLookupBusy(false);
+    setTmkLookupBusy(false);
+    setLicenseLookupBusy(false);
+    if (!propertyId) return;
+    let cancelled = false;
+    fetch(`/api/builder/compliance/${propertyId}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.values) return;
+        const loaded: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">> = {};
+        for (const [key, value] of Object.entries(data.values)) {
+          const text = String(value ?? "").trim();
+          if (text) {
+            loaded[key as keyof typeof loaded] = text;
+          }
+        }
+        if (Object.keys(loaded).length > 0) setComplianceOverrides(loaded);
+      })
+      .catch(() => { /* non-fatal — builder still works from static property data */ });
+    return () => { cancelled = true; };
   }, [propertyId]);
 
   const effectivePropertyData = useMemo(() => {
@@ -747,11 +777,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [effectivePropertyData, complianceProfile.jurisdiction]);
 
   const complianceDisplayValue = useCallback((value?: string | null): string => {
-    return value && !isPlaceholderLicenseValue(value) ? value : "—";
+    const raw = String(value ?? "").trim();
+    return raw || "—";
   }, []);
 
   const canCopyComplianceValue = useCallback((value?: string | null): boolean => {
-    return Boolean(value && !isPlaceholderLicenseValue(value));
+    return Boolean(String(value ?? "").trim());
   }, []);
 
   const complianceSummaryValues = useMemo(() => {
@@ -764,17 +795,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
   }, [complianceProfile.jurisdiction, complianceValueFor]);
 
-  const persistDraftComplianceValues = useCallback(async (
+  const persistComplianceValues = useCallback(async (
     values: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>,
   ) => {
-    if (!propertyId || propertyId >= 0) return;
+    if (!propertyId) return;
     const payload: Record<string, string> = {};
     for (const [key, value] of Object.entries(values)) {
       const text = String(value ?? "").trim();
-      if (text && !isPlaceholderLicenseValue(text)) payload[key] = text;
+      if (text) payload[key] = text;
     }
     if (Object.keys(payload).length === 0) return;
-    const resp = await fetch(`/api/community/${Math.abs(propertyId)}`, {
+    const url = propertyId < 0
+      ? `/api/community/${Math.abs(propertyId)}`
+      : `/api/builder/compliance/${propertyId}`;
+    const resp = await fetch(url, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -783,25 +817,39 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const error = await resp.json().catch(() => ({}));
       throw new Error(error?.error || error?.message || `Save failed (${resp.status})`);
     }
-    await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+    if (propertyId < 0) {
+      await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+    }
   }, [propertyId, queryClient]);
 
-  const validateComplianceRequirement = useCallback((req: LicenseRequirement) => {
-    const value = complianceValueFor(req.key);
-    if (!value || isPlaceholderLicenseValue(value)) {
-      const description = req.key === "dbprLicense"
-        ? "Click the main requirements check to search Florida DBPR automatically. If DBPR has no confident public address/name match, this field stays blank instead of guessing."
-        : req.key === "touristTaxAccount"
-          ? "Paste the real Lee County Tourist Development Tax account/reference if you track it outside the OTA-collected taxes."
-          : `Paste the real ${req.shortLabel} before pushing compliance.`;
-      toast({ title: req.shortLabel, description });
-      return;
+  const generateSampleForRequirement = useCallback(async (req: LicenseRequirement) => {
+    const city = effectivePropertyData?.address?.city ?? "";
+    const state = effectivePropertyData?.address?.state ?? "";
+    const samples = sampleLicensesForLocation(city, state);
+    const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
+    const sample = isFloridaProfile
+      ? req.key === "dbprLicense" ? samples.taxMapKey
+        : req.key === "touristTaxAccount" ? samples.tatLicense
+          : req.key === "getLicense" ? samples.getLicense
+            : req.key === "strPermit" ? samples.strPermit
+              : undefined
+      : req.key === "taxMapKey" ? samples.taxMapKey
+        : req.key === "tatLicense" ? samples.tatLicense
+          : req.key === "getLicense" ? samples.getLicense
+            : req.key === "strPermit" ? samples.strPermit
+              : undefined;
+    if (!sample) return;
+    setComplianceOverrides((prev) => ({ ...prev, [req.key]: sample }));
+    try {
+      await persistComplianceValues({ [req.key]: sample } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>);
+      toast({
+        title: `Sample ${req.shortLabel} applied`,
+        description: "County/state-shaped placeholder — replace with the real license before publishing, or pull the real value from Guesty/public records above.",
+      });
+    } catch (err: any) {
+      toast({ title: "Sample save failed", description: err?.message || String(err), variant: "destructive" });
     }
-    toast({
-      title: `${req.shortLabel} looks usable`,
-      description: "This is a real-looking value, not a sample placeholder, and it will be included when you push compliance.",
-    });
-  }, [complianceValueFor, toast]);
+  }, [complianceProfile.jurisdiction, effectivePropertyData?.address?.city, effectivePropertyData?.address?.state, persistComplianceValues, toast]);
 
   const pullLicenseRequirements = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
@@ -835,7 +883,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ...(data.values?.dbprLicense ? { dbprLicense: data.values.dbprLicense } : {}),
         ...(data.values?.touristTaxAccount ? { touristTaxAccount: data.values.touristTaxAccount } : {}),
       }));
-      await persistDraftComplianceValues(data.values ?? {});
+      await persistComplianceValues(data.values ?? {});
       const missingRequired = (data.profile?.requirements ?? [])
         .filter((req: any) => req.required && isPlaceholderLicenseValue(data.values?.[req.key]))
         .map((req: any) => req.shortLabel || req.label);
@@ -850,7 +898,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setLicenseLookupBusy(false);
     }
-  }, [effectivePropertyData, complianceProfile.jurisdiction, persistDraftComplianceValues, toast]);
+  }, [effectivePropertyData, complianceProfile.jurisdiction, persistComplianceValues, toast]);
 
   // Compliance card labels swap by state. The four data fields
   // (taxMapKey / getLicense / tatLicense / strPermit) are reused
@@ -905,6 +953,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return /\b(hawaii|hi)\b/i.test(`${stateField} ${fullField}`);
   }, [effectivePropertyData?.address]);
 
+  const COMPLIANCE_FETCH_TIMEOUT_MS = 28_000;
+
   const pullRealTaxMapKey = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
     const fullAddress = typeof effectivePropertyData.address === "object"
@@ -920,22 +970,152 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const params = new URLSearchParams({
         address: fullAddress,
       });
-      const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`);
+      const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`, {
+        signal: AbortSignal.timeout(COMPLIANCE_FETCH_TIMEOUT_MS),
+      });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || data?.message || "TMK lookup failed");
       setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
-      await persistDraftComplianceValues({ taxMapKey: data.taxMapKey });
+      void persistComplianceValues({ taxMapKey: data.taxMapKey }).catch((err) => {
+        toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
+      });
       setTmkLookupResult(data as TmkLookupResult);
       toast({
         title: data.confidence === "unit-cpr" ? "Guesty-address unit TMK applied" : "Guesty-address parcel TMK applied",
         description: data.note,
       });
     } catch (err: any) {
-      toast({ title: "TMK lookup failed", description: err?.message || String(err), variant: "destructive" });
+      const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+      toast({
+        title: "TMK lookup failed",
+        description: timedOut
+          ? "Kauai TMK lookup timed out. Try again in a moment."
+          : err?.message || String(err),
+        variant: "destructive",
+      });
     } finally {
       setTmkLookupBusy(false);
     }
-  }, [effectivePropertyData?.address, persistDraftComplianceValues, toast]);
+  }, [effectivePropertyData?.address, persistComplianceValues, toast]);
+
+  const pullHawaiiComplianceField = useCallback(async (options: {
+    field: "getLicense" | "tatLicense" | "strPermit";
+    endpoint: string;
+    label: string;
+    setBusy: (busy: boolean) => void;
+    setResult: (result: ComplianceLookupResult | null) => void;
+    requiresListing?: boolean;
+  }) => {
+    if (!effectivePropertyData?.address) return;
+    const fullAddress = typeof effectivePropertyData.address === "object"
+      ? effectivePropertyData.address.full
+      : String(effectivePropertyData.address);
+    if (!fullAddress) {
+      toast({ title: "Missing Guesty address", description: `A full Hawaii Guesty listing address is needed before ${options.label} lookup.`, variant: "destructive" });
+      return;
+    }
+    if (options.requiresListing && !selectedId) {
+      toast({ title: "Select a Guesty listing", description: `Connect/select a Guesty listing first so ${options.label} can be pulled from Guesty compliance fields.`, variant: "destructive" });
+      return;
+    }
+    options.setBusy(true);
+    options.setResult(null);
+    try {
+      const params = new URLSearchParams({ address: fullAddress });
+      if (selectedId) params.set("listingId", selectedId);
+      if (propertyId) params.set("propertyId", String(propertyId));
+      if (effectivePropertyData.taxMapKey) params.set("taxMapKey", effectivePropertyData.taxMapKey);
+      const resp = await fetch(`${options.endpoint}?${params.toString()}`, {
+        signal: AbortSignal.timeout(COMPLIANCE_FETCH_TIMEOUT_MS),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || data?.message || `${options.label} lookup failed`);
+      const value = String(data.value || data[options.field] || "").trim();
+      if (!value) throw new Error(`${options.label} lookup returned no value`);
+      if (isPlaceholderLicenseValue(value)) {
+        throw new Error(
+          `The ${options.label} returned is still a sample/placeholder. Connect a Guesty listing with real Hawaii compliance fields, or enter the official ${options.label} manually.`,
+        );
+      }
+      const previous = complianceValueFor(options.field);
+      const unchanged = previous
+        && !isPlaceholderLicenseValue(previous)
+        && previous.replace(/\W/g, "").toLowerCase() === value.replace(/\W/g, "").toLowerCase();
+      setComplianceOverrides((prev) => ({ ...prev, [options.field]: value }));
+      void persistComplianceValues({ [options.field]: value }).catch((err) => {
+        toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
+      });
+      options.setResult(data as ComplianceLookupResult);
+      if (unchanged) {
+        toast({
+          title: `${options.label} unchanged`,
+          description: `Already set to ${value}. ${data.note || ""}`.trim(),
+        });
+      } else {
+        toast({ title: `${options.label} applied`, description: data.note });
+      }
+    } catch (err: any) {
+      const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+      toast({
+        title: `${options.label} lookup failed`,
+        description: timedOut
+          ? `${options.label} lookup timed out (Guesty or county registry may be slow). Try again in a moment.`
+          : err?.message || String(err),
+        variant: "destructive",
+      });
+    } finally {
+      options.setBusy(false);
+    }
+  }, [complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistComplianceValues, propertyId, selectedId, toast]);
+
+  const pullRealGetLicense = useCallback(async () => {
+    await pullHawaiiComplianceField({
+      field: "getLicense",
+      endpoint: "/api/builder/get-lookup",
+      label: "GET license",
+      setBusy: setGetLookupBusy,
+      setResult: setGetLookupResult,
+    });
+  }, [pullHawaiiComplianceField]);
+
+  const pullRealTatLicense = useCallback(async () => {
+    await pullHawaiiComplianceField({
+      field: "tatLicense",
+      endpoint: "/api/builder/tat-lookup",
+      label: "TAT license",
+      setBusy: setTatLookupBusy,
+      setResult: setTatLookupResult,
+    });
+  }, [pullHawaiiComplianceField]);
+
+  const pullRealStrPermit = useCallback(async () => {
+    await pullHawaiiComplianceField({
+      field: "strPermit",
+      endpoint: "/api/builder/str-permit-lookup",
+      label: "STR permit",
+      setBusy: setStrLookupBusy,
+      setResult: setStrLookupResult,
+    });
+  }, [pullHawaiiComplianceField]);
+
+  const renderComplianceLookupMeta = (result: ComplianceLookupResult | null) => {
+    if (!result) return null;
+    return (
+      <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+        {result.confidence.replace(/-/g, " ")} · {result.source}
+        {result.sourceUrl && (
+          <>
+            {" · "}
+            <a href={result.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "var(--primary)" }}>
+              source
+            </a>
+          </>
+        )}
+        <br />
+        {result.note}
+      </div>
+    );
+  };
 
   // ── Availability windows ───────────────────────────────────────────────────
   type AvailStatus = "unscanned" | "scanning" | "available" | "low" | "none" | "error";
@@ -2862,8 +3042,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const monthlySampleTotal = monthlySampleComplete
         ? Math.round(monthlySampleRates.reduce((s, n) => s + (n ?? 0), 0))
         : null;
-      const currentUnitRates = propPricing.units.map((u) => {
-        const buyInRate = getBuyInRate(u.community, u.bedrooms, propertyId, row.season, row.yearMonth);
+      const currentUnitRates = propPricing.units.map((u, unitIdx) => {
+        const perUnitMonthly = monthlySampleRates[unitIdx];
+        const buyInRate = perUnitMonthly ?? getBuyInRate(u.community, u.bedrooms, propertyId, row.season, row.yearMonth);
         return {
           buyInRate,
           sellRate: cleanBaseRateFromBuyIn(buyInRate),
@@ -2934,29 +3115,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   // ── Guesty-confirmed monthly rates + channel-aware profit floor ──
   // Fetches what Guesty is charging per month so we can compare against
-  // our pricing sheet at a glance. The table also overlays the latest
-  // verified push recorded by the server so a just-run queue update is
-  // visible immediately, even if Guesty's calendar read endpoint lags.
+  // our pricing sheet at a glance (never overlay computed "intent" rates).
   const [guestyRatesByMonth, setGuestyRatesByMonth] = useState<Record<string, GuestyMonthlyRate>>({});
   const [guestyRatesLoading, setGuestyRatesLoading] = useState(false);
   const [guestyRatesError, setGuestyRatesError] = useState<string | null>(null);
   // Live market refresh state (from the new /refresh-market-rates endpoint)
   const [liveMarket, setLiveMarket] = useState<any>(null);
   const [marketRefreshing, setMarketRefreshing] = useState(false);
-  // Merge the per-month rates we just pushed to Guesty directly into the
-  // table's state. Sidesteps Guesty's eventually-consistent calendar GET,
-  // which was returning stale rates immediately after the PUT.
-  const applyPushedRates = (plan: Array<{ yearMonth: string; price: number }>) => {
-    setGuestyRatesByMonth((prev) => {
-      const next = { ...prev };
-      for (const { yearMonth, price } of plan) {
-        const [y, m] = yearMonth.split("-").map(Number);
-        const daysInMonth = new Date(y, m, 0).getDate();
-        next[yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth, source: "last-push" };
-      }
-      return next;
-    });
-  };
   const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
   const pricingMarginTarget = isSingleListing ? targetMarginPct / 100 : MIN_PROFIT_MARGIN;
   const [scannerSchedule, setScannerSchedule] = useState<ScannerScheduleSnapshot | null>(null);
@@ -2999,9 +3164,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return () => window.clearTimeout(timer);
   }, [propertyId, isSingleListing, targetMarginPct]);
 
-  useEffect(() => {
+  const refetchGuestyRates = useCallback(() => {
     if (!propertyId) return;
-    let cancelled = false;
     setGuestyRatesLoading(true);
     setGuestyRatesError(null);
     const qs = new URLSearchParams({ months: "24" });
@@ -3015,50 +3179,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         return r.json();
       })
       .then((data: any) => {
-        if (cancelled) return;
         const byMonth: Record<string, GuestyMonthlyRate> = {};
         for (const m of data.months ?? []) {
-          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days, source: "guesty" };
+          byMonth[m.yearMonth] = { avgRate: m.avgRate, minRate: m.minRate, maxRate: m.maxRate, days: m.days };
         }
         setGuestyRatesByMonth(byMonth);
       })
       .catch((e: any) => {
-        if (!cancelled) setGuestyRatesError(e.message || "Failed to fetch Guesty rates");
+        setGuestyRatesError(e.message || "Failed to fetch Guesty rates");
       })
       .finally(() => {
-        if (!cancelled) setGuestyRatesLoading(false);
+        setGuestyRatesLoading(false);
       });
-    return () => { cancelled = true; };
   }, [propertyId, selectedId]);
 
-  const latestPushedGuestyRatesByMonth = useMemo<Record<string, GuestyMonthlyRate>>(() => {
-    if (!scannerSchedule?.lastGuestyRatePushAt || scannerSchedule.lastGuestyRatePushStatus === "error") return {};
-    const pushMs = Date.parse(scannerSchedule.lastGuestyRatePushAt);
-    if (!Number.isFinite(pushMs)) return {};
-    if (latestServerMarketRateNotice?.finishedAt && pushMs + 1000 < latestServerMarketRateNotice.finishedAt) {
-      return {};
-    }
-    const next: Record<string, GuestyMonthlyRate> = {};
-    for (const row of seasonalMonths) {
-      if (row.totalBuyIn <= 0) continue;
-      const [y, m] = row.yearMonth.split("-").map(Number);
-      const daysInMonth = new Date(y, m, 0).getDate();
-      const price = cleanBaseRateFromBuyIn(row.totalBuyIn, pricingMarginTarget);
-      next[row.yearMonth] = { avgRate: price, minRate: price, maxRate: price, days: daysInMonth, source: "last-push" };
-    }
-    return next;
-  }, [
-    scannerSchedule?.lastGuestyRatePushAt,
-    scannerSchedule?.lastGuestyRatePushStatus,
-    latestServerMarketRateNotice?.finishedAt,
-    seasonalMonths,
-    pricingMarginTarget,
-  ]);
+  useEffect(() => {
+    refetchGuestyRates();
+  }, [refetchGuestyRates]);
 
-  const displayGuestyRatesByMonth = useMemo<Record<string, GuestyMonthlyRate>>(() => {
-    if (Object.keys(latestPushedGuestyRatesByMonth).length === 0) return guestyRatesByMonth;
-    return { ...guestyRatesByMonth, ...latestPushedGuestyRatesByMonth };
-  }, [guestyRatesByMonth, latestPushedGuestyRatesByMonth]);
+  useEffect(() => {
+    if (!propertyId || marketRatesVersion < 1) return;
+    refetchGuestyRates();
+    const t = window.setTimeout(refetchGuestyRates, 6000);
+    return () => window.clearTimeout(t);
+  }, [marketRatesVersion, propertyId, refetchGuestyRates]);
 
   // ── Market comparables ─────────────────────────────────────────────────
   // Per-season distribution of area rates for properties with the SAME
@@ -4194,6 +4338,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {isHawaiiCompliance && (
+                              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={pullRealGetLicense}
+                                  disabled={getLookupBusy || !effectivePropertyData.address}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: getLookupBusy ? "var(--muted)" : "#fff",
+                                    color: "var(--text)",
+                                    cursor: getLookupBusy ? "wait" : "pointer",
+                                  }}
+                                  data-testid="button-pull-real-get"
+                                >
+                                  {getLookupBusy ? "Pulling real GET..." : "Pull real GET license"}
+                                </button>
+                                <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                  Pulls from the connected Guesty listing compliance fields only (not static sample data).
+                                </div>
+                                {renderComplianceLookupMeta(getLookupResult)}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -4210,6 +4381,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {isHawaiiCompliance && (
+                              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={pullRealTatLicense}
+                                  disabled={tatLookupBusy || !effectivePropertyData.address}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: tatLookupBusy ? "var(--muted)" : "#fff",
+                                    color: "var(--text)",
+                                    cursor: tatLookupBusy ? "wait" : "pointer",
+                                  }}
+                                  data-testid="button-pull-real-tat"
+                                >
+                                  {tatLookupBusy ? "Pulling real TAT..." : "Pull real TAT license"}
+                                </button>
+                                <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                  Pulls from the connected Guesty listing compliance fields only (not static sample data).
+                                </div>
+                                {renderComplianceLookupMeta(tatLookupResult)}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -4226,6 +4424,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {isHawaiiCompliance && (
+                              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={pullRealStrPermit}
+                                  disabled={strLookupBusy || !effectivePropertyData.address}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: strLookupBusy ? "var(--muted)" : "#fff",
+                                    color: "var(--text)",
+                                    cursor: strLookupBusy ? "wait" : "pointer",
+                                  }}
+                                  data-testid="button-pull-real-str"
+                                >
+                                  {strLookupBusy ? "Pulling real STR permit..." : "Pull real STR permit from Guesty address"}
+                                </button>
+                                <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
+                                  Uses the connected Guesty listing when available, otherwise matches the Kauai County TVR registry by TMK.
+                                </div>
+                                {renderComplianceLookupMeta(strLookupResult)}
+                              </div>
+                            )}
                           </div>
                         </div>
                         {complianceProfile.requirements.length > 0 && (
@@ -4233,9 +4458,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             {complianceProfile.requirements.map((req) => {
                               const value = complianceValueFor(req.key);
                               const isPlaceholder = isPlaceholderLicenseValue(value);
-                              const inputValue = value && !isPlaceholder ? value : "";
+                              const inputValue = String(value ?? "").trim();
                               const canPublicPull = (complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit")
-                                || (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction) && req.key === "dbprLicense");
+                                || (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction) && req.key === "dbprLicense")
+                                || (isHawaiiCompliance && req.key === "taxMapKey");
                               return (
                                 <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
                                   <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -4253,7 +4479,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isPlaceholder && (
                                     <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
-                                      Sample value only. Enter the real {req.shortLabel}{canPublicPull ? ` or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : "Fort Myers STR portal"}` : ""} before pushing compliance.
+                                      Sample value only. Enter the real {req.shortLabel}, generate a sample placeholder below{canPublicPull ? `, or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : req.key === "taxMapKey" ? "county GIS" : "Fort Myers STR portal"}` : ""} before pushing compliance.
                                     </div>
                                   )}
                                   <input
@@ -4263,7 +4489,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       setComplianceOverrides((prev) => ({ ...prev, [req.key]: next }));
                                     }}
                                     onBlur={(event) => {
-                                      persistDraftComplianceValues({ [req.key]: event.target.value } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>)
+                                      persistComplianceValues({ [req.key]: event.target.value } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>)
                                         .catch((err) => toast({ title: "License save failed", description: err.message, variant: "destructive" }));
                                     }}
                                     placeholder={req.sample}
@@ -4286,7 +4512,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <button
                                     type="button"
                                     disabled={licenseLookupBusy}
-                                    onClick={canPublicPull ? pullLicenseRequirements : () => validateComplianceRequirement(req)}
+                                    onClick={canPublicPull && req.key === "taxMapKey" && isHawaiiCompliance ? pullRealTaxMapKey : (canPublicPull ? pullLicenseRequirements : () => { void generateSampleForRequirement(req); })}
                                     style={{
                                       marginTop: 8,
                                       fontSize: 11,
@@ -4302,7 +4528,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   >
                                     {canPublicPull
                                       ? (value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`)
-                                      : `Validate pasted ${req.shortLabel}`}
+                                      : `Generate sample ${req.shortLabel}`}
                                   </button>
                                 </div>
                               );
@@ -4574,7 +4800,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     seasonal rates" has been run yet. */}
                                 {(() => {
                                   const total = seasonalMonths.length;
-                                  const synced = seasonalMonths.filter((r) => !!displayGuestyRatesByMonth[r.yearMonth]).length;
+                                  const synced = seasonalMonths.filter((r) => !!guestyRatesByMonth[r.yearMonth]).length;
                                   if (guestyRatesLoading) return <span style={{ color: "#9ca3af" }}>Loading Guesty rates…</span>;
                                   if (guestyRatesError) return <span style={{ color: "#dc2626" }} title={guestyRatesError}>Guesty rates unavailable</span>;
                                   if (total === 0) return null;
@@ -5159,9 +5385,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </thead>
                               <tbody>
                                 {seasonalMonths.map((row) => {
-                                  const guesty = displayGuestyRatesByMonth[row.yearMonth];
+                                  const guesty = guestyRatesByMonth[row.yearMonth];
                                   const sheet = row.totalSell;
                                   const buyIn = row.totalBuyIn;
+                                  const guestyDrift = guesty && Math.abs(guesty.avgRate - sheet) >= 2;
                                   // Guesty now owns channel-level pricing adjustments. For
                                   // display, estimate the sell rate each channel needs to
                                   // clear the margin floor after its host fee.
@@ -5198,9 +5425,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         {row.monthlySampleTotal != null && Math.abs(row.monthlySampleTotal - buyIn) >= 1 && (
                                           <div
                                             style={{ fontSize: 9, color: "#9ca3af", marginTop: 2 }}
-                                            title="Saved monthly scraper sample is retained for diagnostics; the pricing table now uses the canonical season-band basis for this season."
+                                            title="Monthly SearchAPI sample total differs from the buy-in shown — reload market rates or check for a partial unit sample."
                                           >
-                                            sample ${row.monthlySampleTotal.toLocaleString()} ignored
+                                            sample ${row.monthlySampleTotal.toLocaleString()} vs buy-in ${buyIn.toLocaleString()}
                                           </div>
                                         )}
                                       </td>
@@ -5214,14 +5441,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                                 ${guesty.minRate.toLocaleString()}–${guesty.maxRate.toLocaleString()}
                                               </div>
                                             )}
-                                            <div
-                                              style={{ display: "inline-block", marginTop: 2, background: "#dcfce7", color: "#166534", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
-                                              title={guesty.source === "last-push"
-                                                ? `Most recent verified Guesty push set ${guesty.days} day${guesty.days === 1 ? "" : "s"} for this month.`
-                                                : `Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
-                                            >
-                                              {guesty.source === "last-push" ? "✓ pushed to Guesty" : "✓ in Guesty"}
-                                            </div>
+                                            {guestyDrift ? (
+                                              <div
+                                                style={{ display: "inline-block", marginTop: 2, background: "#fef3c7", color: "#92400e", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
+                                                title={`Guesty calendar shows $${guesty.avgRate.toLocaleString()}/night but the sheet base is $${sheet.toLocaleString()}. Push marked-up rates below to sync.`}
+                                              >
+                                                ⚠ drift vs sheet (${sheet.toLocaleString()} target)
+                                              </div>
+                                            ) : (
+                                              <div
+                                                style={{ display: "inline-block", marginTop: 2, background: "#dcfce7", color: "#166534", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600 }}
+                                                title={`Guesty has ${guesty.days} day${guesty.days === 1 ? "" : "s"} of rate data for this month.`}
+                                              >
+                                                ✓ in Guesty
+                                              </div>
+                                            )}
                                           </>
                                         ) : (
                                           <>
@@ -5384,7 +5618,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     listingId={selectedId}
                     propertyId={propertyId}
                     seasonalMonths={seasonalMonths}
-                    applyPushedRates={applyPushedRates}
                     targetMarginPct={targetMarginPct}
                     setTargetMarginPct={setTargetMarginPct}
                     allowCustomMargin={isSingleListing}
@@ -5392,6 +5625,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     lastGuestyRatePushStatus={scannerSchedule?.lastGuestyRatePushStatus ?? null}
                     lastGuestyRatePushSummary={scannerSchedule?.lastGuestyRatePushSummary ?? null}
                     onGuestyRatePushRecorded={refreshScannerSchedule}
+                    refetchGuestyRates={refetchGuestyRates}
                   />
                 )}
 
