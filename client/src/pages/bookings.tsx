@@ -2048,6 +2048,26 @@ function directCandidateFitsTarget(
   return true;
 }
 
+function comboOptionVisiblePicks(
+  option: AutoFillComboOption,
+  targetResortName: string,
+  community: string,
+) {
+  return option.picks.filter((pick) => directCandidateFitsTarget(targetResortName, community, pick));
+}
+
+function comboOptionIsComplete(
+  option: AutoFillComboOption,
+  targetResortName: string,
+  community: string,
+): boolean {
+  const visiblePicks = comboOptionVisiblePicks(option, targetResortName, community);
+  return visiblePicks.length === option.bedrooms.length
+    && option.picks.length === option.bedrooms.length
+    && typeof option.totalCost === "number"
+    && Number.isFinite(option.totalCost);
+}
+
 function targetLocationRejectReason(
   targetResortName: string,
   community: string,
@@ -2674,25 +2694,30 @@ function ComboComparisonPanel({
     url?: string | null;
   }) => directCandidateFitsTarget(targetResortName, community, candidate);
   const visibleOptions = options.map((option) => {
-    const filteredPicks = option.picks.filter(candidateVisibleForTarget);
-    const allPicksVisible = filteredPicks.length === option.picks.length;
+    const filteredPicks = comboOptionVisiblePicks(option, targetResortName, community);
+    const isComplete = comboOptionIsComplete(option, targetResortName, community);
+    const missingUnits = option.bedrooms.length - filteredPicks.length;
     return {
       ...option,
-      selected: option.selected && allPicksVisible,
-      totalCost: allPicksVisible ? option.totalCost : null,
-      unavailableReason: allPicksVisible
+      selected: option.selected && isComplete,
+      totalCost: isComplete ? option.totalCost : null,
+      unavailableReason: isComplete
         ? option.unavailableReason
-        : `Filtered out off-target rows that did not match ${targetResortName || community}`,
-      picks: filteredPicks,
+        : filteredPicks.length === 0
+          ? option.unavailableReason ?? `No bookable ${option.label} combination found for ${targetResortName || community} on these dates.`
+          : `Could not verify a complete ${option.label} combination — only ${filteredPicks.length}/${option.bedrooms.length} unit${filteredPicks.length === 1 ? "" : "s"} matched ${targetResortName || community}${missingUnits > 0 ? ` (${missingUnits} still missing)` : ""}.`,
+      picks: isComplete ? filteredPicks : [],
       pools: option.pools?.map((pool) => ({
         ...pool,
         candidates: pool.candidates.filter(candidateVisibleForTarget),
       })),
     };
   });
-  const selected = visibleOptions.find((option) => option.selected);
-  const pricedVisibleOptions = visibleOptions
-    .filter((option) => typeof option.totalCost === "number" && Number.isFinite(option.totalCost))
+  const completeVisibleOptions = visibleOptions.filter((option) =>
+    comboOptionIsComplete(option, targetResortName, community),
+  );
+  const selected = completeVisibleOptions.find((option) => option.selected);
+  const pricedVisibleOptions = completeVisibleOptions
     .sort((a, b) => (a.totalCost ?? Number.POSITIVE_INFINITY) - (b.totalCost ?? Number.POSITIVE_INFINITY));
   const primaryOption = selected ?? pricedVisibleOptions[0] ?? visibleOptions[0];
   const secondaryOption = pricedVisibleOptions.find((option) => option.label !== primaryOption?.label)
@@ -2792,9 +2817,19 @@ function ComboComparisonPanel({
     : 0;
   return (
     <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs">
+      {completeVisibleOptions.length === 0 && (
+        <div className="mb-2 rounded border border-amber-300 bg-amber-50 px-2 py-2 text-amber-950">
+          <p className="font-semibold">No complete two-unit combination found</p>
+          <p className="mt-0.5 text-[11px]">
+            We compared {visibleOptions.map((option) => option.label).join(" and ")} for {targetResortName || community} but could not verify two distinct bookable units for this stay.
+          </p>
+        </div>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="font-medium text-emerald-900">
-          {bestOptimizedCombo
+          {completeVisibleOptions.length === 0
+            ? "Two-unit combination search"
+            : bestOptimizedCombo
             ? `Direct-optimized combination: ${bestOptimizedCombo.option.label} · ${fmtMoney(bestOptimizedCombo.totalCost)}`
             : `Cheapest two-unit combination${selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}`}
         </p>
@@ -5517,9 +5552,22 @@ export default function Bookings() {
       const skipped = results.filter((r) => !r.picked).map((r) => r.slot.unitLabel);
       const zeroCostFills = filled.filter((r) => (r.picked?.totalPrice ?? 0) === 0);
       const selectedCombo = comboOptions.find((option) => option.selected);
+      const comboTargetResort = directBookingTargetResortName(
+        PROPERTY_UNIT_CONFIGS[selectedBuyInPropertyId ?? 0]?.community
+          ?? reservation.slots.find((slot) => slot.community)?.community
+          ?? "",
+      );
+      const comboCommunity = PROPERTY_UNIT_CONFIGS[selectedBuyInPropertyId ?? 0]?.community
+        ?? reservation.slots.find((slot) => slot.community)?.community
+        ?? "";
       const comboSummary = comboOptions.length > 0
         ? ` · Compared ${comboOptions
-            .map((option) => `${option.label}: ${option.totalCost == null ? option.unavailableReason ?? "unavailable" : fmtMoney(option.totalCost)}`)
+            .map((option) => {
+              if (comboOptionIsComplete(option, comboTargetResort, comboCommunity)) {
+                return `${option.label}: ${fmtMoney(option.totalCost ?? 0)}`;
+              }
+              return `${option.label}: no complete combination`;
+            })
             .join("; ")}${selectedCombo ? ` · Selected ${selectedCombo.label}` : ""}`
         : "";
       if (!variables?.silent && searchAudits.length > 0) {
@@ -7614,8 +7662,19 @@ export default function Bookings() {
                           />
                         )}
                         {searchAudits.length > 0 && (() => {
-                          const selectedCombo = comboOptions.find((option) => option.selected && option.totalCost != null);
-	                          const fallbackCost = comboOptions
+                          const comboTargetResort = directBookingTargetResortName(
+                            selectedPropertyId
+                              ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+                              : r.slots.find((slot) => slot.community)?.community ?? "",
+                          );
+                          const comboCommunity = selectedPropertyId
+                            ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+                            : r.slots.find((slot) => slot.community)?.community ?? "";
+                          const completeComboOptions = comboOptions.filter((option) =>
+                            comboOptionIsComplete(option, comboTargetResort, comboCommunity),
+                          );
+                          const selectedCombo = completeComboOptions.find((option) => option.selected);
+	                          const fallbackCost = completeComboOptions
 	                            .map((option) => option.totalCost)
 	                            .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
 	                            .sort((a, b) => a - b)[0] ?? null;
