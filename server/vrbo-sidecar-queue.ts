@@ -295,6 +295,8 @@ export type SidecarQueueContext = {
   listingTitle?: string;
   propertyId?: number;
   concurrencyMode?: "availability_bulk";
+  /** When true, never reuse a prior successful sidecar search result for this op. */
+  skipResultCache?: boolean;
 };
 
 export type SidecarSearchVariationAttempt = {
@@ -2847,16 +2849,20 @@ async function awaitOpResult(opts: {
     };
   }
   const requestKey = makeRequestKey(opts.enqueueArgs.opType, opts.enqueueArgs.params);
-  const cached = cachedSuccessfulResult(requestKey);
-  if (cached) {
-    const ageMs = nowMs() - cached.cachedAt;
-    return {
-      results: cached.results,
-      searchVariationSummary: cached.searchVariationSummary,
-      workerOnline: true,
-      durationMs: nowMs() - startedAt,
-      reason: `served from successful sidecar result cache (${Math.round(ageMs / 60000)}m old)`,
-    };
+  const skipResultCache = (opts.enqueueArgs.params as { queueContext?: SidecarQueueContext } | undefined)
+    ?.queueContext?.skipResultCache === true;
+  if (!skipResultCache) {
+    const cached = cachedSuccessfulResult(requestKey);
+    if (cached) {
+      const ageMs = nowMs() - cached.cachedAt;
+      return {
+        results: cached.results,
+        searchVariationSummary: cached.searchVariationSummary,
+        workerOnline: true,
+        durationMs: nowMs() - startedAt,
+        reason: `served from successful sidecar result cache (${Math.round(ageMs / 60000)}m old)`,
+      };
+    }
   }
   const { id, deduped } = enqueueOp(opts.enqueueArgs);
   let activeStartedAt: number | null = null;

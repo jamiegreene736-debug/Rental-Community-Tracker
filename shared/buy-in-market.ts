@@ -219,3 +219,58 @@ export function resolveBuyInMarket(input: {
 export function searchLocationForBuyInMarket(marketKey: string): string | null {
   return BUY_IN_MARKET_SEARCH_LOCATIONS[marketKey] || null;
 }
+
+/** Beachfront/oceanfront sources should only scout other waterfront markets. */
+export function oceanfrontComparableBuyInMarket(community: string | null | undefined): boolean {
+  const key = String(community ?? "").toLowerCase();
+  return /\b(oceanfront|beachfront|brenneckes?|poipu kai)\b/.test(key);
+}
+
+const DRIVE_SPEED_MPH = 35;
+const DRIVE_ROAD_FACTOR = 1.35;
+
+function haversineMiles(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 3958.8;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLng = Math.sin(dLng / 2);
+  const h = sinDLat * sinDLat + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * sinDLng * sinDLng;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+export function driveMinutesBetweenBuyInMarkets(fromKey: string, toKey: string): number | null {
+  const a = BUY_IN_MARKET_LOCATIONS[fromKey];
+  const b = BUY_IN_MARKET_LOCATIONS[toKey];
+  if (!a || !b) return null;
+  const roadMiles = haversineMiles(a.lat, a.lng, b.lat, b.lng) * DRIVE_ROAD_FACTOR;
+  return Math.max(1, Math.ceil((roadMiles / DRIVE_SPEED_MPH) * 60));
+}
+
+/** Nearby substitute markets within a short drive of the base community. */
+export function nearbyBuyInMarketsForScout(
+  baseCommunity: string,
+  opts: { maxDriveMinutes?: number; oceanfrontOnly?: boolean; limit?: number } = {},
+): string[] {
+  const maxDriveMinutes = opts.maxDriveMinutes ?? 20;
+  const limit = opts.limit ?? 5;
+  if (!BUY_IN_MARKET_LOCATIONS[baseCommunity]) {
+    return (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
+      .filter((key) => key !== baseCommunity && !!BUY_IN_MARKET_LOCATIONS[key])
+      .filter((key) => !opts.oceanfrontOnly || oceanfrontComparableBuyInMarket(key))
+      .slice(0, limit);
+  }
+
+  const ranked: { key: string; minutes: number }[] = [];
+  for (const market of Object.values(BUY_IN_MARKETS)) {
+    if (market.key === baseCommunity || market.key === "Florida Generic") continue;
+    if (!market.location) continue;
+    if (opts.oceanfrontOnly && !oceanfrontComparableBuyInMarket(market.key)) continue;
+    const minutes = driveMinutesBetweenBuyInMarkets(baseCommunity, market.key);
+    if (minutes === null || minutes > maxDriveMinutes) continue;
+    ranked.push({ key: market.key, minutes });
+  }
+  ranked.sort((a, b) => a.minutes - b.minutes || a.key.localeCompare(b.key));
+  return ranked.slice(0, limit).map((row) => row.key);
+}
