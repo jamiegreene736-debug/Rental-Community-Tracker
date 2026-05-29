@@ -9088,6 +9088,16 @@ export async function registerRoutes(
     const googleDiscoveryEnabled = airbnbDirectLensEnabled;
     const pmGoogleDiscoveryEnabled = includePm && googleDiscoveryEnabled;
     const looseResortPhotoProof = propertyUnitConfig?.looseResortPhotoProof === true;
+    const requestedBedrooms = bedrooms;
+    const propertyUnitSlots = propertyUnitConfig?.units ?? [];
+    const maxUnitBedrooms = propertyUnitSlots.length > 0
+      ? Math.max(...propertyUnitSlots.map((u) => u.bedrooms))
+      : requestedBedrooms;
+    // Multi-unit listings (e.g. Poipu Kai 3+3) are filled with per-unit buy-ins, not one 4–6BR OTA search.
+    const buyInBedroomFloor = propertyUnitSlots.length >= 2 && requestedBedrooms > maxUnitBedrooms
+      ? maxUnitBedrooms
+      : requestedBedrooms;
+    const otaSearchBedrooms = buyInBedroomFloor;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
     const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v3-strict|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
@@ -9310,7 +9320,7 @@ export async function registerRoutes(
     const mentionsKnownNonPoipuKaiComplex = (haystack: string): boolean => {
       if (normalizedResortName !== "poipu kai") return false;
       const n = norm(haystack);
-      return /\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers?|jobs?|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
+      return /\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|poipu beach estates|lihue|kalapaki|springboard hospitality|employer profile|careers?|jobs?|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
     };
     const mentionsKnownNonKahaLaniComplex = (haystack: string): boolean => {
       if (!targetIsKahaLani) return false;
@@ -9370,7 +9380,14 @@ export async function registerRoutes(
     const bedroomOk = (text: string): boolean => {
       const b = bedroomFromText(text);
       if (b === null) return true; // unknown — keep for manual review
-      return b >= bedrooms;
+      return b >= buyInBedroomFloor;
+    };
+    const satisfiesBuyInBedrooms = (signal: number | null): boolean => {
+      if (signal === null) return false;
+      if (signal === requestedBedrooms) return true;
+      return propertyUnitSlots.length >= 2
+        && requestedBedrooms > maxUnitBedrooms
+        && signal >= buyInBedroomFloor;
     };
     const pmDeepDiveResortOk = (haystack: string): boolean => {
       if (mentionsKnownNonRegencyPoipuKaiComplex(haystack) || mentionsKnownNonPoipuKaiComplex(haystack) || mentionsKnownNonKahaLaniComplex(haystack)) {
@@ -9394,7 +9411,9 @@ export async function registerRoutes(
     const bookingWebsiteSearchTerm = buyInPlatformSearch.booking ?? websiteSearchTerm;
     const vrboWebsiteSearchTerm = buyInPlatformSearch.vrbo ?? websiteSearchTerm;
     const pmWebsiteSearchTerm = buyInPlatformSearch.pm ?? websiteSearchTerm;
-    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" booking="${bookingWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`);
+    console.log(
+      `[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" booking="${bookingWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${requestedBedrooms}${otaSearchBedrooms !== requestedBedrooms ? ` otaSearchBedrooms=${otaSearchBedrooms}` : ""} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`,
+    );
 
     const scanStartedAt = Date.now();
     const { getSidecarStopGeneration } = await import("./vrbo-sidecar-queue");
@@ -9814,7 +9833,7 @@ export async function registerRoutes(
           || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
-      if (inferredBedrooms !== null && inferredBedrooms < bedrooms) return false;
+      if (inferredBedrooms !== null && inferredBedrooms < buyInBedroomFloor) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
       if (pricePlausibilityReason(c)) return false;
       if (targetIsRegencyPoipuKai) {
@@ -9863,7 +9882,9 @@ export async function registerRoutes(
           || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return "no visible target resort proof";
       const inferredBedrooms = candidateBedroomSignal(c);
-      if (inferredBedrooms !== null && inferredBedrooms < bedrooms) return `bedroom mismatch ${inferredBedrooms}BR < ${bedrooms}BR`;
+      if (inferredBedrooms !== null && inferredBedrooms < buyInBedroomFloor) {
+        return `bedroom mismatch ${inferredBedrooms}BR < ${buyInBedroomFloor}BR`;
+      }
       const priceReason = pricePlausibilityReason(c);
       if (priceReason) return priceReason;
       if (targetIsRegencyPoipuKai && !visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c) && !strongRegencyProof) {
@@ -9914,8 +9935,10 @@ export async function registerRoutes(
       const targetReject = candidateTargetRejectReason(c);
       if (targetReject !== "unknown target-filter rejection") return targetReject;
       const inferredBedrooms = candidateBedroomSignal(c);
-      if (inferredBedrooms === null) return `no explicit ${bedrooms}BR proof on listing/search result`;
-      if (inferredBedrooms !== bedrooms) return `bedroom mismatch ${inferredBedrooms}BR != requested ${bedrooms}BR`;
+      if (inferredBedrooms === null) return `no explicit ${requestedBedrooms}BR proof on listing/search result`;
+      if (!satisfiesBuyInBedrooms(inferredBedrooms)) {
+        return `bedroom mismatch ${inferredBedrooms}BR != requested ${requestedBedrooms}BR`;
+      }
       if (!candidateHasFinalResortProof(c)) return `no final ${resortName ?? community} resort/community proof`;
       return null;
     };
@@ -9924,7 +9947,7 @@ export async function registerRoutes(
       && (!c.airbnbAnchorUrl || candidateHasUsableAirbnbDirectLink(c))
       && (!c.directBookingUrl || candidateHasUsableAirbnbDirectLink(c))
       && candidateFitsTarget(c, { requireBedroomProof: true })
-      && candidateBedroomSignal(c) === bedrooms
+      && satisfiesBuyInBedrooms(candidateBedroomSignal(c))
       && candidateHasFinalResortProof(c);
 
     // Append the reservation's check-in/out to the URL so the landing page
@@ -10078,7 +10101,7 @@ export async function registerRoutes(
           check_in_date: checkIn,
           check_out_date: checkOut,
           adults: "2",
-          bedrooms: String(bedrooms),
+          bedrooms: String(otaSearchBedrooms),
           type_of_place: "entire_home",
           currency: "USD",
           api_key: apiKey,
@@ -10118,7 +10141,7 @@ export async function registerRoutes(
             return false;
           }
           const inferred = bedroomFromText(hay);
-          if (inferred !== null && inferred < bedrooms) {
+          if (inferred !== null && inferred < buyInBedroomFloor) {
             wrongBedrooms++;
             return false;
           }
@@ -10179,7 +10202,7 @@ export async function registerRoutes(
           searchTerm: bookingWebsiteSearchTerm,
           checkIn,
           checkOut,
-          bedrooms,
+          bedrooms: otaSearchBedrooms,
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
           rerunOnlyUntried: rerunOnlyUntriedVariations,
@@ -10200,12 +10223,13 @@ export async function registerRoutes(
         bookingPricedCount = r.candidates.filter((c) => c.totalPrice > 0 || c.nightlyPrice > 0).length;
         const accepted = r.candidates.filter((c) => {
           const inferred = rawCandidateBedroomSignal(c);
-          return inferred !== null && inferred >= bedrooms;
+          if (inferred !== null && inferred < buyInBedroomFloor) return false;
+          return true;
         });
         const dropped = r.candidates.length - accepted.length;
         bookingDropped = { noResort: 0, wrongBedrooms: dropped };
         if (dropped > 0) {
-          console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} candidates below ${bedrooms}BR or unknown-BR candidates`);
+          console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} candidates below ${buyInBedroomFloor}BR`);
         }
         return accepted.map((c): Candidate => {
           const total = Number(c.totalPrice || 0) > 0
@@ -10265,7 +10289,7 @@ export async function registerRoutes(
           searchTerm: targetSearchTerm,
           checkIn,
           checkOut,
-          bedrooms,
+          bedrooms: otaSearchBedrooms,
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
           rerunOnlyUntried: rerunOnlyUntriedVariations,
@@ -10276,11 +10300,12 @@ export async function registerRoutes(
         if (!r) return [];
         const acceptedVrbo = r.candidates.filter((c) => {
           const inferred = rawCandidateBedroomSignal(c);
-          return inferred !== null && inferred >= bedrooms;
+          if (inferred !== null && inferred < buyInBedroomFloor) return false;
+          return true;
         });
         const droppedVrbo = r.candidates.length - acceptedVrbo.length;
         if (droppedVrbo > 0) {
-          console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} candidates below ${bedrooms}BR or unknown-BR candidates`);
+          console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} candidates below ${buyInBedroomFloor}BR`);
         }
         vrboGoogleCount = 0;
         vrboSidecarCount = acceptedVrbo.length;
@@ -11713,8 +11738,8 @@ export async function registerRoutes(
         if (!isAirbnbFallback || !searchedByAirbnbSidecar || c.verified !== "yes") return false;
       }
       const bedroomSignal = comparisonBedroomSignal(c);
-      if (bedroomSignal !== null && bedroomSignal !== bedrooms) return false;
-      if (bedroomSignal === null && typeof c.bedrooms === "number" && c.bedrooms !== bedrooms) return false;
+      if (bedroomSignal !== null && !satisfiesBuyInBedrooms(bedroomSignal)) return false;
+      if (bedroomSignal === null && typeof c.bedrooms === "number" && !satisfiesBuyInBedrooms(c.bedrooms)) return false;
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       if (groundFloorOnly && c.groundFloorStatus !== "confirmed") return false;
       return true;
@@ -12047,8 +12072,10 @@ export async function registerRoutes(
       });
     }
     if (finalIdentityDropped > 0) {
+      const onlyAirbnbAttachBlocks = verifiedCheapestBeforeFinalIdentity.length > 0
+        && verifiedCheapestBeforeFinalIdentity.every((c) => c.source === "airbnb");
       issueList.push({
-        severity: cheapest.length > 0 ? "warning" : "error",
+        severity: cheapest.length > 0 || onlyAirbnbAttachBlocks ? "warning" : "error",
         source: "Final identity gate",
         summary: `Dropped ${finalIdentityDropped} verified candidate(s) before auto-pick because bedroom/resort proof was not exact enough`,
         detail: finalIdentityDroppedExamples.join(" | "),
@@ -12132,7 +12159,9 @@ export async function registerRoutes(
       confidence: providerConfidence(input.status, input.raw, input.priced, input.verified),
       datesSearched: { checkIn, checkOut, nights },
       bedroomFilter: {
-        bedrooms,
+        bedrooms: requestedBedrooms,
+        otaSearchBedrooms: otaSearchBedrooms !== requestedBedrooms ? otaSearchBedrooms : undefined,
+        buyInBedroomFloor: buyInBedroomFloor !== requestedBedrooms ? buyInBedroomFloor : undefined,
         applied: input.bedroomFilterApplied ?? true,
         mode: input.bedroomFilterMode ?? "provider/date/search result filtering plus server-side curation",
       },
