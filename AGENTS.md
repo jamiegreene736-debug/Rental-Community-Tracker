@@ -29,6 +29,14 @@ to open a fix PR via Claude Code or accept the original decision.
   change contradicts one of them, pause and ask the human before
   proceeding.
 
+## Build Hygiene (Load-Bearing — prevents repeated Railway/esbuild failures)
+
+**Never append duplicate function declarations ("back-compat copies") at the bottom of a .ts file.**
+
+A recent commit appended copies of `resolveAvailabilityPropertyConfig` and `getAvailabilitySchedulerUnsupportedReason` at the end of `server/availability-scheduler.ts` while the originals were still present. esbuild (used by `npm run build` → Railway) rejected the file with duplicate export errors.
+
+See the machine-readable rule at `.cursor/rules/build-hygiene.mdc` for the full policy and verification steps (`npm run check && npm run build` must pass locally before pushing anything that touches schedulers/routes/shared pricing).
+
 ## VRBO / OTA Buy-In Search Policy (Load-Bearing)
 
 **Never inject a pre-constructed `vrbo.com/search?...` URL (or any

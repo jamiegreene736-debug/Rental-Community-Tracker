@@ -1,0 +1,35 @@
+---
+description: Build hygiene rules to prevent duplicate-export and refactor-related CI failures on Railway (esbuild)
+alwaysApply: true
+---
+
+# Build Hygiene — Never Create Duplicate Exports
+
+## The Rule (caused multiple Railway build failures)
+
+**Never append "back-compat" or "restored" copies of functions at the bottom of a .ts file.**
+
+When a refactor moves or renames symbols:
+- Either update **all** call sites immediately, or
+- Place the canonical implementation in a shared module (`@shared/...` or a dedicated `*-compat.ts`) and re-export cleanly from one place.
+
+Appending duplicate `export function foo() { ... }` (or `export async function`) blocks at the end of a file that already (or used to) contain the symbol produces esbuild errors like:
+
+  "4 duplicate export errors" for `resolveAvailabilityPropertyConfig` and `getAvailabilitySchedulerUnsupportedReason`
+
+(See: server/availability-scheduler.ts — a bad commit appended back-compat copies of the two functions while the originals at ~205/213 were not removed. The build on Railway (tsx script/build.ts → esbuild server/index.ts) hard-fails.)
+
+## What to do instead
+
+1. Run `npm run check` (tsc) and `npm run build` (or the esbuild step) **locally** before any commit that touches scheduler / routes / shared pricing modules.
+2. If you need temporary back-compat during a large refactor, use a single re-export barrel, not duplicated bodies.
+3. After any refactor that touches availability-scheduler.ts or the functions it used to export, grep the whole `server/` and `shared/` trees for the old names and either delete the dead imports or point them at the new location.
+4. The sidecar worker and availability code have many historical "compat" hacks — treat every one as a landmine for the next build.
+
+## Verification before push / Railway deploy
+
+- `npm run check`
+- `npm run build` (must succeed with 0 esbuild duplicate-export errors)
+- If the PR touches anything under `server/availability*` or `server/routes.ts` that imports scheduler symbols, explicitly call out the build verification in the PR description.
+
+This rule is stored so future agents (and you) never repeat the "append duplicate at bottom" pattern that has repeatedly broken Railway deploys.
