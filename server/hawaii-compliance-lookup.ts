@@ -3,7 +3,7 @@ import { isPlaceholderLicenseValue, usableLicenseValue } from "../shared/license
 
 export type HawaiiComplianceLookupResult = {
   value: string;
-  confidence: "guesty-listing" | "kauai-tvr-registry" | "unit-cpr" | "master-parcel";
+  confidence: "guesty-listing" | "property-record" | "paired-tax-license" | "kauai-tvr-registry" | "unit-cpr" | "master-parcel";
   note: string;
   searchedAddress?: string;
   geocodedAddress?: string;
@@ -308,75 +308,171 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
   };
 }
 
+const HAWAII_TAT_PATTERN = /\bTA-\d{3}-\d{3}-\d{4}-\d{2}\b/i;
+const HAWAII_GET_PATTERN = /\bGE-\d{3}-\d{3}-\d{4}-\d{2}\b/i;
+
 const tagValue = (tags: string[], prefix: string): string | null => {
-  const match = tags.find((tag) => tag.startsWith(prefix));
+  const match = tags.find((tag) => tag.toUpperCase().startsWith(prefix.toUpperCase()));
   const value = match ? match.slice(prefix.length).trim() : "";
   return usableLicenseValue(value);
 };
 
-const notesValue = (notes: string, label: string): string | null => {
-  const pattern = new RegExp(`${label}\\s*:?\\s*([^\\n]+)`, "i");
-  const match = notes.match(pattern);
-  return usableLicenseValue(match?.[1]);
+const licenseInTags = (tags: string[], kind: "tat" | "get"): string | null => {
+  const prefix = kind === "tat" ? "TAT:" : "GET:";
+  const fromPrefix = tagValue(tags, prefix);
+  if (fromPrefix) return fromPrefix;
+  const pattern = kind === "tat" ? HAWAII_TAT_PATTERN : HAWAII_GET_PATTERN;
+  for (const tag of tags) {
+    const match = tag.match(pattern);
+    if (match) return usableLicenseValue(match[0]);
+  }
+  return null;
 };
 
-export function extractHawaiiComplianceFromGuestyListing(listing: Record<string, unknown>): {
-  taxMapKey: string | null;
-  tatLicense: string | null;
-  getLicense: string | null;
-  strPermit: string | null;
-} {
-  const tags = Array.isArray(listing.tags)
-    ? (listing.tags as unknown[]).filter((tag): tag is string => typeof tag === "string")
-    : [];
-  const notes = String(((listing.publicDescription as Record<string, unknown> | undefined)?.notes) ?? "");
+const licenseInText = (text: string, kind: "tat" | "get"): string | null => {
+  const pattern = kind === "tat" ? HAWAII_TAT_PATTERN : HAWAII_GET_PATTERN;
+  const match = text.match(pattern);
+  if (match) return usableLicenseValue(match[0]);
+  const label = kind === "tat" ? "Transient Accommodations Tax ID \\(TAT\\)" : "General Excise Tax ID \\(GET\\)";
+  const labeled = new RegExp(`${label}\\s*:?\\s*([^\\n]+)`, "i").exec(text);
+  return usableLicenseValue(labeled?.[1]);
+};
 
+const bookingContentData = (listing: Record<string, unknown>): Array<{ name?: string; value?: string }> => {
   const integrations = Array.isArray(listing.integrations)
     ? listing.integrations as Array<Record<string, unknown>>
     : [];
   const bookingInteg = integrations.find((entry) =>
     ["bookingCom", "bookingCom2", "booking_com"].includes(String(entry.platform ?? "")),
   );
-  const contentData = (((((bookingInteg?.bookingCom as Record<string, unknown> | undefined)?.license as Record<string, unknown> | undefined)?.information as Record<string, unknown> | undefined)?.contentData) ?? []) as Array<{ name?: string; value?: string }>;
+  const fromIntegration = (((bookingInteg?.bookingCom as Record<string, unknown> | undefined)?.license as Record<string, unknown> | undefined)?.information as Record<string, unknown> | undefined)?.contentData;
+  if (Array.isArray(fromIntegration)) return fromIntegration as Array<{ name?: string; value?: string }>;
 
+  const channels = listing.channels as Record<string, unknown> | undefined;
+  const fromChannels = (((channels?.bookingCom as Record<string, unknown> | undefined)?.license as Record<string, unknown> | undefined)?.information as Record<string, unknown> | undefined)?.contentData;
+  if (Array.isArray(fromChannels)) return fromChannels as Array<{ name?: string; value?: string }>;
+  return [];
+};
+
+export function pairHawaiiTaxLicense(value: unknown, target: "tatLicense" | "getLicense"): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const tatMatch = raw.match(/^TA-(\d{3}-\d{3}-\d{4}-\d{2})$/i);
+  if (tatMatch && target === "getLicense") return usableLicenseValue(`GE-${tatMatch[1]}`);
+  const getMatch = raw.match(/^GE-(\d{3}-\d{3}-\d{4}-\d{2})$/i);
+  if (getMatch && target === "tatLicense") return usableLicenseValue(`TA-${getMatch[1]}`);
+  return null;
+}
+
+export type HawaiiComplianceValues = {
+  taxMapKey?: string | null;
+  tatLicense?: string | null;
+  getLicense?: string | null;
+  strPermit?: string | null;
+};
+
+export function extractHawaiiComplianceFromGuestyListing(listing: Record<string, unknown>): Required<HawaiiComplianceValues> {
+  const tags = Array.isArray(listing.tags)
+    ? (listing.tags as unknown[]).filter((tag): tag is string => typeof tag === "string")
+    : [];
+  const notes = String(((listing.publicDescription as Record<string, unknown> | undefined)?.notes) ?? "");
+  const contentData = bookingContentData(listing);
   const contentValue = (name: string): string | null => {
     const match = contentData.find((entry) => entry?.name === name);
     return usableLicenseValue(match?.value);
   };
 
+  const homeaway = ((listing.channels as Record<string, unknown> | undefined)?.homeaway || {}) as Record<string, string | undefined>;
   const fromTopLevelTat = usableLicenseValue(listing.licenseNumber);
   const fromTopLevelGet = usableLicenseValue(listing.taxId);
+  const fromHomeawayTat = usableLicenseValue(homeaway.licenseNumber);
+  const fromHomeawayGet = usableLicenseValue(homeaway.taxId);
+  const fromHomeawayTmk = usableLicenseValue(homeaway.parcelNumber);
+
+  const tatLicense =
+    licenseInTags(tags, "tat")
+    || fromTopLevelTat
+    || fromHomeawayTat
+    || contentValue("number")
+    || licenseInText(notes, "tat");
+  const getLicense =
+    licenseInTags(tags, "get")
+    || fromTopLevelGet
+    || fromHomeawayGet
+    || licenseInText(notes, "get");
+
+  const strFromNotes = (() => {
+    const labeled = notes.match(/Short-Term Rental Registration \/ Permit:\s*([^\n]+)/i);
+    if (labeled) return usableLicenseValue(labeled[1]);
+    const permitMatch = notes.match(/\b(?:TVR-\d{4}-\d{2,4}|TVNC-\d{4}|STVR-\d{4}-\d{6}|STRH-\d{8}|NUC-\d{2}-\d{3}-\d{4})\b/i);
+    return permitMatch ? usableLicenseValue(permitMatch[0]) : null;
+  })();
 
   return {
-    taxMapKey: tagValue(tags, "TMK:") || contentValue("tmk_number"),
-    tatLicense: tagValue(tags, "TAT:") || fromTopLevelTat || contentValue("number") || notesValue(notes, "Transient Accommodations Tax ID \\(TAT\\)"),
-    getLicense: tagValue(tags, "GET:") || fromTopLevelGet || notesValue(notes, "General Excise Tax ID \\(GET\\)"),
-    strPermit: tagValue(tags, "STR:") || contentValue("permit_number") || notesValue(notes, "Short-Term Rental Registration / Permit"),
+    taxMapKey: tagValue(tags, "TMK:") || contentValue("tmk_number") || fromHomeawayTmk,
+    tatLicense,
+    getLicense,
+    strPermit: tagValue(tags, "STR:") || contentValue("permit_number") || strFromNotes,
   };
 }
+
+const fieldLabel = (field: "getLicense" | "tatLicense" | "strPermit"): string =>
+  field === "getLicense" ? "GET" : field === "tatLicense" ? "TAT" : "STR";
+
+const resolveTaxField = (
+  field: "getLicense" | "tatLicense" | "strPermit",
+  values: HawaiiComplianceValues,
+): string | null => {
+  const direct = usableLicenseValue(values[field]);
+  if (direct) return direct;
+  if (field === "getLicense") return pairHawaiiTaxLicense(values.tatLicense, "getLicense");
+  if (field === "tatLicense") return pairHawaiiTaxLicense(values.getLicense, "tatLicense");
+  return null;
+};
 
 export async function lookupHawaiiComplianceField(options: {
   field: "getLicense" | "tatLicense" | "strPermit";
   address: string;
   listingId?: string | null;
   taxMapKey?: string | null;
+  propertyValues?: HawaiiComplianceValues | null;
   fetchGuestyListing?: (listingId: string) => Promise<Record<string, unknown>>;
 }): Promise<HawaiiComplianceLookupResult> {
-  const { field, address, listingId, taxMapKey, fetchGuestyListing } = options;
+  const { field, address, listingId, taxMapKey, propertyValues, fetchGuestyListing } = options;
   const searchedAddress = address.trim();
+  const label = fieldLabel(field);
 
   if (listingId && fetchGuestyListing) {
     const listing = await fetchGuestyListing(listingId);
     const extracted = extractHawaiiComplianceFromGuestyListing(listing);
-    const guestyValue = extracted[field];
-    if (guestyValue && !isPlaceholderLicenseValue(guestyValue)) {
+    const guestyValue = resolveTaxField(field, extracted);
+    if (guestyValue) {
+      const paired = !usableLicenseValue(extracted[field]);
       return {
         value: guestyValue,
-        confidence: "guesty-listing",
-        note: `Pulled the real ${field === "getLicense" ? "GET" : field === "tatLicense" ? "TAT" : "STR"} value already stored on the connected Guesty listing.`,
+        confidence: paired ? "paired-tax-license" : "guesty-listing",
+        note: paired
+          ? `Derived the ${label} license from the paired ${field === "getLicense" ? "TAT" : "GET"} value already stored on the connected Guesty listing.`
+          : `Pulled the real ${label} value already stored on the connected Guesty listing.`,
         searchedAddress,
         source: "Guesty listing compliance fields",
         sourceUrl: `https://app.guesty.com/properties/${listingId}/owners-and-license`,
+      };
+    }
+  }
+
+  if (propertyValues) {
+    const propertyValue = resolveTaxField(field, propertyValues);
+    if (propertyValue) {
+      const paired = !usableLicenseValue(propertyValues[field]);
+      return {
+        value: propertyValue,
+        confidence: paired ? "paired-tax-license" : "property-record",
+        note: paired
+          ? `Derived the ${label} license from the paired ${field === "getLicense" ? "TAT" : "GET"} value on this property record.`
+          : `Pulled the real ${label} value from this property record.`,
+        searchedAddress,
+        source: "Property compliance record",
       };
     }
   }
@@ -401,7 +497,7 @@ export async function lookupHawaiiComplianceField(options: {
 
   throw new Error(
     listingId
-      ? "The connected Guesty listing does not have a real GET/TAT value stored yet. Paste it manually or push compliance after you obtain the official Hawaii tax license."
-      : "Select a connected Guesty listing to pull real GET/TAT values from Guesty, or paste the official Hawaii tax license manually.",
+      ? `No real ${label} license was found on the connected Guesty listing or this property record. Push compliance after you have the official Hawaii ${label} license, or paste it manually.`
+      : `Select a connected Guesty listing to pull the real ${label} license from Guesty or this property record, or paste it manually.`,
   );
 }

@@ -5429,7 +5429,38 @@ export async function registerRoutes(
   });
 
   const fetchGuestyListingForCompliance = async (listingId: string): Promise<Record<string, unknown>> => {
-    return await guestyRequest("GET", `/listings/${listingId}`) as Record<string, unknown>;
+    const fields = [
+      "tags",
+      "licenseNumber",
+      "taxId",
+      "integrations",
+      "channels",
+      "publicDescription",
+    ].join("%20");
+    return await guestyRequest("GET", `/listings/${listingId}?fields=${fields}`) as Record<string, unknown>;
+  };
+
+  const loadPropertyComplianceValues = async (propertyIdRaw: unknown) => {
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId === 0) return null;
+    if (propertyId > 0) {
+      const property = getUnitBuilderByPropertyId(propertyId);
+      if (!property) return null;
+      return {
+        taxMapKey: property.taxMapKey ?? null,
+        tatLicense: property.tatLicense ?? null,
+        getLicense: property.getLicense ?? null,
+        strPermit: property.strPermit ?? null,
+      };
+    }
+    const draft = await storage.getCommunityDraft(Math.abs(propertyId));
+    if (!draft) return null;
+    return {
+      taxMapKey: draft.taxMapKey ?? null,
+      tatLicense: draft.tatLicense ?? null,
+      getLicense: draft.getLicense ?? null,
+      strPermit: draft.strPermit ?? null,
+    };
   };
 
   const handleHawaiiLicenseLookup = (field: "getLicense" | "tatLicense" | "strPermit", failureLabel: string) =>
@@ -5442,11 +5473,13 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Only Hawaii license lookup is currently supported" });
       }
       try {
+        const propertyValues = await loadPropertyComplianceValues(req.query.propertyId);
         const result = await lookupHawaiiComplianceField({
           field,
           address,
           listingId,
           taxMapKey,
+          propertyValues,
           fetchGuestyListing: fetchGuestyListingForCompliance,
         });
         res.json({
@@ -5463,7 +5496,7 @@ export async function registerRoutes(
       } catch (err: any) {
         const message = err?.message || String(err);
         console.error(`[${field}-lookup] failed:`, message);
-        if (/does not have a real|Select a connected Guesty listing|No Kauai County TVR/i.test(message)) {
+        if (/No real .* license was found|Select a connected Guesty listing|No Kauai County TVR/i.test(message)) {
           return res.status(404).json({ error: message, searchedAddress: address, listingId });
         }
         res.status(500).json({ error: `${failureLabel} lookup failed`, message });

@@ -975,6 +975,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     try {
       const params = new URLSearchParams({ address: fullAddress });
       if (selectedId) params.set("listingId", selectedId);
+      if (propertyId) params.set("propertyId", String(propertyId));
       if (effectivePropertyData.taxMapKey) params.set("taxMapKey", effectivePropertyData.taxMapKey);
       const resp = await fetch(`${options.endpoint}?${params.toString()}`);
       const data = await resp.json();
@@ -990,7 +991,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       options.setBusy(false);
     }
-  }, [effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistDraftComplianceValues, selectedId, toast]);
+  }, [effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistDraftComplianceValues, propertyId, selectedId, toast]);
 
   const pullRealGetLicense = useCallback(async () => {
     await pullHawaiiComplianceField({
@@ -999,7 +1000,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       label: "GET license",
       setBusy: setGetLookupBusy,
       setResult: setGetLookupResult,
-      requiresListing: true,
     });
   }, [pullHawaiiComplianceField]);
 
@@ -1010,7 +1010,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       label: "TAT license",
       setBusy: setTatLookupBusy,
       setResult: setTatLookupResult,
-      requiresListing: true,
     });
   }, [pullHawaiiComplianceField]);
 
@@ -4306,7 +4305,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <button
                                   type="button"
                                   onClick={pullRealGetLicense}
-                                  disabled={getLookupBusy || !effectivePropertyData.address || !selectedId}
+                                  disabled={getLookupBusy || !effectivePropertyData.address}
                                   style={{
                                     width: "100%",
                                     fontSize: 11,
@@ -4320,10 +4319,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   }}
                                   data-testid="button-pull-real-get"
                                 >
-                                  {getLookupBusy ? "Pulling real GET..." : "Pull real GET from Guesty listing"}
+                                  {getLookupBusy ? "Pulling real GET..." : "Pull real GET license"}
                                 </button>
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
-                                  Reads the connected Guesty listing tags / taxId / notes for the real GET license.
+                                  Uses the connected Guesty listing when available, otherwise this property record.
                                 </div>
                                 {renderComplianceLookupMeta(getLookupResult)}
                               </div>
@@ -4349,7 +4348,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <button
                                   type="button"
                                   onClick={pullRealTatLicense}
-                                  disabled={tatLookupBusy || !effectivePropertyData.address || !selectedId}
+                                  disabled={tatLookupBusy || !effectivePropertyData.address}
                                   style={{
                                     width: "100%",
                                     fontSize: 11,
@@ -4363,10 +4362,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   }}
                                   data-testid="button-pull-real-tat"
                                 >
-                                  {tatLookupBusy ? "Pulling real TAT..." : "Pull real TAT from Guesty listing"}
+                                  {tatLookupBusy ? "Pulling real TAT..." : "Pull real TAT license"}
                                 </button>
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
-                                  Reads the connected Guesty listing tags / licenseNumber / notes for the real TAT license.
+                                  Uses the connected Guesty listing when available, otherwise this property record.
                                 </div>
                                 {renderComplianceLookupMeta(tatLookupResult)}
                               </div>

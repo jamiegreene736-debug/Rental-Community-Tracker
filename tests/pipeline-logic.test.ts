@@ -809,6 +809,7 @@ import {
   extractHawaiiComplianceFromGuestyListing,
   formatKauaiCountyPermit,
   matchKauaiStrPermit,
+  pairHawaiiTaxLicense,
   parseKauaiTvrPdfText,
   tmkMatchKeys,
 } from "../server/hawaii-compliance-lookup";
@@ -844,6 +845,20 @@ const extracted = extractHawaiiComplianceFromGuestyListing({
 assert.equal(extracted.tatLicense, "TA-024-120-9012-01");
 assert.equal(extracted.getLicense, "GE-024-120-9012-01");
 assert.equal(extracted.strPermit, "TVR-2022-037");
+
+const fromHomeaway = extractHawaiiComplianceFromGuestyListing({
+  tags: [],
+  channels: {
+    homeaway: {
+      licenseNumber: "TA-024-630-2345-01",
+      taxId: "GE-024-630-2345-01",
+      parcelNumber: "430150130001",
+    },
+  },
+});
+assert.equal(fromHomeaway.tatLicense, "TA-024-630-2345-01");
+assert.equal(fromHomeaway.getLicense, "GE-024-630-2345-01");
+assert.equal(pairHawaiiTaxLicense("TA-024-120-9012-01", "getLicense"), "GE-024-120-9012-01");
 console.log("  ✓ Hawaii compliance extraction + Kauai TVR parsing");
 
 // ---------- Guesty session cache layered read ----------
