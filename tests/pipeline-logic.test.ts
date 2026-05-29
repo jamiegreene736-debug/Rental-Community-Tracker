@@ -1403,7 +1403,8 @@ import {
 } from "../shared/buy-in-market";
 
 assert.equal(oceanfrontComparableBuyInMarket("Kapaa Beachfront"), true);
-assert.equal(oceanfrontComparableBuyInMarket("Poipu Kai"), true);
+assert.equal(oceanfrontComparableBuyInMarket("Poipu Kai"), false);
+assert.equal(oceanfrontComparableBuyInMarket("Makahuena"), true);
 assert.equal(oceanfrontComparableBuyInMarket("Princeville"), false);
 
 const poipuToOceanfront = driveMinutesBetweenBuyInMarkets("Poipu Kai", "Poipu Oceanfront");
@@ -1412,8 +1413,14 @@ assert.ok(poipuToOceanfront !== null && poipuToOceanfront <= 20, "Poipu Oceanfro
 const poipuToKapaa = driveMinutesBetweenBuyInMarkets("Poipu Kai", "Kapaa Beachfront");
 assert.ok(poipuToKapaa !== null && poipuToKapaa > 20, "Kapaa should be outside the 20 min drive scout radius from Poipu Kai");
 
-const poipuNearby = nearbyBuyInMarketsForScout("Poipu Kai", { maxDriveMinutes: 20, oceanfrontOnly: true });
-assert.ok(poipuNearby.includes("Poipu Oceanfront"), "oceanfront scout should include Poipu Oceanfront");
-assert.ok(poipuNearby.includes("Poipu Brenneckes"), "Poipu Brenneckes counts as oceanfront-comparable");
-assert.ok(!poipuNearby.includes("Kapaa Beachfront"), "Kapaa should be excluded at 20 min for Poipu Kai oceanfront scout");
+const poipuNearbyAll = nearbyBuyInMarketsForScout("Poipu Kai", { maxDriveMinutes: 20, oceanfrontOnly: false });
+assert.ok(poipuNearbyAll.includes("Pili Mai"), "Pili Mai should be within 20 min of Poipu Kai");
+assert.ok(!poipuNearbyAll.includes("Kapaa Beachfront"), "Kapaa should be outside 20 min from Poipu Kai");
+
+const poipuNearbyOcean = nearbyBuyInMarketsForScout("Poipu Kai", { maxDriveMinutes: 20, oceanfrontOnly: true });
+assert.ok(poipuNearbyOcean.includes("Poipu Oceanfront"), "oceanfront scout should include Poipu Oceanfront");
+assert.ok(poipuNearbyOcean.includes("Poipu Brenneckes"), "Poipu Brenneckes counts as oceanfront-comparable");
+assert.ok(poipuNearbyOcean.includes("Makahuena"), "Makahuena should be within 20 min oceanfront scout");
+assert.ok(!poipuNearbyOcean.includes("Pili Mai"), "Pili Mai is not oceanfront-comparable");
+assert.ok(!poipuNearbyOcean.includes("Kapaa Beachfront"), "Kapaa should be excluded at 20 min for Poipu Kai oceanfront scout");
 console.log("[test] nearby buy-in markets by drive: PASS");

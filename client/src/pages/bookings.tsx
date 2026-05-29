@@ -314,6 +314,7 @@ type AlternativeScoutResult = {
   oceanfrontComparable?: boolean;
   errors?: string[];
   durationMs?: number;
+  driveMinutesFromBase?: number | null;
   samples: AlternativeScoutSample[];
 };
 
@@ -326,9 +327,11 @@ type AlternativeScoutResponse = {
   threshold: number;
   requiresOceanfrontComparable?: boolean;
   replacementPlans?: number[][];
+  nearbyWithinDriveMinutes?: Array<{ community: string; driveMinutes: number }>;
   results: AlternativeScoutResult[];
   recommended: AlternativeScoutResult[];
   rejected?: AlternativeScoutResult[];
+  scouted?: AlternativeScoutResult[];
   generatedAt: string;
 };
 
@@ -1959,7 +1962,17 @@ function AlternativeBuyInWorkflowPanel({
 }) {
   const active = workflow?.activeCommunity ?? null;
   const sidecarResults = workflow?.sidecarResults ?? {};
-  const communities = workflow?.scout?.results ?? [];
+  const communities = (() => {
+    const scouted = workflow?.scout?.scouted ?? workflow?.scout?.results ?? [];
+    const byCommunity = new Map<string, AlternativeScoutResult>();
+    for (const row of scouted) byCommunity.set(row.community, row);
+    for (const row of workflow?.scout?.rejected ?? []) {
+      if (!byCommunity.has(row.community)) byCommunity.set(row.community, row);
+    }
+    return Array.from(byCommunity.values()).sort(
+      (a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999),
+    );
+  })();
   const completeReplacementSet = bestAlternativeReplacementSet(workflow);
   const replacementPlanText = alternativeReplacementNeedText(workflow);
   return (
@@ -1968,8 +1981,14 @@ function AlternativeBuyInWorkflowPanel({
         <div>
           <p className="font-semibold">Alternative buy-in workflow</p>
           <p className="text-[11px] opacity-80">
-            Scout nearby communities within ~20 minutes drive (beachfront/oceanfront sources stay waterfront), then run the full sidecar search for communities that prove a complete replacement combo.
+            Scouts every configured buy-in community within ~20 minutes drive of {workflow?.scout?.baseCommunity ?? "this resort"}
+            {workflow?.scout?.requiresOceanfrontComparable ? " (waterfront communities only)" : ""}, then run the full sidecar search where Airbnb proves a replacement combo.
           </p>
+          {(workflow?.scout?.nearbyWithinDriveMinutes?.length ?? 0) > 0 && (
+            <p className="mt-0.5 text-[11px] opacity-80">
+              Within 20 min: {workflow!.scout!.nearbyWithinDriveMinutes!.map((row) => `${row.community} (~${row.driveMinutes} min)`).join(" · ")}
+            </p>
+          )}
           {replacementPlanText && (
             <p className="mt-0.5 text-[11px] opacity-80">
               Airbnb proof required: {replacementPlanText}{workflow?.scout?.requiresOceanfrontComparable ? " · oceanfront comparable only" : ""}
