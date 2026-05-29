@@ -874,6 +874,14 @@ assert.ok(isPlaceholderLicenseValue("GE-025-430-9876-01"), "Makahuena sample GET
 assert.ok(isPlaceholderLicenseValue("TA-025-430-9876-01"), "Makahuena sample TAT");
 assert.ok(isPlaceholderLicenseValue("TVR-2024-999"), "Makahuena sample STR");
 assert.ok(isPlaceholderLicenseValue("420090060001"), "Makahuena sample TMK");
+
+import { sampleLicensesForLocation } from "../client/src/data/adapt-draft";
+const poipuSamples = sampleLicensesForLocation("Koloa", "HI");
+assert.equal(poipuSamples.tatLicense, "TA-025-430-9876-01");
+assert.equal(poipuSamples.getLicense, "GE-025-430-9876-01");
+assert.equal(poipuSamples.strPermit, "TVR-2022-048");
+const kauaiHomestay = sampleLicensesForLocation("Lihue", "Hawaii");
+assert.equal(kauaiHomestay.strPermit, "TVNC-0342");
 console.log("  ✓ Hawaii compliance extraction + Kauai TVR parsing");
 
 // ---------- Guesty session cache layered read ----------
