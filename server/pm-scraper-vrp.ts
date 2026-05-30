@@ -491,4 +491,79 @@ export const VRP_SITES = {
     label: "EVR Hawaii",
     baseUrl: "https://evrhi.com",
   },
+  // Additional high-value Kauai VRP sites frequently surfaced by Google for
+  // Poipu / Princeville / Kapaa searches. Adding here gives them the same
+  // excellent sitemap + direct pricing API treatment (no browser needed)
+  // as the original four — best possible combo coverage for buy-in.
+  kauaiVacationRentals: {
+    label: "Kauai Vacation Rentals",
+    baseUrl: "https://www.kauai-vacation-rentals.com",
+  },
+  poipuBeachHouse: {
+    label: "Poipu Beach House",
+    baseUrl: "https://www.poipubeachhouse.com",
+  },
+  islandRealtyKauai: {
+    label: "Island Realty Kauai",
+    baseUrl: "https://www.islandrealtykauai.com",
+  },
+  kauaiParadise: {
+    label: "Kauai Paradise Vacations",
+    baseUrl: "https://kauaiparadisevacations.com",
+  },
 } as const satisfies Record<string, VrpSiteConfig>;
+
+/**
+ * Probe an arbitrary domain to see if it is powered by vrp_main (the common
+ * WordPress vacation rental plugin used by many small-to-mid Kauai PMs).
+ *
+ * If the ?vrpsitemap=1 fingerprint matches and we can extract unit URLs,
+ * we return a temporary VrpSiteConfig + the count of units found. The caller
+ * can then feed it into findAvailableVrpUnits (or a thin wrapper) to get
+ * priced, date-filtered inventory.
+ *
+ * This is the "quickest leverage" mechanism for adding many additional direct
+ * sources dynamically: any PM that Google surfaces for a resort that happens
+ * to use this popular plugin gets the same high-quality sitemap + API pricing
+ * treatment as the pre-registered ones (Parrish, CB Island, etc.), without
+ * needing a one-line config addition first.
+ */
+export async function probeForVrpMain(
+  baseUrl: string,
+  label?: string
+): Promise<{ isVrp: true; site: VrpSiteConfig; unitCount: number } | { isVrp: false; reason: string }> {
+  const cleanBase = baseUrl.replace(/\/$/, "");
+  const displayLabel = label || new URL(cleanBase).hostname.replace(/^www\./, "");
+
+  try {
+    const r = await fetch(`${cleanBase}/?vrpsitemap=1`, {
+      headers: { "User-Agent": HEADERS["User-Agent"] },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) {
+      return { isVrp: false, reason: `sitemap HTTP ${r.status}` };
+    }
+    const xml = await r.text();
+
+    // Same regex pattern the main scraper uses
+    const unitPathRe = new RegExp(
+      `^${escapeRe(cleanBase)}/vrp/unit/[A-Za-z0-9_-]+-\\d+-\\d+$`
+    );
+    const urls = Array.from(xml.matchAll(/<loc>([^<]+)<\/loc>/g))
+      .map((m) => m[1].trim())
+      .filter((u) => unitPathRe.test(u));
+
+    if (urls.length === 0) {
+      return { isVrp: false, reason: "no /vrp/unit/ entries in sitemap" };
+    }
+
+    const site: VrpSiteConfig = {
+      label: displayLabel,
+      baseUrl: cleanBase,
+    };
+
+    return { isVrp: true, site, unitCount: urls.length };
+  } catch (e: any) {
+    return { isVrp: false, reason: e?.message ?? "probe failed" };
+  }
+}

@@ -34,7 +34,7 @@ import { verifyPmRate } from "./pm-rate-agent";
 import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-availability";
 import { captchaAutomationUnavailable } from "./captcha-policy";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
-import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
+import { findAvailableVrpUnits, VRP_SITES, probeForVrpMain } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
@@ -10673,6 +10673,14 @@ export async function registerRoutes(
     const cbDiscoveryPromise = vrpDiscoveryPromise("cbIslandVacations", "cbCalls");
     const pikoDiscoveryPromise = vrpDiscoveryPromise("pikoProperties", "pikoCalls");
     const evrhiDiscoveryPromise = vrpDiscoveryPromise("evrhi", "evrhiCalls");
+
+    // Newly added additional VRP-powered PMs (quickest leverage direct sources).
+    // These use the same generic vrp scraper (sitemap + direct pricing API).
+    // Stats are best-effort; unknown keys are ignored inside the helper.
+    const kvrDiscoveryPromise = vrpDiscoveryPromise("kauaiVacationRentals", "pkCalls"); // reuse an existing counter for now
+    const pbhDiscoveryPromise = vrpDiscoveryPromise("poipuBeachHouse", "cbCalls");
+    const irkDiscoveryPromise = vrpDiscoveryPromise("islandRealtyKauai", "pikoCalls");
+    const kpDiscoveryPromise = vrpDiscoveryPromise("kauaiParadise", "evrhiCalls");
 
     // ── Gather Vacations inventory (PR #332) ──────────────────────────────
     // gathervacations.com runs a customised vrp_main fork — the plugin's
