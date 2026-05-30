@@ -14498,7 +14498,7 @@ export async function registerRoutes(
   app.post("/api/bookings/:reservationId/attach-buy-in", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
-      const { buyInId } = req.body as { buyInId: number };
+      const { buyInId, targetUnitId } = req.body as { buyInId: number; targetUnitId?: string };
       if (!buyInId) return res.status(400).json({ error: "buyInId required" });
 
       const candidate = await storage.getBuyIn(buyInId);
@@ -14526,6 +14526,40 @@ export async function registerRoutes(
           error: "Buy-in not sufficiently verified at search time",
           message: "Only buy-ins with verified=yes (high unit-type confidence from search) can be attached. Refresh the search and re-select.",
         });
+      }
+
+      // Per-slot combo awareness and stricter enforcement (surgical addition for this PR)
+      // For multi-unit combo bookings, validate that the buy-in matches an unfilled slot's requirements
+      // (bedrooms + high unit-type confidence / sub-community match).
+      let propertyConfig = null;
+      const candidateBuyIn = await storage.getBuyIn(buyInId);
+      const pid = candidateBuyIn?.propertyId;
+      if (pid && PROPERTY_UNIT_NEEDS[pid]) propertyConfig = PROPERTY_UNIT_NEEDS[pid];
+      if (propertyConfig?.units && propertyConfig.units.length > 1) {
+        // Multi-slot combo reservation – enforce slot-aware matching
+        const current = await storage.getBuyInsByReservation(reservationId);
+        const filledUnitIds = new Set(current.map((b) => b.unitId));
+        const neededSlots = propertyConfig.units.filter((u) => !filledUnitIds.has(u.unitId || `slot-${u.bedrooms}`)); // simplistic
+
+        if (neededSlots.length > 0) {
+          const candidateBedrooms = candidate.bedrooms || 0; // assume BuyIn may store it or infer from notes
+          const matchingSlot = neededSlots.find((slot) => slot.bedrooms === candidateBedrooms);
+
+          if (!matchingSlot) {
+            return res.status(409).json({
+              error: "Buy-in does not match any unfilled combo slot",
+              message: `This buy-in appears to be ${candidateBedrooms}BR but the remaining slots need different bedroom counts. Unit type confidence was ${candidate.unitTypeConfidence ?? 'unknown'}%.`,
+            });
+          }
+
+          // If we have unitTypeConfidence on the buy-in record, enforce high confidence for combo slots
+          if (typeof candidate.unitTypeConfidence === "number" && candidate.unitTypeConfidence < 85) {
+            return res.status(409).json({
+              error: "Buy-in unit-type confidence too low for combo slot",
+              message: `Unit type confidence ${candidate.unitTypeConfidence}% is below the 85% threshold required for reliable combo attachments. Refresh search and select a higher-confidence option.`,
+            });
+          }
+        }
       }
 
       const buyIn = await storage.attachBuyIn(buyInId, reservationId);
