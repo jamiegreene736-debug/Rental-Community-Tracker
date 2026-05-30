@@ -88,6 +88,9 @@ export const propertyBuyInMarkets = pgTable("property_buy_in_markets", {
   propertyId: integer("property_id").primaryKey(),
   baseCommunity: text("base_community").notNull(),
   recommendedMarkets: jsonb("recommended_markets").$type<string[]>().default(sql`'[]'::jsonb`).notNull(),
+  // Per-property unit-type confidence threshold for buy-in attach (default 85).
+  // Used to enforce "correct unit" (bedroom + sub-community) before high-confidence attach.
+  unitTypeConfidenceThreshold: integer("unit_type_confidence_threshold").default(85),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

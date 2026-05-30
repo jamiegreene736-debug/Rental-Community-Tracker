@@ -6654,6 +6654,17 @@ export async function registerRoutes(
     return entries.length ? entries.join(", ") : "no qualifying rows";
   }
 
+  // Helper for configurable unit-type confidence threshold (per-property via buy-in markets config, default 85).
+  // Used for both search-time gates and attach-time enforcement.
+  async function getUnitTypeConfidenceThreshold(propertyId: number): Promise<number> {
+    try {
+      const cfg = await storage.getPropertyBuyInMarkets(propertyId);
+      return cfg?.unitTypeConfidenceThreshold ?? 85;
+    } catch {
+      return 85;
+    }
+  }
+
   /**
    * For Hawaii communities, run the high-quality direct PM scrapers we already have
    * (VRP + Streamline + Suite Paradise + Gather) to get replacement proof.
@@ -10102,9 +10113,10 @@ export async function registerRoutes(
       }
       if (!candidateHasFinalResortProof(c)) return `no final ${resortName ?? community} resort/community proof`;
 
-      // High-confidence unit type gate (85+ required for auto-attach on combos)
+      // High-confidence unit type gate (configurable threshold, default 85)
+      const threshold = await getUnitTypeConfidenceThreshold(propertyId);
       const confidence = computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName);
-      if (confidence < 85) return `unit-type confidence too low (${confidence}%; 85+ required for safe attach)`;
+      if (confidence < threshold) return `unit-type confidence too low (${confidence}%; ${threshold}+ required for safe attach)`;
 
       return null;
     };
@@ -10115,7 +10127,7 @@ export async function registerRoutes(
       && candidateFitsTarget(c, { requireBedroomProof: true })
       && satisfiesBuyInBedrooms(candidateBedroomSignal(c))
       && candidateHasFinalResortProof(c)
-      && computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName) >= 85;  // High-confidence gate for correct unit type (bedroom + sub-community)
+      && computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName) >= (await getUnitTypeConfidenceThreshold(propertyId));  // High-confidence gate (configurable threshold)
 
     // Append the reservation's check-in/out to the URL so the landing page
     // opens with availability already filtered for those dates. Each platform
@@ -12590,7 +12602,7 @@ export async function registerRoutes(
           // Sidecar availability means at least one live website search
           // source was driven through the local Chrome worker.
           available: airbnbSidecarOnline || vrboSidecarOnline || bookingSidecarOnline || pmWebsiteSidecarOnline,
-          unitTypeConfidenceGate: "85+ required for high-confidence auto-attach (correct bedroom + sub-community)",
+          unitTypeConfidenceGate: "Configurable per-property threshold (default 85) for high-confidence auto-attach",
         },
         providerHealth: {
           airbnb: airbnbProviderHealth,
@@ -14498,7 +14510,7 @@ export async function registerRoutes(
   app.post("/api/bookings/:reservationId/attach-buy-in", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
-      const { buyInId, targetUnitId } = req.body as { buyInId: number; targetUnitId?: string };
+      const { buyInId, targetUnitId, force } = req.body as { buyInId: number; targetUnitId?: string; force?: boolean };
       if (!buyInId) return res.status(400).json({ error: "buyInId required" });
 
       const candidate = await storage.getBuyIn(buyInId);
@@ -14552,12 +14564,17 @@ export async function registerRoutes(
             });
           }
 
-          // If we have unitTypeConfidence on the buy-in record, enforce high confidence for combo slots
-          if (typeof candidate.unitTypeConfidence === "number" && candidate.unitTypeConfidence < 85) {
-            return res.status(409).json({
-              error: "Buy-in unit-type confidence too low for combo slot",
-              message: `Unit type confidence ${candidate.unitTypeConfidence}% is below the 85% threshold required for reliable combo attachments. Refresh search and select a higher-confidence option.`,
-            });
+          // Enforce per-property (or default 85) unit-type confidence for combo slots
+          const attachThreshold = await getUnitTypeConfidenceThreshold(pid);
+          if (typeof candidate.unitTypeConfidence === "number" && candidate.unitTypeConfidence < attachThreshold) {
+            if (!force) {
+              return res.status(409).json({
+                error: "Buy-in unit-type confidence too low for combo slot",
+                message: `Unit type confidence ${candidate.unitTypeConfidence}% is below the ${attachThreshold}% threshold. Refresh search and select a higher-confidence option, or use force override (with audit).`,
+              });
+            }
+            // Operator override allowed — log for audit
+            console.warn(`[attach-buy-in] Operator force-attach below threshold: buyIn=${buyInId} confidence=${candidate.unitTypeConfidence} threshold=${attachThreshold} reservation=${reservationId}`);
           }
         }
       }

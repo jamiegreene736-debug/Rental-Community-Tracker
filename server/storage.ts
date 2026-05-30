@@ -740,6 +740,7 @@ export class DatabaseStorage implements IStorage {
         set: {
           baseCommunity: input.baseCommunity,
           recommendedMarkets: input.recommendedMarkets ?? [],
+          unitTypeConfidenceThreshold: input.unitTypeConfidenceThreshold ?? 85,
           updatedAt: new Date(),
         },
       })
