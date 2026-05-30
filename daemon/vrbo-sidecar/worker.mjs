@@ -2063,6 +2063,30 @@ async function clearOtaClientSearchState(origin, label = "client search state re
   }
 }
 
+function isCdpContextManagementError(error) {
+  return /setDownloadBehavior|context management is not supported/i.test(error?.message ?? String(error));
+}
+
+async function switchToHeadlessFromCdpFailure(message) {
+  if (!HEADLESS_FALLBACK_ENABLED) {
+    throw new Error(message);
+  }
+  log(message);
+  await teardownBrowser("CDP fallback to headless");
+  browser = null;
+  context = null;
+  page = null;
+  activeChromeAllocation = {
+    type: "headless",
+    label: WORKER_ROLE === "server" ? "Railway headless Chromium fallback" : "headless Chromium fallback",
+    cdpUrl: null,
+    noVncUrl: null,
+    ephemeral: false,
+    release: async () => {},
+  };
+  return ensureHeadlessBrowser();
+}
+
 async function ensureBrowser() {
   const allocation = await acquireChromeForRequest();
   if (usingHeadlessRuntime()) return ensureHeadlessBrowser();
@@ -2072,56 +2096,57 @@ async function ensureBrowser() {
   }
   log(`connecting to Chrome via CDP (${allocation.label})…`);
   await verifyActiveChromeHealth("before connect");
-  browser = await chromium.connectOverCDP(allocation.cdpUrl);
-  context = browser.contexts()[0] ?? (await browser.newContext());
-  activeBrowserFingerprint = browserFingerprintForRequest(activeRuntimeRequest);
-  await installFingerprintInitScript(context, activeBrowserFingerprint);
-  if (activeBrowserFingerprint) {
+  try {
+    browser = await chromium.connectOverCDP(allocation.cdpUrl);
+    // Never call browser.newContext() over CDP: Playwright issues Browser.setDownloadBehavior,
+    // which headed server Chrome rejects ("Browser context management is not supported").
+    const existingContexts = browser.contexts();
+    if (!existingContexts.length) {
+      await browser.close().catch(() => {});
+      browser = null;
+      return switchToHeadlessFromCdpFailure("CDP Chrome has no browser contexts; falling back to headless Chromium");
+    }
+    context = existingContexts[0];
+    activeBrowserFingerprint = browserFingerprintForRequest(activeRuntimeRequest);
+    await installFingerprintInitScript(context, activeBrowserFingerprint);
+    if (activeBrowserFingerprint) {
+      log(
+        `browser fingerprint ${activeBrowserFingerprint.id}: ${activeBrowserFingerprint.os} ` +
+        `${activeBrowserFingerprint.viewport.width}x${activeBrowserFingerprint.viewport.height} ` +
+        `tz=${activeBrowserFingerprint.timezone} hc=${activeBrowserFingerprint.hardwareConcurrency} dm=${activeBrowserFingerprint.deviceMemory}`,
+      );
+    }
+    await installContextGuards();
+    await clearContextStorageForFreshRun("local Chrome startup");
+    await syncRemoteCookies();
+    const cookies = loadCookies();
+    const shouldSeedCookies = !needsFreshIdentityForOp(activeRuntimeRequest?.opType);
+    const seeded = shouldSeedCookies && cookies.length ? await addCookiesBestEffort(cookies, "startup cookie seed") : false;
+    if (activeRequestIsVrbo()) {
+      await restoreVrboManualSessionCookies("server Chrome VRBO manual session restore");
+    }
     log(
-      `browser fingerprint ${activeBrowserFingerprint.id}: ${activeBrowserFingerprint.os} ` +
-      `${activeBrowserFingerprint.viewport.width}x${activeBrowserFingerprint.viewport.height} ` +
-      `tz=${activeBrowserFingerprint.timezone} hc=${activeBrowserFingerprint.hardwareConcurrency} dm=${activeBrowserFingerprint.deviceMemory}`,
+      shouldSeedCookies
+        ? seeded
+          ? `seeded ${cookies.length} cookies into Chrome context`
+          : `using existing Chrome profile/server cookies (${cookies.length} cookies available on disk)`
+        : "skipped cookie seeding for isolated OTA identity",
     );
-  }
-  await installContextGuards();
-  await clearContextStorageForFreshRun("local Chrome startup");
-  await syncRemoteCookies();
-  const cookies = loadCookies();
-  const shouldSeedCookies = !needsFreshIdentityForOp(activeRuntimeRequest?.opType);
-  const seeded = shouldSeedCookies && cookies.length ? await addCookiesBestEffort(cookies, "startup cookie seed") : false;
-  if (activeRequestIsVrbo()) {
-    await restoreVrboManualSessionCookies("server Chrome VRBO manual session restore");
-  }
-  log(
-    shouldSeedCookies
-      ? seeded
-        ? `seeded ${cookies.length} cookies into Chrome context`
-        : `using existing Chrome profile/server cookies (${cookies.length} cookies available on disk)`
-      : "skipped cookie seeding for isolated OTA identity",
-  );
 
-  // PR #302 (revised): always create a NEW page rather than reusing
-  // pages[0]. The daemon's Chrome accumulates tabs from prior sessions
-  // (cookie-extension setup, leftover scans, manual user navigation)
-  // and `pages[0]` may not be a tab the daemon owns. Operator
-  // screenshot 2026-04-29 showed the visible window stuck on
-  // about:blank while the daemon was scraping a hidden tab.
-  //
-  // PR #307: create the daemon-owned tab FIRST, then close all
-  // OTHER tabs in the context. The earlier "close everything then
-  // newPage" attempt hung Chrome because closing the last tab quits
-  // Chrome on macOS — but if we have ≥2 tabs (our new one + N stale
-  // ones), closing the stale set leaves Chrome alive and the daemon
-  // tab as the only one. Net result: each daemon start gives us a
-  // single fresh tab, no clutter, no stale state, no risk of
-  // accidentally scraping a leftover tab.
-  page = await Promise.race([
-    context.newPage(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("newPage timed out")), 8000)),
-  ]);
-  await normalizePageDisplay(page);
-  const closedCount = await closeExtraTabs("startup tab cleanup", page);
-  log(`opened fresh daemon-owned tab; closed ${closedCount} stale tab(s)`);
+    // PR #302 (revised): always create a NEW page rather than reusing pages[0].
+    page = await Promise.race([
+      context.newPage(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("newPage timed out")), 8000)),
+    ]);
+    await normalizePageDisplay(page);
+    const closedCount = await closeExtraTabs("startup tab cleanup", page);
+    log(`opened fresh daemon-owned tab; closed ${closedCount} stale tab(s)`);
+  } catch (e) {
+    if (isCdpContextManagementError(e)) {
+      return switchToHeadlessFromCdpFailure(`CDP browser setup failed (${e?.message ?? e})`);
+    }
+    throw e;
+  }
 }
 
 function headlessUserDataDirForWorker() {

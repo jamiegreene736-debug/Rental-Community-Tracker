@@ -1,5 +1,3 @@
-import { haversineFeet } from "./walking-distance";
-
 export type BuyInPlatformSearchTerms = {
   airbnb?: string;
   booking?: string;
@@ -88,6 +86,13 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     location: { searchName: "Poipu Brenneckes", city: "Koloa", state: "Hawaii", streetAddress: "2298 Ho'one Rd", lat: 21.8744, lng: -159.4538 },
     bounds: { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
   },
+  "Makahuena": {
+    key: "Makahuena",
+    aliases: [/\b(?:makahuena|ma\s*kahuena)\b/i],
+    searchLocation: "Makahuena at Poipu, Koloa, Kauai, Hawaii",
+    location: { searchName: "Makahuena at Poipu", city: "Koloa", state: "Hawaii", streetAddress: "1661 Pe'e Rd", lat: 21.8735, lng: -159.4482 },
+    bounds: { sw_lat: 21.870, sw_lng: -159.456, ne_lat: 21.878, ne_lng: -159.442 },
+  },
   "Pili Mai": {
     key: "Pili Mai",
     aliases: [/\bpili\s+mai\b/i],
@@ -125,15 +130,11 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Southern Dunes",
     aliases: [/\b(?:southern\s+dunes|haines\s+city|davenport)\b/i],
     searchLocation: "Southern Dunes, Haines City, Florida",
-    location: { searchName: "Southern Dunes Resort", city: "Haines City", state: "Florida", streetAddress: "1450 Southern Dunes Blvd", lat: 28.0995, lng: -81.5892 },
-    bounds: { sw_lat: 28.085, sw_lng: -81.605, ne_lat: 28.115, ne_lng: -81.572 },
   },
   "Caribe Cove": {
     key: "Caribe Cove",
     aliases: [/\bcaribe\s+cove\b/i],
     searchLocation: "Caribe Cove Resort, Kissimmee, Florida",
-    location: { searchName: "Caribe Cove Resort", city: "Kissimmee", state: "Florida", streetAddress: "9000 Treasure Trove Ln", lat: 28.3365, lng: -81.6045 },
-    bounds: { sw_lat: 28.325, sw_lng: -81.618, ne_lat: 28.348, ne_lng: -81.590 },
   },
   "Florida Generic": {
     key: "Florida Generic",
@@ -226,67 +227,86 @@ export function searchLocationForBuyInMarket(marketKey: string): string | null {
   return BUY_IN_MARKET_SEARCH_LOCATIONS[marketKey] || null;
 }
 
-/**
- * Estimate driving time in minutes between two lat/lng points.
- * Uses haversine straight-line, applies road detour factor, and region-specific
- * average effective speeds (Kauai resorts: winding/slower ~30mph; Florida: ~40mph).
- * This is a lightweight proxy — good enough to decide "within 15 min drive" for
- * alternative buy-in community scouting without burning Google Distance Matrix credits.
- */
-export function estimateDriveMinutes(
-  lat1: number,
-  lng1: number,
-  lat2: number,
-  lng2: number,
-  region: "hawaii" | "florida" = "hawaii"
-): number {
-  const feet = haversineFeet(lat1, lng1, lat2, lng2);
-  const miles = feet / 5280;
-  const roadFactor = 1.28; // typical non-straight local resort access roads
-  const avgMph = region === "florida" ? 40 : 30;
-  const minutes = (miles * roadFactor / avgMph) * 60;
-  return Math.max(2, Math.ceil(minutes));
+/** Beachfront/oceanfront sources should only scout other waterfront markets. */
+export function oceanfrontComparableBuyInMarket(community: string | null | undefined): boolean {
+  const key = String(community ?? "").toLowerCase();
+  return /\b(oceanfront|beachfront|brenneckes?|makahuena)\b/.test(key);
 }
 
-function inferRegionForCommunity(community: string): "hawaii" | "florida" {
-  const fl = /florida|kissimmee|davenport|haines|bonita|naples|estero|windsor|caribe|southern dunes/i.test(community);
-  return fl ? "florida" : "hawaii";
+const DRIVE_SPEED_MPH = 35;
+const DRIVE_ROAD_FACTOR = 1.35;
+
+function haversineMiles(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 3958.8;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLng = Math.sin(dLng / 2);
+  const h = sinDLat * sinDLat + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * sinDLng * sinDLng;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-/**
- * Returns other buy-in communities whose center is estimated to be within
- * maxDriveMinutes drive of the reference point (or the base community's center).
- * Used to replace/augment the old static SIMILAR_BUY_IN_MARKETS list so the
- * alternative buy-in workflow and buy-in tools surface any plausible nearby
- * option (15 min drive by default) rather than being capped at 2-3 curated ones.
- */
-export function getNearbyBuyInCommunities(
+export function driveMinutesBetweenBuyInMarkets(fromKey: string, toKey: string): number | null {
+  const a = BUY_IN_MARKET_LOCATIONS[fromKey];
+  const b = BUY_IN_MARKET_LOCATIONS[toKey];
+  if (!a || !b) return null;
+  const roadMiles = haversineMiles(a.lat, a.lng, b.lat, b.lng) * DRIVE_ROAD_FACTOR;
+  return Math.max(1, Math.ceil((roadMiles / DRIVE_SPEED_MPH) * 60));
+}
+
+/** All configured buy-in markets that have map coordinates (used for drive-time scout). */
+export function buyInMarketsWithScoutCoordinates(): BuyInMarket[] {
+  return Object.values(BUY_IN_MARKETS).filter((market) => market.location);
+}
+
+/** Nearby substitute markets within a short drive of the base community. */
+export function nearbyBuyInMarketsForScout(
   baseCommunity: string,
-  maxDriveMinutes = 15,
-  reference?: { lat: number; lng: number }
+  opts: { maxDriveMinutes?: number; oceanfrontOnly?: boolean; limit?: number } = {},
 ): string[] {
-  const baseLoc = BUY_IN_MARKET_LOCATIONS[baseCommunity];
-  const refLat = reference?.lat ?? baseLoc?.lat;
-  const refLng = reference?.lng ?? baseLoc?.lng;
-  if (!refLat || !refLng) {
-    // Fallback to the old curated list if we have no coords for this base
-    return (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? []).filter((k) => k !== baseCommunity);
+  const maxDriveMinutes = opts.maxDriveMinutes ?? 20;
+  const limit = opts.limit ?? 10;
+  const baseLocation = BUY_IN_MARKET_LOCATIONS[baseCommunity];
+  if (!baseLocation) {
+    return (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
+      .filter((key) => key !== baseCommunity && !!BUY_IN_MARKET_LOCATIONS[key])
+      .filter((key) => !opts.oceanfrontOnly || oceanfrontComparableBuyInMarket(key))
+      .slice(0, limit);
   }
-  const region = inferRegionForCommunity(baseCommunity);
-  const nearby: Array<{ key: string; driveMin: number }> = [];
-  for (const [key, loc] of Object.entries(BUY_IN_MARKET_LOCATIONS)) {
-    if (key === baseCommunity) continue;
-    const mins = estimateDriveMinutes(refLat, refLng, loc.lat, loc.lng, region);
-    if (mins <= maxDriveMinutes) {
-      nearby.push({ key, driveMin: mins });
-    }
+
+  const ranked: { key: string; minutes: number }[] = [];
+  for (const market of buyInMarketsWithScoutCoordinates()) {
+    if (market.key === baseCommunity || market.key === "Florida Generic") continue;
+    if (market.location!.state !== baseLocation.state) continue;
+    if (opts.oceanfrontOnly && !oceanfrontComparableBuyInMarket(market.key)) continue;
+    const minutes = driveMinutesBetweenBuyInMarkets(baseCommunity, market.key);
+    if (minutes === null || minutes > maxDriveMinutes) continue;
+    ranked.push({ key: market.key, minutes });
   }
-  nearby.sort((a, b) => a.driveMin - b.driveMin || a.key.localeCompare(b.key));
-  if (nearby.length === 0) {
-    // No one within the strict drive radius — fall back to the curated "same area"
-    // links (e.g. Kapaa <-> Princeville) so the alternative workflow still has
-    // something useful instead of an empty list.
-    return (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? []).filter((k) => k !== baseCommunity);
+  ranked.sort((a, b) => a.minutes - b.minutes || a.key.localeCompare(b.key));
+  return ranked.slice(0, limit).map((row) => row.key);
+}
+
+/** Drive-time ranked list for UI transparency (community + minutes). */
+export function nearbyBuyInMarketsForScoutDetailed(
+  baseCommunity: string,
+  opts: { maxDriveMinutes?: number; oceanfrontOnly?: boolean; limit?: number } = {},
+): Array<{ community: string; driveMinutes: number }> {
+  const maxDriveMinutes = opts.maxDriveMinutes ?? 20;
+  const limit = opts.limit ?? 10;
+  const baseLocation = BUY_IN_MARKET_LOCATIONS[baseCommunity];
+  if (!baseLocation) return [];
+
+  const ranked: { community: string; driveMinutes: number }[] = [];
+  for (const market of buyInMarketsWithScoutCoordinates()) {
+    if (market.key === baseCommunity || market.key === "Florida Generic") continue;
+    if (market.location!.state !== baseLocation.state) continue;
+    if (opts.oceanfrontOnly && !oceanfrontComparableBuyInMarket(market.key)) continue;
+    const minutes = driveMinutesBetweenBuyInMarkets(baseCommunity, market.key);
+    if (minutes === null || minutes > maxDriveMinutes) continue;
+    ranked.push({ community: market.key, driveMinutes: minutes });
   }
-  return nearby.map((n) => n.key);
+  ranked.sort((a, b) => a.driveMinutes - b.driveMinutes || a.community.localeCompare(b.community));
+  return ranked.slice(0, limit);
 }

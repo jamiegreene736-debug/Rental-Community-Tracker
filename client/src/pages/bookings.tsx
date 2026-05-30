@@ -314,6 +314,7 @@ type AlternativeScoutResult = {
   oceanfrontComparable?: boolean;
   errors?: string[];
   durationMs?: number;
+  driveMinutesFromBase?: number | null;
   samples: AlternativeScoutSample[];
 };
 
@@ -326,9 +327,11 @@ type AlternativeScoutResponse = {
   threshold: number;
   requiresOceanfrontComparable?: boolean;
   replacementPlans?: number[][];
+  nearbyWithinDriveMinutes?: Array<{ community: string; driveMinutes: number }>;
   results: AlternativeScoutResult[];
   recommended: AlternativeScoutResult[];
   rejected?: AlternativeScoutResult[];
+  scouted?: AlternativeScoutResult[];
   generatedAt: string;
 };
 
@@ -1252,7 +1255,11 @@ function buyInProviderSearchStatus(
 ) {
   const config = BUY_IN_SEARCH_PROVIDER_CONFIG.find((provider) => provider.key === key)!;
   const stats = buyInProviderStats(summary, diagnostics, key);
-  const hardFailed = stats.status === "error" || stats.status === "timeout";
+  const hardFailed = stats.status === "error"
+    || stats.status === "timeout"
+    || /setDownloadBehavior|context management is not supported/i.test(
+      `${stats.diagnostic?.failureReason ?? ""} ${stats.diagnostic?.reason ?? ""} ${stats.diagnostic?.message ?? ""}`,
+    );
   const searched = stats.searched || stats.raw > 0;
   const passed = !hardFailed && stats.status === "ok" && searched && stats.raw > 0;
   const warned = !passed && !hardFailed && searched;
@@ -1684,6 +1691,29 @@ function buyInCancellationTier(score: number): BuyInCancellationTier {
   return "do_not_cancel";
 }
 
+function shouldShowAlternativeBuyInWorkflow(
+  advice: BuyInCancellationAdvice | null,
+  opts?: { noCompleteCombo?: boolean },
+): boolean {
+  if (!advice) return false;
+  if (opts?.noCompleteCombo) return true;
+  if (advice.basis === "no_inventory" || advice.basis === "insufficient_coverage") return true;
+  return advice.score >= 50;
+}
+
+function countAttachableBuyInCandidates(audits: AutoFillSearchAudit[]): number {
+  return audits.flatMap((audit) => audit.candidates).filter((candidate) => {
+    if (candidate.verified !== "yes") return false;
+    if (candidate.source === "airbnb") return false;
+    return true;
+  }).length;
+}
+
+function providerSidecarProtocolFailed(status: ReturnType<typeof buyInProviderSearchStatus>): boolean {
+  const hay = `${status.failureReason ?? ""} ${status.message ?? ""} ${status.stats.diagnostic?.reason ?? ""}`;
+  return /setDownloadBehavior|context management is not supported/i.test(hay);
+}
+
 function buyInCancellationTitle(tier: BuyInCancellationTier): string {
   switch (tier) {
     case "cancel": return "Cancel likely justified";
@@ -1729,6 +1759,8 @@ function buildBuyInCancellationAdvice(args: {
   audits: AutoFillSearchAudit[];
   proposedCost?: number | null;
   currentSlotId?: string;
+  noCompleteCombo?: boolean;
+  attachableVerifiedCount?: number;
 }): BuyInCancellationAdvice | null {
   const audits = args.audits.filter(Boolean);
   if (audits.length === 0) return null;
@@ -1743,12 +1775,18 @@ function buildBuyInCancellationAdvice(args: {
     providerKey === key && status.hardFailed,
   );
   const providerClean = (key: BuyInSearchProviderKey) => providerStatuses.some(({ key: providerKey, status }) =>
-    providerKey === key && status.stats.searched && status.stats.status === "ok" && !status.hardFailed,
+    providerKey === key
+    && status.stats.searched
+    && status.stats.status === "ok"
+    && !status.hardFailed
+    && !providerSidecarProtocolFailed(status),
   );
   const providersSearched = BUY_IN_OTA_PROVIDER_KEYS.filter(providerWasSearched).length;
   const providersClean = BUY_IN_OTA_PROVIDER_KEYS.filter(providerClean).length;
   const providersHardFailed = BUY_IN_OTA_PROVIDER_KEYS.filter(providerHardFailed).length;
-  const verifiedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.verified, 0);
+  const providerVerifiedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.verified, 0);
+  const attachableVerifiedCount = args.attachableVerifiedCount ?? countAttachableBuyInCandidates(audits);
+  const verifiedCount = attachableVerifiedCount;
   const pricedCount = providerStatuses.reduce((sum, { status }) => sum + status.stats.priced, 0);
   const diagnosticsHardError = audits.some((audit) => audit.diagnostics?.severity === "error");
   const completedEnough = providersClean >= 2 && providersHardFailed === 0 && !diagnosticsHardError;
@@ -1758,13 +1796,18 @@ function buildBuyInCancellationAdvice(args: {
       ? "medium"
       : "low";
 
-  const candidateCost = args.proposedCost && args.proposedCost > 0
-    ? args.proposedCost
-    : audits
-      .flatMap((audit) => audit.candidates)
-      .map((candidate) => candidate.totalPrice)
-      .filter((price) => Number.isFinite(price) && price > 0)
-      .sort((a, b) => a - b)[0] ?? null;
+  const candidateCost = args.noCompleteCombo
+    ? null
+    : args.proposedCost && args.proposedCost > 0
+      ? args.proposedCost
+      : attachableVerifiedCount > 0
+        ? audits
+          .flatMap((audit) => audit.candidates)
+          .filter((candidate) => candidate.verified === "yes" && candidate.source !== "airbnb")
+          .map((candidate) => candidate.totalPrice)
+          .filter((price) => Number.isFinite(price) && price > 0)
+          .sort((a, b) => a - b)[0] ?? null
+        : null;
 
   const existingCost = args.reservation.slots.reduce((sum, slot) => {
     if (args.currentSlotId && slot.unitId === args.currentSlotId) return sum;
@@ -1778,20 +1821,25 @@ function buildBuyInCancellationAdvice(args: {
   let basis: BuyInCancellationAdvice["basis"];
   const evidence: string[] = [];
 
-  if (candidateCost == null || verifiedCount === 0) {
+  if (candidateCost == null || verifiedCount === 0 || args.noCompleteCombo) {
     basis = completedEnough ? "no_inventory" : "insufficient_coverage";
-    // A no-inventory scan is important, but it is still a negative signal
-    // from volatile OTA searches. Do not let one scan say "cancel
-    // recommended" unless there is also a verified replacement-cost loss.
     score = providersClean >= 3 && providersHardFailed === 0 ? 84 : providersClean >= 2 && providersHardFailed === 0 ? 68 : 45;
-    summary = providersClean >= 3
-      ? "All three OTA checks completed cleanly and found no verified bookable inventory. Treat this as a strong warning, then re-run or manually confirm before canceling."
-      : completedEnough
-        ? "No verified bookable inventory was kept, but only two OTA checks completed cleanly. Treat this as manual-review evidence, not a cancel decision."
-        : "No verified bookable inventory was kept, and provider coverage was not strong enough for a cancellation call.";
-    evidence.push(`${verifiedCount} verified bookable rows across ${providersClean}/3 clean OTA provider checks (${providersSearched}/3 searched).`);
+    if (args.noCompleteCombo) {
+      score = Math.max(score, providersClean >= 2 ? 78 : 68);
+    }
+    summary = args.noCompleteCombo
+      ? "No complete two-unit buy-in combination was verified for this resort and stay. Consider canceling after scouting nearby communities or re-running per-slot searches."
+      : providersClean >= 3
+        ? "All three OTA checks completed cleanly and found no attachable bookable inventory. Treat this as a strong warning, then re-run or manually confirm before canceling."
+        : completedEnough
+          ? "No attachable bookable inventory was kept, but only two OTA checks completed cleanly. Treat this as manual-review evidence, not a cancel decision."
+          : "No attachable bookable inventory was kept, and provider coverage was not strong enough for a cancellation call.";
+    evidence.push(`${verifiedCount} attachable verified row${verifiedCount === 1 ? "" : "s"} across ${providersClean}/3 clean OTA provider checks (${providersSearched}/3 searched).`);
+    if (providerVerifiedCount > verifiedCount) {
+      evidence.push(`${providerVerifiedCount - verifiedCount} additional Airbnb-priced row${providerVerifiedCount - verifiedCount === 1 ? "" : "s"} could not be attached without a direct booking link.`);
+    }
     if (pricedCount > 0) {
-      evidence.push(`${pricedCount} priced row${pricedCount === 1 ? "" : "s"} appeared, but none survived verification/identity/availability checks.`);
+      evidence.push(`${pricedCount} priced row${pricedCount === 1 ? "" : "s"} appeared, but none survived attachable verification/identity checks.`);
     }
   } else {
     basis = "verified_cost";
@@ -1914,7 +1962,17 @@ function AlternativeBuyInWorkflowPanel({
 }) {
   const active = workflow?.activeCommunity ?? null;
   const sidecarResults = workflow?.sidecarResults ?? {};
-  const communities = workflow?.scout?.results ?? [];
+  const communities = (() => {
+    const scouted = workflow?.scout?.scouted ?? workflow?.scout?.results ?? [];
+    const byCommunity = new Map<string, AlternativeScoutResult>();
+    for (const row of scouted) byCommunity.set(row.community, row);
+    for (const row of workflow?.scout?.rejected ?? []) {
+      if (!byCommunity.has(row.community)) byCommunity.set(row.community, row);
+    }
+    return Array.from(byCommunity.values()).sort(
+      (a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999),
+    );
+  })();
   const completeReplacementSet = bestAlternativeReplacementSet(workflow);
   const replacementPlanText = alternativeReplacementNeedText(workflow);
   return (
@@ -1923,8 +1981,14 @@ function AlternativeBuyInWorkflowPanel({
         <div>
           <p className="font-semibold">Alternative buy-in workflow</p>
           <p className="text-[11px] opacity-80">
-            Scout nearby communities with SearchAPI Airbnb first, then run the full sidecar search for communities that prove a complete replacement combo.
+            Scouts every configured buy-in community within ~20 minutes drive of {workflow?.scout?.baseCommunity ?? "this resort"}
+            {workflow?.scout?.requiresOceanfrontComparable ? " (waterfront communities only)" : ""}, then run the full sidecar search where Airbnb proves a replacement combo.
           </p>
+          {(workflow?.scout?.nearbyWithinDriveMinutes?.length ?? 0) > 0 && (
+            <p className="mt-0.5 text-[11px] opacity-80">
+              Within 20 min: {workflow!.scout!.nearbyWithinDriveMinutes!.map((row) => `${row.community} (~${row.driveMinutes} min)`).join(" · ")}
+            </p>
+          )}
           {replacementPlanText && (
             <p className="mt-0.5 text-[11px] opacity-80">
               Airbnb proof required: {replacementPlanText}{workflow?.scout?.requiresOceanfrontComparable ? " · oceanfront comparable only" : ""}
@@ -2040,6 +2104,26 @@ function directCandidateFitsTarget(
       || /\b1831\s+poipu\b/.test(hay);
   }
   return true;
+}
+
+function comboOptionVisiblePicks(
+  option: AutoFillComboOption,
+  targetResortName: string,
+  community: string,
+) {
+  return option.picks.filter((pick) => directCandidateFitsTarget(targetResortName, community, pick));
+}
+
+function comboOptionIsComplete(
+  option: AutoFillComboOption,
+  targetResortName: string,
+  community: string,
+): boolean {
+  const visiblePicks = comboOptionVisiblePicks(option, targetResortName, community);
+  return visiblePicks.length === option.bedrooms.length
+    && option.picks.length === option.bedrooms.length
+    && typeof option.totalCost === "number"
+    && Number.isFinite(option.totalCost);
 }
 
 function targetLocationRejectReason(
@@ -2668,25 +2752,30 @@ function ComboComparisonPanel({
     url?: string | null;
   }) => directCandidateFitsTarget(targetResortName, community, candidate);
   const visibleOptions = options.map((option) => {
-    const filteredPicks = option.picks.filter(candidateVisibleForTarget);
-    const allPicksVisible = filteredPicks.length === option.picks.length;
+    const filteredPicks = comboOptionVisiblePicks(option, targetResortName, community);
+    const isComplete = comboOptionIsComplete(option, targetResortName, community);
+    const missingUnits = option.bedrooms.length - filteredPicks.length;
     return {
       ...option,
-      selected: option.selected && allPicksVisible,
-      totalCost: allPicksVisible ? option.totalCost : null,
-      unavailableReason: allPicksVisible
+      selected: option.selected && isComplete,
+      totalCost: isComplete ? option.totalCost : null,
+      unavailableReason: isComplete
         ? option.unavailableReason
-        : `Filtered out off-target rows that did not match ${targetResortName || community}`,
-      picks: filteredPicks,
+        : filteredPicks.length === 0
+          ? option.unavailableReason ?? `No bookable ${option.label} combination found for ${targetResortName || community} on these dates.`
+          : `Could not verify a complete ${option.label} combination — only ${filteredPicks.length}/${option.bedrooms.length} unit${filteredPicks.length === 1 ? "" : "s"} matched ${targetResortName || community}${missingUnits > 0 ? ` (${missingUnits} still missing)` : ""}.`,
+      picks: isComplete ? filteredPicks : [],
       pools: option.pools?.map((pool) => ({
         ...pool,
         candidates: pool.candidates.filter(candidateVisibleForTarget),
       })),
     };
   });
-  const selected = visibleOptions.find((option) => option.selected);
-  const pricedVisibleOptions = visibleOptions
-    .filter((option) => typeof option.totalCost === "number" && Number.isFinite(option.totalCost))
+  const completeVisibleOptions = visibleOptions.filter((option) =>
+    comboOptionIsComplete(option, targetResortName, community),
+  );
+  const selected = completeVisibleOptions.find((option) => option.selected);
+  const pricedVisibleOptions = completeVisibleOptions
     .sort((a, b) => (a.totalCost ?? Number.POSITIVE_INFINITY) - (b.totalCost ?? Number.POSITIVE_INFINITY));
   const primaryOption = selected ?? pricedVisibleOptions[0] ?? visibleOptions[0];
   const secondaryOption = pricedVisibleOptions.find((option) => option.label !== primaryOption?.label)
@@ -2786,9 +2875,19 @@ function ComboComparisonPanel({
     : 0;
   return (
     <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs">
+      {completeVisibleOptions.length === 0 && (
+        <div className="mb-2 rounded border border-amber-300 bg-amber-50 px-2 py-2 text-amber-950">
+          <p className="font-semibold">No complete two-unit combination found</p>
+          <p className="mt-0.5 text-[11px]">
+            We compared {visibleOptions.map((option) => option.label).join(" and ")} for {targetResortName || community} but could not verify two distinct bookable units for this stay.
+          </p>
+        </div>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="font-medium text-emerald-900">
-          {bestOptimizedCombo
+          {completeVisibleOptions.length === 0
+            ? "Two-unit combination search"
+            : bestOptimizedCombo
             ? `Direct-optimized combination: ${bestOptimizedCombo.option.label} · ${fmtMoney(bestOptimizedCombo.totalCost)}`
             : `Cheapest two-unit combination${selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}`}
         </p>
@@ -5511,9 +5610,22 @@ export default function Bookings() {
       const skipped = results.filter((r) => !r.picked).map((r) => r.slot.unitLabel);
       const zeroCostFills = filled.filter((r) => (r.picked?.totalPrice ?? 0) === 0);
       const selectedCombo = comboOptions.find((option) => option.selected);
+      const comboTargetResort = directBookingTargetResortName(
+        PROPERTY_UNIT_CONFIGS[selectedBuyInPropertyId ?? 0]?.community
+          ?? reservation.slots.find((slot) => slot.community)?.community
+          ?? "",
+      );
+      const comboCommunity = PROPERTY_UNIT_CONFIGS[selectedBuyInPropertyId ?? 0]?.community
+        ?? reservation.slots.find((slot) => slot.community)?.community
+        ?? "";
       const comboSummary = comboOptions.length > 0
         ? ` · Compared ${comboOptions
-            .map((option) => `${option.label}: ${option.totalCost == null ? option.unavailableReason ?? "unavailable" : fmtMoney(option.totalCost)}`)
+            .map((option) => {
+              if (comboOptionIsComplete(option, comboTargetResort, comboCommunity)) {
+                return `${option.label}: ${fmtMoney(option.totalCost ?? 0)}`;
+              }
+              return `${option.label}: no complete combination`;
+            })
             .join("; ")}${selectedCombo ? ` · Selected ${selectedCombo.label}` : ""}`
         : "";
       if (!variables?.silent && searchAudits.length > 0) {
@@ -7608,20 +7720,34 @@ export default function Bookings() {
                           />
                         )}
                         {searchAudits.length > 0 && (() => {
-                          const selectedCombo = comboOptions.find((option) => option.selected && option.totalCost != null);
-	                          const fallbackCost = comboOptions
+                          const comboTargetResort = directBookingTargetResortName(
+                            selectedPropertyId
+                              ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+                              : r.slots.find((slot) => slot.community)?.community ?? "",
+                          );
+                          const comboCommunity = selectedPropertyId
+                            ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
+                            : r.slots.find((slot) => slot.community)?.community ?? "";
+                          const completeComboOptions = comboOptions.filter((option) =>
+                            comboOptionIsComplete(option, comboTargetResort, comboCommunity),
+                          );
+                          const selectedCombo = completeComboOptions.find((option) => option.selected);
+	                          const fallbackCost = completeComboOptions
 	                            .map((option) => option.totalCost)
 	                            .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
 	                            .sort((a, b) => a - b)[0] ?? null;
+	                          const noCompleteCombo = comboOptions.length > 0 && completeComboOptions.length === 0;
 	                          const advice = buildBuyInCancellationAdvice({
 	                            reservation: r,
 	                            audits: searchAudits,
-	                            proposedCost: selectedCombo?.totalCost ?? fallbackCost,
+	                            proposedCost: noCompleteCombo ? null : selectedCombo?.totalCost ?? fallbackCost,
+	                            noCompleteCombo,
+	                            attachableVerifiedCount: countAttachableBuyInCandidates(searchAudits),
 	                          });
 	                          return (
 	                            <div className="space-y-2">
 	                              <BuyInCancellationAdviceCard advice={advice} />
-	                              {advice && advice.score >= 70 && (
+	                              {shouldShowAlternativeBuyInWorkflow(advice, { noCompleteCombo }) && (
 	                                <AlternativeBuyInWorkflowPanel
 	                                  workflow={alternativeWorkflows[r._id]}
 	                                  onScout={() => scoutAlternativeCommunities(r, advice)}
@@ -7822,6 +7948,10 @@ export default function Bookings() {
                                 slot={slot}
                                 listingId={selectedListingId}
                                 enableGroundFloorRequirement={selectedHasBuyInConfig}
+                                alternativeWorkflow={alternativeWorkflows[r._id]}
+                                onScoutAlternatives={(advice) => scoutAlternativeCommunities(r, advice)}
+                                onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(r, community)}
+                                onDraftAlternativeMessage={() => draftAlternativeGuestMessage(r)}
                               />
                             </div>
                           )}
@@ -8504,6 +8634,10 @@ export default function Bookings() {
               slot={picker.slot}
               listingId={selectedListingId}
               enableGroundFloorRequirement={selectedHasBuyInConfig}
+              alternativeWorkflow={alternativeWorkflows[picker.reservation._id]}
+              onScoutAlternatives={(advice) => scoutAlternativeCommunities(picker.reservation, advice)}
+              onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(picker.reservation, community)}
+              onDraftAlternativeMessage={() => draftAlternativeGuestMessage(picker.reservation)}
             />
           )}
         </DialogContent>
@@ -8889,12 +9023,20 @@ function CandidateList({
   slot,
   listingId,
   enableGroundFloorRequirement = true,
+  alternativeWorkflow,
+  onScoutAlternatives,
+  onRunAlternativeCommunity,
+  onDraftAlternativeMessage,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
   listingId?: string | null;
   enableGroundFloorRequirement?: boolean;
+  alternativeWorkflow?: AlternativeWorkflowState;
+  onScoutAlternatives?: (advice: BuyInCancellationAdvice) => void;
+  onRunAlternativeCommunity?: (community: string) => void;
+  onDraftAlternativeMessage?: () => void;
 }) {
   // Existing-buy-ins picker was removed (was here historically): when
   // auto-fill creates buy-in records and the operator detaches them,
@@ -8914,6 +9056,10 @@ function CandidateList({
         slot={slot}
         listingId={listingId}
         enableGroundFloorRequirement={enableGroundFloorRequirement}
+        alternativeWorkflow={alternativeWorkflow}
+        onScoutAlternatives={onScoutAlternatives}
+        onRunAlternativeCommunity={onRunAlternativeCommunity}
+        onDraftAlternativeMessage={onDraftAlternativeMessage}
       />
     </div>
   );
@@ -10068,12 +10214,20 @@ function LiveSearchSection({
   slot,
   listingId,
   enableGroundFloorRequirement = true,
+  alternativeWorkflow,
+  onScoutAlternatives,
+  onRunAlternativeCommunity,
+  onDraftAlternativeMessage,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
   listingId?: string | null;
   enableGroundFloorRequirement?: boolean;
+  alternativeWorkflow?: AlternativeWorkflowState;
+  onScoutAlternatives?: (advice: BuyInCancellationAdvice) => void;
+  onRunAlternativeCommunity?: (community: string) => void;
+  onDraftAlternativeMessage?: () => void;
 }) {
   const { toast } = useToast();
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
@@ -10505,12 +10659,19 @@ function LiveSearchSection({
       .filter((price) => Number.isFinite(price) && price > 0)
       .sort((a, b) => a - b)[0] ?? null
     : null;
+  const singleSearchAttachableCount = confirmationAudit
+    ? countAttachableBuyInCandidates([confirmationAudit])
+    : 0;
   const singleSearchCancellationAdvice = buildBuyInCancellationAdvice({
     reservation,
     audits: confirmationAudit ? [confirmationAudit] : [],
-    proposedCost: focusedUnitCheapestPrice ?? availableCheapest[0]?.totalPrice ?? null,
+    proposedCost: singleSearchAttachableCount > 0
+      ? focusedUnitCheapestPrice ?? availableCheapest[0]?.totalPrice ?? null
+      : null,
     currentSlotId: slot.unitId,
+    attachableVerifiedCount: singleSearchAttachableCount,
   });
+  const singleSearchNoBookableReplacement = singleSearchAttachableCount === 0 && !!confirmationAudit;
 
   // Map a unit's primary listing back to a LiveCandidate so the existing
   // record-buy-in dialog can keep its current contract. PRs #275+ will
@@ -10744,6 +10905,14 @@ function LiveSearchSection({
       )}
 
       <BuyInCancellationAdviceCard advice={singleSearchCancellationAdvice} />
+      {shouldShowAlternativeBuyInWorkflow(singleSearchCancellationAdvice, { noCompleteCombo: singleSearchNoBookableReplacement }) && onScoutAlternatives && (
+        <AlternativeBuyInWorkflowPanel
+          workflow={alternativeWorkflow}
+          onScout={() => onScoutAlternatives(singleSearchCancellationAdvice!)}
+          onRunCommunity={(community) => onRunAlternativeCommunity?.(community)}
+          onDraftMessage={() => onDraftAlternativeMessage?.()}
+        />
+      )}
 
       {/* Cheapest callout — gated server-side on verified=yes (real
           availability + real per-night rate confirmed for these dates).

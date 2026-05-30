@@ -34,7 +34,7 @@ import { verifyPmRate } from "./pm-rate-agent";
 import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-availability";
 import { captchaAutomationUnavailable } from "./captcha-policy";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
-import { findAvailableVrpUnits, VRP_SITES, probeForVrpMain } from "./pm-scraper-vrp";
+import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
@@ -104,10 +104,12 @@ import {
   BUY_IN_MARKET_PLATFORM_SEARCH_TERMS,
   BUY_IN_MARKET_SEARCH_LOCATIONS,
   SIMILAR_BUY_IN_MARKETS,
+  driveMinutesBetweenBuyInMarkets,
+  nearbyBuyInMarketsForScout,
+  nearbyBuyInMarketsForScoutDetailed,
+  oceanfrontComparableBuyInMarket,
   resolveBuyInMarket,
   searchLocationForBuyInMarket,
-  getNearbyBuyInCommunities,
-  estimateDriveMinutes,
 } from "@shared/buy-in-market";
 import { draftPhotoFolderRef, isScannableFolder, replacementPhotoFolderRef, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import {
@@ -6380,16 +6382,12 @@ export async function registerRoutes(
   });
 
   const validBuyInMarketKeys = () => Object.keys(BUY_IN_MARKETS).filter((key) => key !== "Florida Generic").sort();
-  const defaultBuyInMarketsFor = (baseCommunity: string): string[] => {
-    // Prefer dynamic 15-min drive radius (any community the operator could plausibly
-    // drive a guest to in ~15 minutes). Falls back to static curated list only if
-    // the base has no coordinates.
-    const dynamic = getNearbyBuyInCommunities(baseCommunity, 15);
-    if (dynamic.length > 0) return dynamic.slice(0, 6);
-    return (SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [])
-      .filter((market) => !!BUY_IN_MARKETS[market] && market !== baseCommunity)
-      .slice(0, 3);
-  };
+  const defaultBuyInMarketsFor = (baseCommunity: string): string[] =>
+    nearbyBuyInMarketsForScout(baseCommunity, {
+      maxDriveMinutes: 20,
+      oceanfrontOnly: oceanfrontComparableBuyInMarket(baseCommunity),
+      limit: 3,
+    });
   const sanitizeRecommendedBuyInMarkets = (baseCommunity: string, raw: unknown): string[] => {
     if (!Array.isArray(raw)) throw new Error("markets must be an array");
     const seen = new Set<string>();
@@ -6585,11 +6583,6 @@ export async function registerRoutes(
     }
   });
 
-  function oceanfrontComparableBuyInMarket(community: string | null | undefined): boolean {
-    const key = String(community ?? "").toLowerCase();
-    return /\b(oceanfront|beachfront|brennecke|poipu kai)\b/.test(key);
-  }
-
   function twoUnitReplacementPlans(preferredBedrooms: number[]): number[][] {
     const total = preferredBedrooms.reduce((sum, n) => sum + (Number.isFinite(n) ? n : 0), 0);
     if (total <= 0) return [];
@@ -6681,16 +6674,17 @@ export async function registerRoutes(
       const savedMarketConfig = await storage.getPropertyBuyInMarkets(propertyId).catch(() => undefined);
       const configuredSimilar = Array.isArray(savedMarketConfig?.recommendedMarkets) && savedMarketConfig.recommendedMarkets.length > 0
         ? savedMarketConfig.recommendedMarkets
-        : null;
-      // When no operator-saved recommended markets, use 15-min drive radius from the
-      // community's center (or precise address if we resolve one). This is what makes
-      // the alternative buy-in workflow and related buy-in tools show *all* plausible
-      // communities within a short drive instead of being stuck at 2-3 static entries.
-      const baseSimilar = configuredSimilar ?? getNearbyBuyInCommunities(baseCommunity, 15);
-      const similar = baseSimilar
+        : [];
+      const driveNearbyDetailed = nearbyBuyInMarketsForScoutDetailed(baseCommunity, {
+        maxDriveMinutes: 20,
+        oceanfrontOnly: sourceRequiresOceanfront,
+        limit: 12,
+      });
+      const driveNearby = driveNearbyDetailed.map((row) => row.community);
+      const similar = Array.from(new Set([...configuredSimilar, ...driveNearby]))
+        .filter((community) => community !== baseCommunity)
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
-        .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community))
-        .slice(0, 8);  // allow more now that radius is explicit and drive-based
+        .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community));
       const replacementPlans = twoUnitReplacementPlans(propertyConfig?.units?.map((unit) => unit.bedrooms) ?? [bedrooms]);
       const minAirbnbResults = Math.max(1, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "1"), 10) || 1));
       const results = await Promise.all(similar.map(async (community) => {
@@ -6748,6 +6742,7 @@ export async function registerRoutes(
           const bestPlan = passingPlans[0] ?? null;
           const maxPlanCount = Math.max(0, ...Object.values(countsByBedroom));
           const samples = flattenScoutSamplesForPlan(samplesByBedroom, bestPlan ?? replacementPlans[0]);
+          const driveMinutesFromBase = driveMinutesBetweenBuyInMarkets(baseCommunity, community);
           return {
             community,
             searchTerm: q,
@@ -6756,12 +6751,13 @@ export async function registerRoutes(
             raw: Object.values(countsByBedroom).reduce((sum, count) => sum + count, 0),
             recommended: passingPlans.length > 0,
             reason: passingPlans.length > 0
-              ? `Airbnb scout passed ${bestPlan!.join("+")}BR replacement proof (${formatBedroomCounts(countsByBedroom)}).`
-              : `Airbnb scout could not prove a complete replacement combo (${replacementPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")}; ${formatBedroomCounts(countsByBedroom)}).`,
+              ? `Airbnb scout passed ${bestPlan!.join("+")}BR replacement proof (${formatBedroomCounts(countsByBedroom)}${driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : ""}).`
+              : `Airbnb scout could not prove a complete replacement combo (${replacementPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")}; ${formatBedroomCounts(countsByBedroom)}${driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : ""}).`,
             countsByBedroom,
             passingPlans,
             replacementPlans,
             oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
+            driveMinutesFromBase,
             errors,
             durationMs: Date.now() - startedAt,
             samples,
@@ -6796,9 +6792,11 @@ export async function registerRoutes(
         threshold: minAirbnbResults,
         requiresOceanfrontComparable: sourceRequiresOceanfront,
         replacementPlans,
+        nearbyWithinDriveMinutes: driveNearbyDetailed,
         results: recommended,
         recommended,
         rejected: results.filter((r) => !r.recommended),
+        scouted: results,
         generatedAt: new Date().toISOString(),
       });
     } catch (err: any) {
@@ -7974,7 +7972,8 @@ export async function registerRoutes(
     expiresAt: number;
   };
   const buyInListingSitesCache = new Map<string, BuyInListingSitesCacheEntry>();
-  const FIND_BUY_IN_TTL_MS = 5 * 60_000;
+  // Buy-in scans must always hit live SearchAPI + sidecar work — no HTTP result cache.
+  const FIND_BUY_IN_TTL_MS = 0;
   const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
   // Railway's edge can return "Application failed to respond" when a
   // long handler stays silent. find-buy-in is allowed to run longer
@@ -9092,10 +9091,20 @@ export async function registerRoutes(
     const googleDiscoveryEnabled = airbnbDirectLensEnabled;
     const pmGoogleDiscoveryEnabled = includePm && googleDiscoveryEnabled;
     const looseResortPhotoProof = propertyUnitConfig?.looseResortPhotoProof === true;
+    const requestedBedrooms = bedrooms;
+    const propertyUnitSlots = propertyUnitConfig?.units ?? [];
+    const maxUnitBedrooms = propertyUnitSlots.length > 0
+      ? Math.max(...propertyUnitSlots.map((u) => u.bedrooms))
+      : requestedBedrooms;
+    // Multi-unit listings (e.g. Poipu Kai 3+3) are filled with per-unit buy-ins, not one 4–6BR OTA search.
+    const buyInBedroomFloor = propertyUnitSlots.length >= 2 && requestedBedrooms > maxUnitBedrooms
+      ? maxUnitBedrooms
+      : requestedBedrooms;
+    const otaSearchBedrooms = buyInBedroomFloor;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
     const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v3-strict|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
-    const noCache = req.query.nocache === "1";
+    const noCache = req.query.nocache === "1" || FIND_BUY_IN_TTL_MS <= 0;
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
     let findBuyInLaneHeartbeat: ReturnType<typeof setInterval> | null = null;
@@ -9314,7 +9323,7 @@ export async function registerRoutes(
     const mentionsKnownNonPoipuKaiComplex = (haystack: string): boolean => {
       if (normalizedResortName !== "poipu kai") return false;
       const n = norm(haystack);
-      return /\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|lihue|kalapaki|springboard hospitality|employer profile|careers?|jobs?|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
+      return /\b(nihi kai|kipu|pili mai|kiahuna|makahuena|waikomo|waikomo stream|lawai beach|hale kahanalu|banyan harbor|poipu beach estates|lihue|kalapaki|springboard hospitality|employer profile|careers?|jobs?|blue\s*tide|bluetidevillas|leilani house|kauai kailani|royal coconut coast|kapaa|kapa a|kuhio highway|kuhio|ocean forest villas|elliottbeachrentals|staywaileabeachvillas|glynlea|myrtle beach|port st lucie|wailea|kihei|lahaina|wailuku|maui|kona|kailua kona|ko olina|bonita springs|florida|la quinta|palm springs)\b/.test(n);
     };
     const mentionsKnownNonKahaLaniComplex = (haystack: string): boolean => {
       if (!targetIsKahaLani) return false;
@@ -9374,7 +9383,14 @@ export async function registerRoutes(
     const bedroomOk = (text: string): boolean => {
       const b = bedroomFromText(text);
       if (b === null) return true; // unknown — keep for manual review
-      return b >= bedrooms;
+      return b >= buyInBedroomFloor;
+    };
+    const satisfiesBuyInBedrooms = (signal: number | null): boolean => {
+      if (signal === null) return false;
+      if (signal === requestedBedrooms) return true;
+      return propertyUnitSlots.length >= 2
+        && requestedBedrooms > maxUnitBedrooms
+        && signal >= buyInBedroomFloor;
     };
     const pmDeepDiveResortOk = (haystack: string): boolean => {
       if (mentionsKnownNonRegencyPoipuKaiComplex(haystack) || mentionsKnownNonPoipuKaiComplex(haystack) || mentionsKnownNonKahaLaniComplex(haystack)) {
@@ -9398,7 +9414,9 @@ export async function registerRoutes(
     const bookingWebsiteSearchTerm = buyInPlatformSearch.booking ?? websiteSearchTerm;
     const vrboWebsiteSearchTerm = buyInPlatformSearch.vrbo ?? websiteSearchTerm;
     const pmWebsiteSearchTerm = buyInPlatformSearch.pm ?? websiteSearchTerm;
-    console.log(`[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" booking="${bookingWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${bedrooms} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`);
+    console.log(
+      `[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" booking="${bookingWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${requestedBedrooms}${otaSearchBedrooms !== requestedBedrooms ? ` otaSearchBedrooms=${otaSearchBedrooms}` : ""} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`,
+    );
 
     const scanStartedAt = Date.now();
     const { getSidecarStopGeneration } = await import("./vrbo-sidecar-queue");
@@ -9818,12 +9836,17 @@ export async function registerRoutes(
           || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return false;
       const inferredBedrooms = candidateBedroomSignal(c);
-      if (inferredBedrooms !== null && inferredBedrooms < bedrooms) return false;
+      if (inferredBedrooms !== null && inferredBedrooms < buyInBedroomFloor) return false;
       if (opts.requireBedroomProof && inferredBedrooms === null) return false;
       if (pricePlausibilityReason(c)) return false;
       if (targetIsRegencyPoipuKai) {
         if (!visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c) && !strongRegencyProof) return false;
-      } else if (!searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) {
+      } else if (
+        !searchProofCanCarryTarget
+        && !pricePlausibleSearchProof
+        && !candidateIsPoipuKaiCondoLike(c)
+        && !(normalizedResortName === "poipu kai" && mentionsPoipuKai(hay))
+      ) {
         return false;
       }
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
@@ -9862,13 +9885,21 @@ export async function registerRoutes(
           || (c.source === "vrbo" && normalizedResortName === "poipu kai" && candidateIsPoipuKaiCondoLike(c));
       if (!targetSignal) return "no visible target resort proof";
       const inferredBedrooms = candidateBedroomSignal(c);
-      if (inferredBedrooms !== null && inferredBedrooms < bedrooms) return `bedroom mismatch ${inferredBedrooms}BR < ${bedrooms}BR`;
+      if (inferredBedrooms !== null && inferredBedrooms < buyInBedroomFloor) {
+        return `bedroom mismatch ${inferredBedrooms}BR < ${buyInBedroomFloor}BR`;
+      }
       const priceReason = pricePlausibilityReason(c);
       if (priceReason) return priceReason;
       if (targetIsRegencyPoipuKai && !visibleResortProof && !photoMatchProof && !candidateIsPoipuKaiCondoLike(c) && !strongRegencyProof) {
         return "no Regency-specific proof";
       }
-      if (!targetIsRegencyPoipuKai && !searchProofCanCarryTarget && !pricePlausibleSearchProof && !candidateIsPoipuKaiCondoLike(c)) {
+      if (
+        !targetIsRegencyPoipuKai
+        && !searchProofCanCarryTarget
+        && !pricePlausibleSearchProof
+        && !candidateIsPoipuKaiCondoLike(c)
+        && !(normalizedResortName === "poipu kai" && mentionsPoipuKai(hay))
+      ) {
         return "not condo-like for target";
       }
       if (c.source === "pm" && !isDetailUrl("pm", c.url)) return "PM URL is not a detail page";
@@ -9907,8 +9938,10 @@ export async function registerRoutes(
       const targetReject = candidateTargetRejectReason(c);
       if (targetReject !== "unknown target-filter rejection") return targetReject;
       const inferredBedrooms = candidateBedroomSignal(c);
-      if (inferredBedrooms === null) return `no explicit ${bedrooms}BR proof on listing/search result`;
-      if (inferredBedrooms !== bedrooms) return `bedroom mismatch ${inferredBedrooms}BR != requested ${bedrooms}BR`;
+      if (inferredBedrooms === null) return `no explicit ${requestedBedrooms}BR proof on listing/search result`;
+      if (!satisfiesBuyInBedrooms(inferredBedrooms)) {
+        return `bedroom mismatch ${inferredBedrooms}BR != requested ${requestedBedrooms}BR`;
+      }
       if (!candidateHasFinalResortProof(c)) return `no final ${resortName ?? community} resort/community proof`;
       return null;
     };
@@ -9917,7 +9950,7 @@ export async function registerRoutes(
       && (!c.airbnbAnchorUrl || candidateHasUsableAirbnbDirectLink(c))
       && (!c.directBookingUrl || candidateHasUsableAirbnbDirectLink(c))
       && candidateFitsTarget(c, { requireBedroomProof: true })
-      && candidateBedroomSignal(c) === bedrooms
+      && satisfiesBuyInBedrooms(candidateBedroomSignal(c))
       && candidateHasFinalResortProof(c);
 
     // Append the reservation's check-in/out to the URL so the landing page
@@ -10060,6 +10093,7 @@ export async function registerRoutes(
       listingTitle: listingTitle ?? undefined,
       propertyId,
       detail: `${providerLabel}: scanning ${bedrooms}BR unit · ${sidecarQueueDateLabel} · ${(resortName || community).trim()}`,
+      skipResultCache: true,
     });
     const airbnbSidecarAbort = makeSidecarAbort("airbnb-searchapi");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
@@ -10070,7 +10104,7 @@ export async function registerRoutes(
           check_in_date: checkIn,
           check_out_date: checkOut,
           adults: "2",
-          bedrooms: String(bedrooms),
+          bedrooms: String(otaSearchBedrooms),
           type_of_place: "entire_home",
           currency: "USD",
           api_key: apiKey,
@@ -10110,7 +10144,7 @@ export async function registerRoutes(
             return false;
           }
           const inferred = bedroomFromText(hay);
-          if (inferred !== null && inferred < bedrooms) {
+          if (inferred !== null && inferred < buyInBedroomFloor) {
             wrongBedrooms++;
             return false;
           }
@@ -10138,6 +10172,7 @@ export async function registerRoutes(
             verified: "yes",
             verifiedNightlyPrice: Math.round(nightly),
             verifiedReason: "SearchAPI Airbnb engine returned this date-specific priced result for the resort, dates, and bedroom filter",
+            inTargetBounds: airbnbCoordsInBounds(p, bounds, 0.01),
           };
         });
       } catch (e: any) {
@@ -10170,7 +10205,7 @@ export async function registerRoutes(
           searchTerm: bookingWebsiteSearchTerm,
           checkIn,
           checkOut,
-          bedrooms,
+          bedrooms: otaSearchBedrooms,
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
           rerunOnlyUntried: rerunOnlyUntriedVariations,
@@ -10191,12 +10226,13 @@ export async function registerRoutes(
         bookingPricedCount = r.candidates.filter((c) => c.totalPrice > 0 || c.nightlyPrice > 0).length;
         const accepted = r.candidates.filter((c) => {
           const inferred = rawCandidateBedroomSignal(c);
-          return inferred !== null && inferred >= bedrooms;
+          if (inferred !== null && inferred < buyInBedroomFloor) return false;
+          return true;
         });
         const dropped = r.candidates.length - accepted.length;
         bookingDropped = { noResort: 0, wrongBedrooms: dropped };
         if (dropped > 0) {
-          console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} candidates below ${bedrooms}BR or unknown-BR candidates`);
+          console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} candidates below ${buyInBedroomFloor}BR`);
         }
         return accepted.map((c): Candidate => {
           const total = Number(c.totalPrice || 0) > 0
@@ -10256,7 +10292,7 @@ export async function registerRoutes(
           searchTerm: targetSearchTerm,
           checkIn,
           checkOut,
-          bedrooms,
+          bedrooms: otaSearchBedrooms,
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
           rerunOnlyUntried: rerunOnlyUntriedVariations,
@@ -10267,11 +10303,12 @@ export async function registerRoutes(
         if (!r) return [];
         const acceptedVrbo = r.candidates.filter((c) => {
           const inferred = rawCandidateBedroomSignal(c);
-          return inferred !== null && inferred >= bedrooms;
+          if (inferred !== null && inferred < buyInBedroomFloor) return false;
+          return true;
         });
         const droppedVrbo = r.candidates.length - acceptedVrbo.length;
         if (droppedVrbo > 0) {
-          console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} candidates below ${bedrooms}BR or unknown-BR candidates`);
+          console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} candidates below ${buyInBedroomFloor}BR`);
         }
         vrboGoogleCount = 0;
         vrboSidecarCount = acceptedVrbo.length;
@@ -10673,14 +10710,6 @@ export async function registerRoutes(
     const cbDiscoveryPromise = vrpDiscoveryPromise("cbIslandVacations", "cbCalls");
     const pikoDiscoveryPromise = vrpDiscoveryPromise("pikoProperties", "pikoCalls");
     const evrhiDiscoveryPromise = vrpDiscoveryPromise("evrhi", "evrhiCalls");
-
-    // Newly added additional VRP-powered PMs (quickest leverage direct sources).
-    // These use the same generic vrp scraper (sitemap + direct pricing API).
-    // Stats are best-effort; unknown keys are ignored inside the helper.
-    const kvrDiscoveryPromise = vrpDiscoveryPromise("kauaiVacationRentals", "pkCalls"); // reuse an existing counter for now
-    const pbhDiscoveryPromise = vrpDiscoveryPromise("poipuBeachHouse", "cbCalls");
-    const irkDiscoveryPromise = vrpDiscoveryPromise("islandRealtyKauai", "pikoCalls");
-    const kpDiscoveryPromise = vrpDiscoveryPromise("kauaiParadise", "evrhiCalls");
 
     // ── Gather Vacations inventory (PR #332) ──────────────────────────────
     // gathervacations.com runs a customised vrp_main fork — the plugin's
@@ -11712,8 +11741,8 @@ export async function registerRoutes(
         if (!isAirbnbFallback || !searchedByAirbnbSidecar || c.verified !== "yes") return false;
       }
       const bedroomSignal = comparisonBedroomSignal(c);
-      if (bedroomSignal !== null && bedroomSignal !== bedrooms) return false;
-      if (bedroomSignal === null && typeof c.bedrooms === "number" && c.bedrooms !== bedrooms) return false;
+      if (bedroomSignal !== null && !satisfiesBuyInBedrooms(bedroomSignal)) return false;
+      if (bedroomSignal === null && typeof c.bedrooms === "number" && !satisfiesBuyInBedrooms(c.bedrooms)) return false;
       if (c.source === "pm" && (!isDetailUrl("pm", c.url) || isLandingUrl("pm", c.url))) return false;
       if (groundFloorOnly && c.groundFloorStatus !== "confirmed") return false;
       return true;
@@ -12046,8 +12075,10 @@ export async function registerRoutes(
       });
     }
     if (finalIdentityDropped > 0) {
+      const onlyAirbnbAttachBlocks = verifiedCheapestBeforeFinalIdentity.length > 0
+        && verifiedCheapestBeforeFinalIdentity.every((c) => c.source === "airbnb");
       issueList.push({
-        severity: cheapest.length > 0 ? "warning" : "error",
+        severity: cheapest.length > 0 || onlyAirbnbAttachBlocks ? "warning" : "error",
         source: "Final identity gate",
         summary: `Dropped ${finalIdentityDropped} verified candidate(s) before auto-pick because bedroom/resort proof was not exact enough`,
         detail: finalIdentityDroppedExamples.join(" | "),
@@ -12131,7 +12162,9 @@ export async function registerRoutes(
       confidence: providerConfidence(input.status, input.raw, input.priced, input.verified),
       datesSearched: { checkIn, checkOut, nights },
       bedroomFilter: {
-        bedrooms,
+        bedrooms: requestedBedrooms,
+        otaSearchBedrooms: otaSearchBedrooms !== requestedBedrooms ? otaSearchBedrooms : undefined,
+        buyInBedroomFloor: buyInBedroomFloor !== requestedBedrooms ? buyInBedroomFloor : undefined,
         applied: input.bedroomFilterApplied ?? true,
         mode: input.bedroomFilterMode ?? "provider/date/search result filtering plus server-side curation",
       },
@@ -12373,7 +12406,7 @@ export async function registerRoutes(
     // them is how Auto-fill can immediately replay a stale "0 scanned rows"
     // result after the sidecar has already recovered.
     evictExpiredFindBuyIn();
-    const cacheTtlMs = scanComplete
+    const cacheTtlMs = scanComplete && FIND_BUY_IN_TTL_MS > 0
       ? (priced.length > 0 ? FIND_BUY_IN_TTL_MS : 30_000)
       : 0;
     if (cacheTtlMs > 0) {
