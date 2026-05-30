@@ -25,6 +25,14 @@ import {
   sampleMedianBuyInForSeason,
   type SeasonKey,
 } from "./availability-search";
+import {
+  availabilityPolicyForWindow,
+  seasonForWindow,
+  AVAILABILITY_POLICY_STANDARD_LEAD_DAYS,
+  AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS,
+  AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS,
+  AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS,
+} from "./seasonal-availability";
 import { getPropertyUnits } from "@shared/property-units";
 import { applyAirbnbBiasAndCombo } from "@shared/pricing-rates";
 
@@ -36,6 +44,57 @@ let _tickRunning = false;
 
 export function getScannerSchedulerStatus() {
   return { lastTickAt: _lastTickAt, running: _tickRunning };
+}
+
+// Pure calendar lead-time safety policy (independent of inventory counts).
+// Generates blocked weeks for the next N weeks based on days-until-arrival
+// vs the season band (standard 45 / high 75 / holiday 90 / ultra 120).
+function computePureLeadTimePolicyBlocks(
+  today: Date,
+  weeks = 52,
+  leadDays?: { standard?: number; high?: number; holiday?: number; ultra?: number }
+): Array<{ startDate: string; endDate: string; verdict: "blocked"; reason: string }> {
+  const blocks: Array<{ startDate: string; endDate: string; verdict: "blocked"; reason: string }> = [];
+  const std = leadDays?.standard ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS;
+  const high = leadDays?.high ?? AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS;
+  const holiday = leadDays?.holiday ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS;
+  const ultra = leadDays?.ultra ?? AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS;
+
+  for (let w = 1; w <= weeks; w++) {
+    const start = new Date(today);
+    start.setDate(start.getDate() + (w - 1) * 7);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 7);
+
+    const sd = start.toISOString().slice(0, 10);
+    const ed = end.toISOString().slice(0, 10);
+
+    const policy = availabilityPolicyForWindow({
+      region: "hawaii",
+      checkIn: sd,
+      checkOut: ed,
+      nights: 7,
+      now: today,
+    });
+
+    if (policy.shouldBlock) {
+      const bandLabel = policy.band === "ultraPeak" ? "ultra-peak" :
+                        policy.band === "majorHoliday" ? "major holiday" :
+                        policy.band === "high" ? "high season" : "standard";
+      // Use the per-property (or default) lead days in the reason for transparency
+      const effectiveLead = policy.band === "ultraPeak" ? ultra :
+                            policy.band === "majorHoliday" ? holiday :
+                            policy.band === "high" ? high : std;
+      blocks.push({
+        startDate: sd,
+        endDate: ed,
+        verdict: "blocked",
+        reason: `lead-time safety: ${effectiveLead} days (${bandLabel})`,
+      });
+    }
+  }
+
+  return blocks;
 }
 
 // Pick a *random* 7-night inside the next season occurrence (capped 10mo).
@@ -188,16 +247,43 @@ export async function runFullScanForProperty(
     const overrideByStart = new Map(overrides.map((o) => [o.startDate, o]));
     const today = new Date(); today.setHours(12, 0, 0, 0);
     const weeks = 52;
-    const windows: Array<{ startDate: string; endDate: string; verdict: "open" | "tight" | "blocked"; maxSets?: number; minSets: number }> = [];
+
+    // Pure lead-time policy blocks (the 45/75/90/120 day safety rules) — now automatically applied by cron.
+    // Reads per-property values from scannerSchedule (with global defaults).
+    const scheduleRow = await storage.getScannerSchedule(propertyId).catch(() => null);
+    const leadDays = {
+      standard: scheduleRow?.standardLeadDays ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS,
+      high: scheduleRow?.highSeasonLeadDays ?? AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS,
+      holiday: scheduleRow?.majorHolidayLeadDays ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS,
+      ultra: scheduleRow?.ultraPeakLeadDays ?? AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS,
+    };
+    const policyBlocks = computePureLeadTimePolicyBlocks(today, weeks, leadDays);
+    const policyBlocked = new Set(policyBlocks.map(b => `${b.startDate}:${b.endDate}`));
+
+    const windows: Array<{ startDate: string; endDate: string; verdict: "open" | "tight" | "blocked"; maxSets?: number; minSets: number; reason?: string }> = [];
     for (let w = 1; w <= weeks; w++) {
       const start = new Date(today); start.setDate(start.getDate() + (w - 1) * 7);
       const end = new Date(start); end.setDate(end.getDate() + 7);
       const sd = start.toISOString().slice(0, 10);
       const ed = end.toISOString().slice(0, 10);
       const ov = overrideByStart.get(sd);
-      const verdict: "open" | "blocked" =
-        ov && ov.mode === "force-block" ? "blocked" : "open";
-      windows.push({ startDate: sd, endDate: ed, verdict, maxSets: baselineSets, minSets: opts.minSets });
+      const isPolicyBlock = policyBlocked.has(`${sd}:${ed}`);
+
+      let verdict: "open" | "blocked" = "open";
+      if (ov && ov.mode === "force-block") {
+        verdict = "blocked";
+      } else if (isPolicyBlock) {
+        verdict = "blocked";
+      }
+
+      windows.push({
+        startDate: sd,
+        endDate: ed,
+        verdict,
+        maxSets: baselineSets,
+        minSets: opts.minSets,
+        reason: isPolicyBlock && ! (ov && ov.mode === "force-block") ? "lead-time safety policy" : undefined,
+      });
     }
 
     const active = await storage.getActiveScannerBlocks(propertyId);

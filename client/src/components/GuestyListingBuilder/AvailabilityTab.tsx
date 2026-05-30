@@ -176,6 +176,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     intervalHours: number;
     runInventory: boolean; runPricing: boolean; runSyncBlocks: boolean;
     targetMargin: string | number; minSets: number;
+    // Per-property pure lead-time safety policy (defaults in DB: 45/75/90/120)
+    standardLeadDays?: number;
+    highSeasonLeadDays?: number;
+    majorHolidayLeadDays?: number;
+    ultraPeakLeadDays?: number;
     lastRunAt: string | null; lastRunStatus: string | null; lastRunSummary: string | null;
   };
   const [schedule, setSchedule] = useState<Schedule | null>(null);
@@ -234,6 +239,10 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [activeBlocks, setActiveBlocks] = useState<ActiveBlock[]>([]);
   const [activeBlocksLoaded, setActiveBlocksLoaded] = useState(false);
   const [activeBlocksError, setActiveBlocksError] = useState<string | null>(null);
+
+  // === Lead Time Safety Policy Editor (placed in Availability tab per request) ===
+  // Compact, self-contained editor for the four pure calendar lead-time numbers.
+  // These control the automatic safety blackouts the scheduler cron now applies.
   useEffect(() => {
     if (!propertyId || schedulerUnavailable) {
       setActiveBlocks([]);
@@ -265,6 +274,44 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     // Re-fetch after each run so new blocks appear without a page refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, schedule?.lastRunAt, schedulerUnavailable]);
+
+  // === Lead Time Safety Policy (editable per-property) ===
+  const [policySaving, setPolicySaving] = useState(false);
+  const [policySavedMsg, setPolicySavedMsg] = useState<string | null>(null);
+
+  const currentPolicy = {
+    standard: schedule?.standardLeadDays ?? 45,
+    high: schedule?.highSeasonLeadDays ?? 75,
+    holiday: schedule?.majorHolidayLeadDays ?? 90,
+    ultra: schedule?.ultraPeakLeadDays ?? 120,
+  };
+
+  const [policyDraft, setPolicyDraft] = useState(currentPolicy);
+
+  // Keep draft in sync when schedule loads/changes
+  useEffect(() => {
+    setPolicyDraft(currentPolicy);
+  }, [schedule?.standardLeadDays, schedule?.highSeasonLeadDays, schedule?.majorHolidayLeadDays, schedule?.ultraPeakLeadDays]);
+
+  const saveLeadTimePolicy = async () => {
+    if (!propertyId || schedulerUnavailable) return;
+    setPolicySaving(true);
+    setPolicySavedMsg(null);
+    try {
+      await updateSchedule({
+        standardLeadDays: policyDraft.standard,
+        highSeasonLeadDays: policyDraft.high,
+        majorHolidayLeadDays: policyDraft.holiday,
+        ultraPeakLeadDays: policyDraft.ultra,
+      });
+      setPolicySavedMsg("Saved. Scheduler will use these values on next run.");
+      setTimeout(() => setPolicySavedMsg(null), 4000);
+    } catch (e: any) {
+      setPolicySavedMsg("Save failed: " + (e?.message ?? "unknown error"));
+    } finally {
+      setPolicySaving(false);
+    }
+  };
 
   // Tracks whether the initial GET for the schedule has completed. Uses
   // state (not a ref) so the auto-enable useEffect below re-runs after

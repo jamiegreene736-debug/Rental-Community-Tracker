@@ -1045,6 +1045,12 @@ export const scannerSchedule = pgTable("scanner_schedule", {
   targetMargin: numeric("target_margin", { precision: 5, scale: 4 }).notNull().default("0.2000"),
   // Minimum sets floor the run uses when deciding blocks.
   minSets: integer("min_sets").notNull().default(3),
+  // Per-property lead-time safety policy (pure calendar blackouts, independent of inventory).
+  // These drive the automatic "45/75/90/120 days out" blocks the cron can apply.
+  standardLeadDays: integer("standard_lead_days").notNull().default(45),
+  highSeasonLeadDays: integer("high_season_lead_days").notNull().default(75),
+  majorHolidayLeadDays: integer("major_holiday_lead_days").notNull().default(90),
+  ultraPeakLeadDays: integer("ultra_peak_lead_days").notNull().default(120),
   lastRunAt: timestamp("last_run_at"),
   lastRunStatus: text("last_run_status"),       // "ok" | "error" | null
   lastRunSummary: text("last_run_summary"),     // short message for the UI
