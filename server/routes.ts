@@ -10053,9 +10053,9 @@ export async function registerRoutes(
       const fromDirectPm = c.source === "pm" && c.verified === "yes";
       if (fromDirectPm) score += 35;
 
-      // Bonus if the PM provided explicit sub-community / resort metadata
+      // Strong bonus for explicit sub-community metadata (key for correct Poipu Kai sub-area in combos)
       const hasRichMetadata = !!(c as any).subCommunity || !!(c as any).resortSlug || !!(c as any).resortHaystack;
-      if (fromDirectPm && hasRichMetadata) score += 10;
+      if (fromDirectPm && hasRichMetadata) score += 20;  // Increased weight for sub-community correctness
 
       // Layer 2: Sidecar verified detail page reported matching bedrooms
       if (c.verified === "yes" && typeof c.bedrooms === "number" && c.bedrooms === targetBedrooms) {
