@@ -10102,9 +10102,9 @@ export async function registerRoutes(
       }
       if (!candidateHasFinalResortProof(c)) return `no final ${resortName ?? community} resort/community proof`;
 
-      // New: expose unit type confidence for gating (85+ target for high-confidence combo attach)
+      // High-confidence unit type gate (85+ required for auto-attach on combos)
       const confidence = computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName);
-      if (confidence < 70) return `low unit-type confidence (${confidence}%)`;
+      if (confidence < 85) return `unit-type confidence too low (${confidence}%; 85+ required for safe attach)`;
 
       return null;
     };
@@ -10114,7 +10114,8 @@ export async function registerRoutes(
       && (!c.directBookingUrl || candidateHasUsableAirbnbDirectLink(c))
       && candidateFitsTarget(c, { requireBedroomProof: true })
       && satisfiesBuyInBedrooms(candidateBedroomSignal(c))
-      && candidateHasFinalResortProof(c);
+      && candidateHasFinalResortProof(c)
+      && computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName) >= 85;  // High-confidence gate for correct unit type (bedroom + sub-community)
 
     // Append the reservation's check-in/out to the URL so the landing page
     // opens with availability already filtered for those dates. Each platform
@@ -12047,7 +12048,10 @@ export async function registerRoutes(
     }
     // Cap at 20 — multi-slot reservations need enough variety to fill
     // distinct units per slot. Do not fall back to unpriced rows here.
-    const cheapest = verifiedCheapest.slice(0, 20);
+    const cheapest = verifiedCheapest.slice(0, 20).map((c) => ({
+      ...c,
+      unitTypeConfidence: computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName),
+    }));
     const finalIdentityDropped = verifiedCheapestBeforeFinalIdentity.length - verifiedCheapest.length;
     const totalPhotoMatches = airbnbWithMatches.reduce((s, c) => s + (c.photoMatches?.length ?? 0), 0);
 
@@ -12586,6 +12590,7 @@ export async function registerRoutes(
           // Sidecar availability means at least one live website search
           // source was driven through the local Chrome worker.
           available: airbnbSidecarOnline || vrboSidecarOnline || bookingSidecarOnline || pmWebsiteSidecarOnline,
+          unitTypeConfidenceGate: "85+ required for high-confidence auto-attach (correct bedroom + sub-community)",
         },
         providerHealth: {
           airbnb: airbnbProviderHealth,
