@@ -14516,6 +14516,18 @@ export async function registerRoutes(
         });
       }
 
+      // Attach-time re-validation for unit type correctness (surgical addition)
+      // For combo bookings, we want high confidence that each attached buy-in
+      // is the correct bedroom count in the right sub-community.
+      // Currently we rely on the search-time 85+ gate + verified=yes.
+      // Future: store unitTypeConfidence on the BuyIn record for exact re-check here.
+      if (candidate.verified !== "yes") {
+        return res.status(409).json({
+          error: "Buy-in not sufficiently verified at search time",
+          message: "Only buy-ins with verified=yes (high unit-type confidence from search) can be attached. Refresh the search and re-select.",
+        });
+      }
+
       const buyIn = await storage.attachBuyIn(buyInId, reservationId);
       if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
       res.json(buyIn);
