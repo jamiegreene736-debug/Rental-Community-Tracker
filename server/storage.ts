@@ -1,6 +1,6 @@
 import {
   type User, type InsertUser,
-  type BuyIn, type InsertBuyIn,
+  type BuyIn, type InsertBuyIn, // now includes unitTypeConfidence and breakdown after schema update
   type ReservationCancellationAudit, type InsertReservationCancellationAudit,
   type ManualReservation, type InsertManualReservation,
   type LodgifyBooking, type InsertLodgifyBooking,
