@@ -2001,7 +2001,7 @@ function AlternativeBuyInWorkflowPanel({
         </Button>
       </div>
       {communities.length > 0 && (
-        <div className="mt-2 grid gap-2 md:grid-cols-2">
+        <div className="mt-2 grid gap-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {communities.map((result) => {
             const running = active === result.community;
             const sidecar = sidecarResults[result.community];
