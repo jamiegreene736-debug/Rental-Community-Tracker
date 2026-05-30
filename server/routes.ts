@@ -14593,7 +14593,6 @@ export async function registerRoutes(
                 message: `Unit type confidence ${candidate.unitTypeConfidence}% is below the ${attachThreshold}% threshold. Refresh search and select a higher-confidence option, or use force override (with audit).`,
               });
             }
-<<<<<<< HEAD
             // Operator override allowed — persist audit note to the buy-in record (append, no new tables)
             const overrideNote = (req.body as any)?.overrideNote ? String((req.body as any).overrideNote).trim() : "";
             const auditLine = `[${new Date().toISOString()}] FORCE-OVERRIDE (conf ${candidate.unitTypeConfidence}% < ${attachThreshold}%) — ${overrideNote || "no note provided"}`;
@@ -14603,10 +14602,6 @@ export async function registerRoutes(
               await storage.updateBuyIn(buyInId, { notes: updatedNotes }).catch(() => {});
             } catch {}
             console.warn(`[attach-buy-in] Operator force-attach below threshold: buyIn=${buyInId} confidence=${candidate.unitTypeConfidence} threshold=${attachThreshold} reservation=${reservationId} note=${overrideNote ? "yes" : "no"}`);
-=======
-            // Operator override allowed — log for audit
-            console.warn(`[attach-buy-in] Operator force-attach below threshold: buyIn=${buyInId} confidence=${candidate.unitTypeConfidence} threshold=${attachThreshold} reservation=${reservationId}`);
->>>>>>> origin/main
           }
         }
       }
