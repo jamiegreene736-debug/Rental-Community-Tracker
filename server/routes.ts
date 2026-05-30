@@ -6406,6 +6406,13 @@ export async function registerRoutes(
     return markets;
   };
 
+  const sanitizeUnitTypeConfidenceThreshold = (raw: unknown): number => {
+    const n = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isFinite(n)) return 85;
+    const clamped = Math.max(60, Math.min(95, Math.trunc(n)));
+    return clamped;
+  };
+
   app.get("/api/property/:propertyId/buy-in-markets", async (req, res) => {
     try {
       const propertyId = parseInt(req.params.propertyId, 10);
@@ -6421,11 +6428,14 @@ export async function registerRoutes(
       }
       const defaultMarkets = defaultBuyInMarketsFor(baseCommunity);
       const markets = Array.isArray(saved?.recommendedMarkets) ? saved.recommendedMarkets : defaultMarkets;
+      const threshold = typeof saved?.unitTypeConfidenceThreshold === "number" ? saved.unitTypeConfidenceThreshold : 85;
       return res.json({
         propertyId,
         baseCommunity,
         markets,
         defaultMarkets,
+        threshold,
+        defaultThreshold: 85,
         saved: !!saved,
         availableMarkets: validBuyInMarketKeys(),
         updatedAt: saved?.updatedAt ?? null,
@@ -6442,16 +6452,20 @@ export async function registerRoutes(
       const baseCommunity = PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? PROPERTY_UNIT_NEEDS[propertyId]?.community;
       if (!baseCommunity) return res.status(404).json({ error: "Property not found in unit config" });
       const markets = sanitizeRecommendedBuyInMarkets(baseCommunity, req.body?.markets);
+      const threshold = sanitizeUnitTypeConfidenceThreshold(req.body?.unitTypeConfidenceThreshold);
       const row = await storage.upsertPropertyBuyInMarkets({
         propertyId,
         baseCommunity,
         recommendedMarkets: markets,
+        unitTypeConfidenceThreshold: threshold,
       });
       return res.json({
         propertyId,
         baseCommunity,
         markets: row.recommendedMarkets,
         defaultMarkets: defaultBuyInMarketsFor(baseCommunity),
+        threshold: row.unitTypeConfidenceThreshold ?? 85,
+        defaultThreshold: 85,
         saved: true,
         availableMarkets: validBuyInMarketKeys(),
         updatedAt: row.updatedAt,
@@ -6475,6 +6489,8 @@ export async function registerRoutes(
         baseCommunity,
         markets: defaultBuyInMarketsFor(baseCommunity),
         defaultMarkets: defaultBuyInMarketsFor(baseCommunity),
+        threshold: 85,
+        defaultThreshold: 85,
         saved: false,
         availableMarkets: validBuyInMarketKeys(),
         updatedAt: null,
@@ -10099,7 +10115,7 @@ export async function registerRoutes(
       if (!isLikelyDirectBookingSurface({ domain, title: c.title, url: c.directBookingUrl })) return false;
       return true;
     };
-    const candidateFinalIdentityRejectReason = (c: Candidate): string | null => {
+    const candidateFinalIdentityRejectReason = async (c: Candidate): Promise<string | null> => {
       if (c.source === "airbnb") return "Airbnb row has no direct booking link; raw Airbnb cannot be attached";
       if (c.airbnbAnchorUrl && !candidateHasUsableAirbnbDirectLink(c)) {
         return "Airbnb-backed row has no usable direct booking link";
@@ -10120,7 +10136,7 @@ export async function registerRoutes(
 
       return null;
     };
-    const candidateIsFinalAutoPickSafe = (c: Candidate): boolean =>
+    const candidateIsFinalAutoPickSafe = async (c: Candidate): Promise<boolean> =>
       c.source !== "airbnb"
       && (!c.airbnbAnchorUrl || candidateHasUsableAirbnbDirectLink(c))
       && (!c.directBookingUrl || candidateHasUsableAirbnbDirectLink(c))
@@ -12041,18 +12057,20 @@ export async function registerRoutes(
     // - undefined → out (defensive — should never happen in production).
     const finalIdentityDroppedExamples: string[] = [];
     const verifiedCheapestBeforeFinalIdentity = priced.filter((c) => c.verified === "yes");
-    const verifiedCheapest = verifiedCheapestBeforeFinalIdentity.filter((c) => {
-      if (candidateIsFinalAutoPickSafe(c)) return true;
-      if (finalIdentityDroppedExamples.length < 8) {
+    const verifiedCheapest: typeof verifiedCheapestBeforeFinalIdentity = [];
+    for (const c of verifiedCheapestBeforeFinalIdentity) {
+      if (await candidateIsFinalAutoPickSafe(c)) {
+        verifiedCheapest.push(c);
+      } else if (finalIdentityDroppedExamples.length < 8) {
         const host = (() => {
           try { return new URL(c.url).hostname.replace(/^www\./, ""); } catch { return c.sourceLabel || c.source; }
         })();
+        const reason = await candidateFinalIdentityRejectReason(c);
         finalIdentityDroppedExamples.push(
-          `${candidateFinalIdentityRejectReason(c) ?? "final identity proof missing"} :: ${host} :: ${(c.title || c.url).replace(/\s+/g, " ").slice(0, 90)}`,
+          `${reason ?? "final identity proof missing"} :: ${host} :: ${(c.title || c.url).replace(/\s+/g, " ").slice(0, 90)}`,
         );
       }
-      return false;
-    });
+    }
     if (finalIdentityDroppedExamples.length > 0) {
       console.log(
         `[find-buy-in] final auto-pick identity gate dropped ${verifiedCheapestBeforeFinalIdentity.length - verifiedCheapest.length}/${verifiedCheapestBeforeFinalIdentity.length}: ${finalIdentityDroppedExamples.join(" | ")}`,
@@ -12183,17 +12201,19 @@ export async function registerRoutes(
     // units by minNightlyPrice across the verified subset of listings.
     const units: CheapestUnit[] = [];
     for (const { anchor, members } of Array.from(clusters.values())) {
-      const finalSafeVerifiedMembers = members.filter((c) => c.verified === "yes" && candidateIsFinalAutoPickSafe(c));
+      const finalSafeVerifiedMembers: typeof members = [];
+      for (const c of members) if (c.verified === "yes" && await candidateIsFinalAutoPickSafe(c)) finalSafeVerifiedMembers.push(c);
       if (finalSafeVerifiedMembers.length === 0) continue; // skip clusters that cannot be auto-attached safely
-      const listingChannels: ListingChannel[] = members
-        .filter((c) => c.verified !== "yes" || candidateIsFinalAutoPickSafe(c))
-        .map(candidateToListing)
-        .sort((a: ListingChannel, b: ListingChannel) => {
-          const aRank = a.verified === "yes" ? 0 : 1;
-          const bRank = b.verified === "yes" ? 0 : 1;
-          if (aRank !== bRank) return aRank - bRank;
-          return (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999);
-        });
+      const listingChannels: ListingChannel[] = [];
+      for (const c of members) {
+        if (c.verified !== "yes" || await candidateIsFinalAutoPickSafe(c)) listingChannels.push(candidateToListing(c));
+      }
+      listingChannels.sort((a: ListingChannel, b: ListingChannel) => {
+        const aRank = a.verified === "yes" ? 0 : 1;
+        const bRank = b.verified === "yes" ? 0 : 1;
+        if (aRank !== bRank) return aRank - bRank;
+        return (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999);
+      });
       const verifiedYes = listingChannels.filter((l: ListingChannel) => l.verified === "yes" && l.nightlyPrice > 0);
       if (verifiedYes.length === 0) continue; // skip un-buyable clusters
       const cheapestVerified = verifiedYes[0];
@@ -14573,8 +14593,20 @@ export async function registerRoutes(
                 message: `Unit type confidence ${candidate.unitTypeConfidence}% is below the ${attachThreshold}% threshold. Refresh search and select a higher-confidence option, or use force override (with audit).`,
               });
             }
+<<<<<<< HEAD
+            // Operator override allowed — persist audit note to the buy-in record (append, no new tables)
+            const overrideNote = (req.body as any)?.overrideNote ? String((req.body as any).overrideNote).trim() : "";
+            const auditLine = `[${new Date().toISOString()}] FORCE-OVERRIDE (conf ${candidate.unitTypeConfidence}% < ${attachThreshold}%) — ${overrideNote || "no note provided"}`;
+            try {
+              const existingNotes = candidate.notes || "";
+              const updatedNotes = existingNotes ? `${existingNotes}\n${auditLine}` : auditLine;
+              await storage.updateBuyIn(buyInId, { notes: updatedNotes }).catch(() => {});
+            } catch {}
+            console.warn(`[attach-buy-in] Operator force-attach below threshold: buyIn=${buyInId} confidence=${candidate.unitTypeConfidence} threshold=${attachThreshold} reservation=${reservationId} note=${overrideNote ? "yes" : "no"}`);
+=======
             // Operator override allowed — log for audit
             console.warn(`[attach-buy-in] Operator force-attach below threshold: buyIn=${buyInId} confidence=${candidate.unitTypeConfidence} threshold=${attachThreshold} reservation=${reservationId}`);
+>>>>>>> origin/main
           }
         }
       }
