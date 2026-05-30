@@ -6654,6 +6654,100 @@ export async function registerRoutes(
     return entries.length ? entries.join(", ") : "no qualifying rows";
   }
 
+  /**
+   * For Hawaii communities, run the high-quality direct PM scrapers we already have
+   * (VRP + Streamline + Suite Paradise + Gather) to get replacement proof.
+   * This dramatically improves the "Scout similar areas" (nearby resorts) button for Hawaii.
+   */
+  async function getHawaiiDirectPmReplacementProof(
+    community: string,
+    replacementPlans: number[][],
+    checkIn: string,
+    checkOut: string
+  ): Promise<{ countsByBedroom: Record<string, number>; samples: any[]; recommended: boolean; reason?: string }> {
+    const isHawaiiCommunity = /\b(?:hawaii|kauai|koloa|poipu|princeville|kapaa|maui|oahu|kona)\b/i.test(community);
+    if (!isHawaiiCommunity) {
+      return { countsByBedroom: {}, samples: [], recommended: false };
+    }
+
+    const allUnits: any[] = [];
+
+    try {
+      // Run the main direct sources in parallel (with modest limits)
+      const [vrpUnits, streamlineUnits, suiteUnits, gatherUnits] = await Promise.all([
+        // All registered VRP sites (including the 4 new ones)
+        Promise.all(Object.keys(VRP_SITES).map(key =>
+          findAvailableVrpUnits({
+            site: VRP_SITES[key as keyof typeof VRP_SITES],
+            bedrooms: 0, // let it return what it can, we filter later
+            checkIn,
+            checkOut,
+            resortName: community,
+            limit: 12,
+          }).catch(() => [])
+        )).then(arrays => arrays.flat()),
+
+        // Streamline sites
+        Promise.all(Object.keys(STREAMLINE_SITES).map(key =>
+          findAvailableStreamlineUnits({
+            site: STREAMLINE_SITES[key as keyof typeof STREAMLINE_SITES],
+            bedrooms: 0,
+            checkIn,
+            checkOut,
+            resortName: community,
+            limit: 12,
+          }).catch(() => [])
+        )).then(arrays => arrays.flat()),
+
+        // Suite Paradise (only useful for Poipu-area)
+        /\bpoipu\b/i.test(community)
+          ? findAvailableSuiteParadiseUnits({ bedrooms: 0, checkIn, checkOut, resortName: community, limit: 12 }).catch(() => [])
+          : Promise.resolve([]),
+
+        // Gather Vacations
+        findAvailableGatherVacationsUnits({ bedrooms: 0, checkIn, checkOut, resortName: community, limit: 12 }).catch(() => []),
+      ]);
+
+      allUnits.push(...vrpUnits, ...streamlineUnits, ...suiteUnits, ...gatherUnits);
+    } catch (e) {
+      console.warn(`[alternative-scout] direct PM proof error for ${community}:`, e);
+    }
+
+    // Build counts by bedroom from the direct units
+    const countsByBedroom: Record<string, number> = {};
+    const samplesByBedroom: Record<string, any[]> = {};
+
+    for (const unit of allUnits) {
+      const br = unit.bedrooms;
+      if (!br) continue;
+      countsByBedroom[String(br)] = (countsByBedroom[String(br)] || 0) + 1;
+      if (!samplesByBedroom[String(br)]) samplesByBedroom[String(br)] = [];
+      if (samplesByBedroom[String(br)].length < 3) {
+        samplesByBedroom[String(br)].push({
+          title: unit.title || unit.name || `${community} Direct`,
+          url: unit.url,
+          image: unit.image || "",
+          totalPrice: unit.totalPrice,
+          sourceLabel: unit.sourceLabel || "Direct PM",
+          bedrooms: br,
+        });
+      }
+    }
+
+    const passingPlans = replacementPlans.filter(plan =>
+      plan.every(br => (countsByBedroom[String(br)] || 0) > 0)
+    );
+
+    return {
+      countsByBedroom,
+      samples: Object.values(samplesByBedroom).flat().slice(0, 6),
+      recommended: passingPlans.length > 0,
+      reason: passingPlans.length > 0
+        ? `Direct Hawaii PMs provided ${passingPlans[0].join("+")}BR replacement proof`
+        : undefined,
+    };
+  }
+
   app.post("/api/operations/alternative-buy-in-scout", async (req, res) => {
     try {
       const apiKey = process.env.SEARCHAPI_API_KEY;
@@ -6742,25 +6836,47 @@ export async function registerRoutes(
           const bestPlan = passingPlans[0] ?? null;
           const maxPlanCount = Math.max(0, ...Object.values(countsByBedroom));
           const samples = flattenScoutSamplesForPlan(samplesByBedroom, bestPlan ?? replacementPlans[0]);
+
+          // === Improvement #1: For Hawaii communities, also run direct PM sources ===
+          const directPmProof = await getHawaiiDirectPmReplacementProof(community, replacementPlans, checkIn, checkOut);
+
+          // Merge Airbnb + Direct PM proof for better combo detection
+          const mergedCounts = { ...countsByBedroom };
+          Object.entries(directPmProof.countsByBedroom).forEach(([br, count]) => {
+            mergedCounts[br] = (mergedCounts[br] || 0) + count;
+          });
+
+          const mergedPassingPlans = replacementPlans.filter((plan) =>
+            plan.every(br => (mergedCounts[String(br)] || 0) > 0)
+          );
+
           const driveMinutesFromBase = driveMinutesBetweenBuyInMarkets(baseCommunity, community);
+
+          const finalRecommended = mergedPassingPlans.length > 0;
+          const finalReason = finalRecommended
+            ? (passingPlans.length > 0
+                ? `Airbnb scout passed ${bestPlan!.join("+")}BR replacement proof`
+                : `Direct Hawaii PMs provided strong replacement proof`) +
+              (driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : "")
+            : `Could not prove replacement combo via Airbnb or direct Hawaii PMs`;
+
           return {
             community,
             searchTerm: q,
             status: errors.length === replacementPlans.length ? "error" : "ok",
-            count: maxPlanCount,
-            raw: Object.values(countsByBedroom).reduce((sum, count) => sum + count, 0),
-            recommended: passingPlans.length > 0,
-            reason: passingPlans.length > 0
-              ? `Airbnb scout passed ${bestPlan!.join("+")}BR replacement proof (${formatBedroomCounts(countsByBedroom)}${driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : ""}).`
-              : `Airbnb scout could not prove a complete replacement combo (${replacementPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")}; ${formatBedroomCounts(countsByBedroom)}${driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : ""}).`,
-            countsByBedroom,
-            passingPlans,
+            count: Math.max(maxPlanCount, Object.values(directPmProof.countsByBedroom).reduce((a, b) => a + b, 0)),
+            raw: Object.values(mergedCounts).reduce((sum, count) => sum + count, 0),
+            recommended: finalRecommended,
+            reason: finalReason,
+            countsByBedroom: mergedCounts,
+            passingPlans: mergedPassingPlans,
             replacementPlans,
             oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
             driveMinutesFromBase,
-            errors,
+            errors: [...errors, ...(directPmProof.reason ? [] : ["Direct PM check ran"])],
             durationMs: Date.now() - startedAt,
-            samples,
+            samples: [...samples, ...directPmProof.samples].slice(0, 8),
+            directPmUsed: directPmProof.recommended,
           };
         } catch (err: any) {
           return {
@@ -6775,9 +6891,11 @@ export async function registerRoutes(
             passingPlans: [],
             replacementPlans,
             oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
+            driveMinutesFromBase: driveMinutesBetweenBuyInMarkets(baseCommunity, community),
             errors: [err?.message ?? String(err)],
             durationMs: Date.now() - startedAt,
             samples: [],
+            directPmUsed: false,
           };
         }
       }));
@@ -10557,7 +10675,10 @@ export async function registerRoutes(
             return [];
           }
         }));
-        const flat = deepResults.flat().slice(0, 20);
+        // Improvement #3: Give Hawaii searches higher PM discovery budget
+        // because we have many excellent direct scrapers and want maximum recall for combos.
+        const pmDeepDiveCap = isHawaii ? 40 : 20;
+        const flat = deepResults.flat().slice(0, pmDeepDiveCap);
         pmDiscoveryStats.googleCalls++;
         const priced = flat.filter((c) => c.nightlyPrice > 0);
         const unpriced = flat.length - priced.length;
@@ -10670,12 +10791,15 @@ export async function registerRoutes(
       return (async () => {
         pmDiscoveryStats[statsKey]++;
         try {
+          // Improvement #3: Higher limit for Hawaii to maximize combo options from direct sources
+          const vrpLimit = isHawaii ? 20 : 8;
           const units = await findAvailableVrpUnits({
             site,
             bedrooms,
             checkIn,
             checkOut,
             resortName: resortName ?? community,
+            limit: vrpLimit,
           });
           if (units.length > 0) pmDiscoveryStats[hitsKey]++;
           pmDiscoveryStats[totalKey] += units.length;
