@@ -10711,6 +10711,30 @@ export async function registerRoutes(
     const pikoDiscoveryPromise = vrpDiscoveryPromise("pikoProperties", "pikoCalls");
     const evrhiDiscoveryPromise = vrpDiscoveryPromise("evrhi", "evrhiCalls");
 
+    // New direct VRP sources added in the previous PR (quickest leverage).
+    // These use the exact same high-quality sitemap + direct pricing API path.
+    const kvrDiscoveryPromise = vrpDiscoveryPromise("kauaiVacationRentals", "pkCalls");
+    const pbhDiscoveryPromise = vrpDiscoveryPromise("poipuBeachHouse", "cbCalls");
+    const irkDiscoveryPromise = vrpDiscoveryPromise("islandRealtyKauai", "pikoCalls");
+    const kpDiscoveryPromise = vrpDiscoveryPromise("kauaiParadise", "evrhiCalls");
+
+    // Await the new VRP sources in parallel with the others and surface them
+    // as first-class "pm" candidates (direct API, high quality for combos).
+    const [kvrUnits, pbhUnits, irkUnits, kpUnits] = await Promise.all([
+      kvrDiscoveryPromise,
+      pbhDiscoveryPromise,
+      irkDiscoveryPromise,
+      kpDiscoveryPromise,
+    ]);
+    kvrDiscovered.push(...kvrUnits);
+    pbhDiscovered.push(...pbhUnits);
+    irkDiscovered.push(...irkUnits);
+    kpDiscovered.push(...kpUnits);
+
+    // Make the new direct VRP sources contribute to the main candidate pool
+    // (so they appear in cheapest results and can be used for combos).
+    pm.push(...kvrUnits, ...pbhUnits, ...irkUnits, ...kpUnits);
+
     // ── Gather Vacations inventory (PR #332) ──────────────────────────────
     // gathervacations.com runs a customised vrp_main fork — the plugin's
     // standard rate-quote AJAX is stripped, but every unit page server-
@@ -11115,6 +11139,11 @@ export async function registerRoutes(
     const cbDiscovered: Candidate[] = [];
     const pikoDiscovered: Candidate[] = [];
     const evrhiDiscovered: Candidate[] = [];
+    // New VRP sources from the previous PR
+    const kvrDiscovered: Candidate[] = [];
+    const pbhDiscovered: Candidate[] = [];
+    const irkDiscovered: Candidate[] = [];
+    const kpDiscovered: Candidate[] = [];
     const gvDiscovered: Candidate[] = [];
     const slAlekonaDiscovered: Candidate[] = [];
     const slPrincevilleDiscovered: Candidate[] = [];
@@ -12360,7 +12389,7 @@ export async function registerRoutes(
         { label: "Airbnb Google Lens direct links", count: photoMatchPmCandidates.length },
       ],
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromKvrSitemap: kvrDiscovered.length, pmFromPbhSitemap: pbhDiscovered.length, pmFromIrkSitemap: irkDiscovered.length, pmFromKpSitemap: kpDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,
