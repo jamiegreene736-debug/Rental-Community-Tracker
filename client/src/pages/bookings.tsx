@@ -1052,6 +1052,16 @@ function candidateMatchesBedroom(candidate: Pick<LiveCandidate, "bedrooms">, bed
   return typeof candidate.bedrooms !== "number" || Math.round(candidate.bedrooms) === bedrooms;
 }
 
+function UnitTypeConfidenceBadge({ confidence }: { confidence?: number | null }) {
+  if (typeof confidence !== "number") return null;
+  const color = confidence >= 85 ? "emerald" : confidence >= 70 ? "amber" : "rose";
+  return (
+    <span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded bg-${color}-100 text-${color}-700 font-mono`}>
+      {confidence}% unit type
+    </span>
+  );
+}
+
 function bestAlternativeReplacementSet(workflow: AlternativeWorkflowState | undefined): AlternativeReplacementSet | null {
   const sidecarResults = workflow?.sidecarResults ?? {};
   const scoutResults = workflow?.scout?.recommended ?? workflow?.scout?.results ?? [];
@@ -1076,6 +1086,9 @@ function bestAlternativeReplacementSet(workflow: AlternativeWorkflowState | unde
           .filter((candidate) => candidate.totalPrice > 0 && candidateMatchesBedroom(candidate, bedrooms))
           .sort((a, b) => a.totalPrice - b.totalPrice)
           .find((candidate) => !hasUsedListingIdentity(used, candidate));
+      if (pick) {
+        // Note: unitTypeConfidence is available on pick for future display
+      }
         if (!pick) break;
         addUsedListingIdentity(used, pick);
         picks.push({ ...pick, community: scoutResult.community });
@@ -2012,6 +2025,7 @@ function AlternativeBuyInWorkflowPanel({
                     <p className="font-semibold">{result.community}</p>
                     <p className="text-[11px] text-muted-foreground">
                       Airbnb scout: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} passed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
+                      <UnitTypeConfidenceBadge confidence={sidecar?.cheapest?.[0]?.unitTypeConfidence} />
                     </p>
                     <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.reason}</p>
                   </div>
@@ -2024,6 +2038,7 @@ function AlternativeBuyInWorkflowPanel({
                   <p className="mt-1 rounded bg-slate-50 px-2 py-1 text-[11px]">
                     Full search: {sidecar.cheapest?.length ?? 0} verified candidate{(sidecar.cheapest?.length ?? 0) === 1 ? "" : "s"}
                     {sidecar.cheapest?.[0]?.totalPrice ? ` · best ${fmtMoney(sidecar.cheapest[0].totalPrice)}` : ""}
+                    <UnitTypeConfidenceBadge confidence={sidecar.cheapest?.[0]?.unitTypeConfidence} />
                   </p>
                 )}
               </div>
