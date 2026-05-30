@@ -19,6 +19,10 @@ export const WALKING_SPEED_MPH = 3;
 export const PATH_BEND_FACTOR = 1.15; // paths inside resorts bend ~15% longer than straight-line
 export const MAX_BUY_IN_WALK_MINUTES = 10;
 
+// For true multi-unit combo buy-ins (e.g. two 3BRs replacing a 6BR booking),
+// we intend to enforce this strictly at attach time. Sub-community correctness
+// (via unitTypeConfidence) is now an additional strong gate alongside distance.
+
 export type WalkResult = {
   minutes: number;       // rounded up to nearest minute
   feet: number;          // rounded to nearest 10 ft
