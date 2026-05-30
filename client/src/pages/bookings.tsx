@@ -1062,6 +1062,69 @@ function UnitTypeConfidenceBadge({ confidence }: { confidence?: number | null })
   );
 }
 
+type ForceDialogState = {
+  reservationId: string;
+  buyInId: number;
+  confidence: number | null;
+  threshold: number;
+  bedrooms?: number | null;
+  community?: string | null;
+  message: string;
+};
+
+function ForceAttachConfirmDialog({
+  open,
+  onOpenChange,
+  state,
+  onConfirm,
+  confirming,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  state: ForceDialogState | null;
+  onConfirm: (note: string) => void;
+  confirming?: boolean;
+}) {
+  const [note, setNote] = useState("");
+  const canConfirm = note.trim().length >= 10;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Force attach below threshold?</DialogTitle>
+          <DialogDescription>
+            This buy-in has unit-type confidence {state?.confidence ?? "?"}% (threshold {state?.threshold ?? 85}%).
+            For combo properties this gate exists to ensure the unit is the correct bedroom count in the right sub-community (e.g. Regency Poipu Kai vs Pili Mai).
+            Only proceed with a clear manual verification note for the audit trail.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2 py-2">
+          <Label htmlFor="force-audit-note" className="text-xs">Audit note (required, ≥10 chars)</Label>
+          <Textarea
+            id="force-audit-note"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. Manually confirmed via VRP direct quote + Poipu Kai resort page; exact 3BR Regency Bldg 7 unit, not adjacent complex. Operator visual match on floorplan + address."
+            rows={4}
+            className="text-xs"
+          />
+          <p className="text-[10px] text-muted-foreground">This note will be appended to the buy-in record for audit.</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => { setNote(""); onOpenChange(false); }} disabled={confirming}>Cancel</Button>
+          <Button
+            onClick={() => onConfirm(note.trim())}
+            disabled={!canConfirm || confirming}
+          >
+            {confirming ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+            Force attach + log override
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function bestAlternativeReplacementSet(workflow: AlternativeWorkflowState | undefined): AlternativeReplacementSet | null {
   const sidecarResults = workflow?.sidecarResults ?? {};
   const scoutResults = workflow?.scout?.recommended ?? workflow?.scout?.results ?? [];
@@ -4376,17 +4439,45 @@ export default function Bookings() {
     onError: (e: any) => toast({ title: "Manual reservation failed", description: e.message, variant: "destructive" }),
   });
 
+  const [forceDialog, setForceDialog] = useState<ForceDialogState | null>(null);
+  const [forceConfirming, setForceConfirming] = useState(false);
+
   const attachMutation = useMutation({
-    mutationFn: ({ reservationId, buyInId }: { reservationId: string; buyInId: number }) =>
-      apiRequest("POST", `/api/bookings/${reservationId}/attach-buy-in`, { buyInId }).then((r) => r.json()),
-    onSuccess: () => {
+    mutationFn: ({ reservationId, buyInId, force, overrideNote }: { reservationId: string; buyInId: number; force?: boolean; overrideNote?: string }) =>
+      apiRequest("POST", `/api/bookings/${reservationId}/attach-buy-in`, { buyInId, force, overrideNote }).then((r) => r.json()),
+    onSuccess: (_data, vars) => {
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
       setPicker(null);
-      toast({ title: "Buy-in attached" });
+      setForceDialog(null);
+      setForceConfirming(false);
+      toast({ title: vars?.force ? "Buy-in attached (force override recorded)" : "Buy-in attached" });
     },
-    onError: (e: any) => toast({ title: "Attach failed", description: e.message, variant: "destructive" }),
+    onError: (e: any) => {
+      const msg = String(e?.message ?? e ?? "");
+      // Let the caller decide whether to open the force dialog for low-confidence cases.
+      // Raw toasts for other errors (proximity, verified, etc.) still surface here if not intercepted.
+      if (!/confidence too low|force override/i.test(msg)) {
+        toast({ title: "Attach failed", description: e?.message ?? String(e), variant: "destructive" });
+      }
+    },
   });
+
+  const requestForceAttach = (s: ForceDialogState) => {
+    setForceDialog(s);
+    setForceConfirming(false);
+  };
+
+  const performForceAttach = (note: string) => {
+    if (!forceDialog) return;
+    setForceConfirming(true);
+    attachMutation.mutate({
+      reservationId: forceDialog.reservationId,
+      buyInId: forceDialog.buyInId,
+      force: true,
+      overrideNote: note,
+    });
+  };
 
   const detachMutation = useMutation({
     mutationFn: ({ buyInId }: { buyInId: number; reservationId: string }) =>

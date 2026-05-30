@@ -229,6 +229,8 @@ type BuyInMarketsResponse = {
   baseCommunity: string;
   markets: string[];
   defaultMarkets: string[];
+  threshold?: number;
+  defaultThreshold?: number;
   saved: boolean;
   availableMarkets: string[];
   updatedAt: string | null;
@@ -237,6 +239,7 @@ type BuyInMarketsResponse = {
 function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
   const [data, setData] = useState<BuyInMarketsResponse | null>(null);
   const [markets, setMarkets] = useState<string[]>([]);
+  const [threshold, setThreshold] = useState<number>(85);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -250,6 +253,7 @@ function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
       if (!response.ok) throw new Error(payload?.message ?? payload?.error ?? "Failed to load buy-in markets");
       setData(payload);
       setMarkets(Array.isArray(payload.markets) ? payload.markets.slice(0, 3) : []);
+      setThreshold(typeof payload.threshold === "number" ? payload.threshold : 85);
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -281,12 +285,13 @@ function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
       const response = await fetch(`/api/property/${propertyId}/buy-in-markets`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ markets: cleaned }),
+        body: JSON.stringify({ markets: cleaned, unitTypeConfidenceThreshold: threshold }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.message ?? payload?.error ?? "Failed to save buy-in markets");
       setData(payload);
       setMarkets(Array.isArray(payload.markets) ? payload.markets.slice(0, 3) : []);
+      if (typeof payload.threshold === "number") setThreshold(payload.threshold);
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -302,6 +307,7 @@ function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
       if (!response.ok) throw new Error(payload?.message ?? payload?.error ?? "Failed to reset buy-in markets");
       setData(payload);
       setMarkets(Array.isArray(payload.markets) ? payload.markets.slice(0, 3) : []);
+      setThreshold(85);
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -324,6 +330,32 @@ function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
         <p className="text-sm font-medium" data-testid={`text-buy-in-base-${propertyId}`}>
           {data?.baseCommunity ?? "Unknown"}
         </p>
+      </div>
+
+      <div className="rounded-md border bg-muted/10 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs text-muted-foreground mb-0.5">Unit-type confidence threshold for attach</p>
+            <p className="text-[11px] text-muted-foreground max-w-[42ch]">
+              85+ (default) requires strong proof the candidate matches the exact bedroom count + sub-community for combo slots (Poipu Kai examples: Regency vs Pili Mai). Lower = more manual review allowed. Applies to both cheapest buy-in and Alternative scout.
+            </p>
+          </div>
+          <input
+            type="number"
+            min={60}
+            max={95}
+            step={1}
+            value={threshold}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10);
+              if (Number.isFinite(v)) setThreshold(Math.max(60, Math.min(95, v)));
+            }}
+            className="h-9 w-20 rounded-md border border-input bg-background px-3 text-sm font-mono text-right"
+            data-testid={`input-buy-in-threshold-${propertyId}`}
+            aria-label="Unit type confidence threshold"
+          />
+        </div>
+        <p className="mt-1 text-[10px] text-muted-foreground">Current effective: <span className="font-mono">{threshold}</span>% (higher = stricter correctness for multi-unit bookings)</p>
       </div>
 
       <div className="space-y-2">
@@ -382,7 +414,7 @@ function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
       </div>
 
       <p className="text-[11px] text-muted-foreground">
-        {data?.saved ? "Custom markets saved for this property." : "Using default markets."}
+        {data?.saved ? "Custom markets + threshold saved for this property." : "Using default markets and 85% threshold."}
       </p>
     </div>
   );
