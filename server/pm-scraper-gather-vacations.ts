@@ -87,6 +87,9 @@ export interface GatherVacationsAvailableUnit {
   totalPrice: number;
   nightlyPrice: number;
   unitId: string;
+  /** Richer sub-community metadata for confidence scoring (surgical). */
+  subCommunity?: string;
+  resortArea?: string;
 }
 
 interface GatherUnitData {

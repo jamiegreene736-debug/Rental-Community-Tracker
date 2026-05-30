@@ -155,6 +155,9 @@ export interface StreamlineAvailableUnit {
   /** PM cross-listings, when Streamline knows them. Useful for de-duping. */
   vrboCode?: string;
   airbnbCode?: string;
+  /** Richer sub-community metadata for confidence scoring (surgical). */
+  subCommunity?: string;
+  resortArea?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
