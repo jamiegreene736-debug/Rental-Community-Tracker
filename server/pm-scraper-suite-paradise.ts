@@ -440,6 +440,9 @@ export type SuiteParadiseAvailableUnit = {
   totalPrice: number;
   nightlyPrice: number;
   eid: number;
+  /** Richer sub-community metadata for confidence scoring (surgical addition). */
+  subCommunity?: string;
+  resortArea?: string;
 };
 
 export async function findAvailableSuiteParadiseUnits(opts: {
@@ -537,6 +540,9 @@ export async function findAvailableSuiteParadiseUnits(opts: {
         totalPrice: Math.round(priced.totalPrice),
         nightlyPrice: Math.round(priced.totalPrice / nights),
         eid: meta.eid,
+        // Richer metadata for unit-type confidence (surgical)
+        subCommunity: meta.resortHaystack ? meta.resortHaystack.split(" ").slice(0, 4).join(" ") : undefined,
+        resortArea: "Poipu",
       };
     } catch {
       return null;

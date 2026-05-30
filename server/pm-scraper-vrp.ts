@@ -313,6 +313,10 @@ export type VrpAvailableUnit = {
   sourceLabel: string;
   /** True when totalPrice is the full bookable quote including required fees/taxes. */
   includesFees: boolean;
+  /** Richer sub-community / resort metadata for unit-type confidence scoring (surgical addition). */
+  subCommunity?: string;
+  resortSlug?: string;
+  resortHaystack?: string;
 };
 
 export async function findAvailableVrpUnits(opts: {
@@ -435,6 +439,10 @@ export async function findAvailableVrpUnits(opts: {
           unitId: meta.unitId,
           sourceLabel: site.label,
           includesFees: true,
+          // Richer metadata for unit-type confidence (surgical)
+          subCommunity: meta.resortHaystack || undefined,
+          resortSlug: meta.slug || undefined,
+          resortHaystack: meta.resortHaystack || undefined,
         };
       }
 
@@ -447,6 +455,10 @@ export async function findAvailableVrpUnits(opts: {
         unitId: meta.unitId,
         sourceLabel: site.label,
         includesFees: false,
+        // Richer metadata for unit-type confidence (surgical)
+        subCommunity: meta.resortHaystack || undefined,
+        resortSlug: meta.slug || undefined,
+        resortHaystack: meta.resortHaystack || undefined,
       };
     } catch {
       return null;

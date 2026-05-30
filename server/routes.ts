@@ -10040,6 +10040,46 @@ export async function registerRoutes(
       }
       return mentionsResort(hay) || candidateHasResortPhotoProof(c);
     };
+
+    /**
+     * Surgical addition: Layered unit type correctness confidence (0-100).
+     * Goal: 85+ before high-confidence auto-attach for combo slots.
+     * Uses existing signals + new optional subCommunity metadata from direct PMs.
+     */
+    const computeUnitTypeConfidence = (c: Candidate, targetBedrooms: number, targetResort: string): number => {
+      let score = 0;
+
+      // Layer 1: Direct PM structured data (strongest)
+      const fromDirectPm = c.source === "pm" && c.verified === "yes";
+      if (fromDirectPm) score += 35;
+
+      // Bonus if the PM provided explicit sub-community / resort metadata
+      const hasRichMetadata = !!(c as any).subCommunity || !!(c as any).resortSlug || !!(c as any).resortHaystack;
+      if (fromDirectPm && hasRichMetadata) score += 10;
+
+      // Layer 2: Sidecar verified detail page reported matching bedrooms
+      if (c.verified === "yes" && typeof c.bedrooms === "number" && c.bedrooms === targetBedrooms) {
+        score += 25;
+      }
+
+      // Layer 3: Strong photo proof anchored to correct type
+      if (candidateHasResortPhotoProof(c)) score += 20;
+
+      // Layer 4: Explicit bedroom signal in text that matches
+      const explicitBr = candidateBedroomSignal(c);
+      if (explicitBr === targetBedrooms) score += 15;
+
+      // Layer 5: Resort / sub-community proof (existing logic)
+      if (candidateHasFinalResortProof(c)) score += 15;
+
+      // Penalties for known wrong complexes or standalone homes
+      const hay = candidateHaystack(c);
+      if (mentionsKnownNonPoipuKaiComplex(hay) || mentionsKnownNonRegencyPoipuKaiComplex(hay)) score -= 40;
+      if (candidateLooksStandaloneHome(c)) score -= 30;
+
+      // Normalize
+      return Math.max(0, Math.min(100, Math.round(score)));
+    };
     const candidateHasUsableAirbnbDirectLink = (c: Candidate): boolean => {
       if (!c.directBookingUrl) return false;
       const domain = c.directBookingHost || domainFromUrl(c.directBookingUrl);
@@ -10061,6 +10101,11 @@ export async function registerRoutes(
         return `bedroom mismatch ${inferredBedrooms}BR != requested ${requestedBedrooms}BR`;
       }
       if (!candidateHasFinalResortProof(c)) return `no final ${resortName ?? community} resort/community proof`;
+
+      // New: expose unit type confidence for gating (85+ target for high-confidence combo attach)
+      const confidence = computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName);
+      if (confidence < 70) return `low unit-type confidence (${confidence}%)`;
+
       return null;
     };
     const candidateIsFinalAutoPickSafe = (c: Candidate): boolean =>
@@ -10751,6 +10796,9 @@ export async function registerRoutes(
               verified: u.nightlyPrice > 0 ? ("yes" as const) : undefined,
               verifiedNightlyPrice: u.nightlyPrice > 0 ? u.nightlyPrice : undefined,
               verifiedReason: u.nightlyPrice > 0 ? "Suite Paradise rcapi returned a date-specific quote" : undefined,
+              // Pass richer metadata (surgical)
+              ...(u.subCommunity && { subCommunity: u.subCommunity }),
+              ...(u.resortArea && { resortArea: u.resortArea }),
             }));
           } catch (e: any) {
             console.error("[find-buy-in] sp-discovery error:", e.message);
@@ -10819,6 +10867,10 @@ export async function registerRoutes(
             snippet: `${site.label} · ${u.bedrooms}BR · sitemap-discovered, ${u.includesFees ? "all-in quote" : "base rent only"}`,
             verified: u.includesFees && u.nightlyPrice > 0 ? ("yes" as const) : undefined,
             verifiedNightlyPrice: u.includesFees && u.nightlyPrice > 0 ? u.nightlyPrice : undefined,
+            // Pass through richer sub-community metadata for the new confidence scorer (surgical)
+            ...(u.subCommunity && { subCommunity: u.subCommunity }),
+            ...(u.resortSlug && { resortSlug: u.resortSlug }),
+            ...(u.resortHaystack && { resortHaystack: u.resortHaystack }),
             verifiedReason: u.includesFees && u.nightlyPrice > 0
               ? `${site.label} checkavailability returned a date-specific all-in quote (total includes taxes + required fees)`
               : undefined,
