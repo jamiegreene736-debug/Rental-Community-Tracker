@@ -42,6 +42,8 @@ export const buyIns = pgTable("buy_ins", {
   status: text("status").notNull().default("active"),
   guestyReservationId: text("guesty_reservation_id"),
   attachedAt: timestamp("attached_at"),
+  unitTypeConfidence: integer("unit_type_confidence"), // 0-100 from computeUnitTypeConfidence at search time
+  unitTypeConfidenceBreakdown: jsonb("unit_type_confidence_breakdown"), // optional array of {layer, points, reason}
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
