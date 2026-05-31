@@ -45,8 +45,8 @@ export const FOLDER_UNIT_TOKENS: Record<string, string[]> = {
   // unit numbers (3301, 2205) per PR #91 since the original Lae Nani
   // identifiers were swapped out
   "lae-nani-335": ["3301", "2205"],
-  // prop 29 — "Unit 5" and "Units 6-7" both stored against one folder
-  "kaiulani-52": ["5", "6", "7"],
+  // prop 29 — "Unit 5" and "Unit 6-7" both stored against one folder
+  "kaiulani-52": ["5", "6-7"],
   // props 32 + 33 — Pili Mai unit numbers are "Building N", and the
   // folders are placeholder names without a digit. Pull the building
   // numbers as verification tokens.
@@ -61,7 +61,7 @@ export const FOLDER_UNIT_TOKENS: Record<string, string[]> = {
 // they false-positive on snippet text.
 //
 // "Unit 5"        → ["5"]
-// "Units 6-7"     → ["6", "7"]
+// "Unit 6-7"      → ["6", "7"] (only used when no marked compound claim is present)
 // "Building 38"   → ["38"]
 // "7B"            → ["7B"]
 // "A"             → []
@@ -88,7 +88,7 @@ export function normalizeUnitClaim(value: string): string {
 export function extractMarkedUnitClaims(value: string): string[] {
   const claims: string[] = [];
   const seen = new Set<string>();
-  const re = /\b(?:unit|apt\.?|apartment|suite|ste\.?|#)\s*#?\s*([a-z]?\d+[a-z]?(?:\s*(?:-|#|\s)\s*[a-z]?\d+[a-z]?){0,1})\b/gi;
+  const re = /\b(?:units?|apt\.?|apartment|suite|ste\.?|#)\s*#?\s*([a-z]?\d+[a-z]?(?:\s*(?:-|#|\s)\s*[a-z]?\d+[a-z]?){0,1})\b/gi;
   let match: RegExpExecArray | null;
   while ((match = re.exec(value)) !== null) {
     const raw = match[1] ?? "";
@@ -130,8 +130,12 @@ export function unitVerificationClaims(
   // shorter UI label like "Unit #2". That exact case produced a false
   // positive where Apt 2 301 was verified against Apt 2 306.
   if (!hasCompoundAddressClaim) {
-    for (const claim of extractMarkedUnitClaims(unitNumber)) add(claim);
-    for (const token of extractUnitTokens(unitNumber)) add(token);
+    const unitNumberClaims = extractMarkedUnitClaims(unitNumber);
+    const hasCompoundUnitNumberClaim = unitNumberClaims.some(isCompoundUnitClaim);
+    for (const claim of unitNumberClaims) add(claim);
+    if (!hasCompoundUnitNumberClaim) {
+      for (const token of extractUnitTokens(unitNumber)) add(token);
+    }
   }
 
   return out;

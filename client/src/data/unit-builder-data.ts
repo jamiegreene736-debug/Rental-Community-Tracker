@@ -1584,7 +1584,7 @@ Anini Beach, one of Kauai's most beautiful and protected beaches, is just down t
       },
       {
         id: "prop29-kai-4br",
-        unitNumber: "Units 6-7",
+        unitNumber: "Unit 6-7",
         bedrooms: 4,
         bathrooms: "3",
         sqft: "~2,400",
