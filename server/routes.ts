@@ -6800,14 +6800,15 @@ export async function registerRoutes(
       const driveNearbyDetailed = nearbyBuyInMarketsForScoutDetailed(baseCommunity, {
         maxDriveMinutes: 20,
         oceanfrontOnly: sourceRequiresOceanfront,
-        limit: 12,
+        limit: 5,
       });
       const driveNearby = driveNearbyDetailed.map((row) => row.community);
       const clusterSimilar = SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [];
-      const similar = Array.from(new Set([...configuredSimilar, ...driveNearby, ...clusterSimilar]))
+      let similar = Array.from(new Set([...configuredSimilar, ...driveNearby, ...clusterSimilar]))
         .filter((community) => community !== baseCommunity)
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
-        .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community));
+        .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community))
+        .slice(0, 6);
       // Surgical addition: discover additional resorts/condo complexes within ~20min drive
       // using Photon (same pattern as /api/community/nearby-cities) so the alternative
       // scout button can surface options not yet in the BUY_IN_MARKET system. These are
@@ -6883,7 +6884,10 @@ export async function registerRoutes(
           const samplesByBedroom: Record<string, any[]> = {};
           const errors: string[] = [];
 
-          for (const bedroomCount of uniqueReplacementBedrooms(replacementPlans)) {
+          const bedroomList = uniqueReplacementBedrooms(replacementPlans);
+          // Parallelize the per-BR SearchAPI calls (was serial await in for-loop) + overlap heavy direct PM proof
+          const directPmPromise = getHawaiiDirectPmReplacementProof(community, replacementPlans, checkIn, checkOut).catch(() => ({ countsByBedroom: {} as Record<string, number>, samples: [] as any[], recommended: false, reason: undefined as string | undefined }));
+          const brSearchResults = await Promise.all(bedroomList.map(async (bedroomCount) => {
             const params: Record<string, string> = {
               engine: "airbnb",
               q,
@@ -6901,26 +6905,41 @@ export async function registerRoutes(
               params.lat = String(loc.lat);
               params.lng = String(loc.lng);
             }
-
-            const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
-            if (!response.ok) {
-              errors.push(`${bedroomCount}BR SearchAPI HTTP ${response.status}`);
-              countsByBedroom[String(bedroomCount)] = 0;
-              samplesByBedroom[String(bedroomCount)] = [];
-              continue;
+            try {
+              const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
+              if (!response.ok) {
+                return { bedroomCount, error: `HTTP ${response.status}`, count: 0, samples: [] as any[] };
+              }
+              const data = await response.json() as any;
+              const rows = Array.isArray(data?.properties) ? data.properties : [];
+              const qualifyingRows = rows.filter((p: any) => airbnbScoutRowQualifiesForBedroom(p, bedroomCount, bounds));
+              return {
+                bedroomCount,
+                count: qualifyingRows.length,
+                samples: qualifyingRows.slice(0, 5).map((p: any) => ({
+                  title: String(p?.name ?? p?.title ?? `${community} Airbnb`).slice(0, 140),
+                  url: String(p?.link ?? p?.url ?? (p?.id ? `https://www.airbnb.com/rooms/${p.id}` : "")),
+                  image: String(p?.images?.[0] ?? p?.thumbnail ?? p?.picture_url ?? ""),
+                  totalPrice: Number(p?.price?.total?.extracted_value ?? p?.price?.extracted_total_price ?? p?.total_price?.extracted_value ?? p?.price?.extracted_value ?? 0) || null,
+                  sourceLabel: "Airbnb scout",
+                  bedrooms: bedroomCount,
+                })),
+                error: null as string | null,
+              };
+            } catch (e: any) {
+              return { bedroomCount, error: e?.message ?? "fetch error", count: 0, samples: [] as any[] };
             }
-            const data = await response.json() as any;
-            const rows = Array.isArray(data?.properties) ? data.properties : [];
-            const qualifyingRows = rows.filter((p: any) => airbnbScoutRowQualifiesForBedroom(p, bedroomCount, bounds));
-            countsByBedroom[String(bedroomCount)] = qualifyingRows.length;
-            samplesByBedroom[String(bedroomCount)] = qualifyingRows.slice(0, 5).map((p: any) => ({
-              title: String(p?.name ?? p?.title ?? `${community} Airbnb`).slice(0, 140),
-              url: String(p?.link ?? p?.url ?? (p?.id ? `https://www.airbnb.com/rooms/${p.id}` : "")),
-              image: String(p?.images?.[0] ?? p?.thumbnail ?? p?.picture_url ?? ""),
-              totalPrice: Number(p?.price?.total?.extracted_value ?? p?.price?.extracted_total_price ?? p?.total_price?.extracted_value ?? p?.price?.extracted_value ?? 0) || null,
-              sourceLabel: "Airbnb scout",
-              bedrooms: bedroomCount,
-            }));
+          }));
+          for (const r of brSearchResults) {
+            const key = String(r.bedroomCount);
+            if (r.error) {
+              errors.push(`${r.bedroomCount}BR SearchAPI ${r.error}`);
+              countsByBedroom[key] = 0;
+              samplesByBedroom[key] = [];
+            } else {
+              countsByBedroom[key] = r.count;
+              samplesByBedroom[key] = r.samples;
+            }
           }
 
           const passingPlans = replacementPlans.filter((plan) => replacementPlanPasses(plan, countsByBedroom, minAirbnbResults));
@@ -6928,8 +6947,8 @@ export async function registerRoutes(
           const maxPlanCount = Math.max(0, ...Object.values(countsByBedroom));
           const samples = flattenScoutSamplesForPlan(samplesByBedroom, bestPlan ?? replacementPlans[0]);
 
-          // === Improvement #1: For Hawaii communities, also run direct PM sources ===
-          const directPmProof = await getHawaiiDirectPmReplacementProof(community, replacementPlans, checkIn, checkOut);
+          // === Improvement #1: For Hawaii communities, also run direct PM sources (overlapped with searches) ===
+          const directPmProof = await directPmPromise;
 
           // Merge Airbnb + Direct PM proof for better combo detection
           const mergedCounts = { ...countsByBedroom };
