@@ -31430,7 +31430,7 @@ Return ONLY compact JSON with this exact shape:
     const cached = nearbyCitiesCache.get(cacheKey);
     if (cached && Date.now() - cached.ts < NEARBY_CITIES_TTL) return res.json({ cities: cached.cities });
     try {
-      const PLACE_VALUES = new Set(["city","town","village","hamlet","municipality","borough","suburb","locality","neighbourhood"]);
+      const PLACE_VALUES = new Set(["city","town","village","municipality","borough","suburb","locality"]);
       const stripOkina = (s: string) => s.replace(/[ʻʼ'']/g, "").normalize("NFD").replace(/[̀-ͯ]/g, "");
       const bbox = (STATE_BBOX as any)[state];
       // Geocode input city for center point
