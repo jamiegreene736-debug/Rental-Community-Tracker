@@ -715,11 +715,28 @@ export async function researchCommunitiesForCity(
   // listing snippets. See Load-Bearing #36.
   mode: "combo" | "single" = "combo",
 ): Promise<ResearchedCommunity[]> {
+  // Normalize inputs so queries and downstream logic are consistent
+  // regardless of how the operator typed the city (e.g. "fort myers beach"
+  // vs "Fort Myers Beach, FL").
+  const normalizedCity = String(city || "").trim();
+  const normalizedState = String(state || "").trim();
+  if (!normalizedCity || !normalizedState) {
+    throw new Error("city and state are required");
+  }
+  // Use normalized for all query construction and return values.
+  const cityForQuery = normalizedCity;
+  const stateForQuery = normalizedState;
+
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!searchApiKey) throw new Error("SEARCHAPI_API_KEY not configured");
-  const knownComboSeeds = mode === "combo" ? knownComboSeedsForCity(city, state) : [];
+  const knownComboSeeds = mode === "combo" ? knownComboSeedsForCity(cityForQuery, stateForQuery) : [];
   const knownComboNames = knownComboSeeds.map((seed) => `"${seed.name}"`).join(" OR ");
+
+  // Strong, uniform negative operators to keep Google results focused on
+  // individually-owned condo/townhome vacation rentals and away from hotels,
+  // timeshares, condo-hotels, and large branded resort chains.
+  const commonExclusions = '-hotel -timeshare -"condo hotel" -"condo-hotel" -marriott -hilton -westin -sheraton -hyatt -"vacation club" -villa -"single family"';
 
   // Combo queries focus on individually-owned 2BR/3BR mix (combinable).
   // Single-listing queries expand to lists/round-ups of "best vacation
@@ -728,20 +745,20 @@ export async function researchCommunitiesForCity(
   // that the bare site:airbnb-style queries miss.
   const queries = mode === "single"
     ? [
-        `"${city}" "${state}" condo OR condominium resort vacation rental airbnb vrbo -villa -"single family" -hotel`,
-        `"${city}" "${state}" "best" condo resort vacation rental airbnb vrbo`,
-        `"${city}" "${state}" condo townhome vacation rental "individually owned" OR "owner rents" airbnb`,
-        `"top" condo resorts "${city}" "${state}" airbnb vrbo`,
-        `"${city}" "${state}" beach resort condo 2BR 3BR vacation rental airbnb -hotel -timeshare`,
+        `"${cityForQuery}" "${stateForQuery}" condo OR condominium resort vacation rental airbnb vrbo ${commonExclusions}`,
+        `"${cityForQuery}" "${stateForQuery}" "best" condo resort vacation rental airbnb vrbo ${commonExclusions}`,
+        `"${cityForQuery}" "${stateForQuery}" condo townhome vacation rental "individually owned" OR "owner rents" airbnb ${commonExclusions}`,
+        `"top" condo resorts "${cityForQuery}" "${stateForQuery}" airbnb vrbo ${commonExclusions}`,
+        `"${cityForQuery}" "${stateForQuery}" beach resort condo 2BR 3BR vacation rental airbnb ${commonExclusions}`,
       ]
     : [
-        `"${city}" "${state}" (condo OR condominium) complex vacation rental 2-bedroom OR 3-bedroom airbnb vrbo individually owned -villa -"single family" -efficiency -studio -hotel`,
-        `"${city}" "${state}" townhome OR townhouse cluster 3 bedroom vacation rental airbnb individually owned -villa -"single family" -studio`,
-        `"${city}" "${state}" beach condo resort 2BR 3BR individually owned vacation rental -hotel -timeshare -efficiency`,
-        `"${city}" "${state}" "2 bedroom" "condo" "vacation rental" resort`,
-        `"${city}" "${state}" "3 bedroom" "condo" OR "townhome" "vacation rental"`,
+        `"${cityForQuery}" "${stateForQuery}" (condo OR condominium) complex vacation rental 2-bedroom OR 3-bedroom airbnb vrbo individually owned ${commonExclusions} -efficiency -studio`,
+        `"${cityForQuery}" "${stateForQuery}" townhome OR townhouse cluster 3 bedroom vacation rental airbnb individually owned ${commonExclusions} -studio`,
+        `"${cityForQuery}" "${stateForQuery}" beach condo resort 2BR 3BR individually owned vacation rental ${commonExclusions} -efficiency`,
+        `"${cityForQuery}" "${stateForQuery}" "2 bedroom" "condo" "vacation rental" resort ${commonExclusions}`,
+        `"${cityForQuery}" "${stateForQuery}" "3 bedroom" "condo" OR "townhome" "vacation rental" ${commonExclusions}`,
         ...(knownComboNames
-          ? [`"${city}" "${state}" (${knownComboNames}) condo townhome vacation rental 2BR 3BR`]
+          ? [`"${cityForQuery}" "${stateForQuery}" (${knownComboNames}) condo townhome vacation rental 2BR 3BR ${commonExclusions}`]
           : []),
       ];
 
@@ -1068,7 +1085,7 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
   }
 
   if (mode === "single") {
-    const knownSeeds = knownSingleListingSeedsForCity(city, state);
+    const knownSeeds = knownSingleListingSeedsForCity(cityForQuery, stateForQuery);
     for (const seed of knownSeeds) {
       const existing = results.find((r) =>
         normalizeCommunityName(r.name) === normalizeCommunityName(seed.name) &&

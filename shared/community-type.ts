@@ -26,6 +26,27 @@ const DISQUALIFYING_TERMS = [
   "private house",
   "guest quarters",
   "main house",
+  // Hotels, timeshares, and condo-hotel hybrids are explicitly out
+  // (even if they contain "condo" in branding). These are centrally
+  // managed / single-owner inventory, not individually-owned vacation
+  // rental condos/townhomes the business model targets.
+  "hotel",
+  "hotels",
+  "timeshare",
+  "timeshares",
+  "condo hotel",
+  "condo-hotel",
+  "condohotel",
+  "hotel condo",
+  "condo-hotel hybrid",
+  "marriott",
+  "hilton",
+  "westin",
+  "sheraton",
+  "hyatt",
+  "wyndham",
+  "disney vacation club",
+  "vacation club",
 ];
 
 const VILLA_TERMS = ["villa", "villas"];
