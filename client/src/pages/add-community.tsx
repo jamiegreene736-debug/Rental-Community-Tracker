@@ -103,6 +103,7 @@ type SuggestedPairing = {
   rationale: string;
   isTopPick: boolean;
   matchScore: number;
+  alreadyExists?: boolean;
 };
 
 type CommunityProfile = {
@@ -920,12 +921,23 @@ export default function AddCommunity() {
       setUnitSearchResults(data);
       if (data.communityProfile) setCommunityProfile(data.communityProfile);
       if (data.suggestedPairings?.length) setSuggestedPairings(data.suggestedPairings);
+      // Auto-select best unused combo type (surgical automation per user request).
+      // Skips manual "choose combo type" when a strong unused recommendation exists.
+      // If community already has e.g. 3+3, prefers next best like 2+3 if available.
+      if (!selectedPairing) {
+        const best = (data.suggestedPairings || []).find((p: SuggestedPairing) => !p.alreadyExists) || (data.suggestedPairings || [])[0];
+        if (best) {
+          setSelectedPairing(best);
+          setSelectedUnit1({ url: "", title: `Unit A — ${best.unit1Beds}BR`, bedrooms: best.unit1Beds, price: best.estimatedUnit1Rate, source: "Algorithm" });
+          setSelectedUnit2({ url: "", title: `Unit B — ${best.unit2Beds}BR`, bedrooms: best.unit2Beds, price: best.estimatedUnit2Rate, source: "Algorithm" });
+        }
+      }
     } catch (e: any) {
       toast({ title: "Pairing analysis failed", description: e.message, variant: "destructive" });
     } finally {
       setUnitSearchLoading(false);
     }
-  }, [toast]);
+  }, [toast, selectedPairing]);
 
   const handleSelectPairing = useCallback((pairing: SuggestedPairing) => {
     setSelectedPairing(pairing);
@@ -945,6 +957,50 @@ export default function AddCommunity() {
       source: "Algorithm",
     });
   }, []);
+
+  // Quick city-bulk enabler: from research results, one-click queue the best *unused*
+  // combo type for a resort (auto-picks via alreadyExists flag + matchScore sort).
+  // This lets operator search a city, then bulk-add variants across many resorts
+  // with almost zero per-resort clicking (no manual combo type choice).
+  const quickQueueBestCombo = useCallback(async (community: CommunityResult) => {
+    try {
+      const res = await apiRequest("POST", "/api/community/search-units", {
+        communityName: community.name,
+        city: community.city,
+        state: community.state,
+        unitTypes: community.unitTypes,
+      });
+      const data = await res.json();
+      const pairings: SuggestedPairing[] = data.suggestedPairings || [];
+      const best = pairings.find((p) => !p.alreadyExists) || pairings[0];
+      if (!best) {
+        toast({ title: "No combo suggestions", description: "Could not determine a recommended pairing.", variant: "destructive" });
+        return;
+      }
+      const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state });
+      const pricingArea = suggestPricingArea(community.city, community.state, community.name);
+      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", {
+        items: [{
+          id: `quick_${Date.now().toString(36)}`,
+          community,
+          pairing: best,
+          streetAddress: street,
+          pricingArea,
+          strPermit: null,
+          dbprLicense: null,
+          touristTaxAccount: null,
+        }],
+      });
+      const jobData = await resp.json();
+      setBulkComboJob(jobData.job);
+      setBulkComboJobId(jobData.job.id);
+      setBulkComboOpen(true);
+      setBulkComboEvents([]);
+      toast({ title: "Queued best combo", description: `${community.name} — ${best.unit1Beds}+${best.unit2Beds}BR (auto)` });
+    } catch (e: any) {
+      toast({ title: "Quick queue failed", description: e?.message || "See console", variant: "destructive" });
+    }
+  }, [toast]);
 
   const toggleBulkPairing = useCallback((index: number) => {
     setBulkPairingIndexes((prev) => {
@@ -2201,6 +2257,19 @@ export default function AddCommunity() {
                             Already in system
                           </Badge>
                         )}
+                        {typeCheck.eligible && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-6 px-2 text-[10px] border-primary/40 hover:bg-primary/5"
+                            onClick={(e) => { e.stopPropagation(); quickQueueBestCombo(c); }}
+                            data-testid={`button-quick-combo-${i}`}
+                            title="Auto-pick best unused combo type and queue for bulk listing (no manual steps)"
+                          >
+                            ⚡ Best combo
+                          </Button>
+                        )}
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -2482,6 +2551,11 @@ export default function AddCommunity() {
                             <Badge className="text-xs bg-amber-500 hover:bg-amber-500 text-white border-0 gap-1">
                               <Star className="h-3 w-3" /> Algorithm Top Pick
                             </Badge>
+                          </div>
+                        )}
+                        {p.alreadyExists && (
+                          <div className="absolute -top-2.5 right-3">
+                            <Badge variant="outline" className="text-xs border-amber-300 text-amber-700 bg-amber-50">Already have this combo type</Badge>
                           </div>
                         )}
                         {isSelected && (

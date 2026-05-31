@@ -32791,6 +32791,29 @@ Return ONLY compact JSON with this exact shape:
       baseRatePerBR[br] = found ?? (br * basePricePerBR);
     }
 
+    // ── 3b. Detect already-saved combo variants for this community (surgical) ─
+    // Lets UI auto-recommend unused combo types (e.g. 2+3 if 3+3 already exists)
+    let existingComboKeys = new Set<string>();
+    try {
+      const drafts = await storage.getCommunityDrafts();
+      const n = communityName.toLowerCase().trim();
+      const c = (city || "").toLowerCase().trim();
+      const s = (state || "").toLowerCase().trim();
+      for (const d of drafts) {
+        if (
+          (d.name || "").toLowerCase().trim() === n &&
+          (d.city || "").toLowerCase().trim() === c &&
+          (d.state || "").toLowerCase().trim() === s &&
+          !d.singleListing &&
+          d.unit1Bedrooms && d.unit2Bedrooms
+        ) {
+          const b1 = d.unit1Bedrooms, b2 = d.unit2Bedrooms;
+          const key = b1 <= b2 ? `${b1}+${b2}` : `${b2}+${b1}`;
+          existingComboKeys.add(key);
+        }
+      }
+    } catch { /* best-effort; don't block suggestions */ }
+
     // ── 4. Generate pairing combinations ─────────────────────────────────────
     const MARKUP = 1.38;
     type Pairing = {
@@ -32798,6 +32821,7 @@ Return ONLY compact JSON with this exact shape:
       estimatedUnit1Rate: number; estimatedUnit2Rate: number;
       estimatedSellRate: number; estimatedSellRateHigh: number;
       rationale: string; isTopPick: boolean; matchScore: number;
+      alreadyExists?: boolean;
     };
     const pairings: Pairing[] = [];
 
@@ -32823,6 +32847,7 @@ Return ONLY compact JSON with this exact shape:
         if (total >= 8) reasons.push("rare 8BR+ inventory");
         if (b1 === b2 && total >= 6) reasons.push("⭐ algorithm top pick");
 
+        const key = b1 <= b2 ? `${b1}+${b2}` : `${b2}+${b1}`;
         pairings.push({
           unit1Beds: b1, unit2Beds: b2, totalBeds: total,
           estimatedUnit1Rate: r1, estimatedUnit2Rate: r2,
@@ -32830,6 +32855,7 @@ Return ONLY compact JSON with this exact shape:
           rationale: reasons.join(" · "),
           isTopPick: b1 === b2 && total >= 6,
           matchScore,
+          alreadyExists: existingComboKeys.has(key),
         });
       }
     }
