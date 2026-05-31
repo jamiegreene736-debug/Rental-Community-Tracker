@@ -6802,7 +6802,8 @@ export async function registerRoutes(
         limit: 12,
       });
       const driveNearby = driveNearbyDetailed.map((row) => row.community);
-      const similar = Array.from(new Set([...configuredSimilar, ...driveNearby]))
+      const clusterSimilar = SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [];
+      const similar = Array.from(new Set([...configuredSimilar, ...driveNearby, ...clusterSimilar]))
         .filter((community) => community !== baseCommunity)
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
         .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community));
