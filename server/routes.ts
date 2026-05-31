@@ -14135,11 +14135,11 @@ export async function registerRoutes(
       const mappings = await storage.getGuestyPropertyMap();
       const mappingByListingId = new Map(mappings.map((row) => [row.guestyListingId, row]));
       const targetByListingId = new Map<string, OperationsListingTarget>();
-      for (const [listingId, listing] of listingById.entries()) {
-        targetByListingId.set(
-          listingId,
-          await operationsListingTargetFor(listingId, listing, mappingByListingId.get(listingId) ?? null),
-        );
+      const targetPromises = Array.from(listingById.entries()).map(async ([listingId, listing]) =>
+        [listingId, await operationsListingTargetFor(listingId, listing, mappingByListingId.get(listingId) ?? null)] as const
+      );
+      for (const [listingId, target] of await Promise.all(targetPromises)) {
+        targetByListingId.set(listingId, target);
       }
 
       const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
@@ -14165,9 +14165,8 @@ export async function registerRoutes(
         if (rows.length < limit || (total && skip + rows.length >= total)) break;
       }
 
-      const enriched = [];
       const missingListingIds = new Set<string>();
-      for (const reservation of seenReservations.values()) {
+      const enrichmentPromises = Array.from(seenReservations.values()).map(async (reservation) => {
         let listingId = guestyListingIdFromReservation(reservation);
         let target = listingId ? targetByListingId.get(listingId) : undefined;
         if (!target) {
@@ -14180,10 +14179,12 @@ export async function registerRoutes(
         }
         if (!target) {
           missingListingIds.add(firstNonEmptyString(reservation?.listingId, reservation?.listing?._id, reservation?.listing?.id, "unknown"));
-          continue;
+          return null;
         }
-        enriched.push(await enrichGuestyReservationForOperations(reservation, target));
-      }
+        return await enrichGuestyReservationForOperations(reservation, target);
+      });
+      const enrichedResults = await Promise.all(enrichmentPromises);
+      const enriched = enrichedResults.filter((r): r is any => r != null);
 
       enriched.sort((a, b) => {
         const ad = String(a.checkInDateLocalized ?? a.checkIn ?? "");
