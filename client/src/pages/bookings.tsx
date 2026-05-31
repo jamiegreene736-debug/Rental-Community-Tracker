@@ -2030,11 +2030,17 @@ function AlternativeBuyInWorkflowPanel({
   onScout,
   onRunCommunity,
   onDraftMessage,
+  autoScan,
+  onStartAutoScan,
+  onStopAutoScan,
 }: {
   workflow: AlternativeWorkflowState | undefined;
   onScout: () => void;
   onRunCommunity: (community: string) => void;
   onDraftMessage: () => void;
+  autoScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
+  onStartAutoScan?: () => void;
+  onStopAutoScan?: () => void;
 }) {
   const active = workflow?.activeCommunity ?? null;
   const sidecarResults = workflow?.sidecarResults ?? {};
@@ -2075,6 +2081,17 @@ function AlternativeBuyInWorkflowPanel({
           {active === "scouting" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
           Scout similar areas
         </Button>
+        {onStartAutoScan && communities.length > 0 && !completeReplacementSet && (
+          autoScan?.isRunning ? (
+            <Button size="sm" variant="destructive" className="h-7" onClick={() => onStopAutoScan?.()}>
+              <XCircle className="mr-1 h-3.5 w-3.5" /> Stop auto sidecar
+            </Button>
+          ) : (
+            <Button size="sm" className="h-7 bg-sky-600 hover:bg-sky-700 text-white" onClick={onStartAutoScan} disabled={active === "scouting"}>
+              <Zap className="mr-1 h-3.5 w-3.5" /> Auto sidecar until combo (20min)
+            </Button>
+          )
+        )}
       </div>
       {communities.length > 0 && (
         <div className="mt-2 grid gap-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -2091,6 +2108,9 @@ function AlternativeBuyInWorkflowPanel({
                       <UnitTypeConfidenceBadge confidence={sidecar?.cheapest?.[0]?.unitTypeConfidence} />
                     </p>
                     <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.reason}</p>
+                    {autoScan && autoScan.scanned.includes(result.community) && (
+                      <span className="mt-0.5 inline-block text-[10px] px-1 rounded bg-sky-200 text-sky-800">auto-scanned</span>
+                    )}
                   </div>
                   <Button size="sm" className="h-7 shrink-0" onClick={() => onRunCommunity(result.community)} disabled={running}>
                     {running ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <MonitorPlay className="mr-1 h-3.5 w-3.5" />}
@@ -2107,6 +2127,21 @@ function AlternativeBuyInWorkflowPanel({
               </div>
             );
           })}
+        </div>
+      )}
+      {autoScan?.isRunning && (
+        <div className="mt-2 rounded border border-sky-300 bg-sky-100 px-2 py-1 text-[11px] text-sky-900">
+          Auto sidecar scan running: checked {autoScan.scanned.length} so far — stops at first full combo match. Use Stop button above to pause.
+        </div>
+      )}
+      {autoScan && !autoScan.isRunning && autoScan.foundComboIn && (
+        <div className="mt-2 rounded border border-green-300 bg-green-50 px-2 py-1 text-[11px] text-green-900 font-medium">
+          ✓ Auto scan found combo in {autoScan.foundComboIn}. Draft guest message ready below.
+        </div>
+      )}
+      {autoScan && !autoScan.isRunning && !autoScan.foundComboIn && (autoScan.scanned.length > 0 || autoScan.stopped) && (
+        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+          Auto scan complete: no full combo found across the alternatives within 20min drive. The cancellation advice above reflects this.
         </div>
       )}
       {Object.keys(sidecarResults).length > 0 && !completeReplacementSet && replacementPlanText && (
@@ -4060,6 +4095,11 @@ export default function Bookings() {
   const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
   const [lastAutoFillAudits, setLastAutoFillAudits] = useState<Record<string, AutoFillSearchAudit[]>>({});
   const [alternativeWorkflows, setAlternativeWorkflows] = useState<Record<string, AlternativeWorkflowState>>({});
+  const [autoAltScans, setAutoAltScans] = useState<Record<string, { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean }>>({});
+  const alternativeWorkflowsRef = useRef<Record<string, AlternativeWorkflowState>>({});
+  useEffect(() => { alternativeWorkflowsRef.current = alternativeWorkflows; }, [alternativeWorkflows]);
+  const runAlternativeSidecarSearchRef = useRef(runAlternativeSidecarSearch);
+  useEffect(() => { runAlternativeSidecarSearchRef.current = runAlternativeSidecarSearch; }, [runAlternativeSidecarSearch]);
   const [bulkSelectedReservations, setBulkSelectedReservations] = useState<Record<string, boolean>>({});
   const [bulkBuyInQueueOpen, setBulkBuyInQueueOpen] = useState(false);
   const [bulkBuyInQueueItems, setBulkBuyInQueueItems] = useState<BulkBuyInQueueItem[]>([]);
@@ -5912,6 +5952,84 @@ export default function Bookings() {
       toast({ title: `Sidecar search failed for ${community}`, description: error?.message ?? String(error), variant: "destructive" });
     }
   };
+
+  // Auto sidecar scan for alternatives: sequentially runs sidecar (find-buy-in) on 20min-drive communities
+  // until a full combo replacement set is found or all are exhausted. Updates autoAltScans state for UI.
+  const startAutoAlternativeSidecarScan = async (reservation: GuestyReservation) => {
+    const resId = reservation._id;
+    const wf = alternativeWorkflowsRef.current[resId] ?? alternativeWorkflows[resId];
+    const scout = wf?.scout;
+    if (!scout) {
+      toast({ title: "No scout results", description: "Run 'Scout similar areas' first.", variant: "destructive" });
+      return;
+    }
+    const baseComms: AlternativeScoutResult[] = (scout.scouted ?? scout.results ?? []).slice();
+    const rejected = scout.rejected ?? [];
+    const byComm = new Map<string, AlternativeScoutResult>();
+    for (const r of baseComms) byComm.set(r.community, r);
+    for (const r of rejected) if (!byComm.has(r.community)) byComm.set(r.community, r);
+    const communities = Array.from(byComm.values()).sort((a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999));
+    if (communities.length === 0) {
+      toast({ title: "No alternatives", description: "Scout returned no communities within 20min drive." });
+      return;
+    }
+    setAutoAltScans((prev) => ({ ...prev, [resId]: { isRunning: true, scanned: [], foundComboIn: null, stopped: false } }));
+    // The actual sequencing is driven by the reactive useEffect below (watches sidecarResults + auto flag).
+    // We just mark running here; the effect will pick next unscanned and call runAlternative...
+    toast({ title: "Auto sidecar scan started", description: `Will run sidecar on up to ${communities.length} nearby communities until a combo is found.` });
+  };
+
+  const stopAutoAlternativeSidecarScan = (reservationId: string) => {
+    setAutoAltScans((prev) => {
+      const cur = prev[reservationId];
+      if (!cur) return prev;
+      return { ...prev, [reservationId]: { ...cur, isRunning: false, stopped: true } };
+    });
+    // also clear any active in workflow
+    updateAlternativeWorkflow(reservationId, { activeCommunity: null });
+    toast({ title: "Auto scan stopped", description: "Stopped sequential sidecar on alternatives." });
+  };
+
+  // Reactive driver for auto alt scan: when flag on, no active running, pick next unscanned community and run it.
+  // After result lands (sidecarResults grows), re-eval; if complete set found, stop + toast.
+  useEffect(() => {
+    Object.entries(autoAltScans).forEach(([resId, scan]) => {
+      if (!scan.isRunning || scan.stopped) return;
+      const wf = alternativeWorkflowsRef.current[resId] ?? alternativeWorkflows[resId];
+      if (!wf?.scout) return;
+      const complete = bestAlternativeReplacementSet(wf);
+      if (complete) {
+        // success!
+        setAutoAltScans((prev) => ({ ...prev, [resId]: { ...scan, isRunning: false, foundComboIn: complete.community } }));
+        toast({ title: "Combo found via alternative!", description: `${complete.community} · ${complete.plan.join("+")}BR for ${fmtMoney(complete.totalCost)} — ready to draft guest message.` });
+        updateAlternativeWorkflow(resId, { activeCommunity: null });
+        return;
+      }
+      const comms: AlternativeScoutResult[] = (wf.scout!.scouted ?? wf.scout!.results ?? []).slice();
+      const byC = new Map<string, AlternativeScoutResult>();
+      for (const r of comms) byC.set(r.community, r);
+      for (const r of (wf.scout!.rejected ?? [])) if (!byC.has(r.community)) byC.set(r.community, r);
+      const ordered = Array.from(byC.values()).sort((a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999));
+      const scanned = scan.scanned ?? [];
+      const next = ordered.find((c) => !scanned.includes(c.community) && !wf.sidecarResults?.[c.community]);
+      if (!next) {
+        // exhausted
+        if (scan.isRunning) {
+          setAutoAltScans((prev) => ({ ...prev, [resId]: { ...scan, isRunning: false, stopped: true } }));
+          toast({ title: "No combo in 20min alternatives", description: `Scanned all ${ordered.length} nearby communities — none yielded a full replacement combo. Consider cancel.` , variant: "destructive" });
+        }
+        return;
+      }
+      if (wf.activeCommunity) return; // one running, wait
+      // mark as about to scan this one (optimistic, run will set active)
+      setAutoAltScans((prev) => {
+        const cur = prev[resId] ?? scan;
+        return { ...prev, [resId]: { ...cur, scanned: [...(cur.scanned ?? []), next.community] } };
+      });
+      // fire the run (it is async internally, will update sidecarResults when done)
+      runAlternativeSidecarSearchRef.current({ _id: resId } as any, next.community);  // cast ok, only needs _id for keying
+    });
+  }, [autoAltScans, alternativeWorkflows]);  // run func via ref; avoid re-trigger loops
 
   const attachAlternativeReplacementSet = async (reservation: GuestyReservation, replacement: AlternativeReplacementSet) => {
     const meta = reservationPropertyMeta.get(reservation._id);
@@ -7842,7 +7960,7 @@ export default function Bookings() {
 	                            .map((option) => option.totalCost)
 	                            .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
 	                            .sort((a, b) => a - b)[0] ?? null;
-	                          const noCompleteCombo = comboOptions.length > 0 && completeComboOptions.length === 0;
+	                          const noCompleteCombo = completeComboOptions.length === 0;
 	                          const advice = buildBuyInCancellationAdvice({
 	                            reservation: r,
 	                            audits: searchAudits,
@@ -7859,6 +7977,9 @@ export default function Bookings() {
 	                                  onScout={() => scoutAlternativeCommunities(r, advice)}
 	                                  onRunCommunity={(community) => runAlternativeSidecarSearch(r, community)}
 	                                  onDraftMessage={() => draftAlternativeGuestMessage(r)}
+	                                  autoScan={autoAltScans[r._id] ?? null}
+	                                  onStartAutoScan={() => startAutoAlternativeSidecarScan(r)}
+	                                  onStopAutoScan={() => stopAutoAlternativeSidecarScan(r._id)}
 	                                />
 	                              )}
 	                            </div>
