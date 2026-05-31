@@ -42,6 +42,7 @@ import { checkCommunityType } from "@shared/community-type";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
+import { resolveBuyInMarketFromText, nearbyBuyInMarketsForScoutDetailed } from "@shared/buy-in-market";
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -222,6 +223,19 @@ export default function AddCommunity() {
     return () => {
       if (cityDebounceRef.current) clearTimeout(cityDebounceRef.current);
     };
+  }, [cityInput, selectedState]);
+
+  // Nearby city suggestions (within ~30min drive) for the entered city, powered by
+  // existing buy-in market coordinates + drive math. Only surfaces when the typed
+  // city resolves to a known market (e.g. Poipu, Koloa, Kailua-Kona). Lets the
+  // operator quickly pivot to nearby cities and research combo candidates there too.
+  const nearbyCitySuggestions = useMemo(() => {
+    const q = cityInput.trim();
+    if (!q || !selectedState) return [] as Array<{ label: string; minutes: number }>;
+    const market = resolveBuyInMarketFromText(q, selectedState);
+    if (!market) return [];
+    const details = nearbyBuyInMarketsForScoutDetailed(market, { maxDriveMinutes: 30, limit: 5 });
+    return details.map((d) => ({ label: d.community, minutes: d.driveMinutes }));
   }, [cityInput, selectedState]);
 
   // Step 2
@@ -1656,6 +1670,32 @@ export default function AddCommunity() {
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
               <strong>Current selection:</strong> {selectedState || "No state selected"} — {cityInput || "No city entered"}
             </div>
+            {nearbyCitySuggestions.length > 0 && (
+              <div className="mb-4">
+                <div className="text-[11px] font-medium text-muted-foreground mb-1.5 flex items-center gap-1">
+                  <span>Nearby cities within ~30 min drive</span>
+                  <span className="text-[9px]">(click to pivot &amp; research combos there)</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {nearbyCitySuggestions.map((n) => (
+                    <Button
+                      key={n.label}
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        setCityInput(n.label);
+                        setShowCitySuggestions(false);
+                      }}
+                      data-testid={`nearby-city-${n.label.replace(/\s+/g, "-")}`}
+                    >
+                      {n.label} <span className="ml-1 opacity-70">({n.minutes}min)</span>
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               <Button
                 onClick={handleResearch}
