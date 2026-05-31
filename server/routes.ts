@@ -10924,6 +10924,14 @@ export async function registerRoutes(
     const irkDiscoveryPromise = vrpDiscoveryPromise("islandRealtyKauai", "pikoCalls");
     const kpDiscoveryPromise = vrpDiscoveryPromise("kauaiParadise", "evrhiCalls");
 
+    // Hoisted early so the population pushes below (and pm.push) do not hit TDZ.
+    // These were declared too late after wiring the new VRP sources in recent changes.
+    const kvrDiscovered: Candidate[] = [];
+    const pbhDiscovered: Candidate[] = [];
+    const irkDiscovered: Candidate[] = [];
+    const kpDiscovered: Candidate[] = [];
+    const pm: Candidate[] = [];
+
     // Await the new VRP sources in parallel with the others and surface them
     // as first-class "pm" candidates (direct API, high quality for combos).
     const [kvrUnits, pbhUnits, irkUnits, kpUnits] = await Promise.all([
@@ -11345,17 +11353,10 @@ export async function registerRoutes(
     const cbDiscovered: Candidate[] = [];
     const pikoDiscovered: Candidate[] = [];
     const evrhiDiscovered: Candidate[] = [];
-    // New VRP sources from the previous PR
-    const kvrDiscovered: Candidate[] = [];
-    const pbhDiscovered: Candidate[] = [];
-    const irkDiscovered: Candidate[] = [];
-    const kpDiscovered: Candidate[] = [];
     const gvDiscovered: Candidate[] = [];
     const slAlekonaDiscovered: Candidate[] = [];
     const slPrincevilleDiscovered: Candidate[] = [];
-    // PM/direct websites are not searched or scraped for buy-in rates.
-    // Direct links enter below only when Google Lens matches Airbnb photos.
-    const pm: Candidate[] = [];
+    // (kvr/pbh/irk/kp + pm decls hoisted earlier; removed stale duplicates here to fix build + TDZ root cause)
 
     // ── Path B: reverse-image search the top Airbnb candidates ───────────
     // Airbnb listings can't be sublet (Airbnb's TOS bars commercial
