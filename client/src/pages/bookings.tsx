@@ -4098,6 +4098,49 @@ export default function Bookings() {
   const [autoAltScans, setAutoAltScans] = useState<Record<string, { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean }>>({});
   const alternativeWorkflowsRef = useRef<Record<string, AlternativeWorkflowState>>({});
   useEffect(() => { alternativeWorkflowsRef.current = alternativeWorkflows; }, [alternativeWorkflows]);
+
+  // Hoisted early (before first reference in the runAlternativeSidecarSearchRef initializer)
+  // to fix TDZ ReferenceError "Cannot access '...' before initialization" (minified 'jt')
+  // when the Operations (/bookings) page mounts. The definition was after the early
+  // useRef/useEffect that close over the name during component body execution.
+  const runAlternativeSidecarSearch = async (reservation: GuestyReservation, community: string) => {
+    const meta = reservationPropertyMeta.get(reservation._id);
+    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
+    const bedrooms = reservation.slots.find((slot) => !slot.buyIn)?.bedrooms ?? reservation.slots[0]?.bedrooms;
+    const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
+    const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
+    if (!propertyId || !bedrooms || !checkIn || !checkOut) return;
+    updateAlternativeWorkflow(reservation._id, { activeCommunity: community });
+    try {
+      const params = new URLSearchParams({
+        propertyId: String(propertyId),
+        bedrooms: String(bedrooms),
+        checkIn,
+        checkOut,
+        community,
+        nocache: "1",
+      });
+      if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
+      const data = await fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
+      updateAlternativeWorkflow(reservation._id, {
+        activeCommunity: null,
+        sidecarResults: {
+          ...(alternativeWorkflows[reservation._id]?.sidecarResults ?? {}),
+          [community]: data,
+        },
+      });
+      toast({
+        title: `Sidecar search finished for ${community}`,
+        description: data.cheapest?.length
+          ? `${data.cheapest.length} verified candidate${data.cheapest.length === 1 ? "" : "s"} returned.`
+          : data.diagnostics?.summary ?? "No verified candidate returned.",
+      });
+    } catch (error: any) {
+      updateAlternativeWorkflow(reservation._id, { activeCommunity: null });
+      toast({ title: `Sidecar search failed for ${community}`, description: error?.message ?? String(error), variant: "destructive" });
+    }
+  };
+
   const runAlternativeSidecarSearchRef = useRef(runAlternativeSidecarSearch);
   useEffect(() => { runAlternativeSidecarSearchRef.current = runAlternativeSidecarSearch; }, [runAlternativeSidecarSearch]);
   const [bulkSelectedReservations, setBulkSelectedReservations] = useState<Record<string, boolean>>({});
@@ -5912,44 +5955,6 @@ export default function Bookings() {
     } catch (error: any) {
       updateAlternativeWorkflow(reservation._id, { activeCommunity: null });
       toast({ title: "Alternative scout failed", description: error?.message ?? String(error), variant: "destructive" });
-    }
-  };
-
-  const runAlternativeSidecarSearch = async (reservation: GuestyReservation, community: string) => {
-    const meta = reservationPropertyMeta.get(reservation._id);
-    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
-    const bedrooms = reservation.slots.find((slot) => !slot.buyIn)?.bedrooms ?? reservation.slots[0]?.bedrooms;
-    const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
-    const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
-    if (!propertyId || !bedrooms || !checkIn || !checkOut) return;
-    updateAlternativeWorkflow(reservation._id, { activeCommunity: community });
-    try {
-      const params = new URLSearchParams({
-        propertyId: String(propertyId),
-        bedrooms: String(bedrooms),
-        checkIn,
-        checkOut,
-        community,
-        nocache: "1",
-      });
-      if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
-      const data = await fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
-      updateAlternativeWorkflow(reservation._id, {
-        activeCommunity: null,
-        sidecarResults: {
-          ...(alternativeWorkflows[reservation._id]?.sidecarResults ?? {}),
-          [community]: data,
-        },
-      });
-      toast({
-        title: `Sidecar search finished for ${community}`,
-        description: data.cheapest?.length
-          ? `${data.cheapest.length} verified candidate${data.cheapest.length === 1 ? "" : "s"} returned.`
-          : data.diagnostics?.summary ?? "No verified candidate returned.",
-      });
-    } catch (error: any) {
-      updateAlternativeWorkflow(reservation._id, { activeCommunity: null });
-      toast({ title: `Sidecar search failed for ${community}`, description: error?.message ?? String(error), variant: "destructive" });
     }
   };
 
