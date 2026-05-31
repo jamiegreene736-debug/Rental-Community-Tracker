@@ -485,14 +485,14 @@ export default function BuilderPreflight() {
     const pendingIds = new Set(unitsToCheck.map(u => u.id));
     setCheckingUnitIds(new Set(pendingIds));
 
-    const hasPhotos = unitsToCheck.some(u => fullPhotoAudit ? !!(u as any).photoFolder : (!(u as any)._isReplaced && (u as any).photoFolder));
+    const hasPhotos = unitsToCheck.some(u => !!(u as any).photoFolder);
     if (hasPhotos) setCheckPhase("text");
 
     await Promise.all(
       unitsToCheck.map(async (unit) => {
         const singleUnitListing = property.units.length === 1;
         const address = (unit as any)._overrideAddress || (singleUnitListing ? property.address : `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`);
-        const hasUnitPhoto = fullPhotoAudit ? !!(unit as any).photoFolder : (!(unit as any)._isReplaced && (unit as any).photoFolder);
+        const hasUnitPhoto = !!(unit as any).photoFolder;
         const unitPayload = [{
           unitId: unit.id,
           unitNumber: unit.unitNumber,

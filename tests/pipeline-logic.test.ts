@@ -143,6 +143,18 @@ assert.deepEqual(
   ["6"],
   "Kaiulani preflight should check the second selected unit only, not split it into units 6 and 7",
 );
+const preflightSource = readFileSync("client/src/pages/builder-preflight.tsx", "utf8");
+assert.match(
+  preflightSource,
+  /const hasUnitPhoto = !!\(unit as any\)\.photoFolder;/,
+  "preflight recheck must scan replacement photo folders instead of skipping _isReplaced units",
+);
+const routesSource = readFileSync("server/routes.ts", "utf8");
+assert.match(
+  routesSource,
+  /Replacement unit found, but its photos could not be saved/,
+  "unit replacement must reject swaps when replacement photos cannot be saved",
+);
 console.log("  ✓ shared photo folder tokens stay scoped to the unit being checked");
 
 // Case 7: Primary Bathroom — valid (has \"Primary\" + \"Bathroom\").

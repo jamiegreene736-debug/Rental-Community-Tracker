@@ -24798,11 +24798,11 @@ Return ONLY compact JSON with this exact shape:
       newBedrooms: number | null;
       newSourceUrl: string;
     },
-  ): Promise<void> => {
+  ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string }> => {
     const url = swap.newSourceUrl;
-    if (!/^https?:\/\//i.test(url)) return;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
-    if (await unitSwapPhotoFolderHasSource(folder, url)) return;
+    if (!/^https?:\/\//i.test(url)) return { ok: false, folder, savedCount: 0, error: "Replacement source URL is invalid" };
+    if (await unitSwapPhotoFolderHasSource(folder, url)) return { ok: true, folder, savedCount: 1 };
 
     try {
       const folderPath = path.join(process.cwd(), "client/public/photos", folder);
@@ -24810,7 +24810,7 @@ Return ONLY compact JSON with this exact shape:
       const scraped = await scrapeListingPhotos(url, undefined, listingFacts);
       if (!scraped.length) {
         console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
-        return;
+        return { ok: false, folder, savedCount: 0, error: "Replacement listing returned 0 photos" };
       }
 
       const result = await downloadAndPrioritize({
@@ -24838,8 +24838,11 @@ Return ONLY compact JSON with this exact shape:
       await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
 
       console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
+      if (result.kept <= 0) return { ok: false, folder, savedCount: 0, error: "Replacement photo pipeline kept 0 photos" };
+      return { ok: true, folder, savedCount: result.kept };
     } catch (e: any) {
       console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
+      return { ok: false, folder, savedCount: 0, error: e?.message ?? "Replacement photo scrape failed" };
     }
   };
 
@@ -24862,12 +24865,16 @@ Return ONLY compact JSON with this exact shape:
         duplicateOldUnitId: duplicateSource.oldUnitId,
       });
     }
+    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data);
+    if (!hydrated.ok) {
+      return res.status(502).json({
+        error: `Replacement unit found, but its photos could not be saved: ${hydrated.error ?? "unknown error"}. Choose a different replacement so the builder does not reuse duplicate photos.`,
+        photoFolder: hydrated.folder,
+      });
+    }
     const swap = await storage.createUnitSwap(parsed.data);
-    const photoFolder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
 
-    await hydrateUnitSwapPhotoFolder(swap);
-
-    return res.json({ swap, photoFolder });
+    return res.json({ swap, photoFolder: hydrated.folder, savedPhotoCount: hydrated.savedCount });
   });
 
   app.get("/api/unit-swaps/:propertyId", async (req, res) => {
