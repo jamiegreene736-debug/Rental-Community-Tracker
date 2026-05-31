@@ -105,6 +105,7 @@ import {
   BUY_IN_MARKET_SEARCH_LOCATIONS,
   SIMILAR_BUY_IN_MARKETS,
   driveMinutesBetweenBuyInMarkets,
+  driveMinutesBetweenCoords,
   nearbyBuyInMarketsForScout,
   nearbyBuyInMarketsForScoutDetailed,
   oceanfrontComparableBuyInMarket,
@@ -31381,6 +31382,82 @@ Return ONLY compact JSON with this exact shape:
       res.json({ cities });
     } catch (e: any) {
       console.warn(`[city-suggest-any] error for "${query}": ${e.message}`);
+      res.json({ cities: [] });
+    }
+  });
+
+  // GET /api/community/nearby-cities?state=Hawaii&query=Koloa
+  // Returns nearby cities/towns (populated places) within ~20min drive of the
+  // input city. Used by Add Combo Listing UI to let operator pivot research
+  // to adjacent cities. Backed by Photon reverse (radius) + drive math.
+  const nearbyCitiesCache = new Map<string, { cities: Array<{ name: string; minutes: number }>; ts: number }>();
+  const NEARBY_CITIES_TTL = 10 * 60 * 1000;
+  app.get("/api/community/nearby-cities", async (req, res) => {
+    const state = String(req.query.state || "").trim();
+    const query = String(req.query.query || "").trim();
+    if (query.length < 2) return res.json({ cities: [] });
+    const cacheKey = `${state.toLowerCase()}|${query.toLowerCase()}`;
+    const cached = nearbyCitiesCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < NEARBY_CITIES_TTL) return res.json({ cities: cached.cities });
+    try {
+      const PLACE_VALUES = new Set(["city","town","village","hamlet","municipality","borough","suburb","locality","neighbourhood"]);
+      const stripOkina = (s: string) => s.replace(/[ʻʼ'']/g, "").normalize("NFD").replace(/[̀-ͯ]/g, "");
+      const bbox = (STATE_BBOX as any)[state];
+      // Geocode input city for center point
+      const geoUrl = new URL("https://photon.komoot.io/api/");
+      geoUrl.searchParams.set("q", query);
+      geoUrl.searchParams.set("limit", "5");
+      geoUrl.searchParams.set("osm_tag", "place");
+      if (bbox) geoUrl.searchParams.set("bbox", bbox.join(","));
+      const geoResp = await fetch(geoUrl.toString(), { headers: { "User-Agent": "NexStay/1.0 (contact: jamie.greene736@gmail.com)" } });
+      if (!geoResp.ok) { nearbyCitiesCache.set(cacheKey, {cities:[],ts:Date.now()}); return res.json({cities:[]}); }
+      const geoData = await geoResp.json() as any;
+      let cLat: number|null = null, cLon: number|null = null;
+      const qNorm = stripOkina(query).toLowerCase();
+      for (const f of geoData.features ?? []) {
+        const p = f.properties ?? {};
+        if ((p.country??"") !== "United States") continue;
+        if (state && (p.state??"").toLowerCase() !== state.toLowerCase()) continue;
+        if (!PLACE_VALUES.has((p.osm_value??"").toLowerCase())) continue;
+        const [lon, lat] = f.geometry?.coordinates ?? [];
+        if (Number.isFinite(lat) && Number.isFinite(lon)) { cLat=lat; cLon=lon; break; }
+      }
+      if (cLat==null || cLon==null) { nearbyCitiesCache.set(cacheKey,{cities:[],ts:Date.now()}); return res.json({cities:[]}); }
+      // Reverse for nearby places within ~25km
+      const revUrl = new URL("https://photon.komoot.io/reverse");
+      revUrl.searchParams.set("lat", String(cLat));
+      revUrl.searchParams.set("lon", String(cLon));
+      revUrl.searchParams.set("radius", "25");
+      revUrl.searchParams.set("limit", "30");
+      revUrl.searchParams.set("osm_tag", "place");
+      const revResp = await fetch(revUrl.toString(), { headers: { "User-Agent": "NexStay/1.0 (contact: jamie.greene736@gmail.com)" } });
+      if (!revResp.ok) return res.json({cities:[]});
+      const revData = await revResp.json() as any;
+      const seen = new Set<string>();
+      const out: Array<{name:string; minutes:number}> = [];
+      for (const f of revData.features ?? []) {
+        const p = f.properties ?? {};
+        if ((p.country??"") !== "United States") continue;
+        if (state && (p.state??"").toLowerCase() !== state.toLowerCase()) continue;
+        if (!PLACE_VALUES.has((p.osm_value??"").toLowerCase())) continue;
+        const raw = (p.name??"").trim(); if (!raw) continue;
+        const display = stripOkina(raw);
+        const key = display.toLowerCase();
+        if (seen.has(key)) continue;
+        if (key === qNorm || qNorm.includes(key) || key.includes(qNorm)) { seen.add(key); continue; }
+        const [lon, lat] = f.geometry?.coordinates ?? [];
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        const mins = driveMinutesBetweenCoords(cLat, cLon, lat, lon);
+        if (mins == null || mins > 20) continue;
+        seen.add(key);
+        out.push({ name: display, minutes: mins });
+        if (out.length >= 6) break;
+      }
+      out.sort((a,b)=> a.minutes-b.minutes || a.name.localeCompare(b.name));
+      nearbyCitiesCache.set(cacheKey, { cities: out, ts: Date.now() });
+      res.json({ cities: out });
+    } catch (e: any) {
+      console.warn(`[nearby-cities] error for "${query}" in ${state}: ${e.message}`);
       res.json({ cities: [] });
     }
   });

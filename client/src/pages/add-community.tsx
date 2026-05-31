@@ -42,7 +42,6 @@ import { checkCommunityType } from "@shared/community-type";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
-import { resolveBuyInMarketFromText, nearbyBuyInMarketsForScoutDetailed } from "@shared/buy-in-market";
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -228,17 +227,45 @@ export default function AddCommunity() {
     };
   }, [cityInput, selectedState]);
 
-  // Nearby city suggestions (within ~30min drive) for the entered city, powered by
-  // existing buy-in market coordinates + drive math. Only surfaces when the typed
-  // city resolves to a known market (e.g. Poipu, Koloa, Kailua-Kona). Lets the
-  // operator quickly pivot to nearby cities and research combo candidates there too.
-  const nearbyCitySuggestions = useMemo(() => {
+  // Nearby cities within ~20min drive of the typed city (for quick pivot in
+  // Add Combo flow). Fetched from server which uses Photon reverse geocode +
+  // drive-time math so any city input yields real nearby research targets.
+  const [nearbyCitySuggestions, setNearbyCitySuggestions] = useState<Array<{ label: string; minutes: number }>>([]);
+  const [nearbySuggestionsLoading, setNearbySuggestionsLoading] = useState(false);
+  const nearbyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nearbySeqRef = useRef(0);
+
+  useEffect(() => {
+    if (nearbyDebounceRef.current) clearTimeout(nearbyDebounceRef.current);
     const q = cityInput.trim();
-    if (!q || !selectedState) return [] as Array<{ label: string; minutes: number }>;
-    const market = resolveBuyInMarketFromText(q, selectedState);
-    if (!market) return [];
-    const details = nearbyBuyInMarketsForScoutDetailed(market, { maxDriveMinutes: 30, limit: 5 });
-    return details.map((d) => ({ label: d.community, minutes: d.driveMinutes }));
+    if (!selectedState || q.length < 3) {
+      setNearbyCitySuggestions([]);
+      setNearbySuggestionsLoading(false);
+      return;
+    }
+    setNearbySuggestionsLoading(true);
+    const mySeq = ++nearbySeqRef.current;
+    nearbyDebounceRef.current = setTimeout(async () => {
+      try {
+        const r = await fetch(
+          `/api/community/nearby-cities?state=${encodeURIComponent(selectedState)}&query=${encodeURIComponent(q)}`,
+        );
+        const data = await r.json();
+        if (mySeq !== nearbySeqRef.current) return;
+        const list = Array.isArray(data?.cities)
+          ? data.cities.map((c: any) => ({ label: c?.name ?? String(c), minutes: Number(c?.minutes ?? 0) }))
+          : [];
+        setNearbyCitySuggestions(list);
+      } catch {
+        if (mySeq !== nearbySeqRef.current) return;
+        setNearbyCitySuggestions([]);
+      } finally {
+        if (mySeq === nearbySeqRef.current) setNearbySuggestionsLoading(false);
+      }
+    }, 350);
+    return () => {
+      if (nearbyDebounceRef.current) clearTimeout(nearbyDebounceRef.current);
+    };
   }, [cityInput, selectedState]);
 
   // Step 2
@@ -1731,8 +1758,8 @@ export default function AddCommunity() {
             {nearbyCitySuggestions.length > 0 && (
               <div className="mb-4">
                 <div className="text-[11px] font-medium text-muted-foreground mb-1.5 flex items-center gap-1">
-                  <span>Nearby cities within ~30 min drive</span>
-                  <span className="text-[9px]">(click to pivot &amp; research combos there)</span>
+                  <span>Nearby cities within ~20 min drive</span>
+                  <span className="text-[9px]">(researched; click to pivot research)</span>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {nearbyCitySuggestions.map((n) => (

@@ -236,7 +236,7 @@ export function oceanfrontComparableBuyInMarket(community: string | null | undef
 const DRIVE_SPEED_MPH = 35;
 const DRIVE_ROAD_FACTOR = 1.35;
 
-function haversineMiles(aLat: number, aLng: number, bLat: number, bLng: number): number {
+export function haversineMiles(aLat: number, aLng: number, bLat: number, bLng: number): number {
   const R = 3958.8;
   const toRad = (deg: number) => (deg * Math.PI) / 180;
   const dLat = toRad(bLat - aLat);
@@ -252,6 +252,12 @@ export function driveMinutesBetweenBuyInMarkets(fromKey: string, toKey: string):
   const b = BUY_IN_MARKET_LOCATIONS[toKey];
   if (!a || !b) return null;
   const roadMiles = haversineMiles(a.lat, a.lng, b.lat, b.lng) * DRIVE_ROAD_FACTOR;
+  return Math.max(1, Math.ceil((roadMiles / DRIVE_SPEED_MPH) * 60));
+}
+
+export function driveMinutesBetweenCoords(aLat: number, aLng: number, bLat: number, bLng: number): number | null {
+  if (!Number.isFinite(aLat) || !Number.isFinite(aLng) || !Number.isFinite(bLat) || !Number.isFinite(bLng)) return null;
+  const roadMiles = haversineMiles(aLat, aLng, bLat, bLng) * DRIVE_ROAD_FACTOR;
   return Math.max(1, Math.ceil((roadMiles / DRIVE_SPEED_MPH) * 60));
 }
 
