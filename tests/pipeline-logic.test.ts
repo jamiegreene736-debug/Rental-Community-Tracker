@@ -10,6 +10,8 @@ import { parseCommunityResearchJsonArray, researchCommunitiesForCity } from "../
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "../shared/community-addresses";
 import { checkCommunityType } from "../shared/community-type";
+import { unitVerificationClaims } from "../shared/folder-unit-map";
+import { verificationTokensForFolder } from "../shared/photo-folder-utils";
 import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "../server/photo-match-guardrails";
 
@@ -125,6 +127,23 @@ assert.equal(
   "label starting 'Kitchen' in Bedrooms category should demote to Kitchen",
 );
 console.log("  ✓ 'Kitchen With Island' mislabeled as Bedrooms demotes to Kitchen");
+
+const preflightPhotoVerifyTokens = (unitNumber: string, address: string, folder: string): string[] => {
+  const unitScopedTokens = unitVerificationClaims(unitNumber, address);
+  return unitScopedTokens.length > 0 ? unitScopedTokens : verificationTokensForFolder(folder) ?? [];
+};
+
+assert.deepEqual(
+  preflightPhotoVerifyTokens("Unit 5", "4100 Queen Emma's Dr, Princeville, HI 96722, Unit 5", "kaiulani-52"),
+  ["5"],
+  "preflight photo check should not let shared kaiulani folder tokens verify Unit 5 as units 6/7",
+);
+assert.deepEqual(
+  preflightPhotoVerifyTokens("Units 6-7", "4100 Queen Emma's Dr, Princeville, HI 96722, Units 6-7", "kaiulani-52"),
+  ["6", "7"],
+  "combo unit label should remain one selected wizard unit while verifying its own 6/7 claim",
+);
+console.log("  ✓ shared photo folder tokens stay scoped to the unit being checked");
 
 // Case 7: Primary Bathroom — valid (has \"Primary\" + \"Bathroom\").
 assert.equal(

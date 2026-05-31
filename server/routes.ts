@@ -23090,7 +23090,12 @@ Return ONLY compact JSON with this exact shape:
       const allFiles = await selectUnitPhotoFilesForDuplicateCheck(folderPath, photoFolder);
       const files = fullPhotoAudit ? allFiles : allFiles.slice(0, 5);
       const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
-      const verifyTokens = singleListingMode ? [] : unitVerificationClaims(unitNumber, unitAddress, folderTokens);
+      const unitScopedTokens = unitVerificationClaims(unitNumber, unitAddress);
+      const verifyTokens = singleListingMode
+        ? []
+        : unitScopedTokens.length > 0
+          ? unitScopedTokens
+          : folderTokens;
       console.log(`[preflight-platform-check] photoSearch folder=${photoFolder} singleListing=${singleListingMode} mode=${fullPhotoAudit ? "full" : "sample"} files=${files.length}/${allFiles.length}`);
       const photoHits: Record<"airbnb" | "vrbo" | "booking", Set<string>> = {
         airbnb: new Set(),

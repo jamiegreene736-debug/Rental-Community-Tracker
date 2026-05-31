@@ -56,6 +56,15 @@ type UnitOverride = {
   swapId?: number;
 };
 
+function formatUnitDisplayLabel(unitNumber: string): string {
+  const raw = String(unitNumber || "").trim();
+  if (!raw) return "Unit";
+  if (/^(unit|units|apt\.?|apartment|suite|ste\.?|building|townhome|main|guest)\b/i.test(raw)) {
+    return raw;
+  }
+  return `Unit ${raw}`;
+}
+
 // ── Status badge ──────────────────────────────────────────────────────────────
 
 function StatusBadge({
@@ -482,7 +491,7 @@ export default function BuilderPreflight() {
     await Promise.all(
       unitsToCheck.map(async (unit) => {
         const singleUnitListing = property.units.length === 1;
-        const address = (unit as any)._overrideAddress || (singleUnitListing ? property.address : `${property.address}, Unit ${unit.unitNumber}`);
+        const address = (unit as any)._overrideAddress || (singleUnitListing ? property.address : `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`);
         const hasUnitPhoto = fullPhotoAudit ? !!(unit as any).photoFolder : (!(unit as any)._isReplaced && (unit as any).photoFolder);
         const unitPayload = [{
           unitId: unit.id,
@@ -632,7 +641,7 @@ export default function BuilderPreflight() {
     : platformProgressValue;
   const checkingLabels = effectiveUnits
     .filter((unit) => checkingUnitIds.has(unit.id))
-    .map((unit) => `Unit ${unit.unitNumber}`)
+    .map((unit) => formatUnitDisplayLabel(unit.unitNumber))
     .join(", ");
   const canFullUnitAudit = effectiveUnits.some((unit) => !!(unit as any).photoFolder);
   const targetUnit = replacementTargetId
@@ -1159,7 +1168,7 @@ export default function BuilderPreflight() {
                       const unitResult = results[unit.id];
                       const r = unitResult?.platforms[key];
                       const isReplaced = (unit as any)._isReplaced;
-                      const displayAddress = (unit as any)._overrideAddress || `${property.address}, Unit ${unit.unitNumber}`;
+                      const displayAddress = (unit as any)._overrideAddress || `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`;
                       const unitChecking = checkingUnitIds.has(unit.id);
                       return (
                         <tr
@@ -1168,7 +1177,7 @@ export default function BuilderPreflight() {
                           className="border-b border-border/40 last:border-0"
                         >
                           <td className="py-2.5 text-sm font-medium">
-                            <span>Unit {unit.unitNumber}</span>
+                            <span>{formatUnitDisplayLabel(unit.unitNumber)}</span>
                             {isReplaced && !swapsCommitted && (
                               <Badge variant="secondary" className="ml-1.5 text-[10px] py-0 px-1 h-4 align-middle">
                                 replaced
