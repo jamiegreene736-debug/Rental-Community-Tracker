@@ -376,6 +376,8 @@ export default function AddCommunity() {
     createdAt: string;
   };
   const [bulkPairingIndexes, setBulkPairingIndexes] = useState<Set<number>>(new Set());
+  // Community-level bulk selection in Step 2 research results (for multi-resort queueing of best combos)
+  const [bulkCommunityIndexes, setBulkCommunityIndexes] = useState<Set<number>>(new Set());
   const [bulkComboOpen, setBulkComboOpen] = useState(false);
   const [bulkComboStarting, setBulkComboStarting] = useState(false);
   const [bulkComboJobId, setBulkComboJobId] = useState<string | null>(null);
@@ -790,6 +792,7 @@ export default function AddCommunity() {
     }
     setResearchLoading(true);
     setCommunities([]);
+    setBulkCommunityIndexes(new Set());
     try {
       const res = await apiRequest("POST", "/api/community/research", { city: cityInput.trim(), state: selectedState });
       const data = await res.json();
@@ -1028,6 +1031,71 @@ export default function AddCommunity() {
       toast({ title: "Quick queue failed", description: e?.message || "See console", variant: "destructive" });
     }
   }, [toast]);
+
+  const toggleBulkCommunity = useCallback((index: number) => {
+    setBulkCommunityIndexes((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }, []);
+
+  const queueBestCombosForCommunities = useCallback(async (indexes: number[]) => {
+    if (indexes.length === 0) return;
+    const selected = [...indexes].sort((a, b) => a - b).map((i) => communities[i]).filter(Boolean);
+    if (selected.length === 0) return;
+    setBulkComboStarting(true);
+    setBulkComboOpen(true);
+    try {
+      const items: any[] = [];
+      for (const community of selected) {
+        try {
+          const res = await apiRequest("POST", "/api/community/search-units", {
+            communityName: community.name,
+            city: community.city,
+            state: community.state,
+            unitTypes: community.unitTypes,
+          });
+          const data = await res.json();
+          const pairings: SuggestedPairing[] = data.suggestedPairings || [];
+          const best = pairings.find((p: any) => !p.alreadyExists) || pairings[0];
+          if (!best) continue;
+          const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state });
+          const pricingArea = suggestPricingArea(community.city, community.state, community.name);
+          items.push({
+            id: `bcomm_${Date.now().toString(36)}_${items.length}`,
+            community,
+            pairing: best,
+            streetAddress: street,
+            pricingArea,
+            strPermit: null,
+            dbprLicense: null,
+            touristTaxAccount: null,
+          });
+        } catch {
+          // skip one on error; continue others
+        }
+      }
+      if (items.length === 0) {
+        toast({ title: "No combos queued", description: "No valid best pairings found for selection.", variant: "destructive" });
+        return;
+      }
+      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", { items });
+      const jobData = await resp.json();
+      if (jobData.job) {
+        setBulkComboJob(jobData.job);
+        setBulkComboJobId(jobData.job.id);
+        setBulkComboEvents([]);
+        toast({ title: "Bulk queued", description: `${items.length} community best-combo draft${items.length === 1 ? "" : "s"}` });
+      }
+      setBulkCommunityIndexes(new Set());
+    } catch (e: any) {
+      toast({ title: "Bulk community queue failed", description: e?.message || "See console", variant: "destructive" });
+    } finally {
+      setBulkComboStarting(false);
+    }
+  }, [communities, toast]);
 
   const toggleBulkPairing = useCallback((index: number) => {
     setBulkPairingIndexes((prev) => {
@@ -2199,8 +2267,38 @@ export default function AddCommunity() {
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
               <strong>Location:</strong> {cityInput}, {selectedState} — <strong>{communities.length}</strong> communities found. Select one to continue.
             </div>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              {bulkCommunityIndexes.size > 0 && (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => queueBestCombosForCommunities(Array.from(bulkCommunityIndexes))}
+                    disabled={bulkComboStarting}
+                    data-testid="button-bulk-queue-communities"
+                  >
+                    {bulkComboStarting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
+                    Queue {bulkCommunityIndexes.size} selected (best combo each)
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setBulkCommunityIndexes(new Set())}>
+                    Clear selection
+                  </Button>
+                </>
+              )}
+              {communities.length > 0 && bulkCommunityIndexes.size === 0 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setBulkCommunityIndexes(new Set(communities.map((_, i) => i)))}
+                  data-testid="button-select-all-communities-bulk"
+                >
+                  Select all for bulk queue
+                </Button>
+              )}
+            </div>
             <p className="text-muted-foreground text-sm mb-4">
-              Found {communities.length} qualifying communities in <strong>{cityInput}, {selectedState}</strong>. Click a card to select it.
+              Found {communities.length} qualifying communities in <strong>{cityInput}, {selectedState}</strong>. Click a card to select it. Use checkboxes to multi-queue best combos.
             </p>
             <div className="grid grid-cols-1 gap-4">
               {communities.map((c, i) => {
@@ -2248,6 +2346,20 @@ export default function AddCommunity() {
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <label
+                          className="flex items-center"
+                          onClick={(e) => e.stopPropagation()}
+                          onMouseDown={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={bulkCommunityIndexes.has(i)}
+                            onChange={() => toggleBulkCommunity(i)}
+                            className="accent-primary h-4 w-4 mr-1.5"
+                            onClick={(e) => e.stopPropagation()}
+                            data-testid={`checkbox-bulk-community-${i}`}
+                          />
+                        </label>
                         <h3 className="font-semibold text-base" data-testid={`text-community-name-${i}`}>{c.name}</h3>
                         {!typeCheck.eligible && (
                           <Badge variant="outline" className="text-[10px] border-red-400 text-red-700 bg-red-50">
