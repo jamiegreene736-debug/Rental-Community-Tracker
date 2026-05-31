@@ -44,18 +44,30 @@ type LicenseSamples = {
   strPermit: string;
 };
 
+type LicenseSampleContext = {
+  address?: string;
+  propertyType?: string;
+};
+
+type HawaiiCounty = "kauai-vda" | "kauai-non-vda" | "big-island" | "maui" | "oahu" | "unknown";
+
+function locationHaystack(city: string, context?: LicenseSampleContext): string {
+  return `${city || ""} ${context?.address || ""}`.toLowerCase();
+}
+
 // Map a city → Hawaii county. Used to pick the right STR permit format
 // (each county has its own — Kauai uses TVR/TVNC, Big Island STVR,
 // Maui STRH, Oahu NUC). VDA = Visitor Destination Area, the Kauai
 // distinction between resort zones (TVR) and residential (TVNC).
-function hawaiiCountyFromCity(city: string): "kauai-vda" | "kauai-non-vda" | "big-island" | "maui" | "oahu" | "unknown" {
-  const c = (city || "").toLowerCase();
+function hawaiiCountyFromCity(city: string, context?: LicenseSampleContext): HawaiiCounty {
+  const c = locationHaystack(city, context);
+  // Big Island (Hawaii County). Check before Oahu because Kailua-Kona
+  // contains "Kailua" but uses Hawaii County TMK/STVR formats.
+  if (/keauhou|kona|kailua-kona|hilo|waikoloa|mauna|volcano|pahoa|naalehu|big island|hawaii island/.test(c)) return "big-island";
   // Oahu: Honolulu / Waikiki / Kailua / North Shore / Pearl City etc.
-  if (/honolulu|waikiki|kailua|kaneohe|aiea|pearl|wahiawa|haleiwa|kapolei|ewa|north shore/.test(c)) return "oahu";
+  if (/honolulu|waikiki|\bkailua\b|kaneohe|aiea|pearl|wahiawa|haleiwa|kapolei|ewa|north shore/.test(c)) return "oahu";
   // Maui County: Maui island + Lanai + Molokai
   if (/maui|lahaina|kihei|wailea|kaanapali|kapalua|kahului|hana|paia|makawao|lanai|molokai/.test(c)) return "maui";
-  // Big Island (Hawaii County)
-  if (/keauhou|kona|kailua-kona|hilo|waikoloa|mauna|volcano|pahoa|naalehu|big island|hawaii island/.test(c)) return "big-island";
   // Kauai VDA zones (resort areas)
   if (/poipu|princeville|kapaa beachfront|hanalei|koloa/.test(c)) return "kauai-vda";
   // Kauai non-VDA (residential)
@@ -72,8 +84,8 @@ function hawaiiCountyFromCity(city: string): "kauai-vda" | "kauai-non-vda" | "bi
 // real property or owner.
 // Hawaii GET/TAT share the same digit groups; only the TA- vs GE- prefix differs.
 // Shape matches Hawaii Tax Online: TA|GE-###-###-####-## (see unit-builder-data).
-function hawaiiTaxLicenseCore(city: string, county: ReturnType<typeof hawaiiCountyFromCity>): string {
-  const c = (city || "").toLowerCase();
+function hawaiiTaxLicenseCore(city: string, county: HawaiiCounty, context?: LicenseSampleContext): string {
+  const c = locationHaystack(city, context);
   switch (county) {
     case "kauai-vda":
       if (/princeville/.test(c)) return "026-780-7890-01";
@@ -92,17 +104,17 @@ function hawaiiTaxLicenseCore(city: string, county: ReturnType<typeof hawaiiCoun
   }
 }
 
-function tatSampleHawaii(city: string): string {
-  return `TA-${hawaiiTaxLicenseCore(city, hawaiiCountyFromCity(city))}`;
+function tatSampleHawaii(city: string, context?: LicenseSampleContext): string {
+  return `TA-${hawaiiTaxLicenseCore(city, hawaiiCountyFromCity(city, context), context)}`;
 }
 
-function getSampleHawaii(city: string): string {
-  return `GE-${hawaiiTaxLicenseCore(city, hawaiiCountyFromCity(city))}`;
+function getSampleHawaii(city: string, context?: LicenseSampleContext): string {
+  return `GE-${hawaiiTaxLicenseCore(city, hawaiiCountyFromCity(city, context), context)}`;
 }
 
-function strPermitSampleHawaii(city: string): string {
-  const c = (city || "").toLowerCase();
-  const county = hawaiiCountyFromCity(city);
+function strPermitSampleHawaii(city: string, context?: LicenseSampleContext): string {
+  const c = locationHaystack(city, context);
+  const county = hawaiiCountyFromCity(city, context);
   switch (county) {
     case "kauai-vda":
       if (/princeville/.test(c)) return "TVR-2023-074";
@@ -126,8 +138,8 @@ function strPermitSampleHawaii(city: string): string {
 // 4xxx for Kauai, 3xxx for Big Island, 4xxx for Maui (different prefix
 // inside the range), 1xxx for Oahu — so the operator immediately sees
 // which county slot they're filling.
-function tmkSampleHawaii(city: string): string {
-  switch (hawaiiCountyFromCity(city)) {
+function tmkSampleHawaii(city: string, context?: LicenseSampleContext): string {
+  switch (hawaiiCountyFromCity(city, context)) {
     case "kauai-vda":
     case "kauai-non-vda": return "420150080099";
     case "big-island":    return "370110060099";
@@ -147,18 +159,27 @@ function tmkSampleHawaii(city: string): string {
 // a Polk-side Davenport address should overwrite the BTR/TDT/sales-tax
 // samples with their actual numbers; the fields aren't used until the
 // operator pushes compliance to Guesty.
-function floridaCountyFromCity(city: string): "osceola" | "orange" | "polk" | "lake" | "brevard" | "unknown" {
-  const c = (city || "").toLowerCase();
+type FloridaCounty = "osceola" | "orange" | "polk" | "lake" | "brevard" | "lee" | "unknown";
+
+function floridaCountyFromCity(city: string, context?: LicenseSampleContext): FloridaCounty {
+  const c = locationHaystack(city, context);
   if (/(kissimmee|davenport|celebration|poinciana|st\.?\s*cloud|championsgate|reunion)/.test(c)) return "osceola";
   if (/(orlando|windermere|lake\s+buena\s+vista|ocoee|apopka|winter\s+garden|dr\.?\s*phillips)/.test(c)) return "orange";
   if (/(haines\s*city|lakeland|winter\s+haven|auburndale|bartow|lake\s+wales)/.test(c)) return "polk";
   if (/(clermont|groveland|minneola|mascotte|mount\s+dora|tavares|leesburg)/.test(c)) return "lake";
   if (/(melbourne|cocoa|titusville|palm\s+bay|merritt\s+island|cape\s+canaveral|viera|rockledge)/.test(c)) return "brevard";
+  if (/(fort\s+myers|fort\s+myers\s+beach|bonita\s+springs|bonita\s+national|cape\s+coral|sanibel|estero|lee\s+county|33931|33908|33913|33928|34135)/.test(c)) return "lee";
   return "unknown";
 }
 
+function floridaDbprSample(context?: LicenseSampleContext): string {
+  return /condo|condominium|apartment|unit/i.test(context?.propertyType || "")
+    ? "CND7053894"
+    : "DWE7053894";
+}
+
 // Per-county Florida sample sets. The four FL fields are:
-//   - DBPR Vacation Rental License (DWE for dwellings, DWE/COND for
+//   - DBPR Vacation Rental License (DWE for dwellings, CND for
 //     condo-class units; 7-digit certificate)
 //   - DOR Sales & Use Tax Certificate (XX-XXXXXXXXXX-X; the leading
 //     two digits encode the county the business registered in)
@@ -172,40 +193,47 @@ function floridaCountyFromCity(city: string): "osceola" | "orange" | "polk" | "l
 // slot they're in. Operators replace with their actual numbers
 // before pushing compliance to Guesty.
 type FloridaSamples = { taxMapKey: string; getLicense: string; tatLicense: string; strPermit: string };
-function floridaSamples(c: ReturnType<typeof floridaCountyFromCity>): FloridaSamples {
+function floridaSamples(c: FloridaCounty, context?: LicenseSampleContext): FloridaSamples {
+  const dbprLicense = floridaDbprSample(context);
   switch (c) {
     case "osceola": return {
-      taxMapKey:  "DWE/COND-7053894",
+      taxMapKey:  dbprLicense,
       getLicense: "49-8013575941-1",
       tatLicense: "Osceola County TDT Acct # 4502187",
       strPermit:  "LBTR-548291",
     };
     case "orange": return {
-      taxMapKey:  "DWE/COND-6841273",
+      taxMapKey:  dbprLicense.replace(/\d+$/, "6841273"),
       getLicense: "48-8014729384-2",
       tatLicense: "Orange County TDT Acct # 7218394",
       strPermit:  "LBTR-739104",
     };
     case "polk": return {
-      taxMapKey:  "DWE/COND-5928374",
+      taxMapKey:  dbprLicense.replace(/\d+$/, "5928374"),
       getLicense: "53-8024918273-3",
       tatLicense: "Polk County TDT Acct # 3612847",
       strPermit:  "LBTR-462051",
     };
     case "lake": return {
-      taxMapKey:  "DWE/COND-4827193",
+      taxMapKey:  dbprLicense.replace(/\d+$/, "4827193"),
       getLicense: "35-8035102847-4",
       tatLicense: "Lake County TDT Acct # 2841093",
       strPermit:  "LBTR-318472",
     };
     case "brevard": return {
-      taxMapKey:  "DWE/COND-3719284",
+      taxMapKey:  dbprLicense.replace(/\d+$/, "3719284"),
       getLicense: "05-8046283715-5",
       tatLicense: "Brevard County TDT Acct # 1928374",
       strPermit:  "LBTR-294817",
     };
+    case "lee": return {
+      taxMapKey:  dbprLicense.replace(/\d+$/, "4601287"),
+      getLicense: "36-8062451938-6",
+      tatLicense: "Lee County TDT Acct # 6184729",
+      strPermit:  "LBTR-190096",
+    };
     default: return {
-      taxMapKey:  "DWE/COND-9999999",
+      taxMapKey:  dbprLicense.replace(/\d+$/, "9999999"),
       getLicense: "99-9999999999-9",
       tatLicense: "FL County TDT Acct # 9999999",
       strPermit:  "LBTR-999999",
@@ -213,18 +241,18 @@ function floridaSamples(c: ReturnType<typeof floridaCountyFromCity>): FloridaSam
   }
 }
 
-export function sampleLicensesForLocation(city: string, state: string): LicenseSamples {
+export function sampleLicensesForLocation(city: string, state: string, context?: LicenseSampleContext): LicenseSamples {
   const s = (state || "").toLowerCase();
   if (s === "hawaii" || s === "hi") {
     return {
-      taxMapKey:  tmkSampleHawaii(city),
-      getLicense: getSampleHawaii(city),
-      tatLicense: tatSampleHawaii(city),
-      strPermit:  strPermitSampleHawaii(city),
+      taxMapKey:  tmkSampleHawaii(city, context),
+      getLicense: getSampleHawaii(city, context),
+      tatLicense: tatSampleHawaii(city, context),
+      strPermit:  strPermitSampleHawaii(city, context),
     };
   }
   if (s === "florida" || s === "fl") {
-    return floridaSamples(floridaCountyFromCity(city));
+    return floridaSamples(floridaCountyFromCity(city, context), context);
   }
   return {
     taxMapKey: "(no parcel/license id required for this state — verify with local jurisdiction)",

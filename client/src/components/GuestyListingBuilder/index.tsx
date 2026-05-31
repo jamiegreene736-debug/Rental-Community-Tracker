@@ -823,9 +823,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [propertyId, queryClient]);
 
   const generateSampleForRequirement = useCallback(async (req: LicenseRequirement) => {
-    const city = effectivePropertyData?.address?.city ?? "";
-    const state = effectivePropertyData?.address?.state ?? "";
-    const samples = sampleLicensesForLocation(city, state);
+    const address = effectivePropertyData?.address;
+    const city = typeof address === "object" && address ? address.city ?? "" : "";
+    const state = typeof address === "object" && address ? address.state ?? "" : "";
+    const fullAddress = typeof address === "object" && address ? address.full ?? "" : "";
+    const propertyType = effectivePropertyData?.propertyType
+      ?? effectivePropertyData?.otaRoomType
+      ?? effectivePropertyData?.roomType
+      ?? "";
+    const samples = sampleLicensesForLocation(city, state, { address: fullAddress, propertyType });
     const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
     const sample = isFloridaProfile
       ? req.key === "dbprLicense" ? samples.taxMapKey
@@ -849,7 +855,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } catch (err: any) {
       toast({ title: "Sample save failed", description: err?.message || String(err), variant: "destructive" });
     }
-  }, [complianceProfile.jurisdiction, effectivePropertyData?.address?.city, effectivePropertyData?.address?.state, persistComplianceValues, toast]);
+  }, [
+    complianceProfile.jurisdiction,
+    effectivePropertyData?.address,
+    effectivePropertyData?.otaRoomType,
+    effectivePropertyData?.propertyType,
+    effectivePropertyData?.roomType,
+    persistComplianceValues,
+    toast,
+  ]);
 
   const pullLicenseRequirements = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
@@ -4302,6 +4316,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >
                                   {tmkLookupBusy ? "Pulling Guesty-address TMK..." : "Pull real TMK from Guesty address"}
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const req = complianceProfile.requirements.find((candidate) => candidate.key === "taxMapKey");
+                                    if (req) void generateSampleForRequirement(req);
+                                  }}
+                                  style={{
+                                    width: "100%",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    padding: "6px 8px",
+                                    borderRadius: 5,
+                                    border: "1px solid var(--border)",
+                                    background: "#fff",
+                                    color: "var(--text)",
+                                    cursor: "pointer",
+                                  }}
+                                  data-testid="button-generate-sample-tmk-map"
+                                >
+                                  Generate sample TMK / MAP
+                                </button>
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
                                   Uses the exact address that will be pushed to Guesty for Airbnb license verification.
                                 </div>
@@ -4462,6 +4497,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               const canPublicPull = (complianceProfile.jurisdiction === "fort_myers_beach_fl" && req.key === "strPermit")
                                 || (isFloridaLicenseJurisdiction(complianceProfile.jurisdiction) && req.key === "dbprLicense")
                                 || (isHawaiiCompliance && req.key === "taxMapKey");
+                              const sampleButtonLabel = req.key === "taxMapKey" && isHawaiiCompliance
+                                ? "Generate sample TMK / MAP"
+                                : `Generate sample ${req.shortLabel}`;
                               return (
                                 <div key={req.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, background: "var(--muted)" }}>
                                   <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 4 }}>
@@ -4509,27 +4547,45 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <div style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 5, lineHeight: 1.35 }}>
                                     {req.helpText}
                                   </div>
-                                  <button
-                                    type="button"
-                                    disabled={licenseLookupBusy}
-                                    onClick={canPublicPull && req.key === "taxMapKey" && isHawaiiCompliance ? pullRealTaxMapKey : (canPublicPull ? pullLicenseRequirements : () => { void generateSampleForRequirement(req); })}
-                                    style={{
-                                      marginTop: 8,
-                                      fontSize: 11,
-                                      fontWeight: 600,
-                                      padding: "4px 8px",
-                                      borderRadius: 5,
-                                      border: "1px solid var(--border)",
-                                      background: "#fff",
-                                      color: "var(--text)",
-                                      cursor: licenseLookupBusy ? "wait" : "pointer",
-                                    }}
-                                    data-testid={`btn-pull-${req.key}`}
-                                  >
-                                    {canPublicPull
-                                      ? (value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`)
-                                      : `Generate sample ${req.shortLabel}`}
-                                  </button>
+                                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                                    {canPublicPull && (
+                                      <button
+                                        type="button"
+                                        disabled={licenseLookupBusy}
+                                        onClick={req.key === "taxMapKey" && isHawaiiCompliance ? pullRealTaxMapKey : pullLicenseRequirements}
+                                        style={{
+                                          fontSize: 11,
+                                          fontWeight: 600,
+                                          padding: "4px 8px",
+                                          borderRadius: 5,
+                                          border: "1px solid var(--border)",
+                                          background: "#fff",
+                                          color: "var(--text)",
+                                          cursor: licenseLookupBusy ? "wait" : "pointer",
+                                        }}
+                                        data-testid={`btn-pull-${req.key}`}
+                                      >
+                                        {value && !isPlaceholder ? `Refresh public ${req.shortLabel}` : `Pull public ${req.shortLabel}`}
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => { void generateSampleForRequirement(req); }}
+                                      style={{
+                                        fontSize: 11,
+                                        fontWeight: 600,
+                                        padding: "4px 8px",
+                                        borderRadius: 5,
+                                        border: "1px solid var(--border)",
+                                        background: "#fff",
+                                        color: "var(--text)",
+                                        cursor: "pointer",
+                                      }}
+                                      data-testid={canPublicPull ? `btn-sample-${req.key}` : `btn-pull-${req.key}`}
+                                    >
+                                      {sampleButtonLabel}
+                                    </button>
+                                  </div>
                                 </div>
                               );
                             })}
