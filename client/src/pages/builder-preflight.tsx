@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, Fragment } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -1144,89 +1144,140 @@ export default function BuilderPreflight() {
             <table id="platform-check-table" className="w-full text-sm mt-2 border-collapse">
               <thead>
                 <tr className="text-left text-xs text-muted-foreground border-b border-border">
-                  <th className="pb-2 font-medium w-24">Unit</th>
-                  <th className="pb-2 font-medium hidden sm:table-cell">Address</th>
-                  <th className="pb-2 font-medium">Status</th>
-                  <th className="pb-2 font-medium w-16 text-right">Link</th>
+                  {effectiveUnits.length === 1 ? (
+                    <>
+                      <th className="pb-2 font-medium w-28">Platform</th>
+                      <th className="pb-2 font-medium">Status</th>
+                      <th className="pb-2 font-medium w-16 text-right">Link</th>
+                    </>
+                  ) : (
+                    <>
+                      <th className="pb-2 font-medium w-24">Unit</th>
+                      <th className="pb-2 font-medium hidden sm:table-cell">Address</th>
+                      <th className="pb-2 font-medium">Status</th>
+                      <th className="pb-2 font-medium w-16 text-right">Link</th>
+                    </>
+                  )}
                 </tr>
               </thead>
               <tbody>
-                {PLATFORM_LIST.map(({ key, label }, pIdx) => (
-                  <Fragment key={key}>
-                    {/* Platform group header */}
-                    <tr className={pIdx > 0 ? "border-t-2 border-border" : ""}>
-                      <td
-                        colSpan={4}
-                        className="pt-3 pb-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-muted/30 px-2 rounded"
+                {effectiveUnits.length === 1 ? (
+                  PLATFORM_LIST.map(({ key, label }) => {
+                    const unit = effectiveUnits[0];
+                    const unitResult = results[unit.id];
+                    const r = unitResult?.platforms[key];
+                    const unitChecking = checkingUnitIds.has(unit.id);
+                    return (
+                      <tr
+                        key={key}
+                        id={`check-${key}-${unit.id}`}
+                        className="border-b border-border/40 last:border-0"
                       >
-                        {label}
-                      </td>
-                    </tr>
-
-                    {/* One row per effective unit */}
-                    {effectiveUnits.map(unit => {
-                      const unitResult = results[unit.id];
-                      const r = unitResult?.platforms[key];
-                      const isReplaced = (unit as any)._isReplaced;
-                      const displayAddress = (unit as any)._overrideAddress || `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`;
-                      const unitChecking = checkingUnitIds.has(unit.id);
-                      return (
-                        <tr
-                          key={`${key}-${unit.id}`}
-                          id={`check-${key}-${unit.id}`}
-                          className="border-b border-border/40 last:border-0"
-                        >
-                          <td className="py-2.5 text-sm font-medium">
-                            <span>{formatUnitDisplayLabel(unit.unitNumber)}</span>
-                            {isReplaced && !swapsCommitted && (
-                              <Badge variant="secondary" className="ml-1.5 text-[10px] py-0 px-1 h-4 align-middle">
-                                replaced
-                              </Badge>
-                            )}
-                          </td>
-                          <td className="py-2.5 text-xs text-muted-foreground hidden sm:table-cell pr-4">
-                            {displayAddress}
-                          </td>
-                          <td className="py-2.5">
-                            <StatusBadge result={r} checking={unitChecking} />
-                            {r && (
-                              <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
-                            )}
-                            {/* Per-row replace button only on Airbnb row (avoid 3x repetition). */}
-                            {key === "airbnb" && property.communityPhotoFolder && !swapsCommitted && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="mt-2 h-7 px-2 text-xs"
-                                data-testid={`button-replace-unit-${unit.id}`}
-                                onClick={() => {
-                                  setReplacementTargetId(unit.id);
-                                  setShowReplacementFlow(true);
-                                }}
-                              >
-                                <RefreshCw className="h-3 w-3 mr-1" />
-                                {isReplaced ? "Change replacement" : "Replace this unit"}
-                              </Button>
-                            )}
-                          </td>
-                          <td className="py-2.5 text-right">
-                            {r?.url && (
-                              <a
-                                id={`link-${key}-${unit.id}`}
-                                href={r.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                              >
-                                View <ExternalLink className="h-3 w-3" />
-                              </a>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </Fragment>
-                ))}
+                        <td className="py-2.5 text-sm font-medium">{label}</td>
+                        <td className="py-2.5">
+                          <StatusBadge result={r} checking={unitChecking} />
+                          {r && (
+                            <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
+                          )}
+                        </td>
+                        <td className="py-2.5 text-right">
+                          {r?.url && (
+                            <a
+                              id={`link-${key}-${unit.id}`}
+                              href={r.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                            >
+                              View <ExternalLink className="h-3 w-3" />
+                            </a>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  effectiveUnits.map((unit, uIdx) => {
+                    const unitResult = results[unit.id];
+                    const isReplaced = (unit as any)._isReplaced;
+                    const displayAddress = (unit as any)._overrideAddress || `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`;
+                    const unitChecking = checkingUnitIds.has(unit.id);
+                    return (
+                      <tr
+                        key={unit.id}
+                        id={`check-${unit.id}`}
+                        className={uIdx > 0 ? "border-t-2 border-border" : "border-b border-border/40 last:border-0"}
+                      >
+                        <td className="py-2.5 text-sm font-medium">
+                          <span>{formatUnitDisplayLabel(unit.unitNumber)}</span>
+                          {isReplaced && !swapsCommitted && (
+                            <Badge variant="secondary" className="ml-1.5 text-[10px] py-0 px-1 h-4 align-middle">
+                              replaced
+                            </Badge>
+                          )}
+                        </td>
+                        <td className="py-2.5 text-xs text-muted-foreground hidden sm:table-cell pr-4">
+                          {displayAddress}
+                        </td>
+                        <td className="py-2.5">
+                          <div className="space-y-3">
+                            {PLATFORM_LIST.map(({ key, label }) => {
+                              const r = unitResult?.platforms[key];
+                              return (
+                                <div key={key} id={`check-${key}-${unit.id}`}>
+                                  <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                    {label}
+                                  </p>
+                                  <StatusBadge result={r} checking={unitChecking} />
+                                  {r && (
+                                    <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {property.communityPhotoFolder && !swapsCommitted && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="mt-3 h-7 px-2 text-xs"
+                              data-testid={`button-replace-unit-${unit.id}`}
+                              onClick={() => {
+                                setReplacementTargetId(unit.id);
+                                setShowReplacementFlow(true);
+                              }}
+                            >
+                              <RefreshCw className="h-3 w-3 mr-1" />
+                              {isReplaced ? "Change replacement" : "Replace this unit"}
+                            </Button>
+                          )}
+                        </td>
+                        <td className="py-2.5 text-right align-top">
+                          <div className="space-y-3">
+                            {PLATFORM_LIST.map(({ key }) => {
+                              const r = unitResult?.platforms[key];
+                              return (
+                                <div key={key} className="min-h-[2.75rem] flex items-start justify-end pt-5">
+                                  {r?.url && (
+                                    <a
+                                      id={`link-${key}-${unit.id}`}
+                                      href={r.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                                    >
+                                      View <ExternalLink className="h-3 w-3" />
+                                    </a>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           )}
