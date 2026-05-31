@@ -121,6 +121,56 @@ function StatusBadge({
   }
 }
 
+function CompactStatusBadge({
+  result,
+  checking,
+}: {
+  result: UnitPlatformResult | undefined;
+  checking: boolean;
+}) {
+  const base = "inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium whitespace-nowrap";
+  if (checking || !result) {
+    return (
+      <span className={`${base} bg-muted text-muted-foreground`}>
+        <Loader2 className="h-3 w-3 animate-spin" /> Checking
+      </span>
+    );
+  }
+  switch (result.status) {
+    case "confirmed":
+    case "photo-confirmed":
+      return (
+        <span className={`${base} bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300`}>
+          <CheckCircle2 className="h-3 w-3" /> Listed
+        </span>
+      );
+    case "photo-only":
+      return (
+        <span className={`${base} bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300`}>
+          <AlertTriangle className="h-3 w-3" /> Likely
+        </span>
+      );
+    case "unconfirmed":
+      return (
+        <span className={`${base} bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300`}>
+          <AlertTriangle className="h-3 w-3" /> Review
+        </span>
+      );
+    case "not-listed":
+      return (
+        <span className={`${base} bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300`}>
+          <XCircle className="h-3 w-3" /> Clear
+        </span>
+      );
+    default:
+      return (
+        <span className={`${base} bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400`}>
+          <AlertTriangle className="h-3 w-3" /> Error
+        </span>
+      );
+  }
+}
+
 // Whether a status is "listed" (should suggest replacing the unit)
 function isListedStatus(status: UnitPlatformResult["status"]) {
   return status === "confirmed" || status === "photo-confirmed" || status === "photo-only";
@@ -1083,7 +1133,7 @@ export default function BuilderPreflight() {
 
           {/* Progress bar */}
           {isCheckRunning && totalUnits > 0 && (
-            <div className="mb-5 space-y-2 rounded-md border border-primary/15 bg-primary/5 p-3">
+            <div className="mb-4 space-y-2 rounded-md border border-primary/15 bg-primary/5 p-3">
               <style>{`
                 @keyframes preflight-progress-stripes {
                   from { background-position: 0 0; }
@@ -1127,10 +1177,10 @@ export default function BuilderPreflight() {
               <div className="flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
                 <p>
                   {fullAuditRunning
-                    ? "Checking every available unit photo with Google Lens. This is slower, but gives the strongest photo-overlap answer."
+                    ? "Checking every available unit photo with Google Lens."
                     : checkPhase === "photo"
-                    ? "Uploading photos to Google Lens and waiting for reverse-image matches."
-                    : "Querying search engines for address and unit number matches across all platforms."}
+                    ? "Uploading photos for reverse-image matches."
+                    : "Checking address and unit-number matches."}
                 </p>
                 <p className="font-medium text-foreground/80">
                   {checkingLabels ? `Working on ${checkingLabels}` : "Finalizing results..."}
@@ -1139,147 +1189,90 @@ export default function BuilderPreflight() {
             </div>
           )}
 
-          {/* Results table — shown as soon as any check starts or has results */}
+          {/* Results — compact unit-first cards */}
           {(isCheckRunning || hasAnyResults) && (
-            <table id="platform-check-table" className="w-full text-sm mt-2 border-collapse">
-              <thead>
-                <tr className="text-left text-xs text-muted-foreground border-b border-border">
-                  {effectiveUnits.length === 1 ? (
-                    <>
-                      <th className="pb-2 font-medium w-28">Platform</th>
-                      <th className="pb-2 font-medium">Status</th>
-                      <th className="pb-2 font-medium w-16 text-right">Link</th>
-                    </>
-                  ) : (
-                    <>
-                      <th className="pb-2 font-medium w-24">Unit</th>
-                      <th className="pb-2 font-medium hidden sm:table-cell">Address</th>
-                      <th className="pb-2 font-medium">Status</th>
-                      <th className="pb-2 font-medium w-16 text-right">Link</th>
-                    </>
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                {effectiveUnits.length === 1 ? (
-                  PLATFORM_LIST.map(({ key, label }) => {
-                    const unit = effectiveUnits[0];
-                    const unitResult = results[unit.id];
-                    const r = unitResult?.platforms[key];
-                    const unitChecking = checkingUnitIds.has(unit.id);
-                    return (
-                      <tr
-                        key={key}
-                        id={`check-${key}-${unit.id}`}
-                        className="border-b border-border/40 last:border-0"
-                      >
-                        <td className="py-2.5 text-sm font-medium">{label}</td>
-                        <td className="py-2.5">
-                          <StatusBadge result={r} checking={unitChecking} />
-                          {r && (
-                            <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
-                          )}
-                        </td>
-                        <td className="py-2.5 text-right">
-                          {r?.url && (
-                            <a
-                              id={`link-${key}-${unit.id}`}
-                              href={r.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                            >
-                              View <ExternalLink className="h-3 w-3" />
-                            </a>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })
-                ) : (
-                  effectiveUnits.map((unit, uIdx) => {
-                    const unitResult = results[unit.id];
-                    const isReplaced = (unit as any)._isReplaced;
-                    const displayAddress = (unit as any)._overrideAddress || `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`;
-                    const unitChecking = checkingUnitIds.has(unit.id);
-                    return (
-                      <tr
-                        key={unit.id}
-                        id={`check-${unit.id}`}
-                        className={uIdx > 0 ? "border-t-2 border-border" : "border-b border-border/40 last:border-0"}
-                      >
-                        <td className="py-2.5 text-sm font-medium">
-                          <span>{formatUnitDisplayLabel(unit.unitNumber)}</span>
+            <div id="platform-check-table" className="mt-3 space-y-2">
+              {effectiveUnits.map((unit) => {
+                const unitResult = results[unit.id];
+                const isReplaced = (unit as any)._isReplaced;
+                const displayAddress = (unit as any)._overrideAddress || `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`;
+                const unitChecking = checkingUnitIds.has(unit.id);
+
+                return (
+                  <div
+                    key={unit.id}
+                    id={`check-${unit.id}`}
+                    className="rounded-md border border-border/70 bg-background/75 px-3 py-3"
+                  >
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+                      <div className="min-w-0 lg:w-64 lg:flex-shrink-0">
+                        <div className="flex items-center gap-2">
+                          <p className="font-medium text-sm">{formatUnitDisplayLabel(unit.unitNumber)}</p>
                           {isReplaced && !swapsCommitted && (
-                            <Badge variant="secondary" className="ml-1.5 text-[10px] py-0 px-1 h-4 align-middle">
+                            <Badge variant="secondary" className="text-[10px] py-0 px-1.5 h-5">
                               replaced
                             </Badge>
                           )}
-                        </td>
-                        <td className="py-2.5 text-xs text-muted-foreground hidden sm:table-cell pr-4">
+                        </div>
+                        <p className="text-xs text-muted-foreground truncate" title={displayAddress}>
                           {displayAddress}
-                        </td>
-                        <td className="py-2.5">
-                          <div className="space-y-3">
-                            {PLATFORM_LIST.map(({ key, label }) => {
-                              const r = unitResult?.platforms[key];
-                              return (
-                                <div key={key} id={`check-${key}-${unit.id}`}>
-                                  <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">
-                                    {label}
-                                  </p>
-                                  <StatusBadge result={r} checking={unitChecking} />
-                                  {r && (
-                                    <p className="text-xs text-muted-foreground mt-1">{r.detection}</p>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {property.communityPhotoFolder && !swapsCommitted && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="mt-3 h-7 px-2 text-xs"
-                              data-testid={`button-replace-unit-${unit.id}`}
-                              onClick={() => {
-                                setReplacementTargetId(unit.id);
-                                setShowReplacementFlow(true);
-                              }}
-                            >
-                              <RefreshCw className="h-3 w-3 mr-1" />
-                              {isReplaced ? "Change replacement" : "Replace this unit"}
-                            </Button>
-                          )}
-                        </td>
-                        <td className="py-2.5 text-right align-top">
-                          <div className="space-y-3">
-                            {PLATFORM_LIST.map(({ key }) => {
-                              const r = unitResult?.platforms[key];
-                              return (
-                                <div key={key} className="min-h-[2.75rem] flex items-start justify-end pt-5">
-                                  {r?.url && (
-                                    <a
-                                      id={`link-${key}-${unit.id}`}
-                                      href={r.url}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                                    >
-                                      View <ExternalLink className="h-3 w-3" />
-                                    </a>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
+                        </p>
+                      </div>
+
+                      <div className="grid flex-1 grid-cols-1 gap-2 sm:grid-cols-3">
+                        {PLATFORM_LIST.map(({ key, label }) => {
+                          const r = unitResult?.platforms[key];
+                          return (
+                            <div key={key} id={`check-${key}-${unit.id}`} className="rounded border border-border/60 bg-muted/20 px-2.5 py-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                  {label}
+                                </span>
+                                {r?.url && (
+                                  <a
+                                    id={`link-${key}-${unit.id}`}
+                                    href={r.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-primary hover:underline text-[11px]"
+                                  >
+                                    View <ExternalLink className="h-3 w-3" />
+                                  </a>
+                                )}
+                              </div>
+                              <div className="mt-1.5">
+                                <CompactStatusBadge result={r} checking={unitChecking} />
+                              </div>
+                              {r?.detection && (
+                                <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground" title={r.detection}>
+                                  {r.detection}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {property.communityPhotoFolder && !swapsCommitted && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 px-2.5 text-xs lg:flex-shrink-0"
+                          data-testid={`button-replace-unit-${unit.id}`}
+                          onClick={() => {
+                            setReplacementTargetId(unit.id);
+                            setShowReplacementFlow(true);
+                          }}
+                        >
+                          <RefreshCw className="h-3 w-3 mr-1" />
+                          {isReplaced ? "Change" : "Replace"}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
 
           {/* Status legend */}
