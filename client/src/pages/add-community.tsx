@@ -80,6 +80,8 @@ type CommunityResult = {
   minimumStayNights?: number | null;
   minimumStayEvidence?: string | null;
   minimumStaySourceUrl?: string | null;
+  /** True when operator already has a draft/listing for this exact resort name+city in community_drafts. */
+  hasExistingListing?: boolean;
 };
 
 type UnitResult = {
@@ -2191,6 +2193,12 @@ export default function AddCommunity() {
                         {c.fromWorldKnowledge && (
                           <Badge variant="outline" className="text-[10px] border-blue-300 text-blue-700">
                             From AI knowledge
+                          </Badge>
+                        )}
+                        {c.hasExistingListing && (
+                          <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200 text-[10px]">
+                            <CheckCircle2 className="h-3 w-3 mr-1" />
+                            Already in system
                           </Badge>
                         )}
                         <TooltipProvider>

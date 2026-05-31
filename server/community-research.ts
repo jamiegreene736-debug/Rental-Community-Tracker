@@ -19,6 +19,10 @@ export type ResearchedCommunity = {
   combinedBedroomsTypical?: number;
   combinabilityScore?: number;
   fromWorldKnowledge?: boolean;
+  /** Populated by the research endpoint (not the pure research fn) to flag
+   *  resorts where the operator already has at least one draft/listing in
+   *  community_drafts for the same name+city. UI renders a ✓ badge. */
+  hasExistingListing?: boolean;
   // CODEX NOTE (2026-05-04, claude/single-listing-bedroom-list):
   // Single-mode research returns the actual bedroom counts a
   // community offers (e.g. Santa Maria Resort = [2, 3]) so the

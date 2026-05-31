@@ -33,7 +33,7 @@ export type BuyInMarket = {
 export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
   "Poipu Kai": {
     key: "Poipu Kai",
-    aliases: [/\b(?:poipu\s+kai|regency\s+at\s+poipu|villas\s+at\s+poipu\s+kai)\b/i],
+    aliases: [/\b(?:poipu(?:\s+kai)?|regency\s+at\s+poipu|villas\s+at\s+poipu\s+kai)\b/i],
     searchLocation: "Poipu Kai Resort, Koloa, Kauai, Hawaii",
     platformSearch: {
       airbnb: "Poipu Kai Resort, Koloa, HI",
