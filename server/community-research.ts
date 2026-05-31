@@ -203,9 +203,11 @@ const KNOWN_SINGLE_LISTING_COMMUNITY_SEEDS: KnownSingleListingCommunitySeed[] = 
   },
 ];
 
+const SOUTH_BIG_ISLAND_CITY_PATTERN = /^(waiohinu|wai[ʻ'’]?ohinu|naalehu|na[ʻ'’]?alehu|punaluu|punalu[ʻ'’]?u|pahala|hilea|ninole|kipuka nahuaopala)$/i;
+
 const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
   {
-    city: /^kailua-kona$/i,
+    city: /^(kailua-kona|kona|keauhou|kahaluu-keauhou|holualoa)$/i,
     state: /^(hi|hawaii)$/i,
     name: "Na Hale O Keauhou",
     unitTypes: "townhomes",
@@ -217,7 +219,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Keauhou townhome community with recurring 2BR/3BR vacation-rental inventory suitable for bundling nearby units.",
   },
   {
-    city: /^kailua-kona$/i,
+    city: /^(kailua-kona|kona|keauhou|kahaluu-keauhou|holualoa)$/i,
     state: /^(hi|hawaii)$/i,
     name: "Alii Cove",
     unitTypes: "condos and townhomes",
@@ -229,7 +231,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Gated Kailua-Kona condo/townhome community with 2BR and 3BR vacation-rental inventory.",
   },
   {
-    city: /^kailua-kona$/i,
+    city: /^(kailua-kona|kona|keauhou|kahaluu-keauhou|holualoa)$/i,
     state: /^(hi|hawaii)$/i,
     name: "Kona Reef Resort",
     unitTypes: "condos",
@@ -241,7 +243,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Kailua-Kona oceanfront condominium resort with individually rented condo units; strongest for 2BR plus 2BR bundles.",
   },
   {
-    city: /^kailua-kona$/i,
+    city: /^(kailua-kona|kona|keauhou|kahaluu-keauhou|holualoa)$/i,
     state: /^(hi|hawaii)$/i,
     name: "Keauhou Kona Surf & Racquet Club",
     unitTypes: "condos and townhomes",
@@ -253,7 +255,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Large Keauhou condo/townhome resort community with 2BR/3BR vacation rental inventory.",
   },
   {
-    city: /^kailua-kona$/i,
+    city: /^(kailua-kona|kona|keauhou|kahaluu-keauhou|holualoa)$/i,
     state: /^(hi|hawaii)$/i,
     name: "White Sands Village",
     unitTypes: "condos",
@@ -263,6 +265,21 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     combinabilityScore: 54,
     sourceUrl: "https://www.hawaiigaga.com/big-island/condos/white-sands-village.aspx",
     researchSummary: "Kailua-Kona condo community near Magic Sands with recurring 2BR vacation-rental inventory.",
+  },
+  {
+    city: SOUTH_BIG_ISLAND_CITY_PATTERN,
+    state: /^(hi|hawaii)$/i,
+    name: "Colony One at Sea Mountain",
+    unitTypes: "condos and townhouse-style condos",
+    bedroomMix: "1BR and 2BR condos/townhouse-style condos",
+    availableBedrooms: [1, 2],
+    estimatedTotalUnits: 76,
+    estimatedBedroomUnitCounts: { "1": 40, "2": 24 },
+    combinedBedroomsTypical: 4,
+    confidenceScore: 74,
+    combinabilityScore: 54,
+    sourceUrl: "https://www.expedia.com/Pahala-Hotels-52-2-Bedroom2-Bath-Beautifully-Furnished-Polynesian-Style-Townhouse-With-2.h85475959.Hotel-Information",
+    researchSummary: "South Big Island condo resort near Punalu'u Black Sand Beach with recurring 1BR/2BR whole-condo vacation rental inventory; suitable for 2x2BR bundles when larger resorts are sparse.",
   },
   // Poipu / Koloa (Kauai south shore) — added to ensure combo research for Poipu HI
   // surfaces all major individually-owned condo/townhome vacation-rental communities.
@@ -403,6 +420,46 @@ function knownComboSeedsForCity(city: string, state: string): ResearchedCommunit
 
 function normalizeCommunityName(value: unknown): string {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function parseCommunityResearchJsonArray(rawText: string): Array<any> | null {
+  const cleaned = String(rawText || "").replace(/```(?:json)?\s*/g, "").replace(/```/g, "");
+  const candidates: Array<any>[] = [];
+  for (let start = 0; start < cleaned.length; start += 1) {
+    if (cleaned[start] !== "[") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < cleaned.length; i += 1) {
+      const ch = cleaned[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === "\"") inString = false;
+        continue;
+      }
+      if (ch === "\"") {
+        inString = true;
+        continue;
+      }
+      if (ch === "[") depth += 1;
+      if (ch === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          const slice = cleaned.slice(start, i + 1);
+          try {
+            const parsed = JSON.parse(slice);
+            if (Array.isArray(parsed)) candidates.push(parsed);
+          } catch {
+            // Try the next bracket-balanced candidate.
+          }
+          break;
+        }
+      }
+    }
+  }
+  if (candidates.length === 0) return null;
+  return candidates.find((arr) => arr.some((item) => item && typeof item === "object" && !Array.isArray(item))) ?? candidates[0];
 }
 
 function normalizeBedroomList(value: unknown): number[] | undefined {
@@ -1084,20 +1141,14 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
         console.error(`[research] Anthropic error envelope for ${city}, ${state}: ${upstreamMsg}`);
       } else {
         const text: string = claudeData?.content?.[0]?.text ?? "";
-        // Tolerate Markdown fences around the JSON — Haiku occasionally
-        // wraps array output in ```json … ``` despite the "no markdown"
-        // instruction. Strip the fences before regex-matching the array.
-        const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "");
-        const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) {
+        // Tolerate Markdown fences and occasional multi-array output
+        // such as `[]\n[{...}]`. The old greedy regex parsed that as
+        // one invalid JSON string, which made valid city research look
+        // empty in the UI.
+        const scored = parseCommunityResearchJsonArray(text);
+        if (!scored) {
           console.error(`[research] Claude returned no JSON array for ${city}, ${state}. Raw text head: ${text.slice(0, 200)}`);
         } else {
-          let scored: Array<any> = [];
-          try {
-            scored = JSON.parse(jsonMatch[0]) as Array<any>;
-          } catch (parseErr: any) {
-            console.error(`[research] JSON.parse failed for ${city}, ${state}: ${parseErr.message}. Head: ${jsonMatch[0].slice(0, 200)}`);
-          }
           // Single mode keeps up to 20; combo mode keeps the original 10.
           const sliceCap = mode === "single" ? 20 : 10;
           for (const s of scored.slice(0, sliceCap)) {

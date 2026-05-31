@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { researchCommunitiesForCity } from "../server/community-research";
+import { parseCommunityResearchJsonArray, researchCommunitiesForCity } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "../shared/community-addresses";
 import { checkCommunityType } from "../shared/community-type";
@@ -1110,6 +1110,16 @@ assert.equal(
 );
 console.log("  ✓ detached villas remain disqualified");
 
+const parsedMultiArrayResearch = parseCommunityResearchJsonArray(`[]\n[
+  {"communityName":"Colony One at Sea Mountain","unitTypes":"condos","confidenceScore":74}
+]`);
+assert.equal(
+  parsedMultiArrayResearch?.[0]?.communityName,
+  "Colony One at Sea Mountain",
+  "community research parser should recover a non-empty array after an empty-array preface",
+);
+console.log("  ✓ Claude multi-array community research output is parsed");
+
 const originalFetch = globalThis.fetch;
 const originalSearchKey = process.env.SEARCHAPI_API_KEY;
 const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -1132,6 +1142,13 @@ try {
     "curated fallback candidates should pass the shared community type guard",
   );
   console.log("  ✓ Kailua-Kona has curated fallback communities when search/AI under-find it");
+
+  const waiohinu = await researchCommunitiesForCity("Waiohinu", "Hawaii");
+  assert.ok(
+    waiohinu.some((c) => c.name === "Colony One at Sea Mountain"),
+    "South Big Island towns should fall back to the known Punalu'u/Sea Mountain condo candidate",
+  );
+  console.log("  ✓ South Big Island small towns have a deterministic combo fallback");
 } finally {
   globalThis.fetch = originalFetch;
   if (originalSearchKey == null) delete process.env.SEARCHAPI_API_KEY;
