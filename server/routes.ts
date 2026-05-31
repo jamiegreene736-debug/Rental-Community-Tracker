@@ -6808,6 +6808,68 @@ export async function registerRoutes(
         .filter((community) => community !== baseCommunity)
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
         .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community));
+      // Surgical addition: discover additional resorts/condo complexes within ~20min drive
+      // using Photon (same pattern as /api/community/nearby-cities) so the alternative
+      // scout button can surface options not yet in the BUY_IN_MARKET system. These are
+      // lightweight (no pre-scout SearchAPI cost); user selects which to queue to sidecar
+      // (find-buy-in) for live confirmation.
+      const baseLocation = BUY_IN_MARKET_LOCATIONS[baseCommunity] || null;
+      let discoveredResorts: any[] = [];
+      if (baseLocation) {
+        try {
+          const stripOkina = (s: string) => s.replace(/[ʻʼ'']/g, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          const revUrl = new URL("https://photon.komoot.io/reverse");
+          revUrl.searchParams.set("lat", String(baseLocation.lat));
+          revUrl.searchParams.set("lon", String(baseLocation.lng));
+          revUrl.searchParams.set("radius", "22");
+          revUrl.searchParams.set("limit", "35");
+          revUrl.searchParams.set("osm_tag", "place,tourism");
+          const revResp = await fetch(revUrl.toString(), {
+            headers: { "User-Agent": "NexStay/1.0 (contact: jamie.greene736@gmail.com)" },
+          });
+          if (revResp.ok) {
+            const revData = await revResp.json() as any;
+            const resortRe = /\b(resort|condominium|condo|villas?|plantation|cove|kai|estates?|complex|beachfront|oceanfront|mauka|makai)\b/i;
+            const seen = new Set<string>();
+            const out: any[] = [];
+            for (const f of (revData.features ?? [])) {
+              const p = f.properties ?? {};
+              if ((p.country ?? "") !== "United States") continue;
+              if (baseLocation.state && String(p.state ?? "").toLowerCase() !== baseLocation.state.toLowerCase()) continue;
+              const raw = String(p.name ?? "").trim();
+              if (!raw) continue;
+              const display = stripOkina(raw);
+              const key = display.toLowerCase();
+              if (seen.has(key)) continue;
+              const looksResort = resortRe.test(display) || /tourism/.test(String(p.osm_key || p.osm_value || ""));
+              if (!looksResort) continue;
+              if (similar.some((s: string) => s.toLowerCase() === key || key.includes(s.toLowerCase()) || s.toLowerCase().includes(key))) continue;
+              const [lon, lat] = f.geometry?.coordinates ?? [];
+              if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+              const mins = driveMinutesBetweenCoords(baseLocation.lat, baseLocation.lng, Number(lat), Number(lon));
+              if (mins == null || mins > 20 || mins < 2) continue;
+              seen.add(key);
+              out.push({
+                community: display,
+                driveMinutesFromBase: mins,
+                isDiscovered: true,
+                reason: `Discovered nearby resort/area (~${mins} min drive) — not yet in system. Run sidecar to check live buy-in options.`,
+                count: 0,
+                raw: 0,
+                recommended: false,
+                status: "discovered",
+                samples: [],
+                passingPlans: [],
+                replacementPlans: [],
+              });
+            }
+            out.sort((a, b) => (a.driveMinutesFromBase ?? 99) - (b.driveMinutesFromBase ?? 99) || a.community.localeCompare(b.community));
+            discoveredResorts = out.slice(0, 8);
+          }
+        } catch (e: any) {
+          console.warn(`[alternative-buy-in-scout] photon resort discovery failed for ${baseCommunity}:`, e?.message ?? e);
+        }
+      }
       const replacementPlans = twoUnitReplacementPlans(propertyConfig?.units?.map((unit) => unit.bedrooms) ?? [bedrooms]);
       const minAirbnbResults = Math.max(1, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "1"), 10) || 1));
       const results = await Promise.all(similar.map(async (community) => {
@@ -6943,7 +7005,8 @@ export async function registerRoutes(
         results: recommended,
         recommended,
         rejected: results.filter((r) => !r.recommended),
-        scouted: results,
+        scouted: [...results, ...discoveredResorts],
+        discoveredResorts,
         generatedAt: new Date().toISOString(),
       });
     } catch (err: any) {

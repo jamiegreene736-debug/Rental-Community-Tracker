@@ -315,6 +315,7 @@ type AlternativeScoutResult = {
   errors?: string[];
   durationMs?: number;
   driveMinutesFromBase?: number | null;
+  isDiscovered?: boolean;
   samples: AlternativeScoutSample[];
 };
 
@@ -332,6 +333,7 @@ type AlternativeScoutResponse = {
   recommended: AlternativeScoutResult[];
   rejected?: AlternativeScoutResult[];
   scouted?: AlternativeScoutResult[];
+  discoveredResorts?: AlternativeScoutResult[];
   generatedAt: string;
 };
 
@@ -2063,8 +2065,8 @@ function AlternativeBuyInWorkflowPanel({
         <div>
           <p className="font-semibold">Alternative buy-in workflow</p>
           <p className="text-[11px] opacity-80">
-            Scouts every configured buy-in community within ~20 minutes drive of {workflow?.scout?.baseCommunity ?? "this resort"}
-            {workflow?.scout?.requiresOceanfrontComparable ? " (waterfront communities only)" : ""}, then run the full sidecar search where Airbnb proves a replacement combo.
+            Scouts configured buy-in communities within ~20 minutes drive of {workflow?.scout?.baseCommunity ?? "this resort"}
+            {workflow?.scout?.requiresOceanfrontComparable ? " (waterfront only)" : ""}; also discovers other nearby resorts/condo areas (even if not yet in system) for selective sidecar queuing.
           </p>
           {(workflow?.scout?.nearbyWithinDriveMinutes?.length ?? 0) > 0 && (
             <p className="mt-0.5 text-[11px] opacity-80">
@@ -2102,7 +2104,7 @@ function AlternativeBuyInWorkflowPanel({
               <div key={result.community} className="rounded border bg-white/80 px-2 py-2">
                 <div className="flex items-start justify-between gap-2">
                   <div>
-                    <p className="font-semibold">{result.community}</p>
+                    <p className="font-semibold">{result.community}{ (result as any).isDiscovered ? <span className="ml-1 text-[10px] rounded bg-amber-100 px-1 text-amber-700">new</span> : null }</p>
                     <p className="text-[11px] text-muted-foreground">
                       Airbnb scout: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} passed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
                       <UnitTypeConfidenceBadge confidence={sidecar?.cheapest?.[0]?.unitTypeConfidence} />
