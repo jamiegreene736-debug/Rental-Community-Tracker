@@ -26174,6 +26174,14 @@ Return ONLY compact JSON with this exact shape:
         }
       });
       fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
+      // Run the extensive photo-listing-scanner preflight (reverse image SearchAPI + platform checks)
+      // so bulk-added combo drafts automatically populate photo_listing_checks. This ensures
+      // the "not listed on VRBO/Airbnb/Booking" gate used in builder-preflight is respected
+      // for bulk flows exactly as for manual unit addition.
+      void runPhotoListingCheckForFolders([
+        `draft-${draftId}-unit-a`,
+        `draft-${draftId}-unit-b`,
+      ]).catch(() => null);
       await enqueueCommunityPricingRefreshJob(draftId).catch((e: any) => {
         item.message = `Draft saved; pricing queue warning: ${e?.message ?? e}`;
       });
