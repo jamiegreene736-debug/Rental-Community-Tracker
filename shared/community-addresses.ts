@@ -6,7 +6,7 @@ export type CommunityAddressRule = {
 };
 
 export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
-  { names: ["Regency at Poipu Kai", "Poipu Kai"], street: "1831 Poipu Rd", city: "Koloa", state: "HI" },
+  { names: ["Regency at Poipu Kai", "Poipu Kai", "Kahala at Poipu Kai", "Poipu Sands"], street: "1831 Poipu Rd", city: "Koloa", state: "HI" },
   { names: ["Pili Mai", "Pili Mai at Poipu"], street: "2611 Kiahuna Plantation Dr", city: "Koloa", state: "HI" },
   { names: ["Mauna Kai Princeville", "Mauna Kai"], street: "3920 Wyllie Rd", city: "Princeville", state: "HI" },
   { names: ["Kaha Lani Resort", "Kaha Lani"], street: "4460 Nehe Rd", city: "Lihue", state: "HI" },
@@ -17,6 +17,10 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Caribe Cove Resort", "Caribe Cove"], street: "9000 Treasure Trove Ln", city: "Kissimmee", state: "FL" },
   { names: ["Windsor Hills", "Windsor Hills Resort"], street: "2600 N Old Lake Wilson Rd", city: "Kissimmee", state: "FL" },
   { names: ["Pink Shell Beach Resort", "Pink Shell Beach Resort and Marina", "Pink Shell Resort", "Pink Shell"], street: "275 Estero Blvd", city: "Fort Myers Beach", state: "FL" },
+  // Additional Poipu/Koloa addresses for new combo seeds (enables geo-bbox unit search in /api/community/search-units and refresh-pricing)
+  { names: ["Poipu Kapili"], street: "2221 Kapili Rd", city: "Koloa", state: "HI" },
+  { names: ["Poipu Shores"], street: "1775 Pe'e Rd", city: "Koloa", state: "HI" },
+  { names: ["Manualoha at Poipu Kai"], street: "2371 Ho'ohu Road", city: "Koloa", state: "HI" },
 ];
 
 export function normalizeCommunityAddressToken(value: string): string {
