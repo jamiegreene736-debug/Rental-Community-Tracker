@@ -30895,6 +30895,20 @@ Return ONLY compact JSON with this exact shape:
       // mode (default) keeps the original gating; single mode lifts
       // caps and uses Sonnet — see Load-Bearing #36.
       const communities = await researchCommunitiesForCity(city, state, mode === "single" ? "single" : "combo");
+      // Annotate with hasExistingListing so the add-combo wizard can show ✓
+      // for resorts the operator already has a draft for (surgical, non-blocking).
+      try {
+        const drafts = await storage.getCommunityDrafts();
+        const existing = new Set(
+          drafts.map((d) => `${(d.name || "").toLowerCase().trim()}|${(d.city || "").toLowerCase().trim()}`)
+        );
+        for (const c of communities) {
+          const key = `${(c.name || "").toLowerCase().trim()}|${(c.city || "").toLowerCase().trim()}`;
+          (c as any).hasExistingListing = existing.has(key);
+        }
+      } catch {
+        // best-effort only; leave flags undefined
+      }
       return res.json({ communities });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });

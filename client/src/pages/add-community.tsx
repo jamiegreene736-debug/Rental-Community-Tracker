@@ -42,6 +42,7 @@ import { checkCommunityType } from "@shared/community-type";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
+import { nearbyBuyInMarketsForScoutDetailed } from "@shared/buy-in-market";
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -79,6 +80,8 @@ type CommunityResult = {
   minimumStayNights?: number | null;
   minimumStayEvidence?: string | null;
   minimumStaySourceUrl?: string | null;
+  /** True when operator already has a draft/listing for this exact resort name+city in community_drafts. */
+  hasExistingListing?: boolean;
 };
 
 type UnitResult = {
@@ -457,6 +460,27 @@ export default function AddCommunity() {
       selectedCommunity?.state ?? selectedState,
     ].filter(Boolean).join(" "),
   }), [selectedCommunity, cityInput, selectedState, editedStreetAddress, suggestedStreetAddress]);
+
+  // 20-min drive nearby cities for the combo search city input (surgical addition
+  // to surface the "other cities within 20 min drive" that the prior deploy
+  // intended for Poipu etc.). Maps typed city to a buy-in market base key then
+  // reuses the existing drive-time scout helpers.
+  const nearby20min = useMemo(() => {
+    const q = (cityInput || "").toLowerCase().trim();
+    if (!q) return [] as Array<{ community: string; driveMinutes: number }>;
+    let base: string | null = null;
+    if (q.includes("poipu") || q.includes("koloa")) base = "Poipu Kai";
+    else if (q.includes("princeville") || q.includes("hanalei")) base = "Princeville";
+    else if (q.includes("kapaa") || q.includes("wailua") || q.includes("lihue")) base = "Kapaa Beachfront";
+    else if (q.includes("keauhou") || q.includes("kona")) base = "Keauhou";
+    else if (q.includes("kekaha") || q.includes("waimea")) base = "Kekaha Beachfront";
+    if (!base) return [];
+    try {
+      return nearbyBuyInMarketsForScoutDetailed(base, { maxDriveMinutes: 20, limit: 6 });
+    } catch {
+      return [];
+    }
+  }, [cityInput]);
 
   useEffect(() => {
     if (!editedStreetAddress.trim() && suggestedStreetAddress) {
@@ -1656,6 +1680,16 @@ export default function AddCommunity() {
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
               <strong>Current selection:</strong> {selectedState || "No state selected"} — {cityInput || "No city entered"}
             </div>
+            {nearby20min.length > 0 && (
+              <div className="mb-3 px-3 py-1.5 rounded-md border border-blue-200 bg-blue-50/60 text-xs text-blue-900 flex items-center gap-1.5">
+                <span className="font-medium">Within ~20 min drive:</span>{" "}
+                {nearby20min.map((n, idx) => (
+                  <span key={idx} className="inline-block px-1.5 py-0.5 bg-white/70 rounded">
+                    {n.community} (~{n.driveMinutes} min)
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               <Button
                 onClick={handleResearch}
@@ -2151,6 +2185,12 @@ export default function AddCommunity() {
                         {c.fromWorldKnowledge && (
                           <Badge variant="outline" className="text-[10px] border-blue-300 text-blue-700">
                             From AI knowledge
+                          </Badge>
+                        )}
+                        {c.hasExistingListing && (
+                          <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200 text-[10px]">
+                            <CheckCircle2 className="h-3 w-3 mr-1" />
+                            Already in system
                           </Badge>
                         )}
                         <TooltipProvider>
