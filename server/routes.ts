@@ -30904,16 +30904,21 @@ Return ONLY compact JSON with this exact shape:
       // mode (default) keeps the original gating; single mode lifts
       // caps and uses Sonnet — see Load-Bearing #36.
       const communities = await researchCommunitiesForCity(city, state, mode === "single" ? "single" : "combo");
-      // Annotate with hasExistingListing so the add-combo wizard can show ✓
-      // for resorts the operator already has a draft/listing for (surgical, best-effort).
+      // Annotate with hasExistingListing (name-only match) so the add-combo wizard shows
+      // "Already in system" badge for any community that has a draft OR published property
+      // (e.g. Pili Mai via props 32/33). Uses name-only to tolerate city spelling diffs
+      // (research may return "Poipu" while stored uses "Koloa"). Surgical, best-effort.
       try {
         const drafts = await storage.getCommunityDrafts();
-        const existing = new Set(
-          drafts.map((d) => `${(d.name || "").toLowerCase().trim()}|${(d.city || "").toLowerCase().trim()}`)
-        );
+        const existing = new Set<string>();
+        for (const d of drafts) if (d.name) existing.add(String(d.name).toLowerCase().trim());
+        for (const pidStr of Object.keys(PROPERTY_UNIT_CONFIGS)) {
+          const cfg = PROPERTY_UNIT_CONFIGS[Number(pidStr)];
+          if (cfg?.community) existing.add(cfg.community.toLowerCase().trim());
+        }
         for (const c of communities) {
-          const key = `${(c.name || "").toLowerCase().trim()}|${(c.city || "").toLowerCase().trim()}`;
-          (c as any).hasExistingListing = existing.has(key);
+          const nm = (c.name || "").toLowerCase().trim();
+          (c as any).hasExistingListing = existing.has(nm);
         }
       } catch {
         // best-effort only
