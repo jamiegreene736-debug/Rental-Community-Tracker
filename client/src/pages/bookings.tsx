@@ -4100,19 +4100,27 @@ export default function Bookings() {
   const [autoAltScans, setAutoAltScans] = useState<Record<string, { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean }>>({});
   const alternativeWorkflowsRef = useRef<Record<string, AlternativeWorkflowState>>({});
   useEffect(() => { alternativeWorkflowsRef.current = alternativeWorkflows; }, [alternativeWorkflows]);
+  const rawReservationsRef = useRef<GuestyReservation[]>([]);
 
   // Hoisted early (before first reference in the runAlternativeSidecarSearchRef initializer)
   // to fix TDZ ReferenceError "Cannot access '...' before initialization" (minified 'jt')
   // when the Operations (/bookings) page mounts. The definition was after the early
   // useRef/useEffect that close over the name during component body execution.
   const runAlternativeSidecarSearch = async (reservation: GuestyReservation, community: string) => {
-    const meta = reservationPropertyMeta.get(reservation._id);
+    const resId = reservation._id;
+    const resForData: GuestyReservation = (reservation as any).slots ? reservation : (rawReservationsRef.current.find((r) => r._id === resId) || (reservation as any));
+    if (!(resForData as any).slots) {
+      toast({ title: `Sidecar search failed for ${community}`, description: "Reservation details unavailable.", variant: "destructive" });
+      updateAlternativeWorkflow(resId, { activeCommunity: null });
+      return;
+    }
+    const meta = reservationPropertyMeta.get(resId);
     const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
-    const bedrooms = reservation.slots.find((slot) => !slot.buyIn)?.bedrooms ?? reservation.slots[0]?.bedrooms;
-    const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
-    const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
+    const bedrooms = resForData.slots.find((slot) => !slot.buyIn)?.bedrooms ?? resForData.slots[0]?.bedrooms;
+    const checkIn = (resForData.checkInDateLocalized ?? resForData.checkIn ?? "").slice(0, 10);
+    const checkOut = (resForData.checkOutDateLocalized ?? resForData.checkOut ?? "").slice(0, 10);
     if (!propertyId || !bedrooms || !checkIn || !checkOut) return;
-    updateAlternativeWorkflow(reservation._id, { activeCommunity: community });
+    updateAlternativeWorkflow(resId, { activeCommunity: community });
     try {
       const params = new URLSearchParams({
         propertyId: String(propertyId),
@@ -4124,10 +4132,10 @@ export default function Bookings() {
       });
       if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
       const data = await fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
-      updateAlternativeWorkflow(reservation._id, {
+      updateAlternativeWorkflow(resId, {
         activeCommunity: null,
         sidecarResults: {
-          ...(alternativeWorkflows[reservation._id]?.sidecarResults ?? {}),
+          ...(alternativeWorkflows[resId]?.sidecarResults ?? {}),
           [community]: data,
         },
       });
@@ -4138,7 +4146,7 @@ export default function Bookings() {
           : data.diagnostics?.summary ?? "No verified candidate returned.",
       });
     } catch (error: any) {
-      updateAlternativeWorkflow(reservation._id, { activeCommunity: null });
+      updateAlternativeWorkflow(resId, { activeCommunity: null });
       toast({ title: `Sidecar search failed for ${community}`, description: error?.message ?? String(error), variant: "destructive" });
     }
   };
@@ -4368,6 +4376,7 @@ export default function Bookings() {
   const rawReservations = isGlobalView ? globalReservations : (bookingsData?.reservations ?? []);
   const unitSlots = isGlobalView ? [] : (bookingsData?.unitSlots ?? []);
   const hasBuyInSlots = unitSlots.length > 0;
+  useEffect(() => { rawReservationsRef.current = rawReservations; }, [rawReservations]);
   const selectedBuyInPropertyId = !isGlobalView
     ? ((bookingsData as any)?.propertyId ?? selectedQueryPropertyId)
     : null;
