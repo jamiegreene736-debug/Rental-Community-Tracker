@@ -11356,7 +11356,7 @@ export async function registerRoutes(
     const gvDiscovered: Candidate[] = [];
     const slAlekonaDiscovered: Candidate[] = [];
     const slPrincevilleDiscovered: Candidate[] = [];
-    // (kvr/pbh/irk/kp + pm decls hoisted earlier; removed stale duplicates here to fix build + TDZ root cause)
+    // (kvr/pbh/irk/kp + pm decls hoisted earlier to fix TDZ 'LR' + Railway build)
 
     // ── Path B: reverse-image search the top Airbnb candidates ───────────
     // Airbnb listings can't be sublet (Airbnb's TOS bars commercial
