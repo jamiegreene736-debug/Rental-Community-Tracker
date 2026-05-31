@@ -11353,15 +11353,10 @@ export async function registerRoutes(
     const cbDiscovered: Candidate[] = [];
     const pikoDiscovered: Candidate[] = [];
     const evrhiDiscovered: Candidate[] = [];
-    // New VRP sources from the previous PR
-    const kvrDiscovered: Candidate[] = [];
-    const pbhDiscovered: Candidate[] = [];
-    const irkDiscovered: Candidate[] = [];
-    const kpDiscovered: Candidate[] = [];
     const gvDiscovered: Candidate[] = [];
     const slAlekonaDiscovered: Candidate[] = [];
     const slPrincevilleDiscovered: Candidate[] = [];
-    // (kvr/pbh/irk/kp + pm decls hoisted earlier to before first .push in VRP discovery wiring to fix TDZ "Cannot access 'LR' before initialization" on Auto-fill cheapest / find-buy-in)
+    // (kvr/pbh/irk/kp + pm decls hoisted earlier to fix TDZ 'LR' + Railway build)
 
     // ── Path B: reverse-image search the top Airbnb candidates ───────────
     // Airbnb listings can't be sublet (Airbnb's TOS bars commercial
