@@ -1543,11 +1543,11 @@ The location is unbeatable - Brennecke's Beach, Poipu Beach Park, and Shipwreck 
     address: "4100 Queen Emma's Dr, Princeville, HI 96722",
     bookingTitle: "Princeville - 7BR Ocean View - Sleeps 14",
     sampleDisclaimer: "This listing represents a managed portfolio of similar townhome units within Kaiulani of Princeville. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
-    combinedDescription: `This listing is comprised of three townhome units within the Kaiulani of Princeville community, perched above beautiful Anini Beach on Kauai's North Shore. Together they offer 7 bedrooms and can accommodate up to 17 guests, with ocean and mountain views and access to the community pool.
+    combinedDescription: `This listing is comprised of two townhome units within the Kaiulani of Princeville community, perched above beautiful Anini Beach on Kauai's North Shore. Together they offer 7 bedrooms and can accommodate up to 17 guests, with ocean and mountain views and access to the community pool.
 
 Unit A is a spacious 3-bedroom, 2.5-bathroom two-story townhome (~1,800 sq ft) with high vaulted ceilings, a fully equipped kitchen, and a covered lanai with mountain and partial ocean views. Sleeps 8 with a King master upstairs, Queen and Twin bedrooms, and a queen sleeper sofa.
 
-Unit B is two adjacent 2-bedroom townhomes combined to create a 4-bedroom, 3-bathroom vacation home (~2,400 sq ft). Each section has its own kitchen, living area, lanai, and queen sleeper sofa, providing flexibility for your group. Four bedrooms with King and Queen beds throughout. Sleeps 9.
+Unit B is a spacious 4-bedroom, 3-bathroom townhome (~2,400 sq ft) with its own kitchen, living area, lanai, and queen sleeper sofa, providing flexibility for your group. Four bedrooms with King and Queen beds throughout. Sleeps 9.
 
 Anini Beach below offers some of the calmest, clearest waters on Kauai, ideal for swimming, snorkeling, and kayaking. Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, the Na Pali Coast, and countless waterfalls all within reach. Nearby: Queen's Bath tide pools, Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, taro fields of Hanalei Valley. Fine dining at Makana Terrace, casual eats in Hanalei town.
 
@@ -1584,17 +1584,17 @@ Anini Beach, one of Kauai's most beautiful and protected beaches, is just down t
       },
       {
         id: "prop29-kai-4br",
-        unitNumber: "Unit 6-7",
+        unitNumber: "Unit 6",
         bedrooms: 4,
         bathrooms: "3",
         sqft: "~2,400",
         maxGuests: 9,
-        shortDescription: "Two adjacent 2BR townhomes combined for 4 bedrooms and 3 baths. Each unit has its own kitchen, living area, lanai, and queen sleeper sofa. King and queen beds throughout. Ocean and mountain views above Anini Beach.",
-        longDescription: `Welcome to this spacious 4-bedroom, 3-bathroom vacation home above Anini Beach, created from two adjacent 2-bedroom townhomes within the Kaiulani of Princeville community.
+        shortDescription: "Spacious 4-bedroom, 3-bath townhome with its own kitchen, living area, lanai, and queen sleeper sofa. King and queen beds throughout. Ocean and mountain views above Anini Beach.",
+        longDescription: `Welcome to this spacious 4-bedroom, 3-bathroom vacation home above Anini Beach within the Kaiulani of Princeville community.
 
-Each townhome unit has its own fully equipped kitchen, living area, and covered lanai, providing flexibility for your group. The combined layout creates a large vacation home while allowing different parts of your group to have their own space and privacy.
+This townhome has its own fully equipped kitchen, living area, and covered lanai, providing flexibility for your group.
 
-Four bedrooms across the two units feature king and queen beds. Three full bathrooms ensure comfort for all guests. Each townhome includes a queen sleeper sofa in the living area, providing additional sleeping for more guests. Each kitchen is fully stocked with modern appliances, cookware, and dining essentials.
+Four bedrooms feature king and queen beds. Three full bathrooms ensure comfort for all guests. The townhome includes a queen sleeper sofa in the living area, providing additional sleeping for more guests. The kitchen is fully stocked with modern appliances, cookware, and dining essentials.
 
 The covered lanais offer views of the mountains and ocean, perfect for relaxing with a tropical drink. Trade winds and ceiling fans provide natural cooling.
 

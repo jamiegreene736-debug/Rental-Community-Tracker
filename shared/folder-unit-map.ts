@@ -45,8 +45,8 @@ export const FOLDER_UNIT_TOKENS: Record<string, string[]> = {
   // unit numbers (3301, 2205) per PR #91 since the original Lae Nani
   // identifiers were swapped out
   "lae-nani-335": ["3301", "2205"],
-  // prop 29 — "Unit 5" and "Unit 6-7" both stored against one folder
-  "kaiulani-52": ["5", "6-7"],
+  // prop 29 — "Unit 5" and "Unit 6" both stored against one folder
+  "kaiulani-52": ["5", "6"],
   // props 32 + 33 — Pili Mai unit numbers are "Building N", and the
   // folders are placeholder names without a digit. Pull the building
   // numbers as verification tokens.

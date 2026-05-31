@@ -139,9 +139,9 @@ assert.deepEqual(
   "preflight photo check should not let shared kaiulani folder tokens verify Unit 5 as the other selected unit",
 );
 assert.deepEqual(
-  preflightPhotoVerifyTokens("Unit 6-7", "4100 Queen Emma's Dr, Princeville, HI 96722, Unit 6-7", "kaiulani-52"),
-  ["6-7"],
-  "compound Kaiulani unit label should remain one selected wizard unit, not split into units 6 and 7",
+  preflightPhotoVerifyTokens("Unit 6", "4100 Queen Emma's Dr, Princeville, HI 96722, Unit 6", "kaiulani-52"),
+  ["6"],
+  "Kaiulani preflight should check the second selected unit only, not split it into units 6 and 7",
 );
 console.log("  ✓ shared photo folder tokens stay scoped to the unit being checked");
 
