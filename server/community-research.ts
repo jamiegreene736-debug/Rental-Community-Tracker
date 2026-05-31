@@ -886,11 +886,10 @@ export async function researchCommunitiesForCity(
 
   // Single-listing mode tolerates an empty SearchAPI response — the
   // world-knowledge fallback below can still surface known named
-  // resorts in major markets (e.g. Fort Myers Beach → Santa Maria
-  // Resort) without any organic results to anchor on. Combo mode
-  // keeps the original "no results = no results" behavior because
-  // its prompt is too combinability-focused to work cold.
-  if (unique.length === 0 && mode === "combo" && knownComboSeeds.length === 0) return [];
+  // resorts. Combo now also attempts LLM (for nearby-city pivots in Add
+  // Combo flow when Google signals are sparse but real inventory exists).
+  // Post-filters (confidence>=60 && combinability>=50) still apply.
+
 
   // Spot-check the typical per-unit nightly rate for a community by
   // hitting SearchAPI's airbnb engine for a 7-night window 30 days out
