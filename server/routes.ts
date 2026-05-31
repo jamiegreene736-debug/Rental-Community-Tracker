@@ -30894,6 +30894,25 @@ Return ONLY compact JSON with this exact shape:
   // ============================================================
   // Step 2: Research communities in a city/state via SearchAPI + Claude scoring
   // ============================================================
+
+  // Fuzzy name matcher (surgical addition): tolerates spelling variants like
+  // "Kahi Lani" vs "Kaha Lani Resort" and "Pili Mai" etc without relying on
+  // exact string or chat context. Actively used against current drafts + unit
+  // configs so "already in system" reflects what's really tracked.
+  const nameLooksSame = (a: string | null | undefined, b: string | null | undefined): boolean => {
+    if (!a || !b) return false;
+    const na = String(a).toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    const nb = String(b).toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (!na || !nb) return false;
+    if (na === nb || na.includes(nb) || nb.includes(na)) return true;
+    const stop = /^(resort|condos?|townhomes?|villas?|community|beachfront|the|and|for|sea)$/i;
+    const ta = na.split(" ").filter(t => t.length > 2 && !stop.test(t));
+    const tb = nb.split(" ").filter(t => t.length > 2 && !stop.test(t));
+    if (ta.length === 0 || tb.length === 0) return false;
+    const hits = ta.filter(t => tb.some(u => u === t || u.includes(t) || t.includes(u) || (u.length > 3 && t.length > 3 && (u.startsWith(t.slice(0, 4)) || t.startsWith(u.slice(0, 4)))))).length;
+    return hits / Math.min(ta.length, tb.length) >= 0.5;
+  };
+
   app.post("/api/community/research", async (req, res) => {
     const { city, state, mode } = req.body as { city: string; state: string; mode?: "combo" | "single" };
     if (!city || !state) return res.status(400).json({ error: "city and state required" });
@@ -30904,21 +30923,19 @@ Return ONLY compact JSON with this exact shape:
       // mode (default) keeps the original gating; single mode lifts
       // caps and uses Sonnet — see Load-Bearing #36.
       const communities = await researchCommunitiesForCity(city, state, mode === "single" ? "single" : "combo");
-      // Annotate with hasExistingListing (name-only match) so the add-combo wizard shows
-      // "Already in system" badge for any community that has a draft OR published property
-      // (e.g. Pili Mai via props 32/33). Uses name-only to tolerate city spelling diffs
-      // (research may return "Poipu" while stored uses "Koloa"). Surgical, best-effort.
+      // Annotate with hasExistingListing using fuzzy name search against current
+      // drafts + published unit configs (active DB+static scan, not chat context).
       try {
         const drafts = await storage.getCommunityDrafts();
-        const existing = new Set<string>();
-        for (const d of drafts) if (d.name) existing.add(String(d.name).toLowerCase().trim());
+        const existingNames: string[] = [];
+        for (const d of drafts) if (d.name) existingNames.push(String(d.name).toLowerCase().trim());
         for (const pidStr of Object.keys(PROPERTY_UNIT_CONFIGS)) {
           const cfg = PROPERTY_UNIT_CONFIGS[Number(pidStr)];
-          if (cfg?.community) existing.add(cfg.community.toLowerCase().trim());
+          if (cfg?.community) existingNames.push(cfg.community.toLowerCase().trim());
         }
         for (const c of communities) {
           const nm = (c.name || "").toLowerCase().trim();
-          (c as any).hasExistingListing = existing.has(nm);
+          (c as any).hasExistingListing = existingNames.some(ex => nameLooksSame(ex, nm));
         }
       } catch {
         // best-effort only
@@ -32882,7 +32899,8 @@ Return ONLY compact JSON with this exact shape:
     }
 
     // ── 3b. Detect already-saved combo variants for this community (surgical) ─
-    // Lets UI auto-recommend unused combo types (e.g. 2+3 if 3+3 already exists)
+    // Lets UI auto-recommend unused combo types (e.g. 2+3 if 3+3 already exists).
+    // Uses fuzzy name/city match so "Kahi Lani" draft is found for "Kaha Lani Resort" search.
     let existingComboKeys = new Set<string>();
     try {
       const drafts = await storage.getCommunityDrafts();
@@ -32891,9 +32909,9 @@ Return ONLY compact JSON with this exact shape:
       const s = (state || "").toLowerCase().trim();
       for (const d of drafts) {
         if (
-          (d.name || "").toLowerCase().trim() === n &&
-          (d.city || "").toLowerCase().trim() === c &&
-          (d.state || "").toLowerCase().trim() === s &&
+          nameLooksSame(d.name, communityName) &&
+          (!c || nameLooksSame(d.city, city)) &&
+          (!s || (d.state || "").toLowerCase().trim() === s) &&
           !d.singleListing &&
           d.unit1Bedrooms && d.unit2Bedrooms
         ) {

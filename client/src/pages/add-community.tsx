@@ -2391,7 +2391,7 @@ export default function AddCommunity() {
                           </Badge>
                         )}
                         {c.hasExistingListing && (
-                          <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200 text-[10px]">
+                          <Badge className="bg-blue-600 text-white border-blue-700 text-[10px]">
                             <CheckCircle2 className="h-3 w-3 mr-1" />
                             Already in system
                           </Badge>
@@ -2694,7 +2694,7 @@ export default function AddCommunity() {
                         )}
                         {p.alreadyExists && (
                           <div className="absolute -top-2.5 right-3">
-                            <Badge variant="outline" className="text-xs border-amber-300 text-amber-700 bg-amber-50">Already have this combo type</Badge>
+                            <Badge className="text-xs bg-amber-500 text-white border-0">Already have this combo type</Badge>
                           </div>
                         )}
                         {isSelected && (
