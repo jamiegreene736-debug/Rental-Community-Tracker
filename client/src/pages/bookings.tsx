@@ -4122,12 +4122,21 @@ export default function Bookings() {
     if (!propertyId || !bedrooms || !checkIn || !checkOut) return;
     updateAlternativeWorkflow(resId, { activeCommunity: community });
     try {
+      const workflow = alternativeWorkflowsRef.current[resId] ?? alternativeWorkflows[resId];
+      const scoutedRows = [
+        ...(workflow?.scout?.scouted ?? []),
+        ...(workflow?.scout?.results ?? []),
+        ...(workflow?.scout?.rejected ?? []),
+        ...(workflow?.scout?.discoveredResorts ?? []),
+      ];
+      const scoutRow = scoutedRows.find((row) => row.community === community);
+      const communitySearchTerm = scoutRow?.searchTerm || community;
       const params = new URLSearchParams({
         propertyId: String(propertyId),
         bedrooms: String(bedrooms),
         checkIn,
         checkOut,
-        community,
+        community: communitySearchTerm,
         nocache: "1",
       });
       if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);

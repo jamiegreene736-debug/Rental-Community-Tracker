@@ -6800,7 +6800,7 @@ export async function registerRoutes(
       const driveNearbyDetailed = nearbyBuyInMarketsForScoutDetailed(baseCommunity, {
         maxDriveMinutes: 20,
         oceanfrontOnly: sourceRequiresOceanfront,
-        limit: 5,
+        limit: 20,
       });
       const driveNearby = driveNearbyDetailed.map((row) => row.community);
       const clusterSimilar = SIMILAR_BUY_IN_MARKETS[baseCommunity] ?? [];
@@ -6808,82 +6808,146 @@ export async function registerRoutes(
         .filter((community) => community !== baseCommunity)
         .filter((community) => !!BUY_IN_MARKET_LOCATIONS[community])
         .filter((community) => !sourceRequiresOceanfront || oceanfrontComparableBuyInMarket(community))
-        .slice(0, 6);
-      // Surgical addition: discover additional resorts/condo complexes within ~20min drive
-      // using Photon + Google SearchAPI (per operator request) so the alternative
-      // scout button surfaces options not yet in BUY_IN_MARKET. Then qualify via
-      // Airbnb SearchAPI for the dates; ONLY combos that match (e.g. two 3BR units
-      // available) qualify to appear in results for sidecar queuing.
+        .slice(0, 18);
+      // Discover additional resorts/condo complexes within a real 20-minute
+      // drive using SearchAPI Google Maps. This is intentionally independent
+      // of BUY_IN_MARKETS so the scout button can surface resorts that are not
+      // configured in our system yet. Each discovered resort is qualified below
+      // through dated Airbnb SearchAPI calls before it is shown.
       const baseLocation = BUY_IN_MARKET_LOCATIONS[baseCommunity] || null;
       let discoveredResorts: any[] = [];
       if (baseLocation) {
         try {
           const stripOkina = (s: string) => s.replace(/[ʻʼ'']/g, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-          const revUrl = new URL("https://photon.komoot.io/reverse");
-          revUrl.searchParams.set("lat", String(baseLocation.lat));
-          revUrl.searchParams.set("lon", String(baseLocation.lng));
-          revUrl.searchParams.set("radius", "22");
-          revUrl.searchParams.set("limit", "35");
-          revUrl.searchParams.set("osm_tag", "place,tourism");
-          const revResp = await fetch(revUrl.toString(), {
-            headers: { "User-Agent": "NexStay/1.0 (contact: jamie.greene736@gmail.com)" },
-          });
-          if (revResp.ok) {
-            const revData = await revResp.json() as any;
-            const resortRe = /\b(resort|condominium|condo|villas?|plantation|cove|kai|estates?|complex|beachfront|oceanfront|mauka|makai|kalaheo|lawai|eleele|waimea|hanapepe)\b/i;
-            const seen = new Set<string>();
-            const out: any[] = [];
-            for (const f of (revData.features ?? [])) {
-              const p = f.properties ?? {};
-              if ((p.country ?? "") !== "United States") continue;
-              if (baseLocation.state && String(p.state ?? "").toLowerCase() !== baseLocation.state.toLowerCase()) continue;
-              const raw = String(p.name ?? "").trim();
-              if (!raw) continue;
-              const display = stripOkina(raw);
-              const key = display.toLowerCase();
+          const normalizeName = (s: string) => stripOkina(s).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+          const knownNames = new Set<string>();
+          for (const market of Object.values(BUY_IN_MARKETS)) {
+            knownNames.add(normalizeName(market.key));
+            if (market.location?.searchName) knownNames.add(normalizeName(market.location.searchName));
+          }
+          const discoveryQueries = [
+            "vacation rental resort",
+            "condo resort vacation rentals",
+            "resort condominium vacation rentals",
+            "townhome resort vacation rentals",
+            `${baseLocation.city} ${baseLocation.state} vacation rental condos resort`,
+          ];
+          const mapsResponses = await Promise.all(discoveryQueries.map(async (q) => {
+            const params = new URLSearchParams({
+              engine: "google_maps",
+              q,
+              ll: `@${baseLocation.lat},${baseLocation.lng},32187m`,
+              api_key: apiKey,
+              gl: "us",
+              hl: "en",
+            });
+            const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+            if (!response.ok) return null;
+            return response.json() as Promise<any>;
+          }));
+          const seen = new Set<string>();
+          const rawPlaces: any[] = [];
+          for (const data of mapsResponses) {
+            const rows = [...(Array.isArray(data?.ads) ? data.ads : []), ...(Array.isArray(data?.local_results) ? data.local_results : [])];
+            for (const row of rows) {
+              const title = stripOkina(String(row?.title ?? "").trim());
+              const lat = Number(row?.gps_coordinates?.latitude);
+              const lng = Number(row?.gps_coordinates?.longitude);
+              if (!title || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+              const key = String(row?.place_id ?? row?.data_id ?? `${normalizeName(title)}|${normalizeName(row?.address ?? "")}`);
               if (seen.has(key)) continue;
-              const looksResort = resortRe.test(display) || /tourism|place/.test(String(p.osm_key || p.osm_value || "")) || (String(baseLocation.state || "").toLowerCase() === "hawaii" && display.length > 2 && !/^(kauai|hawaii)$/i.test(display));
-              if (!looksResort) continue;
-              if (similar.some((s: string) => s.toLowerCase() === key || key.includes(s.toLowerCase()) || s.toLowerCase().includes(key))) continue;
-              const [lon, lat] = f.geometry?.coordinates ?? [];
-              if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-              const latN = Number(lat), lonN = Number(lon);
-              const mins = driveMinutesBetweenCoords(baseLocation.lat, baseLocation.lng, latN, lonN);
-              if (mins == null || mins > 20 || mins < 2) continue;
               seen.add(key);
-              out.push({
-                community: display,
-                driveMinutesFromBase: mins,
-                isDiscovered: true,
-                reason: `Discovered nearby resort/area (~${mins} min drive) — not yet in system. Run sidecar to check live buy-in options.`,
-                count: 0,
-                raw: 0,
-                recommended: false,
-                status: "discovered",
-                samples: [],
-                passingPlans: [],
-                replacementPlans: [],
-                lat: latN,
-                lng: lonN,
+              const normalizedTitle = normalizeName(title);
+              if (normalizedTitle === normalizeName(baseCommunity)) continue;
+              if (knownNames.has(normalizedTitle) || similar.some((s) => normalizeName(s) === normalizedTitle)) continue;
+              const hay = normalizeName(`${title} ${row?.type ?? ""} ${(row?.types ?? []).join(" ")} ${row?.description ?? ""} ${row?.address ?? ""}`);
+              if (!/\b(resort|condo|condominium|villas?|townhomes?|townhouses?|vacation rentals?)\b/.test(hay)) continue;
+              if (/\b(hotel|motel|hostel|timeshare|travel agency|real estate agency)\b/.test(hay) && !/\b(condo|condominium|vacation rental|resort)\b/.test(hay)) continue;
+              if (sourceRequiresOceanfront && !/\b(ocean|beach|waterfront|shore|brennecke|makahuena)\b/.test(hay)) continue;
+              const estimatedMinutes = driveMinutesBetweenCoords(baseLocation.lat, baseLocation.lng, lat, lng);
+              if (estimatedMinutes == null || estimatedMinutes > 30 || estimatedMinutes < 1) continue;
+              rawPlaces.push({
+                community: title,
+                address: String(row?.address ?? ""),
+                website: row?.website ? String(row.website) : null,
+                lat,
+                lng,
+                estimatedMinutes,
               });
             }
-            out.sort((a, b) => (a.driveMinutesFromBase ?? 99) - (b.driveMinutesFromBase ?? 99) || a.community.localeCompare(b.community));
-            discoveredResorts = out.slice(0, 8);
           }
+          rawPlaces.sort((a, b) => a.estimatedMinutes - b.estimatedMinutes || a.community.localeCompare(b.community));
+          const withDirections = await mapLimited(rawPlaces.slice(0, 28), 4, async (place) => {
+            try {
+              const params = new URLSearchParams({
+                engine: "google_maps_directions",
+                from: `${baseLocation.lat},${baseLocation.lng}`,
+                to: `${place.lat},${place.lng}`,
+                travel_mode: "driving",
+                distance_units: "mi",
+                api_key: apiKey,
+                gl: "us",
+                hl: "en",
+              });
+              const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+              if (!response.ok) return null;
+              const data = await response.json() as any;
+              const route = (Array.isArray(data?.directions) ? data.directions : [])
+                .find((d: any) => String(d?.travel_mode ?? "").toLowerCase() === "driving") ?? data?.directions?.[0];
+              const mins = Math.round(Number(route?.duration ?? 0) / 60);
+              if (!Number.isFinite(mins) || mins > 20 || mins < 1) return null;
+              return {
+                ...place,
+                driveMinutesFromBase: mins,
+                driveTime: route?.formatted_duration ? String(route.formatted_duration) : `${mins} min`,
+                driveDistance: route?.formatted_distance ? String(route.formatted_distance) : null,
+              };
+            } catch {
+              return null;
+            }
+          });
+          discoveredResorts = withDirections
+            .filter(Boolean)
+            .sort((a: any, b: any) => (a.driveMinutesFromBase ?? 99) - (b.driveMinutesFromBase ?? 99) || a.community.localeCompare(b.community))
+            .slice(0, 16)
+            .map((place: any) => ({
+              ...place,
+              searchTerm: `${place.community}, ${baseLocation.city}, ${baseLocation.state}`,
+              isDiscovered: true,
+              reason: `Discovered by SearchAPI Google Maps within ${place.driveTime ?? `${place.driveMinutesFromBase} min`} drive — Airbnb scout must prove two qualifying units before sidecar.`,
+              count: 0,
+              raw: 0,
+              recommended: false,
+              status: "discovered",
+              samples: [],
+              passingPlans: [],
+              replacementPlans: [],
+            }));
         } catch (e: any) {
-          console.warn(`[alternative-buy-in-scout] photon resort discovery failed for ${baseCommunity}:`, e?.message ?? e);
+          console.warn(`[alternative-buy-in-scout] Google Maps resort discovery failed for ${baseCommunity}:`, e?.message ?? e);
         }
       }
       const replacementPlans = twoUnitReplacementPlans(propertyConfig?.units?.map((unit) => unit.bedrooms) ?? [bedrooms]);
       const minAirbnbResults = Math.max(1, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "1"), 10) || 1));
-      // Qualify discovered (Google/Photon) via Airbnb SearchAPI for the exact dates + combo.
+      // Qualify discovered resorts via Airbnb SearchAPI for the exact dates + combo.
       // Only those with qualifying unit counts (e.g. 2x3BR) are returned for sidecar queuing.
       let qualifiedDiscovered: any[] = [];
       if (discoveredResorts.length > 0 && apiKey) {
+        const boundsAround = (lat: number, lng: number, radiusMiles = 1.5) => {
+          const latDelta = radiusMiles / 69;
+          const lngDelta = radiusMiles / (69 * Math.max(0.2, Math.cos((lat * Math.PI) / 180)));
+          return {
+            sw_lat: lat - latDelta,
+            sw_lng: lng - lngDelta,
+            ne_lat: lat + latDelta,
+            ne_lng: lng + lngDelta,
+          };
+        };
         qualifiedDiscovered = (await Promise.all(discoveredResorts.map(async (d: any) => {
           const startedAt = Date.now();
-          const q = `${d.community}, Koloa, Kauai, HI`;
+          const q = d.searchTerm || `${d.community}, ${baseLocation?.city ?? ""}, ${baseLocation?.state ?? ""}`;
           const coords = (Number.isFinite(d.lat) && Number.isFinite(d.lng)) ? { lat: d.lat, lng: d.lng } : null;
+          const discoveredBounds = coords ? boundsAround(coords.lat, coords.lng) : undefined;
           try {
             const countsByBedroom: Record<string, number> = {};
             const samplesByBedroom: Record<string, any[]> = {};
@@ -6900,23 +6964,25 @@ export async function registerRoutes(
                 currency: "USD",
                 api_key: apiKey,
               };
-              if (coords) {
-                params.lat = String(coords.lat);
-                params.lng = String(coords.lng);
+              if (discoveredBounds) {
+                params.bounding_box = `[[${discoveredBounds.ne_lat},${discoveredBounds.ne_lng}],[${discoveredBounds.sw_lat},${discoveredBounds.sw_lng}]]`;
               }
               try {
                 const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
                 if (!response.ok) return { bedroomCount: brCount, count: 0, samples: [] as any[] };
                 const data = await response.json() as any;
                 const rows = Array.isArray(data?.properties) ? data.properties : [];
-                const qualifyingRows = rows.filter((p: any) => airbnbScoutRowQualifiesForBedroom(p, brCount, undefined as any));
+                const qualifyingRows = rows.filter((p: any) => airbnbScoutRowQualifiesForBedroom(p, brCount, discoveredBounds));
                 return {
                   bedroomCount: brCount,
                   count: qualifyingRows.length,
                   samples: qualifyingRows.slice(0, 3).map((p: any) => ({
                     title: String(p?.name ?? p?.title ?? d.community).slice(0, 100),
                     url: String(p?.link ?? p?.url ?? ""),
+                    image: String(p?.images?.[0] ?? p?.thumbnail ?? p?.picture_url ?? ""),
                     totalPrice: Number(p?.price?.total?.extracted_value ?? p?.price?.extracted_total_price ?? 0) || null,
+                    sourceLabel: "Airbnb scout",
+                    bedrooms: brCount,
                   })),
                 };
               } catch {
@@ -6935,9 +7001,9 @@ export async function registerRoutes(
               ...d,
               status: "ok",
               count: maxPlanCount,
-              raw: maxPlanCount,
+              raw: Object.values(countsByBedroom).reduce((sum, count) => sum + count, 0),
               recommended: true,
-              reason: `Airbnb scout passed ${passingPlans[0].join("+")}BR replacement (discovered ~${d.driveMinutesFromBase} min drive via SearchAPI Google/Photon)`,
+              reason: `Airbnb scout passed ${passingPlans[0].join("+")}BR replacement at ${d.community} (${d.driveTime ?? `~${d.driveMinutesFromBase} min drive`} via SearchAPI Google Maps)`,
               countsByBedroom,
               passingPlans,
               replacementPlans,
@@ -9379,7 +9445,7 @@ export async function registerRoutes(
 	      }
 	      config = { community: inferredCommunity, units: [{ bedrooms }] };
 	    }
-	    if (requestedCommunity && BUY_IN_MARKET_SEARCH_LOCATIONS[requestedCommunity]) {
+	    if (requestedCommunity) {
 	      config = { ...config, community: requestedCommunity };
 	    }
 
@@ -9506,7 +9572,7 @@ export async function registerRoutes(
 
     const community = config.community;
     const nights = Math.max(1, Math.round((new Date(checkOut + "T12:00:00").getTime() - new Date(checkIn + "T12:00:00").getTime()) / 86_400_000));
-    const searchLocation = searchLocationForBuyInMarket(community) || `${community}, Hawaii`;
+    const searchLocation = searchLocationForBuyInMarket(community) || (requestedCommunity ? requestedCommunity : `${community}, Hawaii`);
     const buyInPlatformSearch = COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS[community] ?? {};
     const vrboDestination = buyInPlatformSearch.vrbo ?? searchLocation;
     const bounds = COMMUNITY_BOUNDS[community];
@@ -9562,7 +9628,7 @@ export async function registerRoutes(
             .split(" ")
             .filter((t) => t.length >= 3 && !GENERIC_RESORT_TOKENS.has(t))
         : [];
-    const communitySearchName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName;
+    const communitySearchName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName ?? (requestedCommunity ? requestedCommunity.split(",")[0].trim() : undefined);
     const listingResolvedResortName = resortName;
     const configuredTargetTokens = meaningfulResortTokens(communitySearchName);
     const listingLeadTokens = meaningfulResortTokens(resortName);
