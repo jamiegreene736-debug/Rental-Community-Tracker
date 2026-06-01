@@ -83,6 +83,8 @@ type CommunityResult = {
   minimumStaySourceUrl?: string | null;
   /** True when operator already has a draft/listing for this exact resort name+city in community_drafts. */
   hasExistingListing?: boolean;
+  existingComboLabels?: string[];
+  reservedComboLabels?: string[];
 };
 
 type CommunityResearchHistory = {
@@ -116,6 +118,15 @@ const positiveInteger = (value: unknown): number | null => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
+const comboKeyForPairing = (pairing: Pick<SuggestedPairing, "unit1Beds" | "unit2Beds">): string => {
+  const b1 = pairing.unit1Beds;
+  const b2 = pairing.unit2Beds;
+  return b1 <= b2 ? `${b1}+${b2}` : `${b2}+${b1}`;
+};
+
+const isPairingAvailable = (pairing: SuggestedPairing): boolean =>
+  pairing.availability === "available" || (!pairing.alreadyExists && !pairing.reserved && pairing.availability !== "existing" && pairing.availability !== "reserved");
+
 type SuggestedPairing = {
   unit1Beds: number;
   unit2Beds: number;
@@ -127,13 +138,34 @@ type SuggestedPairing = {
   rationale: string;
   isTopPick: boolean;
   matchScore: number;
+  availability?: "available" | "existing" | "reserved";
   alreadyExists?: boolean;
+  reserved?: boolean;
+  duplicateReason?: string | null;
+};
+
+type ComboInventoryItem = {
+  key: string;
+  label: string;
+  unit1Beds: number;
+  unit2Beds: number;
+  totalBeds: number;
+  source: "draft" | "reserved";
+  status: string;
+  draftId?: number;
+  jobId?: string;
+  itemId?: string;
+  title?: string | null;
 };
 
 type CommunityProfile = {
   availableTypes: number[];
   airbnbListingCount: number;
   ratesByBR: Record<string, { median: number | null; count: number }>;
+  comboInventory?: ComboInventoryItem[];
+  existingComboLabels?: string[];
+  reservedComboLabels?: string[];
+  allCombosUsed?: boolean;
 };
 
 type PhotoItem = { url: string; label: string };
@@ -437,6 +469,7 @@ export default function AddCommunity() {
     createdAt: string;
   };
   const [bulkPairingIndexes, setBulkPairingIndexes] = useState<Set<number>>(new Set());
+  const [duplicateOverrideKeys, setDuplicateOverrideKeys] = useState<Set<string>>(new Set());
   // Community-level bulk selection in Step 2 research results (for multi-resort queueing of best combos)
   const [bulkCommunityIndexes, setBulkCommunityIndexes] = useState<Set<number>>(new Set());
   const [bulkComboOpen, setBulkComboOpen] = useState(false);
@@ -1072,6 +1105,8 @@ export default function AddCommunity() {
     setUnitSearchResults(null);
     setCommunityProfile(null);
     setSuggestedPairings([]);
+    setBulkPairingIndexes(new Set());
+    setDuplicateOverrideKeys(new Set());
     setSelectedPairing(null);
     setSelectedUnit1(null);
     setSelectedUnit2(null);
@@ -1094,7 +1129,7 @@ export default function AddCommunity() {
       // Auto-select best unused combo type (surgical automation per user request).
       // Skips manual "choose combo type" when a strong unused recommendation exists.
       // If community already has e.g. 3+3, prefers next best like 2+3 if available.
-      const best = pairings.find((p) => !p.alreadyExists) || pairings[0];
+      const best = pairings.find(isPairingAvailable) || null;
       if (best) {
         setSelectedPairing(best);
         setSelectedUnit1({ url: "", title: `Unit A — ${best.unit1Beds}BR`, bedrooms: best.unit1Beds, price: best.estimatedUnit1Rate, source: "Algorithm" });
@@ -1130,6 +1165,15 @@ export default function AddCommunity() {
   ]);
 
   const handleSelectPairing = useCallback((pairing: SuggestedPairing) => {
+    const key = comboKeyForPairing(pairing);
+    if (!isPairingAvailable(pairing) && !duplicateOverrideKeys.has(key)) {
+      toast({
+        title: pairing.availability === "reserved" ? "Combo is already queued" : "Combo already exists",
+        description: "Use Queue duplicate anyway if you intentionally want another listing with this bedroom mix.",
+        variant: "destructive",
+      });
+      return;
+    }
     setSelectedPairing(pairing);
     // Create virtual unit records so downstream steps (Photos, Listing Draft) still work
     setSelectedUnit1({
@@ -1146,7 +1190,7 @@ export default function AddCommunity() {
       price: pairing.estimatedUnit2Rate,
       source: "Algorithm",
     });
-  }, []);
+  }, [duplicateOverrideKeys, toast]);
 
   // Quick city-bulk enabler: from research results, one-click queue the best *unused*
   // combo type for a resort (auto-picks via alreadyExists flag + matchScore sort).
@@ -1166,9 +1210,9 @@ export default function AddCommunity() {
       });
       const data = await res.json();
       const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
-      const best = pairings.find((p) => !p.alreadyExists) || pairings[0];
+      const best = pairings.find(isPairingAvailable);
       if (!best) {
-        toast({ title: "No combo suggestions", description: "Could not determine a recommended pairing.", variant: "destructive" });
+        toast({ title: "All combos already used", description: "Open the community and choose Queue duplicate anyway if you intentionally want another listing.", variant: "destructive" });
         return;
       }
       const pricingArea = suggestPricingArea(community.city, community.state, community.name);
@@ -1226,7 +1270,7 @@ export default function AddCommunity() {
           });
           const data = await res.json();
           const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
-          const best = pairings.find((p: any) => !p.alreadyExists) || pairings[0];
+          const best = pairings.find(isPairingAvailable);
           if (!best) continue;
           const pricingArea = suggestPricingArea(community.city, community.state, community.name);
           items.push({
@@ -1279,6 +1323,15 @@ export default function AddCommunity() {
       .map((index) => suggestedPairings[index])
       .filter(Boolean);
     if (picked.length === 0) return;
+    const blocked = picked.filter((pairing) => !isPairingAvailable(pairing) && !duplicateOverrideKeys.has(comboKeyForPairing(pairing)));
+    if (blocked.length > 0) {
+      toast({
+        title: "Duplicate combo blocked",
+        description: "One or more selected pairings already exist or are queued. Use Queue duplicate anyway on each pairing you want to override.",
+        variant: "destructive",
+      });
+      return;
+    }
     setBulkComboStarting(true);
     setBulkComboOpen(true);
     try {
@@ -1287,6 +1340,7 @@ export default function AddCommunity() {
           id: `pairing_${index + 1}_${pairing.unit1Beds}_${pairing.unit2Beds}`,
           community: selectedCommunity,
           pairing,
+          allowDuplicate: duplicateOverrideKeys.has(comboKeyForPairing(pairing)),
           streetAddress: editedStreetAddress.trim() || suggestedStreetAddress || undefined,
           pricingArea: editedPricingArea || suggestPricingArea(selectedCommunity.city, selectedCommunity.state, selectedCommunity.name),
           strPermit: strPermit.trim() || null,
@@ -1310,6 +1364,7 @@ export default function AddCommunity() {
     selectedCommunity,
     bulkPairingIndexes,
     suggestedPairings,
+    duplicateOverrideKeys,
     editedStreetAddress,
     suggestedStreetAddress,
     editedPricingArea,
@@ -1443,6 +1498,14 @@ export default function AddCommunity() {
   const handleConfirmUnits = useCallback(async () => {
     if (!selectedUnit1 || !selectedUnit2) {
       toast({ title: "Please select two units to combine", variant: "destructive" });
+      return;
+    }
+    if (selectedPairing && !isPairingAvailable(selectedPairing) && !duplicateOverrideKeys.has(comboKeyForPairing(selectedPairing))) {
+      toast({
+        title: "Duplicate combo blocked",
+        description: "Use Queue duplicate anyway if you intentionally want another listing with this bedroom mix.",
+        variant: "destructive",
+      });
       return;
     }
     if (await startServerPhotoFetchJob()) return;
@@ -1596,7 +1659,7 @@ export default function AddCommunity() {
         setPhotoFetchStartedAt(null);
       }
     }
-  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, unit1BedroomCount, unit2BedroomCount, toast, postJsonWithTimeout, startServerPhotoFetchJob]);
+  }, [selectedUnit1, selectedUnit2, selectedPairing, duplicateOverrideKeys, selectedCommunity, editedStreetAddress, suggestedStreetAddress, unit1BedroomCount, unit2BedroomCount, toast, postJsonWithTimeout, startServerPhotoFetchJob]);
 
   useEffect(() => {
     if (!draftHydratedRef.current || !draftAutosaveReady) return;
@@ -2656,6 +2719,11 @@ export default function AddCommunity() {
                             Already in system
                           </Badge>
                         )}
+                        {(c.existingComboLabels?.length || c.reservedComboLabels?.length) ? (
+                          <Badge variant="outline" className="text-[10px] border-blue-300 text-blue-700 bg-blue-50">
+                            Existing: {[...(c.existingComboLabels ?? []), ...(c.reservedComboLabels ?? []).map((label) => `${label} queued`)].join(", ")}
+                          </Badge>
+                        ) : null}
                         {typeCheck.eligible && (
                           <Button
                             type="button"
@@ -2843,6 +2911,44 @@ export default function AddCommunity() {
               </div>
             )}
 
+            {communityProfile?.comboInventory && communityProfile.comboInventory.length > 0 && (
+              <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50/60 p-3">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <p className="text-sm font-semibold text-blue-950">Existing community inventory</p>
+                    <p className="text-xs text-blue-800">The next best combo picker skips these by default.</p>
+                  </div>
+                  {communityProfile.allCombosUsed && (
+                    <Badge className="bg-amber-500 text-white border-0">All suggested combos used</Badge>
+                  )}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {communityProfile.comboInventory.map((item, index) => (
+                    <Badge
+                      key={`${item.source}-${item.key}-${item.draftId ?? item.jobId ?? index}`}
+                      variant="outline"
+                      className={item.source === "reserved" ? "border-amber-300 bg-amber-50 text-amber-800" : "border-blue-300 bg-white text-blue-800"}
+                    >
+                      {item.label}
+                      {item.source === "reserved" ? " queued" : item.draftId ? ` · Draft #${item.draftId}` : ""}
+                    </Badge>
+                  ))}
+                </div>
+                {suggestedPairings.some(isPairingAvailable) ? (
+                  <p className="mt-2 text-xs text-blue-900">
+                    Next unused: {(() => {
+                      const next = suggestedPairings.find(isPairingAvailable);
+                      return next ? `${next.unit1Beds}+${next.unit2Beds}BR` : "None";
+                    })()}
+                  </p>
+                ) : (
+                  <p className="mt-2 text-xs text-amber-900">
+                    No unused combo type remains. Use Queue duplicate anyway on a pairing only if you intentionally want another listing with the same bedroom mix.
+                  </p>
+                )}
+              </div>
+            )}
+
             {unitSearchLoading && (
               <div className="flex flex-col items-center gap-3 py-16 text-muted-foreground">
                 <Loader2 className="h-6 w-6 animate-spin text-primary" />
@@ -2889,9 +2995,9 @@ export default function AddCommunity() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => setBulkPairingIndexes(new Set(suggestedPairings.map((_, index) => index)))}
+                      onClick={() => setBulkPairingIndexes(new Set(suggestedPairings.map((pairing, index) => isPairingAvailable(pairing) ? index : -1).filter((index) => index >= 0)))}
                     >
-                      Select all
+                      Select available
                     </Button>
                     <Button
                       type="button"
@@ -2919,6 +3025,10 @@ export default function AddCommunity() {
                   {suggestedPairings.map((p, i) => {
                     const isSelected = selectedPairing?.unit1Beds === p.unit1Beds && selectedPairing?.unit2Beds === p.unit2Beds;
                     const isBulkSelected = bulkPairingIndexes.has(i);
+                    const pairingKey = comboKeyForPairing(p);
+                    const isAvailable = isPairingAvailable(p);
+                    const duplicateAllowed = duplicateOverrideKeys.has(pairingKey);
+                    const isBlocked = !isAvailable && !duplicateAllowed;
                     const buyCost = p.estimatedUnit1Rate + p.estimatedUnit2Rate;
                     const profit = p.estimatedSellRate - buyCost;
                     return (
@@ -2928,6 +3038,8 @@ export default function AddCommunity() {
                         className={`relative p-4 rounded-xl border-2 cursor-pointer transition-all ${
                           isSelected
                             ? "border-primary bg-primary/5 shadow-sm"
+                            : isBlocked
+                              ? "border-amber-200 bg-amber-50/40"
                             : "border-border hover:border-primary/40 hover:bg-muted/30"
                         }`}
                         data-testid={`card-pairing-${i}`}
@@ -2939,6 +3051,7 @@ export default function AddCommunity() {
                           <input
                             type="checkbox"
                             checked={isBulkSelected}
+                            disabled={isBlocked}
                             onChange={() => toggleBulkPairing(i)}
                             className="accent-primary"
                             data-testid={`checkbox-bulk-pairing-${i}`}
@@ -2954,7 +3067,9 @@ export default function AddCommunity() {
                         )}
                         {p.alreadyExists && (
                           <div className="absolute -top-2.5 right-3">
-                            <Badge className="text-xs bg-amber-500 text-white border-0">Already have this combo type</Badge>
+                            <Badge className={`text-xs text-white border-0 ${p.availability === "reserved" ? "bg-blue-600" : "bg-amber-500"}`}>
+                              {p.availability === "reserved" ? "Reserved in queue" : "Already built"}
+                            </Badge>
                           </div>
                         )}
                         {isSelected && (
@@ -3008,6 +3123,29 @@ export default function AddCommunity() {
 
                         {/* Rationale */}
                         <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{p.rationale}</p>
+                        {!isAvailable && (
+                          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-white/70 px-3 py-2 text-xs text-amber-900">
+                            <span>{p.duplicateReason || "This combo type is already used for this community."}</span>
+                            {!duplicateAllowed ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-7 px-2 text-xs border-amber-300 text-amber-900 hover:bg-amber-50"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDuplicateOverrideKeys((prev) => new Set(prev).add(pairingKey));
+                                  setBulkPairingIndexes((prev) => new Set(prev).add(i));
+                                  handleSelectPairing({ ...p, availability: "available", alreadyExists: false, reserved: false, duplicateReason: null });
+                                }}
+                              >
+                                Queue duplicate anyway
+                              </Button>
+                            ) : (
+                              <Badge variant="outline" className="border-amber-300 text-amber-800">Duplicate override enabled</Badge>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}

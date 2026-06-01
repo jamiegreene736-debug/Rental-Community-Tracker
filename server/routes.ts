@@ -26217,6 +26217,7 @@ Return ONLY compact JSON with this exact shape:
       estimatedSellRate: number;
       estimatedSellRateHigh?: number;
     };
+    allowDuplicate?: boolean;
     streetAddress?: string;
     pricingArea?: string | null;
     strPermit?: string | null;
@@ -26912,6 +26913,36 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/community/bulk-combo-listing-jobs", async (req, res) => {
     const inputs = Array.isArray(req.body?.items) ? req.body.items as BulkComboListingInput[] : [];
     if (inputs.length === 0) return res.status(400).json({ error: "items required" });
+    const requestReservations = new Set<string>();
+    for (const input of inputs.slice(0, 12)) {
+      const communityName = String(input.community?.name || "").trim();
+      const city = String(input.community?.city || "").trim();
+      const state = String(input.community?.state || "").trim();
+      const key = comboKeyForBeds(input.pairing?.unit1Beds, input.pairing?.unit2Beds);
+      if (!communityName || !key) continue;
+      const reservationKey = `${normalizeQueueText(communityName)}|${normalizeQueueText(city)}|${normalizeQueueText(state)}|${key}`;
+      const inventory = await getComboInventoryForCommunity({ communityName, city, state });
+      const occupied = inventory.occupiedKeys.has(key) || requestReservations.has(reservationKey);
+      if (occupied && !input.allowDuplicate) {
+        const existing = inventory.items.find((item) => item.key === key);
+        return res.status(409).json({
+          error: "Combo already exists or is queued",
+          message: `${communityName} already has or is actively queueing ${comboLabelForKey(key)}. Choose the next unused combo or explicitly queue a duplicate.`,
+          duplicate: {
+            communityName,
+            city,
+            state,
+            key,
+            label: comboLabelForKey(key),
+            source: requestReservations.has(reservationKey) ? "current_request" : existing?.source ?? "existing",
+            draftId: existing?.draftId ?? null,
+            jobId: existing?.jobId ?? null,
+          },
+          comboInventory: inventory.items,
+        });
+      }
+      requestReservations.add(reservationKey);
+    }
     const now = Date.now();
     const id = `bcj_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const items: BulkComboListingItem[] = inputs.slice(0, 12).map((input, index) => {
@@ -26985,6 +27016,7 @@ Return ONLY compact JSON with this exact shape:
         id: item.id,
         community: item.community,
         pairing: item.pairing,
+        allowDuplicate: item.allowDuplicate,
         streetAddress: item.streetAddress,
         pricingArea: item.pricingArea,
         strPermit: item.strPermit,
@@ -31523,6 +31555,146 @@ Return ONLY compact JSON with this exact shape:
     const hits = ta.filter(t => tb.some(u => u === t || u.includes(t) || t.includes(u) || (u.length > 3 && t.length > 3 && (u.startsWith(t.slice(0, 4)) || t.startsWith(u.slice(0, 4)))))).length;
     return hits / Math.min(ta.length, tb.length) >= 0.5;
   };
+  const comboKeyForBeds = (unit1Beds: unknown, unit2Beds: unknown): string | null => {
+    const b1 = Math.round(Number(unit1Beds));
+    const b2 = Math.round(Number(unit2Beds));
+    if (!Number.isFinite(b1) || !Number.isFinite(b2) || b1 <= 0 || b2 <= 0) return null;
+    return b1 <= b2 ? `${b1}+${b2}` : `${b2}+${b1}`;
+  };
+  const comboLabelForKey = (key: string) => `${key.replace("+", "+")}BR`;
+  const comboCommunityMatches = (
+    community: { name?: unknown; city?: unknown; state?: unknown },
+    target: { communityName: string; city?: string; state?: string },
+  ) => {
+    const city = String(target.city || "").trim();
+    const state = String(target.state || "").trim();
+    return (
+      nameLooksSame(String(community.name || ""), target.communityName) &&
+      (!city || nameLooksSame(String(community.city || ""), city)) &&
+      (!state || String(community.state || "").trim().toLowerCase() === state.toLowerCase())
+    );
+  };
+  type ComboInventoryItem = {
+    key: string;
+    label: string;
+    unit1Beds: number;
+    unit2Beds: number;
+    totalBeds: number;
+    source: "draft" | "reserved";
+    status: string;
+    draftId?: number;
+    jobId?: string;
+    itemId?: string;
+    title?: string | null;
+  };
+  const getComboInventoryForCommunity = async (target: {
+    communityName: string;
+    city?: string;
+    state?: string;
+  }): Promise<{
+    items: ComboInventoryItem[];
+    existingKeys: Set<string>;
+    reservedKeys: Set<string>;
+    occupiedKeys: Set<string>;
+  }> => {
+    const items: ComboInventoryItem[] = [];
+    const existingKeys = new Set<string>();
+    const reservedKeys = new Set<string>();
+    try {
+      const drafts = await storage.getCommunityDrafts();
+      for (const draft of drafts as any[]) {
+        const status = String(draft.status || "");
+        if (draft.singleListing || /archiv|delete|cancel/i.test(status)) continue;
+        if (!comboCommunityMatches({ name: draft.name, city: draft.city, state: draft.state }, target)) continue;
+        const key = comboKeyForBeds(draft.unit1Bedrooms, draft.unit2Bedrooms);
+        if (!key) continue;
+        existingKeys.add(key);
+        items.push({
+          key,
+          label: comboLabelForKey(key),
+          unit1Beds: Number(draft.unit1Bedrooms),
+          unit2Beds: Number(draft.unit2Bedrooms),
+          totalBeds: Number(draft.combinedBedrooms || Number(draft.unit1Bedrooms) + Number(draft.unit2Bedrooms)),
+          source: "draft",
+          status: status || "draft",
+          draftId: Number(draft.id),
+          title: draft.listingTitle || draft.bookingTitle || draft.name || null,
+        });
+      }
+    } catch (e: any) {
+      console.warn(`[combo-inventory] draft lookup failed for ${target.communityName}: ${e?.message ?? e}`);
+    }
+    try {
+      const rows = await db
+        .select({
+          jobId: bulkComboListingJobItemRows.jobId,
+          itemKey: bulkComboListingJobItemRows.itemKey,
+          itemStatus: bulkComboListingJobItemRows.status,
+          itemLabel: bulkComboListingJobItemRows.label,
+          payload: bulkComboListingJobItemRows.payload,
+        })
+        .from(bulkComboListingJobItemRows)
+        .innerJoin(bulkComboListingJobRows, eq(bulkComboListingJobItemRows.jobId, bulkComboListingJobRows.id))
+        .where(inArray(bulkComboListingJobRows.status, ["queued", "running"]));
+      for (const row of rows) {
+        const itemStatus = String(row.itemStatus || "");
+        if (/completed|failed|cancelled/i.test(itemStatus)) continue;
+        const payload = (row.payload && typeof row.payload === "object" ? row.payload : {}) as any;
+        if (!comboCommunityMatches(payload.community || {}, target)) continue;
+        const key = comboKeyForBeds(payload.pairing?.unit1Beds, payload.pairing?.unit2Beds);
+        if (!key) continue;
+        reservedKeys.add(key);
+        if (existingKeys.has(key)) continue;
+        items.push({
+          key,
+          label: comboLabelForKey(key),
+          unit1Beds: Number(payload.pairing?.unit1Beds || 0),
+          unit2Beds: Number(payload.pairing?.unit2Beds || 0),
+          totalBeds: Number(payload.pairing?.totalBeds || 0),
+          source: "reserved",
+          status: itemStatus || "queued",
+          jobId: row.jobId,
+          itemId: row.itemKey,
+          title: row.itemLabel,
+        });
+      }
+    } catch (e: any) {
+      console.warn(`[combo-inventory] reservation lookup failed for ${target.communityName}: ${e?.message ?? e}`);
+    }
+    return {
+      items,
+      existingKeys,
+      reservedKeys,
+      occupiedKeys: new Set([...existingKeys, ...reservedKeys]),
+    };
+  };
+  const annotateCommunitiesWithComboInventory = async (
+    communities: any[],
+    fallbackCity: string,
+    fallbackState: string,
+  ) => {
+    let existingNames: string[] = [];
+    try {
+      const drafts = await storage.getCommunityDrafts();
+      for (const d of drafts) if (d.name) existingNames.push(String(d.name).toLowerCase().trim());
+    } catch { /* best-effort */ }
+    for (const pidStr of Object.keys(PROPERTY_UNIT_CONFIGS)) {
+      const cfg = PROPERTY_UNIT_CONFIGS[Number(pidStr)];
+      if (cfg?.community) existingNames.push(cfg.community.toLowerCase().trim());
+    }
+    for (const community of communities) {
+      const inventory = await getComboInventoryForCommunity({
+        communityName: community.name,
+        city: community.city || fallbackCity,
+        state: community.state || fallbackState,
+      });
+      const name = String(community.name || "").toLowerCase().trim();
+      community.hasExistingListing = existingNames.some((existing) => nameLooksSame(existing, name)) || inventory.items.length > 0;
+      community.existingComboLabels = Array.from(inventory.existingKeys).sort().map(comboLabelForKey);
+      community.reservedComboLabels = Array.from(inventory.reservedKeys).sort().map(comboLabelForKey);
+    }
+    return communities;
+  };
 
   const communityResearchMode = (mode?: string): "combo" | "single" => mode === "single" ? "single" : "combo";
   const communityResearchCityKey = (city: string, state: string, mode?: string): string =>
@@ -31627,23 +31799,7 @@ Return ONLY compact JSON with this exact shape:
       // caps and uses Sonnet — see Load-Bearing #36.
       const researchMode = communityResearchMode(mode);
       const communities = await researchCommunitiesForCity(city, state, researchMode);
-      // Annotate with hasExistingListing using fuzzy name search against current
-      // drafts + published unit configs (active DB+static scan, not chat context).
-      try {
-        const drafts = await storage.getCommunityDrafts();
-        const existingNames: string[] = [];
-        for (const d of drafts) if (d.name) existingNames.push(String(d.name).toLowerCase().trim());
-        for (const pidStr of Object.keys(PROPERTY_UNIT_CONFIGS)) {
-          const cfg = PROPERTY_UNIT_CONFIGS[Number(pidStr)];
-          if (cfg?.community) existingNames.push(cfg.community.toLowerCase().trim());
-        }
-        for (const c of communities) {
-          const nm = (c.name || "").toLowerCase().trim();
-          (c as any).hasExistingListing = existingNames.some(ex => nameLooksSame(ex, nm));
-        }
-      } catch {
-        // best-effort only
-      }
+      await annotateCommunitiesWithComboInventory(communities as any[], city, state).catch(() => communities);
       let history = null;
       try {
         history = serializeCommunityResearchSearch(await upsertCommunityResearchSearch({
@@ -31745,7 +31901,11 @@ Return ONLY compact JSON with this exact shape:
         market.status = "running";
         job.updatedAt = Date.now();
         try {
-          const communities = await researchCommunitiesForCity(market.city, market.state);
+          const communities = await annotateCommunitiesWithComboInventory(
+            await researchCommunitiesForCity(market.city, market.state),
+            market.city,
+            market.state,
+          );
           market.status = "done";
           market.count = communities.length;
           market.communities = communities;
@@ -31863,7 +32023,11 @@ Return ONLY compact JSON with this exact shape:
       };
       emit({ type: "market-start", city, state, tag, estimatedComboLow, estimatedComboHigh, index: i + 1, total: markets.length });
       try {
-        const communities = await researchCommunitiesForCity(city, state);
+        const communities = await annotateCommunitiesWithComboInventory(
+          await researchCommunitiesForCity(city, state),
+          city,
+          state,
+        );
         totalCommunities += communities.length;
         for (const c of communities) {
           const score = c.confidenceScore + (c.combinabilityScore ?? 50);
@@ -33638,29 +33802,7 @@ Return ONLY compact JSON with this exact shape:
       baseRatePerBR[br] = found ?? (br * basePricePerBR);
     }
 
-    // ── 3b. Detect already-saved combo variants for this community (surgical) ─
-    // Lets UI auto-recommend unused combo types (e.g. 2+3 if 3+3 already exists).
-    // Uses fuzzy name/city match so "Kahi Lani" draft is found for "Kaha Lani Resort" search.
-    let existingComboKeys = new Set<string>();
-    try {
-      const drafts = await storage.getCommunityDrafts();
-      const n = communityName.toLowerCase().trim();
-      const c = (city || "").toLowerCase().trim();
-      const s = (state || "").toLowerCase().trim();
-      for (const d of drafts) {
-        if (
-          nameLooksSame(d.name, communityName) &&
-          (!c || nameLooksSame(d.city, city)) &&
-          (!s || (d.state || "").toLowerCase().trim() === s) &&
-          !d.singleListing &&
-          d.unit1Bedrooms && d.unit2Bedrooms
-        ) {
-          const b1 = d.unit1Bedrooms, b2 = d.unit2Bedrooms;
-          const key = b1 <= b2 ? `${b1}+${b2}` : `${b2}+${b1}`;
-          existingComboKeys.add(key);
-        }
-      }
-    } catch { /* best-effort; don't block suggestions */ }
+    const comboInventory = await getComboInventoryForCommunity({ communityName, city, state });
 
     // ── 4. Generate pairing combinations ─────────────────────────────────────
     const MARKUP = 1.38;
@@ -33669,7 +33811,10 @@ Return ONLY compact JSON with this exact shape:
       estimatedUnit1Rate: number; estimatedUnit2Rate: number;
       estimatedSellRate: number; estimatedSellRateHigh: number;
       rationale: string; isTopPick: boolean; matchScore: number;
+      availability: "available" | "existing" | "reserved";
       alreadyExists?: boolean;
+      reserved?: boolean;
+      duplicateReason?: string | null;
     };
     const pairings: Pairing[] = [];
 
@@ -33695,7 +33840,9 @@ Return ONLY compact JSON with this exact shape:
         if (total >= 8) reasons.push("rare 8BR+ inventory");
         if (b1 === b2 && total >= 6) reasons.push("⭐ algorithm top pick");
 
-        const key = b1 <= b2 ? `${b1}+${b2}` : `${b2}+${b1}`;
+        const key = comboKeyForBeds(b1, b2) || `${b1}+${b2}`;
+        const exists = comboInventory.existingKeys.has(key);
+        const reserved = !exists && comboInventory.reservedKeys.has(key);
         pairings.push({
           unit1Beds: b1, unit2Beds: b2, totalBeds: total,
           estimatedUnit1Rate: r1, estimatedUnit2Rate: r2,
@@ -33703,7 +33850,10 @@ Return ONLY compact JSON with this exact shape:
           rationale: reasons.join(" · "),
           isTopPick: b1 === b2 && total >= 6,
           matchScore,
-          alreadyExists: existingComboKeys.has(key),
+          availability: exists ? "existing" : reserved ? "reserved" : "available",
+          alreadyExists: exists || reserved,
+          reserved,
+          duplicateReason: exists ? "Already built in dashboard" : reserved ? "Reserved by an active bulk queue" : null,
         });
       }
     }
@@ -33719,6 +33869,10 @@ Return ONLY compact JSON with this exact shape:
         ratesByBR: Object.fromEntries(
           Object.entries(ratesByBR).map(([k, v]) => [k, { median: medianRate(v), count: v.length }])
         ),
+        comboInventory: comboInventory.items,
+        existingComboLabels: Array.from(comboInventory.existingKeys).sort().map(comboLabelForKey),
+        reservedComboLabels: Array.from(comboInventory.reservedKeys).sort().map(comboLabelForKey),
+        allCombosUsed: pairings.length > 0 && pairings.every((p) => p.availability !== "available"),
       },
       suggestedPairings: pairings,
       // backward compat
