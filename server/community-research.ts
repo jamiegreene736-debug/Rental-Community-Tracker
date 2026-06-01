@@ -875,6 +875,10 @@ export async function researchCommunitiesForCity(
   // Maria Resort in Fort Myers Beach), and uses extra targeted
   // SearchAPI queries that hit lists/round-ups instead of just
   // listing snippets. See Load-Bearing #36.
+  // HI override (2026-06): for any Hawaii city in combo mode (Add Combo
+  // Listing tool), Sonnet + exhaustive prompt + 12-15 cap ensures the
+  // research autonomously finds all qualifying VR-only condo/townhome
+  // resorts without requiring manual Codex/Grok additions.
   mode: "combo" | "single" = "combo",
 ): Promise<ResearchedCommunity[]> {
   // Normalize inputs so queries and downstream logic are consistent
@@ -888,6 +892,11 @@ export async function researchCommunitiesForCity(
   // Use normalized for all query construction and return values.
   const cityForQuery = normalizedCity;
   const stateForQuery = normalizedState;
+
+  // Hawaii detection for exhaustive combo research (addresses operator requirement
+  // that any HI city search in the Add Combo Listing tool must autonomously surface
+  // all qualifying vacation-rental-only condo/townhome communities, no hotels/timeshares/SFH).
+  const isHawaii = /^(hi|hawaii)$/i.test(stateForQuery);
 
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -922,6 +931,11 @@ export async function researchCommunitiesForCity(
         ...(knownComboNames
           ? [`"${cityForQuery}" "${stateForQuery}" (${knownComboNames}) condo townhome vacation rental 2BR 3BR ${commonExclusions}`]
           : []),
+        // Extra HI-specific queries for exhaustive coverage on any Hawaii city (used only for HI to keep non-HI sweeps fast).
+        ...(isHawaii ? [
+          `"${cityForQuery}" hawaii (condo OR townhome OR condominium) ("vacation rental" OR airbnb OR vrbo) ("individually owned" OR "owner managed" OR "private owner") ${commonExclusions}`,
+          `maui OR kauai OR "big island" OR oahu "${cityForQuery}" (condo OR townhome) resort "vacation rental" -hotel -timeshare ${commonExclusions}`,
+        ] : []),
       ];
 
   const allResults: Array<{ title: string; link: string; snippet: string }> = [];
@@ -1102,8 +1116,8 @@ SCORING:
     30–49: mostly 1BR → 2BR combined (marginal)
     <30: mostly studios → skip
 
-Use (1) the search results below, and (2) your own knowledge — add up to 3 well-known communities in "${city}, ${state}" that fit, marked fromWorldKnowledge:true.
-If a resort markets attached condominium/townhome inventory as "villas", only call it a fit when the units are shared-wall condos/townhomes; detached villas remain disqualified. In that case, set unitTypes to "condos", "townhomes", or "condo-style villas" rather than generic "villas".
+Use (1) the search results below, and (2) your own knowledge — add up to ${isHawaii ? 12 : 3} well-known communities in "${city}, ${state}" that fit, marked fromWorldKnowledge:true.
+${isHawaii ? `**HAWAII EXHAUSTIVE MODE (for Add Combo Listing tool):** For any Hawaii city, be exhaustive and complete. Surface EVERY qualifying individually-owned condo/townhome vacation-rental resort (majority condos or townhomes, no hotels, no timeshares, no single-family/villa complexes) that your knowledge or the results know for "${city}" or its resort market area. The operator must be able to discover new HI cities without manual intervention — do not under-report. ` : ""}If a resort markets attached condominium/townhome inventory as "villas", only call it a fit when the units are shared-wall condos/townhomes; detached villas remain disqualified. In that case, set unitTypes to "condos", "townhomes", or "condo-style villas" rather than generic "villas".
 
 KNOWN LOCAL CANDIDATES to consider for "${city}, ${state}" if the search results are sparse:
 ${knownComboSeeds.length
@@ -1132,7 +1146,7 @@ ${unique.length
 Output JSON array. Each element:
 {"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"estimatedBedroomUnitCounts":{"2":N,"3":N},"minimumStayNights":N|null,"minimumStayEvidence":"short source-backed note or empty","minimumStaySourceUrl":"source url or empty","combinedBedroomsTypical":N,"unitTypes":"...","confidenceScore":0-100,"combinabilityScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":false}
 
-Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Max 10 results. Sort by (confidenceScore + combinabilityScore) descending. No markdown, no prose.`;
+Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Max ${isHawaii ? 15 : 10} results${isHawaii ? " (exhaustive for Hawaii cities)" : ""}. Sort by (confidenceScore + combinabilityScore) descending. No markdown, no prose.`;
 
     try {
       const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -1151,8 +1165,12 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
           // which iterates 12+ markets, so the Haiku speed/cost
           // advantage matters there. Single mode is per-operator-
           // click, so the per-call latency is acceptable.
-          model: mode === "single" ? "claude-sonnet-4-6" : "claude-haiku-4-5-20251001",
-          max_tokens: mode === "single" ? 8000 : 4000,
+          // For Hawaii cities in combo mode (Add Combo Listing tool), force
+          // Sonnet + higher budget: exhaustive research for any HI city must
+          // surface all qualifying VR condo/townhome resorts without operator
+          // needing to ask Codex/Grok to manually add communities.
+          model: (mode === "single" || isHawaii) ? "claude-sonnet-4-6" : "claude-haiku-4-5-20251001",
+          max_tokens: (mode === "single" || isHawaii) ? 8000 : 4000,
           messages: [{ role: "user", content: prompt }],
         }),
       });
