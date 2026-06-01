@@ -25312,7 +25312,7 @@ Return ONLY compact JSON with this exact shape:
     const overlap = b.filter((p) => keys.has(p.url.replace(/[?#].*$/, "").toLowerCase())).length;
     return overlap / Math.min(a.length, b.length) >= 0.8;
   };
-  const fetchComboPhotoJson = async (url: string, body: unknown, options: { abortKey?: string; signal?: AbortSignal } = {}) => {
+  const fetchComboPhotoJson = async (url: string, body: unknown, options: { abortKey?: string; signal?: AbortSignal; timeoutMs?: number } = {}) => {
     const circuitKey = queueCircuitKeyForUrl(url);
     assertQueueCircuitOpen(circuitKey);
     const controller = new AbortController();
@@ -25326,7 +25326,7 @@ Return ONLY compact JSON with this exact shape:
     };
     if (options.signal?.aborted) abortFromParent();
     else options.signal?.addEventListener("abort", abortFromParent, { once: true });
-    const timer = setTimeout(() => controller.abort(), COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS);
     try {
       const resp = await fetch(url, {
         method: "POST",
@@ -25387,11 +25387,18 @@ Return ONLY compact JSON with this exact shape:
     };
     for (const attempt of attempts) {
       if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
-      const data = await fetchComboPhotoJson(
-        `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
-        buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
-        { abortKey, signal },
-      );
+      let data: any;
+      try {
+        data = await fetchComboPhotoJson(
+          `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
+          buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
+          { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 35_000 },
+        );
+      } catch (error: any) {
+        if (attempt.relaxed || job.cancelRequested || error?.cancelled) throw error;
+        console.warn(`[combo-photo-fetch] exact photo search failed for ${item.communityName}: ${error?.message ?? error}; retrying relaxed`);
+        continue;
+      }
       const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
       const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
       const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKeyForComboPhotoJob(u) === listingKeyForComboPhotoJob(sourceUrl));
