@@ -1276,6 +1276,7 @@ try {
 }
 
 const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+const homeSource = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
 const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
 assert.equal(
   routeSource.includes("${DISCLOSURE}"),
@@ -1283,6 +1284,28 @@ assert.equal(
   "generate-listing fallback must not reference removed DISCLOSURE constant",
 );
 console.log("  ✓ generate-listing fallback has no stale DISCLOSURE reference");
+
+assert.match(
+  routeSource,
+  /unit1Bedrooms and unit2Bedrooms are required for combo drafts/,
+  "community/save must reject combo drafts without explicit per-unit bedroom counts",
+);
+assert.match(
+  routeSource,
+  /unitA: normalizeGeneratedUnitDraft\(parsed\.unitA, unit1\)/,
+  "generate-listing must coerce AI Unit A bedrooms back to selected unit bedrooms",
+);
+assert.match(
+  addCommunitySource,
+  /unit1Bedrooms: unit1BedroomCount/,
+  "add-community save must send the selected pairing's Unit A bedroom count",
+);
+assert.match(
+  homeSource,
+  /unitBedroomSum > 0 \? unitBedroomSum/,
+  "dashboard draft rows must prefer per-unit bedroom sums over inferred title text",
+);
+console.log("  ✓ combo draft bedroom counts stay structured from selection through dashboard");
 
 assert.equal(MAX_BUY_IN_WALK_MINUTES, 10, "buy-in unit walking-distance guardrail should stay at 10 minutes");
 console.log("  ✓ buy-in walking-distance guardrail is pinned at 10 minutes");

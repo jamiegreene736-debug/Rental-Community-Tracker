@@ -29120,16 +29120,39 @@ Return ONLY compact JSON with this exact shape:
     return next;
   };
 
+  const normalizeCommunityDraftBedroomFields = <T extends Record<string, any>>(draft: T): T => {
+    const singleListing = draft.singleListing === true;
+    const unit1Bedrooms = positiveDraftInteger(draft.unit1Bedrooms);
+    const unit2Bedrooms = singleListing ? null : positiveDraftInteger(draft.unit2Bedrooms);
+    if (!unit1Bedrooms || (!singleListing && !unit2Bedrooms)) {
+      throw new Error(singleListing
+        ? "unit1Bedrooms is required for single-listing drafts"
+        : "unit1Bedrooms and unit2Bedrooms are required for combo drafts");
+    }
+    return {
+      ...draft,
+      unit1Bedrooms,
+      unit2Bedrooms: singleListing ? null : unit2Bedrooms,
+      combinedBedrooms: singleListing ? unit1Bedrooms : unit1Bedrooms + unit2Bedrooms!,
+    };
+  };
+
   app.post("/api/community/save", async (req, res) => {
     const result = insertCommunityDraftSchema.safeParse(normalizeCommunityDraftNumericFields(req.body));
     if (!result.success) return res.status(400).json({ error: result.error.flatten() });
+    let draftData: typeof result.data;
+    try {
+      draftData = normalizeCommunityDraftBedroomFields(result.data);
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message ?? "Bedroom counts are required" });
+    }
     // CODEX NOTE (2026-05-04, claude/single-listing): community-type
     // check applies to BOTH combo and single-listing drafts. A
     // single-listing standalone is still a condo/townhouse — only
     // the count differs (one unit instead of two combined). Villas
     // / single-family / estates remain disqualified across the
     // board because they aren't the product the business handles.
-    const typeCheck = checkCommunityType(result.data.unitTypes, result.data.researchSummary);
+    const typeCheck = checkCommunityType(draftData.unitTypes, draftData.researchSummary);
     if (!typeCheck.eligible) {
       return res.status(400).json({
         error: "Community type not supported",
@@ -29138,31 +29161,31 @@ Return ONLY compact JSON with this exact shape:
       });
     }
     const canonicalRule =
-      communityAddressRuleForName(result.data.name) ||
+      communityAddressRuleForName(draftData.name) ||
       communityAddressRuleForName([
-        result.data.name,
-        result.data.listingTitle,
-        result.data.bookingTitle,
-        result.data.listingDescription,
-        result.data.neighborhood,
-        result.data.unit1Url,
+        draftData.name,
+        draftData.listingTitle,
+        draftData.bookingTitle,
+        draftData.listingDescription,
+        draftData.neighborhood,
+        draftData.unit1Url,
       ].filter(Boolean).join(" "));
-    const validationStreetAddress = canonicalRule?.street || result.data.streetAddress;
+    const validationStreetAddress = canonicalRule?.street || draftData.streetAddress;
     const unitToken = extractUnitTokenFromText([
-      result.data.unit1Address,
-      result.data.streetAddress,
-      result.data.unit1Url,
-      result.data.listingTitle,
-      result.data.bookingTitle,
+      draftData.unit1Address,
+      draftData.streetAddress,
+      draftData.unit1Url,
+      draftData.listingTitle,
+      draftData.bookingTitle,
     ].filter(Boolean).join(" "));
     const normalizedUnit1Address =
-      result.data.singleListing && canonicalRule
+      draftData.singleListing && canonicalRule
         ? (withUnitToken(canonicalRule.street, unitToken) || canonicalRule.street)
-        : result.data.unit1Address;
+        : draftData.unit1Address;
     const addressCheck = validateCommunityStreetAddress({
-      communityName: result.data.name,
-      city: result.data.city,
-      state: result.data.state,
+      communityName: draftData.name,
+      city: draftData.city,
+      state: draftData.state,
       streetAddress: validationStreetAddress,
     });
     if (!addressCheck.ok) {
@@ -29172,29 +29195,29 @@ Return ONLY compact JSON with this exact shape:
         expectedStreet: addressCheck.expectedStreet,
       });
     }
-    if (result.data.queueIdempotencyKey) {
+    if (draftData.queueIdempotencyKey) {
       const existingDraft = (await storage.getCommunityDrafts()).find(
-        (draft: any) => draft.queueIdempotencyKey === result.data.queueIdempotencyKey,
+        (draft: any) => draft.queueIdempotencyKey === draftData.queueIdempotencyKey,
       );
       if (existingDraft) {
         return res.json(existingDraft);
       }
     }
 
-    const resolvedPricingArea = result.data.pricingArea || resolveBuyInMarket({
-      name: result.data.name,
-      listingTitle: result.data.listingTitle,
-      bookingTitle: result.data.bookingTitle,
-      city: result.data.city,
-      state: result.data.state,
+    const resolvedPricingArea = draftData.pricingArea || resolveBuyInMarket({
+      name: draftData.name,
+      listingTitle: draftData.listingTitle,
+      bookingTitle: draftData.bookingTitle,
+      city: draftData.city,
+      state: draftData.state,
       streetAddress: addressCheck.streetAddress,
       unit1Address: normalizedUnit1Address,
-      unit2Address: result.data.unit2Address,
-      sourceUrl: result.data.sourceUrl,
+      unit2Address: draftData.unit2Address,
+      sourceUrl: draftData.sourceUrl,
     });
 
     const draft = await storage.createCommunityDraft({
-      ...result.data,
+      ...draftData,
       pricingArea: resolvedPricingArea,
       unit1Address: normalizedUnit1Address,
       streetAddress: addressCheck.streetAddress,
@@ -29212,8 +29235,8 @@ Return ONLY compact JSON with this exact shape:
     // risk. Worst-case ~30s for the SearchAPI multi-query + per-host
     // vrp_main fingerprint probe; well under any background timeout.
     if (process.env.SEARCHAPI_API_KEY) {
-      const community = result.data.name;
-      const location = `${result.data.city}, ${result.data.state}`;
+      const community = draftData.name;
+      const location = `${draftData.city}, ${draftData.state}`;
       void (async () => {
         try {
           console.log(`[community-save] kicking off PM discovery for "${community}" / "${location}"`);
@@ -33712,11 +33735,22 @@ Return ONLY compact JSON with this exact shape:
     if (!singleListing && !unit2) {
       return res.status(400).json({ error: "unit2 required for combo listings" });
     }
+    const unit1Bedrooms = positiveDraftInteger(unit1?.bedrooms);
+    const unit2Bedrooms = singleListing ? null : positiveDraftInteger(unit2?.bedrooms);
+    if (!unit1Bedrooms || (!singleListing && !unit2Bedrooms)) {
+      return res.status(400).json({
+        error: singleListing
+          ? "unit1.bedrooms is required"
+          : "unit1.bedrooms and unit2.bedrooms are required",
+      });
+    }
+    unit1.bedrooms = unit1Bedrooms;
+    if (unit2 && unit2Bedrooms) unit2.bedrooms = unit2Bedrooms;
 
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const combinedBedrooms = singleListing
-      ? (unit1.bedrooms || 0)
-      : (unit1.bedrooms || 0) + (unit2?.bedrooms || 0);
+      ? unit1Bedrooms
+      : unit1Bedrooms + unit2Bedrooms!;
 
     // Best-effort walking distance for the description. Only used for
     // combo listings — for a single standalone unit there's only one
@@ -33823,6 +33857,19 @@ Return ONLY compact JSON with this exact shape:
           : "King primary bedroom, queen second bedroom, and a sleeper sofa in the living area.",
         shortDescription: `${bedrooms}BR vacation condo at ${communityName} in ${city}.`,
         longDescription: `This ${bedrooms}-bedroom vacation condo at ${communityName} gives guests a comfortable home base in ${city}, ${state}. The layout is designed for families or small groups, with private bedrooms, shared living space, and easy access to the surrounding resort area.`,
+      };
+    };
+
+    const normalizeGeneratedUnitDraft = (draft: unknown, unit: { bedrooms: number }) => {
+      const fallback = fallbackUnitDraft(unit);
+      const raw = draft && typeof draft === "object" && !Array.isArray(draft)
+        ? draft as Record<string, unknown>
+        : {};
+      return {
+        ...fallback,
+        ...raw,
+        bedrooms: unit.bedrooms,
+        maxGuests: positiveDraftInteger(raw.maxGuests) ?? fallback.maxGuests,
       };
     };
 
@@ -34058,8 +34105,8 @@ CONSTRAINTS
         space: parsedSpace,
         neighborhood: parsedNeighborhood,
         transit: parsedTransit,
-        unitA: parsed.unitA ?? null,
-        unitB: parsed.unitB ?? null,
+        unitA: normalizeGeneratedUnitDraft(parsed.unitA, unit1),
+        unitB: singleListing || !unit2 ? null : normalizeGeneratedUnitDraft(parsed.unitB, unit2),
         combinedBedrooms,
         suggestedRate,
         walk,

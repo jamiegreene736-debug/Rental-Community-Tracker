@@ -110,6 +110,11 @@ type UnitResult = {
   source: string;
 };
 
+const positiveInteger = (value: unknown): number | null => {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
 type SuggestedPairing = {
   unit1Beds: number;
   unit2Beds: number;
@@ -528,7 +533,9 @@ export default function AddCommunity() {
   const [touristTaxAccount, setTouristTaxAccount] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const combinedBedrooms = (selectedUnit1?.bedrooms ?? 0) + (selectedUnit2?.bedrooms ?? 0);
+  const unit1BedroomCount = positiveInteger(selectedUnit1?.bedrooms) ?? positiveInteger(selectedPairing?.unit1Beds);
+  const unit2BedroomCount = positiveInteger(selectedUnit2?.bedrooms) ?? positiveInteger(selectedPairing?.unit2Beds);
+  const combinedBedrooms = (unit1BedroomCount ?? 0) + (unit2BedroomCount ?? 0);
   const baseRate = (selectedUnit1?.price ?? 0) + (selectedUnit2?.price ?? 0);
   // Suggested nightly rate targets a 20% NET margin AFTER channel
   // costs (Airbnb takes 15.5%, the highest-volume channel for this
@@ -1366,6 +1373,14 @@ export default function AddCommunity() {
 
   const startServerPhotoFetchJob = useCallback(async (): Promise<boolean> => {
     if (!selectedCommunity || !selectedUnit1 || !selectedUnit2) return false;
+    if (!unit1BedroomCount || !unit2BedroomCount) {
+      toast({
+        title: "Bedroom counts required",
+        description: "Pick a pairing with explicit bedroom counts before fetching photos.",
+        variant: "destructive",
+      });
+      return false;
+    }
     setStep(4);
     setPhotosLoading(true);
     setPhotoFetchStartedAt(null);
@@ -1388,13 +1403,13 @@ export default function AddCommunity() {
           unit1: {
             url: selectedUnit1.url,
             title: selectedUnit1.title,
-            bedrooms: selectedUnit1.bedrooms,
+            bedrooms: unit1BedroomCount,
             address: (selectedUnit1 as any).address,
           },
           unit2: {
             url: selectedUnit2.url,
             title: selectedUnit2.title,
-            bedrooms: selectedUnit2.bedrooms,
+            bedrooms: unit2BedroomCount,
             address: (selectedUnit2 as any).address,
           },
         },
@@ -1417,7 +1432,10 @@ export default function AddCommunity() {
     selectedUnit2,
     editedStreetAddress,
     suggestedStreetAddress,
+    unit1BedroomCount,
+    unit2BedroomCount,
     applyPhotoFetchJob,
+    toast,
   ]);
 
   const handleConfirmUnits = useCallback(async () => {
@@ -1449,6 +1467,8 @@ export default function AddCommunity() {
     //
     // We only short-circuit to the empty state when neither path
     // can run (no URL AND insufficient community info to search).
+    const selectedBedroomsFor = (u: UnitResult) =>
+      u === selectedUnit1 ? unit1BedroomCount : u === selectedUnit2 ? unit2BedroomCount : positiveInteger(u.bedrooms);
     const buildBody = (u: UnitResult, skipUrls: string[] = [], bedroomOverride?: number | "any") =>
       u.url
         ? { url: u.url }
@@ -1457,10 +1477,10 @@ export default function AddCommunity() {
             streetAddress: editedStreetAddress.trim() || suggestedStreetAddress || undefined,
             city: selectedCommunity?.city,
             state: selectedCommunity?.state,
-            bedrooms: bedroomOverride ?? u.bedrooms ?? undefined,
+            bedrooms: bedroomOverride ?? selectedBedroomsFor(u) ?? undefined,
             skipUrls,
           };
-    const canFetch = (u: UnitResult) => !!(u.url || (selectedCommunity?.name && u.bedrooms));
+    const canFetch = (u: UnitResult) => !!(u.url || (selectedCommunity?.name && selectedBedroomsFor(u)));
 
     if (!canFetch(selectedUnit1) && !canFetch(selectedUnit2)) {
       // Nothing we can fetch with — neither a URL nor enough
@@ -1574,7 +1594,7 @@ export default function AddCommunity() {
         setPhotoFetchStartedAt(null);
       }
     }
-  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, toast, postJsonWithTimeout, startServerPhotoFetchJob]);
+  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, unit1BedroomCount, unit2BedroomCount, toast, postJsonWithTimeout, startServerPhotoFetchJob]);
 
   useEffect(() => {
     if (!draftHydratedRef.current || !draftAutosaveReady) return;
@@ -1649,6 +1669,14 @@ export default function AddCommunity() {
   // ── Step 5: Generate listing ────────────────────────────────
   const handleGenerateListing = useCallback(async () => {
     if (!selectedCommunity || !selectedUnit1 || !selectedUnit2) return;
+    if (!unit1BedroomCount || !unit2BedroomCount) {
+      toast({
+        title: "Bedroom counts required",
+        description: "Pick a pairing with explicit bedroom counts before generating the listing draft.",
+        variant: "destructive",
+      });
+      return;
+    }
     setListingLoading(true);
     setStep(5);
     try {
@@ -1657,12 +1685,12 @@ export default function AddCommunity() {
         city: selectedCommunity.city,
         state: selectedCommunity.state,
         unit1: {
-          bedrooms: selectedUnit1.bedrooms ?? 2,
+          bedrooms: unit1BedroomCount,
           url: selectedUnit1.url,
           address: (selectedUnit1 as any).address,
         },
         unit2: {
-          bedrooms: selectedUnit2.bedrooms ?? 2,
+          bedrooms: unit2BedroomCount,
           url: selectedUnit2.url,
           address: (selectedUnit2 as any).address,
         },
@@ -1705,11 +1733,19 @@ export default function AddCommunity() {
     } finally {
       setListingLoading(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, suggestedRate, strPermit, editedStreetAddress, suggestedStreetAddress, toast]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, unit1BedroomCount, unit2BedroomCount, suggestedRate, strPermit, editedStreetAddress, suggestedStreetAddress, toast]);
 
   // ── Save to dashboard ───────────────────────────────────────
   const handleSave = useCallback(async () => {
     if (!selectedCommunity) return;
+    if (!unit1BedroomCount || !unit2BedroomCount) {
+      toast({
+        title: "Bedroom counts required",
+        description: "Pick a pairing with explicit bedroom counts before saving to the dashboard.",
+        variant: "destructive",
+      });
+      return;
+    }
     const addressCheck = validateCommunityStreetAddress({
       communityName: selectedCommunity.name,
       city: selectedCommunity.city,
@@ -1741,7 +1777,7 @@ export default function AddCommunity() {
         minimumStayEvidence: selectedCommunity.minimumStayEvidence ?? null,
         minimumStaySourceUrl: selectedCommunity.minimumStaySourceUrl ?? null,
         unit1Url: selectedUnit1?.url || unit1PhotoSourceUrl || null,
-        unit1Bedrooms: selectedUnit1?.bedrooms ?? null,
+        unit1Bedrooms: unit1BedroomCount,
         // Per-unit structured fields. Each is nullable on the
         // schema so a draft saved before the operator filled them
         // in (or saved with the AI fallback that doesn't produce
@@ -1753,7 +1789,7 @@ export default function AddCommunity() {
         unit1ShortDescription: editedUnitA?.shortDescription ?? null,
         unit1LongDescription: editedUnitA?.longDescription ?? null,
         unit2Url: selectedUnit2?.url || unit2PhotoSourceUrl || null,
-        unit2Bedrooms: selectedUnit2?.bedrooms ?? null,
+        unit2Bedrooms: unit2BedroomCount,
         unit2Bathrooms: editedUnitB?.bathrooms ?? null,
         unit2Sqft: editedUnitB?.sqft ?? null,
         unit2MaxGuests: editedUnitB?.maxGuests ?? null,
@@ -1827,7 +1863,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, suggestedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, dbprLicense, touristTaxAccount, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, unit1BedroomCount, unit2BedroomCount, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, suggestedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, dbprLicense, touristTaxAccount, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -3111,8 +3147,8 @@ export default function AddCommunity() {
                     )}
 
                     {[
-                      { key: "unit-1", label: `Unit 1 — ${selectedUnit1?.bedrooms ?? "?"}BR`, photos: unit1Photos, sourceUrl: unit1PhotoSourceUrl },
-                      { key: "unit-2", label: `Unit 2 — ${selectedUnit2?.bedrooms ?? "?"}BR`, photos: unit2Photos, sourceUrl: unit2PhotoSourceUrl },
+                      { key: "unit-1", label: `Unit 1 — ${unit1BedroomCount ?? "?"}BR`, photos: unit1Photos, sourceUrl: unit1PhotoSourceUrl },
+                      { key: "unit-2", label: `Unit 2 — ${unit2BedroomCount ?? "?"}BR`, photos: unit2Photos, sourceUrl: unit2PhotoSourceUrl },
                     ].map(({ key, label, photos, sourceUrl }) => (
                       <div key={label} className="mb-6">
                         <div className="flex items-center gap-2 mb-3">
@@ -3371,8 +3407,8 @@ export default function AddCommunity() {
 
                   {/* ── Per-unit details (Unit A / Unit B) ──── */}
                   {[
-                    { key: "A", state: editedUnitA, setState: setEditedUnitA, brFallback: selectedUnit1?.bedrooms ?? 0 },
-                    { key: "B", state: editedUnitB, setState: setEditedUnitB, brFallback: selectedUnit2?.bedrooms ?? 0 },
+                    { key: "A", state: editedUnitA, setState: setEditedUnitA, brFallback: unit1BedroomCount ?? 0 },
+                    { key: "B", state: editedUnitB, setState: setEditedUnitB, brFallback: unit2BedroomCount ?? 0 },
                   ].map(({ key, state, setState, brFallback }) => {
                     const unit = state ?? {
                       bedrooms: brFallback,

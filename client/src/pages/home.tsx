@@ -1292,7 +1292,8 @@ function AdminDashboard() {
       const isSingle = (d as any).singleListing === true;
       const u1Br = inferBedrooms(d, "unit1");
       const u2Br = isSingle ? 0 : inferBedrooms(d, "unit2");
-      const totalBr = isSingle ? u1Br : (positiveInt(d.combinedBedrooms) ?? (u1Br + u2Br));
+      const unitBedroomSum = u1Br + u2Br;
+      const totalBr = isSingle ? u1Br : (unitBedroomSum > 0 ? unitBedroomSum : (positiveInt(d.combinedBedrooms) ?? 0));
       const totalGuests = isSingle
         ? inferSleeps(d, u1Br)
         : (((d.unit1MaxGuests ?? 0) + (d.unit2MaxGuests ?? 0)) || totalBr * 2);
