@@ -1261,9 +1261,17 @@ function AdminDashboard() {
       const structured = positiveInt(stored) ?? positiveInt(combined);
       if (structured) return structured;
 
-      const text = [
+      const unitText = [
         unitKey === "unit1" ? (d as any).unit1Description : (d as any).unit2Description,
         unitKey === "unit1" ? d.unit1Bedding : d.unit2Bedding,
+        unitKey === "unit1" ? (d as any).unit1ShortDescription : (d as any).unit2ShortDescription,
+        unitKey === "unit1" ? (d as any).unit1LongDescription : (d as any).unit2LongDescription,
+      ].filter(Boolean).join(" ");
+      const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+      if (unitMatch) return positiveInt(unitMatch[1]) ?? 0;
+      if ((d as any).singleListing !== true) return 0;
+
+      const text = [
         d.listingTitle,
         d.bookingTitle,
         d.name,

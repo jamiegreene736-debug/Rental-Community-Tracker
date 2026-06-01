@@ -3927,9 +3927,18 @@ function inferCommunityDraftBedroomCount(draft: any, unitKey: "unit1" | "unit2")
   const fromStructured = positiveDraftInteger(stored) ?? positiveDraftInteger(combined);
   if (fromStructured) return fromStructured;
 
-  const text = [
+  const unitText = [
     unitKey === "unit1" ? draft?.unit1Description : draft?.unit2Description,
     unitKey === "unit1" ? draft?.unit1Bedding : draft?.unit2Bedding,
+    unitKey === "unit1" ? draft?.unit1ShortDescription : draft?.unit2ShortDescription,
+    unitKey === "unit1" ? draft?.unit1LongDescription : draft?.unit2LongDescription,
+  ].filter(Boolean).join(" ");
+  const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  if (unitMatch) return positiveDraftInteger(unitMatch[1]);
+
+  if (draft?.singleListing !== true) return null;
+
+  const text = [
     draft?.listingTitle,
     draft?.bookingTitle,
     draft?.name,
