@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Progress } from "@/components/ui/progress";
 import {
   ArrowLeft,
   ArrowRight,
@@ -388,6 +389,8 @@ export default function AddCommunity() {
       unit1SourceUrl: string | null;
       unit2SourceUrl: string | null;
       error: string | null;
+      progressPercent?: number;
+      heartbeatAt?: string | null;
     }>;
   };
   const [photoFetchJobId, setPhotoFetchJobId] = useState<string | null>(null);
@@ -3025,38 +3028,65 @@ export default function AddCommunity() {
             </div>
 
             {photosLoading && (
-              <div className="flex flex-col items-center gap-3 py-12 justify-center text-muted-foreground">
-                <div className="flex items-center gap-3">
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  <span>{photoFetchJob?.items?.[0]?.message || "Fetching photos from Zillow listing pages…"}</span>
-                </div>
-                {photoFetchJobId && (
-                  <div className="flex flex-col items-center gap-2">
-                    <p className="text-xs">
-                      Server job running. You can leave this tab and come back; this page will reconnect to the job.
-                    </p>
-                    {(() => {
-                      const heartbeat = photoFetchJob?.items?.[0]?.heartbeatAt;
-                      if (!heartbeat) return null;
-                      const ageSeconds = Math.max(0, Math.round((Date.now() - new Date(heartbeat).getTime()) / 1000));
-                      return (
-                        <p className="text-[11px] text-muted-foreground">
-                          Last server heartbeat: {ageSeconds}s ago.
-                        </p>
-                      );
-                    })()}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={cancelPhotoFetchJob}
-                      data-testid="button-cancel-photo-fetch-job"
-                    >
-                      Cancel photo fetch
-                    </Button>
+              (() => {
+                const item = photoFetchJob?.items?.[0];
+                const progressValue = Math.min(100, Math.max(5, Math.round(item?.progressPercent ?? (photoFetchJobId ? 12 : 8))));
+                const heartbeat = item?.heartbeatAt;
+                const heartbeatAgeSeconds = heartbeat
+                  ? Math.max(0, Math.round((Date.now() - new Date(heartbeat).getTime()) / 1000))
+                  : null;
+                const heartbeatIsStale = heartbeatAgeSeconds != null && heartbeatAgeSeconds > 120;
+                return (
+                  <div className="flex flex-col items-center gap-4 py-10 justify-center text-muted-foreground">
+                    <div className="w-full max-w-xl rounded-lg border bg-background p-4 shadow-sm">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-foreground">
+                              {item?.message || "Fetching photos from Zillow listing pages…"}
+                            </p>
+                            <p className="text-xs capitalize text-muted-foreground">
+                              {item?.phase ? `Phase: ${item.phase}` : "Preparing photo search"}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="shrink-0 text-sm font-semibold text-foreground">{progressValue}%</span>
+                      </div>
+                      <Progress value={progressValue} className="h-2" />
+                      <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+                        <div className="rounded-md bg-muted/50 px-2 py-1.5">
+                          Unit A photos: <span className="font-medium text-foreground">{unit1Photos.length}</span>
+                        </div>
+                        <div className="rounded-md bg-muted/50 px-2 py-1.5">
+                          Unit B photos: <span className="font-medium text-foreground">{unit2Photos.length}</span>
+                        </div>
+                        <div className="rounded-md bg-muted/50 px-2 py-1.5">
+                          Heartbeat: <span className="font-medium text-foreground">{heartbeatAgeSeconds == null ? "waiting" : `${heartbeatAgeSeconds}s ago`}</span>
+                        </div>
+                      </div>
+                      {photoFetchJobId && (
+                        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <p className={`text-xs ${heartbeatIsStale ? "text-amber-700" : "text-muted-foreground"}`}>
+                            {heartbeatIsStale
+                              ? "The server heartbeat is stale. Cancel and retry if this does not recover shortly."
+                              : "Server job running. You can leave this tab and come back; this page will reconnect to the job."}
+                          </p>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={cancelPhotoFetchJob}
+                            data-testid="button-cancel-photo-fetch-job"
+                          >
+                            Cancel photo fetch
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
+                );
+              })()
             )}
 
             {!photosLoading && (

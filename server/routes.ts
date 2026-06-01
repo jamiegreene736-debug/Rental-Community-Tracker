@@ -25279,6 +25279,14 @@ Return ONLY compact JSON with this exact shape:
     lockExpiresAt: job.lockExpiresAt ? new Date(job.lockExpiresAt).toISOString() : null,
     items: job.items.map((item) => ({
       ...item,
+      progressPercent:
+        item.status === "completed" ? 100 :
+        item.status === "failed" || item.status === "cancelled" ? 100 :
+        item.phase === "done" ? 95 :
+        item.phase === "unit2" ? (item.unit2Photos.length > 0 ? 85 : 65) :
+        item.phase === "unit1" ? (item.unit1Photos.length > 0 ? 50 : 25) :
+        item.status === "running" ? 15 :
+        5,
       startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
       finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
       heartbeatAt: item.heartbeatAt ? new Date(item.heartbeatAt).toISOString() : null,
