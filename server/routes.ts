@@ -25118,9 +25118,10 @@ Return ONLY compact JSON with this exact shape:
   };
 
   const activeComboPhotoFetchJobIds = new Set<string>();
-  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
+  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 90_000;
   const COMBO_PHOTO_FETCH_HEARTBEAT_MS = 15_000;
   const COMBO_PHOTO_FETCH_STALE_HEARTBEAT_MS = 2 * 60 * 1000;
+  const COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS = 12_000;
   const toQueueMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
     if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -27134,6 +27135,7 @@ Return ONLY compact JSON with this exact shape:
           try {
             const resp = await fetch(
               `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+              { signal: AbortSignal.timeout(COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS) },
             );
             if (!resp.ok) {
               console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
