@@ -717,6 +717,22 @@ export default function AddCommunity() {
     };
   }, [photoFetchJobId, photoFetchJob?.status, applyPhotoFetchJob]);
 
+  const cancelPhotoFetchJob = useCallback(async () => {
+    if (!photoFetchJobId) return;
+    try {
+      const resp = await apiRequest("POST", `/api/community/photo-fetch-jobs/${encodeURIComponent(photoFetchJobId)}/cancel`, {});
+      const data = await resp.json();
+      if (data.job) applyPhotoFetchJob(data.job);
+      toast({ title: "Photo fetch cancelled" });
+    } catch (e: any) {
+      toast({
+        title: "Could not cancel photo fetch",
+        description: e?.message ?? "The server job may have already finished.",
+        variant: "destructive",
+      });
+    }
+  }, [photoFetchJobId, applyPhotoFetchJob, toast]);
+
   useEffect(() => {
     if (!bulkComboJobId) return;
     let cancelled = false;
@@ -2851,9 +2867,30 @@ export default function AddCommunity() {
                   <span>{photoFetchJob?.items?.[0]?.message || "Fetching photos from Zillow listing pages…"}</span>
                 </div>
                 {photoFetchJobId && (
-                  <p className="text-xs">
-                    Server job running. You can leave this tab and come back; this page will reconnect to the job.
-                  </p>
+                  <div className="flex flex-col items-center gap-2">
+                    <p className="text-xs">
+                      Server job running. You can leave this tab and come back; this page will reconnect to the job.
+                    </p>
+                    {(() => {
+                      const heartbeat = photoFetchJob?.items?.[0]?.heartbeatAt;
+                      if (!heartbeat) return null;
+                      const ageSeconds = Math.max(0, Math.round((Date.now() - new Date(heartbeat).getTime()) / 1000));
+                      return (
+                        <p className="text-[11px] text-muted-foreground">
+                          Last server heartbeat: {ageSeconds}s ago.
+                        </p>
+                      );
+                    })()}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={cancelPhotoFetchJob}
+                      data-testid="button-cancel-photo-fetch-job"
+                    >
+                      Cancel photo fetch
+                    </Button>
+                  </div>
                 )}
               </div>
             )}

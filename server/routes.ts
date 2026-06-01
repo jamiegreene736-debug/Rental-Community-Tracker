@@ -25117,7 +25117,8 @@ Return ONLY compact JSON with this exact shape:
   };
 
   const activeComboPhotoFetchJobIds = new Set<string>();
-  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 4 * 60 * 1000;
+  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
+  const COMBO_PHOTO_FETCH_HEARTBEAT_MS = 15_000;
   const toQueueMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
     if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -25332,6 +25333,7 @@ Return ONLY compact JSON with this exact shape:
         state: item.state,
         bedrooms: bedroomOverride ?? unit?.bedrooms ?? undefined,
         skipUrls,
+        maxCandidates: bedroomOverride === "any" ? 24 : 12,
       };
   const canComboPhotoFetchUnit = (item: ComboPhotoFetchItem, unit: ComboPhotoFetchUnit | undefined) =>
     !!(unit?.url || (item.communityName && unit?.bedrooms));
@@ -25388,6 +25390,25 @@ Return ONLY compact JSON with this exact shape:
       job.updatedAt = Date.now();
       await onProgress?.(item);
     };
+    const runWithHeartbeat = async <T>(message: string, work: () => Promise<T>): Promise<T> => {
+      item.message = message;
+      await persistProgress();
+      let persisting = false;
+      const interval = setInterval(() => {
+        if (persisting) return;
+        persisting = true;
+        void persistProgress()
+          .catch((error) => console.warn("[combo-photo-fetch] heartbeat persist failed", error?.message ?? error))
+          .finally(() => { persisting = false; });
+      }, COMBO_PHOTO_FETCH_HEARTBEAT_MS);
+      interval.unref?.();
+      try {
+        return await work();
+      } finally {
+        clearInterval(interval);
+        await persistProgress();
+      }
+    };
     item.status = "running";
     item.phase = "unit1";
     item.message = "Fetching Unit A photos";
@@ -25401,7 +25422,9 @@ Return ONLY compact JSON with this exact shape:
     let firstPhotos: Array<{ url: string; label?: string }> = [];
     let firstSourceUrl: string | null = null;
     if (canComboPhotoFetchUnit(item, item.unit1)) {
-      const first = await fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal);
+      const first = await runWithHeartbeat("Searching for Unit A photos", () =>
+        fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal),
+      );
       firstPhotos = first.photos;
       firstSourceUrl = first.sourceUrl;
       item.unit1Photos = firstPhotos;
@@ -25415,7 +25438,9 @@ Return ONLY compact JSON with this exact shape:
     await persistProgress();
     if (canComboPhotoFetchUnit(item, item.unit2)) {
       const skipUrls = firstSourceUrl && !item.unit2?.url ? [firstSourceUrl] : [];
-      const second = await fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos, abortKey, signal);
+      const second = await runWithHeartbeat("Searching for Unit B photos", () =>
+        fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos, abortKey, signal),
+      );
       let secondPhotos = second.photos;
       if (!item.unit2?.url && firstPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(firstPhotos, secondPhotos)) {
         secondPhotos = [];
@@ -26957,13 +26982,14 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, skipUrls, skipFirst } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, skipUrls, skipFirst, maxCandidates } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
       city?: string;
       state?: string;
       bedrooms?: number | "any";
+      maxCandidates?: number;
       // URLs the caller already has (e.g. from a previous click) so
       // a "Find another" button can skip listings already surfaced.
       skipUrls?: string[];
@@ -27009,6 +27035,9 @@ Return ONLY compact JSON with this exact shape:
         : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
           ? Math.round(Number(bedrooms))
           : null;
+      const candidateLimit = Number.isFinite(Number(maxCandidates)) && Number(maxCandidates) > 0
+        ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
+        : null;
       type DiscoverySource = "zillow" | "realtor" | "redfin" | "homes";
       const candidateUrls: Array<{ url: string; source: DiscoverySource }> = [];
       const seen = new Set<string>();
@@ -27130,7 +27159,10 @@ Return ONLY compact JSON with this exact shape:
       });
 
       const offset = Math.max(0, Math.min(10, Number(skipFirst ?? 0) || 0));
-      for (const candidate of candidateUrls.slice(offset)) {
+      const candidatesToTry = candidateLimit
+        ? candidateUrls.slice(offset, offset + candidateLimit)
+        : candidateUrls.slice(offset);
+      for (const candidate of candidatesToTry) {
         const facts: ListingFacts = {};
         try {
           const photos = await scrapeListingPhotos(candidate.url, undefined, facts);
@@ -27162,7 +27194,7 @@ Return ONLY compact JSON with this exact shape:
           photos: [],
           sourceUrl: null,
           foundVia: "search",
-          note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""}.`,
+          note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${candidatesToTry.length} candidate${candidatesToTry.length === 1 ? "" : "s"}.`,
         });
       }
     }

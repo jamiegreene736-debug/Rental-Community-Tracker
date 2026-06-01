@@ -155,6 +155,16 @@ assert.match(
   /Replacement unit found, but its photos could not be saved/,
   "unit replacement must reject swaps when replacement photos cannot be saved",
 );
+assert.match(
+  routesSource,
+  /COMBO_PHOTO_FETCH_HEARTBEAT_MS/,
+  "combo photo fetch jobs must keep heartbeating while long photo discovery is in progress",
+);
+assert.match(
+  routesSource,
+  /maxCandidates: bedroomOverride === "any" \? 24 : 12/,
+  "combo photo fetch discovery must bound candidate scans so Step 4 does not appear stuck on weak markets",
+);
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
 assert.match(
   dashboardSource,
@@ -165,6 +175,12 @@ assert.match(
   dashboardSource,
   /photo-match-units/,
   "dashboard photo-match column must visibly name affected Unit A/B folders when a platform match is found",
+);
+const addCommunitySource = readFileSync("client/src/pages/add-community.tsx", "utf8");
+assert.match(
+  addCommunitySource,
+  /button-cancel-photo-fetch-job/,
+  "combo photo Step 4 must expose cancellation for a running server photo-fetch job",
 );
 console.log("  ✓ shared photo folder tokens stay scoped to the unit being checked");
 
