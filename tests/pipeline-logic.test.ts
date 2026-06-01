@@ -167,7 +167,7 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /maxCandidates: bedroomOverride === "any" \? 24 : 12/,
+  /maxCandidates: bedroomOverride === "any" \? 10 : 6/,
   "combo photo fetch discovery must bound candidate scans so Step 4 does not appear stuck on weak markets",
 );
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
@@ -201,6 +201,16 @@ assert.match(
   addCommunitySource,
   /ignoredSweepJobIdsRef/,
   "top-market polling must ignore a completed job after the operator chooses to scan different markets",
+);
+assert.match(
+  addCommunitySource,
+  /Unit 1: \{unit1Photos\.length\} photo/,
+  "combo Step 4 photo summary must show Unit 1 and Unit 2 counts independently",
+);
+assert.match(
+  addCommunitySource,
+  /photo-empty-\$\{key\}/,
+  "combo Step 4 must visibly show when a unit has no attached photos instead of rendering an empty grid",
 );
 assert.match(
   routesSource,

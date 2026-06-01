@@ -3095,7 +3095,7 @@ export default function AddCommunity() {
                   <>
                     <div className="flex items-center justify-between mb-4">
                       <p className="text-sm text-muted-foreground">
-                        {unit1Photos.length + unit2Photos.length} photos fetched. Run a platform check to verify they don't appear on Airbnb/VRBO/Booking.com.
+                        Unit 1: {unit1Photos.length} photo{unit1Photos.length === 1 ? "" : "s"} · Unit 2: {unit2Photos.length} photo{unit2Photos.length === 1 ? "" : "s"}.
                       </p>
                       <Button variant="outline" size="sm" onClick={handleCheckAllPhotos} data-testid="button-check-all-photos">
                         <ShieldCheck className="h-4 w-4 mr-2" />
@@ -3111,12 +3111,15 @@ export default function AddCommunity() {
                     )}
 
                     {[
-                      { label: `Unit 1 — ${selectedUnit1?.bedrooms ?? "?"}BR`, photos: unit1Photos, sourceUrl: unit1PhotoSourceUrl },
-                      { label: `Unit 2 — ${selectedUnit2?.bedrooms ?? "?"}BR`, photos: unit2Photos, sourceUrl: unit2PhotoSourceUrl },
-                    ].map(({ label, photos, sourceUrl }) => (
+                      { key: "unit-1", label: `Unit 1 — ${selectedUnit1?.bedrooms ?? "?"}BR`, photos: unit1Photos, sourceUrl: unit1PhotoSourceUrl },
+                      { key: "unit-2", label: `Unit 2 — ${selectedUnit2?.bedrooms ?? "?"}BR`, photos: unit2Photos, sourceUrl: unit2PhotoSourceUrl },
+                    ].map(({ key, label, photos, sourceUrl }) => (
                       <div key={label} className="mb-6">
                         <div className="flex items-center gap-2 mb-3">
                           <h3 className="font-medium text-sm">{label}</h3>
+                          <Badge variant={photos.length > 0 ? "default" : "outline"} className="text-[10px]">
+                            {photos.length} photo{photos.length === 1 ? "" : "s"}
+                          </Badge>
                           {sourceUrl && (
                             <a
                               href={sourceUrl}
@@ -3128,36 +3131,42 @@ export default function AddCommunity() {
                             </a>
                           )}
                         </div>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                          {photos.map((p, i) => {
-                            const checkResult = photoChecks[p.url];
-                            const isChecking = checkResult === "checking";
-                            const isFlagged = checkResult && checkResult !== "checking" && !(checkResult as PhotoCheckResult).clean;
-                            return (
-                              <div key={i} className={`relative rounded-lg overflow-hidden border-2 transition-colors ${isFlagged ? "border-red-400" : "border-transparent"}`} data-testid={`photo-${label.replace(/\s/g,"-")}-${i}`}>
-                                <img src={p.url} alt={p.label} className="w-full aspect-video object-cover" />
-                                {checkResult && checkResult !== "checking" && (
-                                  <div className={`absolute top-1 right-1 rounded-full p-0.5 ${(checkResult as PhotoCheckResult).clean ? "bg-green-500" : "bg-red-500"}`}>
-                                    {(checkResult as PhotoCheckResult).clean
-                                      ? <ShieldCheck className="h-3.5 w-3.5 text-white" />
-                                      : <ShieldX className="h-3.5 w-3.5 text-white" />
-                                    }
-                                  </div>
-                                )}
-                                {isChecking && (
-                                  <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-                                    <Loader2 className="h-5 w-5 text-white animate-spin" />
-                                  </div>
-                                )}
-                                {isFlagged && (
-                                  <div className="absolute bottom-0 left-0 right-0 bg-red-500 text-white text-xs px-2 py-0.5 text-center truncate">
-                                    {((checkResult as PhotoCheckResult).matches[0]?.platform) ?? "Found"}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
+                        {photos.length > 0 ? (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            {photos.map((p, i) => {
+                              const checkResult = photoChecks[p.url];
+                              const isChecking = checkResult === "checking";
+                              const isFlagged = checkResult && checkResult !== "checking" && !(checkResult as PhotoCheckResult).clean;
+                              return (
+                                <div key={i} className={`relative rounded-lg overflow-hidden border-2 transition-colors ${isFlagged ? "border-red-400" : "border-transparent"}`} data-testid={`photo-${key}-${i}`}>
+                                  <img src={p.url} alt={p.label} className="w-full aspect-video object-cover" />
+                                  {checkResult && checkResult !== "checking" && (
+                                    <div className={`absolute top-1 right-1 rounded-full p-0.5 ${(checkResult as PhotoCheckResult).clean ? "bg-green-500" : "bg-red-500"}`}>
+                                      {(checkResult as PhotoCheckResult).clean
+                                        ? <ShieldCheck className="h-3.5 w-3.5 text-white" />
+                                        : <ShieldX className="h-3.5 w-3.5 text-white" />
+                                      }
+                                    </div>
+                                  )}
+                                  {isChecking && (
+                                    <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                                      <Loader2 className="h-5 w-5 text-white animate-spin" />
+                                    </div>
+                                  )}
+                                  {isFlagged && (
+                                    <div className="absolute bottom-0 left-0 right-0 bg-red-500 text-white text-xs px-2 py-0.5 text-center truncate">
+                                      {((checkResult as PhotoCheckResult).matches[0]?.platform) ?? "Found"}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" data-testid={`photo-empty-${key}`}>
+                            No photos attached for this unit from the last fetch.
+                          </div>
+                        )}
                       </div>
                     ))}
                   </>
