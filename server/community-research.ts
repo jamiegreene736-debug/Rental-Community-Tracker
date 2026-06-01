@@ -86,6 +86,14 @@ type KnownComboCommunitySeed = {
   sourceUrl: string;
 };
 
+const COMMUNITY_RESEARCH_SEARCH_TIMEOUT_MS = 6_000;
+const COMMUNITY_RESEARCH_CLAUDE_TIMEOUT_MS = 35_000;
+const COMMUNITY_RESEARCH_RATE_TIMEOUT_MS = 5_000;
+const COMMUNITY_RESEARCH_RATE_SPOT_CHECK_LIMIT = {
+  combo: 2,
+  single: 4,
+} as const;
+
 // CODEX NOTE (2026-05-05, codex/single-listing-known-facts):
 // The single-listing wizard depends on Claude's resort research
 // for the card name, bedroom buttons, and rough resort unit count.
@@ -659,6 +667,7 @@ export async function fetchAmortizedNightlyByBR(
   options?: {
     bedrooms?: number;
     bboxScale?: number;
+    signal?: AbortSignal;
   },
 ): Promise<AmortizedNightlyResult> {
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
@@ -747,6 +756,7 @@ export async function fetchAmortizedNightlyByBR(
     }
     const resp = await fetch(
       `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
+      { signal: options?.signal },
     );
     if (!resp.ok) return { ratesByBR, bboxApplied: !!bbox, bboxCenter, drops };
     const data = await resp.json() as any;
@@ -830,6 +840,7 @@ export async function fetchAmortizedNightlyByBR(
       }
       const resp2 = await fetch(
         `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
+        { signal: options?.signal },
       );
       if (resp2.ok) {
         const data2 = await resp2.json() as any;
@@ -918,19 +929,21 @@ export async function researchCommunitiesForCity(
   // wider context to surface niche named resorts. Combo flow stays
   // tight to keep wall time bounded for the top-markets sweep.
   const numPerQuery = mode === "single" ? 12 : 8;
-  for (const q of queries) {
+  const googleResults = await Promise.all(queries.map(async (q) => {
     try {
       const resp = await fetch(
         `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=${numPerQuery}&api_key=${searchApiKey}`,
+        { signal: AbortSignal.timeout(COMMUNITY_RESEARCH_SEARCH_TIMEOUT_MS) },
       );
-      if (!resp.ok) continue;
+      if (!resp.ok) return [];
       const data = await resp.json() as any;
-      const organic = (data.organic_results || []) as Array<{ title: string; link: string; snippet: string }>;
-      allResults.push(...organic);
+      return (data.organic_results || []) as Array<{ title: string; link: string; snippet: string }>;
     } catch (e: any) {
       console.warn(`[research] SearchAPI error for ${city}:`, e.message);
+      return [];
     }
-  }
+  }));
+  allResults.push(...googleResults.flat());
 
   const seen = new Set<string>();
   const uniqueCap = mode === "single" ? 30 : 15;
@@ -966,15 +979,30 @@ export async function researchCommunitiesForCity(
   // it with the priced-engine lookup is both more accurate AND more
   // reliable — same methodology as `/api/community/search-units`.
   async function spotCheckRate(communityName: string): Promise<{ low: number | null; high: number | null }> {
-    const { ratesByBR } = await fetchAmortizedNightlyByBR(communityName, city, state);
-    const allRates: number[] = [];
-    for (const list of Object.values(ratesByBR)) allRates.push(...list);
-    if (allRates.length === 0) return { low: null, high: null };
-    const sorted = [...allRates].sort((a, b) => a - b);
-    return { low: sorted[0], high: sorted[sorted.length - 1] };
+    try {
+      const { ratesByBR } = await fetchAmortizedNightlyByBR(
+        communityName,
+        city,
+        state,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { signal: AbortSignal.timeout(COMMUNITY_RESEARCH_RATE_TIMEOUT_MS) },
+      );
+      const allRates: number[] = [];
+      for (const list of Object.values(ratesByBR)) allRates.push(...list);
+      if (allRates.length === 0) return { low: null, high: null };
+      const sorted = [...allRates].sort((a, b) => a - b);
+      return { low: sorted[0], high: sorted[sorted.length - 1] };
+    } catch (e: any) {
+      console.warn(`[research] rate spot-check skipped for ${communityName}: ${e?.message ?? String(e)}`);
+      return { low: null, high: null };
+    }
   }
 
   const results: ResearchedCommunity[] = [];
+  let remainingRateSpotChecks = COMMUNITY_RESEARCH_RATE_SPOT_CHECK_LIMIT[mode];
 
   if (anthropicKey) {
     // Single-listing prompt: focused on naming as many qualifying
@@ -1114,6 +1142,7 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
           "x-api-key": anthropicKey,
           "anthropic-version": "2023-06-01",
         },
+        signal: AbortSignal.timeout(COMMUNITY_RESEARCH_CLAUDE_TIMEOUT_MS),
         body: JSON.stringify({
           // Single-listing mode runs on Sonnet (better world-
           // knowledge recall for niche named resorts like Santa
@@ -1172,7 +1201,9 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
             const normalized = mode === "single"
               ? applyKnownSingleListingFacts(String(s.communityName ?? ""), city, state, normalizedBedrooms, normalizedUnits)
               : { name: String(s.communityName ?? ""), availableBedrooms: normalizedBedrooms, estimatedTotalUnits: normalizedUnits };
-            const rates = await spotCheckRate(normalized.name);
+            const rates = remainingRateSpotChecks-- > 0
+              ? await spotCheckRate(normalized.name)
+              : { low: null, high: null };
             results.push({
               name: normalized.name,
               city,
