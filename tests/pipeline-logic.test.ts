@@ -162,6 +162,11 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /releaseStaleComboPhotoFetchLease/,
+  "combo photo fetch polling must release stale dead-worker leases so Step 4 can resume after deploys",
+);
+assert.match(
+  routesSource,
   /maxCandidates: bedroomOverride === "any" \? 24 : 12/,
   "combo photo fetch discovery must bound candidate scans so Step 4 does not appear stuck on weak markets",
 );

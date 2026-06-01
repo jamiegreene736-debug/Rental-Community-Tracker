@@ -25119,6 +25119,7 @@ Return ONLY compact JSON with this exact shape:
   const activeComboPhotoFetchJobIds = new Set<string>();
   const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
   const COMBO_PHOTO_FETCH_HEARTBEAT_MS = 15_000;
+  const COMBO_PHOTO_FETCH_STALE_HEARTBEAT_MS = 2 * 60 * 1000;
   const toQueueMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
     if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -25242,6 +25243,24 @@ Return ONLY compact JSON with this exact shape:
       ))
       .returning({ id: comboPhotoFetchJobRows.id });
     return !!claimed;
+  };
+  const comboPhotoFetchJobLooksStale = (job: ComboPhotoFetchJob) => {
+    if (job.status !== "running") return false;
+    const runningItem = job.items.find((item) => item.status === "running");
+    const heartbeatAt = runningItem?.heartbeatAt ?? job.updatedAt ?? job.startedAt;
+    return !!heartbeatAt && Date.now() - heartbeatAt > COMBO_PHOTO_FETCH_STALE_HEARTBEAT_MS;
+  };
+  const releaseStaleComboPhotoFetchLease = async (job: ComboPhotoFetchJob) => {
+    if (!comboPhotoFetchJobLooksStale(job)) return false;
+    const now = new Date();
+    await db
+      .update(comboPhotoFetchJobRows)
+      .set({ lockedBy: null, lockExpiresAt: null, updatedAt: now })
+      .where(and(eq(comboPhotoFetchJobRows.id, job.id), eq(comboPhotoFetchJobRows.status, "running")));
+    job.lockedBy = null;
+    job.lockExpiresAt = null;
+    job.updatedAt = now.getTime();
+    return true;
   };
   const maybeResumeComboPhotoFetchJob = (job: ComboPhotoFetchJob | null) => {
     if (!job) return;
@@ -25647,6 +25666,7 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/community/photo-fetch-jobs/:jobId", async (req, res) => {
     const job = await loadComboPhotoFetchJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Photo fetch job not found" });
+    await releaseStaleComboPhotoFetchLease(job);
     maybeResumeComboPhotoFetchJob(job);
     res.json({ job: serializeComboPhotoFetchJob(job) });
   });
