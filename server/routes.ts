@@ -33102,8 +33102,9 @@ Return ONLY compact JSON with this exact shape:
   // Step 3: Generate algorithm-based unit pairing suggestions for a community
   // ============================================================
   app.post("/api/community/search-units", async (req, res) => {
-    const { communityName, city, state, unitTypes: rawUnitTypes, streetAddress } = req.body as {
+    const { communityName, city, state, unitTypes: rawUnitTypes, streetAddress, availableBedrooms, bedroomMix } = req.body as {
       communityName: string; city: string; state: string; unitTypes?: string; streetAddress?: string;
+      availableBedrooms?: unknown; bedroomMix?: string;
     };
     if (!communityName) return res.status(400).json({ error: "communityName required" });
 
@@ -33141,15 +33142,28 @@ Return ONLY compact JSON with this exact shape:
       } catch { /* non-fatal */ }
     }
 
-    const { ratesByBR } = await fetchAmortizedNightlyByBR(communityName, city, state, streetAddress);
+    let ratesByBR: Record<number, number[]> = {};
+    try {
+      const priced = await fetchAmortizedNightlyByBR(communityName, city, state, streetAddress);
+      ratesByBR = priced.ratesByBR;
+    } catch (e: any) {
+      console.warn(`[search-units] pricing lookup failed for ${communityName}: ${e?.message ?? String(e)}`);
+    }
 
     // ── 2. Parse available unit types ─────────────────────────────────────────
     // From research step: e.g. "2BR, 3BR" or "3-bedroom, 2-bedroom"
     const parsedTypes = new Set<number>();
-    if (rawUnitTypes) {
-      const nums = rawUnitTypes.match(/(\d+)\s*(?:br|bed)/gi) || rawUnitTypes.match(/\d+/g) || [];
+    const bedroomTypeText = [rawUnitTypes, bedroomMix].filter(Boolean).join(" ");
+    if (bedroomTypeText) {
+      const nums = bedroomTypeText.match(/(\d+)\s*(?:br|bed)/gi) || bedroomTypeText.match(/\d+/g) || [];
       for (const n of nums) {
         const br = parseInt(n);
+        if (br >= 1 && br <= 6) parsedTypes.add(br);
+      }
+    }
+    if (Array.isArray(availableBedrooms)) {
+      for (const raw of availableBedrooms) {
+        const br = Math.round(Number(raw));
         if (br >= 1 && br <= 6) parsedTypes.add(br);
       }
     }

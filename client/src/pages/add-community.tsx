@@ -296,6 +296,7 @@ export default function AddCommunity() {
   const photoFetchRunRef = useRef(0);
   const photoAutoResumeRef = useRef(false);
   const photoStaleRestartRef = useRef(false);
+  const pairingAutoResumeRef = useRef(false);
   // Two-phase flow for the sweep modal. "setup" shows a checkbox grid the
   // user picks markets from; "running" shows streaming per-market progress.
   // Avoids the old behavior of firing a ~30-minute sweep across all 20
@@ -925,13 +926,14 @@ export default function AddCommunity() {
   }, []);
 
   // ── Step 3: Pairing suggestions ─────────────────────────────
-  const handleSelectCommunity = useCallback(async (community: CommunityResult) => {
-    setSelectedCommunity(community);
-    setEditedStreetAddress(inferCommunityStreetAddress({
+  const handleSelectCommunity = useCallback(async (community: CommunityResult, options?: { retryingRestore?: boolean }) => {
+    const streetAddress = inferCommunityStreetAddress({
       communityName: community.name,
       city: community.city,
       state: community.state,
-    }));
+    });
+    setSelectedCommunity(community);
+    setEditedStreetAddress(streetAddress);
     setUnitSearchLoading(true);
     setUnitSearchResults(null);
     setCommunityProfile(null);
@@ -946,28 +948,52 @@ export default function AddCommunity() {
         city: community.city,
         state: community.state,
         unitTypes: community.unitTypes,
+        streetAddress,
+        availableBedrooms: community.availableBedrooms,
+        bedroomMix: community.bedroomMix,
       });
       const data = await res.json();
+      const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
       setUnitSearchResults(data);
       if (data.communityProfile) setCommunityProfile(data.communityProfile);
-      if (data.suggestedPairings?.length) setSuggestedPairings(data.suggestedPairings);
+      setSuggestedPairings(pairings);
       // Auto-select best unused combo type (surgical automation per user request).
       // Skips manual "choose combo type" when a strong unused recommendation exists.
       // If community already has e.g. 3+3, prefers next best like 2+3 if available.
-      if (!selectedPairing) {
-        const best = (data.suggestedPairings || []).find((p: SuggestedPairing) => !p.alreadyExists) || (data.suggestedPairings || [])[0];
-        if (best) {
-          setSelectedPairing(best);
-          setSelectedUnit1({ url: "", title: `Unit A — ${best.unit1Beds}BR`, bedrooms: best.unit1Beds, price: best.estimatedUnit1Rate, source: "Algorithm" });
-          setSelectedUnit2({ url: "", title: `Unit B — ${best.unit2Beds}BR`, bedrooms: best.unit2Beds, price: best.estimatedUnit2Rate, source: "Algorithm" });
-        }
+      const best = pairings.find((p) => !p.alreadyExists) || pairings[0];
+      if (best) {
+        setSelectedPairing(best);
+        setSelectedUnit1({ url: "", title: `Unit A — ${best.unit1Beds}BR`, bedrooms: best.unit1Beds, price: best.estimatedUnit1Rate, source: "Algorithm" });
+        setSelectedUnit2({ url: "", title: `Unit B — ${best.unit2Beds}BR`, bedrooms: best.unit2Beds, price: best.estimatedUnit2Rate, source: "Algorithm" });
       }
     } catch (e: any) {
-      toast({ title: "Pairing analysis failed", description: e.message, variant: "destructive" });
+      toast({
+        title: options?.retryingRestore ? "Pairing retry failed" : "Pairing analysis failed",
+        description: e.message,
+        variant: "destructive",
+      });
     } finally {
       setUnitSearchLoading(false);
     }
-  }, [toast, selectedPairing]);
+  }, [toast]);
+
+  useEffect(() => {
+    if (!draftHydratedRef.current || !draftAutosaveReady) return;
+    if (step !== 3 || !selectedCommunity || unitSearchLoading || unitSearchResults || suggestedPairings.length > 0) return;
+    if (pairingAutoResumeRef.current) return;
+    pairingAutoResumeRef.current = true;
+    window.setTimeout(() => {
+      void handleSelectCommunity(selectedCommunity, { retryingRestore: true });
+    }, 0);
+  }, [
+    draftAutosaveReady,
+    step,
+    selectedCommunity,
+    unitSearchLoading,
+    unitSearchResults,
+    suggestedPairings.length,
+    handleSelectCommunity,
+  ]);
 
   const handleSelectPairing = useCallback((pairing: SuggestedPairing) => {
     setSelectedPairing(pairing);
@@ -994,20 +1020,23 @@ export default function AddCommunity() {
   // with almost zero per-resort clicking (no manual combo type choice).
   const quickQueueBestCombo = useCallback(async (community: CommunityResult) => {
     try {
+      const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state });
       const res = await apiRequest("POST", "/api/community/search-units", {
         communityName: community.name,
         city: community.city,
         state: community.state,
         unitTypes: community.unitTypes,
+        streetAddress: street,
+        availableBedrooms: community.availableBedrooms,
+        bedroomMix: community.bedroomMix,
       });
       const data = await res.json();
-      const pairings: SuggestedPairing[] = data.suggestedPairings || [];
+      const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
       const best = pairings.find((p) => !p.alreadyExists) || pairings[0];
       if (!best) {
         toast({ title: "No combo suggestions", description: "Could not determine a recommended pairing.", variant: "destructive" });
         return;
       }
-      const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state });
       const pricingArea = suggestPricingArea(community.city, community.state, community.name);
       const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", {
         items: [{
@@ -1051,17 +1080,20 @@ export default function AddCommunity() {
       const items: any[] = [];
       for (const community of selected) {
         try {
+          const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state });
           const res = await apiRequest("POST", "/api/community/search-units", {
             communityName: community.name,
             city: community.city,
             state: community.state,
             unitTypes: community.unitTypes,
+            streetAddress: street,
+            availableBedrooms: community.availableBedrooms,
+            bedroomMix: community.bedroomMix,
           });
           const data = await res.json();
-          const pairings: SuggestedPairing[] = data.suggestedPairings || [];
+          const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
           const best = pairings.find((p: any) => !p.alreadyExists) || pairings[0];
           if (!best) continue;
-          const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state });
           const pricingArea = suggestPricingArea(community.city, community.state, community.name);
           items.push({
             id: `bcomm_${Date.now().toString(36)}_${items.length}`,
@@ -2771,6 +2803,23 @@ export default function AddCommunity() {
                 <Building2 className="h-12 w-12 mx-auto mb-3 opacity-20" />
                 <p className="font-medium">No pairing data available</p>
                 <p className="text-sm mt-1">The algorithm couldn't find enough rate data for this community.</p>
+              </div>
+            )}
+
+            {!unitSearchLoading && selectedCommunity && !unitSearchResults && suggestedPairings.length === 0 && (
+              <div className="text-center py-12 text-muted-foreground">
+                <Building2 className="h-12 w-12 mx-auto mb-3 opacity-20" />
+                <p className="font-medium">Pairing analysis needs to run again</p>
+                <p className="text-sm mt-1 mb-4">This saved draft restored before unit combinations were generated.</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => handleSelectCommunity(selectedCommunity)}
+                  data-testid="button-retry-unit-pairing"
+                >
+                  <Search className="h-4 w-4 mr-2" />
+                  Retry pairing analysis
+                </Button>
               </div>
             )}
           </div>
