@@ -3566,9 +3566,28 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     {info?.id && <div className="glb-ch-meta">ID: {info.id}</div>}
                     {info?.status && <div className="glb-ch-meta">Status: {info.status}</div>}
                     {interactive && (
-                      <div className="glb-ch-meta" style={{ color: "#2563eb", fontWeight: 500, marginTop: 4 }}>
-                        ↗ View live listing
-                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openChannel();
+                        }}
+                        style={{
+                          marginTop: 8,
+                          width: "100%",
+                          fontSize: 12,
+                          padding: "4px 10px",
+                          borderRadius: 4,
+                          border: "1px solid #93c5fd",
+                          background: "#eff6ff",
+                          color: "#1d4ed8",
+                          cursor: "pointer",
+                          fontWeight: 500,
+                        }}
+                        data-testid={`btn-view-public-url-${ch}`}
+                      >
+                        ↗ View public URL
+                      </button>
                     )}
                     {isLive && !interactive && (
                       <div className="glb-ch-meta" style={{ color: "#9ca3af", fontSize: 10, marginTop: 4 }}>
@@ -3593,7 +3612,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         Account` state) because there's nothing to
                         publish — the operator needs to set up OAuth in
                         Guesty UI first. See AGENTS.md #29. */}
-                    {isConnected && (() => {
+                    {false && isConnected && (() => {
                       const publishKey = `${selectedId}:${ch}`;
                       const publishBusy = publishStateByListingChannel[publishKey] === "busy";
                       const buttonLabel = isLive
@@ -3667,7 +3686,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         is live on Airbnb (so the regulations form page exists).
                         Three states: already-success (✓), regulation pending (button),
                         or no regulations object yet (button — likely brand-new listing). */}
-                    {ch === "airbnb" && isLive && (() => {
+                    {false && ch === "airbnb" && isLive && (() => {
                       const compliance = info?.compliance;
                       const isComplianceDone = compliance?.status === "success";
                       const complianceBusy = complianceStateByListing[selectedId] === "busy";
@@ -3797,7 +3816,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         re-syncs to VRBO. Step 4 is the equivalent of
                         Airbnb's manual republish reminder being automated
                         for VRBO. See AGENTS.md #28. */}
-                    {ch === "vrbo" && isLive && (() => {
+                    {false && ch === "vrbo" && isLive && (() => {
                       // Persistent VRBO compliance state lives on the
                       // listing payload at channels.homeaway.{licenseNumber,
                       // taxId, parcelNumber}. getChannelStatus surfaces it
