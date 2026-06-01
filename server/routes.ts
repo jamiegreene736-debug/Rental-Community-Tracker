@@ -27040,6 +27040,14 @@ Return ONLY compact JSON with this exact shape:
 
     let listingUrl: string | undefined = url || undefined;
     let foundVia: "url" | "search" = "url";
+    const requestedBedrooms = bedrooms === "any"
+      ? null
+      : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
+        ? Math.round(Number(bedrooms))
+        : null;
+    const minimumBedrooms = Number.isFinite(Number(minBedrooms)) && Number(minBedrooms) > 0
+      ? Math.round(Number(minBedrooms))
+      : null;
 
     if (!listingUrl) {
       // Discovery path. Need at least the community name to search.
@@ -27068,14 +27076,6 @@ Return ONLY compact JSON with this exact shape:
         }
       };
       const skipSet = new Set((skipUrls ?? []).map((u) => listingKey(u)));
-      const requestedBedrooms = bedrooms === "any"
-        ? null
-        : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
-          ? Math.round(Number(bedrooms))
-          : null;
-      const minimumBedrooms = Number.isFinite(Number(minBedrooms)) && Number(minBedrooms) > 0
-        ? Math.round(Number(minBedrooms))
-        : null;
       const candidateLimit = Number.isFinite(Number(maxCandidates)) && Number(maxCandidates) > 0
         ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
         : null;
