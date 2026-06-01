@@ -151,6 +151,8 @@ export function UnitReplacementFlow({
         streetAddress,
         city,
         state,
+        propertyId,
+        targetUnitId: selectedUnit.id,
         requiredBedrooms: selectedUnit.bedrooms,
         skipUrls: [...skipUrls, ...nextExtra],
         expandedSearch: expanded,

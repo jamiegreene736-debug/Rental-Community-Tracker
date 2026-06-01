@@ -23616,6 +23616,146 @@ Return ONLY compact JSON with this exact shape:
     }
   };
 
+  const normalizeReplacementCommunityKey = (value: string | null | undefined): string => String(value ?? "")
+    .toLowerCase()
+    .replace(/&[#a-z0-9]+;/gi, " ")
+    .replace(/\b(?:resort|community|condominiums?|condos?|townhomes?|townhouses?|villas?|apartments?|at|the)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const replacementCommunityNamesMatch = (a: string | null | undefined, b: string | null | undefined): boolean => {
+    const na = normalizeReplacementCommunityKey(a);
+    const nb = normalizeReplacementCommunityKey(b);
+    if (!na || !nb) return false;
+    if (na === nb || na.includes(nb) || nb.includes(na)) return true;
+    const ta = na.split(" ").filter((token) => token.length > 2);
+    const tb = nb.split(" ").filter((token) => token.length > 2);
+    if (ta.length === 0 || tb.length === 0) return false;
+    const hits = ta.filter((token) => tb.some((other) =>
+      token === other ||
+      token.includes(other) ||
+      other.includes(token) ||
+      (token.length > 3 && other.length > 3 && (token.startsWith(other.slice(0, 4)) || other.startsWith(token.slice(0, 4)))),
+    )).length;
+    return hits / Math.min(ta.length, tb.length) >= 0.5;
+  };
+
+  type ReplacementExclusionSource = "draft" | "unit-swap" | "static-listing";
+  type SameCommunityReplacementExclusions = {
+    urlKeys: Set<string>;
+    unitClaims: Set<string>;
+    sources: Array<{ source: ReplacementExclusionSource; label: string; url?: string | null; unitClaim?: string | null }>;
+  };
+
+  const replacementUnitClaimsFrom = (unitNumber?: string | null, address?: string | null, url?: string | null): string[] => {
+    const extraTokens = [
+      extractUnitTokenFromText(String(url ?? "").replace(/[-_/]+/g, " ")),
+      extractUnitTokenFromText(String(address ?? "")),
+    ].filter((token): token is string => !!token);
+    return unitVerificationClaims(String(unitNumber ?? ""), String(address ?? ""), extraTokens)
+      .map((claim) => normalizeUnitClaim(claim).replace(/^0+(?=\d)/, ""))
+      .filter((claim) => claim && /\d/.test(claim));
+  };
+
+  const findReplacementBlockedUnitClaim = (
+    unitNumber: string | null | undefined,
+    address: string | null | undefined,
+    exclusions: SameCommunityReplacementExclusions,
+  ): string | null => {
+    for (const claim of replacementUnitClaimsFrom(unitNumber, address, null)) {
+      if (exclusions.unitClaims.has(claim)) return claim;
+    }
+    return null;
+  };
+
+  const loadSameCommunityReplacementExclusions = async (args: {
+    communityFolder?: string | null;
+    communityName?: string | null;
+    propertyId?: number | null;
+    targetUnitId?: string | null;
+  }): Promise<SameCommunityReplacementExclusions> => {
+    const safeFolder = String(args.communityFolder ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+    const communityName = String(args.communityName ?? "").trim();
+    const propertyId = Number(args.propertyId);
+    const targetUnitId = String(args.targetUnitId ?? "").trim();
+    const currentPropertyId = Number.isFinite(propertyId) && propertyId > 0 ? propertyId : null;
+    const out: SameCommunityReplacementExclusions = { urlKeys: new Set(), unitClaims: new Set(), sources: [] };
+
+    const addUrl = (url: unknown, source: ReplacementExclusionSource, label: string) => {
+      const key = unitSwapListingKey(typeof url === "string" ? url : "");
+      if (!key || out.urlKeys.has(key)) return;
+      out.urlKeys.add(key);
+      out.sources.push({ source, label, url: typeof url === "string" ? url : null });
+    };
+    const addClaims = (unitNumber: unknown, address: unknown, url: unknown, source: ReplacementExclusionSource, label: string) => {
+      for (const claim of replacementUnitClaimsFrom(
+        typeof unitNumber === "string" ? unitNumber : "",
+        typeof address === "string" ? address : "",
+        typeof url === "string" ? url : "",
+      )) {
+        if (out.unitClaims.has(claim)) continue;
+        out.unitClaims.add(claim);
+        out.sources.push({ source, label, unitClaim: claim });
+      }
+    };
+    const sameCommunity = (folder: unknown, name: unknown, candidatePropertyId?: number | null): boolean => {
+      const candidateFolder = String(folder ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+      if (safeFolder && candidateFolder && safeFolder === candidateFolder) return true;
+      const candidateName = String(name ?? PROPERTY_UNIT_CONFIGS[Number(candidatePropertyId ?? 0)]?.community ?? "").trim();
+      return replacementCommunityNamesMatch(candidateName, communityName);
+    };
+
+    try {
+      for (const draft of await storage.getCommunityDrafts()) {
+        if (!sameCommunity(null, draft.name)) continue;
+        const label = `draft #${draft.id} ${draft.name}`;
+        addUrl(draft.unit1Url, "draft", `${label} Unit A`);
+        addUrl(draft.unit2Url, "draft", `${label} Unit B`);
+        addClaims(null, draft.unit1Address, draft.unit1Url, "draft", `${label} Unit A`);
+        addClaims(null, draft.unit2Address, draft.unit2Url, "draft", `${label} Unit B`);
+      }
+    } catch (e: any) {
+      console.warn(`[find-unit] Could not load community drafts for same-community exclusions: ${e?.message ?? e}`);
+    }
+
+    try {
+      const latestBySlot = new Map<string, Awaited<ReturnType<typeof storage.getAllUnitSwaps>>[number]>();
+      for (const swap of await storage.getAllUnitSwaps()) {
+        const slotKey = `${swap.propertyId}:${swap.oldUnitId}`;
+        if (!latestBySlot.has(slotKey)) latestBySlot.set(slotKey, swap);
+      }
+      for (const swap of latestBySlot.values()) {
+        if (currentPropertyId === swap.propertyId && targetUnitId && swap.oldUnitId === targetUnitId) continue;
+        if (!sameCommunity(swap.communityFolder, null, swap.propertyId)) continue;
+        const label = `property ${swap.propertyId} ${swap.oldUnitId}`;
+        addUrl(swap.newSourceUrl, "unit-swap", label);
+        addClaims(swap.newUnitLabel, swap.newAddress, swap.newSourceUrl, "unit-swap", label);
+      }
+    } catch (e: any) {
+      console.warn(`[find-unit] Could not load unit swaps for same-community exclusions: ${e?.message ?? e}`);
+    }
+
+    for (const [pidRaw, config] of Object.entries(PROPERTY_UNIT_CONFIGS)) {
+      const pid = Number(pidRaw);
+      if (currentPropertyId === pid) continue;
+      if (!sameCommunity(null, config.community, pid)) continue;
+      for (const unit of config.units) {
+        addClaims(unit.unitLabel || unit.unitId, null, null, "static-listing", `property ${pid} ${unit.unitId}`);
+      }
+    }
+
+    for (const builder of unitBuilderData) {
+      if (currentPropertyId === builder.propertyId) continue;
+      if (!sameCommunity(builder.communityPhotoFolder, builder.complexName, builder.propertyId)) continue;
+      for (const unit of builder.units) {
+        addClaims(unit.unitNumber, null, null, "static-listing", `property ${builder.propertyId} ${unit.id}`);
+      }
+    }
+
+    return out;
+  };
+
   const latestUnitSwaps = <T extends { oldUnitId: string; createdAt?: Date | string | null }>(swaps: T[]): T[] => {
     const latestByUnit = new Map<string, T>();
     for (const swap of swaps) {
@@ -23656,6 +23796,8 @@ Return ONLY compact JSON with this exact shape:
       streetAddress,
       city: bodyCity,
       state: bodyState,
+      propertyId: bodyPropertyId,
+      targetUnitId,
       expandedSearch: requestedExpandedSearch = false,
     } = req.body as {
       communityFolder: string;
@@ -23668,6 +23810,8 @@ Return ONLY compact JSON with this exact shape:
       streetAddress?: string;
       city?: string;
       state?: string;
+      propertyId?: number;
+      targetUnitId?: string;
       expandedSearch?: boolean;
     };
     const strict = requestedStrict === true && !!cleanChannel;
@@ -23735,6 +23879,16 @@ Return ONLY compact JSON with this exact shape:
     const primaryCommunityAddress = knownCommunityPrimaryAddress();
     const communityAddress = primaryCommunityAddress || rawCommunityAddress;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}, expanded=${expandedSearch}`);
+    const sameCommunityExclusions = await loadSameCommunityReplacementExclusions({
+      communityFolder: safeFolder,
+      communityName,
+      propertyId: Number(bodyPropertyId),
+      targetUnitId,
+    });
+    console.error(
+      `[find-unit] Excluding ${sameCommunityExclusions.urlKeys.size} same-community URL(s) ` +
+      `and ${sameCommunityExclusions.unitClaims.size} unit claim(s) already used in existing listings`,
+    );
     const routeStartedAt = Date.now();
     const ROUTE_BUDGET_MS = expandedSearch ? 300_000 : 210_000;
     const APIFY_SUPPLEMENT_BUDGET_MS = expandedSearch ? 100_000 : 75_000;
@@ -23802,7 +23956,10 @@ Return ONLY compact JSON with this exact shape:
     }
     const candidates: Candidate[] = [];
     const candidateUrlSet = new Set<string>();
-    const skipUrlSet = new Set((skipUrls ?? []).map((u) => unitSwapListingKey(String(u))).filter(Boolean));
+    const skipUrlSet = new Set([
+      ...(skipUrls ?? []).map((u) => unitSwapListingKey(String(u))).filter(Boolean),
+      ...Array.from(sameCommunityExclusions.urlKeys),
+    ]);
     const harvestRootCounts = new Map<string, number>();
     const parsedRequiredBedrooms = Number(requiredBedrooms);
     const requiredBedroomCount = Number.isFinite(parsedRequiredBedrooms) && parsedRequiredBedrooms > 0
@@ -24497,7 +24654,7 @@ Return ONLY compact JSON with this exact shape:
       source: CandidateSource;
       address: string;
       unit: string;
-      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
+      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-internal-duplicate" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
       reason: string;
       platformCheck?: PlatformCheck;
     };
@@ -24521,6 +24678,16 @@ Return ONLY compact JSON with this exact shape:
       }
       try {
         let { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
+        const blockedUnitClaim = findReplacementBlockedUnitClaim(unitNumber, address, sameCommunityExclusions);
+        if (blockedUnitClaim) {
+          console.error(`[find-unit] [${source}] ${sourceUrl} unit ${blockedUnitClaim} is already used by another ${communityName} listing — skipping`);
+          attempts.push({
+            sourceUrl, source, address, unit: unitNumber || "?",
+            verdict: "skipped-internal-duplicate",
+            reason: `Unit ${blockedUnitClaim} is already used by an existing ${communityName} listing.`,
+          });
+          continue;
+        }
         if (
           requiredBedroomCount
           && typeof candidate.bedroomHint === "number"
@@ -24621,6 +24788,17 @@ Return ONLY compact JSON with this exact shape:
               address = alternate.address;
               unitNumber = alternate.unitNumber;
               thumbnail = "";
+              const alternateBlockedClaim = findReplacementBlockedUnitClaim(unitNumber, address, sameCommunityExclusions);
+              if (alternateBlockedClaim) {
+                console.error(`[find-unit] [${source}] equivalent ${sourceUrl} unit ${alternateBlockedClaim} is already used by another ${communityName} listing — skipping`);
+                attempts.push({
+                  sourceUrl, source, address, unit: unitNumber || "?",
+                  verdict: "skipped-internal-duplicate",
+                  reason: `Unit ${alternateBlockedClaim} is already used by an existing ${communityName} listing.`,
+                  platformCheck,
+                });
+                continue;
+              }
               scrapedPhotoUrls = alternate.photos;
               candidateFacts = alternate.facts;
               platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
@@ -24907,6 +25085,25 @@ Return ONLY compact JSON with this exact shape:
       return res.status(409).json({
         error: "This replacement listing is already assigned to another unit. Choose a different replacement so Unit A and Unit B keep separate photo sets.",
         duplicateOldUnitId: duplicateSource.oldUnitId,
+      });
+    }
+    const communityName = PROPERTY_UNIT_CONFIGS[parsed.data.propertyId]?.community ?? COMMUNITY_FOLDER_TO_NAME[parsed.data.communityFolder] ?? "";
+    const sameCommunityExclusions = await loadSameCommunityReplacementExclusions({
+      communityFolder: parsed.data.communityFolder,
+      communityName,
+      propertyId: parsed.data.propertyId,
+      targetUnitId: parsed.data.oldUnitId,
+    });
+    if (newSourceKey && sameCommunityExclusions.urlKeys.has(newSourceKey)) {
+      return res.status(409).json({
+        error: "This replacement listing is already used by another listing in the same community. Choose a different replacement so dashboard listings do not reuse the same unit/photos.",
+      });
+    }
+    const duplicateUnitClaim = findReplacementBlockedUnitClaim(parsed.data.newUnitLabel, parsed.data.newAddress, sameCommunityExclusions);
+    if (duplicateUnitClaim) {
+      return res.status(409).json({
+        error: `Unit ${duplicateUnitClaim} is already used by another listing in this community. Choose a different replacement so dashboard listings do not reuse the same unit/photos.`,
+        duplicateUnitClaim,
       });
     }
     const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data);
