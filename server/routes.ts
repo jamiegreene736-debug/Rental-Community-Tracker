@@ -25354,7 +25354,7 @@ Return ONLY compact JSON with this exact shape:
     skipUrls: string[] = [],
     bedroomOverride?: number | "any",
   ) => unit?.url
-    ? { url: unit.url }
+    ? { url: unit.url, bedrooms: unit.bedrooms ?? undefined }
     : {
         communityName: item.communityName,
         streetAddress: unit?.address || item.streetAddress || undefined,
@@ -27267,6 +27267,17 @@ Return ONLY compact JSON with this exact shape:
       // an empty facts object — no behavior change for combo).
       const facts: ListingFacts = {};
       const photos = await scrapeListingPhotos(listingUrl, undefined, facts);
+      const scrapedBR = facts.bedrooms ?? null;
+      const expectedBedrooms = requestedBedrooms ?? minimumBedrooms;
+      if (expectedBedrooms && scrapedBR !== null && scrapedBR !== expectedBedrooms) {
+        return res.json({
+          photos: [],
+          sourceUrl: null,
+          foundVia,
+          facts,
+          note: `Listing has ${scrapedBR}BR, but ${expectedBedrooms}BR was requested.`,
+        });
+      }
       res.json({
         photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
         sourceUrl: listingUrl,
