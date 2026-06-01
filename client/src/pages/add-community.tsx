@@ -16,6 +16,7 @@ import {
   Search,
   Loader2,
   CheckCircle2,
+  X,
   XCircle,
   Building2,
   BedDouble,
@@ -2326,9 +2327,8 @@ export default function AddCommunity() {
         {bulkComboOpen && (
           <div
             className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-            onClick={() => {
-              const terminal = !bulkComboJob || ["completed", "failed", "cancelled"].includes(bulkComboJob.status);
-              if (terminal) setBulkComboOpen(false);
+            onClick={(event) => {
+              if (event.target === event.currentTarget) setBulkComboOpen(false);
             }}
           >
             <div
@@ -2358,9 +2358,17 @@ export default function AddCommunity() {
                     variant="outline"
                     size="sm"
                     onClick={() => setBulkComboOpen(false)}
-                    disabled={!!bulkComboJob && !["completed", "failed", "cancelled"].includes(bulkComboJob.status)}
                   >
                     Close
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setBulkComboOpen(false)}
+                    aria-label="Close bulk combo listing queue"
+                    title="Close"
+                  >
+                    <X className="h-4 w-4" />
                   </Button>
                 </div>
               </div>

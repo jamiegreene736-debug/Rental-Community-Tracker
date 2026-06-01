@@ -25127,7 +25127,7 @@ Return ONLY compact JSON with this exact shape:
   };
 
   const activeComboPhotoFetchJobIds = new Set<string>();
-  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 90_000;
+  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 180_000;
   const COMBO_PHOTO_FETCH_HEARTBEAT_MS = 15_000;
   const COMBO_PHOTO_FETCH_STALE_HEARTBEAT_MS = 2 * 60 * 1000;
   const COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS = 12_000;
@@ -25402,7 +25402,7 @@ Return ONLY compact JSON with this exact shape:
         data = await fetchComboPhotoJson(
           `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
           buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
-          { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 35_000 },
+          { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 75_000 },
         );
       } catch (error: any) {
         if (attempt.relaxed || job.cancelRequested || error?.cancelled) throw error;
@@ -26064,7 +26064,7 @@ Return ONLY compact JSON with this exact shape:
   const BULK_COMBO_LISTING_STALE_MS = 5 * 60 * 1000;
   const BULK_COMBO_LISTING_RETRY_BACKOFF_MS = [15_000, 45_000];
   const BULK_COMBO_LISTING_STEP_TIMEOUTS_MS: Record<string, number> = {
-    photos: 4 * 60 * 1000,
+    photos: 7 * 60 * 1000,
     copy: 90_000,
     save: 60_000,
     persist: 90_000,
@@ -26720,8 +26720,15 @@ Return ONLY compact JSON with this exact shape:
     const items: BulkComboListingItem[] = inputs.slice(0, 12).map((input, index) => {
       const communityName = input.community?.name || "Community";
       const label = `${communityName} ${input.pairing?.unit1Beds ?? "?"}BR + ${input.pairing?.unit2Beds ?? "?"}BR`;
+      const streetAddress = String(input.streetAddress || inferCommunityStreetAddress({
+        communityName,
+        city: input.community?.city,
+        state: input.community?.state,
+        unitAddresses: [],
+      }) || "").trim();
       return {
         ...input,
+        streetAddress,
         id: input.id || `item_${index + 1}`,
         label,
         status: "queued",
