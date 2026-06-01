@@ -2,10 +2,17 @@ import { Component, useState, useEffect, useCallback, useMemo, useRef, type Reac
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { guestyService } from "@/services/guestyService";
-import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry } from "@/services/guestyService";
+import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry, GuestyListingSummary } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
+import {
+  loadBeddingConfig as loadBuilderBeddingConfig,
+  buildGuestyListingRooms as buildBeddingListingRooms,
+  totalBedrooms as totalBeddingBedrooms,
+  totalBathrooms as totalBeddingBathrooms,
+  totalSleeps as totalBeddingSleeps,
+} from "@/data/bedding-config";
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
 import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
@@ -66,7 +73,10 @@ const CSS = `
 
   /* Selector row */
   .glb-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:24px; }
-  .glb-sel { background:#fff; border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:8px; font-size:13px; flex:1; min-width:200px; max-width:420px; cursor:pointer; outline:none; transition:border-color .2s; }
+  .glb-listing-bar { position:sticky; top:72px; z-index:30; margin:0 0 24px; padding:10px 0 12px; background:rgba(255,255,255,.96); border-bottom:1px solid var(--border); backdrop-filter:blur(8px); }
+  .glb-listing-bar .glb-section-label { margin-bottom:8px; }
+  .glb-listing-row { margin-bottom:0; }
+  .glb-sel { background:#fff; border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:8px; font-size:13px; flex:1; min-width:260px; max-width:720px; cursor:pointer; outline:none; transition:border-color .2s; }
   .glb-sel:focus { border-color:var(--border-focus); box-shadow:0 0 0 3px rgba(0,0,0,.05); }
 
   /* Buttons */
@@ -98,6 +108,12 @@ const CSS = `
 
   /* Data panel */
   .glb-panel { background:#fff; border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:20px; }
+  .glb-data-push-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; padding:10px 12px; background:var(--bg-card); border:1px solid var(--border); border-radius:10px; }
+  .glb-data-push-meta { display:flex; gap:8px; flex-wrap:wrap; flex:1; min-width:260px; }
+  .glb-data-push-item { display:flex; align-items:center; gap:6px; padding:5px 8px; background:#fff; border:1px solid var(--border); border-radius:8px; font-size:11px; color:var(--muted); }
+  .glb-data-push-item strong { color:var(--text); font-weight:600; }
+  .glb-data-push-item.success { border-color:var(--green-border); background:var(--green-bg); color:#166534; }
+  .glb-data-push-item.error { border-color:var(--red-border); background:var(--red-bg); color:#991b1b; }
   .glb-tabs { display:flex; border-bottom:1px solid var(--border); overflow-x:auto; scrollbar-width:none; background:var(--bg-card); }
   .glb-tabs::-webkit-scrollbar { display:none; }
   .glb-tab { padding:11px 18px; font-size:12px; font-weight:500; cursor:pointer; color:var(--muted); border-bottom:2px solid transparent; transition:all .15s; white-space:nowrap; background:none; border-top:none; border-left:none; border-right:none; letter-spacing:.2px; text-transform:capitalize; margin-bottom:-1px; }
@@ -166,8 +182,11 @@ const CSS = `
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
-type GuestyListing = { _id?: string; id?: string; nickname?: string; title?: string };
+type GuestyListing = GuestyListingSummary;
 type LogEntry = BuildStepEntry & { icon: string };
+type DataPushRow = "descriptions" | "bedding" | "amenities";
+type DataPushStatus = "success" | "error";
+type DataPushLog = Partial<Record<DataPushRow, { pushedAt: string; status: DataPushStatus; message: string }>>;
 type ComplianceLookupResult = {
   value: string;
   confidence: string;
@@ -266,6 +285,39 @@ function normalizeListingName(value: unknown): string {
 
 function guestyListingId(listing: GuestyListing | null | undefined): string {
   return String(listing?._id ?? listing?.id ?? "").trim();
+}
+
+function guestyListingAddress(listing: GuestyListing | null | undefined): string {
+  const address = listing?.address;
+  if (!address) return "";
+  if (typeof address === "string") return address.trim();
+  return [
+    address.full,
+    [address.city, address.state].filter(Boolean).join(", "),
+    address.zipcode,
+  ].find((part) => String(part ?? "").trim())?.trim() ?? "";
+}
+
+function guestyListingOptionLabel(listing: GuestyListing): string {
+  const name = listing.nickname || listing.title || guestyListingId(listing);
+  const address = guestyListingAddress(listing);
+  return address ? `${name} - ${address}` : name;
+}
+
+function dataPushStorageKey(listingId: string, propertyId?: number) {
+  return `nexstay_data_push_${listingId}_${propertyId ?? "unknown"}`;
+}
+
+function formatDataPushTime(value?: string) {
+  if (!value) return "Never pushed";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Never pushed";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }
 
 type GuestyMonthlyRate = {
@@ -574,8 +626,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const label = mapped?.propertyId === propertyId
       ? propertyData?.nickname || propertyData?.title || propertyData?.descriptions?.title || selectedId
       : selectedId;
-    return [{ _id: selectedId, nickname: label }, ...listings];
-  }, [listings, propertyMap, propertyData?.descriptions?.title, propertyData?.nickname, propertyData?.title, propertyId, selectedId]);
+    return [{ _id: selectedId, nickname: label, address: propertyData?.address }, ...listings];
+  }, [listings, propertyMap, propertyData?.address, propertyData?.descriptions?.title, propertyData?.nickname, propertyData?.title, propertyId, selectedId]);
   // Same idea, separate state for VRBO so the user can submit Airbnb and
   // VRBO compliance back-to-back without one button's busy spinner
   // blocking the other. Server-side, the VRBO push hits Guesty's UI via
@@ -598,6 +650,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [editableTitle, setEditableTitle] = useState("");
   const [descPushState, setDescPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [descPushError, setDescPushError] = useState<string | null>(null);
+  const [dataPushBusy, setDataPushBusy] = useState(false);
+  const [dataPushLog, setDataPushLog] = useState<DataPushLog>({});
   const [amenityPushState, setAmenityPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [amenityPushResult, setAmenityPushResult] = useState<{
     sent: number;
@@ -758,6 +812,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       },
     };
   }, [propertyData, complianceOverrides, editableTitle]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setDataPushLog({});
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(dataPushStorageKey(selectedId, propertyId));
+      setDataPushLog(raw ? JSON.parse(raw) as DataPushLog : {});
+    } catch {
+      setDataPushLog({});
+    }
+  }, [selectedId, propertyId]);
+
+  const recordDataPush = useCallback((row: DataPushRow, status: DataPushStatus, message: string) => {
+    if (!selectedId) return;
+    const entry = { pushedAt: new Date().toISOString(), status, message };
+    setDataPushLog((prev) => {
+      const next = { ...prev, [row]: entry };
+      try {
+        localStorage.setItem(dataPushStorageKey(selectedId, propertyId), JSON.stringify(next));
+      } catch {
+        // Local push history is advisory; the Guesty push itself already completed.
+      }
+      return next;
+    });
+  }, [selectedId, propertyId]);
 
   const complianceProfile = useMemo(() => {
     return resolveLicenseComplianceProfile({
@@ -2248,96 +2329,129 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     onUpdateComplete?.({ listingId: result.listingId });
   }, [effectivePropertyData, selectedId, building, onUpdateComplete]);
 
-  const pushDescriptions = useCallback(async () => {
-    if (!effectivePropertyData?.descriptions || !selectedId || descPushState === "pushing") return;
+  const pushDescriptionsToGuesty = useCallback(async (showToast = true) => {
+    if (!effectivePropertyData?.descriptions || !selectedId) {
+      throw new Error("Select a Guesty listing and make sure descriptions are available.");
+    }
     setDescPushState("pushing");
     setDescPushError(null);
-    try {
-      const res = await fetch("/api/builder/push-descriptions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ listingId: selectedId, descriptions: effectivePropertyData.descriptions }),
-      });
-      const data = await res.json() as { success: boolean; error?: string; returnedDescriptions?: Record<string, string> | null };
-      if (!res.ok || !data.success) {
-        setDescPushState("error");
-        setDescPushError(data.error ?? `HTTP ${res.status}`);
-      } else {
-        setDescPushState("success");
+    const res = await fetch("/api/builder/push-descriptions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ listingId: selectedId, descriptions: effectivePropertyData.descriptions }),
+    });
+    const data = await res.json() as { success: boolean; error?: string; returnedDescriptions?: Record<string, string> | null };
+    if (!res.ok || !data.success) {
+      throw new Error(data.error ?? `HTTP ${res.status}`);
+    }
+    setDescPushState("success");
+    recordDataPush("descriptions", "success", "Descriptions updated");
+    if (showToast) {
         toast({ title: "Descriptions pushed to Guesty", description: "Summary, Space, Neighborhood, and other description fields updated." });
-      }
+    }
+    return data;
+  }, [effectivePropertyData, selectedId, recordDataPush, toast]);
+
+  const pushDescriptions = useCallback(async () => {
+    if (descPushState === "pushing") return;
+    try {
+      await pushDescriptionsToGuesty(true);
     } catch (e) {
       setDescPushState("error");
       setDescPushError((e as Error).message);
+      recordDataPush("descriptions", "error", (e as Error).message);
     }
-  }, [effectivePropertyData, selectedId, descPushState, toast]);
+  }, [descPushState, pushDescriptionsToGuesty, recordDataPush]);
 
   const [syncingDetails, setSyncingDetails] = useState(false);
+  const syncBeddingAndSqftToGuesty = useCallback(async (showToast = true) => {
+    if (!selectedId) throw new Error("Select a Guesty listing first.");
+    if (typeof propertyId !== "number") throw new Error("Property data is missing a local property id.");
+
+    const propData = getUnitBuilderByPropertyId(propertyId);
+    const beddingConfig = loadBuilderBeddingConfig(propertyId);
+    const beddingRooms = buildBeddingListingRooms(beddingConfig);
+    const rooms = beddingRooms.length > 0 ? beddingRooms : buildListingRooms(propertyId);
+    const sqft = propData
+      ? propData.units.reduce((s, u) => s + parseSqft(u.sqft), 0)
+      : effectivePropertyData?.areaSquareFeet ?? 0;
+    const beds = totalBeddingBedrooms(beddingConfig) || propData?.units.reduce((s, u) => s + u.bedrooms, 0) || 0;
+    const baths = totalBeddingBathrooms(beddingConfig) || propData?.units.reduce((s, u) => s + parseFloat(u.bathrooms), 0) || 0;
+    const sleeps = totalBeddingSleeps(beddingConfig);
+
+    await guestyService.updateListingDetails(selectedId, {
+      areaSquareFeet: sqft || undefined,
+      bedrooms: beds || undefined,
+      bathrooms: baths || undefined,
+      listingRooms: rooms.length > 0 ? rooms : undefined,
+    });
+
+    const message = `Bedding/sqft updated: ${beds || "?"} BR, ${rooms.length} rooms, ${sqft ? `${sqft.toLocaleString()} sqft` : "sqft unavailable"}`;
+    recordDataPush("bedding", "success", message);
+    if (showToast) {
+      toast({
+        title: "Bedding & sqft pushed to Guesty",
+        description: `${rooms.length} rooms, ${sqft.toLocaleString()} sqft, sleeps ${sleeps || "n/a"}.`,
+      });
+    }
+    return { rooms, sqft, beds, baths, sleeps };
+  }, [selectedId, propertyId, effectivePropertyData?.areaSquareFeet, recordDataPush, toast]);
+
   const handleSyncDetails = useCallback(async () => {
-    if (!selectedId || syncingDetails || building) return;
+    if (syncingDetails || building) return;
     setSyncingDetails(true);
     try {
-      const propData = getUnitBuilderByPropertyId(propertyId);
-      const rooms = buildListingRooms(propertyId);
-      const sqft = propData ? propData.units.reduce((s, u) => s + parseSqft(u.sqft), 0) : 0;
-      const beds = propData ? propData.units.reduce((s, u) => s + u.bedrooms, 0) : 0;
-      const baths = propData ? propData.units.reduce((s, u) => s + parseFloat(u.bathrooms), 0) : 0;
-      await guestyService.updateListingDetails(selectedId, {
-        areaSquareFeet: sqft || undefined,
-        bedrooms: beds || undefined,
-        bathrooms: baths || undefined,
-        listingRooms: rooms.length > 0 ? rooms : undefined,
-      });
-      toast({ title: "Rooms & Details Synced", description: `Pushed ${rooms.length} rooms, ${sqft.toLocaleString()} sqft to Guesty.` });
+      await syncBeddingAndSqftToGuesty(true);
     } catch (e) {
+      recordDataPush("bedding", "error", (e as Error).message);
       toast({ title: "Sync Failed", description: (e as Error).message, variant: "destructive" });
     } finally {
       setSyncingDetails(false);
     }
-  }, [selectedId, propertyId, syncingDetails, building, toast]);
+  }, [syncingDetails, building, syncBeddingAndSqftToGuesty, recordDataPush, toast]);
 
-  const pushAmenities = useCallback(async () => {
-    if (!selectedId || amenityPushState === "pushing") return;
+  const pushAmenitiesToGuesty = useCallback(async (showToast = true) => {
+    if (!selectedId) throw new Error("Select a Guesty listing first.");
     setAmenityPushState("pushing");
     setAmenityPushResult(null);
-    try {
-      // Translate our profile keys → Guesty canonical IDs where we have a mapping
-      const amenityPayload = [...pendingAmenities].map(k => keyToGuestyId[k] ?? k);
-      const res = await fetch("/api/builder/push-amenities", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ listingId: selectedId, amenities: amenityPayload }),
-      });
-      const data = await res.json() as {
-        success: boolean;
-        sent?: number;
-        saved?: number;
-        savedAmenities?: string[];
-        otherAmenities?: string[];
-        missing?: string[];
-        rejected?: string[];
-        suggestions?: { name: string; suggestion: string | null; alternatives?: string[] }[];
-        guestyCatalogSize?: number;
-        error?: string;
-      };
-      if (!res.ok || !data.success) {
-        setAmenityPushState("error");
-        toast({ title: "Amenities push failed", description: data.error ?? `HTTP ${res.status}`, variant: "destructive" });
-      } else {
-        setAmenityPushState("success");
-        setAmenityPushResult({
-          sent: data.sent ?? 0,
-          saved: data.saved ?? 0,
-          missing: data.missing ?? [],
-          rejected: data.rejected ?? [],
-          suggestions: data.suggestions ?? [],
-          guestyCatalogSize: data.guestyCatalogSize,
-        });
-        // Refresh the diff panel with what Guesty actually confirmed post-push
-        if (Array.isArray(data.savedAmenities) || Array.isArray(data.otherAmenities)) {
-          const merged = [...(data.savedAmenities ?? []), ...(data.otherAmenities ?? [])];
-          setGuestyLiveAmenities(guestyNamesToProfileKeys(merged));
-        }
+    // Translate our profile keys -> Guesty canonical IDs where we have a mapping.
+    const amenityPayload = Array.from(pendingAmenities).map(k => keyToGuestyId[k] ?? k);
+    const res = await fetch("/api/builder/push-amenities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ listingId: selectedId, amenities: amenityPayload }),
+    });
+    const data = await res.json() as {
+      success: boolean;
+      sent?: number;
+      saved?: number;
+      savedAmenities?: string[];
+      otherAmenities?: string[];
+      missing?: string[];
+      rejected?: string[];
+      suggestions?: { name: string; suggestion: string | null; alternatives?: string[] }[];
+      guestyCatalogSize?: number;
+      error?: string;
+    };
+    if (!res.ok || !data.success) {
+      throw new Error(data.error ?? `HTTP ${res.status}`);
+    }
+
+    setAmenityPushState("success");
+    setAmenityPushResult({
+      sent: data.sent ?? 0,
+      saved: data.saved ?? 0,
+      missing: data.missing ?? [],
+      rejected: data.rejected ?? [],
+      suggestions: data.suggestions ?? [],
+      guestyCatalogSize: data.guestyCatalogSize,
+    });
+    if (Array.isArray(data.savedAmenities) || Array.isArray(data.otherAmenities)) {
+      const merged = [...(data.savedAmenities ?? []), ...(data.otherAmenities ?? [])];
+      setGuestyLiveAmenities(guestyNamesToProfileKeys(merged));
+    }
+    recordDataPush("amenities", "success", `${data.saved ?? 0}/${data.sent ?? amenityPayload.length} amenities confirmed`);
+    if (showToast) {
         toast({
           title: `Amenities pushed to Guesty`,
           description: data.missing && data.missing.length > 0
@@ -2345,12 +2459,80 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             : `${data.saved} amenities confirmed in Guesty's Popular Amenities panel.`,
           duration: 8000,
         });
-      }
+    }
+    return data;
+  }, [selectedId, pendingAmenities, toast, keyToGuestyId, guestyNamesToProfileKeys, recordDataPush]);
+
+  const pushAmenities = useCallback(async () => {
+    if (amenityPushState === "pushing") return;
+    try {
+      await pushAmenitiesToGuesty(true);
     } catch (e) {
       setAmenityPushState("error");
+      recordDataPush("amenities", "error", (e as Error).message);
       toast({ title: "Amenities push failed", description: (e as Error).message, variant: "destructive" });
     }
-  }, [selectedId, pendingAmenities, amenityPushState, toast, keyToGuestyId, guestyNamesToProfileKeys]);
+  }, [amenityPushState, pushAmenitiesToGuesty, recordDataPush, toast]);
+
+  const handlePushPropertyDataPreview = useCallback(async () => {
+    if (!selectedId || dataPushBusy || building || conn !== "connected") return;
+    setDataPushBusy(true);
+    const failures: string[] = [];
+
+    try {
+      await pushDescriptionsToGuesty(false);
+    } catch (e) {
+      const message = (e as Error).message;
+      failures.push(`Descriptions: ${message}`);
+      setDescPushState("error");
+      setDescPushError(message);
+      recordDataPush("descriptions", "error", message);
+    }
+
+    try {
+      await syncBeddingAndSqftToGuesty(false);
+    } catch (e) {
+      const message = (e as Error).message;
+      failures.push(`Bedding: ${message}`);
+      recordDataPush("bedding", "error", message);
+    }
+
+    try {
+      await pushAmenitiesToGuesty(false);
+    } catch (e) {
+      const message = (e as Error).message;
+      failures.push(`Amenities: ${message}`);
+      setAmenityPushState("error");
+      recordDataPush("amenities", "error", message);
+    }
+
+    setDataPushBusy(false);
+    if (failures.length > 0) {
+      toast({
+        title: "Some Guesty pushes failed",
+        description: failures.join(" | "),
+        variant: "destructive",
+        duration: 9000,
+      });
+      return;
+    }
+
+    toast({
+      title: "Property data pushed to Guesty",
+      description: "Descriptions, bedding/sqft, and amenities were updated.",
+      duration: 7000,
+    });
+  }, [
+    selectedId,
+    dataPushBusy,
+    building,
+    conn,
+    pushDescriptionsToGuesty,
+    syncBeddingAndSqftToGuesty,
+    pushAmenitiesToGuesty,
+    recordDataPush,
+    toast,
+  ]);
 
   const pillLabel = conn === "checking" ? "Checking connection…" : conn === "connected" ? "Guesty Connected" : conn === "rate-limited" ? "Rate Limited — retry later" : "Guesty Disconnected";
   const photos = propertyData?.photos || [];
@@ -3320,92 +3502,52 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           </button>
         </div>
 
-        {/* ── Selector + Actions ────────────────────────────────── */}
-        <div className="glb-section-label">Existing Guesty Listings</div>
-        <div className="glb-row">
-          <select
-            className="glb-sel"
-            value={selectedId}
-            onChange={(e) => {
-              const newId = e.target.value;
-              setGuestyLiveAmenities(null);
-              // If the picked listing maps to a property that isn't the
-              // one currently in the URL, navigate there — otherwise the
-              // dropdown only retargets the push button while the
-              // property-keyed tabs (pricing schedule, bedding, photos)
-              // keep showing the previous property's data, which is
-              // exactly the bug the operator hit when switching from
-              // Caribe Cove to a Hawaii listing. The auto-select effect
-              // above will set selectedId on the new page.
-              if (newId) {
-                const mapped = propertyMap.find((m) => m.guestyListingId === newId);
-                if (mapped && mapped.propertyId !== propertyId) {
-                  navigate(`/builder/${mapped.propertyId}`);
-                  return;
+        {/* ── Selector ──────────────────────────────────────────── */}
+        <div className="glb-listing-bar">
+          <div className="glb-section-label">Existing Guesty Listings</div>
+          <div className="glb-row glb-listing-row">
+            <select
+              className="glb-sel"
+              value={selectedId}
+              onChange={(e) => {
+                const newId = e.target.value;
+                setGuestyLiveAmenities(null);
+                // If the picked listing maps to a property that isn't the
+                // one currently in the URL, navigate there — otherwise the
+                // dropdown only retargets the push button while the
+                // property-keyed tabs (pricing schedule, bedding, photos)
+                // keep showing the previous property's data, which is
+                // exactly the bug the operator hit when switching from
+                // Caribe Cove to a Hawaii listing. The auto-select effect
+                // above will set selectedId on the new page.
+                if (newId) {
+                  const mapped = propertyMap.find((m) => m.guestyListingId === newId);
+                  if (mapped && mapped.propertyId !== propertyId) {
+                    navigate(`/builder/${mapped.propertyId}`);
+                    return;
+                  }
                 }
-              }
-              setSelectedId(newId);
-              if (newId && propertyId < 0) {
-                rememberPropertyMap(propertyId, newId);
-                fetch("/api/guesty-property-map", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ propertyId, guestyListingId: newId }),
-                }).catch(() => { /* non-fatal; selection still works for this page */ });
-              }
-            }}
-            data-testid="select-guesty-listing"
-            disabled={conn !== "connected"}
-          >
-            <option value="">— Select an existing listing to view or update —</option>
-            {listingOptions.map((l) => {
-              const id = guestyListingId(l);
-              if (!id) return null;
-              return <option key={id} value={id}>{l.nickname || l.title || id}</option>;
-            })}
-          </select>
-
-          {selectedId && propertyData && (
-            <button className="glb-btn glb-btn-secondary" onClick={handleUpdate} disabled={building || conn !== "connected"} data-testid="btn-push-updates">
-              {building ? "Pushing…" : "↑ Push Updates"}
-            </button>
-          )}
-
-          {selectedId && (
-            <button
-              className="glb-btn glb-btn-secondary"
-              onClick={handleSyncDetails}
-              disabled={syncingDetails || building || conn !== "connected"}
-              data-testid="btn-sync-rooms-details"
-              title="Push bedroom count, square footage, and room/bed configuration to Guesty"
+                setSelectedId(newId);
+                if (newId && typeof propertyId === "number" && propertyId < 0) {
+                  rememberPropertyMap(propertyId, newId);
+                  fetch("/api/guesty-property-map", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ propertyId, guestyListingId: newId }),
+                  }).catch(() => { /* non-fatal; selection still works for this page */ });
+                }
+              }}
+              data-testid="select-guesty-listing"
+              disabled={conn !== "connected"}
             >
-              {syncingDetails ? "Syncing…" : "🛏 Sync Rooms & sqft"}
-            </button>
-          )}
-
-          {selectedId && (
-            channelStatus?.isListed === false ? (
-              <button
-                className="glb-btn glb-btn-secondary"
-                onClick={handleListOnChannels}
-                disabled={!!listingStateBusy || building || conn !== "connected"}
-                data-testid="btn-list-on-channels"
-                title="Set Guesty isListed=true, then verify live channel status"
-              >
-                {listingStateBusy === "list" ? "Verifying…" : "↑ List / Mark Bookable"}
-              </button>
-            ) : (
-              <button
-                className="glb-btn glb-btn-danger"
-                onClick={handleUnlistFromChannels}
-                disabled={!!listingStateBusy || building || conn !== "connected"}
-                data-testid="btn-unlist"
-                title="Set Guesty isListed=false, then verify listing status"
-              >
-                {listingStateBusy === "unlist" ? "Verifying…" : "Unlist"}
-              </button>
-            )
-          )}
+              <option value="">— Select an existing listing to view or update —</option>
+              {listingOptions.map((l) => {
+                const id = guestyListingId(l);
+                if (!id) return null;
+                return <option key={id} value={id}>{guestyListingOptionLabel(l)}</option>;
+              })}
+            </select>
+          </div>
         </div>
 
         {/* ── Build New ─────────────────────────────────────────── */}
@@ -4085,6 +4227,41 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         {propertyData && (
           <>
             <div className="glb-section-label">Property Data Preview</div>
+            <div className="glb-data-push-row" data-testid="property-data-push-row">
+              <button
+                type="button"
+                className="glb-btn glb-btn-secondary"
+                onClick={handlePushPropertyDataPreview}
+                disabled={!selectedId || dataPushBusy || building || conn !== "connected"}
+                data-testid="btn-push-property-data-preview"
+                title={selectedId ? "Push descriptions, bedding/sqft, and amenities to Guesty" : "Select a Guesty listing first"}
+              >
+                {dataPushBusy ? "Pushing property data..." : "Push Descriptions, Bedding & Amenities to Guesty"}
+              </button>
+              <div className="glb-data-push-meta" aria-label="Guesty property data push history">
+                {([
+                  ["descriptions", "Descriptions"] as const,
+                  ["bedding", "Bedding + sqft"] as const,
+                  ["amenities", "Amenities"] as const,
+                ]).map(([key, label]) => {
+                  const entry = dataPushLog[key];
+                  return (
+                    <div
+                      key={key}
+                      className={`glb-data-push-item ${entry?.status ?? ""}`}
+                      title={entry?.message}
+                      data-testid={`data-push-log-${key}`}
+                    >
+                      <strong>{label}</strong>
+                      <span>{formatDataPushTime(entry?.pushedAt)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              {!selectedId && (
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>Select a Guesty listing first</span>
+              )}
+            </div>
             <div className="glb-panel">
               <div className="glb-tabs">
                 {(["descriptions", "bedding", "amenities", "pricing", "photos", "availability"] as const).map((t) => (

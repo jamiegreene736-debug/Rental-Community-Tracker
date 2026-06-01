@@ -10,6 +10,14 @@ export type GuestyAddress = {
   country?: string;
 };
 
+export type GuestyListingSummary = {
+  _id?: string;
+  id?: string;
+  nickname?: string;
+  title?: string;
+  address?: GuestyAddress | string | null;
+};
+
 export type GuestyPhoto = {
   url: string;
   caption?: string;
@@ -211,15 +219,15 @@ class GuestyService {
 
   async getListings(limit = 25, skip = 0) {
     if (skip === 0 && limit >= 200) {
-      const res = await fetch("/api/guesty-listings-all?limit=100&maxPages=50&fields=_id%20nickname%20title");
+      const res = await fetch("/api/guesty-listings-all?limit=100&maxPages=50&fields=_id%20nickname%20title%20address");
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.message || body.error || `HTTP ${res.status}`);
       }
-      return res.json() as Promise<{ results: Array<{ _id?: string; id?: string; nickname?: string; title?: string }> }>;
+      return res.json() as Promise<{ results: GuestyListingSummary[] }>;
     }
-    return this.request<{ results: Array<{ _id?: string; id?: string; nickname?: string; title?: string }> }>(
-      "GET", "/listings", null, `limit=${limit}&skip=${skip}`
+    return this.request<{ results: GuestyListingSummary[] }>(
+      "GET", "/listings", null, `limit=${limit}&skip=${skip}&fields=_id%20nickname%20title%20address`
     );
   }
 
