@@ -193,6 +193,16 @@ assert.match(
   "Add Combo Listing should show the last city research run and its yielded communities before rerunning a search",
 );
 assert.match(
+  addCommunitySource,
+  /resetSweepToMarketPicker/,
+  "top-market Scan different markets must clear the completed sweep job before returning to the picker",
+);
+assert.match(
+  addCommunitySource,
+  /ignoredSweepJobIdsRef/,
+  "top-market polling must ignore a completed job after the operator chooses to scan different markets",
+);
+assert.match(
   routesSource,
   /\/api\/community\/research-history/,
   "city research history must be available without starting a new community research job",

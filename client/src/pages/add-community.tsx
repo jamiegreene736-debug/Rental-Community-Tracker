@@ -338,6 +338,7 @@ export default function AddCommunity() {
   const [sweepRunning, setSweepRunning] = useState(false);
   const [sweepDone, setSweepDone] = useState(false);
   const [sweepJobId, setSweepJobId] = useState<string | null>(null);
+  const ignoredSweepJobIdsRef = useRef<Set<string>>(new Set());
   const [draftRestored, setDraftRestored] = useState(false);
   const draftHydratedRef = useRef(false);
   const [draftAutosaveReady, setDraftAutosaveReady] = useState(false);
@@ -434,6 +435,7 @@ export default function AddCommunity() {
   const [bulkComboEvents, setBulkComboEvents] = useState<QueueJobEventPayload[]>([]);
   const [bulkComboHistory, setBulkComboHistory] = useState<BulkComboListingJobPayload[]>([]);
   const applySweepJob = useCallback((job: TopMarketJobPayload) => {
+    if (ignoredSweepJobIdsRef.current.has(job.id)) return;
     setSweepJobId(job.id);
     setSweepMarkets(job.markets || []);
     setSweepPhase("running");
@@ -695,7 +697,7 @@ export default function AddCommunity() {
           return;
         }
         const data = await resp.json();
-        if (!cancelled && data.job) applySweepJob(data.job);
+        if (!cancelled && data.job && !ignoredSweepJobIdsRef.current.has(data.job.id)) applySweepJob(data.job);
       } catch (e: any) {
         if (!cancelled) console.warn("[add-community] sweep job poll failed", e?.message || e);
       }
@@ -917,15 +919,22 @@ export default function AddCommunity() {
 
   // ── Open the sweep modal in setup mode. Fetches the curated list of
   // markets (if we haven't already) so the checkbox grid can render.
+  const resetSweepToMarketPicker = useCallback(() => {
+    if (sweepJobId) ignoredSweepJobIdsRef.current.add(sweepJobId);
+    setSweepJobId(null);
+    setSweepRunning(false);
+    setSweepDone(false);
+    setSweepMarkets([]);
+    setSweepPhase("setup");
+  }, [sweepJobId]);
+
   const openSweepSetup = useCallback(async () => {
     setSweepOpen(true);
     if (sweepJobId && sweepRunning) {
       setSweepPhase("running");
       return;
     }
-    setSweepPhase("setup");
-    setSweepDone(false);
-    setSweepMarkets([]);
+    resetSweepToMarketPicker();
     if (!seedMarkets) {
       try {
         const resp = await fetch("/api/community/top-markets/seeds");
@@ -943,7 +952,7 @@ export default function AddCommunity() {
         toast({ title: "Couldn't load market list", description: e.message, variant: "destructive" });
       }
     }
-  }, [seedMarkets, sweepJobId, sweepRunning, toast]);
+  }, [seedMarkets, sweepJobId, sweepRunning, resetSweepToMarketPicker, toast]);
 
   const toggleMarket = (m: { city: string; state: string }) => {
     setSelectedMarkets((prev) => {
@@ -2256,7 +2265,7 @@ export default function AddCommunity() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => { setSweepPhase("setup"); setSweepMarkets([]); setSweepDone(false); }}
+                    onClick={resetSweepToMarketPicker}
                   >
                     ← Scan different markets
                   </Button>
