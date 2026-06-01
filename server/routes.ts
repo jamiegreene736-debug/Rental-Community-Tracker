@@ -25362,7 +25362,7 @@ Return ONLY compact JSON with this exact shape:
         state: item.state,
         bedrooms: bedroomOverride ?? unit?.bedrooms ?? undefined,
         skipUrls,
-        maxCandidates: bedroomOverride === "any" ? 24 : 12,
+        maxCandidates: bedroomOverride === "any" ? 10 : 6,
       };
   const canComboPhotoFetchUnit = (item: ComboPhotoFetchItem, unit: ComboPhotoFetchUnit | undefined) =>
     !!(unit?.url || (item.communityName && unit?.bedrooms));
@@ -25377,7 +25377,6 @@ Return ONLY compact JSON with this exact shape:
   ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean }> => {
     const seenUrls = new Set(blockedUrls.filter(Boolean));
     const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
-      { relaxed: false },
       { relaxed: false },
       { bedroomOverride: "any", relaxed: true },
     ];
@@ -27068,6 +27067,8 @@ Return ONLY compact JSON with this exact shape:
       const candidateLimit = Number.isFinite(Number(maxCandidates)) && Number(maxCandidates) > 0
         ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
         : null;
+      const requestedStateAbbr = String(state ?? "").trim().toLowerCase().match(/^(hi|hawaii)$/) ? "hi" : null;
+      const urlStatePattern = /(?:^|[-_/])([A-Z]{2})(?:[-_/]|$)/i;
       type DiscoverySource = "zillow" | "realtor" | "redfin" | "homes";
       const candidateUrls: Array<{ url: string; source: DiscoverySource }> = [];
       const seen = new Set<string>();
@@ -27090,6 +27091,10 @@ Return ONLY compact JSON with this exact shape:
       const addCandidate = (link: string, source: DiscoverySource, title = "", snippet = "", allowedRoots?: Set<string>) => {
         const key = listingKey(link);
         if (seen.has(key) || skipSet.has(key)) return;
+        if (!allowedRoots && requestedStateAbbr) {
+          const urlState = link.match(urlStatePattern)?.[1]?.toLowerCase();
+          if (urlState && urlState !== requestedStateAbbr) return;
+        }
         if (allowedRoots && allowedRoots.size > 0) {
           const root = streetRootFromListingAddress(
             parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
@@ -27164,9 +27169,12 @@ Return ONLY compact JSON with this exact shape:
       if (city && state) {
         const roots = repeatedRoots();
         if (roots.size > 0) {
+          const apifyMaxItems = candidateLimit
+            ? Math.max(50, Math.min(120, candidateLimit * 10))
+            : 300;
           const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
-            harvestZillowUrlsViaApifySearch(city, state, 300),
-            harvestRealtorUrlsViaApifySearch(city, state, 300),
+            harvestZillowUrlsViaApifySearch(city, state, apifyMaxItems),
+            harvestRealtorUrlsViaApifySearch(city, state, apifyMaxItems),
           ]);
           for (const link of zillowApifyUrls) addCandidate(link, "zillow", "", "", roots);
           for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", roots);
@@ -27180,12 +27188,10 @@ Return ONLY compact JSON with this exact shape:
         }
       }
 
-      // Prefer Realtor/Redfin/Homes before Zillow because older/off-market
-      // detail pages often expose facts/photos more reliably than Zillow in
-      // resort condo buildings. Zillow remains a fallback and still benefits
-      // from sidecar/ScrapingBee recovery when needed.
+      // Prefer sources with direct photo payloads first; Realtor often rate
+      // limits or returns empty galleries in dense resort-condo searches.
       candidateUrls.sort((a, b) => {
-        const priority: Record<DiscoverySource, number> = { realtor: 0, redfin: 1, homes: 2, zillow: 3 };
+        const priority: Record<DiscoverySource, number> = { zillow: 0, redfin: 1, homes: 2, realtor: 3 };
         return priority[a.source] - priority[b.source];
       });
 
