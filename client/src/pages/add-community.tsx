@@ -345,6 +345,7 @@ export default function AddCommunity() {
   const photoFetchRunRef = useRef(0);
   const photoAutoResumeRef = useRef(false);
   const photoStaleRestartRef = useRef(false);
+  const restoredPhotoFetchJobIdsRef = useRef<Set<string>>(new Set());
   const pairingAutoResumeRef = useRef(false);
   // Two-phase flow for the sweep modal. "setup" shows a checkbox grid the
   // user picks markets from; "running" shows streaming per-market progress.
@@ -582,7 +583,10 @@ export default function AddCommunity() {
       if (typeof draft.sweepJobId === "string") setSweepJobId(draft.sweepJobId);
       if (typeof draft.sweepPhase === "string") setSweepPhase(draft.sweepPhase === "running" ? "running" : "setup");
       if (typeof draft.sweepDone === "boolean") setSweepDone(draft.sweepDone);
-      if (typeof draft.photoFetchJobId === "string") setPhotoFetchJobId(draft.photoFetchJobId);
+      if (typeof draft.photoFetchJobId === "string") {
+        restoredPhotoFetchJobIdsRef.current.add(draft.photoFetchJobId);
+        setPhotoFetchJobId(draft.photoFetchJobId);
+      }
       if (typeof draft.bulkComboJobId === "string") {
         setBulkComboJobId(draft.bulkComboJobId);
         setBulkComboOpen(true);
@@ -714,8 +718,13 @@ export default function AddCommunity() {
   }, [sweepJobId, sweepDone, sweepRunning, applySweepJob]);
 
   const applyPhotoFetchJob = useCallback((job: ComboPhotoFetchJobPayload) => {
+    const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+    const restoredJob = restoredPhotoFetchJobIdsRef.current.has(job.id);
+    if (terminal) {
+      restoredPhotoFetchJobIdsRef.current.delete(job.id);
+    }
     setPhotoFetchJob(job);
-    setPhotoFetchJobId(job.id);
+    setPhotoFetchJobId(terminal ? null : job.id);
     const item = job.items?.[0];
     if (item) {
       if (Array.isArray(item.unit1Photos) && item.unit1Photos.length > 0) setUnit1Photos(item.unit1Photos);
@@ -723,11 +732,10 @@ export default function AddCommunity() {
       if (typeof item.unit1SourceUrl === "string") setUnit1PhotoSourceUrl(item.unit1SourceUrl);
       if (typeof item.unit2SourceUrl === "string") setUnit2PhotoSourceUrl(item.unit2SourceUrl);
     }
-    const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
     setPhotosLoading(!terminal);
     if (terminal) {
       setPhotoFetchStartedAt(null);
-      if (item?.error) {
+      if (item?.error && !restoredJob) {
         toast({
           title: job.status === "failed" ? "Photo fetch failed" : "Photo fetch completed with notes",
           description: item.error,
