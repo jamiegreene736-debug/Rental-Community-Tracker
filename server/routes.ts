@@ -25361,6 +25361,7 @@ Return ONLY compact JSON with this exact shape:
         city: item.city,
         state: item.state,
         bedrooms: bedroomOverride ?? unit?.bedrooms ?? undefined,
+        minBedrooms: bedroomOverride === "any" ? unit?.bedrooms ?? undefined : undefined,
         skipUrls,
         maxCandidates: bedroomOverride === "any" ? 10 : 6,
       };
@@ -27018,13 +27019,14 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, skipUrls, skipFirst, maxCandidates } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
       city?: string;
       state?: string;
       bedrooms?: number | "any";
+      minBedrooms?: number | string;
       maxCandidates?: number;
       // URLs the caller already has (e.g. from a previous click) so
       // a "Find another" button can skip listings already surfaced.
@@ -27071,6 +27073,9 @@ Return ONLY compact JSON with this exact shape:
         : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
           ? Math.round(Number(bedrooms))
           : null;
+      const minimumBedrooms = Number.isFinite(Number(minBedrooms)) && Number(minBedrooms) > 0
+        ? Math.round(Number(minBedrooms))
+        : null;
       const candidateLimit = Number.isFinite(Number(maxCandidates)) && Number(maxCandidates) > 0
         ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
         : null;
@@ -27175,7 +27180,8 @@ Return ONLY compact JSON with this exact shape:
 
       if (city && state) {
         const roots = repeatedRoots();
-        const hasEnoughFocusedCandidates = candidateLimit !== null && candidateUrls.length >= candidateLimit;
+        const focusedZillowCandidates = candidateUrls.filter((candidate) => candidate.source === "zillow").length;
+        const hasEnoughFocusedCandidates = candidateLimit !== null && focusedZillowCandidates >= Math.min(3, candidateLimit);
         if (roots.size > 0 && !hasEnoughFocusedCandidates) {
           const apifyMaxItems = candidateLimit
             ? Math.max(50, Math.min(120, candidateLimit * 10))
@@ -27222,6 +27228,10 @@ Return ONLY compact JSON with this exact shape:
           const scrapedBR = facts.bedrooms ?? null;
           if (requestedBedrooms && scrapedBR !== null && scrapedBR !== requestedBedrooms) {
             console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
+            continue;
+          }
+          if (!requestedBedrooms && minimumBedrooms && scrapedBR !== null && scrapedBR < minimumBedrooms) {
+            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR is below requested minimum ${minimumBedrooms}BR`);
             continue;
           }
           res.json({
