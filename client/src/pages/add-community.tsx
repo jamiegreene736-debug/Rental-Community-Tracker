@@ -396,6 +396,7 @@ export default function AddCommunity() {
       error: string | null;
       progressPercent?: number;
       heartbeatAt?: string | null;
+      attemptCount?: number;
     }>;
   };
   const [photoFetchJobId, setPhotoFetchJobId] = useState<string | null>(null);
