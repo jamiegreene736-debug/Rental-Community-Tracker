@@ -27168,7 +27168,8 @@ Return ONLY compact JSON with this exact shape:
 
       if (city && state) {
         const roots = repeatedRoots();
-        if (roots.size > 0) {
+        const hasEnoughFocusedCandidates = candidateLimit !== null && candidateUrls.length >= candidateLimit;
+        if (roots.size > 0 && !hasEnoughFocusedCandidates) {
           const apifyMaxItems = candidateLimit
             ? Math.max(50, Math.min(120, candidateLimit * 10))
             : 300;
@@ -27184,7 +27185,11 @@ Return ONLY compact JSON with this exact shape:
             `roots=${Array.from(roots).join(", ") || "none"} total=${candidateUrls.length}`,
           );
         } else {
-          console.log(`[fetch-unit-photos] Apify supplement skipped for "${communityName}" because no resort street root was discovered`);
+          console.log(
+            hasEnoughFocusedCandidates
+              ? `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because focused discovery already found ${candidateUrls.length} candidates`
+              : `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because no resort street root was discovered`,
+          );
         }
       }
 
