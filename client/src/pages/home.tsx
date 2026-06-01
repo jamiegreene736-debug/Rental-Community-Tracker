@@ -1761,12 +1761,20 @@ function AdminDashboard() {
     booking: PhotoAggStatus;
     lastCheckedAt: string | null;
     matchCounts: { airbnb: number; vrbo: number; booking: number };
+    matchedUnits: {
+      airbnb: PhotoMatchedUnit[];
+      vrbo: PhotoMatchedUnit[];
+      booking: PhotoMatchedUnit[];
+    };
     hasScannableFolders: boolean;
     folders: string[];
     checkedRows: number;
     errorMessages: string[];
     hasProviderError: boolean;
   };
+  type PhotoPlatform = keyof PhotoAgg["matchedUnits"];
+  type PhotoUnitOwner = { label: string; detailLabel: string };
+  type PhotoMatchedUnit = PhotoUnitOwner & { folder: string; matches: number };
   const photoByProperty = useMemo(() => {
     const out = new Map<number, PhotoAgg>();
     const draftsByPropertyId = new Map<number, CommunityDraft>();
@@ -1775,11 +1783,22 @@ function AdminDashboard() {
       const rank = (s: PhotoAggStatus) => s === "found" ? 3 : s === "unknown" ? 2 : s === "clean" ? 1 : 0;
       return rank(b) > rank(a) ? b : a;
     };
+    const unitLaneLabel = (index: number) => index === 0 ? "Unit A" : index === 1 ? "Unit B" : `Unit ${index + 1}`;
+    const unitOwner = (index: number, unitNumber?: string | null): PhotoUnitOwner => {
+      const label = unitLaneLabel(index);
+      const number = unitNumber?.trim();
+      return { label, detailLabel: number ? `${label} (${number})` : label };
+    };
     for (const p of allProperties) {
       const builder = getUnitBuilderByPropertyId(p.id);
       const folderSet = new Set<string>();
-      const addFolder = (folder?: string | null) => {
-        if (folder && isScannableFolder(folder)) folderSet.add(folder);
+      const folderOwners = new Map<string, Map<string, PhotoUnitOwner>>();
+      const addFolder = (folder?: string | null, owner?: PhotoUnitOwner) => {
+        if (!folder || !isScannableFolder(folder)) return;
+        folderSet.add(folder);
+        if (!owner) return;
+        if (!folderOwners.has(folder)) folderOwners.set(folder, new Map());
+        folderOwners.get(folder)!.set(owner.label, owner);
       };
       if (builder) {
         // Unit folders only. communityPhotoFolder is excluded (shared
@@ -1790,18 +1809,16 @@ function AdminDashboard() {
         // scanner skips (no map entry AND no digit hint) drop out
         // here too, keeping the dashboard aggregation in lockstep
         // with what was scanned.
-        for (const u of builder.units) {
-          addFolder(u.photoFolder);
-        }
+        builder.units.forEach((u, index) => addFolder(u.photoFolder, unitOwner(index, u.unitNumber)));
       }
       const draft = draftsByPropertyId.get(p.id);
       if (draft) {
-        addFolder(draft.unit1PhotoFolder);
-        if ((draft as any).singleListing !== true) addFolder(draft.unit2PhotoFolder);
+        addFolder(draft.unit1PhotoFolder, unitOwner(0));
+        if ((draft as any).singleListing !== true) addFolder(draft.unit2PhotoFolder, unitOwner(1));
       }
       if (p.draftId !== undefined) {
-        addFolder(`draft-${p.draftId}-unit-a`);
-        if (p.multiUnit) addFolder(`draft-${p.draftId}-unit-b`);
+        addFolder(`draft-${p.draftId}-unit-a`, unitOwner(0));
+        if (p.multiUnit) addFolder(`draft-${p.draftId}-unit-b`, unitOwner(1));
       }
       const folders = Array.from(folderSet);
       let agg: PhotoAgg = {
@@ -1810,11 +1827,27 @@ function AdminDashboard() {
         booking: null,
         lastCheckedAt: null,
         matchCounts: { airbnb: 0, vrbo: 0, booking: 0 },
+        matchedUnits: { airbnb: [], vrbo: [], booking: [] },
         hasScannableFolders: folders.length > 0,
         folders,
         checkedRows: 0,
         errorMessages: [],
         hasProviderError: false,
+      };
+      const addMatchedUnits = (platform: PhotoPlatform, folder: string, matches: number) => {
+        if (matches <= 0) return;
+        const owners = Array.from(folderOwners.get(folder)?.values() ?? []);
+        const affected = owners.length > 0
+          ? owners
+          : [{ label: "Unit folder", detailLabel: folder }];
+        for (const owner of affected) {
+          const existing = agg.matchedUnits[platform].find((unit) => unit.label === owner.label);
+          if (existing) {
+            existing.matches += matches;
+          } else {
+            agg.matchedUnits[platform].push({ ...owner, folder, matches });
+          }
+        }
       };
       for (const f of folders) {
         const row = photoCheckByFolder.get(f);
@@ -1826,6 +1859,9 @@ function AdminDashboard() {
         agg.matchCounts.airbnb  += row.airbnbMatches?.length  ?? 0;
         agg.matchCounts.vrbo    += row.vrboMatches?.length    ?? 0;
         agg.matchCounts.booking += row.bookingMatches?.length ?? 0;
+        addMatchedUnits("airbnb", f, row.airbnbMatches?.length ?? 0);
+        addMatchedUnits("vrbo", f, row.vrboMatches?.length ?? 0);
+        addMatchedUnits("booking", f, row.bookingMatches?.length ?? 0);
         if (row.errorMessage && !agg.errorMessages.includes(row.errorMessage)) {
           agg.errorMessages.push(row.errorMessage);
         }
@@ -3264,7 +3300,7 @@ function AdminDashboard() {
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
                 <TableHead className="w-[84px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[96px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
+                <TableHead className="w-[136px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
                   <div className="flex items-center justify-center gap-1">
                     <span>Photo Match</span>
                     <Button
@@ -3607,50 +3643,66 @@ function AdminDashboard() {
                         warn:    { bg: "#f59e0b", glyph: "!" },
                         na:      { bg: "#9ca3af", glyph: "–" },
                       };
-                      const items: Array<{ letter: string; name: string; status: PhotoAggStatus; matches: number }> = [
-                        { letter: "A", name: "Airbnb",       status: agg?.airbnb  ?? null, matches: agg?.matchCounts.airbnb  ?? 0 },
-                        { letter: "V", name: "VRBO",         status: agg?.vrbo    ?? null, matches: agg?.matchCounts.vrbo    ?? 0 },
-                        { letter: "B", name: "Booking.com",  status: agg?.booking ?? null, matches: agg?.matchCounts.booking ?? 0 },
+                      const unitList = (units: PhotoMatchedUnit[], key: "label" | "detailLabel" = "label") => {
+                        const labels = units.map((unit) => unit[key]).filter(Boolean);
+                        if (labels.length <= 1) return labels[0] ?? "unit folder";
+                        return `${labels.slice(0, -1).join(", ")} + ${labels[labels.length - 1]}`;
+                      };
+                      const items: Array<{ letter: string; name: string; status: PhotoAggStatus; matches: number; units: PhotoMatchedUnit[] }> = [
+                        { letter: "A", name: "Airbnb",       status: agg?.airbnb  ?? null, matches: agg?.matchCounts.airbnb  ?? 0, units: agg?.matchedUnits.airbnb ?? [] },
+                        { letter: "V", name: "VRBO",         status: agg?.vrbo    ?? null, matches: agg?.matchCounts.vrbo    ?? 0, units: agg?.matchedUnits.vrbo ?? [] },
+                        { letter: "B", name: "Booking.com",  status: agg?.booking ?? null, matches: agg?.matchCounts.booking ?? 0, units: agg?.matchedUnits.booking ?? [] },
                       ];
+                      const matchedSummary = items
+                        .filter((it) => it.status === "found")
+                        .map((it) => `${it.name}: ${unitList(it.units)}`);
                       const folders = agg?.folders ?? [];
                       const stamp = agg?.lastCheckedAt ? new Date(agg.lastCheckedAt).toLocaleDateString() : "never";
                       const errorPreview = photoCheckErrorPreview(agg?.errorMessages?.[0]);
                       return (
-                        <div className="flex gap-0.5 justify-center items-center" data-testid={`photo-match-${property.id}`}>
-                          {items.map((it) => {
-                            const tone = toneOf(it.status);
-                            const p = PAL[tone];
-                            const tip =
-                              noFolders ? `${it.name}: no scannable units — backfill real unit numbers in unit-builder-data to enable scanning` :
-                              it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
-                              it.status === "found" ? `${it.name}: ${it.matches} match${it.matches === 1 ? "" : "es"} found (last checked ${stamp})` :
-                              it.status === "unknown" ? `${it.name}: inconclusive, not a match (${stamp})${errorPreview ? ` — ${errorPreview}` : ""}` :
-                              `${it.name}: not checked yet`;
-                            return (
-                              <span
-                                key={it.letter}
-                                title={tip}
-                                className="inline-flex items-center justify-center h-[18px] px-1 rounded text-[9px] font-bold leading-none"
-                                style={{ background: p.bg, color: "white", minWidth: 22 }}
-                                data-testid={`photo-match-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
-                              >
-                                {it.letter}{p.glyph}
-                              </span>
-                            );
-                          })}
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="ml-1 h-[18px] w-[18px] rounded"
-                            title={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans; no folders resolved for ${property.name}`}
-                            aria-label={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans`}
-                            disabled={photoScanMutation.isPending}
-                            onClick={() => photoScanMutation.mutate(folders.length > 0 ? folders : undefined)}
-                            data-testid={`button-run-photo-match-scan-${property.id}`}
-                          >
-                            <RefreshCw className={`h-3 w-3 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
-                          </Button>
+                        <div className="flex flex-col items-center gap-0.5" data-testid={`photo-match-${property.id}`}>
+                          <div className="flex gap-0.5 justify-center items-center">
+                            {items.map((it) => {
+                              const tone = toneOf(it.status);
+                              const p = PAL[tone];
+                              const affected = it.status === "found" ? `; change photos for ${unitList(it.units, "detailLabel")}` : "";
+                              const tip =
+                                noFolders ? `${it.name}: no scannable units — backfill real unit numbers in unit-builder-data to enable scanning` :
+                                it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
+                                it.status === "found" ? `${it.name}: ${it.matches} match${it.matches === 1 ? "" : "es"} found${affected} (last checked ${stamp})` :
+                                it.status === "unknown" ? `${it.name}: inconclusive, not a match (${stamp})${errorPreview ? ` — ${errorPreview}` : ""}` :
+                                `${it.name}: not checked yet`;
+                              return (
+                                <span
+                                  key={it.letter}
+                                  title={tip}
+                                  className="inline-flex items-center justify-center h-[18px] px-1 rounded text-[9px] font-bold leading-none"
+                                  style={{ background: p.bg, color: "white", minWidth: 22 }}
+                                  data-testid={`photo-match-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
+                                >
+                                  {it.letter}{p.glyph}
+                                </span>
+                              );
+                            })}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="ml-1 h-[18px] w-[18px] rounded"
+                              title={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans; no folders resolved for ${property.name}`}
+                              aria-label={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans`}
+                              disabled={photoScanMutation.isPending}
+                              onClick={() => photoScanMutation.mutate(folders.length > 0 ? folders : undefined)}
+                              data-testid={`button-run-photo-match-scan-${property.id}`}
+                            >
+                              <RefreshCw className={`h-3 w-3 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
+                            </Button>
+                          </div>
+                          {matchedSummary.length > 0 ? (
+                            <div className="max-w-[132px] text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
+                              {matchedSummary.join(" · ")}
+                            </div>
+                          ) : null}
                         </div>
                       );
                     })()}

@@ -155,6 +155,17 @@ assert.match(
   /Replacement unit found, but its photos could not be saved/,
   "unit replacement must reject swaps when replacement photos cannot be saved",
 );
+const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
+assert.match(
+  dashboardSource,
+  /matchedUnits:/,
+  "dashboard photo-match aggregation must retain which Unit A/B folder produced a platform match",
+);
+assert.match(
+  dashboardSource,
+  /photo-match-units/,
+  "dashboard photo-match column must visibly name affected Unit A/B folders when a platform match is found",
+);
 console.log("  ✓ shared photo folder tokens stay scoped to the unit being checked");
 
 // Case 7: Primary Bathroom — valid (has \"Primary\" + \"Bathroom\").
