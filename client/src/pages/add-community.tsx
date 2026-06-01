@@ -338,6 +338,8 @@ export default function AddCommunity() {
       unit1SourceUrl: string | null;
       unit2SourceUrl: string | null;
       error: string | null;
+      heartbeatAt?: string | null;
+      attemptCount?: number;
     }>;
   };
   const [photoFetchJobId, setPhotoFetchJobId] = useState<string | null>(null);

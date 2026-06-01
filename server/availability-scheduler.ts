@@ -500,7 +500,7 @@ export async function resolveAvailabilityPropertyConfig(propertyId: number): Pro
         units.push({ unitId: "main", unitLabel: "Combined", bedrooms: draft.combinedBedrooms });
       }
       return {
-        community: draft.community || draft.name || "unknown",
+        community: draft.name || "unknown",
         units,
       };
     }
