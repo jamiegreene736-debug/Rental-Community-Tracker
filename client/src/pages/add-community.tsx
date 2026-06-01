@@ -271,7 +271,23 @@ export default function AddCommunity() {
   // Step 2
   const [communities, setCommunities] = useState<CommunityResult[]>([]);
   const [researchLoading, setResearchLoading] = useState(false);
+  const [researchProgress, setResearchProgress] = useState(0);
   const [selectedCommunity, setSelectedCommunity] = useState<CommunityResult | null>(null);
+
+  // Ramp a fake progress % while research is in-flight so the search area shows live status.
+  // Mirrors the richer feedback in add-single-listing. Timer is client-only; real work is server-side.
+  useEffect(() => {
+    if (!researchLoading) return;
+    const startedAt = Date.now();
+    setResearchProgress((prev) => Math.max(prev, 8));
+    const id = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      // Ramp 8 → ~92 over ~25s (typical research wall time), then hold until response arrives.
+      const target = Math.min(92, 8 + Math.floor((elapsed / 25000) * 84));
+      setResearchProgress((prev) => Math.max(prev, Math.min(92, Math.round(target))));
+    }, 450);
+    return () => window.clearInterval(id);
+  }, [researchLoading]);
 
   // Top-markets sweep — scans a curated list of US vacation-rental hotspots
   type MarketResult = {
@@ -808,12 +824,14 @@ export default function AddCommunity() {
       return;
     }
     setResearchLoading(true);
+    setResearchProgress(8);
     setCommunities([]);
     setBulkCommunityIndexes(new Set());
     try {
       const res = await apiRequest("POST", "/api/community/research", { city: cityInput.trim(), state: selectedState });
       const data = await res.json();
       setCommunities(data.communities || []);
+      setResearchProgress(100);
       if ((data.communities || []).length === 0) {
         toast({ title: "No qualifying communities found", description: "Try a different city or state." });
       } else {
@@ -823,6 +841,8 @@ export default function AddCommunity() {
       toast({ title: "Research failed", description: e.message, variant: "destructive" });
     } finally {
       setResearchLoading(false);
+      // reset after short delay so UI doesn't flash
+      setTimeout(() => setResearchProgress(0), 800);
     }
   }, [selectedState, cityInput, toast]);
 
@@ -1919,11 +1939,34 @@ export default function AddCommunity() {
                 {sweepRunning ? "Sweeping…" : "Scan top markets"}
               </Button>
             </div>
-            {researchLoading && (
-              <p className="text-sm text-muted-foreground mt-3" id="status-message">
-                Searching for communities and scoring with AI — this takes 20–40 seconds…
-              </p>
-            )}
+            {researchLoading && (() => {
+              const pct = Math.min(100, Math.max(0, researchProgress));
+              const stage = pct < 25 ? { label: "Starting research", detail: "Sending city to community research service + Google." }
+                : pct < 55 ? { label: "Finding communities", detail: "Querying vacation-rental condo/townhome clusters." }
+                : pct < 78 ? { label: "AI scoring", detail: "Claude ranking by confidence + combinability for bundled listings." }
+                : pct < 96 ? { label: "Finalizing shortlist", detail: "Preparing results with rates and unit mixes." }
+                : { label: "Wrapping up", detail: "Loading researched communities." };
+              return (
+                <div className="mt-3 border rounded-lg p-3 bg-muted/20" id="status-message">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-2 min-w-0">
+                      <Loader2 className="h-4 w-4 animate-spin text-primary mt-0.5 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-foreground">{stage.label}</div>
+                        <div className="text-xs text-muted-foreground">{stage.detail}</div>
+                      </div>
+                    </div>
+                    <div className="text-xs font-mono tabular-nums text-muted-foreground">{pct}%</div>
+                  </div>
+                  <div className="w-full h-2 bg-muted rounded-full overflow-hidden mt-2">
+                    <div className="h-full bg-primary transition-all duration-500" style={{ width: `${pct}%` }} />
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-1.5">
+                    Server-side research continues even if you close this tab (results are computed on Railway). Re-open to see progress or re-run to retrieve.
+                  </div>
+                </div>
+              );
+            })()}
           </Card>
         )}
 
