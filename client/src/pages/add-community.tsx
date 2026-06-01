@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Progress } from "@/components/ui/progress";
 import {
   ArrowLeft,
   ArrowRight,
@@ -83,12 +84,35 @@ type CommunityResult = {
   hasExistingListing?: boolean;
 };
 
+type CommunityResearchHistory = {
+  city: string;
+  state: string;
+  mode: string;
+  resultCount: number;
+  resultNames: string[];
+  resultSummaries: Array<{
+    name: string;
+    confidenceScore: number | null;
+    unitTypes: string | null;
+    estimatedLowRate: number | null;
+    estimatedHighRate: number | null;
+  }>;
+  error: string | null;
+  lastSearchedAt: string;
+  updatedAt: string;
+};
+
 type UnitResult = {
   url: string;
   title: string;
   bedrooms: number | null;
   price: number | null;
   source: string;
+};
+
+const positiveInteger = (value: unknown): number | null => {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
 };
 
 type SuggestedPairing = {
@@ -114,6 +138,18 @@ type CommunityProfile = {
 type PhotoItem = { url: string; label: string };
 
 type PhotoCheckResult = { clean: boolean; matches: Array<{ platform: string; url: string }> };
+
+function formatResearchHistoryTime(value: string | null | undefined): string {
+  if (!value) return "Never";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Unknown";
+  return new Date(timestamp).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 function formatResortUnitMix(community: CommunityResult): string | null {
   const bedroomCounts = Object.entries(community.estimatedBedroomUnitCounts ?? {})
@@ -271,7 +307,25 @@ export default function AddCommunity() {
   // Step 2
   const [communities, setCommunities] = useState<CommunityResult[]>([]);
   const [researchLoading, setResearchLoading] = useState(false);
+  const [researchProgress, setResearchProgress] = useState(0);
+  const [researchHistory, setResearchHistory] = useState<CommunityResearchHistory | null>(null);
+  const [researchHistoryLoading, setResearchHistoryLoading] = useState(false);
   const [selectedCommunity, setSelectedCommunity] = useState<CommunityResult | null>(null);
+
+  // Ramp a fake progress % while research is in-flight so the search area shows live status.
+  // Mirrors the richer feedback in add-single-listing. Timer is client-only; real work is server-side.
+  useEffect(() => {
+    if (!researchLoading) return;
+    const startedAt = Date.now();
+    setResearchProgress((prev) => Math.max(prev, 8));
+    const id = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      // Ramp 8 → ~92 over ~25s (typical research wall time), then hold until response arrives.
+      const target = Math.min(92, 8 + Math.floor((elapsed / 25000) * 84));
+      setResearchProgress((prev) => Math.max(prev, Math.min(92, Math.round(target))));
+    }, 450);
+    return () => window.clearInterval(id);
+  }, [researchLoading]);
 
   // Top-markets sweep — scans a curated list of US vacation-rental hotspots
   type MarketResult = {
@@ -290,12 +344,14 @@ export default function AddCommunity() {
   const [sweepRunning, setSweepRunning] = useState(false);
   const [sweepDone, setSweepDone] = useState(false);
   const [sweepJobId, setSweepJobId] = useState<string | null>(null);
+  const ignoredSweepJobIdsRef = useRef<Set<string>>(new Set());
   const [draftRestored, setDraftRestored] = useState(false);
   const draftHydratedRef = useRef(false);
   const [draftAutosaveReady, setDraftAutosaveReady] = useState(false);
   const photoFetchRunRef = useRef(0);
   const photoAutoResumeRef = useRef(false);
   const photoStaleRestartRef = useRef(false);
+  const restoredPhotoFetchJobIdsRef = useRef<Set<string>>(new Set());
   const pairingAutoResumeRef = useRef(false);
   // Two-phase flow for the sweep modal. "setup" shows a checkbox grid the
   // user picks markets from; "running" shows streaming per-market progress.
@@ -338,6 +394,7 @@ export default function AddCommunity() {
       unit1SourceUrl: string | null;
       unit2SourceUrl: string | null;
       error: string | null;
+      progressPercent?: number;
       heartbeatAt?: string | null;
       attemptCount?: number;
     }>;
@@ -388,6 +445,7 @@ export default function AddCommunity() {
   const [bulkComboEvents, setBulkComboEvents] = useState<QueueJobEventPayload[]>([]);
   const [bulkComboHistory, setBulkComboHistory] = useState<BulkComboListingJobPayload[]>([]);
   const applySweepJob = useCallback((job: TopMarketJobPayload) => {
+    if (ignoredSweepJobIdsRef.current.has(job.id)) return;
     setSweepJobId(job.id);
     setSweepMarkets(job.markets || []);
     setSweepPhase("running");
@@ -476,7 +534,9 @@ export default function AddCommunity() {
   const [touristTaxAccount, setTouristTaxAccount] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const combinedBedrooms = (selectedUnit1?.bedrooms ?? 0) + (selectedUnit2?.bedrooms ?? 0);
+  const unit1BedroomCount = positiveInteger(selectedUnit1?.bedrooms) ?? positiveInteger(selectedPairing?.unit1Beds);
+  const unit2BedroomCount = positiveInteger(selectedUnit2?.bedrooms) ?? positiveInteger(selectedPairing?.unit2Beds);
+  const combinedBedrooms = (unit1BedroomCount ?? 0) + (unit2BedroomCount ?? 0);
   const baseRate = (selectedUnit1?.price ?? 0) + (selectedUnit2?.price ?? 0);
   // Suggested nightly rate targets a 20% NET margin AFTER channel
   // costs (Airbnb takes 15.5%, the highest-volume channel for this
@@ -506,6 +566,10 @@ export default function AddCommunity() {
       selectedCommunity?.state ?? selectedState,
     ].filter(Boolean).join(" "),
   }), [selectedCommunity, cityInput, selectedState, editedStreetAddress, suggestedStreetAddress]);
+  const researchHistoryNames = useMemo(
+    () => (researchHistory?.resultNames ?? []).filter(Boolean).slice(0, 5),
+    [researchHistory],
+  );
 
   useEffect(() => {
     if (!editedStreetAddress.trim() && suggestedStreetAddress) {
@@ -530,7 +594,10 @@ export default function AddCommunity() {
       if (typeof draft.sweepJobId === "string") setSweepJobId(draft.sweepJobId);
       if (typeof draft.sweepPhase === "string") setSweepPhase(draft.sweepPhase === "running" ? "running" : "setup");
       if (typeof draft.sweepDone === "boolean") setSweepDone(draft.sweepDone);
-      if (typeof draft.photoFetchJobId === "string") setPhotoFetchJobId(draft.photoFetchJobId);
+      if (typeof draft.photoFetchJobId === "string") {
+        restoredPhotoFetchJobIdsRef.current.add(draft.photoFetchJobId);
+        setPhotoFetchJobId(draft.photoFetchJobId);
+      }
       if (typeof draft.bulkComboJobId === "string") {
         setBulkComboJobId(draft.bulkComboJobId);
         setBulkComboOpen(true);
@@ -645,7 +712,7 @@ export default function AddCommunity() {
           return;
         }
         const data = await resp.json();
-        if (!cancelled && data.job) applySweepJob(data.job);
+        if (!cancelled && data.job && !ignoredSweepJobIdsRef.current.has(data.job.id)) applySweepJob(data.job);
       } catch (e: any) {
         if (!cancelled) console.warn("[add-community] sweep job poll failed", e?.message || e);
       }
@@ -662,8 +729,13 @@ export default function AddCommunity() {
   }, [sweepJobId, sweepDone, sweepRunning, applySweepJob]);
 
   const applyPhotoFetchJob = useCallback((job: ComboPhotoFetchJobPayload) => {
+    const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+    const restoredJob = restoredPhotoFetchJobIdsRef.current.has(job.id);
+    if (terminal) {
+      restoredPhotoFetchJobIdsRef.current.delete(job.id);
+    }
     setPhotoFetchJob(job);
-    setPhotoFetchJobId(job.id);
+    setPhotoFetchJobId(terminal ? null : job.id);
     const item = job.items?.[0];
     if (item) {
       if (Array.isArray(item.unit1Photos) && item.unit1Photos.length > 0) setUnit1Photos(item.unit1Photos);
@@ -671,11 +743,10 @@ export default function AddCommunity() {
       if (typeof item.unit1SourceUrl === "string") setUnit1PhotoSourceUrl(item.unit1SourceUrl);
       if (typeof item.unit2SourceUrl === "string") setUnit2PhotoSourceUrl(item.unit2SourceUrl);
     }
-    const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
     setPhotosLoading(!terminal);
     if (terminal) {
       setPhotoFetchStartedAt(null);
-      if (item?.error) {
+      if (item?.error && !restoredJob) {
         toast({
           title: job.status === "failed" ? "Photo fetch failed" : "Photo fetch completed with notes",
           description: item.error,
@@ -797,6 +868,38 @@ export default function AddCommunity() {
     };
   }, [bulkComboJobId]);
 
+  useEffect(() => {
+    const city = cityInput.trim();
+    if (!selectedState || city.length < 2) {
+      setResearchHistory(null);
+      setResearchHistoryLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setResearchHistoryLoading(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ city, state: selectedState, mode: "combo" });
+        const resp = await fetch(`/api/community/research-history?${params.toString()}`, { credentials: "include" });
+        const data = resp.ok ? await resp.json() : { history: null };
+        if (!cancelled) setResearchHistory(data.history ?? null);
+      } catch (e: any) {
+        if (!cancelled) {
+          console.warn("[add-community] research history lookup failed", e?.message || e);
+          setResearchHistory(null);
+        }
+      } finally {
+        if (!cancelled) setResearchHistoryLoading(false);
+      }
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [selectedState, cityInput]);
+
   const clearSavedComboDraft = useCallback(() => {
     window.localStorage.removeItem(ADD_COMBO_DRAFT_KEY);
     setDraftRestored(false);
@@ -810,12 +913,15 @@ export default function AddCommunity() {
       return;
     }
     setResearchLoading(true);
+    setResearchProgress(8);
     setCommunities([]);
     setBulkCommunityIndexes(new Set());
     try {
       const res = await apiRequest("POST", "/api/community/research", { city: cityInput.trim(), state: selectedState });
       const data = await res.json();
       setCommunities(data.communities || []);
+      setResearchProgress(100);
+      if (data.history) setResearchHistory(data.history);
       if ((data.communities || []).length === 0) {
         toast({ title: "No qualifying communities found", description: "Try a different city or state." });
       } else {
@@ -825,20 +931,29 @@ export default function AddCommunity() {
       toast({ title: "Research failed", description: e.message, variant: "destructive" });
     } finally {
       setResearchLoading(false);
+      // reset after short delay so UI doesn't flash
+      setTimeout(() => setResearchProgress(0), 800);
     }
   }, [selectedState, cityInput, toast]);
 
   // ── Open the sweep modal in setup mode. Fetches the curated list of
   // markets (if we haven't already) so the checkbox grid can render.
+  const resetSweepToMarketPicker = useCallback(() => {
+    if (sweepJobId) ignoredSweepJobIdsRef.current.add(sweepJobId);
+    setSweepJobId(null);
+    setSweepRunning(false);
+    setSweepDone(false);
+    setSweepMarkets([]);
+    setSweepPhase("setup");
+  }, [sweepJobId]);
+
   const openSweepSetup = useCallback(async () => {
     setSweepOpen(true);
     if (sweepJobId && sweepRunning) {
       setSweepPhase("running");
       return;
     }
-    setSweepPhase("setup");
-    setSweepDone(false);
-    setSweepMarkets([]);
+    resetSweepToMarketPicker();
     if (!seedMarkets) {
       try {
         const resp = await fetch("/api/community/top-markets/seeds");
@@ -856,7 +971,7 @@ export default function AddCommunity() {
         toast({ title: "Couldn't load market list", description: e.message, variant: "destructive" });
       }
     }
-  }, [seedMarkets, sweepJobId, sweepRunning, toast]);
+  }, [seedMarkets, sweepJobId, sweepRunning, resetSweepToMarketPicker, toast]);
 
   const toggleMarket = (m: { city: string; state: string }) => {
     setSelectedMarkets((prev) => {
@@ -1259,6 +1374,14 @@ export default function AddCommunity() {
 
   const startServerPhotoFetchJob = useCallback(async (): Promise<boolean> => {
     if (!selectedCommunity || !selectedUnit1 || !selectedUnit2) return false;
+    if (!unit1BedroomCount || !unit2BedroomCount) {
+      toast({
+        title: "Bedroom counts required",
+        description: "Pick a pairing with explicit bedroom counts before fetching photos.",
+        variant: "destructive",
+      });
+      return false;
+    }
     setStep(4);
     setPhotosLoading(true);
     setPhotoFetchStartedAt(null);
@@ -1281,13 +1404,13 @@ export default function AddCommunity() {
           unit1: {
             url: selectedUnit1.url,
             title: selectedUnit1.title,
-            bedrooms: selectedUnit1.bedrooms,
+            bedrooms: unit1BedroomCount,
             address: (selectedUnit1 as any).address,
           },
           unit2: {
             url: selectedUnit2.url,
             title: selectedUnit2.title,
-            bedrooms: selectedUnit2.bedrooms,
+            bedrooms: unit2BedroomCount,
             address: (selectedUnit2 as any).address,
           },
         },
@@ -1310,7 +1433,10 @@ export default function AddCommunity() {
     selectedUnit2,
     editedStreetAddress,
     suggestedStreetAddress,
+    unit1BedroomCount,
+    unit2BedroomCount,
     applyPhotoFetchJob,
+    toast,
   ]);
 
   const handleConfirmUnits = useCallback(async () => {
@@ -1342,6 +1468,8 @@ export default function AddCommunity() {
     //
     // We only short-circuit to the empty state when neither path
     // can run (no URL AND insufficient community info to search).
+    const selectedBedroomsFor = (u: UnitResult) =>
+      u === selectedUnit1 ? unit1BedroomCount : u === selectedUnit2 ? unit2BedroomCount : positiveInteger(u.bedrooms);
     const buildBody = (u: UnitResult, skipUrls: string[] = [], bedroomOverride?: number | "any") =>
       u.url
         ? { url: u.url }
@@ -1350,10 +1478,10 @@ export default function AddCommunity() {
             streetAddress: editedStreetAddress.trim() || suggestedStreetAddress || undefined,
             city: selectedCommunity?.city,
             state: selectedCommunity?.state,
-            bedrooms: bedroomOverride ?? u.bedrooms ?? undefined,
+            bedrooms: bedroomOverride ?? selectedBedroomsFor(u) ?? undefined,
             skipUrls,
           };
-    const canFetch = (u: UnitResult) => !!(u.url || (selectedCommunity?.name && u.bedrooms));
+    const canFetch = (u: UnitResult) => !!(u.url || (selectedCommunity?.name && selectedBedroomsFor(u)));
 
     if (!canFetch(selectedUnit1) && !canFetch(selectedUnit2)) {
       // Nothing we can fetch with — neither a URL nor enough
@@ -1467,7 +1595,7 @@ export default function AddCommunity() {
         setPhotoFetchStartedAt(null);
       }
     }
-  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, toast, postJsonWithTimeout, startServerPhotoFetchJob]);
+  }, [selectedUnit1, selectedUnit2, selectedCommunity, editedStreetAddress, suggestedStreetAddress, unit1BedroomCount, unit2BedroomCount, toast, postJsonWithTimeout, startServerPhotoFetchJob]);
 
   useEffect(() => {
     if (!draftHydratedRef.current || !draftAutosaveReady) return;
@@ -1542,6 +1670,14 @@ export default function AddCommunity() {
   // ── Step 5: Generate listing ────────────────────────────────
   const handleGenerateListing = useCallback(async () => {
     if (!selectedCommunity || !selectedUnit1 || !selectedUnit2) return;
+    if (!unit1BedroomCount || !unit2BedroomCount) {
+      toast({
+        title: "Bedroom counts required",
+        description: "Pick a pairing with explicit bedroom counts before generating the listing draft.",
+        variant: "destructive",
+      });
+      return;
+    }
     setListingLoading(true);
     setStep(5);
     try {
@@ -1550,12 +1686,12 @@ export default function AddCommunity() {
         city: selectedCommunity.city,
         state: selectedCommunity.state,
         unit1: {
-          bedrooms: selectedUnit1.bedrooms ?? 2,
+          bedrooms: unit1BedroomCount,
           url: selectedUnit1.url,
           address: (selectedUnit1 as any).address,
         },
         unit2: {
-          bedrooms: selectedUnit2.bedrooms ?? 2,
+          bedrooms: unit2BedroomCount,
           url: selectedUnit2.url,
           address: (selectedUnit2 as any).address,
         },
@@ -1598,11 +1734,19 @@ export default function AddCommunity() {
     } finally {
       setListingLoading(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, suggestedRate, strPermit, editedStreetAddress, suggestedStreetAddress, toast]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, unit1BedroomCount, unit2BedroomCount, suggestedRate, strPermit, editedStreetAddress, suggestedStreetAddress, toast]);
 
   // ── Save to dashboard ───────────────────────────────────────
   const handleSave = useCallback(async () => {
     if (!selectedCommunity) return;
+    if (!unit1BedroomCount || !unit2BedroomCount) {
+      toast({
+        title: "Bedroom counts required",
+        description: "Pick a pairing with explicit bedroom counts before saving to the dashboard.",
+        variant: "destructive",
+      });
+      return;
+    }
     const addressCheck = validateCommunityStreetAddress({
       communityName: selectedCommunity.name,
       city: selectedCommunity.city,
@@ -1634,7 +1778,7 @@ export default function AddCommunity() {
         minimumStayEvidence: selectedCommunity.minimumStayEvidence ?? null,
         minimumStaySourceUrl: selectedCommunity.minimumStaySourceUrl ?? null,
         unit1Url: selectedUnit1?.url || unit1PhotoSourceUrl || null,
-        unit1Bedrooms: selectedUnit1?.bedrooms ?? null,
+        unit1Bedrooms: unit1BedroomCount,
         // Per-unit structured fields. Each is nullable on the
         // schema so a draft saved before the operator filled them
         // in (or saved with the AI fallback that doesn't produce
@@ -1646,7 +1790,7 @@ export default function AddCommunity() {
         unit1ShortDescription: editedUnitA?.shortDescription ?? null,
         unit1LongDescription: editedUnitA?.longDescription ?? null,
         unit2Url: selectedUnit2?.url || unit2PhotoSourceUrl || null,
-        unit2Bedrooms: selectedUnit2?.bedrooms ?? null,
+        unit2Bedrooms: unit2BedroomCount,
         unit2Bathrooms: editedUnitB?.bathrooms ?? null,
         unit2Sqft: editedUnitB?.sqft ?? null,
         unit2MaxGuests: editedUnitB?.maxGuests ?? null,
@@ -1720,7 +1864,7 @@ export default function AddCommunity() {
     } finally {
       setSaving(false);
     }
-  }, [selectedCommunity, selectedUnit1, selectedUnit2, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, suggestedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, dbprLicense, touristTaxAccount, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
+  }, [selectedCommunity, selectedUnit1, selectedUnit2, unit1BedroomCount, unit2BedroomCount, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, suggestedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, dbprLicense, touristTaxAccount, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
 
@@ -1873,6 +2017,34 @@ export default function AddCommunity() {
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
               <strong>Current selection:</strong> {selectedState || "No state selected"} — {cityInput || "No city entered"}
             </div>
+            {(researchHistoryLoading || researchHistory) && (
+              <div
+                className="mb-4 rounded-md border border-blue-100 bg-blue-50/60 p-3 text-sm text-blue-950"
+                data-testid="city-research-history"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <CalendarDays className="h-4 w-4 text-blue-700" />
+                  <strong>Last city search:</strong>
+                  {researchHistoryLoading ? (
+                    <span className="text-blue-800/75">Checking history…</span>
+                  ) : researchHistory ? (
+                    <span>
+                      {formatResearchHistoryTime(researchHistory.lastSearchedAt)} — yielded{" "}
+                      <strong>{researchHistory.resultCount}</strong> communities
+                    </span>
+                  ) : null}
+                </div>
+                {!researchHistoryLoading && researchHistory?.error && (
+                  <div className="mt-1 text-xs text-red-700">Last run failed: {researchHistory.error}</div>
+                )}
+                {!researchHistoryLoading && !researchHistory?.error && researchHistoryNames.length > 0 && (
+                  <div className="mt-1 text-xs text-blue-900/75">
+                    Results: {researchHistoryNames.join(", ")}
+                    {researchHistory && researchHistory.resultNames.length > researchHistoryNames.length ? "…" : ""}
+                  </div>
+                )}
+              </div>
+            )}
             {nearbyCitySuggestions.length > 0 && (
               <div className="mb-4">
                 <div className="text-[11px] font-medium text-muted-foreground mb-1.5 flex items-center gap-1">
@@ -1921,11 +2093,34 @@ export default function AddCommunity() {
                 {sweepRunning ? "Sweeping…" : "Scan top markets"}
               </Button>
             </div>
-            {researchLoading && (
-              <p className="text-sm text-muted-foreground mt-3" id="status-message">
-                Searching for communities and scoring with AI — this takes 20–40 seconds…
-              </p>
-            )}
+            {researchLoading && (() => {
+              const pct = Math.min(100, Math.max(0, researchProgress));
+              const stage = pct < 25 ? { label: "Starting research", detail: "Sending city to community research service + Google." }
+                : pct < 55 ? { label: "Finding communities", detail: "Querying vacation-rental condo/townhome clusters." }
+                : pct < 78 ? { label: "AI scoring", detail: "Claude ranking by confidence + combinability for bundled listings." }
+                : pct < 96 ? { label: "Finalizing shortlist", detail: "Preparing results with rates and unit mixes." }
+                : { label: "Wrapping up", detail: "Loading researched communities." };
+              return (
+                <div className="mt-3 border rounded-lg p-3 bg-muted/20" id="status-message">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-2 min-w-0">
+                      <Loader2 className="h-4 w-4 animate-spin text-primary mt-0.5 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-foreground">{stage.label}</div>
+                        <div className="text-xs text-muted-foreground">{stage.detail}</div>
+                      </div>
+                    </div>
+                    <div className="text-xs font-mono tabular-nums text-muted-foreground">{pct}%</div>
+                  </div>
+                  <div className="w-full h-2 bg-muted rounded-full overflow-hidden mt-2">
+                    <div className="h-full bg-primary transition-all duration-500" style={{ width: `${pct}%` }} />
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-1.5">
+                    Server-side research continues even if you close this tab (results are computed on Railway). Re-open to see progress or re-run to retrieve.
+                  </div>
+                </div>
+              );
+            })()}
           </Card>
         )}
 
@@ -2118,7 +2313,7 @@ export default function AddCommunity() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => { setSweepPhase("setup"); setSweepMarkets([]); setSweepDone(false); }}
+                    onClick={resetSweepToMarketPicker}
                   >
                     ← Scan different markets
                   </Button>
@@ -2316,6 +2511,13 @@ export default function AddCommunity() {
             </div>
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
               <strong>Location:</strong> {cityInput}, {selectedState} — <strong>{communities.length}</strong> communities found. Select one to continue.
+              {researchHistory && (
+                <div className="mt-1 flex flex-wrap items-center gap-1 text-xs">
+                  <CalendarDays className="h-3.5 w-3.5" />
+                  <strong>Last searched:</strong> {formatResearchHistoryTime(researchHistory.lastSearchedAt)} — yielded {researchHistory.resultCount} communities
+                  {researchHistoryNames.length > 0 ? ` (${researchHistoryNames.join(", ")}${researchHistory.resultNames.length > researchHistoryNames.length ? "…" : ""})` : ""}
+                </div>
+              )}
             </div>
             <div className="mb-3 flex flex-wrap items-center gap-2">
               {bulkCommunityIndexes.size > 0 && (
@@ -2863,38 +3065,65 @@ export default function AddCommunity() {
             </div>
 
             {photosLoading && (
-              <div className="flex flex-col items-center gap-3 py-12 justify-center text-muted-foreground">
-                <div className="flex items-center gap-3">
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  <span>{photoFetchJob?.items?.[0]?.message || "Fetching photos from Zillow listing pages…"}</span>
-                </div>
-                {photoFetchJobId && (
-                  <div className="flex flex-col items-center gap-2">
-                    <p className="text-xs">
-                      Server job running. You can leave this tab and come back; this page will reconnect to the job.
-                    </p>
-                    {(() => {
-                      const heartbeat = photoFetchJob?.items?.[0]?.heartbeatAt;
-                      if (!heartbeat) return null;
-                      const ageSeconds = Math.max(0, Math.round((Date.now() - new Date(heartbeat).getTime()) / 1000));
-                      return (
-                        <p className="text-[11px] text-muted-foreground">
-                          Last server heartbeat: {ageSeconds}s ago.
-                        </p>
-                      );
-                    })()}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={cancelPhotoFetchJob}
-                      data-testid="button-cancel-photo-fetch-job"
-                    >
-                      Cancel photo fetch
-                    </Button>
+              (() => {
+                const item = photoFetchJob?.items?.[0];
+                const progressValue = Math.min(100, Math.max(5, Math.round(item?.progressPercent ?? (photoFetchJobId ? 12 : 8))));
+                const heartbeat = item?.heartbeatAt;
+                const heartbeatAgeSeconds = heartbeat
+                  ? Math.max(0, Math.round((Date.now() - new Date(heartbeat).getTime()) / 1000))
+                  : null;
+                const heartbeatIsStale = heartbeatAgeSeconds != null && heartbeatAgeSeconds > 120;
+                return (
+                  <div className="flex flex-col items-center gap-4 py-10 justify-center text-muted-foreground">
+                    <div className="w-full max-w-xl rounded-lg border bg-background p-4 shadow-sm">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-foreground">
+                              {item?.message || "Fetching photos from Zillow listing pages…"}
+                            </p>
+                            <p className="text-xs capitalize text-muted-foreground">
+                              {item?.phase ? `Phase: ${item.phase}` : "Preparing photo search"}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="shrink-0 text-sm font-semibold text-foreground">{progressValue}%</span>
+                      </div>
+                      <Progress value={progressValue} className="h-2" />
+                      <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+                        <div className="rounded-md bg-muted/50 px-2 py-1.5">
+                          Unit A photos: <span className="font-medium text-foreground">{unit1Photos.length}</span>
+                        </div>
+                        <div className="rounded-md bg-muted/50 px-2 py-1.5">
+                          Unit B photos: <span className="font-medium text-foreground">{unit2Photos.length}</span>
+                        </div>
+                        <div className="rounded-md bg-muted/50 px-2 py-1.5">
+                          Heartbeat: <span className="font-medium text-foreground">{heartbeatAgeSeconds == null ? "waiting" : `${heartbeatAgeSeconds}s ago`}</span>
+                        </div>
+                      </div>
+                      {photoFetchJobId && (
+                        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <p className={`text-xs ${heartbeatIsStale ? "text-amber-700" : "text-muted-foreground"}`}>
+                            {heartbeatIsStale
+                              ? "The server heartbeat is stale. Cancel and retry if this does not recover shortly."
+                              : "Server job running. You can leave this tab and come back; this page will reconnect to the job."}
+                          </p>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={cancelPhotoFetchJob}
+                            data-testid="button-cancel-photo-fetch-job"
+                          >
+                            Cancel photo fetch
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
+                );
+              })()
             )}
 
             {!photosLoading && (
@@ -2903,7 +3132,7 @@ export default function AddCommunity() {
                   <>
                     <div className="flex items-center justify-between mb-4">
                       <p className="text-sm text-muted-foreground">
-                        {unit1Photos.length + unit2Photos.length} photos fetched. Run a platform check to verify they don't appear on Airbnb/VRBO/Booking.com.
+                        Unit 1: {unit1Photos.length} photo{unit1Photos.length === 1 ? "" : "s"} · Unit 2: {unit2Photos.length} photo{unit2Photos.length === 1 ? "" : "s"}.
                       </p>
                       <Button variant="outline" size="sm" onClick={handleCheckAllPhotos} data-testid="button-check-all-photos">
                         <ShieldCheck className="h-4 w-4 mr-2" />
@@ -2919,12 +3148,15 @@ export default function AddCommunity() {
                     )}
 
                     {[
-                      { label: `Unit 1 — ${selectedUnit1?.bedrooms ?? "?"}BR`, photos: unit1Photos, sourceUrl: unit1PhotoSourceUrl },
-                      { label: `Unit 2 — ${selectedUnit2?.bedrooms ?? "?"}BR`, photos: unit2Photos, sourceUrl: unit2PhotoSourceUrl },
-                    ].map(({ label, photos, sourceUrl }) => (
+                      { key: "unit-1", label: `Unit 1 — ${unit1BedroomCount ?? "?"}BR`, photos: unit1Photos, sourceUrl: unit1PhotoSourceUrl },
+                      { key: "unit-2", label: `Unit 2 — ${unit2BedroomCount ?? "?"}BR`, photos: unit2Photos, sourceUrl: unit2PhotoSourceUrl },
+                    ].map(({ key, label, photos, sourceUrl }) => (
                       <div key={label} className="mb-6">
                         <div className="flex items-center gap-2 mb-3">
                           <h3 className="font-medium text-sm">{label}</h3>
+                          <Badge variant={photos.length > 0 ? "default" : "outline"} className="text-[10px]">
+                            {photos.length} photo{photos.length === 1 ? "" : "s"}
+                          </Badge>
                           {sourceUrl && (
                             <a
                               href={sourceUrl}
@@ -2936,36 +3168,42 @@ export default function AddCommunity() {
                             </a>
                           )}
                         </div>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                          {photos.map((p, i) => {
-                            const checkResult = photoChecks[p.url];
-                            const isChecking = checkResult === "checking";
-                            const isFlagged = checkResult && checkResult !== "checking" && !(checkResult as PhotoCheckResult).clean;
-                            return (
-                              <div key={i} className={`relative rounded-lg overflow-hidden border-2 transition-colors ${isFlagged ? "border-red-400" : "border-transparent"}`} data-testid={`photo-${label.replace(/\s/g,"-")}-${i}`}>
-                                <img src={p.url} alt={p.label} className="w-full aspect-video object-cover" />
-                                {checkResult && checkResult !== "checking" && (
-                                  <div className={`absolute top-1 right-1 rounded-full p-0.5 ${(checkResult as PhotoCheckResult).clean ? "bg-green-500" : "bg-red-500"}`}>
-                                    {(checkResult as PhotoCheckResult).clean
-                                      ? <ShieldCheck className="h-3.5 w-3.5 text-white" />
-                                      : <ShieldX className="h-3.5 w-3.5 text-white" />
-                                    }
-                                  </div>
-                                )}
-                                {isChecking && (
-                                  <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-                                    <Loader2 className="h-5 w-5 text-white animate-spin" />
-                                  </div>
-                                )}
-                                {isFlagged && (
-                                  <div className="absolute bottom-0 left-0 right-0 bg-red-500 text-white text-xs px-2 py-0.5 text-center truncate">
-                                    {((checkResult as PhotoCheckResult).matches[0]?.platform) ?? "Found"}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
+                        {photos.length > 0 ? (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            {photos.map((p, i) => {
+                              const checkResult = photoChecks[p.url];
+                              const isChecking = checkResult === "checking";
+                              const isFlagged = checkResult && checkResult !== "checking" && !(checkResult as PhotoCheckResult).clean;
+                              return (
+                                <div key={i} className={`relative rounded-lg overflow-hidden border-2 transition-colors ${isFlagged ? "border-red-400" : "border-transparent"}`} data-testid={`photo-${key}-${i}`}>
+                                  <img src={p.url} alt={p.label} className="w-full aspect-video object-cover" />
+                                  {checkResult && checkResult !== "checking" && (
+                                    <div className={`absolute top-1 right-1 rounded-full p-0.5 ${(checkResult as PhotoCheckResult).clean ? "bg-green-500" : "bg-red-500"}`}>
+                                      {(checkResult as PhotoCheckResult).clean
+                                        ? <ShieldCheck className="h-3.5 w-3.5 text-white" />
+                                        : <ShieldX className="h-3.5 w-3.5 text-white" />
+                                      }
+                                    </div>
+                                  )}
+                                  {isChecking && (
+                                    <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                                      <Loader2 className="h-5 w-5 text-white animate-spin" />
+                                    </div>
+                                  )}
+                                  {isFlagged && (
+                                    <div className="absolute bottom-0 left-0 right-0 bg-red-500 text-white text-xs px-2 py-0.5 text-center truncate">
+                                      {((checkResult as PhotoCheckResult).matches[0]?.platform) ?? "Found"}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" data-testid={`photo-empty-${key}`}>
+                            No photos attached for this unit from the last fetch.
+                          </div>
+                        )}
                       </div>
                     ))}
                   </>
@@ -3170,8 +3408,8 @@ export default function AddCommunity() {
 
                   {/* ── Per-unit details (Unit A / Unit B) ──── */}
                   {[
-                    { key: "A", state: editedUnitA, setState: setEditedUnitA, brFallback: selectedUnit1?.bedrooms ?? 0 },
-                    { key: "B", state: editedUnitB, setState: setEditedUnitB, brFallback: selectedUnit2?.bedrooms ?? 0 },
+                    { key: "A", state: editedUnitA, setState: setEditedUnitA, brFallback: unit1BedroomCount ?? 0 },
+                    { key: "B", state: editedUnitB, setState: setEditedUnitB, brFallback: unit2BedroomCount ?? 0 },
                   ].map(({ key, state, setState, brFallback }) => {
                     const unit = state ?? {
                       bedrooms: brFallback,

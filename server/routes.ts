@@ -11,6 +11,7 @@ import {
   buyInVendorContacts,
   comboPhotoFetchJobItems as comboPhotoFetchJobItemRows,
   comboPhotoFetchJobs as comboPhotoFetchJobRows,
+  communityResearchSearches as communityResearchSearchRows,
   communityPricingRefreshJobs as communityPricingRefreshJobRows,
   guestyPropertyMap,
   insertBuyInSchema,
@@ -3926,9 +3927,18 @@ function inferCommunityDraftBedroomCount(draft: any, unitKey: "unit1" | "unit2")
   const fromStructured = positiveDraftInteger(stored) ?? positiveDraftInteger(combined);
   if (fromStructured) return fromStructured;
 
-  const text = [
+  const unitText = [
     unitKey === "unit1" ? draft?.unit1Description : draft?.unit2Description,
     unitKey === "unit1" ? draft?.unit1Bedding : draft?.unit2Bedding,
+    unitKey === "unit1" ? draft?.unit1ShortDescription : draft?.unit2ShortDescription,
+    unitKey === "unit1" ? draft?.unit1LongDescription : draft?.unit2LongDescription,
+  ].filter(Boolean).join(" ");
+  const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  if (unitMatch) return positiveDraftInteger(unitMatch[1]);
+
+  if (draft?.singleListing !== true) return null;
+
+  const text = [
     draft?.listingTitle,
     draft?.bookingTitle,
     draft?.name,
@@ -25117,9 +25127,10 @@ Return ONLY compact JSON with this exact shape:
   };
 
   const activeComboPhotoFetchJobIds = new Set<string>();
-  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
+  const COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS = 90_000;
   const COMBO_PHOTO_FETCH_HEARTBEAT_MS = 15_000;
   const COMBO_PHOTO_FETCH_STALE_HEARTBEAT_MS = 2 * 60 * 1000;
+  const COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS = 12_000;
   const toQueueMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
     if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -25278,6 +25289,14 @@ Return ONLY compact JSON with this exact shape:
     lockExpiresAt: job.lockExpiresAt ? new Date(job.lockExpiresAt).toISOString() : null,
     items: job.items.map((item) => ({
       ...item,
+      progressPercent:
+        item.status === "completed" ? 100 :
+        item.status === "failed" || item.status === "cancelled" ? 100 :
+        item.phase === "done" ? 95 :
+        item.phase === "unit2" ? (item.unit2Photos.length > 0 ? 85 : 65) :
+        item.phase === "unit1" ? (item.unit1Photos.length > 0 ? 50 : 25) :
+        item.status === "running" ? 15 :
+        5,
       startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
       finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
       heartbeatAt: item.heartbeatAt ? new Date(item.heartbeatAt).toISOString() : null,
@@ -25302,7 +25321,7 @@ Return ONLY compact JSON with this exact shape:
     const overlap = b.filter((p) => keys.has(p.url.replace(/[?#].*$/, "").toLowerCase())).length;
     return overlap / Math.min(a.length, b.length) >= 0.8;
   };
-  const fetchComboPhotoJson = async (url: string, body: unknown, options: { abortKey?: string; signal?: AbortSignal } = {}) => {
+  const fetchComboPhotoJson = async (url: string, body: unknown, options: { abortKey?: string; signal?: AbortSignal; timeoutMs?: number } = {}) => {
     const circuitKey = queueCircuitKeyForUrl(url);
     assertQueueCircuitOpen(circuitKey);
     const controller = new AbortController();
@@ -25316,7 +25335,7 @@ Return ONLY compact JSON with this exact shape:
     };
     if (options.signal?.aborted) abortFromParent();
     else options.signal?.addEventListener("abort", abortFromParent, { once: true });
-    const timer = setTimeout(() => controller.abort(), COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? COMBO_PHOTO_FETCH_REQUEST_TIMEOUT_MS);
     try {
       const resp = await fetch(url, {
         method: "POST",
@@ -25344,15 +25363,16 @@ Return ONLY compact JSON with this exact shape:
     skipUrls: string[] = [],
     bedroomOverride?: number | "any",
   ) => unit?.url
-    ? { url: unit.url }
+    ? { url: unit.url, bedrooms: unit.bedrooms ?? undefined }
     : {
         communityName: item.communityName,
         streetAddress: unit?.address || item.streetAddress || undefined,
         city: item.city,
         state: item.state,
         bedrooms: bedroomOverride ?? unit?.bedrooms ?? undefined,
+        minBedrooms: bedroomOverride === "any" ? unit?.bedrooms ?? undefined : undefined,
         skipUrls,
-        maxCandidates: bedroomOverride === "any" ? 24 : 12,
+        maxCandidates: bedroomOverride === "any" ? 10 : 6,
       };
   const canComboPhotoFetchUnit = (item: ComboPhotoFetchItem, unit: ComboPhotoFetchUnit | undefined) =>
     !!(unit?.url || (item.communityName && unit?.bedrooms));
@@ -25368,7 +25388,6 @@ Return ONLY compact JSON with this exact shape:
     const seenUrls = new Set(blockedUrls.filter(Boolean));
     const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
       { relaxed: false },
-      { relaxed: false },
       { bedroomOverride: "any", relaxed: true },
     ];
     let best: { photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean } = {
@@ -25378,11 +25397,18 @@ Return ONLY compact JSON with this exact shape:
     };
     for (const attempt of attempts) {
       if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
-      const data = await fetchComboPhotoJson(
-        `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
-        buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
-        { abortKey, signal },
-      );
+      let data: any;
+      try {
+        data = await fetchComboPhotoJson(
+          `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
+          buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
+          { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 35_000 },
+        );
+      } catch (error: any) {
+        if (attempt.relaxed || job.cancelRequested || error?.cancelled) throw error;
+        console.warn(`[combo-photo-fetch] exact photo search failed for ${item.communityName}: ${error?.message ?? error}; retrying relaxed`);
+        continue;
+      }
       const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
       const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
       const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKeyForComboPhotoJob(u) === listingKeyForComboPhotoJob(sourceUrl));
@@ -27002,13 +27028,14 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, skipUrls, skipFirst, maxCandidates } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
       city?: string;
       state?: string;
       bedrooms?: number | "any";
+      minBedrooms?: number | string;
       maxCandidates?: number;
       // URLs the caller already has (e.g. from a previous click) so
       // a "Find another" button can skip listings already surfaced.
@@ -27022,6 +27049,14 @@ Return ONLY compact JSON with this exact shape:
 
     let listingUrl: string | undefined = url || undefined;
     let foundVia: "url" | "search" = "url";
+    const requestedBedrooms = bedrooms === "any"
+      ? null
+      : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
+        ? Math.round(Number(bedrooms))
+        : null;
+    const minimumBedrooms = Number.isFinite(Number(minBedrooms)) && Number(minBedrooms) > 0
+      ? Math.round(Number(minBedrooms))
+      : null;
 
     if (!listingUrl) {
       // Discovery path. Need at least the community name to search.
@@ -27050,14 +27085,11 @@ Return ONLY compact JSON with this exact shape:
         }
       };
       const skipSet = new Set((skipUrls ?? []).map((u) => listingKey(u)));
-      const requestedBedrooms = bedrooms === "any"
-        ? null
-        : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
-          ? Math.round(Number(bedrooms))
-          : null;
       const candidateLimit = Number.isFinite(Number(maxCandidates)) && Number(maxCandidates) > 0
         ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
         : null;
+      const requestedStateAbbr = String(state ?? "").trim().toLowerCase().match(/^(hi|hawaii)$/) ? "hi" : null;
+      const urlStatePattern = /(?:^|[-_/])([A-Z]{2})(?:[-_/]|$)/i;
       type DiscoverySource = "zillow" | "realtor" | "redfin" | "homes";
       const candidateUrls: Array<{ url: string; source: DiscoverySource }> = [];
       const seen = new Set<string>();
@@ -27080,6 +27112,10 @@ Return ONLY compact JSON with this exact shape:
       const addCandidate = (link: string, source: DiscoverySource, title = "", snippet = "", allowedRoots?: Set<string>) => {
         const key = listingKey(link);
         if (seen.has(key) || skipSet.has(key)) return;
+        if (!allowedRoots && requestedStateAbbr) {
+          const urlState = link.match(urlStatePattern)?.[1]?.toLowerCase();
+          if (urlState && urlState !== requestedStateAbbr) return;
+        }
         if (allowedRoots && allowedRoots.size > 0) {
           const root = streetRootFromListingAddress(
             parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
@@ -27125,6 +27161,7 @@ Return ONLY compact JSON with this exact shape:
           try {
             const resp = await fetch(
               `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+              { signal: AbortSignal.timeout(COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS) },
             );
             if (!resp.ok) {
               console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
@@ -27152,10 +27189,15 @@ Return ONLY compact JSON with this exact shape:
 
       if (city && state) {
         const roots = repeatedRoots();
-        if (roots.size > 0) {
+        const focusedZillowCandidates = candidateUrls.filter((candidate) => candidate.source === "zillow").length;
+        const hasEnoughFocusedCandidates = candidateLimit !== null && focusedZillowCandidates >= Math.min(3, candidateLimit);
+        if (roots.size > 0 && !hasEnoughFocusedCandidates) {
+          const apifyMaxItems = candidateLimit
+            ? Math.max(50, Math.min(120, candidateLimit * 10))
+            : 300;
           const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
-            harvestZillowUrlsViaApifySearch(city, state, 300),
-            harvestRealtorUrlsViaApifySearch(city, state, 300),
+            harvestZillowUrlsViaApifySearch(city, state, apifyMaxItems),
+            harvestRealtorUrlsViaApifySearch(city, state, apifyMaxItems),
           ]);
           for (const link of zillowApifyUrls) addCandidate(link, "zillow", "", "", roots);
           for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", roots);
@@ -27165,16 +27207,18 @@ Return ONLY compact JSON with this exact shape:
             `roots=${Array.from(roots).join(", ") || "none"} total=${candidateUrls.length}`,
           );
         } else {
-          console.log(`[fetch-unit-photos] Apify supplement skipped for "${communityName}" because no resort street root was discovered`);
+          console.log(
+            hasEnoughFocusedCandidates
+              ? `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because focused discovery already found ${candidateUrls.length} candidates`
+              : `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because no resort street root was discovered`,
+          );
         }
       }
 
-      // Prefer Realtor/Redfin/Homes before Zillow because older/off-market
-      // detail pages often expose facts/photos more reliably than Zillow in
-      // resort condo buildings. Zillow remains a fallback and still benefits
-      // from sidecar/ScrapingBee recovery when needed.
+      // Prefer sources with direct photo payloads first; Realtor often rate
+      // limits or returns empty galleries in dense resort-condo searches.
       candidateUrls.sort((a, b) => {
-        const priority: Record<DiscoverySource, number> = { realtor: 0, redfin: 1, homes: 2, zillow: 3 };
+        const priority: Record<DiscoverySource, number> = { zillow: 0, redfin: 1, homes: 2, realtor: 3 };
         return priority[a.source] - priority[b.source];
       });
 
@@ -27193,6 +27237,10 @@ Return ONLY compact JSON with this exact shape:
           const scrapedBR = facts.bedrooms ?? null;
           if (requestedBedrooms && scrapedBR !== null && scrapedBR !== requestedBedrooms) {
             console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
+            continue;
+          }
+          if (!requestedBedrooms && minimumBedrooms && scrapedBR !== null && scrapedBR < minimumBedrooms) {
+            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR is below requested minimum ${minimumBedrooms}BR`);
             continue;
           }
           res.json({
@@ -27228,6 +27276,17 @@ Return ONLY compact JSON with this exact shape:
       // an empty facts object — no behavior change for combo).
       const facts: ListingFacts = {};
       const photos = await scrapeListingPhotos(listingUrl, undefined, facts);
+      const scrapedBR = facts.bedrooms ?? null;
+      const expectedBedrooms = requestedBedrooms ?? minimumBedrooms;
+      if (expectedBedrooms && scrapedBR !== null && scrapedBR !== expectedBedrooms) {
+        return res.json({
+          photos: [],
+          sourceUrl: null,
+          foundVia,
+          facts,
+          note: `Listing has ${scrapedBR}BR, but ${expectedBedrooms}BR was requested.`,
+        });
+      }
       res.json({
         photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
         sourceUrl: listingUrl,
@@ -29070,16 +29129,39 @@ Return ONLY compact JSON with this exact shape:
     return next;
   };
 
+  const normalizeCommunityDraftBedroomFields = <T extends Record<string, any>>(draft: T): T => {
+    const singleListing = draft.singleListing === true;
+    const unit1Bedrooms = positiveDraftInteger(draft.unit1Bedrooms);
+    const unit2Bedrooms = singleListing ? null : positiveDraftInteger(draft.unit2Bedrooms);
+    if (!unit1Bedrooms || (!singleListing && !unit2Bedrooms)) {
+      throw new Error(singleListing
+        ? "unit1Bedrooms is required for single-listing drafts"
+        : "unit1Bedrooms and unit2Bedrooms are required for combo drafts");
+    }
+    return {
+      ...draft,
+      unit1Bedrooms,
+      unit2Bedrooms: singleListing ? null : unit2Bedrooms,
+      combinedBedrooms: singleListing ? unit1Bedrooms : unit1Bedrooms + unit2Bedrooms!,
+    };
+  };
+
   app.post("/api/community/save", async (req, res) => {
     const result = insertCommunityDraftSchema.safeParse(normalizeCommunityDraftNumericFields(req.body));
     if (!result.success) return res.status(400).json({ error: result.error.flatten() });
+    let draftData: typeof result.data;
+    try {
+      draftData = normalizeCommunityDraftBedroomFields(result.data);
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message ?? "Bedroom counts are required" });
+    }
     // CODEX NOTE (2026-05-04, claude/single-listing): community-type
     // check applies to BOTH combo and single-listing drafts. A
     // single-listing standalone is still a condo/townhouse — only
     // the count differs (one unit instead of two combined). Villas
     // / single-family / estates remain disqualified across the
     // board because they aren't the product the business handles.
-    const typeCheck = checkCommunityType(result.data.unitTypes, result.data.researchSummary);
+    const typeCheck = checkCommunityType(draftData.unitTypes, draftData.researchSummary);
     if (!typeCheck.eligible) {
       return res.status(400).json({
         error: "Community type not supported",
@@ -29088,31 +29170,31 @@ Return ONLY compact JSON with this exact shape:
       });
     }
     const canonicalRule =
-      communityAddressRuleForName(result.data.name) ||
+      communityAddressRuleForName(draftData.name) ||
       communityAddressRuleForName([
-        result.data.name,
-        result.data.listingTitle,
-        result.data.bookingTitle,
-        result.data.listingDescription,
-        result.data.neighborhood,
-        result.data.unit1Url,
+        draftData.name,
+        draftData.listingTitle,
+        draftData.bookingTitle,
+        draftData.listingDescription,
+        draftData.neighborhood,
+        draftData.unit1Url,
       ].filter(Boolean).join(" "));
-    const validationStreetAddress = canonicalRule?.street || result.data.streetAddress;
+    const validationStreetAddress = canonicalRule?.street || draftData.streetAddress;
     const unitToken = extractUnitTokenFromText([
-      result.data.unit1Address,
-      result.data.streetAddress,
-      result.data.unit1Url,
-      result.data.listingTitle,
-      result.data.bookingTitle,
+      draftData.unit1Address,
+      draftData.streetAddress,
+      draftData.unit1Url,
+      draftData.listingTitle,
+      draftData.bookingTitle,
     ].filter(Boolean).join(" "));
     const normalizedUnit1Address =
-      result.data.singleListing && canonicalRule
+      draftData.singleListing && canonicalRule
         ? (withUnitToken(canonicalRule.street, unitToken) || canonicalRule.street)
-        : result.data.unit1Address;
+        : draftData.unit1Address;
     const addressCheck = validateCommunityStreetAddress({
-      communityName: result.data.name,
-      city: result.data.city,
-      state: result.data.state,
+      communityName: draftData.name,
+      city: draftData.city,
+      state: draftData.state,
       streetAddress: validationStreetAddress,
     });
     if (!addressCheck.ok) {
@@ -29122,29 +29204,29 @@ Return ONLY compact JSON with this exact shape:
         expectedStreet: addressCheck.expectedStreet,
       });
     }
-    if (result.data.queueIdempotencyKey) {
+    if (draftData.queueIdempotencyKey) {
       const existingDraft = (await storage.getCommunityDrafts()).find(
-        (draft: any) => draft.queueIdempotencyKey === result.data.queueIdempotencyKey,
+        (draft: any) => draft.queueIdempotencyKey === draftData.queueIdempotencyKey,
       );
       if (existingDraft) {
         return res.json(existingDraft);
       }
     }
 
-    const resolvedPricingArea = result.data.pricingArea || resolveBuyInMarket({
-      name: result.data.name,
-      listingTitle: result.data.listingTitle,
-      bookingTitle: result.data.bookingTitle,
-      city: result.data.city,
-      state: result.data.state,
+    const resolvedPricingArea = draftData.pricingArea || resolveBuyInMarket({
+      name: draftData.name,
+      listingTitle: draftData.listingTitle,
+      bookingTitle: draftData.bookingTitle,
+      city: draftData.city,
+      state: draftData.state,
       streetAddress: addressCheck.streetAddress,
       unit1Address: normalizedUnit1Address,
-      unit2Address: result.data.unit2Address,
-      sourceUrl: result.data.sourceUrl,
+      unit2Address: draftData.unit2Address,
+      sourceUrl: draftData.sourceUrl,
     });
 
     const draft = await storage.createCommunityDraft({
-      ...result.data,
+      ...draftData,
       pricingArea: resolvedPricingArea,
       unit1Address: normalizedUnit1Address,
       streetAddress: addressCheck.streetAddress,
@@ -29162,8 +29244,8 @@ Return ONLY compact JSON with this exact shape:
     // risk. Worst-case ~30s for the SearchAPI multi-query + per-host
     // vrp_main fingerprint probe; well under any background timeout.
     if (process.env.SEARCHAPI_API_KEY) {
-      const community = result.data.name;
-      const location = `${result.data.city}, ${result.data.state}`;
+      const community = draftData.name;
+      const location = `${draftData.city}, ${draftData.state}`;
       void (async () => {
         try {
           console.log(`[community-save] kicking off PM discovery for "${community}" / "${location}"`);
@@ -31238,6 +31320,98 @@ Return ONLY compact JSON with this exact shape:
     return hits / Math.min(ta.length, tb.length) >= 0.5;
   };
 
+  const communityResearchMode = (mode?: string): "combo" | "single" => mode === "single" ? "single" : "combo";
+  const communityResearchCityKey = (city: string, state: string, mode?: string): string =>
+    `${communityResearchMode(mode)}:${state.trim().toLowerCase()}:${city.trim().toLowerCase()}`;
+  const serializeCommunityResearchSearch = (row: typeof communityResearchSearchRows.$inferSelect | null | undefined) => row ? {
+    id: row.id,
+    city: row.city,
+    state: row.state,
+    mode: row.mode,
+    resultCount: row.resultCount,
+    resultNames: Array.isArray(row.resultNames) ? row.resultNames : [],
+    resultSummaries: Array.isArray(row.resultSummaries) ? row.resultSummaries : [],
+    error: row.error,
+    lastSearchedAt: row.lastSearchedAt?.toISOString?.() ?? row.lastSearchedAt,
+    updatedAt: row.updatedAt?.toISOString?.() ?? row.updatedAt,
+  } : null;
+  const summarizeCommunityResearchResults = (communities: Array<{
+    name?: string | null;
+    confidenceScore?: number | null;
+    unitTypes?: string | null;
+    estimatedLowRate?: number | null;
+    estimatedHighRate?: number | null;
+  }>) => communities.slice(0, 20).map((community) => ({
+    name: String(community.name || "").trim(),
+    confidenceScore: typeof community.confidenceScore === "number" ? community.confidenceScore : null,
+    unitTypes: community.unitTypes ? String(community.unitTypes) : null,
+    estimatedLowRate: typeof community.estimatedLowRate === "number" ? community.estimatedLowRate : null,
+    estimatedHighRate: typeof community.estimatedHighRate === "number" ? community.estimatedHighRate : null,
+  })).filter((community) => community.name.length > 0);
+  const upsertCommunityResearchSearch = async (params: {
+    city: string;
+    state: string;
+    mode: "combo" | "single";
+    communities: Array<{
+      name?: string | null;
+      confidenceScore?: number | null;
+      unitTypes?: string | null;
+      estimatedLowRate?: number | null;
+      estimatedHighRate?: number | null;
+    }>;
+    error?: string | null;
+  }) => {
+    const now = new Date();
+    const resultNames = params.communities
+      .map((community) => String(community.name || "").trim())
+      .filter(Boolean)
+      .slice(0, 50);
+    const [row] = await db.insert(communityResearchSearchRows).values({
+      cityKey: communityResearchCityKey(params.city, params.state, params.mode),
+      city: params.city.trim(),
+      state: params.state.trim(),
+      mode: params.mode,
+      resultCount: params.communities.length,
+      resultNames,
+      resultSummaries: summarizeCommunityResearchResults(params.communities),
+      error: params.error || null,
+      lastSearchedAt: now,
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: communityResearchSearchRows.cityKey,
+      set: {
+        city: params.city.trim(),
+        state: params.state.trim(),
+        mode: params.mode,
+        resultCount: params.communities.length,
+        resultNames,
+        resultSummaries: summarizeCommunityResearchResults(params.communities),
+        error: params.error || null,
+        lastSearchedAt: now,
+        updatedAt: now,
+      },
+    }).returning();
+    return row;
+  };
+
+  app.get("/api/community/research-history", async (req, res) => {
+    const city = String(req.query.city || "").trim();
+    const state = String(req.query.state || "").trim();
+    const mode = communityResearchMode(String(req.query.mode || "combo"));
+    if (!city || !state) return res.json({ history: null });
+
+    try {
+      const [row] = await db.select()
+        .from(communityResearchSearchRows)
+        .where(eq(communityResearchSearchRows.cityKey, communityResearchCityKey(city, state, mode)))
+        .limit(1);
+      return res.json({ history: serializeCommunityResearchSearch(row) });
+    } catch (err: any) {
+      console.warn("[community-research-history] lookup failed", err?.message || err);
+      return res.status(500).json({ error: err.message || "research history lookup failed" });
+    }
+  });
+
   app.post("/api/community/research", async (req, res) => {
     const { city, state, mode } = req.body as { city: string; state: string; mode?: "combo" | "single" };
     if (!city || !state) return res.status(400).json({ error: "city and state required" });
@@ -31247,7 +31421,8 @@ Return ONLY compact JSON with this exact shape:
       // is forwarded through to researchCommunitiesForCity. Combo
       // mode (default) keeps the original gating; single mode lifts
       // caps and uses Sonnet — see Load-Bearing #36.
-      const communities = await researchCommunitiesForCity(city, state, mode === "single" ? "single" : "combo");
+      const researchMode = communityResearchMode(mode);
+      const communities = await researchCommunitiesForCity(city, state, researchMode);
       // Annotate with hasExistingListing using fuzzy name search against current
       // drafts + published unit configs (active DB+static scan, not chat context).
       try {
@@ -31265,8 +31440,30 @@ Return ONLY compact JSON with this exact shape:
       } catch {
         // best-effort only
       }
-      return res.json({ communities });
+      let history = null;
+      try {
+        history = serializeCommunityResearchSearch(await upsertCommunityResearchSearch({
+          city,
+          state,
+          mode: researchMode,
+          communities,
+        }));
+      } catch (historyErr: any) {
+        console.warn("[community-research-history] save failed", historyErr?.message || historyErr);
+      }
+      return res.json({ communities, history });
     } catch (err: any) {
+      try {
+        await upsertCommunityResearchSearch({
+          city,
+          state,
+          mode: communityResearchMode(mode),
+          communities: [],
+          error: err.message || "research failed",
+        });
+      } catch (historyErr: any) {
+        console.warn("[community-research-history] failure save failed", historyErr?.message || historyErr);
+      }
       return res.status(500).json({ error: err.message });
     }
   });
@@ -33547,11 +33744,22 @@ Return ONLY compact JSON with this exact shape:
     if (!singleListing && !unit2) {
       return res.status(400).json({ error: "unit2 required for combo listings" });
     }
+    const unit1Bedrooms = positiveDraftInteger(unit1?.bedrooms);
+    const unit2Bedrooms = singleListing ? null : positiveDraftInteger(unit2?.bedrooms);
+    if (!unit1Bedrooms || (!singleListing && !unit2Bedrooms)) {
+      return res.status(400).json({
+        error: singleListing
+          ? "unit1.bedrooms is required"
+          : "unit1.bedrooms and unit2.bedrooms are required",
+      });
+    }
+    unit1.bedrooms = unit1Bedrooms;
+    if (unit2 && unit2Bedrooms) unit2.bedrooms = unit2Bedrooms;
 
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const combinedBedrooms = singleListing
-      ? (unit1.bedrooms || 0)
-      : (unit1.bedrooms || 0) + (unit2?.bedrooms || 0);
+      ? unit1Bedrooms
+      : unit1Bedrooms + unit2Bedrooms!;
 
     // Best-effort walking distance for the description. Only used for
     // combo listings — for a single standalone unit there's only one
@@ -33658,6 +33866,19 @@ Return ONLY compact JSON with this exact shape:
           : "King primary bedroom, queen second bedroom, and a sleeper sofa in the living area.",
         shortDescription: `${bedrooms}BR vacation condo at ${communityName} in ${city}.`,
         longDescription: `This ${bedrooms}-bedroom vacation condo at ${communityName} gives guests a comfortable home base in ${city}, ${state}. The layout is designed for families or small groups, with private bedrooms, shared living space, and easy access to the surrounding resort area.`,
+      };
+    };
+
+    const normalizeGeneratedUnitDraft = (draft: unknown, unit: { bedrooms: number }) => {
+      const fallback = fallbackUnitDraft(unit);
+      const raw = draft && typeof draft === "object" && !Array.isArray(draft)
+        ? draft as Record<string, unknown>
+        : {};
+      return {
+        ...fallback,
+        ...raw,
+        bedrooms: unit.bedrooms,
+        maxGuests: positiveDraftInteger(raw.maxGuests) ?? fallback.maxGuests,
       };
     };
 
@@ -33893,8 +34114,8 @@ CONSTRAINTS
         space: parsedSpace,
         neighborhood: parsedNeighborhood,
         transit: parsedTransit,
-        unitA: parsed.unitA ?? null,
-        unitB: parsed.unitB ?? null,
+        unitA: normalizeGeneratedUnitDraft(parsed.unitA, unit1),
+        unitB: singleListing || !unit2 ? null : normalizeGeneratedUnitDraft(parsed.unitB, unit2),
         combinedBedrooms,
         suggestedRate,
         walk,

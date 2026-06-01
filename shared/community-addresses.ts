@@ -14,6 +14,7 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Kaiulani of Princeville", "Ka'iulani of Princeville", "Kaiulani"], street: "4100 Queen Emma's Dr", city: "Princeville", state: "HI" },
   { names: ["Kekaha Beachfront Estate"], street: "8497 Kekaha Rd", city: "Kekaha", state: "HI" },
   { names: ["Keauhou Estates"], street: "78-6855 Ali'i Dr", city: "Kailua-Kona", state: "HI" },
+  { names: ["Ilikai", "Ilikai Hotel", "Ilikai Hotel & Luxury Suites", "Ilikai Apt Bldg"], street: "1777 Ala Moana Blvd", city: "Honolulu", state: "HI" },
   { names: ["Caribe Cove Resort", "Caribe Cove"], street: "9000 Treasure Trove Ln", city: "Kissimmee", state: "FL" },
   { names: ["Windsor Hills", "Windsor Hills Resort"], street: "2600 N Old Lake Wilson Rd", city: "Kissimmee", state: "FL" },
   { names: ["Pink Shell Beach Resort", "Pink Shell Beach Resort and Marina", "Pink Shell Resort", "Pink Shell"], street: "275 Estero Blvd", city: "Fort Myers Beach", state: "FL" },

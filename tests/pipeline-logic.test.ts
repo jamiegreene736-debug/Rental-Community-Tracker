@@ -167,7 +167,7 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /maxCandidates: bedroomOverride === "any" \? 24 : 12/,
+  /maxCandidates: bedroomOverride === "any" \? 10 : 6/,
   "combo photo fetch discovery must bound candidate scans so Step 4 does not appear stuck on weak markets",
 );
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
@@ -187,7 +187,48 @@ assert.match(
   /button-cancel-photo-fetch-job/,
   "combo photo Step 4 must expose cancellation for a running server photo-fetch job",
 );
-console.log("  ✓ shared photo folder tokens stay scoped to the unit being checked");
+assert.match(
+  addCommunitySource,
+  /city-research-history/,
+  "Add Combo Listing should show the last city research run and its yielded communities before rerunning a search",
+);
+assert.match(
+  addCommunitySource,
+  /resetSweepToMarketPicker/,
+  "top-market Scan different markets must clear the completed sweep job before returning to the picker",
+);
+assert.match(
+  addCommunitySource,
+  /ignoredSweepJobIdsRef/,
+  "top-market polling must ignore a completed job after the operator chooses to scan different markets",
+);
+assert.match(
+  addCommunitySource,
+  /Unit 1: \{unit1Photos\.length\} photo/,
+  "combo Step 4 photo summary must show Unit 1 and Unit 2 counts independently",
+);
+assert.match(
+  addCommunitySource,
+  /photo-empty-\$\{key\}/,
+  "combo Step 4 must visibly show when a unit has no attached photos instead of rendering an empty grid",
+);
+assert.match(
+  routesSource,
+  /\/api\/community\/research-history/,
+  "city research history must be available without starting a new community research job",
+);
+assert.match(
+  routesSource,
+  /upsertCommunityResearchSearch/,
+  "community research results must be persisted after manual city searches",
+);
+const schemaSource = readFileSync("shared/schema.ts", "utf8");
+assert.match(
+  schemaSource,
+  /communityResearchSearches/,
+  "city research history should have a dedicated table instead of overloading sidecar search variations",
+);
+console.log("  ✓ combo photo and city research state stay observable");
 
 // Case 7: Primary Bathroom — valid (has \"Primary\" + \"Bathroom\").
 assert.equal(
@@ -1235,6 +1276,7 @@ try {
 }
 
 const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+const homeSource = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
 const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
 assert.equal(
   routeSource.includes("${DISCLOSURE}"),
@@ -1242,6 +1284,28 @@ assert.equal(
   "generate-listing fallback must not reference removed DISCLOSURE constant",
 );
 console.log("  ✓ generate-listing fallback has no stale DISCLOSURE reference");
+
+assert.match(
+  routeSource,
+  /unit1Bedrooms and unit2Bedrooms are required for combo drafts/,
+  "community/save must reject combo drafts without explicit per-unit bedroom counts",
+);
+assert.match(
+  routeSource,
+  /unitA: normalizeGeneratedUnitDraft\(parsed\.unitA, unit1\)/,
+  "generate-listing must coerce AI Unit A bedrooms back to selected unit bedrooms",
+);
+assert.match(
+  addCommunitySource,
+  /unit1Bedrooms: unit1BedroomCount/,
+  "add-community save must send the selected pairing's Unit A bedroom count",
+);
+assert.match(
+  homeSource,
+  /unitBedroomSum > 0 \? unitBedroomSum/,
+  "dashboard draft rows must prefer per-unit bedroom sums over inferred title text",
+);
+console.log("  ✓ combo draft bedroom counts stay structured from selection through dashboard");
 
 assert.equal(MAX_BUY_IN_WALK_MINUTES, 10, "buy-in unit walking-distance guardrail should stay at 10 minutes");
 console.log("  ✓ buy-in walking-distance guardrail is pinned at 10 minutes");

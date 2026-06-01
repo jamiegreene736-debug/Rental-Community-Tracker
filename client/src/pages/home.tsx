@@ -1261,9 +1261,17 @@ function AdminDashboard() {
       const structured = positiveInt(stored) ?? positiveInt(combined);
       if (structured) return structured;
 
-      const text = [
+      const unitText = [
         unitKey === "unit1" ? (d as any).unit1Description : (d as any).unit2Description,
         unitKey === "unit1" ? d.unit1Bedding : d.unit2Bedding,
+        unitKey === "unit1" ? (d as any).unit1ShortDescription : (d as any).unit2ShortDescription,
+        unitKey === "unit1" ? (d as any).unit1LongDescription : (d as any).unit2LongDescription,
+      ].filter(Boolean).join(" ");
+      const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+      if (unitMatch) return positiveInt(unitMatch[1]) ?? 0;
+      if ((d as any).singleListing !== true) return 0;
+
+      const text = [
         d.listingTitle,
         d.bookingTitle,
         d.name,
@@ -1292,7 +1300,8 @@ function AdminDashboard() {
       const isSingle = (d as any).singleListing === true;
       const u1Br = inferBedrooms(d, "unit1");
       const u2Br = isSingle ? 0 : inferBedrooms(d, "unit2");
-      const totalBr = isSingle ? u1Br : (positiveInt(d.combinedBedrooms) ?? (u1Br + u2Br));
+      const unitBedroomSum = u1Br + u2Br;
+      const totalBr = isSingle ? u1Br : (unitBedroomSum > 0 ? unitBedroomSum : (positiveInt(d.combinedBedrooms) ?? 0));
       const totalGuests = isSingle
         ? inferSleeps(d, u1Br)
         : (((d.unit1MaxGuests ?? 0) + (d.unit2MaxGuests ?? 0)) || totalBr * 2);
