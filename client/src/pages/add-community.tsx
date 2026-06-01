@@ -83,6 +83,24 @@ type CommunityResult = {
   hasExistingListing?: boolean;
 };
 
+type CommunityResearchHistory = {
+  city: string;
+  state: string;
+  mode: string;
+  resultCount: number;
+  resultNames: string[];
+  resultSummaries: Array<{
+    name: string;
+    confidenceScore: number | null;
+    unitTypes: string | null;
+    estimatedLowRate: number | null;
+    estimatedHighRate: number | null;
+  }>;
+  error: string | null;
+  lastSearchedAt: string;
+  updatedAt: string;
+};
+
 type UnitResult = {
   url: string;
   title: string;
@@ -114,6 +132,18 @@ type CommunityProfile = {
 type PhotoItem = { url: string; label: string };
 
 type PhotoCheckResult = { clean: boolean; matches: Array<{ platform: string; url: string }> };
+
+function formatResearchHistoryTime(value: string | null | undefined): string {
+  if (!value) return "Never";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Unknown";
+  return new Date(timestamp).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 function formatResortUnitMix(community: CommunityResult): string | null {
   const bedroomCounts = Object.entries(community.estimatedBedroomUnitCounts ?? {})
@@ -272,6 +302,8 @@ export default function AddCommunity() {
   const [communities, setCommunities] = useState<CommunityResult[]>([]);
   const [researchLoading, setResearchLoading] = useState(false);
   const [researchProgress, setResearchProgress] = useState(0);
+  const [researchHistory, setResearchHistory] = useState<CommunityResearchHistory | null>(null);
+  const [researchHistoryLoading, setResearchHistoryLoading] = useState(false);
   const [selectedCommunity, setSelectedCommunity] = useState<CommunityResult | null>(null);
 
   // Ramp a fake progress % while research is in-flight so the search area shows live status.
@@ -520,6 +552,10 @@ export default function AddCommunity() {
       selectedCommunity?.state ?? selectedState,
     ].filter(Boolean).join(" "),
   }), [selectedCommunity, cityInput, selectedState, editedStreetAddress, suggestedStreetAddress]);
+  const researchHistoryNames = useMemo(
+    () => (researchHistory?.resultNames ?? []).filter(Boolean).slice(0, 5),
+    [researchHistory],
+  );
 
   useEffect(() => {
     if (!editedStreetAddress.trim() && suggestedStreetAddress) {
@@ -811,6 +847,38 @@ export default function AddCommunity() {
     };
   }, [bulkComboJobId]);
 
+  useEffect(() => {
+    const city = cityInput.trim();
+    if (!selectedState || city.length < 2) {
+      setResearchHistory(null);
+      setResearchHistoryLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setResearchHistoryLoading(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ city, state: selectedState, mode: "combo" });
+        const resp = await fetch(`/api/community/research-history?${params.toString()}`, { credentials: "include" });
+        const data = resp.ok ? await resp.json() : { history: null };
+        if (!cancelled) setResearchHistory(data.history ?? null);
+      } catch (e: any) {
+        if (!cancelled) {
+          console.warn("[add-community] research history lookup failed", e?.message || e);
+          setResearchHistory(null);
+        }
+      } finally {
+        if (!cancelled) setResearchHistoryLoading(false);
+      }
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [selectedState, cityInput]);
+
   const clearSavedComboDraft = useCallback(() => {
     window.localStorage.removeItem(ADD_COMBO_DRAFT_KEY);
     setDraftRestored(false);
@@ -832,6 +900,7 @@ export default function AddCommunity() {
       const data = await res.json();
       setCommunities(data.communities || []);
       setResearchProgress(100);
+      if (data.history) setResearchHistory(data.history);
       if ((data.communities || []).length === 0) {
         toast({ title: "No qualifying communities found", description: "Try a different city or state." });
       } else {
@@ -1891,6 +1960,34 @@ export default function AddCommunity() {
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
               <strong>Current selection:</strong> {selectedState || "No state selected"} — {cityInput || "No city entered"}
             </div>
+            {(researchHistoryLoading || researchHistory) && (
+              <div
+                className="mb-4 rounded-md border border-blue-100 bg-blue-50/60 p-3 text-sm text-blue-950"
+                data-testid="city-research-history"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <CalendarDays className="h-4 w-4 text-blue-700" />
+                  <strong>Last city search:</strong>
+                  {researchHistoryLoading ? (
+                    <span className="text-blue-800/75">Checking history…</span>
+                  ) : researchHistory ? (
+                    <span>
+                      {formatResearchHistoryTime(researchHistory.lastSearchedAt)} — yielded{" "}
+                      <strong>{researchHistory.resultCount}</strong> communities
+                    </span>
+                  ) : null}
+                </div>
+                {!researchHistoryLoading && researchHistory?.error && (
+                  <div className="mt-1 text-xs text-red-700">Last run failed: {researchHistory.error}</div>
+                )}
+                {!researchHistoryLoading && !researchHistory?.error && researchHistoryNames.length > 0 && (
+                  <div className="mt-1 text-xs text-blue-900/75">
+                    Results: {researchHistoryNames.join(", ")}
+                    {researchHistory && researchHistory.resultNames.length > researchHistoryNames.length ? "…" : ""}
+                  </div>
+                )}
+              </div>
+            )}
             {nearbyCitySuggestions.length > 0 && (
               <div className="mb-4">
                 <div className="text-[11px] font-medium text-muted-foreground mb-1.5 flex items-center gap-1">
@@ -2357,6 +2454,13 @@ export default function AddCommunity() {
             </div>
             <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
               <strong>Location:</strong> {cityInput}, {selectedState} — <strong>{communities.length}</strong> communities found. Select one to continue.
+              {researchHistory && (
+                <div className="mt-1 flex flex-wrap items-center gap-1 text-xs">
+                  <CalendarDays className="h-3.5 w-3.5" />
+                  <strong>Last searched:</strong> {formatResearchHistoryTime(researchHistory.lastSearchedAt)} — yielded {researchHistory.resultCount} communities
+                  {researchHistoryNames.length > 0 ? ` (${researchHistoryNames.join(", ")}${researchHistory.resultNames.length > researchHistoryNames.length ? "…" : ""})` : ""}
+                </div>
+              )}
             </div>
             <div className="mb-3 flex flex-wrap items-center gap-2">
               {bulkCommunityIndexes.size > 0 && (

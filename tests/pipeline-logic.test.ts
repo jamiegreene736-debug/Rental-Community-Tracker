@@ -187,7 +187,28 @@ assert.match(
   /button-cancel-photo-fetch-job/,
   "combo photo Step 4 must expose cancellation for a running server photo-fetch job",
 );
-console.log("  ✓ shared photo folder tokens stay scoped to the unit being checked");
+assert.match(
+  addCommunitySource,
+  /city-research-history/,
+  "Add Combo Listing should show the last city research run and its yielded communities before rerunning a search",
+);
+assert.match(
+  routesSource,
+  /\/api\/community\/research-history/,
+  "city research history must be available without starting a new community research job",
+);
+assert.match(
+  routesSource,
+  /upsertCommunityResearchSearch/,
+  "community research results must be persisted after manual city searches",
+);
+const schemaSource = readFileSync("shared/schema.ts", "utf8");
+assert.match(
+  schemaSource,
+  /communityResearchSearches/,
+  "city research history should have a dedicated table instead of overloading sidecar search variations",
+);
+console.log("  ✓ combo photo and city research state stay observable");
 
 // Case 7: Primary Bathroom — valid (has \"Primary\" + \"Bathroom\").
 assert.equal(

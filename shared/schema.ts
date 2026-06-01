@@ -84,6 +84,30 @@ export const insertSidecarSearchVariationSchema = createInsertSchema(sidecarSear
 export type InsertSidecarSearchVariation = z.infer<typeof insertSidecarSearchVariationSchema>;
 export type SidecarSearchVariation = typeof sidecarSearchVariations.$inferSelect;
 
+export const communityResearchSearches = pgTable("community_research_searches", {
+  id: serial("id").primaryKey(),
+  cityKey: text("city_key").notNull().unique(),
+  city: text("city").notNull(),
+  state: text("state").notNull(),
+  mode: text("mode").notNull().default("combo"),
+  resultCount: integer("result_count").notNull().default(0),
+  resultNames: jsonb("result_names").$type<string[]>().default(sql`'[]'::jsonb`).notNull(),
+  resultSummaries: jsonb("result_summaries").$type<Array<{
+    name: string;
+    confidenceScore: number | null;
+    unitTypes: string | null;
+    estimatedLowRate: number | null;
+    estimatedHighRate: number | null;
+  }>>().default(sql`'[]'::jsonb`).notNull(),
+  error: text("error"),
+  lastSearchedAt: timestamp("last_searched_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type CommunityResearchSearch = typeof communityResearchSearches.$inferSelect;
+export type InsertCommunityResearchSearch = typeof communityResearchSearches.$inferInsert;
+
 export const propertyBuyInMarkets = pgTable("property_buy_in_markets", {
   propertyId: integer("property_id").primaryKey(),
   baseCommunity: text("base_community").notNull(),

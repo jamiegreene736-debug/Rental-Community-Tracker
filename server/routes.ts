@@ -11,6 +11,7 @@ import {
   buyInVendorContacts,
   comboPhotoFetchJobItems as comboPhotoFetchJobItemRows,
   comboPhotoFetchJobs as comboPhotoFetchJobRows,
+  communityResearchSearches as communityResearchSearchRows,
   communityPricingRefreshJobs as communityPricingRefreshJobRows,
   guestyPropertyMap,
   insertBuyInSchema,
@@ -31238,6 +31239,98 @@ Return ONLY compact JSON with this exact shape:
     return hits / Math.min(ta.length, tb.length) >= 0.5;
   };
 
+  const communityResearchMode = (mode?: string): "combo" | "single" => mode === "single" ? "single" : "combo";
+  const communityResearchCityKey = (city: string, state: string, mode?: string): string =>
+    `${communityResearchMode(mode)}:${state.trim().toLowerCase()}:${city.trim().toLowerCase()}`;
+  const serializeCommunityResearchSearch = (row: typeof communityResearchSearchRows.$inferSelect | null | undefined) => row ? {
+    id: row.id,
+    city: row.city,
+    state: row.state,
+    mode: row.mode,
+    resultCount: row.resultCount,
+    resultNames: Array.isArray(row.resultNames) ? row.resultNames : [],
+    resultSummaries: Array.isArray(row.resultSummaries) ? row.resultSummaries : [],
+    error: row.error,
+    lastSearchedAt: row.lastSearchedAt?.toISOString?.() ?? row.lastSearchedAt,
+    updatedAt: row.updatedAt?.toISOString?.() ?? row.updatedAt,
+  } : null;
+  const summarizeCommunityResearchResults = (communities: Array<{
+    name?: string | null;
+    confidenceScore?: number | null;
+    unitTypes?: string | null;
+    estimatedLowRate?: number | null;
+    estimatedHighRate?: number | null;
+  }>) => communities.slice(0, 20).map((community) => ({
+    name: String(community.name || "").trim(),
+    confidenceScore: typeof community.confidenceScore === "number" ? community.confidenceScore : null,
+    unitTypes: community.unitTypes ? String(community.unitTypes) : null,
+    estimatedLowRate: typeof community.estimatedLowRate === "number" ? community.estimatedLowRate : null,
+    estimatedHighRate: typeof community.estimatedHighRate === "number" ? community.estimatedHighRate : null,
+  })).filter((community) => community.name.length > 0);
+  const upsertCommunityResearchSearch = async (params: {
+    city: string;
+    state: string;
+    mode: "combo" | "single";
+    communities: Array<{
+      name?: string | null;
+      confidenceScore?: number | null;
+      unitTypes?: string | null;
+      estimatedLowRate?: number | null;
+      estimatedHighRate?: number | null;
+    }>;
+    error?: string | null;
+  }) => {
+    const now = new Date();
+    const resultNames = params.communities
+      .map((community) => String(community.name || "").trim())
+      .filter(Boolean)
+      .slice(0, 50);
+    const [row] = await db.insert(communityResearchSearchRows).values({
+      cityKey: communityResearchCityKey(params.city, params.state, params.mode),
+      city: params.city.trim(),
+      state: params.state.trim(),
+      mode: params.mode,
+      resultCount: params.communities.length,
+      resultNames,
+      resultSummaries: summarizeCommunityResearchResults(params.communities),
+      error: params.error || null,
+      lastSearchedAt: now,
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: communityResearchSearchRows.cityKey,
+      set: {
+        city: params.city.trim(),
+        state: params.state.trim(),
+        mode: params.mode,
+        resultCount: params.communities.length,
+        resultNames,
+        resultSummaries: summarizeCommunityResearchResults(params.communities),
+        error: params.error || null,
+        lastSearchedAt: now,
+        updatedAt: now,
+      },
+    }).returning();
+    return row;
+  };
+
+  app.get("/api/community/research-history", async (req, res) => {
+    const city = String(req.query.city || "").trim();
+    const state = String(req.query.state || "").trim();
+    const mode = communityResearchMode(String(req.query.mode || "combo"));
+    if (!city || !state) return res.json({ history: null });
+
+    try {
+      const [row] = await db.select()
+        .from(communityResearchSearchRows)
+        .where(eq(communityResearchSearchRows.cityKey, communityResearchCityKey(city, state, mode)))
+        .limit(1);
+      return res.json({ history: serializeCommunityResearchSearch(row) });
+    } catch (err: any) {
+      console.warn("[community-research-history] lookup failed", err?.message || err);
+      return res.status(500).json({ error: err.message || "research history lookup failed" });
+    }
+  });
+
   app.post("/api/community/research", async (req, res) => {
     const { city, state, mode } = req.body as { city: string; state: string; mode?: "combo" | "single" };
     if (!city || !state) return res.status(400).json({ error: "city and state required" });
@@ -31247,7 +31340,8 @@ Return ONLY compact JSON with this exact shape:
       // is forwarded through to researchCommunitiesForCity. Combo
       // mode (default) keeps the original gating; single mode lifts
       // caps and uses Sonnet — see Load-Bearing #36.
-      const communities = await researchCommunitiesForCity(city, state, mode === "single" ? "single" : "combo");
+      const researchMode = communityResearchMode(mode);
+      const communities = await researchCommunitiesForCity(city, state, researchMode);
       // Annotate with hasExistingListing using fuzzy name search against current
       // drafts + published unit configs (active DB+static scan, not chat context).
       try {
@@ -31265,8 +31359,30 @@ Return ONLY compact JSON with this exact shape:
       } catch {
         // best-effort only
       }
-      return res.json({ communities });
+      let history = null;
+      try {
+        history = serializeCommunityResearchSearch(await upsertCommunityResearchSearch({
+          city,
+          state,
+          mode: researchMode,
+          communities,
+        }));
+      } catch (historyErr: any) {
+        console.warn("[community-research-history] save failed", historyErr?.message || historyErr);
+      }
+      return res.json({ communities, history });
     } catch (err: any) {
+      try {
+        await upsertCommunityResearchSearch({
+          city,
+          state,
+          mode: communityResearchMode(mode),
+          communities: [],
+          error: err.message || "research failed",
+        });
+      } catch (historyErr: any) {
+        console.warn("[community-research-history] failure save failed", historyErr?.message || historyErr);
+      }
       return res.status(500).json({ error: err.message });
     }
   });
