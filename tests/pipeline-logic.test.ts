@@ -837,6 +837,7 @@ console.log("\nVRBO compliance detection suite");
 // ---------- Hawaii compliance lookup helpers ----------
 console.log("\nHawaii compliance lookup suite");
 import {
+  extractHawaiiComplianceFromPublicText,
   extractHawaiiComplianceFromGuestyListing,
   formatKauaiCountyPermit,
   matchKauaiStrPermit,
@@ -899,6 +900,19 @@ const fromHomeaway = extractHawaiiComplianceFromGuestyListing({
 assert.equal(fromHomeaway.tatLicense, "TA-024-630-2345-01");
 assert.equal(fromHomeaway.getLicense, "GE-024-630-2345-01");
 assert.equal(pairHawaiiTaxLicense("TA-024-120-9012-01", "getLicense"), "GE-024-120-9012-01");
+
+const publicMauiValues = extractHawaiiComplianceFromPublicText(
+  "Property Registration Number 2390010850095, TA-006-753-6384-01, GE-006-753-6384-01",
+);
+assert.equal(publicMauiValues.taxMapKey, "2390010850095");
+assert.equal(publicMauiValues.tatLicense, "TA-006-753-6384-01");
+assert.equal(publicMauiValues.getLicense, "GE-006-753-6384-01");
+
+const publicMauiPermit = extractHawaiiComplianceFromPublicText(
+  "TA-192-286-5152-01 STPH 20150004 TMK (2) 2-7-003:135-0000",
+);
+assert.equal(publicMauiPermit.strPermit, "STPH 20150004");
+assert.equal(publicMauiPermit.taxMapKey, "2270031350000");
 
 import { isPlaceholderLicenseValue } from "../shared/license-compliance";
 assert.ok(isPlaceholderLicenseValue("GE-025-430-9876-01"), "Makahuena sample GET");

@@ -67,7 +67,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
-import { lookupHawaiiComplianceField, lookupKauaiTmkFromAddress } from "./hawaii-compliance-lookup";
+import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
   clearActiveSidecarLane,
@@ -5419,6 +5419,7 @@ export async function registerRoutes(
   // so do not append a sample unit or mutate the address before geocoding.
   app.get("/api/builder/tmk-lookup", async (req, res) => {
     const address = String(req.query.address ?? "").trim();
+    const listingName = String(req.query.listingName ?? "").trim() || null;
     if (!address) return res.status(400).json({ error: "address is required" });
 
     if (!/\b(HI|Hawaii)\b/i.test(address)) {
@@ -5426,11 +5427,28 @@ export async function registerRoutes(
     }
 
     try {
-      res.json(await lookupKauaiTmkFromAddress(address));
+      if (/\b(kauai|koloa|poipu|princeville|kapaa|lihue|wailua|hanalei|waimea|kekaha)\b/i.test(address)) {
+        return res.json(await lookupKauaiTmkFromAddress(address));
+      }
+      const publicValues = await lookupHawaiiPublicListingLicenses({ address, listingName });
+      if (publicValues?.taxMapKey) {
+        return res.json({
+          taxMapKey: publicValues.taxMapKey,
+          confidence: "public-listing",
+          note: publicValues.note,
+          searchedAddress: address,
+          geocodedAddress: address,
+          source: publicValues.source,
+          sourceUrl: publicValues.sourceUrl,
+          parcel: {},
+          candidates: [],
+        });
+      }
+      throw new Error("No public Hawaii TMK / MAP license value matched this Guesty address or listing name.");
     } catch (err: any) {
       const message = err?.message || String(err);
       console.error("[tmk-lookup] failed:", message);
-      if (/No geocoded Hawaii address found|No Kauai parcel TMK found/i.test(message)) {
+      if (/No geocoded Hawaii address found|No Kauai parcel TMK found|No public Hawaii TMK/i.test(message)) {
         return res.status(404).json({ error: message, searchedAddress: address });
       }
       res.status(500).json({ error: "TMK lookup failed", message });
@@ -5490,6 +5508,7 @@ export async function registerRoutes(
     async (req: Request, res: Response) => {
       const address = String(req.query.address ?? "").trim();
       const listingId = String(req.query.listingId ?? "").trim() || null;
+      const listingName = String(req.query.listingName ?? "").trim() || null;
       const taxMapKey = String(req.query.taxMapKey ?? "").trim() || null;
       if (!address) return res.status(400).json({ error: "address is required" });
       if (!/\b(HI|Hawaii)\b/i.test(address)) {
@@ -5500,6 +5519,7 @@ export async function registerRoutes(
         const result = await lookupHawaiiComplianceField({
           field,
           address,
+          listingName,
           listingId,
           taxMapKey,
           propertyValues,
@@ -15352,10 +15372,24 @@ export async function registerRoutes(
     const touristTaxAccountValue = usableLicenseValue(body.touristTaxAccount) || (isFloridaProfile ? tatLicenseValue : null);
     let resolvedStrPermitValue = strPermitValue;
     let resolvedDbprLicenseValue = dbprLicenseValue;
+    let resolvedTaxMapKeyValue = taxMapKeyValue;
+    let resolvedTatLicenseValue = tatLicenseValue;
+    let resolvedGetLicenseValue = getLicenseValue;
     let lookupNote: string | null = null;
     let lookupSource: string | null = null;
     const lookupNotes: string[] = [];
     let lookupCandidates: Array<DeckardLicenseNode | DbprLicenseRecord> = [];
+    if (profile.jurisdiction === "hawaii" && body.address) {
+      const publicLookup = await lookupHawaiiPublicListingLicenses({ address: body.address, listingName: body.listingName });
+      if (publicLookup) {
+        resolvedTaxMapKeyValue = resolvedTaxMapKeyValue || publicLookup.taxMapKey;
+        resolvedTatLicenseValue = resolvedTatLicenseValue || publicLookup.tatLicense;
+        resolvedGetLicenseValue = resolvedGetLicenseValue || publicLookup.getLicense;
+        resolvedStrPermitValue = resolvedStrPermitValue || publicLookup.strPermit;
+        lookupNotes.push(publicLookup.note);
+        lookupSource = publicLookup.sourceUrl || lookupSource;
+      }
+    }
     if (!resolvedStrPermitValue && profile.jurisdiction === "fort_myers_beach_fl" && body.address) {
       const strLookup = await lookupFortMyersBeachStrLicense(body.address);
       if (strLookup) {
@@ -15379,9 +15413,9 @@ export async function registerRoutes(
       ok: true,
       profile,
       values: {
-        taxMapKey: taxMapKeyValue,
-        tatLicense: tatLicenseValue,
-        getLicense: getLicenseValue,
+        taxMapKey: resolvedTaxMapKeyValue,
+        tatLicense: resolvedTatLicenseValue,
+        getLicense: resolvedGetLicenseValue,
         strPermit: resolvedStrPermitValue,
         dbprLicense: resolvedDbprLicenseValue || null,
         touristTaxAccount: touristTaxAccountValue || null,

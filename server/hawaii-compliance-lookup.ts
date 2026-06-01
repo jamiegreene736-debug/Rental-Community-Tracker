@@ -3,7 +3,7 @@ import { isPlaceholderLicenseValue, usableLicenseValue } from "../shared/license
 
 export type HawaiiComplianceLookupResult = {
   value: string;
-  confidence: "guesty-listing" | "property-record" | "paired-tax-license" | "kauai-tvr-registry" | "unit-cpr" | "master-parcel";
+  confidence: "guesty-listing" | "property-record" | "paired-tax-license" | "public-listing" | "kauai-tvr-registry" | "unit-cpr" | "master-parcel";
   note: string;
   searchedAddress?: string;
   geocodedAddress?: string;
@@ -315,7 +315,7 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
 
 const HAWAII_TAT_PATTERN = /\bTA-\d{3}-\d{3}-\d{4}-\d{2}\b/i;
 const HAWAII_GET_PATTERN = /\bGE-\d{3}-\d{3}-\d{4}-\d{2}\b/i;
-const HAWAII_STR_PATTERN = /\b(?:TVR-\d{4}-\d{2,4}|TVNC-\d{4}|STVR-\d{4}-\d{6}|STRH-\d{8}|NUC-\d{2}-\d{3}-\d{4})\b/i;
+const HAWAII_STR_PATTERN = /\b(?:TVR-\d{4}-\d{2,4}|TVNC-\d{4}|STVR-\d{4}-\d{6}|STRH[-\s]?\d{8}|STPH[-\s]?\d{4,8}|NUC-\d{2}-\d{3}-\d{4})\b/i;
 
 const classifyTopLevelLicense = (value: unknown): "tat" | "get" | "str" | null => {
   const raw = String(value ?? "").trim();
@@ -386,6 +386,17 @@ export type HawaiiComplianceValues = {
   strPermit?: string | null;
 };
 
+type HawaiiPublicLicenseLookupInput = {
+  address: string;
+  listingName?: string | null;
+};
+
+type HawaiiPublicLicenseLookupResult = Required<HawaiiComplianceValues> & {
+  source: string;
+  sourceUrl?: string;
+  note: string;
+};
+
 export function extractHawaiiComplianceFromGuestyListing(listing: Record<string, unknown>): Required<HawaiiComplianceValues> {
   const tags = Array.isArray(listing.tags)
     ? (listing.tags as unknown[]).filter((tag): tag is string => typeof tag === "string")
@@ -446,6 +457,153 @@ export function extractHawaiiComplianceFromGuestyListing(listing: Record<string,
   };
 }
 
+const normalizePublicTmk = (value: unknown): string | null => {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  return digits.length >= 11 && digits.length <= 13 ? digits : null;
+};
+
+export function extractHawaiiComplianceFromPublicText(text: string): Required<HawaiiComplianceValues> {
+  const tmkLabeledPatterns = [
+    /(?:Property\s+Registration\s+Number|Tax\s+Map\s+Key|TMK|MAP\s+License|MAP)\s*[:#]?\s*((?:\(?\d\)?\s*)?\d[-\s]?\d[-\s]?\d{3}[-:\s]?\d{3}(?:[-:\s]?\d{3,4})?|\d{11,13})/i,
+    /\bTMK\s*\(?\s*(\d\s*\)?\s*\d[-\s]?\d[-\s]?\d{3}[-:\s]?\d{3}(?:[-:\s]?\d{3,4})?)\b/i,
+  ];
+  const taxMapKey = (() => {
+    for (const pattern of tmkLabeledPatterns) {
+      const match = text.match(pattern);
+      const normalized = normalizePublicTmk(match?.[1]);
+      if (normalized) return normalized;
+    }
+    return null;
+  })();
+  const tatLicense = usableLicenseValue(text.match(HAWAII_TAT_PATTERN)?.[0]);
+  const getLicense = usableLicenseValue(text.match(HAWAII_GET_PATTERN)?.[0]);
+  const strPermit = usableLicenseValue(text.match(HAWAII_STR_PATTERN)?.[0]);
+  return { taxMapKey, tatLicense, getLicense, strPermit };
+}
+
+const chooseTaxMapKey = (current: string | null, candidate: string | null): string | null => {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  return candidate.length > current.length && candidate.endsWith(current) ? candidate : current;
+};
+
+const mergeHawaiiValues = (base: Required<HawaiiComplianceValues>, next: HawaiiComplianceValues): Required<HawaiiComplianceValues> => ({
+  taxMapKey: chooseTaxMapKey(base.taxMapKey, usableLicenseValue(next.taxMapKey)),
+  tatLicense: base.tatLicense || usableLicenseValue(next.tatLicense) || null,
+  getLicense: base.getLicense || usableLicenseValue(next.getLicense) || null,
+  strPermit: base.strPermit || usableLicenseValue(next.strPermit) || null,
+});
+
+const compactListingSearchText = (value: unknown): string => {
+  return String(value ?? "")
+    .replace(/\b(?:sleeps?|bedrooms?|bdrm|br|bathrooms?|baths?|condos?|units?)\b/gi, " ")
+    .replace(/[^\w\s'-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+const searchApiGoogle = async (query: string): Promise<Array<{ title?: string; link?: string; snippet?: string }>> => {
+  const apiKey = process.env.SEARCHAPI_API_KEY;
+  if (!apiKey) return [];
+  const params = new URLSearchParams({ engine: "google", q: query, num: "6", api_key: apiKey });
+  const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+    headers: { "User-Agent": "NexStay/1.0" },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!resp.ok) throw new Error(`SearchAPI Google lookup failed (${resp.status})`);
+  const data = await resp.json() as any;
+  return Array.isArray(data?.organic_results) ? data.organic_results : [];
+};
+
+const fetchPublicLicensePageText = async (url: string): Promise<string | null> => {
+  const allowed = /(?:^|\.)((booking|redawning|vrbo|hawaiilife)\.com)$/i;
+  let host = "";
+  try { host = new URL(url).hostname; } catch { return null; }
+  if (!allowed.test(host)) return null;
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "NexStay/1.0" },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!resp.ok) return null;
+    const html = await resp.text();
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 250_000);
+  } catch {
+    return null;
+  }
+};
+
+export async function lookupHawaiiPublicListingLicenses(input: HawaiiPublicLicenseLookupInput): Promise<HawaiiPublicLicenseLookupResult | null> {
+  const address = input.address.trim();
+  const listingName = compactListingSearchText(input.listingName);
+  const querySeeds = new Set<string>();
+  if (listingName) {
+    querySeeds.add(`"${listingName}" Hawaii "TA-" "GE-"`);
+    querySeeds.add(`"${listingName}" "Property Registration Number"`);
+  }
+  querySeeds.add(`"${address}" Hawaii "TA-" "GE-"`);
+  querySeeds.add(`"${address}" "Property Registration Number"`);
+  if (/menehune\s+shores/i.test(`${listingName} ${address}`)) {
+    querySeeds.add(`"Menehune Shores" Kihei "TA-" "GE-" "Property Registration Number"`);
+  }
+
+  let values: Required<HawaiiComplianceValues> = { taxMapKey: null, tatLicense: null, getLicense: null, strPermit: null };
+  let bestSourceUrl: string | undefined;
+  let bestSource = "public OTA/direct listing search";
+  const pagesToFetch = new Set<string>();
+
+  for (const query of Array.from(querySeeds).slice(0, 5)) {
+    let results: Array<{ title?: string; link?: string; snippet?: string }> = [];
+    try {
+      results = await searchApiGoogle(query);
+    } catch (e: any) {
+      console.warn(`[hawaii-public-license] ${e?.message ?? e}`);
+      continue;
+    }
+    for (const result of results) {
+      const haystack = `${result.title ?? ""}\n${result.snippet ?? ""}\n${result.link ?? ""}`;
+      const extracted = extractHawaiiComplianceFromPublicText(haystack);
+      const before = JSON.stringify(values);
+      values = mergeHawaiiValues(values, extracted);
+      if (JSON.stringify(values) !== before && result.link) {
+        bestSourceUrl = result.link;
+        bestSource = result.title || bestSource;
+      }
+      if (result.link && /(booking|redawning|hawaiilife)\.com/i.test(result.link)) pagesToFetch.add(result.link);
+      if (values.taxMapKey && values.tatLicense && values.getLicense && values.strPermit) break;
+    }
+    if (values.taxMapKey && values.tatLicense && values.getLicense && values.strPermit) break;
+  }
+
+  if (!(values.taxMapKey && values.tatLicense && values.getLicense && values.strPermit)) {
+    for (const url of Array.from(pagesToFetch).slice(0, 3)) {
+      const pageText = await fetchPublicLicensePageText(url);
+      if (!pageText) continue;
+      values = mergeHawaiiValues(values, extractHawaiiComplianceFromPublicText(pageText));
+      bestSourceUrl = url;
+      if (values.taxMapKey && values.tatLicense && values.getLicense && values.strPermit) break;
+    }
+  }
+
+  if (!values.taxMapKey && !values.tatLicense && !values.getLicense && !values.strPermit) return null;
+  return {
+    ...values,
+    source: bestSource,
+    sourceUrl: bestSourceUrl,
+    note: `Pulled public Hawaii compliance values from ${bestSourceUrl ? "a public listing result" : "public listing search snippets"}. Verify against the owner/official records before publishing.`,
+  };
+}
+
 const fieldLabel = (field: "getLicense" | "tatLicense" | "strPermit"): string =>
   field === "getLicense" ? "GET" : field === "tatLicense" ? "TAT" : "STR";
 
@@ -463,12 +621,13 @@ const resolveTaxField = (
 export async function lookupHawaiiComplianceField(options: {
   field: "getLicense" | "tatLicense" | "strPermit";
   address: string;
+  listingName?: string | null;
   listingId?: string | null;
   taxMapKey?: string | null;
   propertyValues?: HawaiiComplianceValues | null;
   fetchGuestyListing?: (listingId: string) => Promise<Record<string, unknown>>;
 }): Promise<HawaiiComplianceLookupResult> {
-  const { field, address, listingId, taxMapKey, propertyValues, fetchGuestyListing } = options;
+  const { field, address, listingName, listingId, taxMapKey, propertyValues, fetchGuestyListing } = options;
   const searchedAddress = address.trim();
   const label = fieldLabel(field);
 
@@ -492,21 +651,36 @@ export async function lookupHawaiiComplianceField(options: {
   }
 
   if (field === "strPermit") {
-    const effectiveTmk = usableLicenseValue(taxMapKey) || (await lookupKauaiTmkFromAddress(searchedAddress)).taxMapKey;
-    const records = await fetchKauaiTvrRecords();
-    const match = matchKauaiStrPermit(records, effectiveTmk, searchedAddress);
-    if (match) {
-      return {
-        value: match.value,
-        confidence: "kauai-tvr-registry",
-        note: match.note,
-        searchedAddress,
-        taxMapKey: effectiveTmk,
-        source: "County of Kauai Planning TVR registry",
-        sourceUrl: KAUAI_TVR_PDF_URL,
-      };
+    if (/\b(kauai|koloa|poipu|princeville|kapaa|lihue|wailua|hanalei|waimea|kekaha)\b/i.test(searchedAddress)) {
+      const effectiveTmk = usableLicenseValue(taxMapKey) || (await lookupKauaiTmkFromAddress(searchedAddress)).taxMapKey;
+      const records = await fetchKauaiTvrRecords();
+      const match = matchKauaiStrPermit(records, effectiveTmk, searchedAddress);
+      if (match) {
+        return {
+          value: match.value,
+          confidence: "kauai-tvr-registry",
+          note: match.note,
+          searchedAddress,
+          taxMapKey: effectiveTmk,
+          source: "County of Kauai Planning TVR registry",
+          sourceUrl: KAUAI_TVR_PDF_URL,
+        };
+      }
     }
-    throw new Error("No Kauai County TVR / homestay permit matched this Guesty address or TMK in the public registry.");
+  }
+
+  const publicValues = await lookupHawaiiPublicListingLicenses({ address: searchedAddress, listingName });
+  const publicValue = publicValues ? resolveTaxField(field, publicValues) : null;
+  if (publicValue) {
+    return {
+      value: publicValue,
+      confidence: "public-listing",
+      note: publicValues.note,
+      searchedAddress,
+      taxMapKey: publicValues.taxMapKey ?? undefined,
+      source: publicValues.source,
+      sourceUrl: publicValues.sourceUrl,
+    };
   }
 
   throw new Error(

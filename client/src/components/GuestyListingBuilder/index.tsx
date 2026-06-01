@@ -180,7 +180,7 @@ type ComplianceLookupResult = {
 };
 type TmkLookupResult = ComplianceLookupResult & {
   taxMapKey: string;
-  confidence: "unit-cpr" | "master-parcel";
+  confidence: "unit-cpr" | "master-parcel" | "public-listing";
   searchedAddress: string;
   geocodedAddress: string;
 };
@@ -968,6 +968,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [effectivePropertyData?.address]);
 
   const COMPLIANCE_FETCH_TIMEOUT_MS = 28_000;
+  const complianceListingName = useMemo(() => (
+    effectivePropertyData?.title
+    || effectivePropertyData?.nickname
+    || effectivePropertyData?.descriptions?.title
+    || ""
+  ), [effectivePropertyData?.descriptions?.title, effectivePropertyData?.nickname, effectivePropertyData?.title]);
 
   const pullRealTaxMapKey = useCallback(async () => {
     if (!effectivePropertyData?.address) return;
@@ -984,6 +990,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const params = new URLSearchParams({
         address: fullAddress,
       });
+      if (complianceListingName) params.set("listingName", complianceListingName);
       const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`, {
         signal: AbortSignal.timeout(COMPLIANCE_FETCH_TIMEOUT_MS),
       });
@@ -995,7 +1002,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       });
       setTmkLookupResult(data as TmkLookupResult);
       toast({
-        title: data.confidence === "unit-cpr" ? "Guesty-address unit TMK applied" : "Guesty-address parcel TMK applied",
+        title: data.confidence === "public-listing"
+          ? "Public listing TMK / MAP applied"
+          : data.confidence === "unit-cpr" ? "Guesty-address unit TMK applied" : "Guesty-address parcel TMK applied",
         description: data.note,
       });
     } catch (err: any) {
@@ -1010,7 +1019,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setTmkLookupBusy(false);
     }
-  }, [effectivePropertyData?.address, persistComplianceValues, toast]);
+  }, [complianceListingName, effectivePropertyData?.address, persistComplianceValues, toast]);
 
   const pullHawaiiComplianceField = useCallback(async (options: {
     field: "getLicense" | "tatLicense" | "strPermit";
@@ -1036,6 +1045,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     options.setResult(null);
     try {
       const params = new URLSearchParams({ address: fullAddress });
+      if (complianceListingName) params.set("listingName", complianceListingName);
       if (selectedId) params.set("listingId", selectedId);
       if (propertyId) params.set("propertyId", String(propertyId));
       if (effectivePropertyData.taxMapKey) params.set("taxMapKey", effectivePropertyData.taxMapKey);
@@ -1080,7 +1090,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       options.setBusy(false);
     }
-  }, [complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistComplianceValues, propertyId, selectedId, toast]);
+  }, [complianceListingName, complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistComplianceValues, propertyId, selectedId, toast]);
 
   const pullRealGetLicense = useCallback(async () => {
     await pullHawaiiComplianceField({
