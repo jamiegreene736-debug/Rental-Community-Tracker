@@ -47,6 +47,8 @@ function parseViewportSize(value, fallback = DEFAULT_VIEWPORT) {
 const VIEWPORT = parseViewportSize(process.env.SIDECAR_VIEWPORT_SIZE ?? process.env.SIDECAR_PLAYWRIGHT_VIEWPORT);
 const SIDE_CAR_CHROME_VISIBLE = process.env.SIDECAR_CHROME_VISIBLE === "1";
 const SIDECAR_ALLOW_FOCUS = process.env.SIDECAR_ALLOW_FOCUS === "1";
+const SIDECAR_IDLE_CHROME_RESET_ENABLED = process.env.SIDECAR_IDLE_CHROME_RESET_ENABLED === "1";
+const SIDECAR_WARM_LOCAL_CHROME_ON_STARTUP = process.env.SIDECAR_WARM_LOCAL_CHROME_ON_STARTUP === "1" || process.env.SIDECAR_WARM_ALL_LOCAL_CHROME === "1";
 const SIDECAR_CAPTCHA_SURFACE_WINDOW = process.env.SIDECAR_CAPTCHA_SURFACE_WINDOW !== "0";
 const SIDECAR_CAPTCHA_ALLOW_FOCUS = process.env.SIDECAR_CAPTCHA_ALLOW_FOCUS !== "0";
 const SIDECAR_MACOS_BACKGROUND_LAUNCH = process.env.SIDECAR_MACOS_BACKGROUND_LAUNCH !== "0";
@@ -2427,6 +2429,10 @@ async function handleQueueControlState(control, hasRequest) {
     pendingIdleChromeReset = true;
   }
   if (!pendingIdleChromeReset || hasRequest || !keepVisibleLocalChromeGrid()) return;
+  if (!SIDECAR_IDLE_CHROME_RESET_ENABLED) {
+    pendingIdleChromeReset = false;
+    return;
+  }
   const reason = control?.paused
     ? "sidecar queue paused/cleared"
     : "sidecar idle startup";
@@ -9090,19 +9096,23 @@ async function main() {
     log("local macOS Chrome warmup skipped; preferring server Chrome/noVNC with residential proxy");
     await logServerChromePoolHealth();
   } else if (WORKER_SLOT === "1") {
-    try {
-      if (process.env.SIDECAR_WARM_ALL_LOCAL_CHROME !== "0") {
-        await chromeSidecarManager.warmAllLocal();
-      } else {
-        await chromeSidecarManager.warmPrimaryLocal();
+    if (SIDECAR_WARM_LOCAL_CHROME_ON_STARTUP) {
+      try {
+        if (process.env.SIDECAR_WARM_ALL_LOCAL_CHROME === "1") {
+          await chromeSidecarManager.warmAllLocal();
+        } else {
+          await chromeSidecarManager.warmPrimaryLocal();
+        }
+      } catch (e) {
+        log(`local Chrome warmup skipped: ${e.message}`);
       }
-    } catch (e) {
-      log(`local Chrome warmup skipped: ${e.message}`);
+    } else {
+      log("local Chrome warmup skipped until a queued sidecar request is claimed");
     }
   } else {
     log("local Chrome warmup skipped on non-primary worker slot");
   }
-  if (keepVisibleLocalChromeGrid()) {
+  if (keepVisibleLocalChromeGrid() && SIDECAR_IDLE_CHROME_RESET_ENABLED) {
     await resetVisibleChromeToIdle("sidecar startup");
   }
   process.on("SIGINT", async () => { await teardownBrowser("SIGINT"); process.exit(0); });
