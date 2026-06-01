@@ -148,6 +148,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [ctx, setCtx] = useState<ScanContext | null>(null);
   const [candidates, setCandidates] = useState<CandidatesEvent | null>(null);
   const [results, setResults] = useState<WindowResult[]>([]);
+  // Persist last "Apply policy" results (full verdicts for green/red calendar UI)
+  // in localStorage so the data sticks across tab exits/re-entries. Server already
+  // persists the blocked dates themselves via scannerBlocks; this just restores the
+  // visual grid without requiring a re-scan.
+  const POLICY_RESULTS_KEY = propertyId ? `rct-avail-policy-${propertyId}` : null;
   const [error, setError] = useState<string | null>(null);
   const [scanPhase, setScanPhase] = useState<string | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -222,6 +227,31 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, schedule?.lastRunAt, schedulerUnavailable]);
+
+  // Load persisted policy results (if any) for this property so the green/red
+  // calendar grid re-appears when re-entering the tab. Fresh scan always wins
+  // (results.length check prevents clobbering live data).
+  useEffect(() => {
+    if (!POLICY_RESULTS_KEY || results.length > 0) return;
+    try {
+      const raw = localStorage.getItem(POLICY_RESULTS_KEY);
+      if (raw) {
+        const parsed: WindowResult[] = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setResults(parsed);
+        }
+      }
+    } catch { /* ignore corrupt cache */ }
+  }, [POLICY_RESULTS_KEY]); // intentionally no `results` dep
+
+  // Save results whenever they change (after scan, after override, etc). Skip
+  // during active scan (we clear temporarily) so we don't wipe the prior cache.
+  useEffect(() => {
+    if (!POLICY_RESULTS_KEY || results.length === 0 || scanning) return;
+    try {
+      localStorage.setItem(POLICY_RESULTS_KEY, JSON.stringify(results));
+    } catch { /* storage full / private mode */ }
+  }, [POLICY_RESULTS_KEY, results, scanning]);
 
   // Active fixed-rule blocks pushed to Guesty for this property.
   // The summary badge on the scheduler card shows aggregate counts
