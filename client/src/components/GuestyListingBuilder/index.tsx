@@ -2851,64 +2851,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     describeChannelVerification,
   ]);
 
-  const applyAvailabilityPolicyToGuesty = useCallback(async () => {
-    if (!propertyId) throw new Error("Select a property before applying availability policy.");
-    const resp = await fetch(`/api/availability/scan/${propertyId}?mode=policy&weeks=104&minSets=3`);
-    if (!resp.ok || !resp.body) {
-      const data = await resp.json().catch(() => ({}));
-      throw new Error(data?.error || `Availability policy failed with HTTP ${resp.status}`);
-    }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let windows = 0;
-    let blocked = 0;
-    let syncResult: any = null;
-    let streamError: string | null = null;
-
-    const handleLine = (line: string) => {
-      if (!line.trim()) return;
-      let evt: any;
-      try { evt = JSON.parse(line); } catch { return; }
-      if (evt.type === "window") {
-        windows++;
-        if (evt.verdict === "blocked") blocked++;
-      } else if (evt.type === "sync-blocks") {
-        syncResult = evt.result ?? { success: false, error: evt.error ?? "Guesty block sync failed" };
-      } else if (evt.type === "error") {
-        streamError = evt.error ?? "Availability policy failed";
-      }
-    };
-
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) handleLine(line);
-    }
-    if (buffer.trim()) handleLine(buffer);
-
-    if (streamError) throw new Error(streamError);
-    if (!syncResult) throw new Error("Availability policy finished without a Guesty block sync receipt.");
-    if (syncResult.success === false) {
-      const failure = Array.isArray(syncResult.failures) && syncResult.failures.length > 0
-        ? syncResult.failures[0]?.error
-        : null;
-      throw new Error(syncResult.reason || syncResult.error || failure || "Guesty block sync failed.");
-    }
-
-    return {
-      windows,
-      blocked,
-      created: syncResult.created ?? 0,
-      removed: syncResult.removed ?? 0,
-      unchanged: syncResult.unchanged ?? 0,
-    };
-  }, [propertyId]);
-
   const queueMarketPricingRefresh = useCallback(async () => {
     if (!propertyId) throw new Error("Select a property before refreshing market pricing.");
     const label = propertyData?.nickname
@@ -2935,7 +2877,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setDataPushBusy(true);
     const failures: string[] = [];
     let bookableChanged = false;
-    let availabilityMessage = "";
     let pricingMessage = "";
 
     try {
@@ -2987,16 +2928,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
 
     try {
-      const availability = await applyAvailabilityPolicyToGuesty();
-      availabilityMessage = `Policy ${availability.blocked}/${availability.windows} blocked; Guesty blocks +${availability.created}/-${availability.removed}/${availability.unchanged} unchanged`;
-      recordDataPush("availability", "success", availabilityMessage);
-    } catch (e) {
-      const message = (e as Error).message;
-      failures.push(`Availability policy: ${message}`);
-      recordDataPush("availability", "error", message);
-    }
-
-    try {
       const job = await queueMarketPricingRefresh();
       pricingMessage = job?.id
         ? `Market pricing refresh queued (${job.id}); Guesty rate push runs after refresh`
@@ -3022,8 +2953,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     toast({
       title: "Property data pushed to Guesty",
       description: bookableChanged
-        ? `Descriptions, bedding/sqft, amenities, photos, bookable status, availability policy, and market pricing were handled. ${availabilityMessage} · ${pricingMessage}`
-        : `Descriptions, bedding/sqft, amenities, photos, availability policy, and market pricing were handled. Bookable status was already handled. ${availabilityMessage} · ${pricingMessage}`,
+        ? `Descriptions, bedding/sqft, amenities, photos, bookable status, and market pricing were handled. ${pricingMessage}`
+        : `Descriptions, bedding/sqft, amenities, photos, and market pricing were handled. Bookable status was already handled. ${pricingMessage}`,
       duration: 7000,
     });
   }, [
@@ -3037,7 +2968,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     effectivePropertyData?.photos,
     upscaleAndUpload,
     pushBookableToGuestyOnce,
-    applyAvailabilityPolicyToGuesty,
     queueMarketPricingRefresh,
     recordDataPush,
     toast,
@@ -4739,9 +4669,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 onClick={handlePushPropertyDataPreview}
                 disabled={!selectedId || dataPushBusy || building || conn !== "connected"}
                 data-testid="btn-push-property-data-preview"
-                title={selectedId ? "Push descriptions, bedding/sqft, amenities, photos, availability policy, and market pricing to Guesty" : "Select a Guesty listing first"}
+                title={selectedId ? "Push descriptions, bedding/sqft, amenities, photos, and market pricing to Guesty" : "Select a Guesty listing first"}
               >
-                {dataPushBusy ? "Pushing property data..." : "Push Descriptions, Bedding, Amenities, Photos, Policy & Pricing"}
+                {dataPushBusy ? "Pushing property data..." : "Push Descriptions, Bedding, Amenities, Photos & Pricing"}
               </button>
               <div className="glb-data-push-meta" aria-label="Guesty property data push history">
                 {([
@@ -4750,7 +4680,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   ["amenities", "Amenities"] as const,
                   ["photos", "Photos"] as const,
                   ["bookable", "Bookable"] as const,
-                  ["availability", "Policy"] as const,
                   ["pricing", "Pricing"] as const,
                 ]).map(([key, label]) => {
                   const entry = dataPushLog[key];
