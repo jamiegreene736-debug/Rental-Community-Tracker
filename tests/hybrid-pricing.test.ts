@@ -176,13 +176,52 @@ try {
     checkIn: "2026-06-01",
     checkOut: "2026-06-08",
   });
-  assert.equal(poipuBasis.medianNightly, 400);
+  assert.equal(poipuBasis.medianNightly, 440);
   assert.equal(poipuBasis.sampleCount, 2);
   assert.equal(requestedSearchApiUrls.length, 1);
   const params = new URL(requestedSearchApiUrls[0]).searchParams;
   assert.equal(params.get("engine"), "airbnb");
   assert.equal(params.get("bedrooms"), "3");
   assert.equal(params.get("type_of_place"), "entire_home");
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+  else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+}
+
+process.env.SEARCHAPI_API_KEY = "test-key";
+globalThis.fetch = (async () => {
+  return new Response(JSON.stringify({
+    properties: [
+      {
+        name: "Poipu Kai 3 bedroom condo",
+        price: { extracted_total_price: 700 },
+      },
+      {
+        name: "Poipu Kai 3 bedroom condo repeated rate",
+        price: { extracted_total_price: 700 },
+      },
+      {
+        name: "Poipu Kai 3 bedroom condo higher rate",
+        price: { extracted_total_price: 1400 },
+      },
+    ],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}) as typeof fetch;
+try {
+  const distinctPoipuBasis = await fetchAirbnbMedianNightly({
+    community: "Poipu Kai",
+    bedrooms: 3,
+    checkIn: "2027-08-11",
+    checkOut: "2027-08-18",
+    avoidNightlyBasis: 100,
+  });
+  assert.equal(distinctPoipuBasis.medianNightly, 200);
+  assert.match(
+    distinctPoipuBasis.notes[0],
+    /adjusted to nearest distinct monthly sample/,
+    "duplicate monthly p40 basis should choose the nearest distinct sampled rate",
+  );
 } finally {
   globalThis.fetch = originalFetch;
   if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;

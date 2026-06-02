@@ -289,24 +289,43 @@ export function calculateBlendedRate(input: HybridCalculationInput, config: Hybr
   };
 }
 
-function nearestRankPercentile(values: number[], percentile: number): number | null {
+function interpolatedPercentile(values: number[], percentile: number): number | null {
   const clean = values.filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
   if (!clean.length) return null;
   const clamped = Math.min(100, Math.max(0, percentile));
-  const index = Math.max(0, Math.ceil((clamped / 100) * clean.length) - 1);
-  return Math.round(clean[index]);
+  if (clean.length === 1) return Math.round(clean[0]);
+  const position = (clamped / 100) * (clean.length - 1);
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return Math.round(clean[lower]);
+  const weight = position - lower;
+  return Math.round(clean[lower] + ((clean[upper] - clean[lower]) * weight));
 }
 
-function marketPricingBasis(values: number[]): { basis: number | null; percentile: number | null; median: number | null } {
-  const percentile = nearestRankPercentile(values, MARKET_PRICING_PERCENTILE);
-  const median = nearestRankPercentile(values, 50);
-  if (percentile == null || median == null) return { basis: null, percentile, median };
-  return { basis: percentile, percentile, median };
+function closestDistinctSampleBasis(values: number[], target: number, avoidBasis?: number | null): number | null {
+  if (!Number.isFinite(target)) return null;
+  if (avoidBasis == null || target !== avoidBasis) return target;
+  const alternatives = Array.from(new Set(
+    values
+      .filter((v) => Number.isFinite(v) && v > 0)
+      .map((v) => Math.round(v)),
+  ))
+    .filter((v) => v !== avoidBasis)
+    .sort((a, b) => Math.abs(a - target) - Math.abs(b - target) || a - b);
+  return alternatives[0] ?? target;
+}
+
+function marketPricingBasis(values: number[], avoidBasis?: number | null): { basis: number | null; percentile: number | null; median: number | null; tieAdjusted: boolean } {
+  const percentile = interpolatedPercentile(values, MARKET_PRICING_PERCENTILE);
+  const median = interpolatedPercentile(values, 50);
+  if (percentile == null || median == null) return { basis: null, percentile, median, tieAdjusted: false };
+  const basis = closestDistinctSampleBasis(values, percentile, avoidBasis);
+  return { basis, percentile, median, tieAdjusted: basis != null && basis !== percentile };
 }
 
 function marketPricingBasisNotes(stats: ReturnType<typeof marketPricingBasis>): string {
   if (stats.percentile != null && stats.median != null) {
-    return `using raw ${MARKET_PRICING_PERCENTILE}th percentile basis $${stats.basis} (median $${stats.median})`;
+    return `using raw ${MARKET_PRICING_PERCENTILE}th percentile basis $${stats.basis} (median $${stats.median})${stats.tieAdjusted ? "; adjusted to nearest distinct monthly sample to avoid repeating the prior month" : ""}`;
   }
   return `using raw ${MARKET_PRICING_PERCENTILE}th percentile basis`;
 }
@@ -562,6 +581,7 @@ export async function fetchAirbnbMedianNightly(args: {
   checkIn: string;
   checkOut: string;
   searchName?: string;
+  avoidNightlyBasis?: number | null;
 }): Promise<{ medianNightly: number | null; sampleCount: number; notes: string[]; evidence?: MarketRateEvidence; confidence?: MarketRateConfidence }> {
   const apiKey = process.env.SEARCHAPI_API_KEY;
   if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
@@ -586,7 +606,7 @@ export async function fetchAirbnbMedianNightly(args: {
       continue;
     }
     if (rates.length > 0) {
-      const basis = marketPricingBasis(rates);
+      const basis = marketPricingBasis(rates, args.avoidNightlyBasis);
       return {
         medianNightly: basis.basis,
         sampleCount: rates.length,
@@ -797,15 +817,18 @@ export async function refreshHybridPricingForTarget(args: {
       for (let attempt = 0; attempt < 4; attempt += 1) {
         if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
         window = hybridPricingWindowForMonth(asOf, monthOffset, stayNights);
+        const previousYearMonth = monthOffset > 0 ? dateOnly(monthStart(asOf, monthOffset - 1)).slice(0, 7) : null;
+        const previousBasis = previousYearMonth ? monthlyRates[previousYearMonth]?.medianNightly ?? null : null;
         airbnb = await fetchAirbnbMedianNightly({
           community: args.community,
           bedrooms,
           checkIn: window.checkIn,
           checkOut: window.checkOut,
           searchName,
+          avoidNightlyBasis: previousBasis,
         });
         if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
-        if (airbnb.medianNightly != null) break;
+        if (airbnb.medianNightly != null && (previousBasis == null || airbnb.medianNightly !== previousBasis)) break;
       }
       if (!window.checkIn) {
         await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
@@ -818,6 +841,15 @@ export async function refreshHybridPricingForTarget(args: {
         throw new Error(
           `SearchAPI Airbnb returned no usable exact-${bedrooms}BR samples for ${searchName} ` +
           `${window.yearMonth} (${window.checkIn} to ${window.checkOut}); static fallback is disabled for market-rate refreshes.`,
+        );
+      }
+      const previousYearMonth = monthOffset > 0 ? dateOnly(monthStart(asOf, monthOffset - 1)).slice(0, 7) : null;
+      const previousBasis = previousYearMonth ? monthlyRates[previousYearMonth]?.medianNightly ?? null : null;
+      if (previousBasis != null && airbnb.medianNightly === previousBasis) {
+        await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
+        throw new Error(
+          `SearchAPI Airbnb produced the same p${MARKET_PRICING_PERCENTILE} basis ($${airbnb.medianNightly}) for ` +
+          `${window.yearMonth} and ${previousYearMonth}; refusing to push duplicate monthly pricing. Retry the market pricing refresh.`,
         );
       }
       const basis = airbnb.medianNightly;
