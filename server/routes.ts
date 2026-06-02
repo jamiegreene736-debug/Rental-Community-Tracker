@@ -23679,7 +23679,10 @@ Return ONLY compact JSON with this exact shape:
     const communityName = String(args.communityName ?? "").trim();
     const propertyId = Number(args.propertyId);
     const targetUnitId = String(args.targetUnitId ?? "").trim();
-    const currentPropertyId = Number.isFinite(propertyId) && propertyId > 0 ? propertyId : null;
+    const currentPropertyId = Number.isFinite(propertyId) && propertyId !== 0 ? propertyId : null;
+    const currentDraftId = currentPropertyId != null && currentPropertyId < 0
+      ? Math.abs(currentPropertyId)
+      : null;
     const out: SameCommunityReplacementExclusions = { urlKeys: new Set(), unitClaims: new Set(), sources: [] };
 
     const addUrl = (url: unknown, source: ReplacementExclusionSource, label: string) => {
@@ -23708,6 +23711,7 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       for (const draft of await storage.getCommunityDrafts()) {
+        if (currentDraftId === draft.id) continue;
         if (!sameCommunity(null, draft.name)) continue;
         const label = `draft #${draft.id} ${draft.name}`;
         addUrl(draft.unit1Url, "draft", `${label} Unit A`);
