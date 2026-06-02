@@ -1770,6 +1770,12 @@ function AdminDashboard() {
     checkedAt: string | null;
     errorMessage: string | null;
   };
+  type ActivePhotoFolderAlias = {
+    propertyId: number;
+    oldUnitId: string;
+    originalFolder: string;
+    activeFolder: string;
+  };
   const isPhotoProviderUnavailableError = (message?: string | null) => {
     const text = (message ?? "").toLowerCase();
     if (!text.includes("searchapi")) return false;
@@ -1795,7 +1801,7 @@ function AdminDashboard() {
       : message;
     return cleaned.replace(/\s+/g, " ").slice(0, 180);
   };
-  const { data: photoCheckData } = useQuery<{ checks: PhotoCheckRow[] }>({
+  const { data: photoCheckData } = useQuery<{ checks: PhotoCheckRow[]; activeFolderAliases?: ActivePhotoFolderAlias[] }>({
     queryKey: ["/api/photo-listing-check"],
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
@@ -1817,6 +1823,15 @@ function AdminDashboard() {
   const photoCheckByFolder = useMemo(() => {
     const map = new Map<string, PhotoCheckRow>();
     for (const r of photoCheckData?.checks ?? []) map.set(r.folder, r);
+    return map;
+  }, [photoCheckData]);
+
+  const activePhotoFolderByOriginal = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const alias of photoCheckData?.activeFolderAliases ?? []) {
+      if (!alias.originalFolder || !alias.activeFolder) continue;
+      map.set(`${alias.propertyId}:${alias.originalFolder}`, alias.activeFolder);
+    }
     return map;
   }, [photoCheckData]);
 
@@ -1879,7 +1894,12 @@ function AdminDashboard() {
         // scanner skips (no map entry AND no digit hint) drop out
         // here too, keeping the dashboard aggregation in lockstep
         // with what was scanned.
-        builder.units.forEach((u, index) => addFolder(u.photoFolder, unitOwner(index, u.unitNumber)));
+        builder.units.forEach((u, index) => {
+          const activeFolder = u.photoFolder
+            ? activePhotoFolderByOriginal.get(`${p.id}:${u.photoFolder}`) ?? u.photoFolder
+            : u.photoFolder;
+          addFolder(activeFolder, unitOwner(index, u.unitNumber));
+        });
       }
       const draft = draftsByPropertyId.get(p.id);
       if (draft) {
@@ -1945,7 +1965,7 @@ function AdminDashboard() {
       out.set(p.id, agg);
     }
     return out;
-  }, [allProperties, communityDraftsDataForRows, photoCheckByFolder]);
+  }, [allProperties, activePhotoFolderByOriginal, communityDraftsDataForRows, photoCheckByFolder]);
 
   const isBulkPricingSelectable = (property: Property) => {
     if (property.draftStatus === "researching" || property.draftStatus === "draft_ready") return false;

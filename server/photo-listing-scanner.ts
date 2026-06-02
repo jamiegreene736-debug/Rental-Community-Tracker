@@ -646,6 +646,9 @@ export async function listScanableFolders(): Promise<string[]> {
     const key = `${swap.propertyId}:${swap.oldUnitId}`;
     if (seenSwaps.has(key)) continue;
     seenSwaps.add(key);
+    const builder = unitBuilderData.find((b) => b.propertyId === swap.propertyId);
+    const oldUnit = builder?.units.find((unit) => unit.id === swap.oldUnitId);
+    if (oldUnit?.photoFolder) set.delete(oldUnit.photoFolder);
     set.add(replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId));
     const draft = String(swap.oldUnitId).match(/^draft(\d+)-unit-([a-z0-9_-]+)$/i);
     if (draft) set.add(`draft-${draft[1]}-unit-${draft[2]}`);

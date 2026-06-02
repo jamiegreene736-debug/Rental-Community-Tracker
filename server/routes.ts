@@ -24529,6 +24529,57 @@ Return ONLY compact JSON with this exact shape:
     return Array.from(latestByUnit.values());
   };
 
+  const activeUnitPhotoFoldersForBuilder = async (builder: typeof unitBuilderData[number]) => {
+    const activeFolders = new Set<string>();
+    const staleFolders = new Set<string>();
+    const unitByFolder = new Map<string, typeof builder.units[number]>();
+    const replacementByOriginal = new Map<string, string>();
+    const unitById = new Map(builder.units.map((unit) => [unit.id, unit]));
+
+    const swaps = latestUnitSwaps(await storage.getUnitSwaps(builder.propertyId));
+    for (const swap of swaps) {
+      const unit = unitById.get(swap.oldUnitId);
+      if (!unit?.photoFolder) continue;
+      const replacementFolder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
+      staleFolders.add(unit.photoFolder);
+      activeFolders.add(replacementFolder);
+      unitByFolder.set(replacementFolder, unit);
+      replacementByOriginal.set(unit.photoFolder, replacementFolder);
+    }
+
+    for (const unit of builder.units) {
+      if (!unit.photoFolder || staleFolders.has(unit.photoFolder)) continue;
+      activeFolders.add(unit.photoFolder);
+      unitByFolder.set(unit.photoFolder, unit);
+    }
+
+    return { activeFolders, staleFolders, unitByFolder, replacementByOriginal };
+  };
+
+  const allActiveUnitPhotoFolderAliases = async () => {
+    const aliases: Array<{
+      propertyId: number;
+      oldUnitId: string;
+      originalFolder: string;
+      activeFolder: string;
+    }> = [];
+
+    for (const builder of unitBuilderData) {
+      const { replacementByOriginal } = await activeUnitPhotoFoldersForBuilder(builder);
+      for (const [originalFolder, activeFolder] of replacementByOriginal.entries()) {
+        const unit = builder.units.find((u) => u.photoFolder === originalFolder);
+        aliases.push({
+          propertyId: builder.propertyId,
+          oldUnitId: unit?.id ?? "",
+          originalFolder,
+          activeFolder,
+        });
+      }
+    }
+
+    return aliases;
+  };
+
   app.post("/api/replacement/find-unit", async (req, res) => {
     const searchApiKey = process.env.SEARCHAPI_API_KEY;
     const imgbbKey = process.env.IMGBB_API_KEY;
@@ -33256,6 +33307,7 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/photo-listing-check", async (_req, res) => {
     try {
       const rows = await storage.getAllPhotoListingChecks();
+      const activeFolderAliases = await allActiveUnitPhotoFolderAliases();
       res.json({
         checks: rows.map((r) => ({
           folder: r.photoFolder,
@@ -33269,6 +33321,7 @@ Return ONLY compact JSON with this exact shape:
           checkedAt: r.checkedAt,
           errorMessage: normalizeSearchApiErrorMessage(r.errorMessage),
         })),
+        activeFolderAliases,
       });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Failed to load photo-listing checks" });
@@ -33953,10 +34006,24 @@ Return ONLY compact JSON with this exact shape:
       // from a different community — they are intrinsic to the
       // resort). Filter out at the folder set so neither real alerts
       // nor synthesized ones reach the response.
-      const folderSet = new Set<string>();
+      let folderSet = new Set<string>();
+      let staleFolderSet = new Set<string>();
+      let unitByFolder = new Map<string, typeof unitBuilderData[number]["units"][number]>();
       if (builder) {
-        for (const u of builder.units) {
-          if (u.photoFolder) folderSet.add(u.photoFolder);
+        const activeFolders = await activeUnitPhotoFoldersForBuilder(builder);
+        folderSet = activeFolders.activeFolders;
+        staleFolderSet = activeFolders.staleFolders;
+        unitByFolder = activeFolders.unitByFolder;
+      }
+      if (staleFolderSet.size > 0) {
+        const staleAlerts = (await storage.getUnacknowledgedPhotoListingAlerts())
+          .filter((a) => staleFolderSet.has(a.photoFolder));
+        for (const alert of staleAlerts) {
+          try {
+            await storage.acknowledgePhotoListingAlert(alert.id);
+          } catch (e: any) {
+            console.warn(`[photo-sync-status] failed to retire stale alert ${alert.id}: ${e?.message ?? e}`);
+          }
         }
       }
       let allAlerts = folderSet.size > 0
@@ -34040,7 +34107,8 @@ Return ONLY compact JSON with this exact shape:
           // resort doesn't have 6BR units, only 2BR/3BR). Falls back
           // to null when the folder is the community folder rather
           // than a per-unit folder.
-          const unit = builder?.units.find((u) => u.photoFolder === a.photoFolder);
+          const unit = unitByFolder.get(a.photoFolder)
+            ?? builder?.units.find((u) => u.photoFolder === a.photoFolder);
           return {
             id: a.id,
             folder: a.photoFolder,
