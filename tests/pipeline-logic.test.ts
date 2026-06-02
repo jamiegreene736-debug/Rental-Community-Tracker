@@ -680,6 +680,11 @@ assert.equal(
   "Bonita Springs draft should resolve to the Bonita National buy-in market",
 );
 assert.equal(
+  suggestPricingArea("Fort Myers Beach", "Florida", "Santa Maria Resort - 2BR Condo - Sleeps 6"),
+  "Santa Maria Resort",
+  "Santa Maria drafts should resolve to the Santa Maria resort market, not Bonita National or Florida Generic",
+);
+assert.equal(
   suggestPricingArea("Fort Myers Beach", "Florida", "Unmapped Gulf Condo"),
   "Florida Generic",
   "unknown Florida drafts should get the Florida fallback instead of a Hawaii market",
@@ -692,6 +697,15 @@ assert.equal(
   }),
   "Bonita National",
   "shared resolver should classify Bonita National before find-buy-in starts",
+);
+assert.equal(
+  resolveBuyInMarket({
+    name: "Santa Maria Resort - 2BR Condo - Sleeps 6",
+    city: "Fort Myers Beach",
+    state: "Florida",
+  }),
+  "Santa Maria Resort",
+  "shared resolver should classify Santa Maria Resort before find-buy-in starts",
 );
 assert.equal(
   resolveBuyInMarket({

@@ -121,6 +121,36 @@ assert.deepEqual(
   },
   "Poipu Kai market pricing must use the curated resort bounds, not the broader center-radius fallback",
 );
+assert.deepEqual(
+  airbnbSearchGeoParamsForMarket("Menehune Shores"),
+  {
+    sw_lat: "20.7615",
+    sw_lng: "-156.4615",
+    ne_lat: "20.7655",
+    ne_lng: "-156.457",
+  },
+  "Menehune Shores market pricing must use resort-footprint bounds, not the broader center-radius fallback",
+);
+assert.deepEqual(
+  airbnbSearchGeoParamsForMarket("Bonita National"),
+  {
+    sw_lat: "26.31",
+    sw_lng: "-81.695",
+    ne_lat: "26.342",
+    ne_lng: "-81.648",
+  },
+  "Bonita National market pricing must keep using its curated club bounds",
+);
+assert.deepEqual(
+  airbnbSearchGeoParamsForMarket("Santa Maria Resort"),
+  {
+    sw_lat: "26.408",
+    sw_lng: "-81.903",
+    ne_lat: "26.415",
+    ne_lng: "-81.895",
+  },
+  "Santa Maria Resort market pricing must stay on the Estero Blvd resort footprint",
+);
 
 const routesSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
 assert.equal(

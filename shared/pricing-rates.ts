@@ -50,6 +50,9 @@ export const BUY_IN_RATES: Record<string, CommunityRate> = {
   "Southern Dunes":    { "2BR":  85, "3BR": 192, "4BR": 200,  region: "florida" },
   "Windsor Hills":     { "2BR": 150, "3BR": 210, "4BR": 294,  region: "florida" },
   "Bonita National":   { "2BR": 160,                          region: "florida" },
+  // Santa Maria Resort (Fort Myers Beach, FL) — distinct from Bonita
+  // National so the pricing queue stays on the Estero Blvd resort footprint.
+  "Santa Maria Resort":{ "2BR": 160,                          region: "florida" },
   // Internal fallback key for Florida single-listing/community drafts
   // whose exact resort has no static buy-in row yet. Keeps live
   // season-band scans on Florida multipliers instead of falling through

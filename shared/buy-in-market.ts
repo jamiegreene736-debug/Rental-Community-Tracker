@@ -105,6 +105,7 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     aliases: [/\bmenehune\s+shores\b/i],
     searchLocation: "Menehune Shores, Kihei, Hawaii",
     location: { searchName: "Menehune Shores", city: "Kihei", state: "Hawaii", streetAddress: "760 S Kihei Rd", lat: 20.7638, lng: -156.4594 },
+    bounds: { sw_lat: 20.7615, sw_lng: -156.4615, ne_lat: 20.7655, ne_lng: -156.4570 },
   },
   "Ilikai": {
     key: "Ilikai",
@@ -138,6 +139,19 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     },
     location: { searchName: "Bonita National", city: "Bonita Springs", state: "Florida", streetAddress: "17501 Bonita National Blvd", lat: 26.3254, lng: -81.6713 },
     bounds: { sw_lat: 26.310, sw_lng: -81.695, ne_lat: 26.342, ne_lng: -81.648 },
+  },
+  "Santa Maria Resort": {
+    key: "Santa Maria Resort",
+    aliases: [/\b(?:santa\s+maria(?:\s+(?:resort|harbou?r|condos?|condominiums?))?|fort\s+myers\s+beach.*santa\s+maria|73(?:07|17|27)\s+estero)\b/i],
+    searchLocation: "Santa Maria Resort, Fort Myers Beach, Florida",
+    platformSearch: {
+      airbnb: "Santa Maria Resort, Fort Myers Beach, FL",
+      booking: "Santa Maria Resort, Fort Myers Beach, FL",
+      vrbo: "Santa Maria Resort Fort Myers Beach",
+      pm: "Santa Maria Resort",
+    },
+    location: { searchName: "Santa Maria Resort", city: "Fort Myers Beach", state: "Florida", streetAddress: "7317 Estero Blvd", lat: 26.4116, lng: -81.8994 },
+    bounds: { sw_lat: 26.4080, sw_lng: -81.9030, ne_lat: 26.4150, ne_lng: -81.8950 },
   },
   "Southern Dunes": {
     key: "Southern Dunes",
