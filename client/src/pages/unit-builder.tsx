@@ -26,6 +26,9 @@ import {
   RotateCcw,
   Save,
   Trash2,
+  ExternalLink,
+  Loader2,
+  Search,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import type { Unit, PropertyUnitBuilder } from "@/data/unit-builder-data";
@@ -235,6 +238,256 @@ type BuyInMarketsResponse = {
   availableMarkets: string[];
   updatedAt: string | null;
 };
+
+type OtaVisibilityPlatform = "booking" | "vrbo";
+type OtaVisibilityStatus = "queued" | "running" | "found" | "not_found" | "error";
+type OtaVisibilityJob = {
+  id: string;
+  platform: OtaVisibilityPlatform;
+  status: OtaVisibilityStatus;
+  message: string;
+  updatedAt: string;
+  completedAt: string | null;
+  checkIn: string | null;
+  checkOut: string | null;
+  nights: number | null;
+  searchTerm: string | null;
+  searchUrl: string | null;
+  publicUrl: string | null;
+  found: boolean;
+  foundPage: number | null;
+  foundPosition: number | null;
+  foundUrl: string | null;
+  matchedTitle: string | null;
+  candidatesChecked: number;
+  bestCandidate: {
+    title: string;
+    url: string;
+    score: number;
+    reason: string;
+    position: number;
+    page: number;
+  } | null;
+  sidecarReason: string | null;
+  durationMs: number | null;
+  error: string | null;
+};
+
+type OtaVisibilityResponse = {
+  propertyId: number;
+  booking: OtaVisibilityJob | null;
+  vrbo: OtaVisibilityJob | null;
+};
+
+function formatVisibilityDate(value: string | null): string {
+  if (!value) return "Not checked";
+  return new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function OtaVisibilityCard({
+  platform,
+  job,
+  running,
+  onRun,
+}: {
+  platform: OtaVisibilityPlatform;
+  job: OtaVisibilityJob | null;
+  running: boolean;
+  onRun: (platform: OtaVisibilityPlatform) => void;
+}) {
+  const label = platform === "booking" ? "Booking.com" : "VRBO";
+  const isActive = job?.status === "queued" || job?.status === "running" || running;
+  const statusLabel = !job
+    ? "Needs check"
+    : job.status === "found"
+      ? "Found"
+      : job.status === "not_found"
+        ? "Not found"
+        : job.status === "error"
+          ? "Error"
+          : "Running";
+  const statusClass = job?.status === "found"
+    ? "bg-green-100 text-green-700 border-green-200"
+    : job?.status === "not_found" || job?.status === "error"
+      ? "bg-red-100 text-red-700 border-red-200"
+      : "bg-muted text-muted-foreground border-border";
+
+  return (
+    <Card className="p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <p className="font-semibold">{label}</p>
+            <Badge variant="outline" className={statusClass}>{statusLabel}</Badge>
+          </div>
+          <p className="text-xs text-muted-foreground mt-1">
+            {job?.checkIn && job?.checkOut
+              ? `${job.checkIn} to ${job.checkOut}${job.nights ? ` · ${job.nights} nights` : ""}`
+              : "Finds the next Guesty-available stay window before searching."}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant={job?.status === "found" ? "outline" : "default"}
+          onClick={() => onRun(platform)}
+          disabled={isActive}
+          data-testid={`button-run-${platform}-visibility`}
+        >
+          {isActive ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+          {isActive ? "Checking" : `Run ${label}`}
+        </Button>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+        <div className="rounded-md bg-muted/40 px-3 py-2">
+          <p className="text-muted-foreground">Last update</p>
+          <p className="font-medium">{formatVisibilityDate(job?.updatedAt ?? null)}</p>
+        </div>
+        <div className="rounded-md bg-muted/40 px-3 py-2">
+          <p className="text-muted-foreground">Result page</p>
+          <p className="font-medium">{job?.foundPage ? `Page ${job.foundPage}, position ${job.foundPosition}` : "—"}</p>
+        </div>
+        <div className="rounded-md bg-muted/40 px-3 py-2">
+          <p className="text-muted-foreground">Cards checked</p>
+          <p className="font-medium">{job?.candidatesChecked ?? "—"}</p>
+        </div>
+      </div>
+
+      {job && (
+        <div className="mt-3 space-y-2 text-sm">
+          <p className={job.status === "error" ? "text-red-700" : "text-muted-foreground"}>{job.message}</p>
+          {job.matchedTitle && <p className="font-medium">{job.matchedTitle}</p>}
+          {job.bestCandidate && !job.found && (
+            <p className="text-xs text-muted-foreground">
+              Best near match: {job.bestCandidate.title} · score {job.bestCandidate.score} ({job.bestCandidate.reason})
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {job.searchUrl && (
+              <Button asChild size="sm" variant="outline">
+                <a href={job.searchUrl} target="_blank" rel="noopener noreferrer">
+                  Search URL <ExternalLink className="h-3.5 w-3.5 ml-1" />
+                </a>
+              </Button>
+            )}
+            {job.foundUrl && (
+              <Button asChild size="sm" variant="outline">
+                <a href={job.foundUrl} target="_blank" rel="noopener noreferrer">
+                  Found listing <ExternalLink className="h-3.5 w-3.5 ml-1" />
+                </a>
+              </Button>
+            )}
+            {job.publicUrl && (
+              <Button asChild size="sm" variant="outline">
+                <a href={job.publicUrl} target="_blank" rel="noopener noreferrer">
+                  Guesty public URL <ExternalLink className="h-3.5 w-3.5 ml-1" />
+                </a>
+              </Button>
+            )}
+          </div>
+          {job.sidecarReason && <p className="text-[11px] text-muted-foreground">Sidecar: {job.sidecarReason}</p>}
+          {job.error && <p className="text-xs text-red-700">{job.error}</p>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function OtaVisibilityTab({ propertyId }: { propertyId: number }) {
+  const [data, setData] = useState<OtaVisibilityResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState<Partial<Record<OtaVisibilityPlatform, boolean>>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  const loadVisibility = async () => {
+    try {
+      const response = await fetch(`/api/builder/ota-visibility/${propertyId}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.message ?? payload?.error ?? "Failed to load OTA visibility");
+      setData(payload);
+      setError(null);
+      const nextRunning: Partial<Record<OtaVisibilityPlatform, boolean>> = {};
+      for (const platform of ["booking", "vrbo"] as const) {
+        const job = payload?.[platform] as OtaVisibilityJob | null;
+        nextRunning[platform] = job?.status === "queued" || job?.status === "running";
+      }
+      setRunning(nextRunning);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadVisibility();
+  }, [propertyId]);
+
+  useEffect(() => {
+    if (!running.booking && !running.vrbo) return;
+    const timer = window.setInterval(() => void loadVisibility(), 2500);
+    return () => window.clearInterval(timer);
+  }, [running.booking, running.vrbo, propertyId]);
+
+  const runPlatform = async (platform: OtaVisibilityPlatform) => {
+    setRunning((prev) => ({ ...prev, [platform]: true }));
+    setError(null);
+    try {
+      const response = await fetch(`/api/builder/ota-visibility/${propertyId}/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ platform }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.message ?? payload?.error ?? `Failed to start ${platform} visibility check`);
+      setData((prev) => ({ propertyId, booking: prev?.booking ?? null, vrbo: prev?.vrbo ?? null, [platform]: payload }));
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+      setRunning((prev) => ({ ...prev, [platform]: false }));
+    }
+  };
+
+  if (loading) {
+    return <Card className="p-4 text-sm text-muted-foreground">Loading OTA visibility...</Card>;
+  }
+
+  return (
+    <Card className="p-4 mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold">OTA Visibility</h2>
+          <p className="text-sm text-muted-foreground">
+            Uses Guesty calendar availability, then searches Booking.com and VRBO through the local sidecar.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => {
+            void runPlatform("booking");
+            void runPlatform("vrbo");
+          }}
+          disabled={!!running.booking || !!running.vrbo}
+          data-testid="button-run-all-ota-visibility"
+        >
+          {(running.booking || running.vrbo) ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Search className="h-4 w-4 mr-2" />}
+          Run all
+        </Button>
+      </div>
+
+      {error && (
+        <p className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {error}
+        </p>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <OtaVisibilityCard platform="booking" job={data?.booking ?? null} running={!!running.booking} onRun={runPlatform} />
+        <OtaVisibilityCard platform="vrbo" job={data?.vrbo ?? null} running={!!running.vrbo} onRun={runPlatform} />
+      </div>
+    </Card>
+  );
+}
 
 function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
   const [data, setData] = useState<BuyInMarketsResponse | null>(null);
@@ -643,6 +896,8 @@ export default function UnitBuilder() {
             </div>
           </Card>
         )}
+
+        <OtaVisibilityTab propertyId={property.propertyId} />
 
         <div className="space-y-6">
           {property.units.map((unit) => (

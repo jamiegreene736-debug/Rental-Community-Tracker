@@ -177,6 +177,229 @@ import { normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInE
 const GUESTY_SUMMARY_SEPARATOR = "\n\n---\n\n";
 const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
 
+type OtaVisibilityPlatform = "booking" | "vrbo";
+type OtaVisibilityStatus = "queued" | "running" | "found" | "not_found" | "error";
+
+type OtaVisibilityCandidate = {
+  url: string;
+  title: string;
+  bedrooms?: number | null;
+  totalPrice?: number | null;
+  nightlyPrice?: number | null;
+  position: number;
+  page: number;
+  score: number;
+  reason: string;
+};
+
+type OtaVisibilityJob = {
+  id: string;
+  propertyId: number;
+  platform: OtaVisibilityPlatform;
+  status: OtaVisibilityStatus;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  guestyListingId: string | null;
+  checkIn: string | null;
+  checkOut: string | null;
+  nights: number | null;
+  searchTerm: string | null;
+  searchUrl: string | null;
+  publicUrl: string | null;
+  found: boolean;
+  foundPage: number | null;
+  foundPosition: number | null;
+  foundUrl: string | null;
+  matchedTitle: string | null;
+  candidatesChecked: number;
+  bestCandidate: OtaVisibilityCandidate | null;
+  candidates: OtaVisibilityCandidate[];
+  sidecarReason: string | null;
+  durationMs: number | null;
+  error: string | null;
+};
+
+const otaVisibilityJobs = new Map<string, OtaVisibilityJob>();
+const otaVisibilityLatest = new Map<string, string>();
+
+function otaVisibilityKey(propertyId: number, platform: OtaVisibilityPlatform): string {
+  return `${propertyId}:${platform}`;
+}
+
+function touchOtaVisibilityJob(job: OtaVisibilityJob, patch: Partial<OtaVisibilityJob>) {
+  Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+}
+
+function normalizeVisibilityText(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function visibilityTokens(value: unknown): string[] {
+  const stop = new Set([
+    "and", "the", "for", "with", "near", "at", "in", "on", "of", "by", "to",
+    "unit", "units", "condo", "condos", "sleeps", "sleep", "guest", "guests",
+    "bedroom", "bedrooms", "br", "bath", "baths",
+  ]);
+  return normalizeVisibilityText(value)
+    .split(/\s+/)
+    .filter((token) => token.length >= 3 && !stop.has(token));
+}
+
+function canonicalVisibilityUrl(raw: unknown): string {
+  if (typeof raw !== "string" || !raw.trim()) return "";
+  try {
+    const parsed = new URL(raw.trim());
+    return `${parsed.hostname.toLowerCase().replace(/^www\./, "")}${decodeURIComponent(parsed.pathname).replace(/\/+$/, "").toLowerCase()}`;
+  } catch {
+    return raw.trim().replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+function parseBuilderAddress(address: string): { city: string; state: string } {
+  const parts = String(address ?? "").split(",").map((part) => part.trim()).filter(Boolean);
+  return {
+    city: parts.length >= 2 ? parts[parts.length - 2] : "",
+    state: parts.length >= 1 ? parts[parts.length - 1].replace(/\s+\d{5}(?:-\d{4})?$/, "") : "",
+  };
+}
+
+function addDaysYmd(ymd: string, days: number): string {
+  const date = new Date(`${ymd}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function bookingVisibilitySearchUrl(searchTerm: string, checkIn: string, checkOut: string): string {
+  const params = new URLSearchParams({
+    ss: searchTerm,
+    checkin: checkIn,
+    checkout: checkOut,
+    group_adults: "2",
+    no_rooms: "1",
+    group_children: "0",
+  });
+  return `https://www.booking.com/searchresults.html?${params.toString()}`;
+}
+
+function vrboVisibilitySearchUrl(searchTerm: string, checkIn: string, checkOut: string): string {
+  const params = new URLSearchParams({
+    destination: searchTerm,
+    startDate: checkIn,
+    endDate: checkOut,
+    adults: "2",
+  });
+  return `https://www.vrbo.com/search?${params.toString()}`;
+}
+
+function pickChannelPublicUrl(listing: Record<string, unknown>, platform: OtaVisibilityPlatform): string | null {
+  const integrations = Array.isArray(listing.integrations)
+    ? listing.integrations as Record<string, unknown>[]
+    : [];
+  const platformKeys = platform === "booking"
+    ? ["bookingCom2", "bookingCom", "booking_com"]
+    : ["homeaway2", "homeaway", "vrbo"];
+  const entry = integrations.find((item) => platformKeys.includes(String(item.platform ?? "")));
+  const key = String(entry?.platform ?? "");
+  const data = (entry?.[key] ?? (platform === "booking" ? listing.bookingCom : listing.homeAway)) as Record<string, unknown> | undefined;
+  for (const field of ["listingUrl", "url", "publicUrl", "propertyUrl"]) {
+    const value = data?.[field];
+    if (typeof value === "string" && /^https?:\/\//i.test(value)) return value;
+  }
+  return null;
+}
+
+function scoreOtaVisibilityCandidate(input: {
+  candidate: { url?: string; title?: string; snippet?: string };
+  position: number;
+  property: PropertyUnitBuilder;
+  listingTitle: string | null;
+  publicUrl: string | null;
+}): OtaVisibilityCandidate {
+  const candidateUrl = String(input.candidate.url ?? "");
+  const candidateTitle = String(input.candidate.title ?? "Untitled result");
+  const haystack = normalizeVisibilityText(`${candidateTitle} ${input.candidate.snippet ?? ""} ${candidateUrl}`);
+  const publicKey = canonicalVisibilityUrl(input.publicUrl);
+  const candidateKey = canonicalVisibilityUrl(candidateUrl);
+  let score = 0;
+  const reasons: string[] = [];
+
+  if (publicKey && candidateKey && (candidateKey === publicKey || candidateKey.includes(publicKey) || publicKey.includes(candidateKey))) {
+    score += 120;
+    reasons.push("public URL match");
+  }
+
+  const titleSources = [
+    input.property.bookingTitle,
+    input.property.propertyName,
+    input.listingTitle,
+  ].filter(Boolean);
+  for (const source of titleSources) {
+    const tokens = visibilityTokens(source).slice(0, 8);
+    if (tokens.length === 0) continue;
+    const matched = tokens.filter((token) => haystack.includes(token)).length;
+    const ratio = matched / tokens.length;
+    if (ratio >= 0.8) {
+      score += Math.round(60 * ratio);
+      reasons.push(`${matched}/${tokens.length} title tokens`);
+      break;
+    }
+    if (ratio >= 0.5) {
+      score += Math.round(30 * ratio);
+      reasons.push(`${matched}/${tokens.length} partial title tokens`);
+    }
+  }
+
+  const communityTokens = visibilityTokens(input.property.complexName).slice(0, 5);
+  const communityMatched = communityTokens.filter((token) => haystack.includes(token)).length;
+  if (communityTokens.length && communityMatched === communityTokens.length) {
+    score += 25;
+    reasons.push("community match");
+  }
+
+  const totalBedrooms = input.property.units.reduce((sum, unit) => sum + unit.bedrooms, 0);
+  if (totalBedrooms > 0 && new RegExp(`(?:^|[^0-9])${totalBedrooms}\\s*(?:br|bed)`, "i").test(haystack)) {
+    score += 15;
+    reasons.push(`${totalBedrooms}BR match`);
+  }
+
+  return {
+    url: candidateUrl,
+    title: candidateTitle,
+    bedrooms: typeof (input.candidate as any).bedrooms === "number" ? (input.candidate as any).bedrooms : null,
+    totalPrice: typeof (input.candidate as any).totalPrice === "number" ? (input.candidate as any).totalPrice : null,
+    nightlyPrice: typeof (input.candidate as any).nightlyPrice === "number" ? (input.candidate as any).nightlyPrice : null,
+    position: input.position,
+    page: 1,
+    score,
+    reason: reasons.join(", ") || "weak match",
+  };
+}
+
+function calendarDaysFromGuestyResponse(calendarResp: any): any[] {
+  return Array.isArray(calendarResp)
+    ? calendarResp
+    : Array.isArray(calendarResp?.data) ? calendarResp.data
+    : Array.isArray(calendarResp?.data?.days) ? calendarResp.data.days
+    : Array.isArray(calendarResp?.days) ? calendarResp.days
+    : [];
+}
+
+function calendarDayIsBookable(day: any): boolean {
+  const status = String(day?.status ?? day?.availability ?? "").toLowerCase();
+  const available = day?.available;
+  const price = Number(day?.price ?? day?.rate ?? day?.nightlyPrice ?? day?.basePrice ?? 0);
+  if (available === false) return false;
+  if (/\b(?:unavailable|blocked|reserved|booked|closed)\b/i.test(status)) return false;
+  if (Number.isFinite(price) && price < 0) return false;
+  return true;
+}
+
 function isComboUnitDisclosure(text: string): boolean {
   return /combines\s+two\s+units\s+within\s+the\s+same\s+community/i.test(text);
 }
@@ -16345,6 +16568,191 @@ export async function registerRoutes(
     });
     console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
+  });
+
+  async function findOtaVisibilityWindow(listingId: string): Promise<{ checkIn: string; checkOut: string; nights: number }> {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 120);
+    const iso = (date: Date) => date.toISOString().slice(0, 10);
+    const calendarResp = await guestyRequest(
+      "GET",
+      `/availability-pricing/api/calendar/listings/${listingId}?startDate=${iso(start)}&endDate=${iso(end)}`,
+    );
+    const days = calendarDaysFromGuestyResponse(calendarResp)
+      .map((day) => ({ ...day, date: String(day?.date ?? day?.day ?? "") }))
+      .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day.date))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const byDate = new Map(days.map((day) => [day.date, day]));
+    for (const nights of [4, 3, 2, 5, 7]) {
+      for (const day of days) {
+        const checkIn = day.date;
+        const stayDates = Array.from({ length: nights }, (_, index) => addDaysYmd(checkIn, index));
+        if (stayDates.every((date) => calendarDayIsBookable(byDate.get(date)))) {
+          return { checkIn, checkOut: addDaysYmd(checkIn, nights), nights };
+        }
+      }
+    }
+    throw new Error("No available Guesty stay window found in the next 120 days");
+  }
+
+  async function runOtaVisibilityJob(job: OtaVisibilityJob, property: PropertyUnitBuilder) {
+    const startedAt = Date.now();
+    try {
+      touchOtaVisibilityJob(job, { status: "running", message: "Reading Guesty listing and calendar..." });
+      const guestyListingId = await storage.getGuestyListingId(property.propertyId);
+      if (!guestyListingId) throw new Error(`No Guesty listing mapped for property ${property.propertyId}`);
+      const listing = await guestyRequest(
+        "GET",
+        `/listings/${guestyListingId}?fields=_id%20title%20nickname%20integrations%20isListed`,
+      ) as Record<string, unknown>;
+      const listingTitle = String(listing?.title ?? listing?.nickname ?? "").trim() || null;
+      const publicUrl = pickChannelPublicUrl(listing, job.platform);
+      const window = await findOtaVisibilityWindow(guestyListingId);
+      const { city, state } = parseBuilderAddress(property.address);
+      const searchTerm = [property.complexName, city, state].filter(Boolean).join(", ");
+      const bedrooms = Math.max(1, property.units.reduce((sum, unit) => sum + unit.bedrooms, 0));
+      const searchUrl = job.platform === "booking"
+        ? bookingVisibilitySearchUrl(searchTerm, window.checkIn, window.checkOut)
+        : vrboVisibilitySearchUrl(searchTerm, window.checkIn, window.checkOut);
+
+      touchOtaVisibilityJob(job, {
+        guestyListingId,
+        publicUrl,
+        checkIn: window.checkIn,
+        checkOut: window.checkOut,
+        nights: window.nights,
+        searchTerm,
+        searchUrl,
+        message: `Searching ${job.platform === "booking" ? "Booking.com" : "VRBO"} for ${window.checkIn} to ${window.checkOut}...`,
+      });
+
+      const queueContext = {
+        scanLabel: `${job.platform === "booking" ? "Booking.com" : "VRBO"} visibility check`,
+        providerLabel: job.platform === "booking" ? "Booking.com" : "VRBO",
+        unitLabel: `${bedrooms}BR listing`,
+        dateLabel: `${window.checkIn} to ${window.checkOut}`,
+        listingTitle: property.bookingTitle || property.propertyName,
+        propertyId: property.propertyId,
+        detail: `${job.platform === "booking" ? "Booking.com" : "VRBO"} visibility · ${property.complexName} · ${window.checkIn} to ${window.checkOut}`,
+        skipResultCache: true,
+      };
+      const sidecarQueue = await import("./vrbo-sidecar-queue");
+      const sidecar = job.platform === "booking"
+        ? await sidecarQueue.searchBookingViaSidecar({
+            destination: searchTerm,
+            searchTerm: property.complexName,
+            checkIn: window.checkIn,
+            checkOut: window.checkOut,
+            bedrooms,
+            walletBudgetMs: 210_000,
+            queueBudgetMs: 285_000,
+            queueContext,
+          })
+        : await sidecarQueue.searchVrboViaSidecar({
+            destination: searchTerm,
+            searchTerm: property.complexName,
+            checkIn: window.checkIn,
+            checkOut: window.checkOut,
+            bedrooms,
+            walletBudgetMs: 210_000,
+            queueBudgetMs: 285_000,
+            queueContext,
+          });
+      const rawCandidates = sidecar?.candidates ?? [];
+      const candidates = rawCandidates
+        .map((candidate, index) => scoreOtaVisibilityCandidate({
+          candidate,
+          position: index + 1,
+          property,
+          listingTitle,
+          publicUrl,
+        }))
+        .sort((a, b) => b.score - a.score || a.position - b.position);
+      const bestCandidate = candidates[0] ?? null;
+      const found = !!bestCandidate && bestCandidate.score >= 70;
+      touchOtaVisibilityJob(job, {
+        status: found ? "found" : "not_found",
+        message: found
+          ? `Found on page ${bestCandidate.page}, position ${bestCandidate.position}.`
+          : `Not found in the first visible ${job.platform === "booking" ? "Booking.com" : "VRBO"} result set.`,
+        completedAt: new Date().toISOString(),
+        found,
+        foundPage: found ? bestCandidate.page : null,
+        foundPosition: found ? bestCandidate.position : null,
+        foundUrl: found ? bestCandidate.url : null,
+        matchedTitle: found ? bestCandidate.title : null,
+        candidatesChecked: rawCandidates.length,
+        bestCandidate,
+        candidates: candidates.slice(0, 10),
+        sidecarReason: sidecar?.reason ?? null,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error: any) {
+      touchOtaVisibilityJob(job, {
+        status: "error",
+        message: error?.message ?? String(error),
+        completedAt: new Date().toISOString(),
+        error: error?.message ?? String(error),
+        durationMs: Date.now() - startedAt,
+      });
+    }
+  }
+
+  app.get("/api/builder/ota-visibility/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    return res.json({
+      propertyId,
+      booking: otaVisibilityJobs.get(otaVisibilityLatest.get(otaVisibilityKey(propertyId, "booking")) ?? "") ?? null,
+      vrbo: otaVisibilityJobs.get(otaVisibilityLatest.get(otaVisibilityKey(propertyId, "vrbo")) ?? "") ?? null,
+    });
+  });
+
+  app.post("/api/builder/ota-visibility/:propertyId/start", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const platform = (req.body?.platform === "booking" || req.body?.platform === "vrbo")
+      ? req.body.platform as OtaVisibilityPlatform
+      : null;
+    if (!platform) return res.status(400).json({ error: "platform must be 'booking' or 'vrbo'" });
+    const property = getUnitBuilderByPropertyId(propertyId);
+    if (!property) return res.status(404).json({ error: `No unit-builder property ${propertyId}` });
+    const id = `ota-vis-${propertyId}-${platform}-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+    const now = new Date().toISOString();
+    const job: OtaVisibilityJob = {
+      id,
+      propertyId,
+      platform,
+      status: "queued",
+      message: "Queued visibility check",
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      guestyListingId: null,
+      checkIn: null,
+      checkOut: null,
+      nights: null,
+      searchTerm: null,
+      searchUrl: null,
+      publicUrl: null,
+      found: false,
+      foundPage: null,
+      foundPosition: null,
+      foundUrl: null,
+      matchedTitle: null,
+      candidatesChecked: 0,
+      bestCandidate: null,
+      candidates: [],
+      sidecarReason: null,
+      durationMs: null,
+      error: null,
+    };
+    otaVisibilityJobs.set(id, job);
+    otaVisibilityLatest.set(otaVisibilityKey(propertyId, platform), id);
+    void runOtaVisibilityJob(job, property);
+    return res.json(job);
   });
 
   // GET /api/builder/guesty-monthly-rates/:propertyId
