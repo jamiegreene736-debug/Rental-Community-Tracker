@@ -2894,7 +2894,7 @@ function AdminDashboard() {
                     <div className="rounded-md border bg-muted/20 p-3 text-sm">
                       <p className="font-medium">Runs one selected property at a time.</p>
                       <p className="mt-1 text-muted-foreground">
-                        This runs one SearchAPI Airbnb 7-night scan per calendar month (24 months ahead), stores the 25th percentile basis for each month, then pushes marked-up Guesty base rates. VRBO, Booking.com, direct booking, and PM websites are not priced. The queue is saved on the server, so closing this tab will not stop it.
+                        This runs one SearchAPI Airbnb 7-night scan per calendar month (24 months ahead), stores the 35th percentile basis for each month, then pushes marked-up Guesty base rates. VRBO, Booking.com, direct booking, and PM websites are not priced. The queue is saved on the server, so closing this tab will not stop it.
                       </p>
                     </div>
                     {!bulkPricingJob ? (

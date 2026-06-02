@@ -998,7 +998,7 @@ async function refreshHybridPricingForDraft(
     bedroomCounts,
     unitCount: unitSlots.length || 1,
     triggerType: "Manual Update",
-    notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 25th percentile bases (no hybrid markup layers).",
+    notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 35th percentile bases (no hybrid markup layers).",
     onMonthScanned,
   });
 }
@@ -1035,7 +1035,7 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string, c
     : await refreshHybridPricingForProperty({
       propertyId,
       triggerType: "Manual Update",
-      notes: "Pricing tab manual refresh from SearchAPI Airbnb monthly 25th percentile bases (no hybrid markup layers).",
+      notes: "Pricing tab manual refresh from SearchAPI Airbnb monthly 35th percentile bases (no hybrid markup layers).",
     });
 
   assertPricingRefreshNotCancelled(propertyId, cancelGeneration);
@@ -1081,7 +1081,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     item.progress = {
       phase: "searchapi-airbnb",
       percent: Math.min(79, Math.round(10 + (70 * (event.monthOffset + 1)) / event.horizonMonths)),
-      label: `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) → P25 $${event.medianNightly}/night`,
+      label: `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) → P35 $${event.medianNightly}/night`,
       currentMonth: event.yearMonth,
       monthsScanned: event.monthOffset + 1,
       horizonMonths: event.horizonMonths,
@@ -1097,7 +1097,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     : await refreshHybridPricingForProperty({
       propertyId: item.propertyId,
       triggerType: "Manual Update",
-      notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 25th percentile bases (no hybrid markup layers).",
+      notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 35th percentile bases (no hybrid markup layers).",
       onMonthScanned,
     });
   item.progress = {

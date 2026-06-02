@@ -171,7 +171,7 @@ try {
     checkIn: "2026-06-01",
     checkOut: "2026-06-08",
   });
-  assert.equal(poipuBasis.medianNightly, 175);
+  assert.equal(poipuBasis.medianNightly, 250);
   assert.equal(poipuBasis.sampleCount, 3);
   assert.equal(requestedSearchApiUrls.length, 1);
   const params = new URL(requestedSearchApiUrls[0]).searchParams;
@@ -187,7 +187,7 @@ try {
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
   hybridPricingSource.includes('source: "airbnb"'),
-  "pricing refresh should persist raw SearchAPI 25th percentile bases without hybrid markup layers",
+  "pricing refresh should persist raw SearchAPI 35th percentile bases without hybrid markup layers",
 );
 assert.equal(
   hybridPricingSource.includes("calculateBlendedRate({"),
@@ -219,8 +219,8 @@ assert.ok(
   "market-rate refresh should fall back to the amortized geo Airbnb path when direct queries are empty",
 );
 assert.ok(
-  hybridPricingSource.includes("MIN_P25_TO_MEDIAN_RATIO = 0.70"),
-  "P25 market pricing should be guarded against low outlier clusters",
+  hybridPricingSource.includes("MIN_P35_TO_MEDIAN_RATIO = 0.70"),
+  "P35 market pricing should be guarded against low outlier clusters",
 );
 assert.equal(
   hybridPricingSource.includes("staticFallbackMonthlyRates"),

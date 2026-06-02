@@ -118,7 +118,7 @@ function loadConfig(): HybridPricingConfig {
 export const HYBRID_PRICING_CONFIG = loadConfig();
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const MIN_P25_TO_MEDIAN_RATIO = 0.70;
+const MIN_P35_TO_MEDIAN_RATIO = 0.70;
 
 function dateOnly(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -241,22 +241,22 @@ function nearestRankPercentile(values: number[], percentile: number): number | n
   return Math.round(clean[index]);
 }
 
-function marketPricingBasis(values: number[]): { basis: number | null; p25: number | null; median: number | null; floorApplied: boolean } {
-  const p25 = nearestRankPercentile(values, 25);
+function marketPricingBasis(values: number[]): { basis: number | null; p35: number | null; median: number | null; floorApplied: boolean } {
+  const p35 = nearestRankPercentile(values, 35);
   const median = nearestRankPercentile(values, 50);
-  if (p25 == null || median == null) return { basis: null, p25, median, floorApplied: false };
-  const medianFloor = Math.round(median * MIN_P25_TO_MEDIAN_RATIO);
-  if (p25 < medianFloor) {
-    return { basis: medianFloor, p25, median, floorApplied: true };
+  if (p35 == null || median == null) return { basis: null, p35, median, floorApplied: false };
+  const medianFloor = Math.round(median * MIN_P35_TO_MEDIAN_RATIO);
+  if (p35 < medianFloor) {
+    return { basis: medianFloor, p35, median, floorApplied: true };
   }
-  return { basis: p25, p25, median, floorApplied: false };
+  return { basis: p35, p35, median, floorApplied: false };
 }
 
 function marketPricingBasisNotes(stats: ReturnType<typeof marketPricingBasis>): string {
-  if (stats.floorApplied && stats.p25 != null && stats.median != null) {
-    return `using guarded 25th percentile basis $${stats.basis} (raw P25 $${stats.p25}; median $${stats.median})`;
+  if (stats.floorApplied && stats.p35 != null && stats.median != null) {
+    return `using guarded 35th percentile basis $${stats.basis} (raw P35 $${stats.p35}; median $${stats.median})`;
   }
-  return "using 25th percentile basis";
+  return "using 35th percentile basis";
 }
 
 function summarizeMonthlyHybridRates(monthlyRates: Record<string, HybridMonthlyRate>) {
@@ -657,7 +657,7 @@ export async function refreshHybridPricingForTarget(args: {
           layers: [],
           notes: [
             ...airbnb.notes,
-            `Stored raw SearchAPI 25th percentile basis (no hybrid markup layers). ${window.yearMonth} window ${window.checkIn} to ${window.checkOut}.`,
+            `Stored raw SearchAPI 35th percentile basis (no hybrid markup layers). ${window.yearMonth} window ${window.checkIn} to ${window.checkOut}.`,
             args.unitCount > 1
               ? `Property has ${args.unitCount} configured unit slot(s); Guesty combo pushes sum the matching unit bases.`
               : "Single-unit pricing basis.",
@@ -713,7 +713,7 @@ export async function refreshHybridPricingForTarget(args: {
     if (scannedMonths.length !== horizonMonths) {
       await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
       throw new Error(
-        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one 25th percentile basis per calendar month.`,
+        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one 35th percentile basis per calendar month.`,
       );
     }
     const row = await storage.upsertPropertyMarketRate({
@@ -738,13 +738,13 @@ export async function refreshHybridPricingForTarget(args: {
       newRate: String(lowBasis),
       status: "ok",
       notes: [
-        args.notes || "SearchAPI Airbnb monthly 25th percentile bases saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.",
+        args.notes || "SearchAPI Airbnb monthly 35th percentile bases saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.",
         `Scanned ${scannedMonths.length} calendar months (${scannedMonths[0]} through ${scannedMonths[scannedMonths.length - 1]}).`,
       ].join(" "),
       layersJson: [],
       calendarJson: monthlyRates,
     }));
-    console.info("[hybrid-pricing] applied raw Airbnb monthly p25 bases", JSON.stringify({
+    console.info("[hybrid-pricing] applied raw Airbnb monthly p35 bases", JSON.stringify({
       propertyId: args.propertyId,
       propertyName: args.propertyName,
       community: args.community,
