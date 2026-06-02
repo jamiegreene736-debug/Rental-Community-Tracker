@@ -68,7 +68,7 @@ import {
 import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { isScannableFolder } from "@shared/photo-folder-utils";
 import { useToast } from "@/hooks/use-toast";
-import { computeQualityScore, extractBRList, gradeColor, gradeBg } from "@/data/quality-score";
+import { extractBRList } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
 import { apiRequest } from "@/lib/queryClient";
 import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -95,7 +95,7 @@ type Property = {
   // `draftId` is set when the row was sourced from a community
   // draft (`/api/community/drafts`) rather than the hard-coded
   // active list. `id` is then a synthetic negative number so
-  // id-keyed caches (qualityScores, baseRates, the `filtered`
+  // id-keyed caches (unit counts, baseRates, the `filtered`
   // sort) never collide with active property ids.
   draftId?: number;
   // Status pulled from the underlying community_drafts row.
@@ -121,6 +121,7 @@ type Property = {
   minimumStayRangeLow?: number | null;
   minimumStayRangeHigh?: number | null;
   multiUnit: boolean;
+  unitCount?: number;
   unitDetails: string;
   url: string;
 };
@@ -485,7 +486,7 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "quality" | "baseRate" | "minimumStay";
+type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay";
 
 // Total nightly buy-in cost across all units (sum of per-unit rates from
 // shared/pricing-rates). Multi-unit properties get parsed from unitDetails
@@ -1106,8 +1107,8 @@ function AdminDashboard() {
   const [selectedCancellationId, setSelectedCancellationId] = useState<number | null>(null);
 
   // Pull community drafts up here (early in the render) because
-  // `allProperties` below depends on them and `qualityScores` /
-  // `baseRates` / `filtered` all read `allProperties`. The fetch
+  // `allProperties` below depends on them and `baseRates` /
+  // `filtered` all read `allProperties`. The fetch
   // is deduped by react-query so rendering it twice (here and the
   // existing useQuery further down used to delete drafts) is free.
   const { data: communityDraftsDataForRows } = useQuery<CommunityDraft[]>({
@@ -1208,10 +1209,12 @@ function AdminDashboard() {
     return properties.map((p) => {
       const stay = minimumStayData?.[p.id];
       const communityStay = communityMinimumStayData.get(p.community);
-      if (!stay && !communityStay) return p;
+      const unitCount = getUnitBuilderByPropertyId(p.id)?.units.length ?? (p.multiUnit ? 2 : 1);
+      if (!stay && !communityStay) return { ...p, unitCount };
       if (communityStay?.minimumStayRangeLow && communityStay.minimumStayRangeHigh) {
         return {
           ...p,
+          unitCount,
           minimumStayNights: null,
           minimumStayEvidence: communityStay.minimumStayEvidence,
           minimumStaySourceUrl: communityStay.minimumStaySourceUrl,
@@ -1221,6 +1224,7 @@ function AdminDashboard() {
       }
       return {
         ...p,
+        unitCount,
         minimumStayNights: stay?.minimumStayNights ?? communityStay?.minimumStayNights ?? null,
         minimumStayEvidence: stay?.minimumStayEvidence ?? communityStay?.minimumStayEvidence ?? null,
         minimumStaySourceUrl: stay?.minimumStaySourceUrl ?? communityStay?.minimumStaySourceUrl ?? null,
@@ -1233,7 +1237,7 @@ function AdminDashboard() {
   // Map community drafts → Property-shaped rows so they show up in
   // the main table next to the active 11 properties. Synthetic
   // negative `id` ensures no collision with active property ids —
-  // every cache keyed on `id` (qualityScores, baseRates, the
+  // every cache keyed on `id` (unit counts, baseRates, the
   // useMemo `filtered` sort) stays unique.
   //
   // Empty / fallback fields:
@@ -1349,36 +1353,21 @@ function AdminDashboard() {
         minimumStayRangeLow: communityRange?.minimumStayRangeLow ?? null,
         minimumStayRangeHigh: communityRange?.minimumStayRangeHigh ?? null,
         multiUnit: !isSingle,
+        unitCount: isSingle ? 1 : 2,
         unitDetails,
         url: d.sourceUrl ?? "",
       };
     });
   }, [communityDraftsDataForRows, communityMinimumStayData, minimumStayData]);
 
-  // Combined list used by every downstream calc (qualityScores,
-  // baseRates, communities/islands filters, the rendered rows).
+  // Combined list used by every downstream calc (baseRates,
+  // communities/islands filters, the rendered rows).
   // Active properties first so they sort to the top by default;
   // drafts append below until the user changes sort order.
   const allProperties = useMemo(
     () => [...activeProperties, ...draftsAsProperties],
     [activeProperties, draftsAsProperties],
   );
-
-  const qualityScores = useMemo(() => {
-    const map = new Map<number, ReturnType<typeof computeQualityScore>>();
-    // Quality score is only meaningful for active properties — it
-    // depends on a real lowPrice and pricingArea-keyed market data.
-    // Drafts get rendered with "—" in the Quality column so the
-    // operator doesn't read a misleading number.
-    for (const p of properties) {
-      // computeQualityScore reads `community` as a pricing/demand key
-      // (MARKET_RATE_PER_BR, LOCATION_DEMAND), so feed pricingArea — the
-      // displayed complex name (Regency at Poipu Kai, Mauna Kai
-      // Princeville, …) won't match those tables.
-      map.set(p.id, computeQualityScore({ ...p, community: p.pricingArea }));
-    }
-    return map;
-  }, []);
 
   // Subscribe to the live-buy-in feed so `baseRates` recomputes
   // after `App.tsx`'s MarketRatesHydrator populates the shared cache
@@ -1430,10 +1419,10 @@ function AdminDashboard() {
       result = result.filter((p) => p.multiUnit === isMulti);
     }
     result = [...result].sort((a, b) => {
-      if (sortField === "quality") {
-        const aScore = qualityScores.get(a.id)?.total ?? 0;
-        const bScore = qualityScores.get(b.id)?.total ?? 0;
-        return sortDir === "asc" ? aScore - bScore : bScore - aScore;
+      if (sortField === "unitCount") {
+        const aCount = a.unitCount ?? 0;
+        const bCount = b.unitCount ?? 0;
+        return sortDir === "asc" ? aCount - bCount : bCount - aCount;
       }
       if (sortField === "baseRate") {
         const aRate = baseRates.get(a.id) ?? 0;
@@ -1457,7 +1446,7 @@ function AdminDashboard() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, qualityScores, baseRates]);
+  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, baseRates]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -3422,14 +3411,13 @@ function AdminDashboard() {
                   <Button
                     variant="ghost"
                     className="font-medium px-1"
-                    onClick={() => handleSort("quality")}
-                    data-testid="button-sort-quality"
-                    id="button-sort-quality"
-                    aria-label="Sort by quality score"
+                    onClick={() => handleSort("unitCount")}
+                    data-testid="button-sort-unit-count"
+                    id="button-sort-unit-count"
+                    aria-label="Sort by unit count"
                   >
-                    <TrendingUp className="h-3.5 w-3.5 mr-1" />
-                    Quality
-                    <SortIcon field="quality" />
+                    Units
+                    <SortIcon field="unitCount" />
                   </Button>
                 </TableHead>
               </TableRow>
@@ -3775,74 +3763,10 @@ function AdminDashboard() {
                       {property.guests}
                     </span>
                   </TableCell>
-                  <TableCell className="text-center" data-testid={`cell-quality-${property.id}`}>
-                    {(() => {
-                      const qs = qualityScores.get(property.id);
-                      // Drafts don't get a quality score — the
-                      // calculation needs a real listed price and a
-                      // pricingArea-keyed market rate, neither of
-                      // which exists yet for a research-stage draft.
-                      // Render "—" so the cell isn't visually broken.
-                      if (!qs) return <span className="text-muted-foreground text-xs">—</span>;
-                      return (
-                        <TooltipProvider>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <div
-                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-xs font-semibold cursor-help ${gradeBg(qs.grade)}`}
-                                data-testid={`badge-quality-${property.id}`}
-                              >
-                                <span className={gradeColor(qs.grade)}>{qs.total}</span>
-                                <span className="text-muted-foreground font-normal">/10</span>
-                                <span className={`ml-0.5 font-bold ${gradeColor(qs.grade)}`}>{qs.grade}</span>
-                              </div>
-                            </TooltipTrigger>
-                            <TooltipContent side="left" className="w-64 p-3">
-                              <p className="font-semibold mb-2 flex items-center gap-1.5">
-                                <TrendingUp className="h-3.5 w-3.5" />
-                                Arbitrage Quality Score
-                              </p>
-                              <div className="space-y-1.5 text-xs">
-                                <div className="flex justify-between">
-                                  <span className="text-muted-foreground">Market Value Gap</span>
-                                  <span className="font-medium">{qs.marketDiscount.toFixed(1)} / 4</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span className="text-muted-foreground">Profit Margin</span>
-                                  <span className="font-medium">{qs.profitMargin.toFixed(1)} / 2</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span className="text-muted-foreground">Location Demand</span>
-                                  <span className="font-medium">{qs.locationDemand.toFixed(1)} / 2</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span className="text-muted-foreground">Group Scarcity</span>
-                                  <span className="font-medium">{qs.groupScarcity.toFixed(1)} / 1</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span className="text-muted-foreground">Unit Pairing</span>
-                                  <span className="font-medium">{qs.unitMatch.toFixed(1)} / 1</span>
-                                </div>
-                                <div className="border-t pt-1.5 mt-1.5 flex justify-between font-semibold">
-                                  <span>Total</span>
-                                  <span>{qs.total} / 10 ({qs.grade})</span>
-                                </div>
-                                <div className="border-t pt-1.5 mt-0.5 text-muted-foreground space-y-0.5">
-                                  <div className="flex justify-between">
-                                    <span>Est. standalone market rate</span>
-                                    <span>${qs.marketRate.toLocaleString()}/night</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span>Our listing savings</span>
-                                    <span className="text-emerald-600 font-medium">{qs.discountPct}% cheaper</span>
-                                  </div>
-                                </div>
-                              </div>
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      );
-                    })()}
+                  <TableCell className="text-center" data-testid={`cell-unit-count-${property.id}`}>
+                    <Badge variant="outline" className="text-xs font-semibold" data-testid={`badge-unit-count-${property.id}`}>
+                      {property.unitCount ?? "—"}
+                    </Badge>
                   </TableCell>
                 </TableRow>
                 );
