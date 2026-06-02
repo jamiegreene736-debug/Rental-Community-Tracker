@@ -28,7 +28,11 @@ export const BUY_IN_RATES: Record<string, CommunityRate> = {
   "Poipu Kai":         { "2BR": 516, "3BR": 636, "4BR": 858,  region: "hawaii" },
   "Poipu Oceanfront":  { "2BR": 630, "3BR": 792, "4BR": 936,  region: "hawaii" },
   "Poipu Brenneckes":  { "2BR": 510, "3BR": 618, "4BR": 864,  region: "hawaii" },
-  "Pili Mai":          { "2BR": 576, "3BR": 744, "4BR": 840,  region: "hawaii" },
+  // Recalibrated from operator-verified Airbnb buy-in comps for
+  // 2026-09-08..2026-09-15: 2BR $384 and 3BR $532. September is LOW
+  // season in Hawaii, so divide by 0.80 to keep this as the annual
+  // baseline used by the existing season multiplier model.
+  "Pili Mai":          { "2BR": 480, "3BR": 665, "4BR": 840,  region: "hawaii" },
   // 3BR re-set 2026-04-28 from $840 to $615 to match the live-data
   // methodology operator chose to keep. The live Airbnb-engine
   // backfill landed Kapaa Beachfront 2BR at $430/n=4 (vs the prior
@@ -71,6 +75,8 @@ const FALLBACK_RATE_PER_BEDROOM: Record<RegionType, number> = {
   florida:  80,
 };
 
+const AIRBNB_STATIC_PLAUSIBILITY_RATIO = 1.25;
+
 export const SEASON_MULTIPLIERS: Record<RegionType, Record<SeasonType, number>> = {
   hawaii:  { LOW: 0.80, HIGH: 1.30, HOLIDAY: 1.80 },
   florida: { LOW: 0.75, HIGH: 1.25, HOLIDAY: 1.70 },
@@ -106,6 +112,33 @@ const FLORIDA_SEASONS: Record<string, SeasonType> = {
 
 export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
+}
+
+function staticRateForSeason(
+  community: string,
+  bedrooms: number,
+  season?: SeasonType,
+): number | null {
+  const entry = BUY_IN_RATES[community];
+  const key = `${bedrooms}BR` as keyof CommunityRate;
+  const rate = entry?.[key];
+  if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) return null;
+  if (!season) return rate;
+  const region = entry?.region ?? getCommunityRegion(community);
+  return Math.round(rate * SEASON_MULTIPLIERS[region][season]);
+}
+
+export function clampSuspiciousAirbnbBuyInRate(args: {
+  community: string;
+  bedrooms: number;
+  rate: number;
+  source?: string | null;
+  season?: SeasonType;
+}): number {
+  if (args.source !== "airbnb") return args.rate;
+  const staticRate = staticRateForSeason(args.community, args.bedrooms, args.season);
+  if (staticRate == null) return args.rate;
+  return args.rate > staticRate * AIRBNB_STATIC_PLAUSIBILITY_RATIO ? staticRate : args.rate;
 }
 
 // Suggest a BUY_IN_RATES key for a draft. Used by the Add a New
@@ -354,7 +387,16 @@ export function getBuyInRate(
     if (live) {
       if (yearMonth) {
         const monthly = getLiveMonthlyBuyIn(propertyId, bedrooms, yearMonth);
-        if (monthly != null) return monthly;
+        if (monthly != null) {
+          const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+          return clampSuspiciousAirbnbBuyInRate({
+            community,
+            bedrooms,
+            rate: monthly,
+            source: live.source,
+            season: season ?? getSeasonForMonth(yearMonth, region),
+          });
+        }
       }
       const normalized = normalizeSeasonalBasis(
         community,
@@ -363,17 +405,27 @@ export function getBuyInRate(
         live.medianNightlyHoliday,
       );
       // Season-specific basis when available + requested.
-      if (season === "HIGH" && normalized.high != null) return normalized.high;
-      if (season === "HOLIDAY" && normalized.holiday != null) return normalized.holiday;
+      if (season === "HIGH" && normalized.high != null) {
+        return clampSuspiciousAirbnbBuyInRate({ community, bedrooms, rate: normalized.high, source: live.source, season });
+      }
+      if (season === "HOLIDAY" && normalized.holiday != null) {
+        return clampSuspiciousAirbnbBuyInRate({ community, bedrooms, rate: normalized.holiday, source: live.source, season });
+      }
       // LOW or unknown-season → use base. When the caller supplied
       // HIGH/HOLIDAY but per-season basis isn't populated, apply the
       // multiplier so the formula still varies seasonally.
       if (season && season !== "LOW") {
         const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
         const multiplier = SEASON_MULTIPLIERS[region][season];
-        return Math.round(live.medianNightly * multiplier);
+        return clampSuspiciousAirbnbBuyInRate({
+          community,
+          bedrooms,
+          rate: Math.round(live.medianNightly * multiplier),
+          source: live.source,
+          season,
+        });
       }
-      return live.medianNightly;
+      return clampSuspiciousAirbnbBuyInRate({ community, bedrooms, rate: live.medianNightly, source: live.source, season });
     }
   }
   const entry = BUY_IN_RATES[community];

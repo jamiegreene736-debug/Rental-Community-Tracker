@@ -564,6 +564,19 @@ assert.equal(getBuyInRate("Caribe Cove", 2), 125, "Caribe Cove 2BR base should b
 assert.equal(BUY_IN_RATES["Caribe Cove"]?.region, "florida");
 console.log("  ✓ Caribe Cove 2BR pinned at $125");
 
+// Pili Mai 5BR is priced as its actual 3BR + 2BR component buy-ins, not
+// as a single 5BR villa comp. The operator-verified September 8-15, 2026
+// Airbnb buy-in comps are $532 for 3BR and $384 for 2BR.
+assert.equal(getBuyInRate("Pili Mai", 3, undefined, "LOW", "2026-09"), 532);
+assert.equal(getBuyInRate("Pili Mai", 2, undefined, "LOW", "2026-09"), 384);
+assert.equal(
+  getBuyInRate("Pili Mai", 3, undefined, "LOW", "2026-09") +
+    getBuyInRate("Pili Mai", 2, undefined, "LOW", "2026-09"),
+  916,
+  "Pili Mai 3BR + 2BR low-season buy-in should match operator-verified Sep 8-15 comps",
+);
+console.log("  ✓ Pili Mai component buy-in basis matches operator Sep 2026 comps");
+
 // Windsor Hills now carries a 2BR entry too — without it the dashboard
 // fell through to the FALLBACK_RATE_PER_BEDROOM (Hawaii-tier $270/BR)
 // for any 2BR Disney-area draft.
@@ -611,6 +624,26 @@ assert.equal(
   "seasonless callers still use canonical LOW basis",
 );
 console.log("  ✓ monthly samples override season basis when yearMonth is supplied");
+
+setLivePropertyMarketRates([{
+  propertyId: 900002,
+  bedrooms: 3,
+  medianNightly: 1900,
+  medianNightlyHigh: 2400,
+  medianNightlyHoliday: 3200,
+  monthlyRates: {
+    "2026-09": { medianNightly: 1900, season: "LOW", sampleCount: 18 },
+  },
+  sampleCount: 18,
+  refreshedAt: "2026-06-02T00:00:00.000Z",
+  source: "airbnb",
+}]);
+assert.equal(
+  getBuyInRate("Pili Mai", 3, 900002, "LOW", "2026-09"),
+  532,
+  "inflated Airbnb-only component medians should fall back to the calibrated static basis",
+);
+console.log("  ✓ suspicious Airbnb-only component medians are capped");
 
 // suggestPricingArea: a Kissimmee draft named "Caribe Cove" should
 // resolve to "Caribe Cove" via the new community-name match — not to

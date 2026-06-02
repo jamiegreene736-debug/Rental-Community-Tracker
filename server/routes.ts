@@ -90,6 +90,7 @@ import {
 import {
   BUY_IN_RATES,
   CHANNEL_HOST_FEE,
+  clampSuspiciousAirbnbBuyInRate,
   getCommunityRegion,
   getBuyInRate,
   getSeasonForMonth,
@@ -800,7 +801,15 @@ function marketRateBasisForMonth(args: {
   const monthly = row?.monthlyRates && typeof row.monthlyRates === "object"
     ? parsePositivePricingRate((row.monthlyRates as Record<string, any>)[yearMonth]?.medianNightly)
     : null;
-  if (monthly != null) return monthly;
+  if (monthly != null) {
+    return clampSuspiciousAirbnbBuyInRate({
+      community,
+      bedrooms,
+      rate: monthly,
+      source: typeof row?.source === "string" ? row.source : null,
+      season,
+    });
+  }
 
   const low = parsePositivePricingRate(row?.medianNightly);
   if (low != null) {
@@ -810,11 +819,41 @@ function marketRateBasisForMonth(args: {
       parsePositivePricingRate(row?.medianNightlyHigh),
       parsePositivePricingRate(row?.medianNightlyHoliday),
     );
-    if (season === "HIGH" && normalized.high != null) return normalized.high;
-    if (season === "HOLIDAY" && normalized.holiday != null) return normalized.holiday;
-    if (season === "LOW") return normalized.low;
+    if (season === "HIGH" && normalized.high != null) {
+      return clampSuspiciousAirbnbBuyInRate({
+        community,
+        bedrooms,
+        rate: normalized.high,
+        source: typeof row?.source === "string" ? row.source : null,
+        season,
+      });
+    }
+    if (season === "HOLIDAY" && normalized.holiday != null) {
+      return clampSuspiciousAirbnbBuyInRate({
+        community,
+        bedrooms,
+        rate: normalized.holiday,
+        source: typeof row?.source === "string" ? row.source : null,
+        season,
+      });
+    }
+    if (season === "LOW") {
+      return clampSuspiciousAirbnbBuyInRate({
+        community,
+        bedrooms,
+        rate: normalized.low,
+        source: typeof row?.source === "string" ? row.source : null,
+        season,
+      });
+    }
     const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
-    return Math.round(low * SEASON_MULTIPLIERS[region][season]);
+    return clampSuspiciousAirbnbBuyInRate({
+      community,
+      bedrooms,
+      rate: Math.round(low * SEASON_MULTIPLIERS[region][season]),
+      source: typeof row?.source === "string" ? row.source : null,
+      season,
+    });
   }
 
   return getBuyInRate(community, bedrooms, propertyId > 0 ? undefined : propertyId, season, yearMonth);
@@ -31756,8 +31795,51 @@ Return ONLY compact JSON with this exact shape:
     }
 
     for (const [propertyId, list] of Array.from(byProperty.entries())) {
-      const community = PROPERTY_UNIT_NEEDS[propertyId]?.community;
+      const community = PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? PROPERTY_UNIT_NEEDS[propertyId]?.community;
       if (!community) continue;
+      for (const rate of list) {
+        const bedrooms = Number(rate?.bedrooms);
+        if (!Number.isFinite(bedrooms)) continue;
+        for (const [field, season] of [
+          ["medianNightly", "LOW"],
+          ["medianNightlyHigh", "HIGH"],
+          ["medianNightlyHoliday", "HOLIDAY"],
+        ] as const) {
+          const value = parsePositiveRate(rate?.[field]);
+          if (value == null) continue;
+          const clamped = clampSuspiciousAirbnbBuyInRate({
+            community,
+            bedrooms,
+            rate: value,
+            source: typeof rate?.source === "string" ? rate.source : null,
+            season,
+          });
+          if (clamped !== value) rate[field] = sameRateShape(rate[field], clamped);
+        }
+        const monthlyRates = rate?.monthlyRates;
+        if (monthlyRates && typeof monthlyRates === "object" && !Array.isArray(monthlyRates)) {
+          const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+          for (const [yearMonth, payload] of Object.entries(monthlyRates as Record<string, any>)) {
+            const value = parsePositiveRate((payload as any)?.medianNightly);
+            if (value == null) continue;
+            const clamped = clampSuspiciousAirbnbBuyInRate({
+              community,
+              bedrooms,
+              rate: value,
+              source: typeof rate?.source === "string" ? rate.source : null,
+              season: ((payload as any)?.season === "LOW" || (payload as any)?.season === "HIGH" || (payload as any)?.season === "HOLIDAY")
+                ? (payload as any).season
+                : getSeasonForMonth(yearMonth, region),
+            });
+            if (clamped !== value) {
+              (monthlyRates as Record<string, any>)[yearMonth] = {
+                ...(payload as any),
+                medianNightly: sameRateShape((payload as any).medianNightly, clamped),
+              };
+            }
+          }
+        }
+      }
       list.sort((a: any, b: any) => Number(a?.bedrooms ?? 0) - Number(b?.bedrooms ?? 0));
       for (let i = 1; i < list.length; i++) {
         const smaller = list[i - 1];
