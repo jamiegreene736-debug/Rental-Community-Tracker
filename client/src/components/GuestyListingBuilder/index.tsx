@@ -184,9 +184,10 @@ const CSS = `
 type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
 type GuestyListing = GuestyListingSummary;
 type LogEntry = BuildStepEntry & { icon: string };
-type DataPushRow = "descriptions" | "bedding" | "amenities" | "bookable" | "availability" | "pricing";
+type DataPushRow = "descriptions" | "bedding" | "amenities" | "photos" | "bookable" | "availability" | "pricing";
 type DataPushStatus = "success" | "error";
 type DataPushLog = Partial<Record<DataPushRow, { pushedAt: string; status: DataPushStatus; message: string }>>;
+type DataPushTab = Exclude<DataPushRow, "bookable">;
 type ComplianceLookupResult = {
   value: string;
   confidence: string;
@@ -522,6 +523,24 @@ function formatDataPushTime(value?: string) {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatDataPushTabTime(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function dataPushTabLabel(tab: DataPushTab, photosCount: number) {
+  if (tab === "photos") return `Photos (${photosCount})`;
+  if (tab === "availability") return "Availability";
+  return tab.charAt(0).toUpperCase() + tab.slice(1);
 }
 
 type GuestyMonthlyRate = {
@@ -4649,19 +4668,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             </div>
             <div className="glb-panel">
               <div className="glb-tabs">
-                {(["descriptions", "bedding", "amenities", "pricing", "photos", "availability", "otaVisibility"] as const).map((t) => (
-                  <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`}>
-                    {t === "photos" ? (
-                      <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                        {/* Tab badge reflects what the operator actually
-                            sees in the Photos tab: the local photo set
-                            (photos.length) PLUS the cover-collage tile
-                            when one is live on Guesty. Keeps the count
-                            honest — clicking "Auto-Set Cover Collage"
-                            bumps the badge by one, matching the extra
-                            tile that appears at the top of the grid. */}
-                        {`Photos (${photos.length + (guestyCoverCollageUrl ? 1 : 0)})`}
-                        {selectedId && (
+                {(["descriptions", "bedding", "amenities", "pricing", "photos", "availability", "otaVisibility"] as const).map((t) => {
+                  const pushTab: DataPushTab | null = t === "otaVisibility" ? null : t;
+                  const entry = pushTab ? dataPushLog[pushTab] : undefined;
+                  const pushedTime = formatDataPushTabTime(entry?.pushedAt);
+                  const photosCount = photos.length + (guestyCoverCollageUrl ? 1 : 0);
+                  const label = t === "otaVisibility"
+                    ? "OTA Visibility"
+                    : t === "amenities"
+                      ? `Amenities (${pendingAmenities.size})`
+                      : dataPushTabLabel(t, photosCount);
+                  const statusTitle = !pushTab
+                    ? label
+                    : entry
+                      ? `${label} ${entry.status === "success" ? "pushed" : "failed"} ${pushedTime || formatDataPushTime(entry.pushedAt)}${entry.message ? `: ${entry.message}` : ""}`
+                      : `${label} has not been pushed from this browser session`;
+                  return (
+                    <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`} title={statusTitle}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                        {label}
+                        {selectedId && t === "photos" && (
                           guestyPhotoCountLoading
                             ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d1d5db", display: "inline-block" }} title="Checking Guesty…" />
                             : guestyPhotoCount === null
@@ -4670,14 +4696,38 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#16a34a", display: "inline-block" }} title={`${guestyPhotoCount} photos in Guesty`} />
                             : <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#dc2626", display: "inline-block" }} title="No photos in Guesty yet" />
                         )}
+                        {pushTab && (
+                          <span
+                            aria-label={entry ? `${label} ${entry.status} ${pushedTime}` : `${label} not pushed`}
+                            title={statusTitle}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 3,
+                              fontSize: 10,
+                              lineHeight: 1,
+                              color: entry?.status === "success" ? "#166534" : entry?.status === "error" ? "#991b1b" : "#9ca3af",
+                              textTransform: "none",
+                              letterSpacing: 0,
+                            }}
+                          >
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                width: 7,
+                                height: 7,
+                                borderRadius: "50%",
+                                background: entry?.status === "success" ? "#16a34a" : entry?.status === "error" ? "#dc2626" : "#d1d5db",
+                                display: "inline-block",
+                              }}
+                            />
+                            {pushedTime && <span>{pushedTime}</span>}
+                          </span>
+                        )}
                       </span>
-                    ) :
-                     t === "amenities" ? `Amenities (${pendingAmenities.size})` :
-                     t === "availability" ? "Availability" :
-                     t === "otaVisibility" ? "OTA Visibility" :
-                     t.charAt(0).toUpperCase() + t.slice(1)}
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
               </div>
               <div className="glb-tab-body">
 
