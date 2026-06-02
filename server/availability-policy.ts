@@ -1,8 +1,24 @@
 export const DAILY_POLICY_RUN_HOUR_ET = 1;
 export const DEFAULT_TIGHT_SCARCITY_MARKUP = 0.12;
 export const DEFAULT_CRITICAL_SCARCITY_MARKUP = 0.40;
+export const DEFAULT_STANDARD_LEAD_TIME_MARKUP = 0.15;
+export const DEFAULT_HIGH_SEASON_LEAD_TIME_MARKUP = 0.25;
+export const DEFAULT_MAJOR_HOLIDAY_LEAD_TIME_MARKUP = 0.40;
+export const DEFAULT_ULTRA_PEAK_LEAD_TIME_MARKUP = 0.50;
 
 type AvailabilityPricingVerdict = "open" | "tight" | "blocked";
+export type LeadTimePricingBand = "standard" | "high" | "majorHoliday" | "ultraPeak";
+
+export function leadTimeMarkupForPolicyBand(band: LeadTimePricingBand | null | undefined): number {
+  if (band === "ultraPeak") return DEFAULT_ULTRA_PEAK_LEAD_TIME_MARKUP;
+  if (band === "majorHoliday") return DEFAULT_MAJOR_HOLIDAY_LEAD_TIME_MARKUP;
+  if (band === "high") return DEFAULT_HIGH_SEASON_LEAD_TIME_MARKUP;
+  return DEFAULT_STANDARD_LEAD_TIME_MARKUP;
+}
+
+export function demandFactorForPolicyBand(band: LeadTimePricingBand | null | undefined): number {
+  return 1 + leadTimeMarkupForPolicyBand(band);
+}
 
 export function demandFactorForAvailabilityVerdict(
   verdict: AvailabilityPricingVerdict,

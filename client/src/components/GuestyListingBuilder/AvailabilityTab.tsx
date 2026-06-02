@@ -99,7 +99,7 @@ function fmtShort(iso: string): string {
 // in `server/availability-scheduler.ts` by joining segments with ` · `:
 //
 //   policy 80 open/0 tight/24 blocked · market-snapshot 3/3 seasons ·
-//   cleanup cleared 2 · rates 24/24 months · scarcity-prices 20/20 windows (+40%)
+//   cleanup cleared 2 · rates 24/24 months · lead-time-prices 20/20 windows (+15/+25/+40/+50%)
 //
 // Any segment can be missing if the operator disabled that phase (e.g.
 // `runInventory: false`). Anything we don't recognize stays in `raw`
@@ -112,6 +112,7 @@ type RunBadges = {
   blocks?: { added: number; removed: number; failed: number };
   rates?: { pushed: number; total: number };
   scarcityPrices?: { pushed: number; total: number; markup: number };
+  leadTimePrices?: { pushed: number; total: number; label: string };
   raw: string[];
 };
 function parseScanSummary(summary: string | null | undefined): RunBadges {
@@ -136,6 +137,8 @@ function parseScanSummary(summary: string | null | undefined): RunBadges {
       out.rates = { pushed: parseInt(m[1], 10), total: parseInt(m[2], 10) };
     } else if ((m = p.match(/^scarcity-prices\s+(\d+)\/(\d+)\s+windows\s+\(\+(\d+)%\)$/i))) {
       out.scarcityPrices = { pushed: parseInt(m[1], 10), total: parseInt(m[2], 10), markup: parseInt(m[3], 10) };
+    } else if ((m = p.match(/^lead-time-prices\s+(\d+)\/(\d+)\s+windows\s+\(([^)]+)\)$/i))) {
+      out.leadTimePrices = { pushed: parseInt(m[1], 10), total: parseInt(m[2], 10), label: m[3] };
     } else {
       out.raw.push(p);
     }
@@ -520,6 +523,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             startDate: r.startDate,
             endDate: r.endDate,
             verdict: r.verdict,
+            policyBand: r.policyBand,
           })),
           // 20% margin matches the scheduler default. If the scheduler row
           // has a different target margin configured for this property,
@@ -527,12 +531,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           targetMargin: schedule?.targetMargin != null
             ? parseFloat(String(schedule.targetMargin))
             : 0.20,
-          tightMarkup: schedule?.tightMarkup != null
-            ? parseFloat(String(schedule.tightMarkup))
-            : 0.12,
-          criticalMarkup: schedule?.criticalMarkup != null
-            ? parseFloat(String(schedule.criticalMarkup))
-            : 0.40,
         }),
       });
       const data = await resp.json();
@@ -600,10 +598,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
 
   const criticalCount = summary.blocked;
   const tightCount = summary.tight;
-  const tightMarkupValue = schedule?.tightMarkup != null ? parseFloat(String(schedule.tightMarkup)) : 0.12;
-  const criticalMarkupValue = schedule?.criticalMarkup != null ? parseFloat(String(schedule.criticalMarkup)) : 0.40;
-  const tightMarkupPct = Math.round(tightMarkupValue * 100);
-  const criticalMarkupPct = Math.round(criticalMarkupValue * 100);
 
   if (!propertyId) {
     return (
@@ -746,6 +740,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                       Scarcity: <b>{b.scarcityPrices.pushed}/{b.scarcityPrices.total}</b> windows · +{b.scarcityPrices.markup}%
                     </span>
                   )}
+                  {b.leadTimePrices && (
+                    <span style={chipStyle}>
+                      Lead-time prices: <b>{b.leadTimePrices.pushed}/{b.leadTimePrices.total}</b> windows · {b.leadTimePrices.label}
+                    </span>
+                  )}
                   {b.raw.map((r, i) => <span key={i} style={chipStyle}>{r}</span>)}
                 </div>
               );
@@ -780,30 +779,9 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               <input type="checkbox" checked={schedule.runPricing} onChange={(e) => updateSchedule({ runPricing: e.target.checked })} />
               Base rates + scarcity push
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              Tight +{tightMarkupPct}%
-            </label>
-            <input
-              type="number"
-              min={0}
-              max={200}
-              step={1}
-              value={tightMarkupPct}
-              onChange={(e) => updateSchedule({ tightMarkup: Math.max(0, Number(e.target.value) || 0) / 100 })}
-              style={{ width: 62, padding: "2px 6px", fontSize: 11, border: "1px solid #e5e7eb", borderRadius: 4 }}
-            />
-            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              Critical +{criticalMarkupPct}%
-            </label>
-            <input
-              type="number"
-              min={0}
-              max={200}
-              step={1}
-              value={criticalMarkupPct}
-              onChange={(e) => updateSchedule({ criticalMarkup: Math.max(0, Number(e.target.value) || 0) / 100 })}
-              style={{ width: 62, padding: "2px 6px", fontSize: 11, border: "1px solid #e5e7eb", borderRadius: 4 }}
-            />
+            <span style={{ fontSize: 11, color: "#475569" }}>
+              Markups: standard +15% · high +25% · holiday +40% · ultra-peak +50%
+            </span>
           </div>
         )}
       </div>
@@ -832,7 +810,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           ))}
         </div>
         <div style={{ fontSize: 11, color: "#475569", marginTop: 8, lineHeight: 1.5 }}>
-            Critical windows are now priced up by {criticalMarkupPct}% instead of blacked out. This tab no longer scrapes Airbnb, VRBO, Booking.com, SearchAPI, or sidecar availability to decide whether a date band should be unavailable.
+            Lead-time windows are now priced up instead of blacked out: standard +15%, high season +25%, major holiday +40%, and ultra-peak +50%. This tab no longer scrapes Airbnb, VRBO, Booking.com, SearchAPI, or sidecar availability to decide whether a date band should be unavailable.
         </div>
       </div>
 
@@ -891,7 +869,8 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                             {parsed.blocks && <>cleanup cleared <b style={{ color: "#166534" }}>{parsed.blocks.removed}</b> · </>}
                             {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
                             {parsed.scarcityPrices && <> · scarcity <b>{parsed.scarcityPrices.pushed}/{parsed.scarcityPrices.total}</b></>}
-                            {!parsed.policy && !parsed.inventory && !parsed.weeklyWindows && !parsed.blocks && !parsed.rates && !parsed.scarcityPrices && r.summary}
+                            {parsed.leadTimePrices && <> · lead-time <b>{parsed.leadTimePrices.pushed}/{parsed.leadTimePrices.total}</b></>}
+                            {!parsed.policy && !parsed.inventory && !parsed.weeklyWindows && !parsed.blocks && !parsed.rates && !parsed.scarcityPrices && !parsed.leadTimePrices && r.summary}
                         </span>
                       )}
                     </td>
@@ -937,7 +916,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, lineHeight: 1.6 }}>
           Applying policy to <b>{ctx.resortName ?? ctx.community}</b> —{" "}
           needed units: {ctx.units.map((u) => `${u.bedrooms}BR`).join(" + ")}.
-            {" "}Each policy window is <b>{ctx.windowNights ?? 7} nights</b>. Critical windows are <b>priced up</b> by fixed lead-time rules only:
+            {" "}Each policy window is <b>{ctx.windowNights ?? 7} nights</b>. Lead-time windows are <b>priced up</b> by fixed rules only:
           standard <b>{ctx.autoBlockNearTermDays ?? 45}</b> days, high season <b>75</b> days, major holiday <b>{ctx.autoBlockHolidayDays ?? 90}</b> days, ultra-peak <b>{ctx.autoBlockUltraPeakDays ?? 120}</b> days.
         </div>
       )}
@@ -956,7 +935,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             <span style={{ color: "#991b1b", fontWeight: 600 }}>✗ {criticalCount} critical pricing</span>
           {tightCount > 0 && (
             <span style={{ color: "#6b7280" }}>
-                · Tight windows get +{tightMarkupPct}%; critical windows get +{criticalMarkupPct}%.
+                · Markups: standard +15%, high +25%, major holiday +40%, ultra-peak +50%.
             </span>
           )}
         </div>
@@ -1043,7 +1022,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               Weekly Pricing Correlation
             </span>
             <span style={{ fontSize: 11, color: "#6b7280" }}>
-              Critical windows are pushed as higher rates instead of being blacked out.
+              Lead-time windows are pushed as higher rates instead of being blacked out.
             </span>
             <div style={{ flex: 1 }} />
             {!pricingRows && (
@@ -1339,7 +1318,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             </div>
           ) : selectedChannelRows.length === 0 ? (
             <div style={{ fontSize: 12, color: "#6b7280" }}>
-                {selected.verdict === "blocked" && `This arrival falls inside the fixed lead-time rule and will receive +${criticalMarkupPct}% scarcity pricing.`}
+                {selected.verdict === "blocked" && `This arrival falls inside the fixed lead-time rule and will receive the policy-band markup.`}
             </div>
           ) : null}
         </div>

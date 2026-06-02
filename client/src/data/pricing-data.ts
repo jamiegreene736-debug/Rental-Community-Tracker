@@ -107,7 +107,7 @@ export function cleanBaseRateFromBuyIn(
   buyIn: number,
   targetMargin: number = MIN_PROFIT_MARGIN,
 ): number {
-  return minProfitableRate(buyIn, "direct", targetMargin);
+  return Math.ceil((1 + targetMargin) * buyIn);
 }
 
 /**

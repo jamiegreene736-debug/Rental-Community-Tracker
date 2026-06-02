@@ -130,7 +130,7 @@ import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybr
 import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
-  demandFactorForAvailabilityVerdict,
+  demandFactorForPolicyBand,
   runFullScanForProperty,
   runFullScanNow,
   runLeadTimePolicySyncForProperty,
@@ -755,8 +755,7 @@ const cleanBaseRateFromBuyInServer = (
   buyIn: number,
   targetMargin: number,
 ): number => {
-  const feeDirect = CHANNEL_HOST_FEE.direct ?? 0.03;
-  return Math.ceil(((1 + targetMargin) * buyIn) / (1 - feeDirect));
+  return Math.ceil((1 + targetMargin) * buyIn);
 };
 
 const parsePositivePricingRate = (value: unknown): number | null => {
@@ -21528,32 +21527,29 @@ Return ONLY compact JSON with this exact shape:
   //
   // Formula:
   //   baseNightly     = sum over units of the saved all-in buy-in basis for this month/season
-  //   demandFactor    = tight → 1.12  |  open → 1.00  |  blocked → 1.40
-  //   targetRate      = round(baseNightly × demandFactor × (1 + margin) / (1 - 0.03))
+  //   demandFactor    = open → 1.00 | standard → 1.15 | high → 1.25 | holiday → 1.40 | ultra → 1.50
+  //   targetRate      = round(baseNightly × demandFactor × (1 + margin))
   //   deltaVsBase     = (targetRate - baseOnlyRate) / baseOnlyRate
   //
-  // The demand factor is the knob that turns "tight inventory at this
-  // resort this week" into a publishable price bump — when fewer
-  // competing listings are available the floor clears naturally and our
-  // own rate can move with it.
+  // The demand factor is fixed by the calendar lead-time policy band.
   app.post("/api/availability/weekly-pricing/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
     const config = await resolveAvailabilityPropertyConfig(propertyId);
     if (!config) return res.status(404).json({ error: "property not in config" });
     const body = (req.body ?? {}) as {
-      windows?: Array<{ startDate: string; endDate: string; verdict: "open" | "tight" | "blocked" }>;
+      windows?: Array<{
+        startDate: string;
+        endDate: string;
+        verdict: "open" | "tight" | "blocked";
+        policyBand?: "standard" | "high" | "majorHoliday" | "ultraPeak";
+      }>;
       targetMargin?: number;
-      tightMarkup?: number;
-      criticalMarkup?: number;
     };
     const windows = body.windows ?? [];
     if (windows.length === 0) return res.status(400).json({ error: "windows required — run scan first" });
     const { totalNightlyBuyInForMonth } = await import("@shared/pricing-rates");
     const targetMargin = typeof body.targetMargin === "number" ? body.targetMargin : 0.20;
-    const tightMarkup = typeof body.tightMarkup === "number" ? body.tightMarkup : DEFAULT_TIGHT_SCARCITY_MARKUP;
-    const criticalMarkup = typeof body.criticalMarkup === "number" ? body.criticalMarkup : DEFAULT_CRITICAL_SCARCITY_MARKUP;
-    const feeDirect = 0.03;
     // Cache baseNightly per month-key so we only look it up once per month.
     const baseByMonth = new Map<string, number>();
     const rows = windows.map((w) => {
@@ -21563,9 +21559,9 @@ Return ONLY compact JSON with this exact shape:
         baseNightly = totalNightlyBuyInForMonth(config.community, config.units, monthKey, propertyId);
         baseByMonth.set(monthKey, baseNightly);
       }
-      const demandFactor = demandFactorForAvailabilityVerdict(w.verdict, { tightMarkup, criticalMarkup });
-      const baseOnlyRate = Math.round(baseNightly * (1 + targetMargin) / (1 - feeDirect));
-      const targetRate = Math.round(baseNightly * demandFactor * (1 + targetMargin) / (1 - feeDirect));
+      const demandFactor = w.verdict === "blocked" ? demandFactorForPolicyBand(w.policyBand) : 1;
+      const baseOnlyRate = Math.round(baseNightly * (1 + targetMargin));
+      const targetRate = Math.round(baseNightly * demandFactor * (1 + targetMargin));
       const deltaVsBase = baseOnlyRate > 0 && targetRate > 0
         ? (targetRate - baseOnlyRate) / baseOnlyRate
         : 0;
@@ -21573,6 +21569,7 @@ Return ONLY compact JSON with this exact shape:
         startDate: w.startDate,
         endDate: w.endDate,
         verdict: w.verdict,
+        policyBand: w.policyBand,
         baseNightly,
         demandFactor,
         baseOnlyRate,
@@ -21583,9 +21580,12 @@ Return ONLY compact JSON with this exact shape:
     res.json({
       community: config.community,
       targetMargin,
-      tightMarkup,
-      criticalMarkup,
-      feeDirect,
+      leadTimeMarkups: {
+        standard: 0.15,
+        high: 0.25,
+        majorHoliday: 0.40,
+        ultraPeak: 0.50,
+      },
       rows,
     });
   });

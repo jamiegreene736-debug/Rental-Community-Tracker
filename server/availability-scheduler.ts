@@ -37,12 +37,15 @@ import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
   demandFactorForAvailabilityVerdict,
+  demandFactorForPolicyBand,
   isDueForPolicyPass,
+  type LeadTimePricingBand,
 } from "./availability-policy";
 export {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
   demandFactorForAvailabilityVerdict,
+  demandFactorForPolicyBand,
   isDueForPolicyPass,
 } from "./availability-policy";
 
@@ -63,8 +66,8 @@ function computePureLeadTimePolicyBlocks(
   today: Date,
   weeks = 52,
   leadDays?: { standard?: number; high?: number; holiday?: number; ultra?: number }
-): Array<{ startDate: string; endDate: string; verdict: "blocked"; reason: string }> {
-  const blocks: Array<{ startDate: string; endDate: string; verdict: "blocked"; reason: string }> = [];
+): Array<{ startDate: string; endDate: string; verdict: "blocked"; policyBand: LeadTimePricingBand; reason: string }> {
+  const blocks: Array<{ startDate: string; endDate: string; verdict: "blocked"; policyBand: LeadTimePricingBand; reason: string }> = [];
   const std = leadDays?.standard ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS;
   const high = leadDays?.high ?? AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS;
   const holiday = leadDays?.holiday ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS;
@@ -99,6 +102,7 @@ function computePureLeadTimePolicyBlocks(
         startDate: sd,
         endDate: ed,
         verdict: "blocked",
+        policyBand: policy.band,
         reason: `lead-time safety: ${effectiveLead} days (${bandLabel})`,
       });
     }
@@ -172,8 +176,6 @@ type FullScanOptions = {
   runInventory: boolean;
   runPricing: boolean;
   runSyncBlocks: boolean;
-  tightMarkup?: number;
-  criticalMarkup?: number;
 };
 
 export async function runFullScanForProperty(
@@ -214,10 +216,6 @@ export async function runFullScanForProperty(
     holiday: scheduleRow?.majorHolidayLeadDays ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS,
     ultra: scheduleRow?.ultraPeakLeadDays ?? AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS,
   };
-  const criticalMarkup = opts.criticalMarkup
-    ?? (scheduleRow?.criticalMarkup != null ? parseFloat(String(scheduleRow.criticalMarkup)) : DEFAULT_CRITICAL_SCARCITY_MARKUP);
-  const tightMarkup = opts.tightMarkup
-    ?? (scheduleRow?.tightMarkup != null ? parseFloat(String(scheduleRow.tightMarkup)) : DEFAULT_TIGHT_SCARCITY_MARKUP);
 
   // ── Inventory: candidate count per BR ──
   let countsByBR: Record<number, number> = {};
@@ -277,11 +275,10 @@ export async function runFullScanForProperty(
   // ── Rate push: per-month Guesty calendar from STATIC buy-in cost ──
   // Uses the manually-curated BUY_IN_RATES from shared/pricing-rates.ts
   // (cost we PAY per night) × season multiplier, then marks up to hit
-  // the target margin after the direct-channel fee. The earlier version
+  // the target margin. The earlier version
   // used live Airbnb engine prices as the cost basis, which was wrong —
   // those are SELL prices already inflated by other hosts' margins.
   if (opts.runPricing) {
-    const feeDirect = 0.03;
     const today = new Date();
     const ranges: Array<{ startDate: string; endDate: string; price: number }> = [];
     for (let m = 0; m < 24; m++) {
@@ -292,7 +289,7 @@ export async function runFullScanForProperty(
       // Cost basis = sum of buy-in cost per slot for this month/season
       const setCost = totalNightlyBuyInForMonth(community, config.units, yearMonth);
       if (setCost <= 0) continue;
-      const targetRate = Math.round(((1 + opts.targetMargin) * setCost) / (1 - feeDirect));
+      const targetRate = Math.round((1 + opts.targetMargin) * setCost);
       const startDate = new Date(y, mm - 1, 1).toISOString().slice(0, 10);
       const lastDay = new Date(y, mm, 0).getDate();
       const endDate = new Date(y, mm - 1, lastDay).toISOString().slice(0, 10);
@@ -318,8 +315,8 @@ export async function runFullScanForProperty(
         const monthKey = w.startDate.slice(0, 7);
         const setCost = totalNightlyBuyInForMonth(community, config.units, monthKey);
         if (setCost <= 0) continue;
-        const factor = demandFactorForAvailabilityVerdict("blocked", { tightMarkup, criticalMarkup });
-        const targetRate = Math.round((setCost * factor * (1 + opts.targetMargin)) / (1 - feeDirect));
+        const factor = demandFactorForPolicyBand(w.policyBand);
+        const targetRate = Math.round(setCost * factor * (1 + opts.targetMargin));
         await guestyRequest("PUT", calPath, {
           startDate: w.startDate,
           endDate: w.endDate,
@@ -330,7 +327,7 @@ export async function runFullScanForProperty(
       } catch { /* continue */ }
     }
     if (scarcityWindows.length > 0) {
-      summaries.push(`scarcity-prices ${pushedScarcity}/${scarcityWindows.length} windows (+${Math.round(criticalMarkup * 100)}%)`);
+      summaries.push(`lead-time-prices ${pushedScarcity}/${scarcityWindows.length} windows (+15/+25/+40/+50%)`);
     }
   }
 
@@ -356,8 +353,6 @@ async function tick() {
           runInventory: row.runInventory,
           runPricing: row.runPricing,
           runSyncBlocks: row.runSyncBlocks,
-          tightMarkup: row.tightMarkup != null ? parseFloat(String(row.tightMarkup)) : DEFAULT_TIGHT_SCARCITY_MARKUP,
-          criticalMarkup: row.criticalMarkup != null ? parseFloat(String(row.criticalMarkup)) : DEFAULT_CRITICAL_SCARCITY_MARKUP,
         });
         const durationMs = Date.now() - startedAt;
         // "skipped:"-prefixed summaries are clean no-ops (missing
@@ -405,8 +400,6 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
       runInventory: sched?.runInventory ?? true,
       runPricing: sched?.runPricing ?? true,
       runSyncBlocks: sched?.runSyncBlocks ?? false,
-      tightMarkup: sched?.tightMarkup != null ? parseFloat(String(sched.tightMarkup)) : DEFAULT_TIGHT_SCARCITY_MARKUP,
-      criticalMarkup: sched?.criticalMarkup != null ? parseFloat(String(sched.criticalMarkup)) : DEFAULT_CRITICAL_SCARCITY_MARKUP,
     });
     const durationMs = Date.now() - startedAt;
     const status: "ok" | "skipped" = summary.startsWith(SKIP_PREFIX) ? "skipped" : "ok";

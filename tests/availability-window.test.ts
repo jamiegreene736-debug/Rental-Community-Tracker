@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 
 const {
-  demandFactorForAvailabilityVerdict,
+  demandFactorForPolicyBand,
   isDueForPolicyPass,
 } = await import("../server/availability-policy");
 
@@ -188,14 +188,10 @@ assert.equal(
 );
 console.log("  ✓ daily policy pass is due after 1 AM Eastern");
 
-assert.equal(demandFactorForAvailabilityVerdict("open"), 1);
-assert.equal(demandFactorForAvailabilityVerdict("tight"), 1.12);
-assert.equal(demandFactorForAvailabilityVerdict("blocked"), 1.4);
-assert.equal(
-  demandFactorForAvailabilityVerdict("blocked", { criticalMarkup: 0.35 }),
-  1.35,
-  "critical windows should be repriced instead of skipped",
-);
-console.log("  ✓ critical windows use scarcity markup instead of skipping rates");
+assert.equal(demandFactorForPolicyBand("standard"), 1.15);
+assert.equal(demandFactorForPolicyBand("high"), 1.25);
+assert.equal(demandFactorForPolicyBand("majorHoliday"), 1.4);
+assert.equal(demandFactorForPolicyBand("ultraPeak"), 1.5);
+console.log("  ✓ lead-time policy bands use fixed seasonal markups");
 
 console.log("availability window suite passed");
