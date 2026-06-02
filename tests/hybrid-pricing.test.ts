@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   calculateBlendedRate,
   fetchAirbnbMedianNightly,
+  airbnbSearchGeoParamsForMarket,
   curatedAirbnbSearchQueries,
   hybridPricingWindowForMonth,
   hybridPricingWindowForSeason,
@@ -110,6 +111,16 @@ assert.equal(
   "Ilikai Hotel, Honolulu, HI",
   "Ilikai market pricing should use the curated address-backed query before the broad community name",
 );
+assert.deepEqual(
+  airbnbSearchGeoParamsForMarket("Poipu Kai"),
+  {
+    sw_lat: "21.875",
+    sw_lng: "-159.478",
+    ne_lat: "21.895",
+    ne_lng: "-159.458",
+  },
+  "Poipu Kai market pricing must use the curated resort bounds, not the broader center-radius fallback",
+);
 
 const routesSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
 assert.equal(
@@ -183,6 +194,10 @@ try {
   assert.equal(params.get("engine"), "airbnb");
   assert.equal(params.get("bedrooms"), "3");
   assert.equal(params.get("type_of_place"), "entire_home");
+  assert.equal(params.get("sw_lat"), "21.875");
+  assert.equal(params.get("sw_lng"), "-159.478");
+  assert.equal(params.get("ne_lat"), "21.895");
+  assert.equal(params.get("ne_lng"), "-159.458");
 } finally {
   globalThis.fetch = originalFetch;
   if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;

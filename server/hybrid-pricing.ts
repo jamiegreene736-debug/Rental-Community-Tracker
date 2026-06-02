@@ -471,6 +471,29 @@ export function curatedAirbnbSearchQueries(community: string, hint?: string): st
   return Array.from(new Set(ordered));
 }
 
+export function airbnbSearchGeoParamsForMarket(community: string): Record<string, string> {
+  const bounds = BUY_IN_MARKET_BOUNDS[community];
+  if (bounds) {
+    return {
+      sw_lat: String(bounds.sw_lat),
+      sw_lng: String(bounds.sw_lng),
+      ne_lat: String(bounds.ne_lat),
+      ne_lng: String(bounds.ne_lng),
+    };
+  }
+  const location = BUY_IN_MARKET_LOCATIONS[community];
+  if (location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) {
+    const halfDeg = 0.02;
+    return {
+      sw_lat: String(location.lat - halfDeg),
+      sw_lng: String(location.lng - halfDeg),
+      ne_lat: String(location.lat + halfDeg),
+      ne_lng: String(location.lng + halfDeg),
+    };
+  }
+  return {};
+}
+
 async function fetchAirbnbMedianNightlyForQuery(args: {
   community: string;
   bedrooms: number;
@@ -493,15 +516,7 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
     currency: "USD",
     api_key: args.apiKey,
   };
-  if (location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) {
-    const halfDeg = 0.02;
-    params.sw_lat = String(location.lat - halfDeg);
-    params.sw_lng = String(location.lng - halfDeg);
-    params.ne_lat = String(location.lat + halfDeg);
-    params.ne_lng = String(location.lng + halfDeg);
-  } else if (bounds) {
-    params.bounding_box = `[[${bounds.ne_lat},${bounds.ne_lng}],[${bounds.sw_lat},${bounds.sw_lng}]]`;
-  }
+  Object.assign(params, airbnbSearchGeoParamsForMarket(args.community));
   const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
   if (!response.ok) throw new Error(`SearchAPI Airbnb HTTP ${response.status}`);
   const data = await response.json() as any;
