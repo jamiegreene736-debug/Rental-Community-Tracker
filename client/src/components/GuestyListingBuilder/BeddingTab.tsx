@@ -70,9 +70,10 @@ const chipActive: React.CSSProperties = {
 interface Props {
   propertyId: number;
   guestyListingId: string | null;
+  onGuestyPushRecorded?: (status: "success" | "error", message: string) => void;
 }
 
-export function BeddingTab({ propertyId, guestyListingId }: Props) {
+export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }: Props) {
   const { toast } = useToast();
   const [config, setConfig] = useState<PropertyBeddingConfig>(() => loadBeddingConfig(propertyId));
   const [pushing, setPushing] = useState(false);
@@ -142,16 +143,20 @@ export function BeddingTab({ propertyId, guestyListingId }: Props) {
         bathrooms: totals.bathrooms || undefined,
         listingRooms: buildGuestyListingRooms(config),
       });
+      const message = `Bedding updated: ${totals.bedrooms} BR, ${totals.bathrooms} bath, sleeps ${totals.sleeps}`;
+      onGuestyPushRecorded?.("success", message);
       toast({
         title: "Bedding pushed to Guesty",
         description: `${totals.bedrooms} bedroom${totals.bedrooms !== 1 ? "s" : ""}, ${totals.bathrooms} bath${totals.bathrooms !== 1 ? "s" : ""}, sleeps ${totals.sleeps}.`,
       });
     } catch (e) {
-      toast({ title: "Push failed", description: (e as Error).message, variant: "destructive" });
+      const message = (e as Error).message;
+      onGuestyPushRecorded?.("error", message);
+      toast({ title: "Push failed", description: message, variant: "destructive" });
     } finally {
       setPushing(false);
     }
-  }, [guestyListingId, pushing, totals, config, toast]);
+  }, [guestyListingId, pushing, totals, config, onGuestyPushRecorded, toast]);
 
   const handleReset = () => {
     if (!confirm("Reset bedding config for this property to defaults? Your edits will be lost.")) return;

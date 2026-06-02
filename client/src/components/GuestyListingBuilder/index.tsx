@@ -5163,7 +5163,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 )}
 
                 {activeTab === "bedding" && (
-                  <BeddingTab propertyId={propertyId} guestyListingId={selectedId || null} />
+                  <BeddingTab
+                    propertyId={propertyId}
+                    guestyListingId={selectedId || null}
+                    onGuestyPushRecorded={(status, message) => recordDataPush("bedding", status, message)}
+                  />
                 )}
 
                 {activeTab === "amenities" && (() => {
