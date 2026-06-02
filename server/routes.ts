@@ -24611,7 +24611,12 @@ Return ONLY compact JSON with this exact shape:
       `and ${sameCommunityExclusions.unitClaims.size} unit claim(s) already used in existing listings`,
     );
     const routeStartedAt = Date.now();
-    const ROUTE_BUDGET_MS = expandedSearch ? 300_000 : 210_000;
+    // Railway's edge budget is five minutes. Normal replacement searches were
+    // stopping around 3:08 with dozens of same-community candidates still
+    // unchecked, which made a second replacement look impossible immediately
+    // after a first one succeeded. Keep a small response reserve, but use more
+    // of the available request window before giving up.
+    const ROUTE_BUDGET_MS = expandedSearch ? 285_000 : 260_000;
     const APIFY_SUPPLEMENT_BUDGET_MS = expandedSearch ? 100_000 : 75_000;
     const PLATFORM_SEARCH_TIMEOUT_MS = 12_000;
     const PHOTO_SCRAPE_TIMEOUT_MS = 45_000;
@@ -25392,7 +25397,7 @@ Return ONLY compact JSON with this exact shape:
     let budgetStopped = false;
     const candidatesToCheck = candidates.slice(0, MAX_CANDIDATES_TO_CHECK);
     for (const candidate of candidatesToCheck) {
-      if (!hasRouteBudget(25_000)) {
+      if (!hasRouteBudget(10_000)) {
         budgetStopped = true;
         console.warn(`[find-unit] route budget nearly exhausted after ${attempts.length}/${candidates.length} candidates`);
         break;
@@ -25672,9 +25677,10 @@ Return ONLY compact JSON with this exact shape:
       diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com${cleanChannel && cleanChannel !== "vrbo" ? " / site:vrbo.com" : ""} searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
     } else {
       const parts: string[] = [];
-      if (budgetStopped) parts.push(`stopped after ${attempts.length}/${totalCandidates} candidates to avoid a stuck request`);
-	      if (totalCandidates > MAX_CANDIDATES_TO_CHECK) parts.push(`checked the best ${MAX_CANDIDATES_TO_CHECK} of ${totalCandidates} candidates`);
-	      if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on the enforced channel`);
+      if (budgetStopped) parts.push(`stopped after checking ${attempts.length}/${totalCandidates} candidates to avoid a stuck request`);
+      const uncheckedByCap = totalCandidates > MAX_CANDIDATES_TO_CHECK && !budgetStopped;
+      if (uncheckedByCap) parts.push(`checked the best ${MAX_CANDIDATES_TO_CHECK} of ${totalCandidates} candidates`);
+	      if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on ${cleanChannel ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}`);
 	      if (breakdown["skipped-photo-found"] > 0) parts.push(`${breakdown["skipped-photo-found"]} had 2+ strong private-photo matches on the enforced channel`);
 	      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
       if (breakdown["skipped-bedroom-mismatch"] > 0) parts.push(`${breakdown["skipped-bedroom-mismatch"]} had too few bedrooms`);

@@ -124,6 +124,7 @@ export function UnitReplacementFlow({
   const [extraSkipUrls, setExtraSkipUrls] = useState<string[]>([]);
 
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
+  const hasActiveReplacement = allUnits.some(u => Boolean(u.replacementSourceUrl));
 
   const isWorking = stage === "searching" || stage === "checking";
   useEffect(() => {
@@ -271,7 +272,12 @@ export function UnitReplacementFlow({
           </div>
 
           {stage === "idle" && (
-            <Button size="sm" className="w-full" onClick={() => search()} data-testid="button-start-unit-search">
+            <Button
+              size="sm"
+              className="w-full"
+              onClick={() => search({ expanded: hasActiveReplacement })}
+              data-testid="button-start-unit-search"
+            >
               <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
               Find Replacement Unit
             </Button>

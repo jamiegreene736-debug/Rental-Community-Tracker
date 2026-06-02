@@ -1321,6 +1321,7 @@ try {
 const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
 const homeSource = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
 const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
+const unitReplacementSource = readFileSync(new URL("../client/src/components/unit-replacement-flow.tsx", import.meta.url), "utf8");
 assert.equal(
   routeSource.includes("${DISCLOSURE}"),
   false,
@@ -1379,6 +1380,28 @@ assert.ok(
   "fresh SearchAPI monthly market rows must not be adjacent-bedroom capped before client hydration",
 );
 console.log("  ✓ market-pricing routes are not shadowed by legacy handlers");
+
+assert.ok(
+  routeSource.includes("const ROUTE_BUDGET_MS = expandedSearch ? 285_000 : 260_000"),
+  "replacement search should use most of Railway's request window before giving up",
+);
+assert.ok(
+  routeSource.includes("!budgetStopped"),
+  "replacement diagnostics must not claim the candidate cap was checked when the route stopped early",
+);
+assert.ok(
+  routeSource.includes('found on ${cleanChannel ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}'),
+  "default replacement diagnostics should explain that all OTA channels are enforced",
+);
+assert.ok(
+  unitReplacementSource.includes("const hasActiveReplacement = allUnits.some(u => Boolean(u.replacementSourceUrl));"),
+  "after one replacement is active, follow-up replacement searches should automatically use expanded mode",
+);
+assert.ok(
+  unitReplacementSource.includes("onClick={() => search({ expanded: hasActiveReplacement })}"),
+  "the initial Find Replacement Unit action should expand automatically when replacing another unit",
+);
+console.log("  ✓ replacement search budget and follow-up expanded mode are guarded");
 
 assert.equal(
   routeSource.includes('ownerType: "bulk-pricing"'),
