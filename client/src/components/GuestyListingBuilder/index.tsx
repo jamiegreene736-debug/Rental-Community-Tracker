@@ -221,6 +221,210 @@ type Props = {
   onPhotoOverridesChanged?: () => void;
 };
 
+type OtaVisibilityPlatform = "booking" | "vrbo";
+type OtaVisibilityStatus = "queued" | "running" | "found" | "not_found" | "error";
+type OtaVisibilityJob = {
+  id: string;
+  platform: OtaVisibilityPlatform;
+  status: OtaVisibilityStatus;
+  propertyId: number;
+  startedAt: string;
+  searchedAt: string | null;
+  updatedAt: string;
+  finishedAt: string | null;
+  checkIn: string | null;
+  checkOut: string | null;
+  nights: number | null;
+  searchUrl: string | null;
+  foundUrl: string | null;
+  foundPage: number | null;
+  foundPosition: number | null;
+  candidatesChecked: number;
+  positionLog: string[];
+  error: string | null;
+};
+
+type OtaVisibilityResponse = {
+  propertyId: number;
+  booking: OtaVisibilityJob | null;
+  vrbo: OtaVisibilityJob | null;
+};
+
+function formatOtaVisibilityTime(value: string | null | undefined) {
+  if (!value) return "Not run yet";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function OtaVisibilityStatusBadge({ status }: { status: OtaVisibilityStatus | null | undefined }) {
+  const label = status ? status.replace("_", " ") : "not run";
+  const color =
+    status === "found" ? "#166534" :
+    status === "running" || status === "queued" ? "#1d4ed8" :
+    status === "error" ? "#991b1b" :
+    "#6b7280";
+  const bg =
+    status === "found" ? "#dcfce7" :
+    status === "running" || status === "queued" ? "#dbeafe" :
+    status === "error" ? "#fee2e2" :
+    "#f3f4f6";
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", padding: "3px 8px", borderRadius: 999, fontSize: 11, fontWeight: 700, color, background: bg, textTransform: "capitalize" }}>
+      {label}
+    </span>
+  );
+}
+
+function OtaVisibilityPanel({ propertyId }: { propertyId?: number }) {
+  const { toast } = useToast();
+  const [data, setData] = useState<OtaVisibilityResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [running, setRunning] = useState<Partial<Record<OtaVisibilityPlatform, boolean>>>({});
+
+  const loadVisibility = useCallback(async () => {
+    if (!propertyId) return;
+    try {
+      const response = await fetch(`/api/builder/ota-visibility/${propertyId}`);
+      if (!response.ok) throw new Error(`Visibility load failed (${response.status})`);
+      const payload = await response.json() as OtaVisibilityResponse;
+      setData(payload);
+      const nextRunning: Partial<Record<OtaVisibilityPlatform, boolean>> = {};
+      for (const platform of ["booking", "vrbo"] as const) {
+        const job = payload[platform];
+        nextRunning[platform] = job?.status === "queued" || job?.status === "running";
+      }
+      setRunning(nextRunning);
+    } catch (error) {
+      console.error("[ota-visibility] load failed", error);
+    }
+  }, [propertyId]);
+
+  useEffect(() => {
+    void loadVisibility();
+  }, [loadVisibility]);
+
+  useEffect(() => {
+    if (!running.booking && !running.vrbo) return;
+    const timer = window.setInterval(() => void loadVisibility(), 2500);
+    return () => window.clearInterval(timer);
+  }, [loadVisibility, running.booking, running.vrbo]);
+
+  const runPlatform = async (platform: OtaVisibilityPlatform) => {
+    if (!propertyId) return;
+    setLoading(true);
+    setRunning((prev) => ({ ...prev, [platform]: true }));
+    try {
+      const response = await fetch(`/api/builder/ota-visibility/${propertyId}/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ platform }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(payload?.error || `Visibility search failed (${response.status})`);
+      }
+      await loadVisibility();
+    } catch (error) {
+      toast({
+        title: "Visibility search failed",
+        description: error instanceof Error ? error.message : "Could not start the OTA search.",
+        variant: "destructive",
+      });
+      setRunning((prev) => ({ ...prev, [platform]: false }));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const renderJob = (platform: OtaVisibilityPlatform, label: string) => {
+    const job = data?.[platform] ?? null;
+    const isRunning = !!running[platform];
+    return (
+      <div key={platform} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 14, background: "#fff" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>{label}</div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+              {job?.checkIn && job?.checkOut ? `${job.checkIn} to ${job.checkOut} (${job.nights} nights)` : "Uses the next Guesty available date window."}
+            </div>
+          </div>
+          <OtaVisibilityStatusBadge status={job?.status} />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+          {[
+            ["Searched", formatOtaVisibilityTime(job?.searchedAt)],
+            ["Updated", formatOtaVisibilityTime(job?.updatedAt)],
+            ["Page", job?.foundPage ? String(job.foundPage) : "—"],
+            ["Position", job?.foundPosition ? String(job.foundPosition) : "—"],
+          ].map(([k, v]) => (
+            <div key={k} style={{ background: "var(--bg-card)", borderRadius: 6, padding: "7px 8px", minWidth: 0 }}>
+              <div style={{ fontSize: 10, color: "var(--faint)", textTransform: "uppercase", letterSpacing: ".4px" }}>{k}</div>
+              <div style={{ fontSize: 12, fontWeight: 600, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        {job?.foundUrl && (
+          <a href={job.foundUrl} target="_blank" rel="noreferrer" style={{ display: "inline-block", fontSize: 12, color: "#1d4ed8", marginBottom: 10 }}>
+            Open found listing
+          </a>
+        )}
+        {job?.positionLog?.length ? (
+          <div style={{ background: "#f8fafc", border: "1px solid var(--border)", borderRadius: 6, padding: 9, marginBottom: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 5 }}>Result position log</div>
+            {job.positionLog.slice(0, 8).map((line, index) => (
+              <div key={`${platform}-pos-${index}`} style={{ fontFamily: "monospace", fontSize: 11, color: "#374151", lineHeight: 1.5 }}>{line}</div>
+            ))}
+          </div>
+        ) : null}
+        {job?.error && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 10 }}>{job.error}</div>}
+        <button
+          type="button"
+          className="glb-btn"
+          disabled={!propertyId || loading || isRunning}
+          onClick={() => runPlatform(platform)}
+          data-testid={`btn-ota-visibility-${platform}`}
+        >
+          {isRunning ? "Searching…" : `Search ${label}`}
+        </button>
+      </div>
+    );
+  };
+
+  if (!propertyId) {
+    return <div style={{ color: "var(--muted)", fontSize: 13 }}>Save or select a dashboard property before running OTA visibility checks.</div>;
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+        <div>
+          <h3 style={{ margin: 0, fontSize: 16 }}>OTA Visibility Search</h3>
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--muted)" }}>
+            Finds the listing in Booking.com and VRBO search results for the next Guesty-available date window, then logs dates, page, and result position.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="glb-btn glb-btn-primary"
+          disabled={loading || running.booking || running.vrbo}
+          onClick={() => {
+            void runPlatform("booking");
+            void runPlatform("vrbo");
+          }}
+          data-testid="btn-ota-visibility-all"
+        >
+          Run both
+        </button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
+        {renderJob("booking", "Booking.com")}
+        {renderJob("vrbo", "VRBO")}
+      </div>
+    </div>
+  );
+}
+
 class BuilderSectionErrorBoundary extends Component<
   { resetKey: string; fallback: ReactNode; children: ReactNode },
   { hasError: boolean }
@@ -641,7 +845,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // side this hits Guesty's Distribution page and clicks the publish-
   // like button scoped to the channel's row — see AGENTS.md #29.
   const [publishStateByListingChannel, setPublishStateByListingChannel] = useState<Record<string, "idle" | "busy">>({});
-  const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability" | "bedding">("descriptions");
+  const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability" | "bedding" | "otaVisibility">("descriptions");
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState(0);
@@ -4445,7 +4649,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             </div>
             <div className="glb-panel">
               <div className="glb-tabs">
-                {(["descriptions", "bedding", "amenities", "pricing", "photos", "availability"] as const).map((t) => (
+                {(["descriptions", "bedding", "amenities", "pricing", "photos", "availability", "otaVisibility"] as const).map((t) => (
                   <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`}>
                     {t === "photos" ? (
                       <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
@@ -4470,6 +4674,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     ) :
                      t === "amenities" ? `Amenities (${pendingAmenities.size})` :
                      t === "availability" ? "Availability" :
+                     t === "otaVisibility" ? "OTA Visibility" :
                      t.charAt(0).toUpperCase() + t.slice(1)}
                   </button>
                 ))}
@@ -6278,6 +6483,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
                 {activeTab === "availability" && (
                   <AvailabilityTab propertyId={propertyId} listingId={selectedId} />
+                )}
+
+                {activeTab === "otaVisibility" && (
+                  <OtaVisibilityPanel propertyId={propertyId} />
                 )}
 
                 {activeTab === "photos" && (
