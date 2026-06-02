@@ -4151,7 +4151,7 @@ function unitSlotsForCommunityDraft(draft: any, sourceListingId?: string): Array
 }> {
   const community = communityKeyForDraft(draft);
   const isSingle = draft?.singleListing === true;
-  const combinedBedrooms = positiveDraftInteger(draft?.combinedBedrooms);
+  const combinedBedrooms = inferCombinedCommunityDraftBedroomCount(draft);
   const unit1Bedrooms = inferCommunityDraftBedroomCount(draft, "unit1")
     ?? (isSingle ? combinedBedrooms : null);
   let unit2Bedrooms = isSingle ? null : inferCommunityDraftBedroomCount(draft, "unit2");
@@ -4203,9 +4203,24 @@ function positiveDraftInteger(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function inferCombinedCommunityDraftBedroomCount(draft: any): number | null {
+  const structured = positiveDraftInteger(draft?.combinedBedrooms);
+  if (structured) return structured;
+
+  const text = [
+    draft?.listingTitle,
+    draft?.bookingTitle,
+    draft?.name,
+    draft?.unitTypes,
+    draft?.listingDescription,
+  ].filter(Boolean).join(" ");
+  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+  return match ? positiveDraftInteger(match[1]) : null;
+}
+
 function inferCommunityDraftBedroomCount(draft: any, unitKey: "unit1" | "unit2"): number | null {
   const stored = unitKey === "unit1" ? draft?.unit1Bedrooms : draft?.unit2Bedrooms;
-  const combined = draft?.singleListing === true ? draft?.combinedBedrooms : null;
+  const combined = draft?.singleListing === true ? inferCombinedCommunityDraftBedroomCount(draft) : null;
   const fromStructured = positiveDraftInteger(stored) ?? positiveDraftInteger(combined);
   if (fromStructured) return fromStructured;
 

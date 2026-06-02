@@ -1314,9 +1314,22 @@ function AdminDashboard() {
       const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
       return Number.isFinite(n) && n > 0 ? n : null;
     };
+    const inferCombinedBedrooms = (d: CommunityDraft): number | null => {
+      const stored = positiveInt(d.combinedBedrooms);
+      if (stored) return stored;
+      const text = [
+        d.listingTitle,
+        d.bookingTitle,
+        d.name,
+        d.unitTypes,
+        d.listingDescription,
+      ].filter(Boolean).join(" ");
+      const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
+      return positiveInt(match?.[1]);
+    };
     const inferBedrooms = (d: CommunityDraft, unitKey: "unit1" | "unit2") => {
       const stored = unitKey === "unit1" ? d.unit1Bedrooms : d.unit2Bedrooms;
-      const combined = (d as any).singleListing === true ? d.combinedBedrooms : null;
+      const combined = (d as any).singleListing === true ? inferCombinedBedrooms(d) : null;
       const structured = positiveInt(stored) ?? positiveInt(combined);
       if (structured) return structured;
 
@@ -1360,7 +1373,7 @@ function AdminDashboard() {
       const u1Br = inferBedrooms(d, "unit1");
       const u2Br = isSingle ? 0 : inferBedrooms(d, "unit2");
       const unitBedroomSum = u1Br + u2Br;
-      const totalBr = isSingle ? u1Br : (unitBedroomSum > 0 ? unitBedroomSum : (positiveInt(d.combinedBedrooms) ?? 0));
+      const totalBr = isSingle ? u1Br : (unitBedroomSum > 0 ? unitBedroomSum : (inferCombinedBedrooms(d) ?? 0));
       const totalGuests = isSingle
         ? inferSleeps(d, u1Br)
         : (((d.unit1MaxGuests ?? 0) + (d.unit2MaxGuests ?? 0)) || totalBr * 2);
