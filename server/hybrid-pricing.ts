@@ -19,6 +19,8 @@ export type HybridMonthScannedEvent = {
   checkOut: string;
   medianNightly: number;
   sampleCount: number;
+  confidence?: MarketRateConfidence;
+  pricingRecipe?: MarketRatePricingRecipe;
 };
 
 const hybridPricingCancelledError = () => Object.assign(new Error("Cancelled by operator"), { cancelled: true });
@@ -100,6 +102,8 @@ export type HybridMonthlyRate = {
   demandClass: HybridDemandClass;
   seasonTierId: string;
   seasonTierLabel: string;
+  confidence?: MarketRateConfidence;
+  evidence?: MarketRateEvidence;
   channels: { airbnb: number | null; vrbo: null; booking: null; pm: null };
   hybrid: {
     baseAirbnbMedian: number;
@@ -121,6 +125,56 @@ export const HYBRID_PRICING_CONFIG = loadConfig();
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MARKET_PRICING_PERCENTILE = 40;
+
+export type MarketRatePricingRecipe = {
+  community: string;
+  searchName: string;
+  source: "searchapi-airbnb";
+  percentileBasis: number;
+  unitCount: number;
+  searchedBedrooms: number[];
+  stayNights: number;
+  querySet: string[];
+};
+
+export type MarketRateCandidateEvidence = {
+  page: number;
+  position: number;
+  title: string | null;
+  url: string | null;
+  nightly: number | null;
+  bedrooms: number | null;
+  communityMatched?: boolean;
+  accepted: boolean;
+  reason: string;
+};
+
+export type MarketRateEvidence = {
+  searchedAt: string;
+  query: string;
+  checkIn: string;
+  checkOut: string;
+  nights: number;
+  requestedBedrooms: number;
+  totalCandidates: number;
+  acceptedCandidates: number;
+  rejectedCandidates: number;
+  acceptedPreview: MarketRateCandidateEvidence[];
+  rejectedPreview: MarketRateCandidateEvidence[];
+  rejectCounts: Record<string, number>;
+  searchContract: Record<string, string>;
+};
+
+export type MarketRateConfidence = {
+  score: number;
+  level: "green" | "yellow" | "red";
+  summary: string;
+  reasons: string[];
+  sampleCount: number;
+  acceptedCandidates: number;
+  rejectedCandidates: number;
+  percentileBasis: number;
+};
 
 function dateOnly(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -294,14 +348,85 @@ function nightlyRateFromListing(candidate: any, nights: number): number | null {
   return null;
 }
 
+function listingTitle(candidate: any): string | null {
+  const value = candidate?.title ?? candidate?.name ?? candidate?.listing_name ?? candidate?.property_name;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function listingUrl(candidate: any): string | null {
+  const value = candidate?.link ?? candidate?.url ?? candidate?.listing_url ?? candidate?.property_url;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function parsedListingBedrooms(candidate: any): number | null {
+  if (typeof candidate?.bedrooms === "number" && Number.isFinite(candidate.bedrooms)) return candidate.bedrooms;
+  const parsed = extractBedroomsFromListing(candidate);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function listingTextMatchesCommunity(candidate: any, community: string, query: string): boolean {
+  const haystack = [
+    listingTitle(candidate),
+    listingUrl(candidate),
+    candidate?.location,
+    candidate?.address,
+    candidate?.snippet,
+  ].filter(Boolean).join(" ").toLowerCase();
+  const tokens = Array.from(new Set([...community.split(/\W+/), ...query.split(/\W+/)]
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length >= 4 && !/hawaii|florida|condo|villa|rental|airbnb/.test(token))));
+  return tokens.length > 0 && tokens.some((token) => haystack.includes(token));
+}
+
 function listingMatchesBedrooms(candidate: any, bedrooms: number): boolean {
-  const parsed = typeof candidate?.bedrooms === "number" && Number.isFinite(candidate.bedrooms)
-    ? candidate.bedrooms
-    : extractBedroomsFromListing(candidate);
+  const parsed = parsedListingBedrooms(candidate);
   // SearchAPI already filters by bedrooms= — when the engine omits BR in the
   // payload, trust the query rather than dropping every priced listing.
-  if (Number.isNaN(parsed)) return true;
+  if (parsed == null) return true;
   return parsed === bedrooms;
+}
+
+function previewPush<T>(items: T[], item: T, limit = 5): void {
+  if (items.length < limit) items.push(item);
+}
+
+function scoreMarketRateConfidence(args: {
+  evidence: MarketRateEvidence;
+  basis: ReturnType<typeof marketPricingBasis>;
+  hasLocationConstraint: boolean;
+}): MarketRateConfidence {
+  const { evidence, basis, hasLocationConstraint } = args;
+  const accepted = evidence.acceptedCandidates;
+  const exactParsed = evidence.acceptedPreview.filter((candidate) => candidate.bedrooms === evidence.requestedBedrooms).length;
+  const unknownParsed = evidence.acceptedPreview.filter((candidate) => candidate.bedrooms == null).length;
+  const communityMatches = evidence.acceptedPreview.filter((candidate) => candidate.communityMatched).length;
+  const sampleScore = accepted >= 12 ? 35 : accepted >= 8 ? 30 : accepted >= 5 ? 24 : accepted >= 3 ? 16 : accepted > 0 ? 8 : 0;
+  const queryScore = evidence.query.trim() ? 15 : 0;
+  const locationScore = hasLocationConstraint ? 15 : 8;
+  const bedroomScore = exactParsed > 0 || unknownParsed > 0 ? 20 : 12;
+  const communityScore = communityMatches > 0 ? 10 : 4;
+  const basisSpread = basis.percentile && basis.median ? Math.abs(basis.median - basis.percentile) / Math.max(1, basis.median) : 0;
+  const dispersionScore = basisSpread <= 0.2 ? 10 : basisSpread <= 0.35 ? 6 : 2;
+  const rejectionPenalty = evidence.rejectedCandidates > accepted * 3 ? 8 : evidence.rejectedCandidates > accepted * 2 ? 4 : 0;
+  const score = Math.max(0, Math.min(100, sampleScore + queryScore + locationScore + bedroomScore + communityScore + dispersionScore - rejectionPenalty));
+  const level: MarketRateConfidence["level"] = score >= 90 ? "green" : score >= 75 ? "yellow" : "red";
+  const reasons = [
+    `${accepted} accepted exact-${evidence.requestedBedrooms}BR candidate${accepted === 1 ? "" : "s"}`,
+    hasLocationConstraint ? "geo-constrained SearchAPI query" : "no configured geo constraint",
+    communityMatches > 0 ? `${communityMatches} preview candidate community text match${communityMatches === 1 ? "" : "es"}` : "community match inferred from query/location only",
+    `basis p${MARKET_PRICING_PERCENTILE}${basis.median != null ? `, median $${basis.median}` : ""}`,
+  ];
+  if (evidence.rejectedCandidates > 0) reasons.push(`${evidence.rejectedCandidates} rejected by existing filters`);
+  return {
+    score,
+    level,
+    summary: `${score}% ${level} confidence`,
+    reasons,
+    sampleCount: accepted,
+    acceptedCandidates: accepted,
+    rejectedCandidates: evidence.rejectedCandidates,
+    percentileBasis: MARKET_PRICING_PERCENTILE,
+  };
 }
 
 export function isSearchApiAirbnbNoResultsError(error: unknown): boolean {
@@ -324,7 +449,7 @@ export function curatedAirbnbSearchQueries(community: string, hint?: string): st
     community,
     hint?.trim() || null,
   ].filter((q): q is string => !!q);
-  return [...new Set(ordered)];
+  return Array.from(new Set(ordered));
 }
 
 async function fetchAirbnbMedianNightlyForQuery(args: {
@@ -335,7 +460,7 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
   query: string;
   apiKey: string;
   nights: number;
-}): Promise<{ rates: number[]; noResultsError: string | null }> {
+}): Promise<{ rates: number[]; evidence: MarketRateEvidence; confidence: MarketRateConfidence | null; noResultsError: string | null }> {
   const location = BUY_IN_MARKET_LOCATIONS[args.community];
   const bounds = BUY_IN_MARKET_BOUNDS[args.community];
   const params: Record<string, string> = {
@@ -361,21 +486,74 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
   const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
   if (!response.ok) throw new Error(`SearchAPI Airbnb HTTP ${response.status}`);
   const data = await response.json() as any;
+  const evidence: MarketRateEvidence = {
+    searchedAt: new Date().toISOString(),
+    query: args.query,
+    checkIn: args.checkIn,
+    checkOut: args.checkOut,
+    nights: args.nights,
+    requestedBedrooms: args.bedrooms,
+    totalCandidates: Array.isArray(data?.properties) ? data.properties.length : 0,
+    acceptedCandidates: 0,
+    rejectedCandidates: 0,
+    acceptedPreview: [],
+    rejectedPreview: [],
+    rejectCounts: {},
+    searchContract: Object.fromEntries(
+      Object.entries(params)
+        .filter(([key]) => key !== "api_key")
+        .map(([key, value]) => [key, String(value)]),
+    ),
+  };
   if (data?.error) {
     const message = `SearchAPI Airbnb: ${data.error}`;
     if (isSearchApiAirbnbNoResultsError(message)) {
-      return { rates: [], noResultsError: message };
+      return { rates: [], evidence, confidence: null, noResultsError: message };
     }
     throw new Error(message);
   }
   const rates: number[] = [];
-  for (const candidate of Array.isArray(data?.properties) ? data.properties : []) {
-    if (!listingMatchesBedrooms(candidate, args.bedrooms)) continue;
+  for (const [index, candidate] of (Array.isArray(data?.properties) ? data.properties : []).entries()) {
+    const parsedBedrooms = parsedListingBedrooms(candidate);
+    const baseEvidence = {
+      page: 1,
+      position: index + 1,
+      title: listingTitle(candidate),
+      url: listingUrl(candidate),
+      bedrooms: parsedBedrooms,
+      communityMatched: listingTextMatchesCommunity(candidate, args.community, args.query),
+    };
+    if (!listingMatchesBedrooms(candidate, args.bedrooms)) {
+      evidence.rejectedCandidates += 1;
+      evidence.rejectCounts.bedrooms = (evidence.rejectCounts.bedrooms || 0) + 1;
+      previewPush(evidence.rejectedPreview, { ...baseEvidence, nightly: null, accepted: false, reason: "bedroom mismatch" });
+      continue;
+    }
     const nightly = nightlyRateFromListing(candidate, args.nights);
-    if (nightly == null || nightly < 50 || nightly > 3000) continue;
+    if (nightly == null || nightly < 50 || nightly > 3000) {
+      evidence.rejectedCandidates += 1;
+      const reason = nightly == null ? "missing nightly rate" : "nightly outlier";
+      evidence.rejectCounts[reason] = (evidence.rejectCounts[reason] || 0) + 1;
+      previewPush(evidence.rejectedPreview, { ...baseEvidence, nightly, accepted: false, reason });
+      continue;
+    }
     rates.push(nightly);
+    evidence.acceptedCandidates += 1;
+    previewPush(evidence.acceptedPreview, { ...baseEvidence, nightly, accepted: true, reason: "accepted by existing filters" });
   }
-  return { rates, noResultsError: null };
+  const basis = marketPricingBasis(rates);
+  return {
+    rates,
+    evidence,
+    confidence: rates.length > 0
+      ? scoreMarketRateConfidence({
+        evidence,
+        basis,
+        hasLocationConstraint: Boolean((location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) || bounds),
+      })
+      : null,
+    noResultsError: null,
+  };
 }
 
 export async function fetchAirbnbMedianNightly(args: {
@@ -384,7 +562,7 @@ export async function fetchAirbnbMedianNightly(args: {
   checkIn: string;
   checkOut: string;
   searchName?: string;
-}): Promise<{ medianNightly: number | null; sampleCount: number; notes: string[] }> {
+}): Promise<{ medianNightly: number | null; sampleCount: number; notes: string[]; evidence?: MarketRateEvidence; confidence?: MarketRateConfidence }> {
   const apiKey = process.env.SEARCHAPI_API_KEY;
   if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
   const nights = nightsBetween(args.checkIn, args.checkOut);
@@ -393,7 +571,7 @@ export async function fetchAirbnbMedianNightly(args: {
   let lastNoResults: string | null = null;
 
   for (const query of queries) {
-    const { rates, noResultsError } = await fetchAirbnbMedianNightlyForQuery({
+    const { rates, evidence, confidence, noResultsError } = await fetchAirbnbMedianNightlyForQuery({
       community: args.community,
       bedrooms: args.bedrooms,
       checkIn: args.checkIn,
@@ -412,8 +590,10 @@ export async function fetchAirbnbMedianNightly(args: {
       return {
         medianNightly: basis.basis,
         sampleCount: rates.length,
+        evidence,
+        confidence: confidence ?? undefined,
         notes: [
-          `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}"; ${marketPricingBasisNotes(basis)}.`,
+          `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}"; ${marketPricingBasisNotes(basis)}; confidence ${confidence?.score ?? 0}%.`,
         ],
       };
     }
@@ -544,6 +724,28 @@ function seasonalBasisSummary(
   return { lowBasis, highBasis, holidayBasis, missing };
 }
 
+function summarizeMarketRateConfidence(confidences: MarketRateConfidence[]): MarketRateConfidence | null {
+  if (confidences.length === 0) return null;
+  const score = Math.round(confidences.reduce((sum, confidence) => sum + confidence.score, 0) / confidences.length);
+  const level: MarketRateConfidence["level"] = score >= 90 ? "green" : score >= 75 ? "yellow" : "red";
+  const acceptedCandidates = confidences.reduce((sum, confidence) => sum + confidence.acceptedCandidates, 0);
+  const rejectedCandidates = confidences.reduce((sum, confidence) => sum + confidence.rejectedCandidates, 0);
+  return {
+    score,
+    level,
+    summary: `${score}% ${level} confidence across ${confidences.length} monthly scan${confidences.length === 1 ? "" : "s"}`,
+    reasons: [
+      `${acceptedCandidates} accepted candidates across ${confidences.length} month${confidences.length === 1 ? "" : "s"}`,
+      `${rejectedCandidates} rejected by existing filters`,
+      `rate basis is p${MARKET_PRICING_PERCENTILE}`,
+    ],
+    sampleCount: acceptedCandidates,
+    acceptedCandidates,
+    rejectedCandidates,
+    percentileBasis: MARKET_PRICING_PERCENTILE,
+  };
+}
+
 export async function refreshHybridPricingForTarget(args: {
   propertyId: number;
   propertyName: string;
@@ -567,12 +769,23 @@ export async function refreshHybridPricingForTarget(args: {
   const bedroomCounts = Array.from(new Set(args.bedroomCounts))
     .filter((bedrooms) => Number.isFinite(bedrooms) && bedrooms > 0)
     .sort((a, b) => a - b);
+  const pricingRecipe: MarketRatePricingRecipe = {
+    community: args.community,
+    searchName,
+    source: "searchapi-airbnb",
+    percentileBasis: MARKET_PRICING_PERCENTILE,
+    unitCount: args.unitCount,
+    searchedBedrooms: bedroomCounts,
+    stayNights: HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights,
+    querySet: searchQueries,
+  };
 
   for (const bedrooms of bedroomCounts) {
     if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
     const previous = (await storage.getPropertyMarketRates(args.propertyId)).find((r) => r.bedrooms === bedrooms);
     const monthlyRates: Record<string, HybridMonthlyRate> = {};
     const seasonalMedians: Record<LegacySeason, number[]> = { LOW: [], HIGH: [], HOLIDAY: [] };
+    const monthlyConfidences: MarketRateConfidence[] = [];
     let totalSamples = 0;
     const horizonMonths = HYBRID_PRICING_CONFIG.scanSettings.horizonMonths;
     const stayNights = HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights;
@@ -610,6 +823,7 @@ export async function refreshHybridPricingForTarget(args: {
       const basis = airbnb.medianNightly;
       const season = getSeasonForMonth(window.yearMonth, pricingRegion);
       const tier = resolveSeasonTier(window.checkIn);
+      if (airbnb.confidence) monthlyConfidences.push(airbnb.confidence);
       totalSamples += airbnb.sampleCount;
       seasonalMedians[legacySeasonForDemandClass(tier.demandClass)].push(basis);
       monthlyRates[window.yearMonth] = {
@@ -622,6 +836,8 @@ export async function refreshHybridPricingForTarget(args: {
         demandClass: tier.demandClass,
         seasonTierId: tier.id,
         seasonTierLabel: tier.label,
+        confidence: airbnb.confidence,
+        evidence: airbnb.evidence,
         channels: { airbnb: basis, vrbo: null, booking: null, pm: null },
         hybrid: {
           baseAirbnbMedian: basis,
@@ -648,6 +864,10 @@ export async function refreshHybridPricingForTarget(args: {
         checkOut: window.checkOut,
         medianNightly: basis,
         sampleCount: airbnb.sampleCount,
+        confidence: airbnb.confidence,
+        acceptedCandidates: airbnb.evidence?.acceptedCandidates,
+        rejectedCandidates: airbnb.evidence?.rejectedCandidates,
+        searchQuery: airbnb.evidence?.query,
         calendarSeason: season,
         demandClass: tier.demandClass,
       }));
@@ -661,6 +881,8 @@ export async function refreshHybridPricingForTarget(args: {
         checkOut: window.checkOut,
         medianNightly: basis,
         sampleCount: airbnb.sampleCount,
+        confidence: airbnb.confidence,
+        pricingRecipe,
       });
       await sleep(HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs);
     }
@@ -682,6 +904,7 @@ export async function refreshHybridPricingForTarget(args: {
     }
     const monthlyValues = Object.values(monthlyRates).map((rate) => rate.medianNightly);
     const scannedMonths = Object.keys(monthlyRates).sort();
+    const confidenceSummary = summarizeMarketRateConfidence(monthlyConfidences);
     if (scannedMonths.length !== horizonMonths) {
       await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
       throw new Error(
@@ -712,8 +935,13 @@ export async function refreshHybridPricingForTarget(args: {
       notes: [
         args.notes || `SearchAPI Airbnb monthly ${MARKET_PRICING_PERCENTILE}th percentile bases saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.`,
         `Scanned ${scannedMonths.length} calendar months (${scannedMonths[0]} through ${scannedMonths[scannedMonths.length - 1]}).`,
+        confidenceSummary ? `Confidence: ${confidenceSummary.summary}.` : "Confidence: not enough evidence to score.",
       ].join(" "),
-      layersJson: [],
+      layersJson: [{
+        type: "market-rate-confidence",
+        pricingRecipe,
+        confidenceSummary,
+      }],
       calendarJson: monthlyRates,
     }));
     console.info("[hybrid-pricing] applied raw Airbnb monthly percentile bases", JSON.stringify({
@@ -725,6 +953,8 @@ export async function refreshHybridPricingForTarget(args: {
       source: "airbnb",
       searchName,
       unitCount: args.unitCount,
+      pricingRecipe,
+      confidenceSummary,
       sampleCount: totalSamples,
       low: {
         basis: lowBasis,

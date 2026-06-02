@@ -1077,6 +1077,10 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       horizonMonths: event.horizonMonths,
       bedrooms: event.bedrooms,
       lastMedianNightly: event.medianNightly,
+      confidence: event.confidence,
+      pricingRecipe: event.pricingRecipe,
+      acceptedCandidates: event.confidence?.acceptedCandidates,
+      rejectedCandidates: event.confidence?.rejectedCandidates,
     };
     item.heartbeatAt = Date.now();
     await persistBulkPricingJob(job);
@@ -1091,17 +1095,21 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       onMonthScanned,
       shouldCancel,
     });
+  const confidenceSummary = summarizeMarketRateProgressConfidence(pricingResult.rows);
+  const pricingRecipe = (item.progress as any)?.pricingRecipe ?? null;
   item.progress = {
     phase: "searchapi-airbnb",
     percent: 80,
     label: `SearchAPI Airbnb monthly pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
     rows: pricingResult.rows.length,
+    confidence: confidenceSummary,
+    pricingRecipe,
   };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
   await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb monthly pricing completed for ${item.label}`, {
     itemKey: item.id,
-    meta: { propertyId: item.propertyId, rows: pricingResult.rows.length },
+    meta: { propertyId: item.propertyId, rows: pricingResult.rows.length, confidence: confidenceSummary, pricingRecipe },
   });
 
   const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
@@ -1123,11 +1131,13 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       phase: "pushing-guesty",
       percent: 90,
       label: `Market rates saved; Guesty push failed and will be retried: ${reason}`,
+      confidence: confidenceSummary,
+      pricingRecipe,
     };
     await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-failed", `Guesty pricing push failed for ${item.label}: ${reason}`, {
       itemKey: item.id,
       level: "error",
-      meta: { propertyId: item.propertyId, reason },
+      meta: { propertyId: item.propertyId, reason, confidence: confidenceSummary, pricingRecipe },
     });
     item.heartbeatAt = Date.now();
     await persistBulkPricingJob(job);
@@ -1139,11 +1149,13 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       percent: 100,
       label: `Market rates saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`,
       guestyPush,
+      confidence: confidenceSummary,
+      pricingRecipe,
     };
     await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-skipped", `Guesty pricing push skipped for ${item.label}: ${guestyPush.reason ?? "not mapped"}`, {
       itemKey: item.id,
       level: "warn",
-      meta: { propertyId: item.propertyId, guestyPush },
+      meta: { propertyId: item.propertyId, guestyPush, confidence: confidenceSummary, pricingRecipe },
     });
   } else {
     item.progress = {
@@ -1151,6 +1163,8 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       percent: 100,
       label: `Market rates saved and marked-up Guesty base rates pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
       guestyPush,
+      confidence: confidenceSummary,
+      pricingRecipe,
     };
     await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed marked-up Guesty base rates for ${item.label}`, {
       itemKey: item.id,
@@ -1160,6 +1174,8 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
         targetMargin: guestyPush.targetMargin,
         pushedDays: guestyPush.seasonal?.pushedDays,
         pushedRanges: guestyPush.seasonal?.pushedRanges,
+        confidence: confidenceSummary,
+        pricingRecipe,
       },
     });
   }
@@ -4202,6 +4218,38 @@ function unitSlotsForCommunityDraft(draft: any, sourceListingId?: string): Array
     community,
     adHoc: true,
   }));
+}
+
+function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unknown> | null {
+  const confidences: Array<{ score: number; level?: string; acceptedCandidates?: number; rejectedCandidates?: number; sampleCount?: number }> = [];
+  for (const row of rows) {
+    const monthlyRates = row?.monthlyRates;
+    if (!monthlyRates || typeof monthlyRates !== "object" || Array.isArray(monthlyRates)) continue;
+    for (const payload of Object.values(monthlyRates as Record<string, any>)) {
+      const confidence = payload?.confidence;
+      if (!confidence || typeof confidence !== "object") continue;
+      const score = Number(confidence.score);
+      if (!Number.isFinite(score)) continue;
+      confidences.push({
+        score,
+        level: typeof confidence.level === "string" ? confidence.level : undefined,
+        acceptedCandidates: Number(confidence.acceptedCandidates) || 0,
+        rejectedCandidates: Number(confidence.rejectedCandidates) || 0,
+        sampleCount: Number(confidence.sampleCount) || 0,
+      });
+    }
+  }
+  if (confidences.length === 0) return null;
+  const score = Math.round(confidences.reduce((sum, confidence) => sum + confidence.score, 0) / confidences.length);
+  const level = score >= 90 ? "green" : score >= 75 ? "yellow" : "red";
+  return {
+    score,
+    level,
+    summary: `${score}% ${level} confidence across ${confidences.length} monthly scans`,
+    acceptedCandidates: confidences.reduce((sum, confidence) => sum + (confidence.acceptedCandidates || 0), 0),
+    rejectedCandidates: confidences.reduce((sum, confidence) => sum + (confidence.rejectedCandidates || 0), 0),
+    sampleCount: confidences.reduce((sum, confidence) => sum + (confidence.sampleCount || 0), 0),
+  };
 }
 
 function positiveDraftInteger(value: unknown): number | null {

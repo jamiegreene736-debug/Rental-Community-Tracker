@@ -71,6 +71,7 @@ import { useToast } from "@/hooks/use-toast";
 import { extractBRList } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
 import { apiRequest } from "@/lib/queryClient";
+import { cn } from "@/lib/utils";
 import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { usePortalSession } from "@/lib/auth";
@@ -161,6 +162,25 @@ type BulkPricingJob = {
       error?: string;
       daemonOnline?: boolean;
       daemonLastPollAgeMs?: number | null;
+      confidence?: {
+        score?: number;
+        level?: "green" | "yellow" | "red";
+        summary?: string;
+        acceptedCandidates?: number;
+        rejectedCandidates?: number;
+        sampleCount?: number;
+      } | null;
+      pricingRecipe?: {
+        community?: string;
+        searchName?: string;
+        percentileBasis?: number;
+        unitCount?: number;
+        searchedBedrooms?: number[];
+        stayNights?: number;
+        source?: string;
+      } | null;
+      acceptedCandidates?: number;
+      rejectedCandidates?: number;
     } | null;
     error: string | null;
   }>;
@@ -2056,6 +2076,22 @@ function AdminDashboard() {
     if (!Number.isFinite(ms)) return "—";
     return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   };
+  const formatPricingRecipe = (recipe?: NonNullable<BulkPricingJob["items"][number]["progress"]>["pricingRecipe"]) => {
+    if (!recipe) return null;
+    const searched = Array.isArray(recipe.searchedBedrooms) && recipe.searchedBedrooms.length > 0
+      ? recipe.searchedBedrooms.map((br) => `${br}BR`).join(", ")
+      : "unknown BR";
+    const unitCount = Number(recipe.unitCount) > 1 ? `${recipe.unitCount} units` : "single unit";
+    const percentile = recipe.percentileBasis ? `p${recipe.percentileBasis}` : "p40";
+    const nights = recipe.stayNights ? `${recipe.stayNights}-night` : "7-night";
+    return `${recipe.community || recipe.searchName || "Market"} · ${unitCount} · searching ${searched} · ${nights} ${percentile}`;
+  };
+  const confidenceTone = (level?: string) => (
+    level === "green" ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+    : level === "yellow" ? "border-amber-200 bg-amber-50 text-amber-700"
+    : level === "red" ? "border-red-200 bg-red-50 text-red-700"
+    : "border-slate-200 bg-slate-50 text-slate-600"
+  );
   useEffect(() => {
     const validIds = new Set(allProperties.filter(isBulkPricingSelectable).map((property) => property.id));
     setSelectedPricingIds((prev) => {
@@ -3055,6 +3091,9 @@ function AdminDashboard() {
                               : item.status === "running" ? "bg-blue-50 text-blue-700 border-blue-200"
                               : "bg-amber-50 text-amber-700 border-amber-200";
                             const percent = typeof item.progress?.percent === "number" ? Math.max(0, Math.min(100, item.progress.percent)) : 0;
+                            const recipeLabel = formatPricingRecipe(item.progress?.pricingRecipe);
+                            const confidence = item.progress?.confidence;
+                            const confidenceScore = typeof confidence?.score === "number" ? Math.round(confidence.score) : null;
                             return (
                               <div key={`${item.propertyId}-${index}`} className="border-b px-3 py-3 last:border-b-0">
                                 <div className="flex items-start justify-between gap-3">
@@ -3066,6 +3105,30 @@ function AdminDashboard() {
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
                                     </p>
+                                    {(recipeLabel || confidenceScore != null) && (
+                                      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                        {recipeLabel && (
+                                          <span className="max-w-full truncate rounded border bg-muted/40 px-2 py-0.5 text-muted-foreground" title={recipeLabel}>
+                                            {recipeLabel}
+                                          </span>
+                                        )}
+                                        {confidenceScore != null && (
+                                          <span className={cn("rounded border px-2 py-0.5 font-medium", confidenceTone(confidence?.level))} title={confidence?.summary}>
+                                            Confidence {confidenceScore}%
+                                          </span>
+                                        )}
+                                        {typeof confidence?.acceptedCandidates === "number" && (
+                                          <span className="rounded border bg-background px-2 py-0.5 text-muted-foreground">
+                                            {confidence.acceptedCandidates} accepted
+                                          </span>
+                                        )}
+                                        {typeof confidence?.rejectedCandidates === "number" && confidence.rejectedCandidates > 0 && (
+                                          <span className="rounded border bg-background px-2 py-0.5 text-muted-foreground">
+                                            {confidence.rejectedCandidates} rejected
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
                                   </div>
                                   <Badge variant="outline" className={`shrink-0 capitalize ${statusTone}`}>
                                     {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
