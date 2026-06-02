@@ -211,6 +211,7 @@ type OtaVisibilityJob = {
   message: string;
   createdAt: string;
   updatedAt: string;
+  searchedAt: string | null;
   completedAt: string | null;
   guestyListingId: string | null;
   checkIn: string | null;
@@ -227,6 +228,7 @@ type OtaVisibilityJob = {
   candidatesChecked: number;
   bestCandidate: OtaVisibilityCandidate | null;
   candidates: OtaVisibilityCandidate[];
+  positionLog: string[];
   sidecarReason: string | null;
   durationMs: number | null;
   error: string | null;
@@ -16665,10 +16667,12 @@ export async function registerRoutes(
       const searchUrl = job.platform === "booking"
         ? bookingVisibilitySearchUrl(searchTerm, window.checkIn, window.checkOut)
         : vrboVisibilitySearchUrl(searchTerm, window.checkIn, window.checkOut);
+      const searchedAt = new Date().toISOString();
 
       touchOtaVisibilityJob(job, {
         guestyListingId,
         publicUrl,
+        searchedAt,
         checkIn: window.checkIn,
         checkOut: window.checkOut,
         nights: window.nights,
@@ -16676,6 +16680,11 @@ export async function registerRoutes(
         searchUrl,
         message: `Searching ${job.platform === "booking" ? "Booking.com" : "VRBO"} for ${window.checkIn} to ${window.checkOut}...`,
       });
+      console.log(
+        `[ota-visibility] start property=${property.propertyId} platform=${job.platform} ` +
+        `searchedAt=${searchedAt} dates=${window.checkIn}->${window.checkOut} ` +
+        `nights=${window.nights} searchTerm="${searchTerm}" searchUrl="${searchUrl}"`,
+      );
 
       const queueContext = {
         scanLabel: `${job.platform === "booking" ? "Booking.com" : "VRBO"} visibility check`,
@@ -16721,6 +16730,21 @@ export async function registerRoutes(
         .sort((a, b) => b.score - a.score || a.position - b.position);
       const bestCandidate = candidates[0] ?? null;
       const found = !!bestCandidate && bestCandidate.score >= 70;
+      const positionLog = candidates
+        .slice()
+        .sort((a, b) => a.page - b.page || a.position - b.position)
+        .slice(0, 25)
+        .map((candidate) => (
+          `page ${candidate.page} pos ${candidate.position}: score ${candidate.score} ` +
+          `${candidate.title} (${candidate.reason})`
+        ));
+      console.log(
+        `[ota-visibility] done property=${property.propertyId} platform=${job.platform} ` +
+        `status=${found ? "found" : "not_found"} searchedAt=${searchedAt} ` +
+        `dates=${window.checkIn}->${window.checkOut} checked=${rawCandidates.length} ` +
+        `foundPage=${found ? bestCandidate.page : "-"} foundPosition=${found ? bestCandidate.position : "-"} ` +
+        `foundUrl="${found ? bestCandidate.url : ""}" positions=${JSON.stringify(positionLog.slice(0, 10))}`,
+      );
       touchOtaVisibilityJob(job, {
         status: found ? "found" : "not_found",
         message: found
@@ -16735,6 +16759,7 @@ export async function registerRoutes(
         candidatesChecked: rawCandidates.length,
         bestCandidate,
         candidates: candidates.slice(0, 10),
+        positionLog,
         sidecarReason: sidecar?.reason ?? null,
         durationMs: Date.now() - startedAt,
       });
@@ -16779,6 +16804,7 @@ export async function registerRoutes(
       createdAt: now,
       updatedAt: now,
       completedAt: null,
+      searchedAt: null,
       guestyListingId: null,
       checkIn: null,
       checkOut: null,
@@ -16794,6 +16820,7 @@ export async function registerRoutes(
       candidatesChecked: 0,
       bestCandidate: null,
       candidates: [],
+      positionLog: [],
       sidecarReason: null,
       durationMs: null,
       error: null,

@@ -247,6 +247,7 @@ type OtaVisibilityJob = {
   status: OtaVisibilityStatus;
   message: string;
   updatedAt: string;
+  searchedAt: string | null;
   completedAt: string | null;
   checkIn: string | null;
   checkOut: string | null;
@@ -268,6 +269,15 @@ type OtaVisibilityJob = {
     position: number;
     page: number;
   } | null;
+  candidates: Array<{
+    title: string;
+    url: string;
+    score: number;
+    reason: string;
+    position: number;
+    page: number;
+  }>;
+  positionLog: string[];
   sidecarReason: string | null;
   durationMs: number | null;
   error: string | null;
@@ -338,7 +348,11 @@ function OtaVisibilityCard({
         </Button>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+      <div className="mt-4 grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs">
+        <div className="rounded-md bg-muted/40 px-3 py-2">
+          <p className="text-muted-foreground">Searched at</p>
+          <p className="font-medium">{formatVisibilityDate(job?.searchedAt ?? null)}</p>
+        </div>
         <div className="rounded-md bg-muted/40 px-3 py-2">
           <p className="text-muted-foreground">Last update</p>
           <p className="font-medium">{formatVisibilityDate(job?.updatedAt ?? null)}</p>
@@ -386,6 +400,18 @@ function OtaVisibilityCard({
             )}
           </div>
           {job.sidecarReason && <p className="text-[11px] text-muted-foreground">Sidecar: {job.sidecarReason}</p>}
+          {job.positionLog?.length > 0 && (
+            <div className="rounded-md border bg-muted/20 p-2">
+              <p className="mb-1 text-xs font-medium">Result position log</p>
+              <div className="space-y-1">
+                {job.positionLog.slice(0, 6).map((line, index) => (
+                  <p key={`${job.id}-position-${index}`} className="text-[11px] text-muted-foreground">
+                    {line}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
           {job.error && <p className="text-xs text-red-700">{job.error}</p>}
         </div>
       )}
