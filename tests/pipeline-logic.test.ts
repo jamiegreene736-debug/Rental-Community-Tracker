@@ -1476,6 +1476,10 @@ assert.ok(
   "Guesty seasonal calendar pushes should retry throttled calendar writes instead of firing all ranges in a tight loop",
 );
 assert.ok(
+  routeSource.includes("status === 403"),
+  "Guesty seasonal calendar pushes should retry transient mid-stream 403 calendar writes before failing the item",
+);
+assert.ok(
   routeSource.includes("Pushed ${pushedRanges}/${ranges.length} ranges; first failed range"),
   "Guesty seasonal calendar pushes should surface partial range failures instead of reporting them as completed",
 );

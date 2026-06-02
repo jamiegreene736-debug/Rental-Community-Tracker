@@ -1379,7 +1379,7 @@ function isImgBbRateLimit(status: number, body: string): boolean {
 function isGuestyCalendarRetryableError(error: any): boolean {
   const status = Number(error?.status ?? 0);
   const message = error?.message ? String(error.message) : String(error || "");
-  return status === 429 || status >= 500 || /429|too many requests|rate.?limit|temporar|timeout|ECONNRESET|ETIMEDOUT/i.test(message);
+  return status === 403 || status === 429 || status >= 500 || /403|forbidden err|429|too many requests|rate.?limit|temporar|timeout|ECONNRESET|ETIMEDOUT/i.test(message);
 }
 
 function isGuestyCalendarRateLimitError(error: any): boolean {
