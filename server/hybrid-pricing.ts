@@ -4,7 +4,7 @@ import path from "node:path";
 import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS } from "@shared/buy-in-market";
 import { getCommunityRegion, getSeasonForMonth } from "@shared/pricing-rates";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
-import { extractBedroomsFromListing, fetchAmortizedNightlyByBR } from "./community-research";
+import { extractBedroomsFromListing } from "./community-research";
 
 export type HybridDemandClass = "standard" | "high" | "peak" | "ultra";
 export type HybridTriggerType = "Weekly Automated Scan" | "Manual Update" | "Admin Backfill";
@@ -121,7 +121,6 @@ export const HYBRID_PRICING_CONFIG = loadConfig();
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MARKET_PRICING_PERCENTILE = 40;
-const MIN_PERCENTILE_TO_MEDIAN_RATIO = 0.70;
 
 function dateOnly(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -244,22 +243,18 @@ function nearestRankPercentile(values: number[], percentile: number): number | n
   return Math.round(clean[index]);
 }
 
-function marketPricingBasis(values: number[]): { basis: number | null; percentile: number | null; median: number | null; floorApplied: boolean } {
+function marketPricingBasis(values: number[]): { basis: number | null; percentile: number | null; median: number | null } {
   const percentile = nearestRankPercentile(values, MARKET_PRICING_PERCENTILE);
   const median = nearestRankPercentile(values, 50);
-  if (percentile == null || median == null) return { basis: null, percentile, median, floorApplied: false };
-  const medianFloor = Math.round(median * MIN_PERCENTILE_TO_MEDIAN_RATIO);
-  if (percentile < medianFloor) {
-    return { basis: medianFloor, percentile, median, floorApplied: true };
-  }
-  return { basis: percentile, percentile, median, floorApplied: false };
+  if (percentile == null || median == null) return { basis: null, percentile, median };
+  return { basis: percentile, percentile, median };
 }
 
 function marketPricingBasisNotes(stats: ReturnType<typeof marketPricingBasis>): string {
-  if (stats.floorApplied && stats.percentile != null && stats.median != null) {
-    return `using guarded ${MARKET_PRICING_PERCENTILE}th percentile basis $${stats.basis} (raw P${MARKET_PRICING_PERCENTILE} $${stats.percentile}; median $${stats.median})`;
+  if (stats.percentile != null && stats.median != null) {
+    return `using raw ${MARKET_PRICING_PERCENTILE}th percentile basis $${stats.basis} (median $${stats.median})`;
   }
-  return `using ${MARKET_PRICING_PERCENTILE}th percentile basis`;
+  return `using raw ${MARKET_PRICING_PERCENTILE}th percentile basis`;
 }
 
 function summarizeMonthlyHybridRates(monthlyRates: Record<string, HybridMonthlyRate>) {
@@ -294,8 +289,6 @@ function priceNumber(value: unknown): number {
 }
 
 function nightlyRateFromListing(candidate: any, nights: number): number | null {
-  const perQualifier = Math.round(priceNumber(candidate?.price?.extracted_price_per_qualifier));
-  if (perQualifier > 0) return perQualifier;
   const total = Math.round(priceNumber(candidate?.price?.extracted_total_price));
   if (total > 0) return Math.round(total / nights);
   return null;
@@ -425,35 +418,6 @@ export async function fetchAirbnbMedianNightly(args: {
       };
     }
     notes.push(`q="${query}" returned 0 usable exact-${args.bedrooms}BR priced samples`);
-  }
-
-  const location = BUY_IN_MARKET_LOCATIONS[args.community];
-  if (location) {
-    const amortized = await fetchAmortizedNightlyByBR(
-      location.searchName,
-      location.city,
-      location.state,
-      location.streetAddress,
-      { lat: location.lat, lng: location.lng },
-      { checkIn: args.checkIn, checkOut: args.checkOut },
-      { bedrooms: args.bedrooms, bboxScale: 2 },
-    );
-    const brRates = amortized.ratesByBR[args.bedrooms] ?? [];
-    if (brRates.length > 0) {
-      const basis = marketPricingBasis(brRates);
-      return {
-        medianNightly: basis.basis,
-        sampleCount: brRates.length,
-        notes: [
-          `SearchAPI amortized path returned ${brRates.length} exact-${args.bedrooms}BR sample(s) for ${location.searchName}; ${marketPricingBasisNotes(basis)}.`,
-        ],
-      };
-    }
-    if (amortized.drops?.engineCount) {
-      notes.push(
-        `amortized geo fallback saw ${amortized.drops.engineCount} engine listing(s) but 0 priced ${args.bedrooms}BR`,
-      );
-    }
   }
 
   if (lastNoResults) {

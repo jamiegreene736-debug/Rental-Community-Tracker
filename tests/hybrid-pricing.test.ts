@@ -176,8 +176,8 @@ try {
     checkIn: "2026-06-01",
     checkOut: "2026-06-08",
   });
-  assert.equal(poipuBasis.medianNightly, 250);
-  assert.equal(poipuBasis.sampleCount, 3);
+  assert.equal(poipuBasis.medianNightly, 400);
+  assert.equal(poipuBasis.sampleCount, 2);
   assert.equal(requestedSearchApiUrls.length, 1);
   const params = new URL(requestedSearchApiUrls[0]).searchParams;
   assert.equal(params.get("engine"), "airbnb");
@@ -219,17 +219,24 @@ assert.ok(
   hybridPricingSource.includes("scannedMonths.length !== horizonMonths"),
   "market-rate refresh must fail when fewer than horizonMonths monthly bases were stored",
 );
-assert.ok(
+assert.equal(
   hybridPricingSource.includes("fetchAmortizedNightlyByBR("),
-  "market-rate refresh should fall back to the amortized geo Airbnb path when direct queries are empty",
+  false,
+  "market-rate refresh must not fall back to amortized geo pricing when a monthly Airbnb SearchAPI query is empty",
 );
 assert.ok(
   hybridPricingSource.includes("MARKET_PRICING_PERCENTILE = 40"),
   "market pricing should use the 40th percentile basis",
 );
-assert.ok(
-  hybridPricingSource.includes("MIN_PERCENTILE_TO_MEDIAN_RATIO = 0.70"),
-  "percentile market pricing should be guarded against low outlier clusters",
+assert.equal(
+  hybridPricingSource.includes("MIN_PERCENTILE_TO_MEDIAN_RATIO"),
+  false,
+  "market pricing must use the raw P40 basis without a median-floor backup",
+);
+assert.equal(
+  hybridPricingSource.includes("extracted_price_per_qualifier"),
+  false,
+  "market pricing must use all-inclusive checkout totals, not per-night display prices",
 );
 assert.equal(
   hybridPricingSource.includes("staticFallbackMonthlyRates"),

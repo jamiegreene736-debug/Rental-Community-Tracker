@@ -388,14 +388,7 @@ export function getBuyInRate(
       if (yearMonth) {
         const monthly = getLiveMonthlyBuyIn(propertyId, bedrooms, yearMonth);
         if (monthly != null) {
-          const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
-          return clampSuspiciousAirbnbBuyInRate({
-            community,
-            bedrooms,
-            rate: monthly,
-            source: live.source,
-            season: season ?? getSeasonForMonth(yearMonth, region),
-          });
+          return monthly;
         }
       }
       const normalized = normalizeSeasonalBasis(

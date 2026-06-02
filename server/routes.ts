@@ -811,19 +811,11 @@ function marketRateBasisForMonth(args: {
   season: SeasonType;
   row?: Awaited<ReturnType<typeof storage.getPropertyMarketRates>>[number] | null;
 }): number | null {
-  const { community, bedrooms, yearMonth, season, row } = args;
+  const { yearMonth, row } = args;
   const monthly = row?.monthlyRates && typeof row.monthlyRates === "object"
     ? parsePositivePricingRate((row.monthlyRates as Record<string, any>)[yearMonth]?.medianNightly)
     : null;
-  if (monthly == null) return null;
-
-  return clampSuspiciousAirbnbBuyInRate({
-    community,
-    bedrooms,
-    rate: monthly,
-    source: typeof row?.source === "string" ? row.source : null,
-    season,
-  });
+  return monthly == null ? null : Math.round(monthly);
 }
 
 async function buildBulkGuestySeasonalPlan(
@@ -32192,6 +32184,7 @@ Return ONLY compact JSON with this exact shape:
           for (const [yearMonth, payload] of Object.entries(monthlyRates as Record<string, any>)) {
             const value = parsePositiveRate((payload as any)?.medianNightly);
             if (value == null) continue;
+            if (rate?.source === "airbnb" && (payload as any)?.hybrid?.baseAirbnbMedian != null) continue;
             const clamped = clampSuspiciousAirbnbBuyInRate({
               community,
               bedrooms,

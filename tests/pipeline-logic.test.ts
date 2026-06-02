@@ -640,10 +640,10 @@ setLivePropertyMarketRates([{
 }]);
 assert.equal(
   getBuyInRate("Pili Mai", 3, 900002, "LOW", "2026-09"),
-  532,
-  "inflated Airbnb-only component medians should fall back to the calibrated static basis",
+  1900,
+  "monthly SearchAPI Airbnb medians should not fall back to the calibrated static basis",
 );
-console.log("  ✓ suspicious Airbnb-only component medians are capped");
+console.log("  ✓ monthly SearchAPI Airbnb medians bypass static fallback caps");
 
 // suggestPricingArea: a Kissimmee draft named "Caribe Cove" should
 // resolve to "Caribe Cove" via the new community-name match — not to
