@@ -311,16 +311,16 @@ function paymentLineLabel(item: any): string {
 function compactCommunityName(name: string): string {
   const trimmed = name.trim();
   const known: Record<string, string> = {
-    "Regency at Poipu Kai": "Regency Poipu",
-    "Mauna Kai Princeville": "Mauna Kai",
+    "Regency at Poipu Kai": "Regency at Poipu Kai",
+    "Mauna Kai Princeville": "Mauna Kai Princeville",
     "Kaha Lani Resort": "Kaha Lani",
-    "Makahuena at Poipu": "Makahuena",
-    "Kaiulani of Princeville": "Kaiulani",
+    "Makahuena at Poipu": "Makahuena at Poipu",
+    "Kaiulani of Princeville": "Kaiulani of Princeville",
   };
   if (known[trimmed]) return known[trimmed];
   const withoutSuffix = trimmed.replace(/\s+(Resort|Villas?|Condos?|Townhomes?)$/i, "").trim();
-  if (withoutSuffix.length <= 18) return withoutSuffix;
-  return withoutSuffix.split(/\s+/).slice(0, 3).join(" ");
+  if (withoutSuffix.length <= 28) return withoutSuffix;
+  return withoutSuffix.split(/\s+/).slice(0, 4).join(" ");
 }
 
 function normalizeCommunityUnitCountKey(name: string): string {
@@ -3333,6 +3333,22 @@ function AdminDashboard() {
           </div>
           <div className="overflow-hidden [&>div]:overflow-hidden">
           <Table id="list-properties" className="w-full table-fixed" style={{ minWidth: 0 }}>
+            <colgroup>
+              <col style={{ width: "2.2%" }} />
+              <col style={{ width: "5.5%" }} />
+              <col style={{ width: "2.1%" }} />
+              <col style={{ width: "1.8%" }} />
+              <col style={{ width: "6.5%" }} />
+              <col style={{ width: "7.5%" }} />
+              <col style={{ width: "13%" }} />
+              <col style={{ width: "32.8%" }} />
+              <col style={{ width: "6%" }} />
+              <col style={{ width: "6.8%" }} />
+              <col style={{ width: "5.2%" }} />
+              <col style={{ width: "3.2%" }} />
+              <col style={{ width: "4.2%" }} />
+              <col style={{ width: "3.2%" }} />
+            </colgroup>
             <TableHeader>
               <TableRow>
                 <TableHead className="w-[30px] text-center px-1">
@@ -3350,11 +3366,11 @@ function AdminDashboard() {
                     {allVisibleBulkPricingSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
                   </Button>
                 </TableHead>
-                <TableHead className="w-[64px] sticky left-0 bg-background z-10">Actions</TableHead>
+                <TableHead className="w-[78px] sticky left-0 bg-background z-10">Actions</TableHead>
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
-                <TableHead className="w-[72px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[110px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
+                <TableHead className="w-[86px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
+                <TableHead className="w-[112px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
                   <div className="flex items-center justify-center gap-1">
                     <span>Photos</span>
                     <Button
@@ -3372,7 +3388,7 @@ function AdminDashboard() {
                     </Button>
                   </div>
                 </TableHead>
-                <TableHead className="w-[158px] max-w-[158px] px-1">
+                <TableHead className="w-[190px] max-w-[190px] px-1">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3385,7 +3401,7 @@ function AdminDashboard() {
                     <SortIcon field="name" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[124px] px-1">
+                <TableHead className="w-[274px] px-1">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3398,7 +3414,7 @@ function AdminDashboard() {
                     <SortIcon field="community" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[82px] px-0.5" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
+                <TableHead className="w-[92px] px-0.5" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3411,7 +3427,7 @@ function AdminDashboard() {
                     <SortIcon field="minimumStay" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-right w-[78px] px-0.5">
+                <TableHead className="text-right w-[88px] px-0.5">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3424,7 +3440,7 @@ function AdminDashboard() {
                     <SortIcon field="baseRate" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[58px] px-0.5">
+                <TableHead className="w-[72px] px-0.5">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3760,7 +3776,7 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
-                  <TableCell className="max-w-[158px] px-1 py-2">
+                  <TableCell className="max-w-[190px] px-1 py-2">
                     <div className="min-w-0">
                       <span className="font-medium text-sm leading-tight block truncate" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`} title={property.name}>
                         {property.name}
@@ -3771,7 +3787,7 @@ function AdminDashboard() {
                   <TableCell className="px-1 py-2">
                     <Badge
                       variant={communityVariant(property.pricingArea)}
-                      className="no-default-hover-elevate no-default-active-elevate block max-w-[114px] truncate text-xs"
+                      className="no-default-hover-elevate no-default-active-elevate flex w-full max-w-full justify-start truncate text-xs"
                       data-testid={`badge-community-${property.id}`}
                       title={property.community}
                     >
