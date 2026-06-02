@@ -16997,37 +16997,58 @@ export async function registerRoutes(
   const bookingRuleReadbackSummary = (terms: Record<string, any>) => ({
     minNights: firstFiniteNumber(terms.minNights, terms.minimumNights, terms.minLOS, terms.minimumStay),
     maxNights: firstFiniteNumber(terms.maxNights, terms.maximumNights, terms.maxLOS, terms.maximumStay),
-    advanceNotice: firstFiniteNumber(
-      terms.advanceNotice,
-      terms.advanceNoticeHours,
-      terms.advanceNoticeInHours,
-      terms.minAdvanceNotice,
-      terms.minAdvanceNoticeHours,
-      terms.minimumAdvanceNotice,
-      terms.minimumAdvanceNoticeHours,
-      terms.bookingLeadTime,
-      terms.bookingLeadTimeHours,
-      terms.advanceNoticeDays,
-    ),
-    preparationTime: firstFiniteNumber(
-      terms.preparationTime,
-      terms.prepTime,
-      terms.preparationDays,
-      terms.turnoverDays,
-      terms.cleaningDays,
-      terms.bufferDays,
-    ),
     instantBooking: typeof terms.instantBooking === "boolean" ? terms.instantBooking : null,
     cancellationPolicy: typeof terms.cancellationPolicy === "string" ? terms.cancellationPolicy : null,
   });
 
-  const verifyGuestyBookingTerms = (terms: Record<string, any>, rules: ReturnType<typeof normalizeBuilderBookingRules>) => {
+  const bookingRuleAvailabilitySummary = (settings: Record<string, any>) => {
+    const rules = settings.calendarRules && typeof settings.calendarRules === "object"
+      ? settings.calendarRules
+      : settings;
+    const advanceNotice = rules.advanceNotice && typeof rules.advanceNotice === "object"
+      ? rules.advanceNotice
+      : {};
+    const preparationTime = rules.preparationTime && typeof rules.preparationTime === "object"
+      ? rules.preparationTime
+      : {};
+    const advanceDefaults = advanceNotice.defaultSettings && typeof advanceNotice.defaultSettings === "object"
+      ? advanceNotice.defaultSettings
+      : {};
+    const prepDefaults = preparationTime.defaultSettings && typeof preparationTime.defaultSettings === "object"
+      ? preparationTime.defaultSettings
+      : {};
+
+    return {
+      advanceNotice: firstFiniteNumber(
+        advanceDefaults.hours,
+        advanceNotice.hours,
+        advanceDefaults.days,
+        advanceNotice.days,
+      ),
+      preparationTime: firstFiniteNumber(
+        prepDefaults.days,
+        preparationTime.days,
+      ),
+      preparationWhen: typeof prepDefaults.when === "string"
+        ? prepDefaults.when
+        : typeof preparationTime.when === "string"
+          ? preparationTime.when
+          : null,
+    };
+  };
+
+  const verifyGuestyBookingRules = (
+    terms: Record<string, any>,
+    availabilitySettings: Record<string, any>,
+    rules: ReturnType<typeof normalizeBuilderBookingRules>,
+  ) => {
     const mismatches: string[] = [];
-    const readback = bookingRuleReadbackSummary(terms);
-    if (readback.minNights !== rules.minNights) mismatches.push("min nights");
-    if (readback.maxNights !== rules.maxNights) mismatches.push("max nights");
-    if (readback.advanceNotice !== rules.advanceNotice * 24 && readback.advanceNotice !== rules.advanceNotice) mismatches.push("advance notice");
-    if (readback.preparationTime !== rules.preparationTime) mismatches.push("prep days");
+    const termsReadback = bookingRuleReadbackSummary(terms);
+    const availabilityReadback = bookingRuleAvailabilitySummary(availabilitySettings);
+    if (termsReadback.minNights !== rules.minNights) mismatches.push("min nights");
+    if (termsReadback.maxNights !== rules.maxNights) mismatches.push("max nights");
+    if (availabilityReadback.advanceNotice !== rules.advanceNotice * 24 && availabilityReadback.advanceNotice !== rules.advanceNotice) mismatches.push("advance notice");
+    if (availabilityReadback.preparationTime !== rules.preparationTime) mismatches.push("prep days");
     if (typeof terms.instantBooking === "boolean" && terms.instantBooking !== rules.instantBooking) mismatches.push("instant booking");
     const policy = String(terms.cancellationPolicy ?? "");
     if (policy && policy !== rules.cancellationPolicies.airbnb) mismatches.push("Airbnb/top-level cancellation policy");
@@ -17056,19 +17077,37 @@ export async function registerRoutes(
       maxNights: rules.maxNights,
       cancellationPolicy: rules.cancellationPolicies.airbnb,
       instantBooking: rules.instantBooking,
-      advanceNotice: rules.advanceNotice * 24,
-      preparationTime: rules.preparationTime,
+    };
+    const availabilitySettings = {
+      calendarRules: {
+        advanceNotice: {
+          defaultSettings: {
+            hours: rules.advanceNotice * 24,
+          },
+        },
+        preparationTime: {
+          defaultSettings: {
+            days: rules.preparationTime,
+            when: "AFTER",
+          },
+        },
+      },
     };
 
     try {
       await guestyRequest("PUT", `/listings/${encodeURIComponent(listingId)}`, { terms });
+      let availabilityReadback = await guestyRequest(
+        "PUT",
+        `/listings/${encodeURIComponent(listingId)}/availability-settings`,
+        availabilitySettings,
+      ) as Record<string, any>;
 
       let readback: Record<string, any> = {};
       let mismatches: string[] = [];
       for (let attempt = 0; attempt < 3; attempt++) {
         if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
         readback = await readGuestyTerms(listingId);
-        mismatches = verifyGuestyBookingTerms(readback, rules);
+        mismatches = verifyGuestyBookingRules(readback, availabilityReadback, rules);
         if (mismatches.length === 0) break;
       }
 
@@ -17087,7 +17126,10 @@ export async function registerRoutes(
           advanceNoticeHours: rules.advanceNotice * 24,
           preparationTime: rules.preparationTime,
         },
-        readback: bookingRuleReadbackSummary(readback),
+        readback: {
+          terms: bookingRuleReadbackSummary(readback),
+          availabilitySettings: bookingRuleAvailabilitySummary(availabilityReadback),
+        },
         mismatches,
       });
 
@@ -17109,6 +17151,7 @@ export async function registerRoutes(
         success: mismatches.length === 0,
         rules: row,
         guestyTerms: readback,
+        guestyAvailabilitySettings: availabilityReadback,
         mismatches,
         summary,
       });
