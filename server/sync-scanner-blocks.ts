@@ -1,18 +1,9 @@
-// Calendar-block sync helper.
+// Legacy scanner block cleanup helper.
 //
-// Two callers:
-//   1. POST /api/availability/sync-blocks/:propertyId — operator
-//      manually clicks the "Sync blocks" button in the Availability
-//      tab. Sends an explicit windows[] payload.
-//   2. server/availability-scanner.ts — after a full scan completes,
-//      auto-publishes blocks for any property the scanner flagged as
-//      below-threshold. Reads the run's scan rows directly from
-//      storage and constructs the windows[] internally.
-//
-// Both paths converge here so the Guesty PUT logic + DB block-tracking
-// stay in one place. Only blocks with `source: "nexstay-scanner"` are
-// created/removed; human-placed blocks from other sources are never
-// touched.
+// Availability now protects near-term/critical windows by raising rates,
+// not by creating unavailable Guesty blocks. This module remains as the
+// single cleanup path for old scanner-created blocks. Only rows tracked in
+// scanner_blocks are cleared; human-placed Guesty blocks are never touched.
 
 import { storage } from "./storage";
 import { guestyRequest } from "./guesty-sync";
@@ -39,24 +30,6 @@ export type SyncResult = {
   reason?: string;
 };
 
-function dateMs(value: string): number {
-  return new Date(`${value}T12:00:00Z`).getTime();
-}
-
-function rangesOverlap(
-  a: { startDate: string; endDate: string },
-  b: { startDate: string; endDate: string },
-): boolean {
-  return dateMs(a.startDate) < dateMs(b.endDate) && dateMs(b.startDate) < dateMs(a.endDate);
-}
-
-function rangeCovers(
-  outer: { startDate: string; endDate: string },
-  inner: { startDate: string; endDate: string },
-): boolean {
-  return dateMs(outer.startDate) <= dateMs(inner.startDate) && dateMs(outer.endDate) >= dateMs(inner.endDate);
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -81,8 +54,12 @@ async function guestyCalendarPutWithRetry(
 
 export async function syncScannerBlocksForProperty(
   propertyId: number,
-  windows: SyncWindow[],
+  _windows: SyncWindow[],
 ): Promise<SyncResult> {
+  return clearScannerBlocksForProperty(propertyId);
+}
+
+export async function clearScannerBlocksForProperty(propertyId: number): Promise<SyncResult> {
   const guestyListingId = await storage.getGuestyListingId(propertyId);
   if (!guestyListingId) {
     return {
@@ -98,31 +75,11 @@ export async function syncScannerBlocksForProperty(
   }
 
   const active = await storage.getActiveScannerBlocks(propertyId);
-  const desiredBlocks = new Set(
-    windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`),
-  );
-  const desiredBlockWindows = windows.filter((w) => w.verdict === "blocked");
-  const clearableWindowList = windows.filter((w) => w.verdict === "available" || w.verdict === "tight");
-  const clearableWindows = new Set(
-    clearableWindowList.map((w) => `${w.startDate}:${w.endDate}`),
-  );
-
-  let created = 0;
   let removed = 0;
   const failures: SyncResult["failures"] = [];
   const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
 
-  // Clear stale scanner-created blocks first. If an old block overlaps a
-  // desired policy block but does not exactly match it, remove it and let the
-  // create phase write the exact replacement range. This keeps the calendar
-  // from accumulating legacy scanner blackout bands after policy changes.
   for (const b of active) {
-    const key = `${b.startDate}:${b.endDate}`;
-    if (desiredBlocks.has(key)) continue;
-    const overlapsKnownWindow =
-      desiredBlockWindows.some((w) => rangesOverlap(b, w)) ||
-      clearableWindowList.some((w) => rangesOverlap(b, w));
-    if (!clearableWindows.has(key) && !overlapsKnownWindow) continue;
     try {
       await guestyCalendarPutWithRetry(calPath, {
         startDate: b.startDate,
@@ -137,50 +94,13 @@ export async function syncScannerBlocksForProperty(
     }
   }
 
-  const remainingActive = await storage.getActiveScannerBlocks(propertyId);
-  const activeKeyed = new Map(remainingActive.map((b) => [`${b.startDate}:${b.endDate}`, b]));
-
-  // Block new windows via calendar PUT.
-  for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
-    const key = `${w.startDate}:${w.endDate}`;
-    if (activeKeyed.has(key)) continue;
-    try {
-      const reason = w.reason
-        ?? (w.maxSets != null && w.minSets != null
-          ? `low-inventory: ${w.maxSets} / ${w.minSets} sets`
-          : "below threshold");
-      const resp = await guestyCalendarPutWithRetry(calPath, {
-        startDate: w.startDate,
-        endDate: w.endDate,
-        status: "unavailable",
-        note: `nexstay-scanner: ${reason}`,
-      }) as any;
-      const createdBlocksArr = resp?.data?.blocks?.createdBlocks
-        ?? resp?.blocks?.createdBlocks
-        ?? [];
-      const guestyBlockId = createdBlocksArr[0]?._id ?? createdBlocksArr[0]?.id ?? null;
-      await storage.createScannerBlock({
-        propertyId,
-        guestyListingId,
-        startDate: w.startDate,
-        endDate: w.endDate,
-        guestyBlockId,
-        reason,
-      });
-      created++;
-      await sleep(750);
-    } catch (e: any) {
-      failures.push({ action: "create", startDate: w.startDate, error: e?.message ?? String(e) });
-    }
-  }
-
   return {
     success: failures.length === 0,
     propertyId,
     guestyListingId,
-    created,
+    created: 0,
     removed,
-    unchanged: Math.max(0, remainingActive.length - created),
+    unchanged: Math.max(0, active.length - removed),
     failures,
   };
 }

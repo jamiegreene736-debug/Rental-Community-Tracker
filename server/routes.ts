@@ -126,7 +126,17 @@ import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage,
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
-import { runFullScanForProperty, runFullScanNow, runLeadTimePolicySyncForProperty, getScannerSchedulerStatus, getAvailabilitySchedulerUnsupportedReason, resolveAvailabilityPropertyConfig } from "./availability-scheduler";
+import {
+  DEFAULT_CRITICAL_SCARCITY_MARKUP,
+  DEFAULT_TIGHT_SCARCITY_MARKUP,
+  demandFactorForAvailabilityVerdict,
+  runFullScanForProperty,
+  runFullScanNow,
+  runLeadTimePolicySyncForProperty,
+  getScannerSchedulerStatus,
+  getAvailabilitySchedulerUnsupportedReason,
+  resolveAvailabilityPropertyConfig,
+} from "./availability-scheduler";
 import {
   aggregateSeasonalCandidates,
   availabilityWindowCountForWeeks,
@@ -17266,18 +17276,17 @@ export async function registerRoutes(
   // ===========================================================
   //
   // The dashboard's Availability tab uses fixed lead-time policy for
-  // booking safety. It no longer blackouts from live OTA inventory scans:
+  // booking safety. It raises prices for critical windows instead of
+  // blacking them out:
   // standard arrivals need 45 days, high season 75, major holidays 90,
   // and ultra-peak arrivals 120.
   //
   // Two endpoints:
   //   GET  /api/availability/scan/:propertyId         streams per-window verdicts
-  //   POST /api/availability/sync-blocks/:propertyId  diffs scan vs DB-tracked
-  //                                                    blocks and writes to Guesty
+  //   POST /api/availability/sync-blocks/:propertyId  legacy cleanup endpoint
   //
-  // Guesty blocking uses calendar PUT with status: "unavailable".
-  // Scanner-placed blocks are tracked in the DB so the diff step never
-  // touches blocks placed by humans or other integrations.
+  // Scanner-placed blocks are tracked in the DB so cleanup never touches
+  // blocks placed by humans or other integrations.
 
   app.get("/api/availability/scan/:propertyId", async (req: Request, res: Response) => {
     const propertyId = parseInt(req.params.propertyId, 10);
@@ -17428,7 +17437,7 @@ export async function registerRoutes(
           const { syncScannerBlocksForProperty } = await import("./sync-scanner-blocks");
           const syncResult = await syncScannerBlocksForProperty(propertyId, syncWindows);
           emit({
-            type: "sync-blocks",
+            type: "legacy-block-cleanup",
             result: syncResult,
             syncedAt: new Date().toISOString(),
             blockedWindows: syncWindows
@@ -17436,7 +17445,7 @@ export async function registerRoutes(
               .map((w) => ({ startDate: w.startDate, endDate: w.endDate })),
           });
         } catch (e: any) {
-          emit({ type: "sync-blocks", error: e?.message ?? String(e), syncedAt: new Date().toISOString() });
+          emit({ type: "legacy-block-cleanup", error: e?.message ?? String(e), syncedAt: new Date().toISOString() });
         }
         emit({
           type: "done",
@@ -17546,18 +17555,10 @@ export async function registerRoutes(
 
   // POST /api/availability/sync-blocks/:propertyId
   //
-  // Reads the client's scan results (array of windows with verdicts),
-  // diffs against the DB-tracked blocks we previously placed, and writes
-  // the delta to Guesty's calendar:
-  //
-  //   New blocked windows → PUT /availability-pricing/api/calendar/listings/{id}
-  //                         with { startDate, endDate, status: "unavailable" }
-  //   Previously-blocked windows now open/tight → same path with status: "available"
-  //
-  // (Confirmed by probe — the legacy POST /blocks path returns 404; the
-  // calendar PUT with a status field is the working approach.)
-  // Only touches blocks where `source = "nexstay-scanner"`. Human-placed
-  // blocks from other tools are never modified.
+  // Legacy cleanup endpoint. It accepts the old windows payload for
+  // compatibility but now only clears scanner-created blocks by marking those
+  // tracked ranges available in Guesty. It never creates new unavailable
+  // blocks and never touches human-placed blocks.
   app.post("/api/availability/sync-blocks/:propertyId", async (req: Request, res: Response) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
@@ -21224,6 +21225,8 @@ Return ONLY compact JSON with this exact shape:
     const body = req.body as Partial<{
       enabled: boolean; intervalHours: number; runInventory: boolean; runPricing: boolean;
       runSyncBlocks: boolean; targetMargin: number; minSets: number;
+      tightMarkup: number; criticalMarkup: number;
+      standardLeadDays: number; highSeasonLeadDays: number; majorHolidayLeadDays: number; ultraPeakLeadDays: number;
     }>;
     const existing = await storage.getScannerSchedule(propertyId);
     const row = await storage.upsertScannerSchedule({
@@ -21232,9 +21235,15 @@ Return ONLY compact JSON with this exact shape:
       intervalHours: body.intervalHours ?? existing?.intervalHours ?? 24,
       runInventory: body.runInventory ?? existing?.runInventory ?? true,
       runPricing: body.runPricing ?? existing?.runPricing ?? true,
-      runSyncBlocks: body.runSyncBlocks ?? existing?.runSyncBlocks ?? true,
+      runSyncBlocks: body.runSyncBlocks ?? existing?.runSyncBlocks ?? false,
       targetMargin: String(body.targetMargin ?? (existing ? parseFloat(String(existing.targetMargin)) : 0.2)),
       minSets: body.minSets ?? existing?.minSets ?? 3,
+      tightMarkup: String(body.tightMarkup ?? (existing?.tightMarkup != null ? parseFloat(String(existing.tightMarkup)) : DEFAULT_TIGHT_SCARCITY_MARKUP)),
+      criticalMarkup: String(body.criticalMarkup ?? (existing?.criticalMarkup != null ? parseFloat(String(existing.criticalMarkup)) : DEFAULT_CRITICAL_SCARCITY_MARKUP)),
+      standardLeadDays: body.standardLeadDays ?? existing?.standardLeadDays ?? 45,
+      highSeasonLeadDays: body.highSeasonLeadDays ?? existing?.highSeasonLeadDays ?? 75,
+      majorHolidayLeadDays: body.majorHolidayLeadDays ?? existing?.majorHolidayLeadDays ?? 90,
+      ultraPeakLeadDays: body.ultraPeakLeadDays ?? existing?.ultraPeakLeadDays ?? 120,
     });
     res.json({ schedule: row });
   });
@@ -21253,8 +21262,7 @@ Return ONLY compact JSON with this exact shape:
   // GET /api/availability/scanner-blocks/:propertyId — returns the active
   // (non-removed) blocks the scanner has pushed to Guesty for the given
   // property. The availability-scheduler summary reports aggregate counts
-  // (e.g. "blocks +2/-1"); this endpoint surfaces the actual date ranges
-  // so the UI can list which weeks got blocked.
+  // so the UI can list any old scanner-created ranges still pending cleanup.
   app.get("/api/availability/scanner-blocks/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
@@ -21279,7 +21287,7 @@ Return ONLY compact JSON with this exact shape:
   //
   // Formula:
   //   baseNightly     = sum over units of the saved all-in buy-in basis for this month/season
-  //   demandFactor    = tight → 1.12  |  open → 1.00  |  blocked → 0 (skipped)
+  //   demandFactor    = tight → 1.12  |  open → 1.00  |  blocked → 1.40
   //   targetRate      = round(baseNightly × demandFactor × (1 + margin) / (1 - 0.03))
   //   deltaVsBase     = (targetRate - baseOnlyRate) / baseOnlyRate
   //
@@ -21295,11 +21303,15 @@ Return ONLY compact JSON with this exact shape:
     const body = (req.body ?? {}) as {
       windows?: Array<{ startDate: string; endDate: string; verdict: "open" | "tight" | "blocked" }>;
       targetMargin?: number;
+      tightMarkup?: number;
+      criticalMarkup?: number;
     };
     const windows = body.windows ?? [];
     if (windows.length === 0) return res.status(400).json({ error: "windows required — run scan first" });
     const { totalNightlyBuyInForMonth } = await import("@shared/pricing-rates");
     const targetMargin = typeof body.targetMargin === "number" ? body.targetMargin : 0.20;
+    const tightMarkup = typeof body.tightMarkup === "number" ? body.tightMarkup : DEFAULT_TIGHT_SCARCITY_MARKUP;
+    const criticalMarkup = typeof body.criticalMarkup === "number" ? body.criticalMarkup : DEFAULT_CRITICAL_SCARCITY_MARKUP;
     const feeDirect = 0.03;
     // Cache baseNightly per month-key so we only look it up once per month.
     const baseByMonth = new Map<string, number>();
@@ -21310,11 +21322,9 @@ Return ONLY compact JSON with this exact shape:
         baseNightly = totalNightlyBuyInForMonth(config.community, config.units, monthKey, propertyId);
         baseByMonth.set(monthKey, baseNightly);
       }
-      const demandFactor = w.verdict === "tight" ? 1.12 : w.verdict === "blocked" ? 0 : 1.00;
+      const demandFactor = demandFactorForAvailabilityVerdict(w.verdict, { tightMarkup, criticalMarkup });
       const baseOnlyRate = Math.round(baseNightly * (1 + targetMargin) / (1 - feeDirect));
-      const targetRate = demandFactor > 0
-        ? Math.round(baseNightly * demandFactor * (1 + targetMargin) / (1 - feeDirect))
-        : 0;
+      const targetRate = Math.round(baseNightly * demandFactor * (1 + targetMargin) / (1 - feeDirect));
       const deltaVsBase = baseOnlyRate > 0 && targetRate > 0
         ? (targetRate - baseOnlyRate) / baseOnlyRate
         : 0;
@@ -21332,6 +21342,8 @@ Return ONLY compact JSON with this exact shape:
     res.json({
       community: config.community,
       targetMargin,
+      tightMarkup,
+      criticalMarkup,
       feeDirect,
       rows,
     });
@@ -21339,8 +21351,8 @@ Return ONLY compact JSON with this exact shape:
 
   // Push the weekly rate ranges to Guesty's calendar. Body: the same
   // shape the weekly-pricing endpoint returns (so the client can send
-  // exactly what it's displaying). Skips weeks where verdict=blocked
-  // (those get blocked, not re-priced).
+  // exactly what it's displaying). Critical windows are pushed as higher
+  // rates instead of being blacked out.
   app.post("/api/availability/sync-weekly-rates/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
@@ -21350,7 +21362,7 @@ Return ONLY compact JSON with this exact shape:
     const body = (req.body ?? {}) as {
       rows?: Array<{ startDate: string; endDate: string; targetRate: number; verdict: string }>;
     };
-    const rows = (body.rows ?? []).filter((r) => r.verdict !== "blocked" && r.targetRate > 0);
+    const rows = (body.rows ?? []).filter((r) => r.targetRate > 0);
     const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
     let pushed = 0;
     const failures: Array<{ startDate: string; error: string }> = [];

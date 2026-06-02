@@ -1013,11 +1013,10 @@ export const guestyTokenCache = pgTable("guesty_token_cache", {
 });
 export type GuestyTokenCache = typeof guestyTokenCache.$inferSelect;
 
-// ── Scanner-placed Guesty calendar blocks ──
-// Records every block the inventory scanner pushes to Guesty so a later
-// scan can REMOVE only the blocks WE placed when inventory recovers,
-// without touching blocks placed by humans / other tools. The scanner
-// re-runs nightly and uses this table to diff desired vs. actual blocks.
+// ── Legacy scanner-placed Guesty calendar blocks ──
+// Records every block the inventory scanner pushed to Guesty so cleanup can
+// REMOVE only the blocks WE placed, without touching blocks placed by humans
+// or other tools.
 export const scannerBlocks = pgTable("scanner_blocks", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull(),
@@ -1036,15 +1035,14 @@ export type ScannerBlock = typeof scannerBlocks.$inferSelect;
 export type InsertScannerBlock = typeof scannerBlocks.$inferInsert;
 
 // ── Per-window manual overrides ──
-// Users can force a window to be open or blocked regardless of what the
-// scanner found. One row per (propertyId, startDate); the scanner reads
-// these before deciding to push/clear blocks.
+// Users can force a window to be normal-priced or critical-priced regardless
+// of the policy result. One row per (propertyId, startDate).
 export const scannerOverrides = pgTable("scanner_overrides", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull(),
   startDate: date("start_date").notNull(),
   endDate: date("end_date").notNull(),
-  // "force-open" → never block this range; "force-block" → always block it
+  // "force-open" → normal pricing; "force-block" → critical scarcity pricing.
   mode: text("mode").notNull(),
   note: text("note"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -1053,9 +1051,9 @@ export type ScannerOverride = typeof scannerOverrides.$inferSelect;
 export type InsertScannerOverride = typeof scannerOverrides.$inferInsert;
 
 // ── Per-listing scheduler rows (Phase 4) ──
-// One row per Guesty-mapped property that the inventory scanner should
-// keep refreshing on its own. The server-side tick reads this table
-// every few minutes and kicks off jobs for whichever rows are past due.
+// One row per Guesty-mapped property that the availability pricing scheduler
+// should keep refreshing on its own. The server-side tick reads this table
+// every few minutes and runs due rows once per Eastern day after 1 AM.
 export const scannerSchedule = pgTable("scanner_schedule", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull(),
@@ -1065,13 +1063,16 @@ export const scannerSchedule = pgTable("scanner_schedule", {
   // off while keeping inventory-check on (or vice versa).
   runInventory: boolean("run_inventory").notNull().default(true),
   runPricing: boolean("run_pricing").notNull().default(true),
-  runSyncBlocks: boolean("run_sync_blocks").notNull().default(true),
-  // User's target margin for the inventory-driven pricing push.
+  runSyncBlocks: boolean("run_sync_blocks").notNull().default(false),
+  // User's target margin for the pricing push.
   targetMargin: numeric("target_margin", { precision: 5, scale: 4 }).notNull().default("0.2000"),
   // Minimum sets floor the run uses when deciding blocks.
   minSets: integer("min_sets").notNull().default(3),
-  // Per-property lead-time safety policy (pure calendar blackouts, independent of inventory).
-  // These drive the automatic "45/75/90/120 days out" blocks the cron can apply.
+  // Scarcity markups layered on policy windows instead of blacking them out.
+  tightMarkup: numeric("tight_markup", { precision: 5, scale: 4 }).notNull().default("0.1200"),
+  criticalMarkup: numeric("critical_markup", { precision: 5, scale: 4 }).notNull().default("0.4000"),
+  // Per-property lead-time safety policy (pure calendar pricing, independent of inventory).
+  // These drive the automatic "45/75/90/120 days out" critical price bands.
   standardLeadDays: integer("standard_lead_days").notNull().default(45),
   highSeasonLeadDays: integer("high_season_lead_days").notNull().default(75),
   majorHolidayLeadDays: integer("major_holiday_lead_days").notNull().default(90),

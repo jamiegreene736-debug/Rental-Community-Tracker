@@ -1,8 +1,8 @@
-// Per-listing availability scanner scheduler (Phase 4).
+// Per-listing availability pricing scheduler (Phase 4).
 //
-// Every few minutes, walk the scanner_schedule table and run the full
-// pipeline (inventory → pricing → block sync → rate push) for any rows
-// whose `lastRunAt` is older than their configured `intervalHours`.
+// Every few minutes, walk the scanner_schedule table and run the pricing
+// policy once per Eastern day after 1 AM. The scheduler no longer creates
+// Guesty unavailable blocks; near-term/critical windows receive scarcity pricing.
 //
 // The pipeline reuses the same in-process helpers and Guesty writers
 // as the manual endpoints — no HTTP round-trips. Failures on any one
@@ -13,9 +13,6 @@ import { guestyRequest } from "./guesty-sync";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import {
   totalNightlyBuyInForMonth,
-  computeChannelMarkups,
-  CHANNEL_TO_GUESTY_KEY,
-  type ChannelKey,
 } from "@shared/pricing-rates";
 import {
   countAirbnbCandidates,
@@ -35,6 +32,19 @@ import {
 } from "./seasonal-availability";
 import { getPropertyUnits } from "@shared/property-units";
 import { applyAirbnbBiasAndCombo } from "@shared/pricing-rates";
+import { clearScannerBlocksForProperty } from "./sync-scanner-blocks";
+import {
+  DEFAULT_CRITICAL_SCARCITY_MARKUP,
+  DEFAULT_TIGHT_SCARCITY_MARKUP,
+  demandFactorForAvailabilityVerdict,
+  isDueForPolicyPass,
+} from "./availability-policy";
+export {
+  DEFAULT_CRITICAL_SCARCITY_MARKUP,
+  DEFAULT_TIGHT_SCARCITY_MARKUP,
+  demandFactorForAvailabilityVerdict,
+  isDueForPolicyPass,
+} from "./availability-policy";
 
 const TICK_MS = 10 * 60 * 1000; // every 10 min
 
@@ -46,8 +56,8 @@ export function getScannerSchedulerStatus() {
   return { lastTickAt: _lastTickAt, running: _tickRunning };
 }
 
-// Pure calendar lead-time safety policy (independent of inventory counts).
-// Generates blocked weeks for the next N weeks based on days-until-arrival
+// Pure calendar lead-time scarcity policy (independent of inventory counts).
+// Generates critical weeks for the next N weeks based on days-until-arrival
 // vs the season band (standard 45 / high 75 / holiday 90 / ultra 120).
 function computePureLeadTimePolicyBlocks(
   today: Date,
@@ -77,14 +87,14 @@ function computePureLeadTimePolicyBlocks(
       now: today,
     });
 
-    if (policy.shouldBlock) {
+    const effectiveLead = policy.band === "ultraPeak" ? ultra :
+                          policy.band === "majorHoliday" ? holiday :
+                          policy.band === "high" ? high : std;
+
+    if (policy.daysUntilArrival <= effectiveLead) {
       const bandLabel = policy.band === "ultraPeak" ? "ultra-peak" :
                         policy.band === "majorHoliday" ? "major holiday" :
                         policy.band === "high" ? "high season" : "standard";
-      // Use the per-property (or default) lead days in the reason for transparency
-      const effectiveLead = policy.band === "ultraPeak" ? ultra :
-                            policy.band === "majorHoliday" ? holiday :
-                            policy.band === "high" ? high : std;
       blocks.push({
         startDate: sd,
         endDate: ed,
@@ -140,12 +150,35 @@ function seasonForMonth(yearMonth: string): SeasonKey {
 // Guesty mapping yet shouldn't look like a failure.
 const SKIP_PREFIX = "skipped:";
 
+async function configFromMappedGuestyListing(propertyId: number): Promise<any | null> {
+  const guestyId = await storage.getGuestyListingId(propertyId).catch(() => null);
+  if (!guestyId) return null;
+  const fields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds");
+  const listing = await guestyRequest("GET", `/listings/${guestyId}?fields=${fields}`) as any;
+  const br = listing?.bedrooms ?? listing?.bedroomsCount ?? listing?.bedroomCount ?? listing?.beds;
+  if (!br) return null;
+  return {
+    community: "unknown",
+    units: [{ unitId: "main", unitLabel: listing?.nickname || listing?.title || "Unit", bedrooms: Math.round(Number(br)) }],
+  };
+}
+
 // Returns a short human-readable summary that goes in lastRunSummary.
 // Summaries beginning with SKIP_PREFIX indicate the run was a clean
 // no-op (precondition missing, not a failure).
+type FullScanOptions = {
+  minSets: number;
+  targetMargin: number;
+  runInventory: boolean;
+  runPricing: boolean;
+  runSyncBlocks: boolean;
+  tightMarkup?: number;
+  criticalMarkup?: number;
+};
+
 export async function runFullScanForProperty(
   propertyId: number,
-  opts: { minSets: number; targetMargin: number; runInventory: boolean; runPricing: boolean; runSyncBlocks: boolean },
+  opts: FullScanOptions,
 ): Promise<string> {
   const apiKey = process.env.SEARCHAPI_API_KEY;
   if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
@@ -174,6 +207,17 @@ export async function runFullScanForProperty(
   const community = config.community;
   const uniqueBedrooms = Array.from(new Set(config.units.map((u) => u.bedrooms)));
   const summaries: string[] = [];
+  const scheduleRow = await storage.getScannerSchedule(propertyId).catch(() => null);
+  const leadDays = {
+    standard: scheduleRow?.standardLeadDays ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS,
+    high: scheduleRow?.highSeasonLeadDays ?? AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS,
+    holiday: scheduleRow?.majorHolidayLeadDays ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS,
+    ultra: scheduleRow?.ultraPeakLeadDays ?? AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS,
+  };
+  const criticalMarkup = opts.criticalMarkup
+    ?? (scheduleRow?.criticalMarkup != null ? parseFloat(String(scheduleRow.criticalMarkup)) : DEFAULT_CRITICAL_SCARCITY_MARKUP);
+  const tightMarkup = opts.tightMarkup
+    ?? (scheduleRow?.tightMarkup != null ? parseFloat(String(scheduleRow.tightMarkup)) : DEFAULT_TIGHT_SCARCITY_MARKUP);
 
   // ── Inventory: candidate count per BR ──
   let countsByBR: Record<number, number> = {};
@@ -225,109 +269,9 @@ export async function runFullScanForProperty(
     summaries.push(`market-snapshot ${pricedSeasons.length}/3 seasons (live+markup+combo)`);
   }
 
-  // ── Block sync: push owner-blocks for insufficient windows ──
-  if (opts.runSyncBlocks && opts.runInventory) {
-    // Build 52 weeks of verdicts. ONLY explicit per-window overrides
-    // (force-block) turn into actual Guesty blocks here — the baseline
-    // supply count is NOT fanned out across all 52 weeks.
-    //
-    // Earlier revisions applied `baselineVerdict` to every non-override
-    // week, which meant a single point-in-time Airbnb-listing count of
-    // "2 sets, need 3" auto-blocked every future week for a year.
-    // That's the wrong shape: baseline is a SIGNAL about current supply
-    // tightness, not an ACTION that should block bookings 11 months
-    // out when supply will almost certainly have shifted by then.
-    //
-    // The per-week scan flow (manual "Run inventory scan" button +
-    // "Push Blackouts to Guesty" in the Availability tab) is the
-    // correct place to push real per-week blocks — it actually queries
-    // each window individually. See Load-Bearing Decision #19 in
-    // AGENTS.md.
-    const overrides = await storage.getScannerOverrides(propertyId);
-    const overrideByStart = new Map(overrides.map((o) => [o.startDate, o]));
-    const today = new Date(); today.setHours(12, 0, 0, 0);
-    const weeks = 52;
-
-    // Pure lead-time policy blocks (the 45/75/90/120 day safety rules) — now automatically applied by cron.
-    // Reads per-property values from scannerSchedule (with global defaults).
-    const scheduleRow = await storage.getScannerSchedule(propertyId).catch(() => null);
-    const leadDays = {
-      standard: scheduleRow?.standardLeadDays ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS,
-      high: scheduleRow?.highSeasonLeadDays ?? AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS,
-      holiday: scheduleRow?.majorHolidayLeadDays ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS,
-      ultra: scheduleRow?.ultraPeakLeadDays ?? AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS,
-    };
-    const policyBlocks = computePureLeadTimePolicyBlocks(today, weeks, leadDays);
-    const policyBlocked = new Set(policyBlocks.map(b => `${b.startDate}:${b.endDate}`));
-
-    const windows: Array<{ startDate: string; endDate: string; verdict: "open" | "tight" | "blocked"; maxSets?: number; minSets: number; reason?: string }> = [];
-    for (let w = 1; w <= weeks; w++) {
-      const start = new Date(today); start.setDate(start.getDate() + (w - 1) * 7);
-      const end = new Date(start); end.setDate(end.getDate() + 7);
-      const sd = start.toISOString().slice(0, 10);
-      const ed = end.toISOString().slice(0, 10);
-      const ov = overrideByStart.get(sd);
-      const isPolicyBlock = policyBlocked.has(`${sd}:${ed}`);
-
-      let verdict: "open" | "blocked" = "open";
-      if (ov && ov.mode === "force-block") {
-        verdict = "blocked";
-      } else if (isPolicyBlock) {
-        verdict = "blocked";
-      }
-
-      windows.push({
-        startDate: sd,
-        endDate: ed,
-        verdict,
-        maxSets: baselineSets,
-        minSets: opts.minSets,
-        reason: isPolicyBlock && ! (ov && ov.mode === "force-block") ? "lead-time safety policy" : undefined,
-      });
-    }
-
-    const active = await storage.getActiveScannerBlocks(propertyId);
-    const activeKeyed = new Map(active.map((b) => [`${b.startDate}:${b.endDate}`, b]));
-    const desiredBlocks = new Set(windows.filter((w) => w.verdict === "blocked").map((w) => `${w.startDate}:${w.endDate}`));
-    const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
-    let created = 0, removed = 0, failed = 0;
-    for (const w of windows.filter((ww) => ww.verdict === "blocked")) {
-      const key = `${w.startDate}:${w.endDate}`;
-      if (activeKeyed.has(key)) continue;
-      try {
-        const reason = `low-inventory: ${w.maxSets ?? 0} / ${w.minSets} sets`;
-        const resp = await guestyRequest("PUT", calPath, {
-          startDate: w.startDate,
-          endDate: w.endDate,
-          status: "unavailable",
-          note: `nexstay-scanner (cron): ${reason}`,
-        }) as any;
-        const createdBlocksArr = resp?.data?.blocks?.createdBlocks ?? resp?.blocks?.createdBlocks ?? [];
-        await storage.createScannerBlock({
-          propertyId, guestyListingId,
-          startDate: w.startDate, endDate: w.endDate,
-          guestyBlockId: createdBlocksArr[0]?._id ?? createdBlocksArr[0]?.id ?? null,
-          reason,
-        });
-        created++;
-        await new Promise((r) => setTimeout(r, 150));
-      } catch { failed++; }
-    }
-    for (const b of active) {
-      const key = `${b.startDate}:${b.endDate}`;
-      if (desiredBlocks.has(key)) continue;
-      try {
-        await guestyRequest("PUT", calPath, {
-          startDate: b.startDate,
-          endDate: b.endDate,
-          status: "available",
-        });
-        await storage.markScannerBlockRemoved(b.id);
-        removed++;
-        await new Promise((r) => setTimeout(r, 150));
-      } catch { failed++; }
-    }
-    summaries.push(`blocks +${created}/-${removed}${failed ? `/×${failed}` : ""}`);
+  const cleanup = await clearScannerBlocksForProperty(propertyId);
+  if (cleanup.removed > 0 || cleanup.failures.length > 0) {
+    summaries.push(`legacy-blocks cleared ${cleanup.removed}${cleanup.failures.length ? `/×${cleanup.failures.length}` : ""}`);
   }
 
   // ── Rate push: per-month Guesty calendar from STATIC buy-in cost ──
@@ -364,30 +308,29 @@ export async function runFullScanForProperty(
     }
     summaries.push(`rates ${pushedRanges}/${ranges.length} months`);
 
-    // ── Channel markup push ──
-    // The base rate above nets targetMargin% on Direct only. Each OTA
-    // has a higher host fee, so we layer per-channel markups on top so
-    // Airbnb/VRBO/Booking also net targetMargin% after their fees.
-    // Formula (from shared/pricing-rates.ts): m_ch = (1 - feeDirect)/(1 - fee_ch) - 1.
-    try {
-      const markups = computeChannelMarkups();
-      const markupsByPlatform: Record<string, { percent: number; active: boolean }> = {};
-      for (const ch of ["airbnb", "vrbo", "booking", "direct"] as ChannelKey[]) {
-        markupsByPlatform[CHANNEL_TO_GUESTY_KEY[ch]] = {
-          percent: markups[ch] * 100,
-          active: true,
-        };
-      }
-      await guestyRequest("PUT", `/listings/${guestyListingId}`, {
-        useAccountMarkups: false,
-        markups: markupsByPlatform,
-      });
-      const labels = (["airbnb", "vrbo", "booking"] as ChannelKey[])
-        .map((ch) => `${ch[0]}${(markups[ch] * 100).toFixed(1)}%`)
-        .join("/");
-      summaries.push(`markups ${labels}`);
-    } catch (e: any) {
-      summaries.push(`markups FAILED: ${(e?.message ?? "unknown").slice(0, 40)}`);
+    const todayNoon = new Date();
+    todayNoon.setHours(12, 0, 0, 0);
+    const scarcityWindows = computePureLeadTimePolicyBlocks(todayNoon, 52, leadDays);
+    const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
+    let pushedScarcity = 0;
+    for (const w of scarcityWindows) {
+      try {
+        const monthKey = w.startDate.slice(0, 7);
+        const setCost = totalNightlyBuyInForMonth(community, config.units, monthKey);
+        if (setCost <= 0) continue;
+        const factor = demandFactorForAvailabilityVerdict("blocked", { tightMarkup, criticalMarkup });
+        const targetRate = Math.round((setCost * factor * (1 + opts.targetMargin)) / (1 - feeDirect));
+        await guestyRequest("PUT", calPath, {
+          startDate: w.startDate,
+          endDate: w.endDate,
+          price: targetRate,
+        });
+        pushedScarcity++;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      } catch { /* continue */ }
+    }
+    if (scarcityWindows.length > 0) {
+      summaries.push(`scarcity-prices ${pushedScarcity}/${scarcityWindows.length} windows (+${Math.round(criticalMarkup * 100)}%)`);
     }
   }
 
@@ -400,10 +343,10 @@ async function tick() {
   _lastTickAt = new Date();
   try {
     const rows = await storage.getScannerSchedules();
-    const now = Date.now();
+    const now = new Date();
     for (const row of rows) {
       if (!row.enabled) continue;
-      const due = !row.lastRunAt || (now - row.lastRunAt.getTime()) >= row.intervalHours * 60 * 60 * 1000;
+      const due = isDueForPolicyPass(row.lastRunAt, now, row.intervalHours);
       if (!due) continue;
       const startedAt = Date.now();
       try {
@@ -413,6 +356,8 @@ async function tick() {
           runInventory: row.runInventory,
           runPricing: row.runPricing,
           runSyncBlocks: row.runSyncBlocks,
+          tightMarkup: row.tightMarkup != null ? parseFloat(String(row.tightMarkup)) : DEFAULT_TIGHT_SCARCITY_MARKUP,
+          criticalMarkup: row.criticalMarkup != null ? parseFloat(String(row.criticalMarkup)) : DEFAULT_CRITICAL_SCARCITY_MARKUP,
         });
         const durationMs = Date.now() - startedAt;
         // "skipped:"-prefixed summaries are clean no-ops (missing
@@ -446,7 +391,7 @@ export function startAvailabilityScheduler() {
   // First tick after 2 minutes so server startup has time to settle.
   setTimeout(() => { tick().catch(() => {}); }, 2 * 60 * 1000);
   _timer = setInterval(() => { tick().catch(() => {}); }, TICK_MS);
-  console.log(`[availability-scheduler] started (tick every ${TICK_MS / 60000} min)`);
+  console.log(`[availability-scheduler] started (daily policy pass after 1 AM ET; tick every ${TICK_MS / 60000} min)`);
 }
 
 // Exposed so the UI's "Run now" button can force a sync without waiting.
@@ -459,7 +404,9 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
       targetMargin: sched ? parseFloat(String(sched.targetMargin)) : 0.2,
       runInventory: sched?.runInventory ?? true,
       runPricing: sched?.runPricing ?? true,
-      runSyncBlocks: sched?.runSyncBlocks ?? true,
+      runSyncBlocks: sched?.runSyncBlocks ?? false,
+      tightMarkup: sched?.tightMarkup != null ? parseFloat(String(sched.tightMarkup)) : DEFAULT_TIGHT_SCARCITY_MARKUP,
+      criticalMarkup: sched?.criticalMarkup != null ? parseFloat(String(sched.criticalMarkup)) : DEFAULT_CRITICAL_SCARCITY_MARKUP,
     });
     const durationMs = Date.now() - startedAt;
     const status: "ok" | "skipped" = summary.startsWith(SKIP_PREFIX) ? "skipped" : "ok";
@@ -499,27 +446,18 @@ export async function resolveAvailabilityPropertyConfig(propertyId: number): Pro
       if (units.length === 0 && draft.combinedBedrooms) {
         units.push({ unitId: "main", unitLabel: "Combined", bedrooms: draft.combinedBedrooms });
       }
-      return {
-        community: draft.name || "unknown",
-        units,
-      };
+      if (units.length > 0) {
+        return {
+          community: draft.name || "unknown",
+          units,
+        };
+      }
     }
   } catch {}
 
   // Last resort: try to resolve from mapped Guesty listing
   try {
-    return await (async () => {
-      const guestyId = await storage.getGuestyListingId(propertyId).catch(() => null);
-      if (!guestyId) return null;
-      const fields = encodeURIComponent("title nickname name bedrooms bedroomsCount bedroomCount beds");
-      const listing = await guestyRequest("GET", `/listings/${guestyId}?fields=${fields}`) as any;
-      const br = listing?.bedrooms ?? listing?.bedroomsCount ?? listing?.bedroomCount ?? listing?.beds;
-      if (!br) return null;
-      return {
-        community: "unknown",
-        units: [{ unitId: "main", unitLabel: listing?.nickname || listing?.title || "Unit", bedrooms: Math.round(Number(br)) }],
-      };
-    })();
+    return await configFromMappedGuestyListing(propertyId);
   } catch {
     return null;
   }
@@ -577,5 +515,3 @@ export async function runLeadTimePolicySyncForProperty(
 
   return `lead-time policy sync scheduled for ${propertyId} (minSets=${minSets}, weeks=${weeks})`;
 }
-
-
