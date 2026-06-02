@@ -99,7 +99,7 @@ function fmtShort(iso: string): string {
 // in `server/availability-scheduler.ts` by joining segments with ` · `:
 //
 //   policy 80 open/0 tight/24 blocked · market-snapshot 3/3 seasons ·
-//   legacy-blocks cleared 2 · rates 24/24 months · scarcity-prices 20/20 windows (+40%)
+//   cleanup cleared 2 · rates 24/24 months · scarcity-prices 20/20 windows (+40%)
 //
 // Any segment can be missing if the operator disabled that phase (e.g.
 // `runInventory: false`). Anything we don't recognize stays in `raw`
@@ -130,7 +130,7 @@ function parseScanSummary(summary: string | null | undefined): RunBadges {
       out.marketSnapshot = { seen: parseInt(m[1], 10), total: parseInt(m[2], 10) };
     } else if ((m = p.match(/^blocks\s+\+(\d+)\/-(\d+)(?:\/\xD7(\d+))?$/i))) {
       out.blocks = { added: parseInt(m[1], 10), removed: parseInt(m[2], 10), failed: parseInt(m[3] ?? "0", 10) };
-    } else if ((m = p.match(/^legacy-blocks\s+cleared\s+(\d+)(?:\/\xD7(\d+))?$/i))) {
+    } else if ((m = p.match(/^(?:cleanup|legacy-blocks)\s+cleared\s+(\d+)(?:\/\xD7(\d+))?$/i))) {
       out.blocks = { added: 0, removed: parseInt(m[1], 10), failed: parseInt(m[2] ?? "0", 10) };
     } else if ((m = p.match(/^rates\s+(\d+)\/(\d+)\s+months$/i))) {
       out.rates = { pushed: parseInt(m[1], 10), total: parseInt(m[2], 10) };
@@ -155,14 +155,11 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   const [candidates, setCandidates] = useState<CandidatesEvent | null>(null);
   const [results, setResults] = useState<WindowResult[]>([]);
   // Persist last "Evaluate policy" results in localStorage so the data sticks
-  // across tab exits/re-entries. Server cleanup still uses scannerBlocks only
-  // for legacy scanner-created blocks.
+  // across tab exits/re-entries.
   const POLICY_RESULTS_KEY = propertyId ? `rct-avail-policy-${propertyId}` : null;
   const [error, setError] = useState<string | null>(null);
   const [scanPhase, setScanPhase] = useState<string | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
-  const [syncBusy, setSyncBusy] = useState(false);
-  const [syncResult, setSyncResult] = useState<any>(null);
   // Weekly-pricing correlation state (populated after a scan + button click)
   type WeeklyPricingRow = {
     startDate: string;
@@ -260,56 +257,9 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     } catch { /* storage full / private mode */ }
   }, [POLICY_RESULTS_KEY, results, scanning]);
 
-  // Legacy scanner-created blocks still tracked for this property. New
-  // policy runs clear these ranges and raise rates instead of blocking.
-  type ActiveBlock = {
-    id: number;
-    startDate: string;
-    endDate: string;
-    guestyListingId: string;
-    guestyBlockId: string | null;
-    reason: string;
-    createdAt: string;
-  };
-  const [activeBlocks, setActiveBlocks] = useState<ActiveBlock[]>([]);
-  const [activeBlocksLoaded, setActiveBlocksLoaded] = useState(false);
-  const [activeBlocksError, setActiveBlocksError] = useState<string | null>(null);
-
   // === Lead Time Pricing Policy Editor (placed in Availability tab per request) ===
   // Compact, self-contained editor for the four pure calendar lead-time numbers.
   // These control the automatic scarcity pricing the scheduler cron applies.
-  useEffect(() => {
-    if (!propertyId || schedulerUnavailable) {
-      setActiveBlocks([]);
-      setActiveBlocksLoaded(true);
-      setActiveBlocksError(null);
-      return;
-    }
-    let cancelled = false;
-    setActiveBlocksLoaded(false);
-    setActiveBlocksError(null);
-    (async () => {
-      try {
-        const r = await fetch(`/api/availability/scanner-blocks/${propertyId}`);
-        if (!r.ok) throw new Error(`Failed to load active blocks (${r.status})`);
-        const d = await r.json();
-        if (!cancelled && Array.isArray(d?.blocks)) {
-          setActiveBlocks(d.blocks);
-          setActiveBlocksLoaded(true);
-        }
-      } catch (e: any) {
-        if (!cancelled) {
-          setActiveBlocks([]);
-          setActiveBlocksError(e?.message ?? "Failed to load active blocks");
-          setActiveBlocksLoaded(true);
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-    // Re-fetch after each run so new blocks appear without a page refresh.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [propertyId, schedule?.lastRunAt, schedulerUnavailable]);
-
   // === Lead Time Safety Policy (editable per-property) ===
   const [policySaving, setPolicySaving] = useState(false);
   const [policySavedMsg, setPolicySavedMsg] = useState<string | null>(null);
@@ -532,14 +482,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
             setCandidates(evt as CandidatesEvent);
           } else if (evt.type === "phase") {
             setScanPhase(evt.label ?? evt.phase ?? "Applying policy");
-          } else if (evt.type === "sync-blocks" || evt.type === "legacy-block-cleanup") {
-            setSyncResult(evt.result
-              ? {
-                ...evt.result,
-                syncedAt: evt.syncedAt ?? new Date().toISOString(),
-                blockedWindows: evt.blockedWindows ?? [],
-              }
-              : { success: false, error: evt.error ?? "Legacy block cleanup failed" });
           } else if (evt.type === "window") {
             done++;
             collected.push(evt as WindowResult);
@@ -563,42 +505,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
   }, [propertyId, weeks, minSets, schedulerUnavailable, schedulerUnavailableMessage]);
 
   const stopScan = () => abortRef.current?.abort();
-
-  const syncBlocks = useCallback(async () => {
-    if (!propertyId || results.length === 0) return;
-    setSyncBusy(true);
-    setSyncResult(null);
-    const criticalWindows = results.filter((r) => r.verdict === "blocked");
-    try {
-      const resp = await fetch(`/api/availability/sync-blocks/${propertyId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          windows: results.map((r) => ({
-            startDate: r.startDate,
-            endDate: r.endDate,
-            verdict: r.verdict,
-            maxSets: r.maxSets,
-            minSets: r.minSets ?? minSets,
-          })),
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-      // Enrich the receipt with when + the actual critical date ranges the
-      // cleanup run evaluated. The server already tells us counts; adding a
-      // timestamp and ranges makes the audit trail clear.
-      setSyncResult({
-        ...data,
-        syncedAt: new Date().toISOString(),
-        blockedWindows: criticalWindows.map((w) => ({ startDate: w.startDate, endDate: w.endDate })),
-      });
-    } catch (e: any) {
-      setSyncResult({ success: false, error: e?.message ?? String(e) });
-    } finally {
-      setSyncBusy(false);
-    }
-  }, [propertyId, results, minSets]);
 
   const computeWeeklyPricing = useCallback(async () => {
     if (!propertyId || results.length === 0) return;
@@ -742,7 +648,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               ⏱ Availability pricing scheduler {schedule?.enabled ? "ON" : "OFF"}
             </div>
             <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-              When enabled, the server runs after <b>1:00 AM Eastern</b>, clears legacy scanner blocks, and refreshes base plus scarcity pricing.
+              When enabled, the server runs after <b>1:00 AM Eastern</b> and refreshes base plus scarcity pricing.
               Last run: <b>{schedule?.lastRunAt ? new Date(schedule.lastRunAt).toLocaleString() : "never"}</b>
               {schedule?.lastRunStatus && (() => {
                 const statusColor =
@@ -807,7 +713,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                   )}
                   {b.inventory && (
                     <span style={{ ...chipStyle, background: verdictChipBg(b.inventory.verdict), color: verdictChipColor(b.inventory.verdict), borderColor: "transparent" }}>
-                      Legacy inventory: <b>{b.inventory.sets}</b> sets · {b.inventory.verdict}
+                      Inventory: <b>{b.inventory.sets}</b> sets · {b.inventory.verdict}
                     </span>
                   )}
                   {b.marketSnapshot && (
@@ -826,7 +732,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                   )}
                   {b.blocks && (
                     <span style={chipStyle}>
-                      Legacy blocks cleared: <b style={{ color: "#166534" }}>{b.blocks.removed}</b>
+                      Cleanup cleared: <b style={{ color: "#166534" }}>{b.blocks.removed}</b>
                       {b.blocks.failed > 0 && <span style={{ color: "#b45309" }}> · {b.blocks.failed} failed</span>}
                     </span>
                   )}
@@ -980,9 +886,9 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
                       ) : (
                         <span style={{ color: "#6b7280" }}>
                             {parsed.policy && <>policy <b style={{ color: "#166534" }}>{parsed.policy.open}</b>/<b style={{ color: "#92400e" }}>{parsed.policy.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.policy.blocked}</b> critical · </>}
-                          {parsed.inventory && <>legacy inv <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
+                          {parsed.inventory && <>inventory <b>{parsed.inventory.sets}</b> ({parsed.inventory.verdict}) · </>}
                             {parsed.weeklyWindows && <>windows <b style={{ color: "#166534" }}>{parsed.weeklyWindows.open}</b>/<b style={{ color: "#92400e" }}>{parsed.weeklyWindows.tight}</b>/<b style={{ color: "#991b1b" }}>{parsed.weeklyWindows.blocked}</b> critical · </>}
-                            {parsed.blocks && <>legacy blocks cleared <b style={{ color: "#166534" }}>{parsed.blocks.removed}</b> · </>}
+                            {parsed.blocks && <>cleanup cleared <b style={{ color: "#166534" }}>{parsed.blocks.removed}</b> · </>}
                             {parsed.rates && <>rates <b>{parsed.rates.pushed}/{parsed.rates.total}</b>mo</>}
                             {parsed.scarcityPrices && <> · scarcity <b>{parsed.scarcityPrices.pushed}/{parsed.scarcityPrices.total}</b></>}
                             {!parsed.policy && !parsed.inventory && !parsed.weeklyWindows && !parsed.blocks && !parsed.rates && !parsed.scarcityPrices && r.summary}
@@ -1000,68 +906,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         </div>
       )}
 
-      {/* ── Legacy scanner blocks pending cleanup ─────────────── */}
-      <div style={{ marginBottom: 16, border: "1px solid #fecaca", borderRadius: 6, overflow: "hidden" }}>
-        <div style={{
-          padding: "6px 12px", background: "#fef2f2", borderBottom: "1px solid #fecaca",
-          fontSize: 11, fontWeight: 600, color: "#991b1b",
-          textTransform: "uppercase", letterSpacing: "0.05em",
-          display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap",
-        }}>
-          <span>Legacy scanner-created blocks — {activeBlocksLoaded ? activeBlocks.length : "loading"} active</span>
-          <span style={{ fontSize: 10, fontWeight: 500, color: "#b45309", textTransform: "none", letterSpacing: "normal" }}>
-            New policy runs clear these tracked ranges and replace the behavior with scarcity pricing.
-          </span>
-        </div>
-        {activeBlocksError ? (
-          <div style={{ padding: "10px 12px", fontSize: 12, color: "#991b1b", background: "#fff7f7" }}>
-            {activeBlocksError}
-          </div>
-        ) : !activeBlocksLoaded ? (
-          <div style={{ padding: "10px 12px", fontSize: 12, color: "#6b7280" }}>
-            Loading legacy scanner blocks…
-          </div>
-        ) : activeBlocks.length === 0 ? (
-          <div style={{ padding: "10px 12px", fontSize: 12, color: "#6b7280" }}>
-            No legacy scanner-created blocks are currently tracked for this property.
-          </div>
-        ) : (
-          <>
-            <div style={{ padding: "6px 12px", fontSize: 11, color: "#6b7280", background: "#fff7f7", borderBottom: "1px solid #fee2e2" }}>
-              Current range: {new Date(activeBlocks[0].startDate + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-              {" "}through{" "}
-              {new Date(activeBlocks[activeBlocks.length - 1].endDate + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}.
-              {" "}The daily policy pass rolls this forward around 1 AM Eastern.
-            </div>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-              <thead>
-                <tr style={{ background: "#fff1f2", color: "#991b1b", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                  <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600, width: 130 }}>Start</th>
-                  <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600, width: 130 }}>End</th>
-                  <th style={{ textAlign: "left", padding: "5px 12px", fontWeight: 600 }}>Rule</th>
-                  <th style={{ textAlign: "right", padding: "5px 12px", fontWeight: 600, width: 150 }}>Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activeBlocks.map((b) => (
-                  <tr key={b.id} style={{ borderTop: "1px solid #fee2e2" }}>
-                    <td style={{ padding: "5px 12px", color: "#374151", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
-                      {new Date(b.startDate + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                    </td>
-                    <td style={{ padding: "5px 12px", color: "#374151", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
-                      {new Date(b.endDate + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                    </td>
-                    <td style={{ padding: "5px 12px", color: "#6b7280" }}>{b.reason}</td>
-                    <td style={{ padding: "5px 12px", textAlign: "right", color: "#9ca3af", whiteSpace: "nowrap" }}>
-                      {new Date(b.createdAt).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </>
-        )}
-      </div>
       {/* ── Controls ─────────────────────────────────────────── */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 12 }}>
         <span style={{ fontSize: 12, color: "#6b7280" }}>
@@ -1086,17 +930,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           </span>
         )}
         <div style={{ flex: 1 }} />
-        {activeBlocks.length > 0 && (
-          <button
-            className="glb-btn"
-            onClick={syncBlocks}
-            disabled={scanning || syncBusy || results.length === 0 || !listingId}
-            style={{ fontSize: 12, borderColor: "#dc2626", color: "#dc2626" }}
-            title={!listingId ? "Select a Guesty listing first" : "Clear old scanner-created blocks from Guesty."}
-          >
-            {syncBusy ? "Clearing…" : "Clear legacy blocks"}
-          </button>
-        )}
       </div>
 
       {/* ── Context + summary ────────────────────────────────── */}
@@ -1133,38 +966,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           {error}
         </div>
       )}
-      {syncResult && (
-        <div
-          style={{
-            padding: 10,
-            background: syncResult.success ? "#f0fdf4" : "#fef3c7",
-            border: `1px solid ${syncResult.success ? "#bbf7d0" : "#fcd34d"}`,
-            borderRadius: 4,
-            fontSize: 12,
-            marginBottom: 12,
-          }}
-        >
-          <div>
-            {syncResult.success ? "✓" : "⚠"}
-            {" "}<b>On {syncResult.syncedAt ? new Date(syncResult.syncedAt).toLocaleString() : "now"}</b>
-            {" — "}
-              <b>{syncResult.removed ?? 0}</b> legacy scanner block(s) cleared,
-              {" "}<b>{syncResult.unchanged ?? 0}</b> unchanged.
-          </div>
-          {syncResult.blockedWindows && syncResult.blockedWindows.length > 0 && (
-            <div style={{ marginTop: 6, fontSize: 11, color: "#4b5563" }}>
-                Critical windows: {syncResult.blockedWindows.slice(0, 8).map((w: any) => `${fmtShort(w.startDate)}–${fmtShort(w.endDate)}`).join(", ")}
-              {syncResult.blockedWindows.length > 8 && ` … +${syncResult.blockedWindows.length - 8} more`}
-            </div>
-          )}
-          {syncResult.failures && syncResult.failures.length > 0 && (
-            <div style={{ marginTop: 4, color: "#92400e" }}>
-              {syncResult.failures.length} failure(s): {syncResult.failures.slice(0, 3).map((f: any) => f.error).join(" · ")}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* ── 24-month summary table ──────────────────────────────
           Flat month-by-month view: one row per month over the scan
           horizon. Makes it obvious at a glance which months have
@@ -1429,7 +1230,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               )}
               {selected.daemonOnline === false && (
                 <div style={{ fontSize: 11, color: "#92400e", marginTop: 4 }}>
-                    Legacy note: this older saved row came from an availability-evidence run. Current scarcity pricing decisions use fixed lead-time rules only.
+                    Older saved row: this came from an availability-evidence run. Current scarcity pricing decisions use fixed lead-time rules only.
                 </div>
               )}
               {selected.overridden && (
@@ -1471,7 +1272,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           {selectedChannelRows.length > 0 && (
             <div style={{ marginBottom: 12, border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" }}>
               <div style={{ padding: "6px 10px", background: "#f9fafb", fontSize: 11, fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                Legacy availability evidence by bedroom
+                Previous availability evidence by bedroom
               </div>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                 <thead>
@@ -1511,7 +1312,7 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
           {selected.sample && Object.keys(selected.sample).length > 0 ? (
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                Legacy sample listings
+                Previous sample listings
               </div>
               {Object.entries(selected.sample).map(([br, listings]) => (
                 <div key={br} style={{ marginBottom: 8 }}>
