@@ -1514,11 +1514,11 @@ function AdminDashboard() {
   };
 
   const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField !== field) return <ArrowUpDown className="ml-1 h-3.5 w-3.5 text-muted-foreground" />;
+    if (sortField !== field) return <ArrowUpDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />;
     return sortDir === "asc" ? (
-      <ArrowUp className="ml-1 h-3.5 w-3.5" />
+      <ArrowUp className="h-3.5 w-3.5 shrink-0" />
     ) : (
-      <ArrowDown className="ml-1 h-3.5 w-3.5" />
+      <ArrowDown className="h-3.5 w-3.5 shrink-0" />
     );
   };
 
@@ -3341,13 +3341,13 @@ function AdminDashboard() {
               <col style={{ width: "6.5%" }} />
               <col style={{ width: "7.5%" }} />
               <col style={{ width: "13%" }} />
-              <col style={{ width: "32.8%" }} />
-              <col style={{ width: "6%" }} />
-              <col style={{ width: "6.8%" }} />
-              <col style={{ width: "5.2%" }} />
+              <col style={{ width: "28%" }} />
+              <col style={{ width: "9.2%" }} />
+              <col style={{ width: "7.6%" }} />
+              <col style={{ width: "5.4%" }} />
               <col style={{ width: "3.2%" }} />
-              <col style={{ width: "4.2%" }} />
-              <col style={{ width: "3.2%" }} />
+              <col style={{ width: "4.5%" }} />
+              <col style={{ width: "3.5%" }} />
             </colgroup>
             <TableHeader>
               <TableRow>
@@ -3391,7 +3391,7 @@ function AdminDashboard() {
                 <TableHead className="w-[190px] max-w-[190px] px-1">
                   <Button
                     variant="ghost"
-                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("name")}
                     data-testid="button-sort-name"
                     id="button-sort-name"
@@ -3404,7 +3404,7 @@ function AdminDashboard() {
                 <TableHead className="w-[274px] px-1">
                   <Button
                     variant="ghost"
-                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("community")}
                     data-testid="button-sort-community"
                     id="button-sort-community"
@@ -3417,7 +3417,7 @@ function AdminDashboard() {
                 <TableHead className="w-[92px] px-0.5" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
                   <Button
                     variant="ghost"
-                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("minimumStay")}
                     data-testid="button-sort-minimum-stay"
                     id="button-sort-minimum-stay"
@@ -3430,7 +3430,7 @@ function AdminDashboard() {
                 <TableHead className="text-right w-[88px] px-0.5">
                   <Button
                     variant="ghost"
-                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("baseRate")}
                     data-testid="button-sort-base-rate"
                     id="button-sort-base-rate"
@@ -3443,7 +3443,7 @@ function AdminDashboard() {
                 <TableHead className="w-[72px] px-0.5">
                   <Button
                     variant="ghost"
-                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("island")}
                     data-testid="button-sort-island"
                     id="button-sort-island"
@@ -3456,7 +3456,7 @@ function AdminDashboard() {
                 <TableHead className="text-center w-[42px]">
                   <Button
                     variant="ghost"
-                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("bedrooms")}
                     data-testid="button-sort-bedrooms"
                     id="button-sort-bedrooms"
@@ -3469,7 +3469,7 @@ function AdminDashboard() {
                 <TableHead className="text-center w-[54px]">
                   <Button
                     variant="ghost"
-                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("guests")}
                     data-testid="button-sort-guests"
                     id="button-sort-guests"
@@ -3482,7 +3482,7 @@ function AdminDashboard() {
                 <TableHead className="text-center w-[46px]">
                   <Button
                     variant="ghost"
-                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("unitCount")}
                     data-testid="button-sort-unit-count"
                     id="button-sort-unit-count"
@@ -3787,7 +3787,7 @@ function AdminDashboard() {
                   <TableCell className="px-1 py-2">
                     <Badge
                       variant={communityVariant(property.pricingArea)}
-                      className="no-default-hover-elevate no-default-active-elevate flex w-full max-w-full justify-start truncate text-xs"
+                    className="no-default-hover-elevate no-default-active-elevate inline-flex max-w-[240px] justify-start truncate text-xs"
                       data-testid={`badge-community-${property.id}`}
                       title={property.community}
                     >
@@ -3801,9 +3801,9 @@ function AdminDashboard() {
                           <Badge
                             variant="outline"
                             className={
-                              minStay.tone === "warn" ? "max-w-[76px] truncate bg-amber-50 border-amber-200 text-amber-800 cursor-help"
-                              : minStay.tone === "ok" ? "max-w-[76px] truncate bg-emerald-50 border-emerald-200 text-emerald-800 cursor-help"
-                              : "max-w-[76px] truncate bg-blue-50 border-blue-200 text-blue-800 cursor-help"
+                              minStay.tone === "warn" ? "max-w-full whitespace-nowrap bg-amber-50 border-amber-200 text-amber-800 cursor-help"
+                              : minStay.tone === "ok" ? "max-w-full whitespace-nowrap bg-emerald-50 border-emerald-200 text-emerald-800 cursor-help"
+                              : "max-w-full whitespace-nowrap bg-blue-50 border-blue-200 text-blue-800 cursor-help"
                             }
                             data-testid={`badge-minimum-stay-${property.id}`}
                           >
