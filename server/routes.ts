@@ -628,6 +628,19 @@ function refreshBulkPricingCounts(job: BulkPricingJob): void {
   job.cancelled = job.items.filter((item) => item.status === "cancelled").length;
 }
 
+function cancelRemainingBulkPricingItems(job: BulkPricingJob, message = "Cancelled by operator"): void {
+  const now = Date.now();
+  for (const item of job.items) {
+    if (item.status !== "queued" && item.status !== "running") continue;
+    item.status = "cancelled";
+    item.error = message;
+    item.progress = { phase: "cancelled", percent: 100, label: message };
+    item.finishedAt = now;
+    item.heartbeatAt = now;
+  }
+  refreshBulkPricingCounts(job);
+}
+
 async function persistBulkPricingJob(job: BulkPricingJob): Promise<void> {
   refreshBulkPricingCounts(job);
   const now = new Date();
@@ -1225,12 +1238,9 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
       const item = job.items[i];
       if (!item || item.status === "completed" || item.status === "cancelled") continue;
       if (job.cancelRequested) {
-        item.status = "cancelled";
-        item.error = "Cancelled by operator";
-        item.finishedAt = Date.now();
-        item.heartbeatAt = Date.now();
+        cancelRemainingBulkPricingItems(job);
         await persistBulkPricingJob(job);
-        continue;
+        break;
       }
 
       let shouldRetry = false;
@@ -1303,6 +1313,11 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
           }
         }
       } while (shouldRetry && !job.cancelRequested);
+      if (job.cancelRequested) {
+        cancelRemainingBulkPricingItems(job);
+        await persistBulkPricingJob(job);
+        break;
+      }
     }
 
     job.finishedAt = Date.now();
@@ -32052,24 +32067,15 @@ Return ONLY compact JSON with this exact shape:
     const now = Date.now();
     const activeLease = job.status === "running" && job.lockExpiresAt != null && job.lockExpiresAt > now;
     job.cancelRequested = true;
-    for (const item of job.items) {
-      if (item.status === "queued") {
-        item.status = "cancelled";
-        item.error = "Cancelled by operator";
-        item.progress = { phase: "cancelled", percent: 100, label: "Cancelled before starting" };
-        item.finishedAt = Date.now();
-        item.heartbeatAt = Date.now();
-      } else if (item.status === "running") {
+    cancelRemainingBulkPricingItems(job, "Cancelled before starting");
+    for (const item of job.items.filter((candidate) => candidate.status === "cancelled" && candidate.startedAt != null)) {
+      if (activeLease) {
+        item.status = "running";
         item.error = "Cancellation requested";
         const percent = Number(item.progress?.percent);
         item.progress = { phase: "cancelling", percent: Number.isFinite(percent) ? percent : 0, label: "Cancellation requested; stopping before the next SearchAPI month" };
         item.heartbeatAt = Date.now();
-        if (!activeLease) {
-          item.status = "cancelled";
-          item.error = "Cancelled by operator";
-          item.progress = { phase: "cancelled", percent: 100, label: "Cancelled stale running item" };
-          item.finishedAt = Date.now();
-        }
+        item.finishedAt = null;
       }
     }
     if (job.status === "queued") {
