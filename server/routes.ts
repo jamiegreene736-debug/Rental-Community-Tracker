@@ -26664,6 +26664,7 @@ Return ONLY compact JSON with this exact shape:
         state: community.state,
         estimatedLowRate: community.estimatedLowRate ?? null,
         estimatedHighRate: community.estimatedHighRate ?? null,
+        estimatedTotalUnits: community.estimatedTotalUnits ?? null,
         unitTypes: community.unitTypes ?? "condominium",
         confidenceScore: community.confidenceScore ?? 70,
         researchSummary: community.researchSummary ?? "",
@@ -29372,6 +29373,7 @@ Return ONLY compact JSON with this exact shape:
     const integerFields = [
       "estimatedLowRate",
       "estimatedHighRate",
+      "estimatedTotalUnits",
       "confidenceScore",
       "unit1Bedrooms",
       "unit1MaxGuests",

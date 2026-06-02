@@ -122,6 +122,7 @@ type Property = {
   minimumStayRangeHigh?: number | null;
   multiUnit: boolean;
   unitCount?: number;
+  communityUnitCount?: number | null;
   unitDetails: string;
   url: string;
 };
@@ -320,6 +321,42 @@ function compactCommunityName(name: string): string {
   const withoutSuffix = trimmed.replace(/\s+(Resort|Villas?|Condos?|Townhomes?)$/i, "").trim();
   if (withoutSuffix.length <= 14) return withoutSuffix;
   return withoutSuffix.split(/\s+/).slice(0, 2).join(" ");
+}
+
+function normalizeCommunityUnitCountKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/\bat\b/g, " ")
+    .replace(/\b(?:resort|villas?|condos?|condominiums?|townhomes?)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+const ESTIMATED_COMMUNITY_UNIT_COUNTS: Record<string, number> = {
+  [normalizeCommunityUnitCountKey("Regency at Poipu Kai")]: 80,
+  [normalizeCommunityUnitCountKey("Mauna Kai Princeville")]: 50,
+  [normalizeCommunityUnitCountKey("Kaha Lani Resort")]: 74,
+  [normalizeCommunityUnitCountKey("Makahuena at Poipu")]: 78,
+  [normalizeCommunityUnitCountKey("Kaiulani of Princeville")]: 76,
+  [normalizeCommunityUnitCountKey("Pili Mai")]: 140,
+  [normalizeCommunityUnitCountKey("Menehune Shores")]: 154,
+  [normalizeCommunityUnitCountKey("Na Hale O Keauhou")]: 44,
+  [normalizeCommunityUnitCountKey("Ilikai")]: 575,
+  [normalizeCommunityUnitCountKey("Waikiki Banyan")]: 876,
+  [normalizeCommunityUnitCountKey("Fairway Villas Waikoloa")]: 165,
+  [normalizeCommunityUnitCountKey("Banyan Harbor")]: 148,
+  [normalizeCommunityUnitCountKey("Bonita National")]: 1450,
+  [normalizeCommunityUnitCountKey("Caribe Cove")]: 250,
+  [normalizeCommunityUnitCountKey("Caribe Cove Resort")]: 250,
+};
+
+function communityUnitCountFor(communityName: string, explicit?: number | null): number | null {
+  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit > 0) {
+    return Math.round(explicit);
+  }
+  return ESTIMATED_COMMUNITY_UNIT_COUNTS[normalizeCommunityUnitCountKey(communityName)] ?? null;
 }
 
 const properties: Property[] = [
@@ -1225,11 +1262,13 @@ function AdminDashboard() {
       const stay = minimumStayData?.[p.id];
       const communityStay = communityMinimumStayData.get(p.community);
       const unitCount = getUnitBuilderByPropertyId(p.id)?.units.length ?? (p.multiUnit ? 2 : 1);
-      if (!stay && !communityStay) return { ...p, unitCount };
+      const communityUnitCount = communityUnitCountFor(p.community);
+      if (!stay && !communityStay) return { ...p, unitCount, communityUnitCount };
       if (communityStay?.minimumStayRangeLow && communityStay.minimumStayRangeHigh) {
         return {
           ...p,
           unitCount,
+          communityUnitCount,
           minimumStayNights: null,
           minimumStayEvidence: communityStay.minimumStayEvidence,
           minimumStaySourceUrl: communityStay.minimumStaySourceUrl,
@@ -1240,6 +1279,7 @@ function AdminDashboard() {
       return {
         ...p,
         unitCount,
+        communityUnitCount,
         minimumStayNights: stay?.minimumStayNights ?? communityStay?.minimumStayNights ?? null,
         minimumStayEvidence: stay?.minimumStayEvidence ?? communityStay?.minimumStayEvidence ?? null,
         minimumStaySourceUrl: stay?.minimumStaySourceUrl ?? communityStay?.minimumStaySourceUrl ?? null,
@@ -1369,6 +1409,7 @@ function AdminDashboard() {
         minimumStayRangeHigh: communityRange?.minimumStayRangeHigh ?? null,
         multiUnit: !isSingle,
         unitCount: isSingle ? 1 : 2,
+        communityUnitCount: communityUnitCountFor(d.name, d.estimatedTotalUnits),
         unitDetails,
         url: d.sourceUrl ?? "",
       };
@@ -1435,8 +1476,8 @@ function AdminDashboard() {
     }
     result = [...result].sort((a, b) => {
       if (sortField === "unitCount") {
-        const aCount = a.unitCount ?? 0;
-        const bCount = b.unitCount ?? 0;
+        const aCount = a.communityUnitCount ?? 0;
+        const bCount = b.communityUnitCount ?? 0;
         return sortDir === "asc" ? aCount - bCount : bCount - aCount;
       }
       if (sortField === "baseRate") {
@@ -3780,8 +3821,13 @@ function AdminDashboard() {
                     </span>
                   </TableCell>
                   <TableCell className="px-1 py-2 text-center" data-testid={`cell-unit-count-${property.id}`}>
-                    <Badge variant="outline" className="px-1.5 text-xs font-semibold" data-testid={`badge-unit-count-${property.id}`}>
-                      {property.unitCount ?? "—"}
+                    <Badge
+                      variant="outline"
+                      className="px-1.5 text-xs font-semibold"
+                      data-testid={`badge-unit-count-${property.id}`}
+                      title={property.communityUnitCount ? `Estimated total units in ${property.community}` : `No community unit estimate available for ${property.community}`}
+                    >
+                      {property.communityUnitCount?.toLocaleString() ?? "—"}
                     </Badge>
                   </TableCell>
                 </TableRow>

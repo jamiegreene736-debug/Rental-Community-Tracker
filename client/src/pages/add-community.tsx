@@ -1834,6 +1834,7 @@ export default function AddCommunity() {
         state: selectedCommunity.state,
         estimatedLowRate: selectedCommunity.estimatedLowRate,
         estimatedHighRate: selectedCommunity.estimatedHighRate,
+        estimatedTotalUnits: selectedCommunity.estimatedTotalUnits ?? null,
         unitTypes: selectedCommunity.unitTypes,
         confidenceScore: selectedCommunity.confidenceScore,
         researchSummary: selectedCommunity.researchSummary,

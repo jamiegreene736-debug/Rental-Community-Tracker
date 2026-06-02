@@ -378,6 +378,7 @@ export const communityDrafts = pgTable("community_drafts", {
   streetAddress: text("street_address"),
   estimatedLowRate: integer("estimated_low_rate"),
   estimatedHighRate: integer("estimated_high_rate"),
+  estimatedTotalUnits: integer("estimated_total_units"),
   unitTypes: text("unit_types"),
   confidenceScore: integer("confidence_score"),
   researchSummary: text("research_summary"),
