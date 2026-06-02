@@ -123,6 +123,8 @@ type Property = {
   multiUnit: boolean;
   unitCount?: number;
   communityUnitCount?: number | null;
+  communityUnitCountRangeLow?: number | null;
+  communityUnitCountRangeHigh?: number | null;
   unitDetails: string;
   url: string;
 };
@@ -357,6 +359,52 @@ function communityUnitCountFor(communityName: string, explicit?: number | null):
     return Math.round(explicit);
   }
   return ESTIMATED_COMMUNITY_UNIT_COUNTS[normalizeCommunityUnitCountKey(communityName)] ?? null;
+}
+
+function communityUnitCountRangeFor(rowUnitCount: number | null | undefined): { low: number; high: number } {
+  const low = Math.max(1, Math.round(Number(rowUnitCount) || 1));
+  const high = Math.max(low, low === 1 ? 50 : 250);
+  return { low, high };
+}
+
+function communityUnitCountFields(
+  communityName: string,
+  rowUnitCount: number,
+  explicit?: number | null,
+): Pick<Property, "communityUnitCount" | "communityUnitCountRangeLow" | "communityUnitCountRangeHigh"> {
+  const exact = communityUnitCountFor(communityName, explicit);
+  if (exact != null) {
+    return {
+      communityUnitCount: exact,
+      communityUnitCountRangeLow: null,
+      communityUnitCountRangeHigh: null,
+    };
+  }
+  const range = communityUnitCountRangeFor(rowUnitCount);
+  return {
+    communityUnitCount: null,
+    communityUnitCountRangeLow: range.low,
+    communityUnitCountRangeHigh: range.high,
+  };
+}
+
+function communityUnitCountSortValue(property: Pick<Property, "communityUnitCount" | "communityUnitCountRangeLow">): number {
+  return property.communityUnitCount ?? property.communityUnitCountRangeLow ?? 1;
+}
+
+function communityUnitCountDisplay(property: Pick<Property, "community" | "communityUnitCount" | "communityUnitCountRangeLow" | "communityUnitCountRangeHigh">): { label: string; title: string } {
+  if (property.communityUnitCount != null) {
+    return {
+      label: property.communityUnitCount.toLocaleString(),
+      title: `Estimated total units in ${property.community}`,
+    };
+  }
+  const low = Math.max(1, Math.round(Number(property.communityUnitCountRangeLow) || 1));
+  const high = Math.max(low, Math.round(Number(property.communityUnitCountRangeHigh) || low));
+  return {
+    label: `${low.toLocaleString()}-${high.toLocaleString()}`,
+    title: `Estimated unit-count range for ${property.community}; exact community unit total is not available yet.`,
+  };
 }
 
 const properties: Property[] = [
@@ -1262,13 +1310,13 @@ function AdminDashboard() {
       const stay = minimumStayData?.[p.id];
       const communityStay = communityMinimumStayData.get(p.community);
       const unitCount = getUnitBuilderByPropertyId(p.id)?.units.length ?? (p.multiUnit ? 2 : 1);
-      const communityUnitCount = communityUnitCountFor(p.community);
-      if (!stay && !communityStay) return { ...p, unitCount, communityUnitCount };
+      const communityUnitCount = communityUnitCountFields(p.community, unitCount);
+      if (!stay && !communityStay) return { ...p, unitCount, ...communityUnitCount };
       if (communityStay?.minimumStayRangeLow && communityStay.minimumStayRangeHigh) {
         return {
           ...p,
           unitCount,
-          communityUnitCount,
+          ...communityUnitCount,
           minimumStayNights: null,
           minimumStayEvidence: communityStay.minimumStayEvidence,
           minimumStaySourceUrl: communityStay.minimumStaySourceUrl,
@@ -1279,7 +1327,7 @@ function AdminDashboard() {
       return {
         ...p,
         unitCount,
-        communityUnitCount,
+        ...communityUnitCount,
         minimumStayNights: stay?.minimumStayNights ?? communityStay?.minimumStayNights ?? null,
         minimumStayEvidence: stay?.minimumStayEvidence ?? communityStay?.minimumStayEvidence ?? null,
         minimumStaySourceUrl: stay?.minimumStaySourceUrl ?? communityStay?.minimumStaySourceUrl ?? null,
@@ -1386,6 +1434,8 @@ function AdminDashboard() {
       const unitDetails = isSingle
         ? (u1Br > 0 ? `${u1Br}BR standalone` : "Standalone (draft)")
         : (u1Br > 0 && u2Br > 0 ? `${u1Br}BR + ${u2Br}BR` : "Two units (draft)");
+      const unitCount = isSingle ? 1 : 2;
+      const communityUnitCount = communityUnitCountFields(d.name, unitCount, d.estimatedTotalUnits);
       const guestyStay = minimumStayData?.[-d.id];
       const communityStay = communityMinimumStayData.get(d.name);
       const communityRange = communityStay?.minimumStayRangeLow && communityStay.minimumStayRangeHigh
@@ -1424,8 +1474,8 @@ function AdminDashboard() {
         minimumStayRangeLow: communityRange?.minimumStayRangeLow ?? null,
         minimumStayRangeHigh: communityRange?.minimumStayRangeHigh ?? null,
         multiUnit: !isSingle,
-        unitCount: isSingle ? 1 : 2,
-        communityUnitCount: communityUnitCountFor(d.name, d.estimatedTotalUnits),
+        unitCount,
+        ...communityUnitCount,
         unitDetails,
         url: d.sourceUrl ?? "",
       };
@@ -1492,8 +1542,8 @@ function AdminDashboard() {
     }
     result = [...result].sort((a, b) => {
       if (sortField === "unitCount") {
-        const aCount = a.communityUnitCount ?? 0;
-        const bCount = b.communityUnitCount ?? 0;
+        const aCount = communityUnitCountSortValue(a);
+        const bCount = communityUnitCountSortValue(b);
         return sortDir === "asc" ? aCount - bCount : bCount - aCount;
       }
       if (sortField === "baseRate") {
@@ -3535,6 +3585,7 @@ function AdminDashboard() {
             </TableHeader>
             <TableBody>
               {filtered.map((property, idx) => {
+                const unitCountDisplay = communityUnitCountDisplay(property);
                 // Three states for the Actions column:
                 //   1. Active hardcoded property (in unitBuilderIds) → Build link
                 //   2. Draft awaiting promotion (draftStatus !== "published") →
@@ -3880,9 +3931,9 @@ function AdminDashboard() {
                       variant="outline"
                       className="px-1.5 text-xs font-semibold"
                       data-testid={`badge-unit-count-${property.id}`}
-                      title={property.communityUnitCount ? `Estimated total units in ${property.community}` : `No community unit estimate available for ${property.community}`}
+                      title={unitCountDisplay.title}
                     >
-                      {property.communityUnitCount?.toLocaleString() ?? "—"}
+                      {unitCountDisplay.label}
                     </Badge>
                   </TableCell>
                 </TableRow>

@@ -191,6 +191,21 @@ assert.match(
   /photo-match-units/,
   "dashboard photo-match column must visibly name affected Unit A/B folders when a platform match is found",
 );
+assert.match(
+  dashboardSource,
+  /communityUnitCountDisplay\(property\)/,
+  "dashboard Units column must use the display helper instead of rendering a dash for unknown community unit counts",
+);
+assert.match(
+  dashboardSource,
+  /label: `\$\{low\.toLocaleString\(\)\}-\$\{high\.toLocaleString\(\)\}`/,
+  "dashboard Units column must fall back to a numeric range when exact community unit count is unavailable",
+);
+assert.equal(
+  dashboardSource.includes('property.communityUnitCount?.toLocaleString() ?? "—"'),
+  false,
+  "dashboard Units column must never render a dash for community unit count",
+);
 const addCommunitySource = readFileSync("client/src/pages/add-community.tsx", "utf8");
 assert.match(
   addCommunitySource,
