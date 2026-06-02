@@ -307,6 +307,21 @@ function paymentLineLabel(item: any): string {
   return String(item?.description ?? item?.note ?? item?.label ?? item?.type ?? item?.kind ?? item?.status ?? "Payment");
 }
 
+function compactCommunityName(name: string): string {
+  const trimmed = name.trim();
+  const known: Record<string, string> = {
+    "Regency at Poipu Kai": "Regency",
+    "Mauna Kai Princeville": "Mauna Kai",
+    "Kaha Lani Resort": "Kaha Lani",
+    "Makahuena at Poipu": "Makahuena",
+    "Kaiulani of Princeville": "Kaiulani",
+  };
+  if (known[trimmed]) return known[trimmed];
+  const withoutSuffix = trimmed.replace(/\s+(Resort|Villas?|Condos?|Townhomes?)$/i, "").trim();
+  if (withoutSuffix.length <= 14) return withoutSuffix;
+  return withoutSuffix.split(/\s+/).slice(0, 2).join(" ");
+}
+
 const properties: Property[] = [
   {
     id: 1,
@@ -3275,11 +3290,11 @@ function AdminDashboard() {
               </Badge>
             </div>
           </div>
-          <div className="overflow-x-auto">
-          <Table id="list-properties" style={{ minWidth: 0 }}>
+          <div className="overflow-hidden [&>div]:overflow-hidden">
+          <Table id="list-properties" className="w-full table-fixed" style={{ minWidth: 0 }}>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[34px] text-center px-1">
+                <TableHead className="w-[30px] text-center px-1">
                   <Button
                     type="button"
                     variant="ghost"
@@ -3294,13 +3309,13 @@ function AdminDashboard() {
                     {allVisibleBulkPricingSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
                   </Button>
                 </TableHead>
-                <TableHead className="w-[70px] sticky left-0 bg-background z-10">Actions</TableHead>
+                <TableHead className="w-[64px] sticky left-0 bg-background z-10">Actions</TableHead>
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
-                <TableHead className="w-[84px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[136px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
+                <TableHead className="w-[72px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
+                <TableHead className="w-[118px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
                   <div className="flex items-center justify-center gap-1">
-                    <span>Photo Match</span>
+                    <span>Photos</span>
                     <Button
                       type="button"
                       variant="ghost"
@@ -3316,10 +3331,10 @@ function AdminDashboard() {
                     </Button>
                   </div>
                 </TableHead>
-                <TableHead className="w-[180px] max-w-[180px] px-2">
+                <TableHead className="w-[168px] max-w-[168px] px-1">
                   <Button
                     variant="ghost"
-                    className="font-medium px-1"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("name")}
                     data-testid="button-sort-name"
                     id="button-sort-name"
@@ -3329,10 +3344,10 @@ function AdminDashboard() {
                     <SortIcon field="name" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[120px] px-2">
+                <TableHead className="w-[88px] px-1">
                   <Button
                     variant="ghost"
-                    className="font-medium px-1"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("community")}
                     data-testid="button-sort-community"
                     id="button-sort-community"
@@ -3342,10 +3357,10 @@ function AdminDashboard() {
                     <SortIcon field="community" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[100px] px-2" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
+                <TableHead className="w-[88px] px-1" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
                   <Button
                     variant="ghost"
-                    className="font-medium px-1"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("minimumStay")}
                     data-testid="button-sort-minimum-stay"
                     id="button-sort-minimum-stay"
@@ -3355,10 +3370,10 @@ function AdminDashboard() {
                     <SortIcon field="minimumStay" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-right w-[95px] px-2">
+                <TableHead className="text-right w-[86px] px-1">
                   <Button
                     variant="ghost"
-                    className="font-medium px-1"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("baseRate")}
                     data-testid="button-sort-base-rate"
                     id="button-sort-base-rate"
@@ -3368,10 +3383,10 @@ function AdminDashboard() {
                     <SortIcon field="baseRate" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[80px] px-2">
+                <TableHead className="w-[62px] px-1">
                   <Button
                     variant="ghost"
-                    className="font-medium px-1"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("island")}
                     data-testid="button-sort-island"
                     id="button-sort-island"
@@ -3381,10 +3396,10 @@ function AdminDashboard() {
                     <SortIcon field="island" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-center w-[50px]">
+                <TableHead className="text-center w-[42px]">
                   <Button
                     variant="ghost"
-                    className="font-medium px-1"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("bedrooms")}
                     data-testid="button-sort-bedrooms"
                     id="button-sort-bedrooms"
@@ -3394,10 +3409,10 @@ function AdminDashboard() {
                     <SortIcon field="bedrooms" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-center w-[70px]">
+                <TableHead className="text-center w-[54px]">
                   <Button
                     variant="ghost"
-                    className="font-medium px-1"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("guests")}
                     data-testid="button-sort-guests"
                     id="button-sort-guests"
@@ -3407,10 +3422,10 @@ function AdminDashboard() {
                     <SortIcon field="guests" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-center w-[90px]">
+                <TableHead className="text-center w-[46px]">
                   <Button
                     variant="ghost"
-                    className="font-medium px-1"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("unitCount")}
                     data-testid="button-sort-unit-count"
                     id="button-sort-unit-count"
@@ -3445,7 +3460,7 @@ function AdminDashboard() {
                   id={`item-property-${property.id}`}
                   className={isResearchDraft ? "bg-amber-50/40 dark:bg-amber-900/10" : ""}
                 >
-                  <TableCell className="text-center px-1">
+                  <TableCell className="px-0.5 py-2 text-center">
                     <Button
                       type="button"
                       variant="ghost"
@@ -3461,7 +3476,7 @@ function AdminDashboard() {
                     </Button>
                   </TableCell>
                   <TableCell
-                    className="sticky left-0 z-10 px-2"
+                    className="sticky left-0 z-10 px-1 py-2"
                     style={{ background: isResearchDraft ? "rgba(254, 243, 199, 0.4)" : undefined }}
                   >
                     {isResearchDraft ? (
@@ -3521,8 +3536,8 @@ function AdminDashboard() {
                       </Link>
                     ) : null}
                   </TableCell>
-                  <TableCell className="text-center text-muted-foreground text-xs">{idx + 1}</TableCell>
-                  <TableCell className="text-center px-0">
+                  <TableCell className="px-0 py-2 text-center text-xs text-muted-foreground">{idx + 1}</TableCell>
+                  <TableCell className="px-0 py-2 text-center">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -3551,7 +3566,7 @@ function AdminDashboard() {
                       </Tooltip>
                     </TooltipProvider>
                   </TableCell>
-                  <TableCell className="text-center px-1">
+                  <TableCell className="px-0.5 py-2 text-center">
                     {(() => {
                       // Dashboard channel indicators: three badges per row
                       // with three states:
@@ -3586,15 +3601,15 @@ function AdminDashboard() {
                         bad:  { bg: "#dc2626", glyph: "✗", desc: "Not live" },
                       };
                       return (
-                        <div className="flex gap-0.5 justify-center items-center" data-testid={`channels-${property.id}`}>
+                        <div className="flex gap-[1px] justify-center items-center" data-testid={`channels-${property.id}`}>
                           {items.map((it) => {
                             const p = PAL[it.tone];
                             return (
                               <span
                                 key={it.letter}
                                 title={`${it.name}: ${p.desc}`}
-                                className="inline-flex items-center justify-center h-[18px] px-1 rounded text-[9px] font-bold leading-none"
-                                style={{ background: p.bg, color: "white", minWidth: 22 }}
+                                className="inline-flex items-center justify-center h-[18px] px-0.5 rounded text-[8px] font-bold leading-none"
+                                style={{ background: p.bg, color: "white", minWidth: 20 }}
                                 data-testid={`channel-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
                               >
                                 {it.letter}{p.glyph}
@@ -3605,7 +3620,7 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
-                  <TableCell className="text-center px-1">
+                  <TableCell className="px-0.5 py-2 text-center">
                     {(() => {
                       // Photo-match indicators mirror the Channels column:
                       // three badges per row with the same color palette.
@@ -3658,7 +3673,7 @@ function AdminDashboard() {
                       const errorPreview = photoCheckErrorPreview(agg?.errorMessages?.[0]);
                       return (
                         <div className="flex flex-col items-center gap-0.5" data-testid={`photo-match-${property.id}`}>
-                          <div className="flex gap-0.5 justify-center items-center">
+                          <div className="flex gap-[1px] justify-center items-center">
                             {items.map((it) => {
                               const tone = toneOf(it.status);
                               const p = PAL[tone];
@@ -3673,8 +3688,8 @@ function AdminDashboard() {
                                 <span
                                   key={it.letter}
                                   title={tip}
-                                  className="inline-flex items-center justify-center h-[18px] px-1 rounded text-[9px] font-bold leading-none"
-                                  style={{ background: p.bg, color: "white", minWidth: 22 }}
+                                  className="inline-flex items-center justify-center h-[18px] px-0.5 rounded text-[8px] font-bold leading-none"
+                                  style={{ background: p.bg, color: "white", minWidth: 20 }}
                                   data-testid={`photo-match-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
                                 >
                                   {it.letter}{p.glyph}
@@ -3685,7 +3700,7 @@ function AdminDashboard() {
                               type="button"
                               variant="ghost"
                               size="icon"
-                              className="ml-1 h-[18px] w-[18px] rounded"
+                              className="ml-0.5 h-[18px] w-[18px] rounded"
                               title={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans; no folders resolved for ${property.name}`}
                               aria-label={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans`}
                               disabled={photoScanMutation.isPending}
@@ -3696,7 +3711,7 @@ function AdminDashboard() {
                             </Button>
                           </div>
                           {matchedSummary.length > 0 ? (
-                            <div className="max-w-[132px] text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
+                            <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
                               {matchedSummary.join(" · ")}
                             </div>
                           ) : null}
@@ -3704,7 +3719,7 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
-                  <TableCell className="max-w-[180px] px-2">
+                  <TableCell className="max-w-[168px] px-1 py-2">
                     <div className="min-w-0">
                       <span className="font-medium text-sm leading-tight block truncate" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`} title={property.name}>
                         {property.name}
@@ -3712,25 +3727,26 @@ function AdminDashboard() {
                       <p className="text-xs text-muted-foreground mt-0.5 truncate">{property.unitDetails}</p>
                     </div>
                   </TableCell>
-                  <TableCell className="px-2">
+                  <TableCell className="px-1 py-2">
                     <Badge
                       variant={communityVariant(property.pricingArea)}
-                      className="no-default-hover-elevate no-default-active-elevate text-xs"
+                      className="no-default-hover-elevate no-default-active-elevate block max-w-[78px] truncate text-xs"
                       data-testid={`badge-community-${property.id}`}
+                      title={property.community}
                     >
-                      {property.community}
+                      {compactCommunityName(property.community)}
                     </Badge>
                   </TableCell>
-                  <TableCell className="px-2">
+                  <TableCell className="px-1 py-2">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Badge
                             variant="outline"
                             className={
-                              minStay.tone === "warn" ? "bg-amber-50 border-amber-200 text-amber-800 cursor-help"
-                              : minStay.tone === "ok" ? "bg-emerald-50 border-emerald-200 text-emerald-800 cursor-help"
-                              : "bg-blue-50 border-blue-200 text-blue-800 cursor-help"
+                              minStay.tone === "warn" ? "max-w-[78px] truncate bg-amber-50 border-amber-200 text-amber-800 cursor-help"
+                              : minStay.tone === "ok" ? "max-w-[78px] truncate bg-emerald-50 border-emerald-200 text-emerald-800 cursor-help"
+                              : "max-w-[78px] truncate bg-blue-50 border-blue-200 text-blue-800 cursor-help"
                             }
                             data-testid={`badge-minimum-stay-${property.id}`}
                           >
@@ -3747,24 +3763,24 @@ function AdminDashboard() {
                       </Tooltip>
                     </TooltipProvider>
                   </TableCell>
-                  <TableCell className="text-right px-2 tabular-nums text-sm" data-testid={`text-base-rate-${property.id}`}>
+                  <TableCell className="px-1 py-2 text-right text-sm tabular-nums" data-testid={`text-base-rate-${property.id}`}>
                     ${(baseRates.get(property.id) ?? 0).toLocaleString()}
                   </TableCell>
-                  <TableCell className="px-2">
-                    <span className="text-sm text-muted-foreground">{property.island}</span>
+                  <TableCell className="px-1 py-2">
+                    <span className="block truncate text-sm text-muted-foreground" title={property.island}>{property.island}</span>
                   </TableCell>
-                  <TableCell className="text-center">
+                  <TableCell className="px-1 py-2 text-center">
                     <span className="font-medium" data-testid={`text-bedrooms-${property.id}`}>
                       {property.bedrooms}
                     </span>
                   </TableCell>
-                  <TableCell className="text-center">
+                  <TableCell className="px-1 py-2 text-center">
                     <span className="font-medium" data-testid={`text-guests-${property.id}`}>
                       {property.guests}
                     </span>
                   </TableCell>
-                  <TableCell className="text-center" data-testid={`cell-unit-count-${property.id}`}>
-                    <Badge variant="outline" className="text-xs font-semibold" data-testid={`badge-unit-count-${property.id}`}>
+                  <TableCell className="px-1 py-2 text-center" data-testid={`cell-unit-count-${property.id}`}>
+                    <Badge variant="outline" className="px-1.5 text-xs font-semibold" data-testid={`badge-unit-count-${property.id}`}>
                       {property.unitCount ?? "—"}
                     </Badge>
                   </TableCell>
