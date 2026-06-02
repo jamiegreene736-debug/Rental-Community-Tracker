@@ -16910,6 +16910,126 @@ export async function registerRoutes(
     }
   });
 
+  type BuilderBookingRulesPayload = {
+    minNights?: number;
+    maxNights?: number;
+    advanceNotice?: number;
+    preparationTime?: number;
+    instantBooking?: boolean;
+    cancellationPolicies?: {
+      airbnb?: string;
+      vrbo?: string;
+      booking?: string;
+    };
+  };
+
+  const clampInt = (value: unknown, fallback: number, min: number, max: number): number => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, Math.trunc(parsed)));
+  };
+
+  const normalizeBuilderBookingRules = (input: BuilderBookingRulesPayload) => ({
+    minNights: clampInt(input.minNights, 3, 1, 90),
+    maxNights: clampInt(input.maxNights, 365, 1, 730),
+    advanceNotice: clampInt(input.advanceNotice, 60, 0, 365),
+    preparationTime: clampInt(input.preparationTime, 1, 0, 30),
+    instantBooking: input.instantBooking !== false,
+    cancellationPolicies: {
+      airbnb: String(input.cancellationPolicies?.airbnb || "firm"),
+      vrbo: String(input.cancellationPolicies?.vrbo || "FIRM"),
+      booking: String(input.cancellationPolicies?.booking || "strict"),
+    },
+  });
+
+  const readGuestyTerms = async (listingId: string): Promise<Record<string, any>> => {
+    const listing = await guestyRequest("GET", `/listings/${encodeURIComponent(listingId)}?fields=terms`) as any;
+    return listing && typeof listing.terms === "object" && listing.terms ? listing.terms : {};
+  };
+
+  const verifyGuestyBookingTerms = (terms: Record<string, any>, rules: ReturnType<typeof normalizeBuilderBookingRules>) => {
+    const mismatches: string[] = [];
+    const asNumber = (value: unknown) => Number(value);
+    if (asNumber(terms.minNights ?? terms.minimumNights ?? terms.minLOS ?? terms.minimumStay) !== rules.minNights) mismatches.push("min nights");
+    if (asNumber(terms.maxNights ?? terms.maximumNights ?? terms.maxLOS ?? terms.maximumStay) !== rules.maxNights) mismatches.push("max nights");
+    const advance = asNumber(terms.advanceNotice);
+    if (Number.isFinite(advance) && advance !== rules.advanceNotice * 24 && advance !== rules.advanceNotice) mismatches.push("advance notice");
+    const prep = asNumber(terms.preparationTime);
+    if (Number.isFinite(prep) && prep !== rules.preparationTime) mismatches.push("prep days");
+    if (typeof terms.instantBooking === "boolean" && terms.instantBooking !== rules.instantBooking) mismatches.push("instant booking");
+    const policy = String(terms.cancellationPolicy ?? "");
+    if (policy && policy !== rules.cancellationPolicies.airbnb) mismatches.push("Airbnb/top-level cancellation policy");
+    return mismatches;
+  };
+
+  app.get("/api/builder/booking-rules/:propertyId", async (req: Request, res: Response) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    const listingId = String(req.query.listingId || "").trim();
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    const row = await storage.getBuilderBookingRules(propertyId, listingId);
+    return res.json({ rules: row ?? null });
+  });
+
+  app.post("/api/builder/booking-rules/:propertyId", async (req: Request, res: Response) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    const listingId = String(req.body?.listingId || "").trim();
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    const rules = normalizeBuilderBookingRules(req.body?.rules ?? req.body ?? {});
+    if (rules.maxNights < rules.minNights) return res.status(400).json({ error: "max nights must be greater than or equal to min nights" });
+
+    const terms = {
+      minNights: rules.minNights,
+      maxNights: rules.maxNights,
+      cancellationPolicy: rules.cancellationPolicies.airbnb,
+      instantBooking: rules.instantBooking,
+      advanceNotice: rules.advanceNotice * 24,
+      preparationTime: rules.preparationTime,
+    };
+
+    try {
+      await guestyRequest("PUT", `/listings/${encodeURIComponent(listingId)}`, { terms });
+
+      let readback: Record<string, any> = {};
+      let mismatches: string[] = [];
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        readback = await readGuestyTerms(listingId);
+        mismatches = verifyGuestyBookingTerms(readback, rules);
+        if (mismatches.length === 0) break;
+      }
+
+      const summary = mismatches.length === 0
+        ? `Verified min ${rules.minNights}, max ${rules.maxNights}, ${rules.advanceNotice}d advance, ${rules.preparationTime}d prep`
+        : `Guesty read-back mismatch: ${mismatches.join(", ")}`;
+
+      const row = await storage.upsertBuilderBookingRules({
+        propertyId,
+        guestyListingId: listingId,
+        minNights: rules.minNights,
+        maxNights: rules.maxNights,
+        advanceNotice: rules.advanceNotice,
+        preparationTime: rules.preparationTime,
+        instantBooking: rules.instantBooking,
+        cancellationPolicies: rules.cancellationPolicies,
+        lastPushedAt: new Date(),
+        lastPushStatus: mismatches.length === 0 ? "ok" : "error",
+        lastPushSummary: summary,
+      });
+
+      return res.status(mismatches.length === 0 ? 200 : 409).json({
+        success: mismatches.length === 0,
+        rules: row,
+        guestyTerms: readback,
+        mismatches,
+        summary,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message ?? String(err) });
+    }
+  });
+
   // POST /api/builder/push-seasonal-rates
   // Pushes per-day base nightly rates to Guesty's calendar. The client sends
   // a flat rate per month and this expands it to the days in each month, then
@@ -16923,6 +17043,7 @@ export async function registerRoutes(
     const { listingId, monthlyRates, propertyId, liveMarketBuyIn } = req.body as {
       listingId?: string;
       propertyId?: number;
+      targetMargin?: number;
       // Each entry: { yearMonth: "2026-08", price: 1970 } — price becomes the
       // per-night base for every day in that month.
       monthlyRates?: Array<{ yearMonth: string; price: number }>;
@@ -16932,7 +17053,10 @@ export async function registerRoutes(
     if (!Array.isArray(monthlyRates) || monthlyRates.length === 0) {
       return res.status(400).json({ error: "monthlyRates array required" });
     }
-    if (liveMarketBuyIn) console.log(`[push-seasonal-rates] liveMarketBuyIn provided for ${Object.keys(liveMarketBuyIn).length} months (final 20% will be layered on top)`);
+    const pushedTargetMargin = Number.isFinite(Number(req.body?.targetMargin))
+      ? Math.max(-0.99, Math.min(1, Number(req.body.targetMargin)))
+      : undefined;
+    if (liveMarketBuyIn) console.log(`[push-seasonal-rates] liveMarketBuyIn provided for ${Object.keys(liveMarketBuyIn).length} months`);
 
     // Expand monthly rates into per-day entries Guesty will accept.
     type DayEntry = { date: string; price: number };
@@ -16972,7 +17096,7 @@ export async function registerRoutes(
     const recordGuestyRatePush = async (status: "ok" | "error", summary: string) => {
       if (!schedulePropertyId) return;
       try {
-        await storage.markScannerGuestyRatePush(schedulePropertyId, status, summary.slice(0, 240));
+        await storage.markScannerGuestyRatePush(schedulePropertyId, status, summary.slice(0, 240), pushedTargetMargin);
       } catch (err: any) {
         console.warn(`[push-seasonal-rates] could not record Guesty push timestamp for property ${schedulePropertyId}: ${err?.message ?? err}`);
       }

@@ -55,10 +55,9 @@ export type GuestyBookingSettings = {
   // to per-channel policies. When `cancellationPolicies` is also set,
   // the per-channel values win.
   cancellationPolicy?: string;
-  // Per-channel cancellation policies. Each channel has its own enum
-  // of accepted values — see GuestyListingBuilder's dropdowns for the
-  // options. Pushed via `integrations.{airbnb2|homeaway2|bookingCom}`
-  // alongside the top-level `terms.cancellationPolicy` fallback.
+  // Per-channel cancellation policies. GuestyListingBuilder persists all
+  // three choices in the builder preference endpoint; only the Airbnb/top-level
+  // fallback is written through `terms.cancellationPolicy`.
   cancellationPolicies?: {
     airbnb?: string;
     vrbo?: string;

@@ -222,6 +222,19 @@ type Props = {
   onPhotoOverridesChanged?: () => void;
 };
 
+const DEFAULT_BOOKING_RULES = {
+  minNights: 3,
+  maxNights: 365,
+  advanceNotice: 60,
+  preparationTime: 1,
+  instantBooking: true,
+  cancellationPolicies: {
+    airbnb: "firm",
+    vrbo: "FIRM",
+    booking: "strict",
+  },
+};
+
 type OtaVisibilityPlatform = "booking" | "vrbo";
 type OtaVisibilityStatus = "queued" | "running" | "found" | "not_found" | "error";
 type OtaVisibilityJob = {
@@ -629,7 +642,6 @@ function GuestyRatePushCard({
   seasonalMonths,
   targetMarginPct,
   setTargetMarginPct,
-  allowCustomMargin,
   lastGuestyRatePushAt,
   lastGuestyRatePushStatus,
   lastGuestyRatePushSummary,
@@ -641,7 +653,6 @@ function GuestyRatePushCard({
   seasonalMonths: Array<{ yearMonth: string; totalBuyIn: number; totalSell: number }>;
   targetMarginPct: number;
   setTargetMarginPct: (value: number) => void;
-  allowCustomMargin: boolean;
   lastGuestyRatePushAt?: string | null;
   lastGuestyRatePushStatus?: string | null;
   lastGuestyRatePushSummary?: string | null;
@@ -658,7 +669,7 @@ function GuestyRatePushCard({
     setTargetMarginInput(String(targetMarginPct));
   }, [targetMarginPct]);
 
-  const marginMinPct = allowCustomMargin ? -99 : 20;
+  const marginMinPct = -99;
   const marginMaxPct = 100;
   const applyTargetMarginInput = (raw: string) => {
     setTargetMarginInput(raw);
@@ -686,7 +697,7 @@ function GuestyRatePushCard({
         yearMonth: row.yearMonth,
         buyIn: row.totalBuyIn,
         // Match the pricing table's Sheet Base column (per-unit ceil, then sum).
-        price: row.totalSell > 0 ? row.totalSell : cleanBaseRateFromBuyIn(row.totalBuyIn, m),
+        price: cleanBaseRateFromBuyIn(row.totalBuyIn, m),
       }));
   };
 
@@ -703,6 +714,7 @@ function GuestyRatePushCard({
         body: JSON.stringify({
           listingId,
           propertyId,
+          targetMargin: targetMarginPct / 100,
           monthlyRates: plan.map(({ yearMonth, price }) => ({ yearMonth, price })),
         }),
       });
@@ -777,26 +789,20 @@ function GuestyRatePushCard({
       </p>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <label style={{ fontSize: 11, color: "#6b7280" }}>
-          {allowCustomMargin ? "Single-listing target margin:" : "Target margin:"}
+          Target margin:
           <input
             type="number"
-            step="1"
+            step="0.1"
             min={marginMinPct}
             max={marginMaxPct}
             value={targetMarginInput}
-            disabled={!allowCustomMargin}
             onChange={(e) => applyTargetMarginInput(e.target.value)}
             onBlur={normalizeTargetMarginInput}
-            style={{ marginLeft: 6, padding: "3px 6px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: 60 }}
+            style={{ marginLeft: 6, padding: "3px 6px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 12, width: 72 }}
             data-testid="input-target-margin"
           />
           <span style={{ marginLeft: 2 }}>%</span>
         </label>
-        {!allowCustomMargin && (
-          <span style={{ fontSize: 11, color: "#6b7280" }}>
-            Combo listings stay locked at the standard 20% margin guardrail.
-          </span>
-        )}
         {seasonalPriceRange && (
           <span style={{ fontSize: 11, color: "#6b7280" }}>
             Marked-up Guesty rates will range <b>${seasonalPriceRange.min.toLocaleString()}</b>–<b>${seasonalPriceRange.max.toLocaleString()}</b> per night.
@@ -1045,23 +1051,57 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // channel-specific policies cleanly. Defaults hit the operator's
   // requested floor: "30+ days notice for a full refund, 50%+ penalty
   // for late cancellation."
-  const [bookingRules, setBookingRules] = useState({
-    minNights: 3,
-    maxNights: 365,
-    advanceNotice: 60,  // days — see comment above
-    preparationTime: 1, // days (cleaning buffer)
-    instantBooking: true,
-    cancellationPolicies: {
-      airbnb: "firm",     // 30d full refund · 14d 50% refund · <14d no refund
-      vrbo: "FIRM",       // 60d full refund · 30d 50% refund · <30d no refund
-      booking: "strict",  // One shape below "non_refundable" — the tightest Booking.com policy that still allows a limited refund window; exact day/percent thresholds are operator-configured in the Extranet
-    },
-  });
+  const [bookingRules, setBookingRules] = useState(DEFAULT_BOOKING_RULES);
   const [pushingBooking, setPushingBooking] = useState(false);
+  const [bookingRulesPushInfo, setBookingRulesPushInfo] = useState<{
+    lastPushedAt: string | null;
+    lastPushStatus: string | null;
+    lastPushSummary: string | null;
+  } | null>(null);
 
   useEffect(() => {
     setEditableTitle(propertyData?.descriptions?.title ?? "");
   }, [propertyData?.descriptions?.title]);
+
+  useEffect(() => {
+    if (!propertyId || !selectedId) {
+      setBookingRules(DEFAULT_BOOKING_RULES);
+      setBookingRulesPushInfo(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/builder/booking-rules/${propertyId}?listingId=${encodeURIComponent(selectedId)}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled) return;
+        const saved = data?.rules;
+        if (!saved) {
+          setBookingRules(DEFAULT_BOOKING_RULES);
+          setBookingRulesPushInfo(null);
+          return;
+        }
+        setBookingRules({
+          minNights: Number(saved.minNights ?? DEFAULT_BOOKING_RULES.minNights),
+          maxNights: Number(saved.maxNights ?? DEFAULT_BOOKING_RULES.maxNights),
+          advanceNotice: Number(saved.advanceNotice ?? DEFAULT_BOOKING_RULES.advanceNotice),
+          preparationTime: Number(saved.preparationTime ?? DEFAULT_BOOKING_RULES.preparationTime),
+          instantBooking: saved.instantBooking !== false,
+          cancellationPolicies: {
+            ...DEFAULT_BOOKING_RULES.cancellationPolicies,
+            ...(saved.cancellationPolicies ?? {}),
+          },
+        });
+        setBookingRulesPushInfo({
+          lastPushedAt: saved.lastPushedAt ?? null,
+          lastPushStatus: saved.lastPushStatus ?? null,
+          lastPushSummary: saved.lastPushSummary ?? null,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setBookingRulesPushInfo(null);
+      });
+    return () => { cancelled = true; };
+  }, [propertyId, selectedId]);
 
   useEffect(() => {
     setComplianceOverrides({});
@@ -3798,12 +3838,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [liveMarket, setLiveMarket] = useState<any>(null);
   const [marketRefreshing, setMarketRefreshing] = useState(false);
   const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
-  const pricingMarginTarget = isSingleListing ? targetMarginPct / 100 : MIN_PROFIT_MARGIN;
+  const pricingMarginTarget = targetMarginPct / 100;
   const [scannerSchedule, setScannerSchedule] = useState<ScannerScheduleSnapshot | null>(null);
-
-  useEffect(() => {
-    if (!isSingleListing) setTargetMarginPct(MIN_PROFIT_MARGIN * 100);
-  }, [isSingleListing]);
 
   const refreshScannerSchedule = useCallback(async () => {
     if (!propertyId) {
@@ -3816,19 +3852,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         const nextSchedule = (data?.schedule ?? null) as ScannerScheduleSnapshot | null;
         setScannerSchedule(nextSchedule);
         const margin = Number.parseFloat(String(data?.schedule?.targetMargin ?? ""));
-        if (isSingleListing && Number.isFinite(margin)) {
+        if (Number.isFinite(margin)) {
           setTargetMarginPct(Math.max(-99, Math.min(100, margin * 100)));
         }
       })
       .catch(() => {});
-  }, [propertyId, isSingleListing]);
+  }, [propertyId]);
 
   useEffect(() => {
     void refreshScannerSchedule();
   }, [refreshScannerSchedule]);
 
   useEffect(() => {
-    if (!propertyId || !isSingleListing) return;
+    if (!propertyId) return;
     const timer = window.setTimeout(() => {
       void fetch(`/api/availability/schedule/${propertyId}`, {
         method: "POST",
@@ -3837,7 +3873,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }).catch(() => {});
     }, 600);
     return () => window.clearTimeout(timer);
-  }, [propertyId, isSingleListing, targetMarginPct]);
+  }, [propertyId, targetMarginPct]);
 
   const refetchGuestyRates = useCallback(() => {
     if (!propertyId) return;
@@ -6388,7 +6424,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     seasonalMonths={seasonalMonths}
                     targetMarginPct={targetMarginPct}
                     setTargetMarginPct={setTargetMarginPct}
-                    allowCustomMargin={isSingleListing}
                     lastGuestyRatePushAt={scannerSchedule?.lastGuestyRatePushAt ?? null}
                     lastGuestyRatePushStatus={scannerSchedule?.lastGuestyRatePushStatus ?? null}
                     lastGuestyRatePushSummary={scannerSchedule?.lastGuestyRatePushSummary ?? null}
@@ -6402,23 +6437,36 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   <div style={{ marginTop: 20, padding: "16px 20px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8 }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
                       <div style={{ fontSize: 13, fontWeight: 600 }}>📋 Booking Rules</div>
+                      {bookingRulesPushInfo?.lastPushedAt && (
+                        <span style={{ fontSize: 11, color: bookingRulesPushInfo.lastPushStatus === "error" ? "#991b1b" : "#166534" }}>
+                          Last push: <b>{fmtDateTime(bookingRulesPushInfo.lastPushedAt)}</b>
+                          {bookingRulesPushInfo.lastPushSummary ? ` · ${bookingRulesPushInfo.lastPushSummary}` : ""}
+                        </span>
+                      )}
                       <button
-                        disabled={!selectedId || pushingBooking}
+                        disabled={!selectedId || !propertyId || pushingBooking}
                         onClick={async () => {
-                          if (!selectedId) return;
+                          if (!selectedId || !propertyId) return;
                           setPushingBooking(true);
                           try {
-                            await guestyService.updateBookingSettings(selectedId, {
-                              minNights: bookingRules.minNights,
-                              maxNights: bookingRules.maxNights,
-                              advanceNotice: bookingRules.advanceNotice,
-                              preparationTime: bookingRules.preparationTime,
-                              instantBooking: bookingRules.instantBooking,
-                              cancellationPolicies: bookingRules.cancellationPolicies,
+                            const response = await fetch(`/api/builder/booking-rules/${propertyId}`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ listingId: selectedId, rules: bookingRules }),
+                            });
+                            const data = await response.json().catch(() => ({}));
+                            if (!response.ok || data.success === false) {
+                              throw new Error(data.error || data.summary || `Booking rules push failed (${response.status})`);
+                            }
+                            const saved = data.rules;
+                            setBookingRulesPushInfo({
+                              lastPushedAt: saved?.lastPushedAt ?? new Date().toISOString(),
+                              lastPushStatus: saved?.lastPushStatus ?? "ok",
+                              lastPushSummary: saved?.lastPushSummary ?? data.summary ?? null,
                             });
                             toast({
                               title: "Booking rules pushed to Guesty",
-                              description: `Min ${bookingRules.minNights} nights · ${bookingRules.advanceNotice}d advance notice · ${bookingRules.preparationTime}d prep time`,
+                              description: data.summary || `Min ${bookingRules.minNights} nights · ${bookingRules.advanceNotice}d advance notice · ${bookingRules.preparationTime}d prep time`,
                             });
                           } catch (e: any) {
                             toast({ title: "Push failed", description: e.message, variant: "destructive" });
@@ -6428,12 +6476,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         }}
                         style={{
                           fontSize: 12, fontWeight: 600, padding: "6px 14px", borderRadius: 6,
-                          border: "none", cursor: selectedId ? "pointer" : "not-allowed",
-                          background: pushingBooking ? "#94a3b8" : selectedId ? "#0f766e" : "#94a3b8",
+                          border: "none", cursor: selectedId && propertyId ? "pointer" : "not-allowed",
+                          background: pushingBooking ? "#94a3b8" : selectedId && propertyId ? "#0f766e" : "#94a3b8",
                           color: "#fff",
                         }}
                         data-testid="btn-push-booking-rules"
-                        title={selectedId ? "Push booking rules to Guesty" : "Select a Guesty listing first"}
+                        title={selectedId && propertyId ? "Push booking rules to Guesty" : "Select a Guesty listing first"}
                       >
                         {pushingBooking ? "Pushing…" : "↑ Push to Guesty"}
                       </button>
@@ -6538,10 +6586,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         Cancellation policies by channel
                       </div>
                       <div style={{ fontSize: 10, color: "#92400e", marginBottom: 10, fontStyle: "italic" }}>
-                        ⚠ Only the Airbnb policy syncs to Guesty via this button.
-                        VRBO &amp; Booking.com per-channel values are captured here
-                        for your records — set them in Guesty's own Booking-Rules
-                        UI to actually apply per-channel.
+                        ⚠ The Airbnb policy syncs to Guesty's top-level booking terms via this button.
+                        VRBO &amp; Booking.com choices are saved here for your records; use Guesty's own
+                        channel Booking-Rules UI to enforce those per-channel overrides.
                       </div>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
                         {/* Airbnb */}

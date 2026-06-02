@@ -792,6 +792,29 @@ export const guestyPropertyMap = pgTable("guesty_property_map", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const builderBookingRules = pgTable("builder_booking_rules", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  guestyListingId: text("guesty_listing_id").notNull(),
+  minNights: integer("min_nights").notNull().default(3),
+  maxNights: integer("max_nights").notNull().default(365),
+  advanceNotice: integer("advance_notice").notNull().default(60),
+  preparationTime: integer("preparation_time").notNull().default(1),
+  instantBooking: boolean("instant_booking").notNull().default(true),
+  cancellationPolicies: jsonb("cancellation_policies").$type<{
+    airbnb?: string;
+    vrbo?: string;
+    booking?: string;
+  }>().default(sql`'{}'::jsonb`).notNull(),
+  lastPushedAt: timestamp("last_pushed_at"),
+  lastPushStatus: text("last_push_status"),
+  lastPushSummary: text("last_push_summary"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type BuilderBookingRules = typeof builderBookingRules.$inferSelect;
+export type InsertBuilderBookingRules = typeof builderBookingRules.$inferInsert;
+
 /** Builder-pulled compliance values for hardcoded (positive) propertyIds. */
 export const propertyComplianceOverrides = pgTable("property_compliance_overrides", {
   propertyId: integer("property_id").primaryKey(),

@@ -10,6 +10,7 @@ import {
   type LodgifyPropertyMap,
   type UnitSwap, type InsertUnitSwap,
   type GuestyPropertyMap, type InsertGuestyPropertyMap,
+  type BuilderBookingRules, type InsertBuilderBookingRules,
   type MessageTemplate, type InsertMessageTemplate,
   type AutoReplyLog, type InsertAutoReplyLog,
   type AutoReplyStyleExample, type InsertAutoReplyStyleExample,
@@ -27,7 +28,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, messageTemplates, autoReplyLog, autoReplyStyleExamples, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
+  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
   type PropertyMarketRate, type InsertPropertyMarketRate,
   type PricingUpdateLog, type InsertPricingUpdateLog,
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
@@ -194,6 +195,8 @@ export interface IStorage {
   getGuestyPropertyMap(): Promise<GuestyPropertyMap[]>;
   getGuestyListingId(propertyId: number): Promise<string | null>;
   updateGuestyLastSynced(propertyId: number): Promise<void>;
+  getBuilderBookingRules(propertyId: number, guestyListingId: string): Promise<BuilderBookingRules | undefined>;
+  upsertBuilderBookingRules(input: InsertBuilderBookingRules): Promise<BuilderBookingRules>;
 
   getPropertyComplianceOverrides(propertyId: number): Promise<{
     taxMapKey: string | null;
@@ -837,6 +840,30 @@ export class DatabaseStorage implements IStorage {
     await db.update(guestyPropertyMap).set({ lastSyncedAt: new Date() }).where(eq(guestyPropertyMap.propertyId, propertyId));
   }
 
+  async getBuilderBookingRules(propertyId: number, guestyListingId: string): Promise<BuilderBookingRules | undefined> {
+    const [row] = await db.select().from(builderBookingRules)
+      .where(and(
+        eq(builderBookingRules.propertyId, propertyId),
+        eq(builderBookingRules.guestyListingId, guestyListingId),
+      ))
+      .limit(1);
+    return row;
+  }
+
+  async upsertBuilderBookingRules(input: InsertBuilderBookingRules): Promise<BuilderBookingRules> {
+    const existing = await this.getBuilderBookingRules(input.propertyId, input.guestyListingId);
+    const values = { ...input, updatedAt: new Date() };
+    if (existing) {
+      const [row] = await db.update(builderBookingRules)
+        .set(values)
+        .where(eq(builderBookingRules.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(builderBookingRules).values(input).returning();
+    return row;
+  }
+
   async getPropertyComplianceOverrides(propertyId: number) {
     const [row] = await db
       .select()
@@ -1308,12 +1335,15 @@ export class DatabaseStorage implements IStorage {
     propertyId: number,
     status: "ok" | "error",
     summary: string,
+    targetMargin?: number,
   ): Promise<void> {
     const now = new Date();
     const existing = await this.getScannerSchedule(propertyId);
+    const marginPatch = Number.isFinite(targetMargin) ? { targetMargin: String(targetMargin) } : {};
     if (existing) {
       await db.update(scannerSchedule)
         .set({
+          ...marginPatch,
           lastGuestyRatePushAt: now,
           lastGuestyRatePushStatus: status,
           lastGuestyRatePushSummary: summary,
@@ -1326,6 +1356,7 @@ export class DatabaseStorage implements IStorage {
       .values({
         propertyId,
         enabled: false,
+        ...marginPatch,
         lastGuestyRatePushAt: now,
         lastGuestyRatePushStatus: status,
         lastGuestyRatePushSummary: summary,
