@@ -285,9 +285,18 @@ export default function BuilderPreflight() {
   // street root is known, then scrapes the first usable detail result.
   // Operator clicks one button per unit; URL paste isn't needed.
   const [scrapingUnitId, setScrapingUnitId] = useState<string | null>(null);
+  const [photoFetchStartedAt, setPhotoFetchStartedAt] = useState<number | null>(null);
+  const [photoFetchTick, setPhotoFetchTick] = useState(0);
+  const [photoFetchPhase, setPhotoFetchPhase] = useState<string | null>(null);
   // Track URLs the operator has already accepted/rejected so the
   // "Try another" path skips them. Reset when the property changes.
   const [skippedUrlsByUnit, setSkippedUrlsByUnit] = useState<Record<string, string[]>>({});
+
+  useEffect(() => {
+    if (!scrapingUnitId) return;
+    const t = setInterval(() => setPhotoFetchTick((tick) => tick + 1), 1_000);
+    return () => clearInterval(t);
+  }, [scrapingUnitId]);
 
   // Parse street / city / state out of the property's display address
   // ("9000 Treasure Trove Lane, Kissimmee, Florida"). For HI properties
@@ -325,6 +334,9 @@ export default function BuilderPreflight() {
       }
     };
     setScrapingUnitId(unit.id);
+    setPhotoFetchStartedAt(Date.now());
+    setPhotoFetchTick(0);
+    setPhotoFetchPhase("Checking existing photo sources");
     try {
       const existingSources = await Promise.all(property.units.map((u) => loadSourceUrl(u.photoFolder)));
       const skipUrls = Array.from(new Set([
@@ -332,6 +344,7 @@ export default function BuilderPreflight() {
         ...existingSources.filter((u): u is string => !!u),
       ]));
       const currentUnitHasPhotos = property.units.some((u) => u.id === unit.id && (u.photos?.length ?? 0) > 0);
+      setPhotoFetchPhase("Searching real-estate listings");
       const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", {
         communityName: property.complexName,
         streetAddress: street || undefined,
@@ -352,6 +365,7 @@ export default function BuilderPreflight() {
         });
         return;
       }
+      setPhotoFetchPhase("Saving photos to this draft");
       // Pass empty array for the OTHER unit so persist-photos doesn't wipe
       // its existing folder. The endpoint skips a unit when its URL list
       // is empty.
@@ -383,6 +397,9 @@ export default function BuilderPreflight() {
       toast({ title: "Scrape failed", description: e?.message || String(e), variant: "destructive" });
     } finally {
       setScrapingUnitId(null);
+      setPhotoFetchStartedAt(null);
+      setPhotoFetchTick(0);
+      setPhotoFetchPhase(null);
     }
   };
 
@@ -677,6 +694,12 @@ export default function BuilderPreflight() {
   }
 
   const hasAnyResults = Object.keys(results).length > 0;
+  const photoFetchElapsedSeconds = photoFetchStartedAt
+    ? Math.max(photoFetchTick, Math.floor((Date.now() - photoFetchStartedAt) / 1000))
+    : 0;
+  const photoFetchProgressValue = scrapingUnitId
+    ? Math.min(94, 16 + photoFetchElapsedSeconds * 1.4)
+    : 0;
   const actualProgress = totalUnits > 0 ? (completedCount / totalUnits) * 100 : 0;
   const elapsedSeconds = checkStartedAt ? Math.max(progressTick, Math.floor((Date.now() - checkStartedAt) / 1000)) : 0;
   const activeProgressCap = totalUnits > 0
@@ -778,6 +801,7 @@ export default function BuilderPreflight() {
               {property.units.map((unit, i) => {
                 const folderHasPhotos = (unit.photos?.length ?? 0) > 0;
                 const skippedCount = (skippedUrlsByUnit[unit.id] ?? []).length;
+                const isScrapingThisUnit = scrapingUnitId === unit.id;
                 return (
                   <div key={unit.id} className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-medium w-20 flex-shrink-0">
@@ -793,8 +817,11 @@ export default function BuilderPreflight() {
                       className="h-8 text-xs"
                       data-testid={`button-scrape-photos-${unit.id}`}
                     >
-                      {scrapingUnitId === unit.id ? (
-                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Searching Zillow…</>
+                      {isScrapingThisUnit ? (
+                        <>
+                          <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                          Searching… {photoFetchElapsedSeconds}s
+                        </>
                       ) : folderHasPhotos ? (
                         <><RefreshCw className="h-3 w-3 mr-1" /> Find different photos</>
                       ) : (
@@ -810,6 +837,31 @@ export default function BuilderPreflight() {
                       <span className="text-[10px] text-muted-foreground flex-shrink-0">
                         skipped {skippedCount}
                       </span>
+                    )}
+                    {isScrapingThisUnit && (
+                      <div className="basis-full rounded-md border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-900">
+                        <div className="mb-1 flex items-center justify-between gap-3">
+                          <span className="font-medium">
+                            {photoFetchPhase ?? "Finding photos"}
+                          </span>
+                          <span className="text-blue-700">
+                            {photoFetchElapsedSeconds}s elapsed
+                          </span>
+                        </div>
+                        <div
+                          className="h-2 overflow-hidden rounded-full bg-blue-100"
+                          role="progressbar"
+                          aria-label={`Finding photos for Unit ${String.fromCharCode(65 + i)}`}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={Math.round(photoFetchProgressValue)}
+                        >
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 transition-all duration-700"
+                            style={{ width: `${photoFetchProgressValue}%` }}
+                          />
+                        </div>
+                      </div>
                     )}
                   </div>
                 );

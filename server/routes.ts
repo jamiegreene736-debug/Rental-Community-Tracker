@@ -27297,6 +27297,13 @@ Return ONLY compact JSON with this exact shape:
     const minimumBedrooms = Number.isFinite(Number(minBedrooms)) && Number(minBedrooms) > 0
       ? Math.round(Number(minBedrooms))
       : null;
+    const startedAt = Date.now();
+    console.log(
+      `[fetch-unit-photos] start community="${communityName ?? ""}" ` +
+      `street="${streetAddress ?? ""}" city="${city ?? ""}" state="${state ?? ""}" ` +
+      `bedrooms=${requestedBedrooms ?? "any"} minBedrooms=${minimumBedrooms ?? "none"} ` +
+      `skipUrls=${Array.isArray(skipUrls) ? skipUrls.length : 0} directUrl=${listingUrl ? "yes" : "no"}`,
+    );
 
     if (!listingUrl) {
       // Discovery path. Need at least the community name to search.
@@ -27483,6 +27490,11 @@ Return ONLY compact JSON with this exact shape:
             console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR is below requested minimum ${minimumBedrooms}BR`);
             continue;
           }
+          console.log(
+            `[fetch-unit-photos] success community="${communityName ?? ""}" ` +
+            `source=${candidate.source} photos=${photos.length} url=${candidate.url} ` +
+            `elapsedMs=${Date.now() - startedAt}`,
+          );
           res.json({
             photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
             sourceUrl: candidate.url,
@@ -27498,6 +27510,10 @@ Return ONLY compact JSON with this exact shape:
       if (!listingUrl) {
         // No matching real-estate listing — return empty so the page's
         // empty state covers it. Not an error.
+        console.log(
+          `[fetch-unit-photos] no-match community="${communityName ?? ""}" ` +
+          `candidates=${candidatesToTry.length} elapsedMs=${Date.now() - startedAt}`,
+        );
         return res.json({
           photos: [],
           sourceUrl: null,
@@ -27519,6 +27535,10 @@ Return ONLY compact JSON with this exact shape:
       const scrapedBR = facts.bedrooms ?? null;
       const expectedBedrooms = requestedBedrooms ?? minimumBedrooms;
       if (expectedBedrooms && scrapedBR !== null && scrapedBR !== expectedBedrooms) {
+        console.log(
+          `[fetch-unit-photos] direct mismatch url=${listingUrl} ` +
+          `scrapedBR=${scrapedBR} expectedBR=${expectedBedrooms} elapsedMs=${Date.now() - startedAt}`,
+        );
         return res.json({
           photos: [],
           sourceUrl: null,
@@ -27527,6 +27547,10 @@ Return ONLY compact JSON with this exact shape:
           note: `Listing has ${scrapedBR}BR, but ${expectedBedrooms}BR was requested.`,
         });
       }
+      console.log(
+        `[fetch-unit-photos] direct success url=${listingUrl} ` +
+        `photos=${photos.length} elapsedMs=${Date.now() - startedAt}`,
+      );
       res.json({
         photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
         sourceUrl: listingUrl,
@@ -27534,6 +27558,7 @@ Return ONLY compact JSON with this exact shape:
         facts,
       });
     } catch (e: any) {
+      console.warn(`[fetch-unit-photos] failed elapsedMs=${Date.now() - startedAt}: ${e.message}`);
       res.status(500).json({ error: e.message });
     }
   });
