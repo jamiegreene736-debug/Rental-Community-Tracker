@@ -3368,6 +3368,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const result = await readServerRefreshProgress().catch((e: any) => ({ kind: "failed" as const, message: e?.message ?? "Progress check failed" }));
       if (cancelled) return;
       if (result.kind === "missing") {
+        if (activeMarketPricingQueueJobRef.current) return;
         const localProgress = refreshProgressRef.current;
         const hadRunningLocalRefresh =
           marketRatesRefreshingRef.current ||
@@ -3438,7 +3439,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setRefreshProgress({
         phase: "queued",
         percent: 5,
-        label: "Queued SearchAPI Airbnb P35 pricing update; Guesty base-rate push will run after refresh",
+        label: "Queued SearchAPI Airbnb P40 pricing update; Guesty base-rate push will run after refresh",
         startedAt,
         lastTickAt: Date.now(),
       });

@@ -187,7 +187,7 @@ try {
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
   hybridPricingSource.includes('source: "airbnb"'),
-  "pricing refresh should persist raw SearchAPI 35th percentile bases without hybrid markup layers",
+  "pricing refresh should persist raw SearchAPI 40th percentile bases without hybrid markup layers",
 );
 assert.equal(
   hybridPricingSource.includes("calculateBlendedRate({"),
@@ -219,8 +219,12 @@ assert.ok(
   "market-rate refresh should fall back to the amortized geo Airbnb path when direct queries are empty",
 );
 assert.ok(
-  hybridPricingSource.includes("MIN_P35_TO_MEDIAN_RATIO = 0.70"),
-  "P35 market pricing should be guarded against low outlier clusters",
+  hybridPricingSource.includes("MARKET_PRICING_PERCENTILE = 40"),
+  "market pricing should use the 40th percentile basis",
+);
+assert.ok(
+  hybridPricingSource.includes("MIN_PERCENTILE_TO_MEDIAN_RATIO = 0.70"),
+  "percentile market pricing should be guarded against low outlier clusters",
 );
 assert.equal(
   hybridPricingSource.includes("staticFallbackMonthlyRates"),

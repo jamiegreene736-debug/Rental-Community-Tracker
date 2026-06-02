@@ -1434,6 +1434,10 @@ assert.ok(
   "Pricing tab market-rate refresh should track the dashboard bulk-pricing queue job so Cancel can stop it",
 );
 assert.ok(
+  builderSource.includes("if (activeMarketPricingQueueJobRef.current) return;"),
+  "Pricing tab market-rate refresh should not mark bulk-queue progress as lost because the legacy progress endpoint is empty",
+);
+assert.ok(
   builderSource.includes("/api/pricing/bulk-refresh/${jobId}"),
   "Pricing tab market-rate refresh should poll the same bulk-pricing queue endpoint as the dashboard",
 );

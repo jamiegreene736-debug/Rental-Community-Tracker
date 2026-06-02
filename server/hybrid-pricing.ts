@@ -118,7 +118,8 @@ function loadConfig(): HybridPricingConfig {
 export const HYBRID_PRICING_CONFIG = loadConfig();
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const MIN_P35_TO_MEDIAN_RATIO = 0.70;
+const MARKET_PRICING_PERCENTILE = 40;
+const MIN_PERCENTILE_TO_MEDIAN_RATIO = 0.70;
 
 function dateOnly(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -241,22 +242,22 @@ function nearestRankPercentile(values: number[], percentile: number): number | n
   return Math.round(clean[index]);
 }
 
-function marketPricingBasis(values: number[]): { basis: number | null; p35: number | null; median: number | null; floorApplied: boolean } {
-  const p35 = nearestRankPercentile(values, 35);
+function marketPricingBasis(values: number[]): { basis: number | null; percentile: number | null; median: number | null; floorApplied: boolean } {
+  const percentile = nearestRankPercentile(values, MARKET_PRICING_PERCENTILE);
   const median = nearestRankPercentile(values, 50);
-  if (p35 == null || median == null) return { basis: null, p35, median, floorApplied: false };
-  const medianFloor = Math.round(median * MIN_P35_TO_MEDIAN_RATIO);
-  if (p35 < medianFloor) {
-    return { basis: medianFloor, p35, median, floorApplied: true };
+  if (percentile == null || median == null) return { basis: null, percentile, median, floorApplied: false };
+  const medianFloor = Math.round(median * MIN_PERCENTILE_TO_MEDIAN_RATIO);
+  if (percentile < medianFloor) {
+    return { basis: medianFloor, percentile, median, floorApplied: true };
   }
-  return { basis: p35, p35, median, floorApplied: false };
+  return { basis: percentile, percentile, median, floorApplied: false };
 }
 
 function marketPricingBasisNotes(stats: ReturnType<typeof marketPricingBasis>): string {
-  if (stats.floorApplied && stats.p35 != null && stats.median != null) {
-    return `using guarded 35th percentile basis $${stats.basis} (raw P35 $${stats.p35}; median $${stats.median})`;
+  if (stats.floorApplied && stats.percentile != null && stats.median != null) {
+    return `using guarded ${MARKET_PRICING_PERCENTILE}th percentile basis $${stats.basis} (raw P${MARKET_PRICING_PERCENTILE} $${stats.percentile}; median $${stats.median})`;
   }
-  return "using 35th percentile basis";
+  return `using ${MARKET_PRICING_PERCENTILE}th percentile basis`;
 }
 
 function summarizeMonthlyHybridRates(monthlyRates: Record<string, HybridMonthlyRate>) {
@@ -657,7 +658,7 @@ export async function refreshHybridPricingForTarget(args: {
           layers: [],
           notes: [
             ...airbnb.notes,
-            `Stored raw SearchAPI 35th percentile basis (no hybrid markup layers). ${window.yearMonth} window ${window.checkIn} to ${window.checkOut}.`,
+            `Stored raw SearchAPI ${MARKET_PRICING_PERCENTILE}th percentile basis (no hybrid markup layers). ${window.yearMonth} window ${window.checkIn} to ${window.checkOut}.`,
             args.unitCount > 1
               ? `Property has ${args.unitCount} configured unit slot(s); Guesty combo pushes sum the matching unit bases.`
               : "Single-unit pricing basis.",
@@ -713,7 +714,7 @@ export async function refreshHybridPricingForTarget(args: {
     if (scannedMonths.length !== horizonMonths) {
       await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
       throw new Error(
-        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one 35th percentile basis per calendar month.`,
+        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one ${MARKET_PRICING_PERCENTILE}th percentile basis per calendar month.`,
       );
     }
     const row = await storage.upsertPropertyMarketRate({
@@ -738,13 +739,13 @@ export async function refreshHybridPricingForTarget(args: {
       newRate: String(lowBasis),
       status: "ok",
       notes: [
-        args.notes || "SearchAPI Airbnb monthly 35th percentile bases saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.",
+        args.notes || `SearchAPI Airbnb monthly ${MARKET_PRICING_PERCENTILE}th percentile bases saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.`,
         `Scanned ${scannedMonths.length} calendar months (${scannedMonths[0]} through ${scannedMonths[scannedMonths.length - 1]}).`,
       ].join(" "),
       layersJson: [],
       calendarJson: monthlyRates,
     }));
-    console.info("[hybrid-pricing] applied raw Airbnb monthly p35 bases", JSON.stringify({
+    console.info("[hybrid-pricing] applied raw Airbnb monthly percentile bases", JSON.stringify({
       propertyId: args.propertyId,
       propertyName: args.propertyName,
       community: args.community,
