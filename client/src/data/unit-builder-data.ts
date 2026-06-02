@@ -1756,7 +1756,7 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
   },
   {
     propertyId: 33,
-    propertyName: "Beautiful Poipu Townhomes for 12 with AC! 6 Bedrooms.",
+    propertyName: "Beautiful Poipu Townhomes for 16 with AC! 6 Bedrooms.",
     complexName: "Pili Mai",
     // Real Pili Mai address with a unique building suffix — see
     // propertyId 32 for the workaround history. Bldg 10 disambiguates
@@ -1764,7 +1764,7 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
     address: "2611 Kiahuna Plantation Dr, Bldg 10, Koloa, HI 96756",
     // Same townhome-not-condo correction as propertyId 32 above.
     propertyType: "Townhouse",
-    bookingTitle: "Pili Mai - 6BR Townhomes - Sleeps 12",
+    bookingTitle: "Pili Mai - 6BR Townhomes - Sleeps 16",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and easy access to Poipu Beach.
 
