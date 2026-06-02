@@ -24,7 +24,7 @@ import {
 } from "@shared/schema";
 import type { BuyIn } from "@shared/schema";
 import { db } from "./db";
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import path from "path";
 import fs from "fs";
@@ -652,6 +652,9 @@ async function persistBulkPricingJob(job: BulkPricingJob): Promise<void> {
     })
     .where(eq(bulkPricingRefreshJobRows.id, job.id));
   for (const [sortOrder, item] of job.items.entries()) {
+    const itemWhere = item.status === "cancelled"
+      ? and(eq(bulkPricingRefreshJobItemRows.jobId, job.id), eq(bulkPricingRefreshJobItemRows.itemKey, item.id))
+      : and(eq(bulkPricingRefreshJobItemRows.jobId, job.id), eq(bulkPricingRefreshJobItemRows.itemKey, item.id), ne(bulkPricingRefreshJobItemRows.status, "cancelled"));
     await db
       .update(bulkPricingRefreshJobItemRows)
       .set({
@@ -666,7 +669,7 @@ async function persistBulkPricingJob(job: BulkPricingJob): Promise<void> {
         finishedAt: bulkPricingDate(item.finishedAt),
         updatedAt: now,
       })
-      .where(and(eq(bulkPricingRefreshJobItemRows.jobId, job.id), eq(bulkPricingRefreshJobItemRows.itemKey, item.id)));
+      .where(itemWhere);
   }
   bulkPricingJobs.set(job.id, job);
 }
@@ -1235,6 +1238,11 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
         shouldRetry = false;
         try {
           await runBulkPricingItem(job, item);
+          const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
+          if (latestJob?.cancelRequested) {
+            job.cancelRequested = true;
+            throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+          }
           item.status = "completed";
           item.progress = item.progress ?? { phase: "done", percent: 100, label: "Market-rate refresh completed" };
           item.finishedAt = Date.now();
