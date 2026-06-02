@@ -1931,8 +1931,11 @@ function AdminDashboard() {
     return out;
   }, [allProperties, communityDraftsDataForRows, photoCheckByFolder]);
 
-  const isBulkPricingSelectable = (property: Property) =>
-    property.bedrooms > 0 && property.draftStatus !== "researching" && property.draftStatus !== "draft_ready";
+  const isBulkPricingSelectable = (property: Property) => {
+    if (property.draftStatus === "researching" || property.draftStatus === "draft_ready") return false;
+    if (property.draftId !== undefined && property.draftStatus === "published") return true;
+    return property.bedrooms > 0;
+  };
 
   const visibleBulkPricingIds = filtered
     .filter(isBulkPricingSelectable)
