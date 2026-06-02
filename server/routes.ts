@@ -16986,15 +16986,48 @@ export async function registerRoutes(
     return listing && typeof listing.terms === "object" && listing.terms ? listing.terms : {};
   };
 
+  const firstFiniteNumber = (...values: unknown[]): number | null => {
+    for (const value of values) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+  };
+
+  const bookingRuleReadbackSummary = (terms: Record<string, any>) => ({
+    minNights: firstFiniteNumber(terms.minNights, terms.minimumNights, terms.minLOS, terms.minimumStay),
+    maxNights: firstFiniteNumber(terms.maxNights, terms.maximumNights, terms.maxLOS, terms.maximumStay),
+    advanceNotice: firstFiniteNumber(
+      terms.advanceNotice,
+      terms.advanceNoticeHours,
+      terms.advanceNoticeInHours,
+      terms.minAdvanceNotice,
+      terms.minAdvanceNoticeHours,
+      terms.minimumAdvanceNotice,
+      terms.minimumAdvanceNoticeHours,
+      terms.bookingLeadTime,
+      terms.bookingLeadTimeHours,
+      terms.advanceNoticeDays,
+    ),
+    preparationTime: firstFiniteNumber(
+      terms.preparationTime,
+      terms.prepTime,
+      terms.preparationDays,
+      terms.turnoverDays,
+      terms.cleaningDays,
+      terms.bufferDays,
+    ),
+    instantBooking: typeof terms.instantBooking === "boolean" ? terms.instantBooking : null,
+    cancellationPolicy: typeof terms.cancellationPolicy === "string" ? terms.cancellationPolicy : null,
+  });
+
   const verifyGuestyBookingTerms = (terms: Record<string, any>, rules: ReturnType<typeof normalizeBuilderBookingRules>) => {
     const mismatches: string[] = [];
-    const asNumber = (value: unknown) => Number(value);
-    if (asNumber(terms.minNights ?? terms.minimumNights ?? terms.minLOS ?? terms.minimumStay) !== rules.minNights) mismatches.push("min nights");
-    if (asNumber(terms.maxNights ?? terms.maximumNights ?? terms.maxLOS ?? terms.maximumStay) !== rules.maxNights) mismatches.push("max nights");
-    const advance = asNumber(terms.advanceNotice);
-    if (Number.isFinite(advance) && advance !== rules.advanceNotice * 24 && advance !== rules.advanceNotice) mismatches.push("advance notice");
-    const prep = asNumber(terms.preparationTime);
-    if (Number.isFinite(prep) && prep !== rules.preparationTime) mismatches.push("prep days");
+    const readback = bookingRuleReadbackSummary(terms);
+    if (readback.minNights !== rules.minNights) mismatches.push("min nights");
+    if (readback.maxNights !== rules.maxNights) mismatches.push("max nights");
+    if (readback.advanceNotice !== rules.advanceNotice * 24 && readback.advanceNotice !== rules.advanceNotice) mismatches.push("advance notice");
+    if (readback.preparationTime !== rules.preparationTime) mismatches.push("prep days");
     if (typeof terms.instantBooking === "boolean" && terms.instantBooking !== rules.instantBooking) mismatches.push("instant booking");
     const policy = String(terms.cancellationPolicy ?? "");
     if (policy && policy !== rules.cancellationPolicies.airbnb) mismatches.push("Airbnb/top-level cancellation policy");
@@ -17042,6 +17075,21 @@ export async function registerRoutes(
       const summary = mismatches.length === 0
         ? `Verified min ${rules.minNights}, max ${rules.maxNights}, ${rules.advanceNotice}d advance, ${rules.preparationTime}d prep`
         : `Guesty read-back mismatch: ${mismatches.join(", ")}`;
+
+      console.log("[booking-rules] Guesty push readback", {
+        propertyId,
+        listingId,
+        status: mismatches.length === 0 ? "verified" : "mismatch",
+        requested: {
+          minNights: rules.minNights,
+          maxNights: rules.maxNights,
+          advanceNoticeDays: rules.advanceNotice,
+          advanceNoticeHours: rules.advanceNotice * 24,
+          preparationTime: rules.preparationTime,
+        },
+        readback: bookingRuleReadbackSummary(readback),
+        mismatches,
+      });
 
       const row = await storage.upsertBuilderBookingRules({
         propertyId,
