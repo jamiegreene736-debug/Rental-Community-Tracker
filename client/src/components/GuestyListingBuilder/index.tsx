@@ -225,7 +225,7 @@ type Props = {
 const DEFAULT_BOOKING_RULES = {
   minNights: 3,
   maxNights: 365,
-  advanceNotice: 60,
+  advanceNotice: 7,
   preparationTime: 1,
   instantBooking: true,
   cancellationPolicies: {
@@ -1037,13 +1037,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [propertyId]);
 
   // ── Booking rules state ────────────────────────────────────────────────────
-  // `advanceNotice: 60` is deliberate — the business model is "buy in
-  // after booking, then assign", and reliable buy-in inventory kicks in
-  // around the 60-day mark for the Poipu portfolio. 60 balances
-  // capturing mid-lead-time demand (30-60d out) with a safety buffer
-  // against inventory races. Tighten per-property in the Pricing tab's
-  // Booking Rules card if you want a specific listing to accept
-  // shorter-notice bookings.
+  // Default advance notice is 7 days. Operators can tighten or loosen
+  // specific listings in the Pricing tab's Booking Rules card.
   //
   // Cancellation is split per-channel because Airbnb, VRBO, and
   // Booking.com each have their own enum of accepted policy IDs —

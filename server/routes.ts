@@ -16977,7 +16977,7 @@ export async function registerRoutes(
   const normalizeBuilderBookingRules = (input: BuilderBookingRulesPayload) => ({
     minNights: clampInt(input.minNights, 3, 1, 90),
     maxNights: clampInt(input.maxNights, 365, 1, 730),
-    advanceNotice: clampInt(input.advanceNotice, 60, 0, 365),
+    advanceNotice: clampInt(input.advanceNotice, 7, 0, 365),
     preparationTime: clampInt(input.preparationTime, 1, 0, 30),
     instantBooking: input.instantBooking !== false,
     cancellationPolicies: {
@@ -17061,23 +17061,55 @@ export async function registerRoutes(
     return mismatches;
   };
 
-  app.get("/api/builder/booking-rules/:propertyId", async (req: Request, res: Response) => {
-    const propertyId = parseInt(req.params.propertyId, 10);
-    const listingId = String(req.query.listingId || "").trim();
-    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
-    if (!listingId) return res.status(400).json({ error: "listingId required" });
-    const row = await storage.getBuilderBookingRules(propertyId, listingId);
-    return res.json({ rules: row ?? null });
-  });
+  const guestyAdvanceNoticeToDays = (value: number | null): number | undefined => {
+    if (!Number.isFinite(value ?? NaN)) return undefined;
+    const n = Number(value);
+    return n > 24 ? Math.round(n / 24) : Math.round(n);
+  };
 
-  app.post("/api/builder/booking-rules/:propertyId", async (req: Request, res: Response) => {
-    const propertyId = parseInt(req.params.propertyId, 10);
-    const listingId = String(req.body?.listingId || "").trim();
-    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
-    if (!listingId) return res.status(400).json({ error: "listingId required" });
-    const rules = normalizeBuilderBookingRules(req.body?.rules ?? req.body ?? {});
-    if (rules.maxNights < rules.minNights) return res.status(400).json({ error: "max nights must be greater than or equal to min nights" });
+  const currentBuilderBookingRulesForListing = async (
+    propertyId: number,
+    listingId: string,
+  ): Promise<BuilderBookingRulesPayload> => {
+    const saved = await storage.getBuilderBookingRules(propertyId, listingId);
+    if (saved) {
+      return {
+        minNights: saved.minNights,
+        maxNights: saved.maxNights,
+        advanceNotice: saved.advanceNotice,
+        preparationTime: saved.preparationTime,
+        instantBooking: saved.instantBooking,
+        cancellationPolicies: saved.cancellationPolicies ?? undefined,
+      };
+    }
 
+    const terms = await readGuestyTerms(listingId).catch(() => ({}));
+    const availabilitySettings = await guestyRequest(
+      "GET",
+      `/listings/${encodeURIComponent(listingId)}/availability-settings`,
+    ).catch(() => ({})) as Record<string, any>;
+    const termsSummary = bookingRuleReadbackSummary(terms);
+    const availabilitySummary = bookingRuleAvailabilitySummary(availabilitySettings);
+    const cancellationPolicy = termsSummary.cancellationPolicy || undefined;
+    return {
+      minNights: termsSummary.minNights ?? undefined,
+      maxNights: termsSummary.maxNights ?? undefined,
+      advanceNotice: guestyAdvanceNoticeToDays(availabilitySummary.advanceNotice),
+      preparationTime: availabilitySummary.preparationTime ?? undefined,
+      instantBooking: termsSummary.instantBooking ?? undefined,
+      cancellationPolicies: {
+        airbnb: cancellationPolicy,
+        vrbo: undefined,
+        booking: undefined,
+      },
+    };
+  };
+
+  const pushBuilderBookingRulesToGuesty = async (
+    propertyId: number,
+    listingId: string,
+    rules: ReturnType<typeof normalizeBuilderBookingRules>,
+  ) => {
     const terms = {
       minNights: rules.minNights,
       maxNights: rules.maxNights,
@@ -17100,66 +17132,136 @@ export async function registerRoutes(
       },
     };
 
-    try {
-      await guestyRequest("PUT", `/listings/${encodeURIComponent(listingId)}`, { terms });
-      let availabilityReadback = await guestyRequest(
-        "PUT",
-        `/listings/${encodeURIComponent(listingId)}/availability-settings`,
-        availabilitySettings,
-      ) as Record<string, any>;
+    await guestyRequest("PUT", `/listings/${encodeURIComponent(listingId)}`, { terms });
+    const availabilityReadback = await guestyRequest(
+      "PUT",
+      `/listings/${encodeURIComponent(listingId)}/availability-settings`,
+      availabilitySettings,
+    ) as Record<string, any>;
 
-      let readback: Record<string, any> = {};
-      let mismatches: string[] = [];
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
-        readback = await readGuestyTerms(listingId);
-        mismatches = verifyGuestyBookingRules(readback, availabilityReadback, rules);
-        if (mismatches.length === 0) break;
-      }
+    let readback: Record<string, any> = {};
+    let mismatches: string[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      readback = await readGuestyTerms(listingId);
+      mismatches = verifyGuestyBookingRules(readback, availabilityReadback, rules);
+      if (mismatches.length === 0) break;
+    }
 
-      const summary = mismatches.length === 0
-        ? `Verified min ${rules.minNights}, max ${rules.maxNights}, ${rules.advanceNotice}d advance, ${rules.preparationTime}d prep`
-        : `Guesty read-back mismatch: ${mismatches.join(", ")}`;
+    const summary = mismatches.length === 0
+      ? `Verified min ${rules.minNights}, max ${rules.maxNights}, ${rules.advanceNotice}d advance, ${rules.preparationTime}d prep`
+      : `Guesty read-back mismatch: ${mismatches.join(", ")}`;
 
-      console.log("[booking-rules] Guesty push readback", {
-        propertyId,
-        listingId,
-        status: mismatches.length === 0 ? "verified" : "mismatch",
-        requested: {
-          minNights: rules.minNights,
-          maxNights: rules.maxNights,
-          advanceNoticeDays: rules.advanceNotice,
-          advanceNoticeHours: rules.advanceNotice * 24,
-          preparationTime: rules.preparationTime,
-        },
-        readback: {
-          terms: bookingRuleReadbackSummary(readback),
-          availabilitySettings: bookingRuleAvailabilitySummary(availabilityReadback),
-        },
-        mismatches,
-      });
-
-      const row = await storage.upsertBuilderBookingRules({
-        propertyId,
-        guestyListingId: listingId,
+    console.log("[booking-rules] Guesty push readback", {
+      propertyId,
+      listingId,
+      status: mismatches.length === 0 ? "verified" : "mismatch",
+      requested: {
         minNights: rules.minNights,
         maxNights: rules.maxNights,
-        advanceNotice: rules.advanceNotice,
+        advanceNoticeDays: rules.advanceNotice,
+        advanceNoticeHours: rules.advanceNotice * 24,
         preparationTime: rules.preparationTime,
-        instantBooking: rules.instantBooking,
-        cancellationPolicies: rules.cancellationPolicies,
-        lastPushedAt: new Date(),
-        lastPushStatus: mismatches.length === 0 ? "ok" : "error",
-        lastPushSummary: summary,
-      });
+      },
+      readback: {
+        terms: bookingRuleReadbackSummary(readback),
+        availabilitySettings: bookingRuleAvailabilitySummary(availabilityReadback),
+      },
+      mismatches,
+    });
 
-      return res.status(mismatches.length === 0 ? 200 : 409).json({
-        success: mismatches.length === 0,
-        rules: row,
-        guestyTerms: readback,
-        guestyAvailabilitySettings: availabilityReadback,
-        mismatches,
-        summary,
+    const row = await storage.upsertBuilderBookingRules({
+      propertyId,
+      guestyListingId: listingId,
+      minNights: rules.minNights,
+      maxNights: rules.maxNights,
+      advanceNotice: rules.advanceNotice,
+      preparationTime: rules.preparationTime,
+      instantBooking: rules.instantBooking,
+      cancellationPolicies: rules.cancellationPolicies,
+      lastPushedAt: new Date(),
+      lastPushStatus: mismatches.length === 0 ? "ok" : "error",
+      lastPushSummary: summary,
+    });
+
+    return { row, readback, availabilityReadback, mismatches, summary };
+  };
+
+  app.post("/api/builder/booking-rules/push-advance-notice-all", async (req: Request, res: Response) => {
+    const advanceNotice = clampInt(req.body?.advanceNotice, 7, 0, 365);
+    const mappings = await storage.getGuestyPropertyMap();
+    const results: Array<{ propertyId: number; listingId: string; status: "ok" | "error"; summary: string }> = [];
+
+    for (const mapping of mappings) {
+      const listingId = mapping.guestyListingId;
+      try {
+        const current = await currentBuilderBookingRulesForListing(mapping.propertyId, listingId);
+        const rules = normalizeBuilderBookingRules({ ...current, advanceNotice });
+        const result = await pushBuilderBookingRulesToGuesty(mapping.propertyId, listingId, rules);
+        results.push({
+          propertyId: mapping.propertyId,
+          listingId,
+          status: result.mismatches.length === 0 ? "ok" : "error",
+          summary: result.summary,
+        });
+      } catch (err: any) {
+        const summary = err?.message ?? String(err);
+        console.error("[booking-rules] bulk advance notice push failed", {
+          propertyId: mapping.propertyId,
+          listingId,
+          advanceNotice,
+          error: summary,
+        });
+        results.push({ propertyId: mapping.propertyId, listingId, status: "error", summary });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+
+    const okCount = results.filter((result) => result.status === "ok").length;
+    const errorCount = results.length - okCount;
+    console.log("[booking-rules] bulk advance notice push complete", {
+      advanceNotice,
+      total: results.length,
+      ok: okCount,
+      error: errorCount,
+    });
+    return res.status(errorCount === 0 ? 200 : 207).json({
+      ok: errorCount === 0,
+      advanceNotice,
+      total: results.length,
+      okCount,
+      errorCount,
+      results,
+    });
+  });
+
+  app.get("/api/builder/booking-rules/:propertyId", async (req: Request, res: Response) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    const listingId = String(req.query.listingId || "").trim();
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    const row = await storage.getBuilderBookingRules(propertyId, listingId);
+    return res.json({ rules: row ?? null });
+  });
+
+  app.post("/api/builder/booking-rules/:propertyId", async (req: Request, res: Response) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    const listingId = String(req.body?.listingId || "").trim();
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    const rules = normalizeBuilderBookingRules(req.body?.rules ?? req.body ?? {});
+    if (rules.maxNights < rules.minNights) return res.status(400).json({ error: "max nights must be greater than or equal to min nights" });
+
+    try {
+      const result = await pushBuilderBookingRulesToGuesty(propertyId, listingId, rules);
+
+      return res.status(result.mismatches.length === 0 ? 200 : 409).json({
+        success: result.mismatches.length === 0,
+        rules: result.row,
+        guestyTerms: result.readback,
+        guestyAvailabilitySettings: result.availabilityReadback,
+        mismatches: result.mismatches,
+        summary: result.summary,
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message ?? String(err) });

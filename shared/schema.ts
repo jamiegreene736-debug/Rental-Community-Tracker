@@ -798,7 +798,7 @@ export const builderBookingRules = pgTable("builder_booking_rules", {
   guestyListingId: text("guesty_listing_id").notNull(),
   minNights: integer("min_nights").notNull().default(3),
   maxNights: integer("max_nights").notNull().default(365),
-  advanceNotice: integer("advance_notice").notNull().default(60),
+  advanceNotice: integer("advance_notice").notNull().default(7),
   preparationTime: integer("preparation_time").notNull().default(1),
   instantBooking: boolean("instant_booking").notNull().default(true),
   cancellationPolicies: jsonb("cancellation_policies").$type<{
