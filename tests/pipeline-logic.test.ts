@@ -1429,6 +1429,19 @@ assert.ok(
   builderSource.includes("refresh-progress/cancel"),
   "Pricing tab Cancel should clear the server progress lock, not only abort the browser fetch",
 );
+assert.ok(
+  builderSource.includes("activeMarketPricingQueueJobRef"),
+  "Pricing tab market-rate refresh should track the dashboard bulk-pricing queue job so Cancel can stop it",
+);
+assert.ok(
+  builderSource.includes("/api/pricing/bulk-refresh/${jobId}"),
+  "Pricing tab market-rate refresh should poll the same bulk-pricing queue endpoint as the dashboard",
+);
+assert.equal(
+  builderSource.includes("/api/property/${propertyId}/refresh-market-rates"),
+  false,
+  "Pricing tab refresh button should not call the legacy direct market-rate refresh endpoint",
+);
 assert.equal(
   builderSource.includes("refresh-pricing?mode=banded"),
   false,

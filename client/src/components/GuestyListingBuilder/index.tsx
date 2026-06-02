@@ -3096,6 +3096,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const missingProgressPollsRef = useRef(0);
   const lostProgressRecordedRef = useRef(false);
   const screenWakeLockRef = useRef<any>(null);
+  const activeMarketPricingQueueJobRef = useRef<string | null>(null);
   // 1Hz ticker so the elapsed-time display + staleness warning re-
   // render between the 1.5s progress polls. Cheap (no network); keyed
   // off marketRatesRefreshing so it stops when the scan ends.
@@ -3151,6 +3152,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       console.info("[refresh-market-rates] operator cancelled");
       refreshAbortRef.current.abort();
       refreshAbortRef.current = null;
+    }
+    const activeQueueJobId = activeMarketPricingQueueJobRef.current;
+    if (activeQueueJobId) {
+      void fetch(`/api/pricing/bulk-refresh/${activeQueueJobId}/cancel`, { method: "POST" }).catch(() => undefined);
+      activeMarketPricingQueueJobRef.current = null;
     }
     void fetch(`/api/property/${propertyId}/refresh-progress/cancel`, { method: "POST" }).catch(() => undefined);
     const cancelledNotice: MarketRefreshNotice = {
@@ -3422,191 +3428,67 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setRefreshStartedAt(startedAt);
     setRefreshProgress({ phase: "starting", percent: 1, label: "Running SearchAPI Airbnb seasonal pricing…", startedAt });
 
-    // Poll progress endpoint while refresh is in flight. Static
-    // properties are positive ids; drafts/promoted drafts are negative
-    // ids, and the server stores progress under that same negative key.
-    // Poll both so draft refreshes don't sit on the local 0% placeholder.
-    let progressTimer: number | null = null;
-    const tickProgress = async () => {
-      await readServerRefreshProgress().catch(() => null);
-    };
-    void tickProgress();
-    progressTimer = window.setInterval(tickProgress, 1500);
-    const readProgress = async () => {
-      return readServerRefreshProgress();
-    };
-    const waitForBackgroundRefresh = async () => {
-      const deadline = Date.now() + 4 * 60 * 60 * 1000;
-      let transientProgressFailures = 0;
-      while (Date.now() < deadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1500));
-        const result = await readProgress().catch((e: any) => ({ kind: "failed" as const, message: e?.message ?? "Progress check failed" }));
-        if (result.kind === "missing") {
-          missingProgressPollsRef.current += 1;
-          if (missingProgressPollsRef.current >= 3) {
-            recordLostRefreshTracking();
-            throw new Error(REFRESH_TRACKING_LOST_MESSAGE);
-          }
-          continue;
-        }
-        if (result.kind === "failed") {
-          transientProgressFailures++;
-          const previous = refreshProgressRef.current;
-          setRefreshProgress({
-            ...(previous ?? { phase: "starting", percent: 1, label: "Reconnecting to pricing refresh…" }),
-            startedAt: previous?.startedAt ?? startedAt,
-            label: "Reconnecting to pricing refresh…",
-            error: result.message,
-          });
-          if (transientProgressFailures >= 20) {
-            recordLostRefreshTracking();
-            throw new Error(REFRESH_TRACKING_LOST_MESSAGE);
-          }
-          continue;
-        }
-        transientProgressFailures = 0;
-        missingProgressPollsRef.current = 0;
-        lostProgressRecordedRef.current = false;
-        const p = result.progress;
-        if (p.phase === "done") {
-          recordRefreshNotice({
-            status: "done",
-            finishedAt: Date.now(),
-            startedAt: p.startedAt ?? startedAt,
-            label: "Pricing update finished",
-          });
-          return;
-        }
-        if (p.phase === "error") throw new Error(p.error || p.label || "Refresh failed");
-      }
-      throw new Error("Refresh is still running after 90 minutes. You can refresh the page later to load any completed rates.");
-    };
-
     try {
-      const path = `/api/property/${propertyId}/refresh-market-rates`;
       const controller = new AbortController();
       refreshAbortRef.current = controller;
-      let r: Response;
-      try {
-        r = await fetch(path, { method: "POST", signal: controller.signal });
-      } catch (e: any) {
-        if (e?.name === "AbortError") throw e;
-        // Railway/browser fetches can drop even after the server accepted
-        // the background refresh. Before showing a red failure, reconnect
-        // to the progress endpoint; if it is alive, keep waiting.
-        const deadline = Date.now() + 15_000;
-        while (Date.now() < deadline) {
-          const progress = await readProgress().catch(() => null);
-          if (progress?.kind === "active") {
-            await waitForBackgroundRefresh();
-            setLiveSnapshot(null);
-            await reloadMarketRates();
-            await reloadPricingLogs();
-            recordRefreshNotice({
-              status: "done",
-              finishedAt: Date.now(),
-              startedAt,
-              label: "Hybrid pricing update finished",
-            });
-            return;
-          }
-          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      const queuedJob = await queueMarketPricingRefresh();
+      const jobId = queuedJob?.id;
+      if (!jobId) throw new Error("Market pricing queue did not return a job id.");
+      activeMarketPricingQueueJobRef.current = jobId;
+      setRefreshProgress({
+        phase: "queued",
+        percent: 5,
+        label: "Queued SearchAPI Airbnb P35 pricing update; Guesty base-rate push will run after refresh",
+        startedAt,
+        lastTickAt: Date.now(),
+      });
+
+      const deadline = Date.now() + 4 * 60 * 60 * 1000;
+      while (Date.now() < deadline) {
+        if (controller.signal.aborted) throw Object.assign(new Error("Cancelled by operator"), { name: "AbortError" });
+        const r = await fetch(`/api/pricing/bulk-refresh/${jobId}`, { signal: controller.signal });
+        const data = await r.json().catch(() => ({} as Record<string, any>));
+        if (!r.ok || data?.ok === false || !data?.job) {
+          throw new Error(data?.error || `Market pricing queue status failed with HTTP ${r.status}`);
         }
-        throw e;
-      }
-      if (!r.ok) {
-        const data = await r.json().catch(() => ({}));
-        const message = data?.error || `HTTP ${r.status}`;
-        setRefreshProgress({ phase: "error", percent: 100, label: "Refresh failed", error: message, startedAt });
-        recordRefreshNotice({
-          status: "error",
-          finishedAt: Date.now(),
+        const job = data.job as {
+          status: string;
+          completed: number;
+          total: number;
+          failed: number;
+          cancelled: number;
+          items?: Array<{
+            propertyId: number;
+            status: string;
+            progress?: { phase?: string; percent?: number; label?: string } | null;
+            error?: string | null;
+            heartbeatAt?: string | null;
+            startedAt?: string | null;
+          }>;
+        };
+        const item = job.items?.find((candidate) => candidate.propertyId === propertyId) ?? job.items?.[0];
+        const queuePercent = job.total > 0 ? Math.round((Math.max(0, job.completed) / job.total) * 100) : 5;
+        const itemPercent = typeof item?.progress?.percent === "number" ? item.progress.percent : queuePercent;
+        const heartbeatMs = item?.heartbeatAt ? Date.parse(item.heartbeatAt) : Date.now();
+        setRefreshProgress({
+          phase: item?.progress?.phase || item?.status || job.status || "running",
+          percent: Math.max(5, Math.min(100, itemPercent)),
+          label: item?.progress?.label || `Bulk market pricing queue ${job.completed}/${job.total} complete`,
           startedAt,
-          label: "Hybrid pricing update failed",
-          error: message,
+          lastTickAt: Number.isFinite(heartbeatMs) ? heartbeatMs : Date.now(),
         });
-        toast({ title: "Refresh failed", description: message, variant: "destructive" });
-        return;
+        if (item?.status === "completed") break;
+        if (item?.status === "failed") throw new Error(item.error || "Market pricing queue item failed");
+        if (item?.status === "cancelled" || job.status === "cancelled") {
+          throw Object.assign(new Error("Cancelled by operator"), { name: "AbortError" });
+        }
+        if (job.status === "failed") throw new Error("Market pricing queue failed");
+        await new Promise((resolve) => window.setTimeout(resolve, 2500));
       }
-      const data = await r.json().catch(() => ({} as Record<string, unknown>));
-      if ((data as any)?.accepted === true) {
-        await waitForBackgroundRefresh();
-        setLiveSnapshot(null);
-        await reloadMarketRates();
-        await reloadPricingLogs();
-        recordRefreshNotice({
-          status: "done",
-          finishedAt: Date.now(),
-          startedAt,
-          label: "Pricing update finished",
-        });
-        toast({
-          duration: Infinity,
-          title: "Market rates refreshed",
-          description: (
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#16a34a"
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-                style={{ flexShrink: 0 }}
-              >
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-              Airbnb SearchAPI pricing basis updated
-            </span>
-          ),
-        });
-        return;
-      }
-      const persisted = (data as any)?.persisted;
-      const snapshot = (data as any)?.snapshot;
-      // Static-property endpoint (PR #282 onwards) returns
-      // snapshot.seasons; draft endpoint doesn't yet, so we no-op
-      // for drafts.
-      if (Array.isArray(persisted) && snapshot && typeof snapshot === "object" && snapshot.seasons) {
-        const region: "hawaii" | "florida" | null =
-          (snapshot as any).region === "hawaii" || (snapshot as any).region === "florida"
-            ? (snapshot as any).region
-            : null;
-        const parseSeason = (s: any) => s && typeof s === "object"
-          ? { checkIn: String(s.checkIn ?? ""), checkOut: String(s.checkOut ?? ""), daemonOnline: !!s.daemonOnline }
-          : null;
-        setLiveSnapshot({
-          seasons: {
-            LOW: parseSeason(snapshot.seasons.LOW),
-            HIGH: parseSeason(snapshot.seasons.HIGH),
-            HOLIDAY: parseSeason(snapshot.seasons.HOLIDAY),
-          },
-          region,
-          perBR: persisted.map((p: any) => ({
-            bedrooms: Number(p.bedrooms),
-            low: typeof p.low === "number" ? p.low : 0,
-            high: typeof p.high === "number" ? p.high : null,
-            holiday: typeof p.holiday === "number" ? p.holiday : null,
-            basisSource: (p.basisSource === "static-buy-in" || p.basisSource === "optimized-buy-in" || p.basisSource === "live-multichannel-median" || p.basisSource === "monthly-multichannel-median" || p.basisSource === "season-band-multichannel-median" || p.basisSource === "hybrid-airbnb-layered" || p.basisSource === "airbnb")
-              ? p.basisSource
-              : "none",
-            channelCount: typeof p.channelCount === "number" ? p.channelCount : 0,
-            channels: {
-              airbnb: typeof p.channels?.airbnb === "number" ? p.channels.airbnb : null,
-              vrbo: typeof p.channels?.vrbo === "number" ? p.channels.vrbo : null,
-              booking: typeof p.channels?.booking === "number" ? p.channels.booking : null,
-              pm: typeof p.channels?.pm === "number" ? p.channels.pm : null,
-            },
-          })),
-        });
-      } else {
-        setLiveSnapshot(null);
-      }
+      if (Date.now() >= deadline) throw new Error("Market pricing queue is still running after 4 hours. You can refresh the page later to load any completed rates.");
+      setLiveSnapshot(null);
       await reloadMarketRates();
-        await reloadPricingLogs();
+      await reloadPricingLogs();
       recordRefreshNotice({
         status: "done",
         finishedAt: Date.now(),
@@ -3666,12 +3548,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
       }
     } finally {
+      activeMarketPricingQueueJobRef.current = null;
       refreshAbortRef.current = null;
-      if (progressTimer) window.clearInterval(progressTimer);
       setRefreshStartedAt(null);
       setMarketRatesRefreshing(false);
     }
-  }, [propertyId, marketRatesRefreshing, readServerRefreshProgress, recordLostRefreshTracking, recordRefreshNotice, reloadMarketRates, reloadPricingLogs, toast]);
+  }, [propertyId, marketRatesRefreshing, queueMarketPricingRefresh, recordRefreshNotice, reloadMarketRates, reloadPricingLogs, toast]);
 
   // Aggregate monthly rates across all units for the 24-month seasonal table
   const seasonalMonths = useMemo(() => {
