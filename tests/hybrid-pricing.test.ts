@@ -105,6 +105,11 @@ assert.equal(
   "Sunny 2BR Condo at Bonita National Golf & Country Club Condominiums",
   "draft marketing title may only be used as a last-resort Airbnb query",
 );
+assert.equal(
+  curatedAirbnbSearchQueries("Ilikai", "Spacious 4BR for 8 at Ilikai!")[0],
+  "Ilikai Hotel, Honolulu, HI",
+  "Ilikai market pricing should use the curated address-backed query before the broad community name",
+);
 
 const routesSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
 assert.equal(
@@ -166,7 +171,7 @@ try {
     checkIn: "2026-06-01",
     checkOut: "2026-06-08",
   });
-  assert.equal(poipuBasis.medianNightly, 120);
+  assert.equal(poipuBasis.medianNightly, 175);
   assert.equal(poipuBasis.sampleCount, 3);
   assert.equal(requestedSearchApiUrls.length, 1);
   const params = new URL(requestedSearchApiUrls[0]).searchParams;
@@ -212,6 +217,10 @@ assert.ok(
 assert.ok(
   hybridPricingSource.includes("fetchAmortizedNightlyByBR("),
   "market-rate refresh should fall back to the amortized geo Airbnb path when direct queries are empty",
+);
+assert.ok(
+  hybridPricingSource.includes("MIN_P25_TO_MEDIAN_RATIO = 0.70"),
+  "P25 market pricing should be guarded against low outlier clusters",
 );
 assert.equal(
   hybridPricingSource.includes("staticFallbackMonthlyRates"),

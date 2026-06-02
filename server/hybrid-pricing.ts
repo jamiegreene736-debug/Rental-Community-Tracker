@@ -118,6 +118,7 @@ function loadConfig(): HybridPricingConfig {
 export const HYBRID_PRICING_CONFIG = loadConfig();
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const MIN_P25_TO_MEDIAN_RATIO = 0.70;
 
 function dateOnly(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -240,8 +241,22 @@ function nearestRankPercentile(values: number[], percentile: number): number | n
   return Math.round(clean[index]);
 }
 
-function marketPricingBasis(values: number[]): number | null {
-  return nearestRankPercentile(values, 25);
+function marketPricingBasis(values: number[]): { basis: number | null; p25: number | null; median: number | null; floorApplied: boolean } {
+  const p25 = nearestRankPercentile(values, 25);
+  const median = nearestRankPercentile(values, 50);
+  if (p25 == null || median == null) return { basis: null, p25, median, floorApplied: false };
+  const medianFloor = Math.round(median * MIN_P25_TO_MEDIAN_RATIO);
+  if (p25 < medianFloor) {
+    return { basis: medianFloor, p25, median, floorApplied: true };
+  }
+  return { basis: p25, p25, median, floorApplied: false };
+}
+
+function marketPricingBasisNotes(stats: ReturnType<typeof marketPricingBasis>): string {
+  if (stats.floorApplied && stats.p25 != null && stats.median != null) {
+    return `using guarded 25th percentile basis $${stats.basis} (raw P25 $${stats.p25}; median $${stats.median})`;
+  }
+  return "using 25th percentile basis";
 }
 
 function summarizeMonthlyHybridRates(monthlyRates: Record<string, HybridMonthlyRate>) {
@@ -397,11 +412,12 @@ export async function fetchAirbnbMedianNightly(args: {
       continue;
     }
     if (rates.length > 0) {
+      const basis = marketPricingBasis(rates);
       return {
-        medianNightly: marketPricingBasis(rates),
+        medianNightly: basis.basis,
         sampleCount: rates.length,
         notes: [
-          `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}"; using 25th percentile basis.`,
+          `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}"; ${marketPricingBasisNotes(basis)}.`,
         ],
       };
     }
@@ -421,11 +437,12 @@ export async function fetchAirbnbMedianNightly(args: {
     );
     const brRates = amortized.ratesByBR[args.bedrooms] ?? [];
     if (brRates.length > 0) {
+      const basis = marketPricingBasis(brRates);
       return {
-        medianNightly: marketPricingBasis(brRates),
+        medianNightly: basis.basis,
         sampleCount: brRates.length,
         notes: [
-          `SearchAPI amortized path returned ${brRates.length} exact-${args.bedrooms}BR sample(s) for ${location.searchName}; using 25th percentile basis.`,
+          `SearchAPI amortized path returned ${brRates.length} exact-${args.bedrooms}BR sample(s) for ${location.searchName}; ${marketPricingBasisNotes(basis)}.`,
         ],
       };
     }
@@ -551,9 +568,9 @@ function seasonalBasisSummary(
   seasonalBases: Record<LegacySeason, number[]>,
 ): { lowBasis: number | null; highBasis: number | null; holidayBasis: number | null; missing: LegacySeason[] } {
   const missing: LegacySeason[] = [];
-  const lowBasis = marketPricingBasis(seasonalBases.LOW);
-  const highBasis = marketPricingBasis(seasonalBases.HIGH);
-  const holidayBasis = marketPricingBasis(seasonalBases.HOLIDAY);
+  const lowBasis = marketPricingBasis(seasonalBases.LOW).basis;
+  const highBasis = marketPricingBasis(seasonalBases.HIGH).basis;
+  const holidayBasis = marketPricingBasis(seasonalBases.HOLIDAY).basis;
   if (lowBasis == null) missing.push("LOW");
   if (highBasis == null) missing.push("HIGH");
   if (holidayBasis == null) missing.push("HOLIDAY");

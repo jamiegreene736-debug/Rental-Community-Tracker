@@ -106,6 +106,19 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     searchLocation: "Menehune Shores, Kihei, Hawaii",
     location: { searchName: "Menehune Shores", city: "Kihei", state: "Hawaii", streetAddress: "760 S Kihei Rd", lat: 20.7638, lng: -156.4594 },
   },
+  "Ilikai": {
+    key: "Ilikai",
+    aliases: [/\bilikai\b/i],
+    searchLocation: "Ilikai Hotel, Honolulu, Hawaii",
+    platformSearch: {
+      airbnb: "Ilikai Hotel, Honolulu, HI",
+      booking: "Ilikai Hotel, Honolulu, HI",
+      vrbo: "Ilikai Hotel, Honolulu, HI",
+      pm: "Ilikai",
+    },
+    location: { searchName: "Ilikai", city: "Honolulu", state: "Hawaii", streetAddress: "1777 Ala Moana Blvd", lat: 21.2845, lng: -157.8380 },
+    bounds: { sw_lat: 21.2795, sw_lng: -157.8430, ne_lat: 21.2895, ne_lng: -157.8330 },
+  },
   "Windsor Hills": {
     key: "Windsor Hills",
     aliases: [/\b(?:windsor\s+hills|kissimmee|orlando)\b/i],
