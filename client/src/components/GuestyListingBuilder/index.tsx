@@ -1723,8 +1723,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
   }, [selectedId, lastPushedPictures]);
 
-  const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean) => {
-    if (!selectedId || !photos?.length) return;
+  type PhotoPushResult = { successCount: number; total: number; shortfall: number; error?: string };
+
+  const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean): Promise<PhotoPushResult> => {
+    if (!selectedId || !photos?.length) {
+      return { successCount: 0, total: photos?.length ?? 0, shortfall: 0, error: "No photos available to push." };
+    }
     setUpscalePhase("pushing");
     setUpscaleTotal(photos.length);
     setUpscaleCurrent(0);
@@ -1752,6 +1756,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
     const controller = new AbortController();
     pushAbortRef.current = controller;
+    let finalResult: PhotoPushResult | null = null;
 
     try {
       // Streaming NDJSON: server sends one JSON line per photo as it completes.
@@ -1765,9 +1770,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({})) as any;
-        setUpscaleError(err.error || `Server error ${resp.status}`);
+        const message = err.error || `Server error ${resp.status}`;
+        setUpscaleError(message);
         setUpscalePhase("error");
-        return;
+        return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
       }
 
       // Read the streaming NDJSON body line-by-line
@@ -1860,6 +1866,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               const shortfall = event.shortfall ?? 0;
               const tot = event.total ?? 0;
               const succeeded = sc > 0 && !guestyError;
+              finalResult = {
+                successCount: sc,
+                total: tot,
+                shortfall,
+                error: guestyError || (sc === 0 && tot > 0 ? "All photos failed — check per-photo errors below" : undefined),
+              };
               if (!guestyError) setGuestyPhotoCount(sc);
               setUpscalePhase(sc === 0 && tot > 0 ? "error" : "done");
               if (sc === 0 && tot > 0 && !guestyError) {
@@ -1894,14 +1906,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } catch (err: any) {
       if (err?.name === "AbortError") {
         // User cancelled — state is already reset by cancelPush()
-        return;
+        return { successCount: 0, total: photos.length, shortfall: photos.length, error: "Photo push cancelled." };
       }
-      setUpscaleError(err?.message || "Network error — could not reach server");
+      const message = err?.message || "Network error — could not reach server";
+      setUpscaleError(message);
       setUpscalePhase("error");
+      return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
     } finally {
       pushAbortRef.current = null;
     }
-  }, [selectedId]);
+    return finalResult ?? { successCount: 0, total: photos.length, shortfall: photos.length, error: "Photo push finished without a server completion event." };
+  }, [selectedId, refreshGuestyPhotoCount, savePushSummary, toast]);
 
   // ── Check connection + load listings ──────────────────────────────────────
   useEffect(() => {
@@ -2618,6 +2633,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
 
     try {
+      const photoPush = await upscaleAndUpload(effectivePropertyData?.photos ?? [], false);
+      if (photoPush.error || photoPush.successCount <= 0) {
+        throw new Error(photoPush.error ?? "No photos were saved to Guesty.");
+      }
+      const photoMessage = `${photoPush.successCount}/${photoPush.total} photos pushed to Guesty${photoPush.shortfall > 0 ? ` (${photoPush.shortfall} dropped by Guesty)` : ""}`;
+      recordDataPush("photos", "success", photoMessage);
+    } catch (e) {
+      const message = (e as Error).message;
+      failures.push(`Photos: ${message}`);
+      recordDataPush("photos", "error", message);
+    }
+
+    try {
       const bookable = await pushBookableToGuestyOnce();
       bookableChanged = bookable.changed;
     } catch (e) {
@@ -2661,8 +2689,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     toast({
       title: "Property data pushed to Guesty",
       description: bookableChanged
-        ? `Descriptions, bedding/sqft, amenities, bookable status, availability policy, and market pricing were handled. ${availabilityMessage} · ${pricingMessage}`
-        : `Descriptions, bedding/sqft, amenities, availability policy, and market pricing were handled. Bookable status was already handled. ${availabilityMessage} · ${pricingMessage}`,
+        ? `Descriptions, bedding/sqft, amenities, photos, bookable status, availability policy, and market pricing were handled. ${availabilityMessage} · ${pricingMessage}`
+        : `Descriptions, bedding/sqft, amenities, photos, availability policy, and market pricing were handled. Bookable status was already handled. ${availabilityMessage} · ${pricingMessage}`,
       duration: 7000,
     });
   }, [
@@ -2673,6 +2701,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     pushDescriptionsToGuesty,
     syncBeddingAndSqftToGuesty,
     pushAmenitiesToGuesty,
+    effectivePropertyData?.photos,
+    upscaleAndUpload,
     pushBookableToGuestyOnce,
     applyAvailabilityPolicyToGuesty,
     queueMarketPricingRefresh,
@@ -4380,15 +4410,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 onClick={handlePushPropertyDataPreview}
                 disabled={!selectedId || dataPushBusy || building || conn !== "connected"}
                 data-testid="btn-push-property-data-preview"
-                title={selectedId ? "Push descriptions, bedding/sqft, amenities, availability policy, and market pricing to Guesty" : "Select a Guesty listing first"}
+                title={selectedId ? "Push descriptions, bedding/sqft, amenities, photos, availability policy, and market pricing to Guesty" : "Select a Guesty listing first"}
               >
-                {dataPushBusy ? "Pushing property data..." : "Push Descriptions, Bedding, Amenities, Policy & Pricing"}
+                {dataPushBusy ? "Pushing property data..." : "Push Descriptions, Bedding, Amenities, Photos, Policy & Pricing"}
               </button>
               <div className="glb-data-push-meta" aria-label="Guesty property data push history">
                 {([
                   ["descriptions", "Descriptions"] as const,
                   ["bedding", "Bedding + sqft"] as const,
                   ["amenities", "Amenities"] as const,
+                  ["photos", "Photos"] as const,
                   ["bookable", "Bookable"] as const,
                   ["availability", "Policy"] as const,
                   ["pricing", "Pricing"] as const,
