@@ -1341,7 +1341,10 @@ function AdminDashboard() {
       ].filter(Boolean).join(" ");
       const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
       if (unitMatch) return positiveInt(unitMatch[1]) ?? 0;
-      if ((d as any).singleListing !== true) return 0;
+      if ((d as any).singleListing !== true) {
+        const combinedBedrooms = inferCombinedBedrooms(d);
+        return combinedBedrooms && combinedBedrooms % 2 === 0 ? combinedBedrooms / 2 : 0;
+      }
 
       const text = [
         d.listingTitle,

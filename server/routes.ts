@@ -979,8 +979,9 @@ async function refreshHybridPricingForDraft(
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>,
 ): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const draftId = Math.abs(propertyId);
-  const draft = await storage.getCommunityDraft(draftId);
+  let draft = await storage.getCommunityDraft(draftId);
   if (!draft) throw new Error(`Draft ${draftId} was not found`);
+  draft = await persistInferredComboDraftBedrooms(draft) ?? draft;
 
   const unitSlots = unitSlotsForCommunityDraft(draft);
   const bedroomCounts = Array.from(new Set(unitSlots.map((unit) => unit.bedrooms)))
@@ -4203,6 +4204,27 @@ function positiveDraftInteger(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+async function persistInferredComboDraftBedrooms(draft: any): Promise<any | null> {
+  if (!draft || draft.singleListing === true) return null;
+  if (positiveDraftInteger(draft.unit1Bedrooms) || positiveDraftInteger(draft.unit2Bedrooms)) return null;
+  const combinedBedrooms = inferCombinedCommunityDraftBedroomCount(draft);
+  if (!combinedBedrooms || combinedBedrooms < 2 || combinedBedrooms % 2 !== 0) return null;
+
+  const perUnitBedrooms = combinedBedrooms / 2;
+  const repaired = await storage.updateCommunityDraft(draft.id, {
+    unit1Bedrooms: perUnitBedrooms,
+    unit2Bedrooms: perUnitBedrooms,
+    combinedBedrooms,
+  } as any);
+  if (repaired) {
+    console.log(
+      `[draft-bedrooms] inferred combo bedrooms for draft ${draft.id}: ` +
+      `combined=${combinedBedrooms}, units=${perUnitBedrooms}+${perUnitBedrooms}`,
+    );
+  }
+  return repaired ?? null;
+}
+
 function inferCombinedCommunityDraftBedroomCount(draft: any): number | null {
   const structured = positiveDraftInteger(draft?.combinedBedrooms);
   if (structured) return structured;
@@ -4233,7 +4255,10 @@ function inferCommunityDraftBedroomCount(draft: any, unitKey: "unit1" | "unit2")
   const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
   if (unitMatch) return positiveDraftInteger(unitMatch[1]);
 
-  if (draft?.singleListing !== true) return null;
+  if (draft?.singleListing !== true) {
+    const comboBedrooms = inferCombinedCommunityDraftBedroomCount(draft);
+    return comboBedrooms && comboBedrooms % 2 === 0 ? comboBedrooms / 2 : null;
+  }
 
   const text = [
     draft?.listingTitle,
