@@ -33,8 +33,12 @@ export const FOLDER_UNIT_TOKENS: Record<string, string[]> = {
   "unit-621": ["621"],
   // prop 9 — folder named for an older unit 721; current claim is 723
   "unit-721": ["723"],
-  // prop 19 — units 9 and 11 share one folder
-  "mauna-kai-6a": ["9", "11"],
+  // prop 19 — units 9 and 11 use isolated folders. Keep the legacy 6A
+  // folder tokenized to its actual unit so old labels/scans do not claim
+  // both originals.
+  "mauna-kai-unit-9": ["9"],
+  "mauna-kai-unit-11": ["11"],
+  "mauna-kai-6a": ["6A"],
   // prop 20 — units 7B and 8 share one folder
   "mauna-kai-t3": ["7B", "8"],
   // prop 23 — Kaha Lani; folders named for older unit identifiers,

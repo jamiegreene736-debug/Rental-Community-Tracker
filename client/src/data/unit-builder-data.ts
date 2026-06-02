@@ -1128,8 +1128,8 @@ The king-bedded master suite, queen-bedded second bedroom, and queen-bedded thir
 Guests enjoy access to the shared outdoor pool and hot tub, perfect for relaxing after a day of North Shore adventures. Water sports gear is available for guest use.
 
 Princeville offers jaw-dropping beaches, top golf courses, and breathtaking cliffs. Hideaways Beach is just two miles away, Hanalei Bay and its famous pier are four miles, and the spectacular Na Pali Coast is accessible for scenic hiking nearby. Nearby you'll find Queen's Bath tide pools, Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, and the taro fields of Hanalei Valley. Fine dining at Makana Terrace and casual eats in Hanalei town.`,
-        photoFolder: "mauna-kai-6a",
-        photos: PHOTOS_MAUNA_KAI_6A,
+        photoFolder: "mauna-kai-unit-9",
+        photos: [],
       },
       {
         id: "prop19-mk-11",
@@ -1150,8 +1150,8 @@ A covered lanai provides the perfect spot for morning coffee or evening relaxati
 Guests enjoy access to the Mauna Kai shared pool and BBQ area. The resort's convenient Princeville location puts you close to shopping, dining, and some of Kauai's most spectacular scenery.
 
 Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture to Hanalei for surfing and dining. The Na Pali Coast's dramatic cliffs and hiking trails are a short drive away. Nearby you'll find Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, and the taro fields of Hanalei Valley. Fine dining at Makana Terrace and casual eats in Hanalei town.`,
-        photoFolder: "mauna-kai-6a",
-        photos: PHOTOS_MAUNA_KAI_6A,
+        photoFolder: "mauna-kai-unit-11",
+        photos: [],
       },
     ],
   },

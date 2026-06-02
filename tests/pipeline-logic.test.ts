@@ -1668,6 +1668,21 @@ for (const prop of unitBuilderData.filter((p) => dashboardPropertyIds.has(p.prop
 }
 console.log("  ✓ active dashboard property addresses match their communities");
 
+const maunaKaiFiveBr = unitBuilderData.find((p) => p.propertyId === 19);
+assert.ok(maunaKaiFiveBr, "property 19 Mauna Kai config should exist");
+const maunaKaiFiveBrFolders = maunaKaiFiveBr.units.map((u) => u.photoFolder).filter(Boolean);
+assert.equal(
+  new Set(maunaKaiFiveBrFolders).size,
+  maunaKaiFiveBrFolders.length,
+  "property 19 Mauna Kai units must not share the same photo folder",
+);
+assert.deepEqual(
+  maunaKaiFiveBrFolders,
+  ["mauna-kai-unit-9", "mauna-kai-unit-11"],
+  "property 19 Mauna Kai unit photo folders should match the actual unit claims",
+);
+console.log("  ✓ property 19 Mauna Kai units use isolated photo folders");
+
 console.log("\nall suites passed ✅");
 
 // ── Surgical addition: market-rate sampler helpers (random near-future windows) ──

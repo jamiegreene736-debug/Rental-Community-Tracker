@@ -1,0 +1,25 @@
+{
+  "folder": "mauna-kai-unit-11",
+  "type": "unit",
+  "referencedBy": [
+    {
+      "propertyId": 19,
+      "address": "3920 Wyllie Rd, Unit 11, Princeville, HI 96722",
+      "unitId": "prop19-mk-11",
+      "unitNumber": "11",
+      "bedrooms": 2,
+      "bathrooms": "2"
+    }
+  ],
+  "verificationStatus": "needs-review",
+  "verifiedDate": null,
+  "verifiedBy": "rescrape-required",
+  "sourceListing": {
+    "url": null,
+    "platform": null,
+    "scrapedDate": null
+  },
+  "notes": "Dedicated source folder for property 19 Unit 11. Paste the real Zillow URL on first rescrape so this unit no longer shares photos with Unit 6A or Unit 9.",
+  "bedrooms": 2,
+  "bathrooms": "2"
+}

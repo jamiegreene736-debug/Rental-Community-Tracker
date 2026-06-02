@@ -22909,7 +22909,11 @@ Return ONLY compact JSON with this exact shape:
     try {
       const stat = await fs.promises.stat(folderPath).catch(() => null);
       if (!stat || !stat.isDirectory()) {
-        return res.status(404).json({ error: `Folder not found: ${folder}` });
+        const canCreateMissingFolder = isScannableFolder(folder) || folder.startsWith("community-");
+        if (!canCreateMissingFolder) {
+          return res.status(404).json({ error: `Folder not found: ${folder}` });
+        }
+        await fs.promises.mkdir(folderPath, { recursive: true });
       }
 
       // Resolve the best sourceUrl we can find.
