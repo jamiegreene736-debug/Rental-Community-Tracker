@@ -2328,7 +2328,7 @@ function walkForPhotosScoped(item: any, out: string[]): void {
 // Requires APIFY_API_TOKEN on the env. APIFY_ZILLOW_ACTOR picks which
 // actor to run — defaults to maxcopell/zillow-detail-scraper which takes
 // a list of Zillow URLs and returns full listing JSON including photos.
-async function scrapeZillowViaApify(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
+async function scrapeZillowViaApify(url: string, timeoutMs = 180_000): Promise<{ urls: string[]; facts: ListingFacts }> {
   const token = process.env.APIFY_API_TOKEN;
   if (!token) {
     console.warn(`[scrapeZillow:Apify] APIFY_API_TOKEN not set`);
@@ -2343,7 +2343,7 @@ async function scrapeZillowViaApify(url: string): Promise<{ urls: string[]; fact
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ startUrls: [{ url }] }),
-      signal: AbortSignal.timeout(180_000), // cold-start + scrape can take 60-120s
+      signal: AbortSignal.timeout(timeoutMs), // cold-start + scrape can take 60-120s
     });
     if (!r.ok) {
       const body = await r.text().catch(() => "");
@@ -2412,7 +2412,7 @@ async function scrapeZillowViaApify(url: string): Promise<{ urls: string[]; fact
   }
 }
 
-async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
+async function scrapeZillowViaScrapingBee(url: string, timeoutMs = 90_000): Promise<{ urls: string[]; facts: ListingFacts }> {
   const key = process.env.SCRAPINGBEE_API_KEY;
   if (!key) {
     console.warn(`[scrapeZillow:SB] SCRAPINGBEE_API_KEY not set`);
@@ -2429,7 +2429,7 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
       block_resources: "true",
     });
     const r = await fetch(`https://app.scrapingbee.com/api/v1/?${params.toString()}`, {
-      signal: AbortSignal.timeout(90000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) {
       const body = await r.text().catch(() => "");
@@ -2551,7 +2551,7 @@ async function scrapeZillowViaScrapingBee(url: string): Promise<{ urls: string[]
 // via env var if a different actor proves more reliable. Wired as
 // the FIRST Realtor scraper tier in scrapeListingPhotos; direct-
 // fetch + ScrapingBee remain as fallbacks below.
-async function scrapeRealtorViaApify(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
+async function scrapeRealtorViaApify(url: string, timeoutMs = 180_000): Promise<{ urls: string[]; facts: ListingFacts }> {
   const token = process.env.APIFY_API_TOKEN;
   if (!token) {
     return { urls: [], facts: {} };
@@ -2566,7 +2566,7 @@ async function scrapeRealtorViaApify(url: string): Promise<{ urls: string[]; fac
       // (the standard Apify pattern) or { urls: [...] } (epctex
       // variant). Send both — actors ignore unknown fields.
       body: JSON.stringify({ startUrls: [{ url }], urls: [url] }),
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) {
       const body = await r.text().catch(() => "");
@@ -2736,6 +2736,7 @@ async function harvestZillowUrlsViaApifySearch(
   city: string,
   state: string,
   maxItems: number = 500,
+  timeoutMs = 180_000,
 ): Promise<string[]> {
   const token = process.env.APIFY_API_TOKEN;
   if (!token) {
@@ -2752,7 +2753,7 @@ async function harvestZillowUrlsViaApifySearch(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) {
       const body = await r.text().catch(() => "");
@@ -2774,6 +2775,7 @@ async function harvestRealtorUrlsViaApifySearch(
   city: string,
   state: string,
   maxItems: number = 500,
+  timeoutMs = 180_000,
 ): Promise<string[]> {
   const token = process.env.APIFY_API_TOKEN;
   if (!token) return [];
@@ -2787,7 +2789,7 @@ async function harvestRealtorUrlsViaApifySearch(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) {
       const body = await r.text().catch(() => "");
@@ -2947,8 +2949,14 @@ async function scrapeRealtorViaFetch(url: string): Promise<{ urls: string[]; fac
 // daemon at 90s would compound to 22 minutes; 25s is plenty for a
 // successful sidecar Zillow scrape (~10-20s typical) and bails
 // fast on a wedged daemon. Set to 0 to disable the sidecar
-// fallback entirely.
-type ScrapeOptions = { sidecarWalletMs?: number };
+// fallback entirely. `detailTimeoutMs` / `scrapingBeeTimeoutMs`
+// let bounded discovery loops avoid multi-minute waits per bad
+// candidate without changing default one-shot behavior.
+type ScrapeOptions = {
+  sidecarWalletMs?: number;
+  detailTimeoutMs?: number;
+  scrapingBeeTimeoutMs?: number;
+};
 
 async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
   try {
@@ -3089,7 +3097,7 @@ async function scrapeListingPhotos(
   //   3. ScrapingBee — JS-rendered HTML, last resort.
   // Photos preserve order from whichever tier returned them.
   if (/realtor\.com\/realestateandhomes-detail/i.test(primaryUrl)) {
-    let result = await scrapeRealtorViaApify(primaryUrl);
+    let result = await scrapeRealtorViaApify(primaryUrl, options?.detailTimeoutMs);
     let bestFacts = result.facts;
     if (result.urls.length === 0) {
       console.log(`[scrapeRealtor] Apify returned 0, falling back to direct fetch`);
@@ -3115,7 +3123,7 @@ async function scrapeListingPhotos(
       try {
         const sbResp = await fetch(
           `https://app.scrapingbee.com/api/v1/?api_key=${encodeURIComponent(process.env.SCRAPINGBEE_API_KEY)}&url=${encodeURIComponent(primaryUrl)}&render_js=true`,
-          { signal: AbortSignal.timeout(60_000) },
+          { signal: AbortSignal.timeout(options?.scrapingBeeTimeoutMs ?? 60_000) },
         );
         if (sbResp.ok) {
           const html = await sbResp.text();
@@ -3167,10 +3175,10 @@ async function scrapeListingPhotos(
   }
 
   if (/zillow\.com/i.test(primaryUrl)) {
-    let result = await scrapeZillowViaApify(primaryUrl);
+    let result = await scrapeZillowViaApify(primaryUrl, options?.detailTimeoutMs);
     if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
       console.log(`[scrapeZillow] Apify returned 0, falling back to ScrapingBee`);
-      result = await scrapeZillowViaScrapingBee(primaryUrl);
+      result = await scrapeZillowViaScrapingBee(primaryUrl, options?.scrapingBeeTimeoutMs);
     }
     // CODEX NOTE (2026-05-04, claude/sidecar-zillow-scrape):
     // Tertiary fallback — when Apify+ScrapingBee both came up
@@ -27336,6 +27344,9 @@ Return ONLY compact JSON with this exact shape:
       const candidateLimit = Number.isFinite(Number(maxCandidates)) && Number(maxCandidates) > 0
         ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
         : null;
+      const isBoundedDiscovery = candidateLimit !== null;
+      const discoveryWallBudgetMs = isBoundedDiscovery ? 115_000 : null;
+      const discoveryElapsedMs = () => Date.now() - startedAt;
       const requestedStateAbbr = String(state ?? "").trim().toLowerCase().match(/^(hi|hawaii)$/) ? "hi" : null;
       const urlStatePattern = /(?:^|[-_/])([A-Z]{2})(?:[-_/]|$)/i;
       type DiscoverySource = "zillow" | "realtor" | "redfin" | "homes";
@@ -27438,14 +27449,17 @@ Return ONLY compact JSON with this exact shape:
       if (city && state) {
         const roots = repeatedRoots();
         const focusedZillowCandidates = candidateUrls.filter((candidate) => candidate.source === "zillow").length;
-        const hasEnoughFocusedCandidates = candidateLimit !== null && focusedZillowCandidates >= Math.min(3, candidateLimit);
+        const hasEnoughFocusedCandidates = candidateLimit !== null
+          ? candidateUrls.length >= Math.min(2, candidateLimit)
+          : false;
         if (roots.size > 0 && !hasEnoughFocusedCandidates) {
           const apifyMaxItems = candidateLimit
-            ? Math.max(50, Math.min(120, candidateLimit * 10))
+            ? Math.max(30, Math.min(80, candidateLimit * 8))
             : 300;
+          const apifySearchTimeoutMs = isBoundedDiscovery ? 45_000 : 180_000;
           const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
-            harvestZillowUrlsViaApifySearch(city, state, apifyMaxItems),
-            harvestRealtorUrlsViaApifySearch(city, state, apifyMaxItems),
+            harvestZillowUrlsViaApifySearch(city, state, apifyMaxItems, apifySearchTimeoutMs),
+            harvestRealtorUrlsViaApifySearch(city, state, apifyMaxItems, apifySearchTimeoutMs),
           ]);
           for (const link of zillowApifyUrls) addCandidate(link, "zillow", "", "", roots);
           for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", roots);
@@ -27475,9 +27489,23 @@ Return ONLY compact JSON with this exact shape:
         ? candidateUrls.slice(offset, offset + candidateLimit)
         : candidateUrls.slice(offset);
       for (const candidate of candidatesToTry) {
+        if (discoveryWallBudgetMs !== null && discoveryElapsedMs() >= discoveryWallBudgetMs) {
+          console.warn(
+            `[fetch-unit-photos] bounded discovery budget hit before ${candidate.url}: ` +
+            `elapsedMs=${discoveryElapsedMs()} candidates=${candidatesToTry.length}`,
+          );
+          break;
+        }
         const facts: ListingFacts = {};
         try {
-          const photos = await scrapeListingPhotos(candidate.url, undefined, facts);
+          const remainingBudgetMs = discoveryWallBudgetMs === null
+            ? null
+            : Math.max(8_000, discoveryWallBudgetMs - discoveryElapsedMs());
+          const photos = await scrapeListingPhotos(candidate.url, undefined, facts, isBoundedDiscovery ? {
+            detailTimeoutMs: Math.min(28_000, remainingBudgetMs ?? 28_000),
+            scrapingBeeTimeoutMs: Math.min(18_000, remainingBudgetMs ?? 18_000),
+            sidecarWalletMs: Math.min(12_000, remainingBudgetMs ?? 12_000),
+          } : undefined);
           if (photos.length === 0) {
             console.warn(`[fetch-unit-photos] ${candidate.source} candidate returned 0 photos: ${candidate.url}`);
             continue;

@@ -353,6 +353,7 @@ export default function BuilderPreflight() {
         bedrooms: unit.bedrooms,
         skipUrls,
         skipFirst: skipUrls.length === 0 && currentUnitHasPhotos ? 1 : 0,
+        maxCandidates: currentUnitHasPhotos ? 8 : 6,
       });
       const fetchData = await fetchR.json();
       const photos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];

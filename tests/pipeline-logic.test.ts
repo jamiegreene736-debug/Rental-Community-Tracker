@@ -170,6 +170,16 @@ assert.match(
   /maxCandidates: bedroomOverride === "any" \? 10 : 6/,
   "combo photo fetch discovery must bound candidate scans so Step 4 does not appear stuck on weak markets",
 );
+assert.match(
+  preflightSource,
+  /maxCandidates: currentUnitHasPhotos \? 8 : 6/,
+  "preflight Find Photos must bound candidate scans so a no-match does not run for several minutes",
+);
+assert.match(
+  routesSource,
+  /discoveryWallBudgetMs = isBoundedDiscovery \? 115_000 : null/,
+  "bounded preflight photo discovery must have a hard wall budget",
+);
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
 assert.match(
   dashboardSource,
