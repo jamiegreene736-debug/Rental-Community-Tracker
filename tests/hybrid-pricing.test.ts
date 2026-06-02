@@ -160,14 +160,14 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   }), { status: 200, headers: { "content-type": "application/json" } });
 }) as typeof fetch;
 try {
-  const poipuMedian = await fetchAirbnbMedianNightly({
+  const poipuBasis = await fetchAirbnbMedianNightly({
     community: "Poipu Kai",
     bedrooms: 3,
     checkIn: "2026-06-01",
     checkOut: "2026-06-08",
   });
-  assert.equal(poipuMedian.medianNightly, 250);
-  assert.equal(poipuMedian.sampleCount, 3);
+  assert.equal(poipuBasis.medianNightly, 120);
+  assert.equal(poipuBasis.sampleCount, 3);
   assert.equal(requestedSearchApiUrls.length, 1);
   const params = new URL(requestedSearchApiUrls[0]).searchParams;
   assert.equal(params.get("engine"), "airbnb");
@@ -182,7 +182,7 @@ try {
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
   hybridPricingSource.includes('source: "airbnb"'),
-  "pricing refresh should persist raw SearchAPI medians without hybrid markup layers",
+  "pricing refresh should persist raw SearchAPI 25th percentile bases without hybrid markup layers",
 );
 assert.equal(
   hybridPricingSource.includes("calculateBlendedRate({"),
@@ -207,7 +207,7 @@ assert.ok(
 );
 assert.ok(
   hybridPricingSource.includes("scannedMonths.length !== horizonMonths"),
-  "market-rate refresh must fail when fewer than horizonMonths monthly medians were stored",
+  "market-rate refresh must fail when fewer than horizonMonths monthly bases were stored",
 );
 assert.ok(
   hybridPricingSource.includes("fetchAmortizedNightlyByBR("),

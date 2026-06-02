@@ -232,11 +232,16 @@ export function calculateBlendedRate(input: HybridCalculationInput, config: Hybr
   };
 }
 
-function median(values: number[]): number | null {
+function nearestRankPercentile(values: number[], percentile: number): number | null {
   const clean = values.filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
   if (!clean.length) return null;
-  const mid = Math.floor(clean.length / 2);
-  return Math.round(clean.length % 2 ? clean[mid] : (clean[mid - 1] + clean[mid]) / 2);
+  const clamped = Math.min(100, Math.max(0, percentile));
+  const index = Math.max(0, Math.ceil((clamped / 100) * clean.length) - 1);
+  return Math.round(clean[index]);
+}
+
+function marketPricingBasis(values: number[]): number | null {
+  return nearestRankPercentile(values, 25);
 }
 
 function summarizeMonthlyHybridRates(monthlyRates: Record<string, HybridMonthlyRate>) {
@@ -393,10 +398,10 @@ export async function fetchAirbnbMedianNightly(args: {
     }
     if (rates.length > 0) {
       return {
-        medianNightly: median(rates),
+        medianNightly: marketPricingBasis(rates),
         sampleCount: rates.length,
         notes: [
-          `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}".`,
+          `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}"; using 25th percentile basis.`,
         ],
       };
     }
@@ -417,10 +422,10 @@ export async function fetchAirbnbMedianNightly(args: {
     const brRates = amortized.ratesByBR[args.bedrooms] ?? [];
     if (brRates.length > 0) {
       return {
-        medianNightly: median(brRates),
+        medianNightly: marketPricingBasis(brRates),
         sampleCount: brRates.length,
         notes: [
-          `SearchAPI amortized path returned ${brRates.length} exact-${args.bedrooms}BR sample(s) for ${location.searchName}.`,
+          `SearchAPI amortized path returned ${brRates.length} exact-${args.bedrooms}BR sample(s) for ${location.searchName}; using 25th percentile basis.`,
         ],
       };
     }
@@ -542,17 +547,17 @@ function representativeMonthlyRate(
   ) ?? null;
 }
 
-function seasonalMedianSummary(
-  seasonalMedians: Record<LegacySeason, number[]>,
-): { lowMedian: number | null; highMedian: number | null; holidayMedian: number | null; missing: LegacySeason[] } {
+function seasonalBasisSummary(
+  seasonalBases: Record<LegacySeason, number[]>,
+): { lowBasis: number | null; highBasis: number | null; holidayBasis: number | null; missing: LegacySeason[] } {
   const missing: LegacySeason[] = [];
-  const lowMedian = median(seasonalMedians.LOW);
-  const highMedian = median(seasonalMedians.HIGH);
-  const holidayMedian = median(seasonalMedians.HOLIDAY);
-  if (lowMedian == null) missing.push("LOW");
-  if (highMedian == null) missing.push("HIGH");
-  if (holidayMedian == null) missing.push("HOLIDAY");
-  return { lowMedian, highMedian, holidayMedian, missing };
+  const lowBasis = marketPricingBasis(seasonalBases.LOW);
+  const highBasis = marketPricingBasis(seasonalBases.HIGH);
+  const holidayBasis = marketPricingBasis(seasonalBases.HOLIDAY);
+  if (lowBasis == null) missing.push("LOW");
+  if (highBasis == null) missing.push("HIGH");
+  if (holidayBasis == null) missing.push("HOLIDAY");
+  return { lowBasis, highBasis, holidayBasis, missing };
 }
 
 export async function refreshHybridPricingForTarget(args: {
@@ -635,7 +640,7 @@ export async function refreshHybridPricingForTarget(args: {
           layers: [],
           notes: [
             ...airbnb.notes,
-            `Stored raw SearchAPI median (no hybrid markup layers). ${window.yearMonth} window ${window.checkIn} to ${window.checkOut}.`,
+            `Stored raw SearchAPI 25th percentile basis (no hybrid markup layers). ${window.yearMonth} window ${window.checkIn} to ${window.checkOut}.`,
             args.unitCount > 1
               ? `Property has ${args.unitCount} configured unit slot(s); Guesty combo pushes sum the matching unit bases.`
               : "Single-unit pricing basis.",
@@ -671,7 +676,7 @@ export async function refreshHybridPricingForTarget(args: {
       await sleep(HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs);
     }
 
-    const { lowMedian, highMedian, holidayMedian, missing } = seasonalMedianSummary(seasonalMedians);
+    const { lowBasis, highBasis, holidayBasis, missing } = seasonalBasisSummary(seasonalMedians);
     if (missing.length > 0) {
       await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
       throw new Error(
@@ -691,15 +696,15 @@ export async function refreshHybridPricingForTarget(args: {
     if (scannedMonths.length !== horizonMonths) {
       await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
       throw new Error(
-        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one median per calendar month.`,
+        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one 25th percentile basis per calendar month.`,
       );
     }
     const row = await storage.upsertPropertyMarketRate({
       propertyId: args.propertyId,
       bedrooms,
-      medianNightly: String(lowMedian),
-      medianNightlyHigh: String(highMedian),
-      medianNightlyHoliday: String(holidayMedian),
+      medianNightly: String(lowBasis),
+      medianNightlyHigh: String(highBasis),
+      medianNightlyHoliday: String(holidayBasis),
       monthlyRates,
       lowNightly: String(Math.min(...monthlyValues)),
       highNightly: String(Math.max(...monthlyValues)),
@@ -713,16 +718,16 @@ export async function refreshHybridPricingForTarget(args: {
       bedrooms,
       triggerType: args.triggerType,
       oldRate: previous?.medianNightly ?? null,
-      newRate: String(lowMedian),
+      newRate: String(lowBasis),
       status: "ok",
       notes: [
-        args.notes || "SearchAPI Airbnb monthly medians saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.",
+        args.notes || "SearchAPI Airbnb monthly 25th percentile bases saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.",
         `Scanned ${scannedMonths.length} calendar months (${scannedMonths[0]} through ${scannedMonths[scannedMonths.length - 1]}).`,
       ].join(" "),
       layersJson: [],
       calendarJson: monthlyRates,
     }));
-    console.info("[hybrid-pricing] applied raw Airbnb monthly medians", JSON.stringify({
+    console.info("[hybrid-pricing] applied raw Airbnb monthly p25 bases", JSON.stringify({
       propertyId: args.propertyId,
       propertyName: args.propertyName,
       community: args.community,
@@ -733,21 +738,21 @@ export async function refreshHybridPricingForTarget(args: {
       unitCount: args.unitCount,
       sampleCount: totalSamples,
       low: {
-        median: lowMedian,
+        basis: lowBasis,
         checkIn: lowRate.checkIn,
         checkOut: lowRate.checkOut,
         baseAirbnbMedian: lowRate.hybrid.baseAirbnbMedian,
         finalRate: lowRate.hybrid.finalRate,
       },
       high: {
-        median: highMedian,
+        basis: highBasis,
         checkIn: highRate.checkIn,
         checkOut: highRate.checkOut,
         baseAirbnbMedian: highRate.hybrid.baseAirbnbMedian,
         finalRate: highRate.hybrid.finalRate,
       },
       holiday: {
-        median: holidayMedian,
+        basis: holidayBasis,
         checkIn: holidayRate.checkIn,
         checkOut: holidayRate.checkOut,
         baseAirbnbMedian: holidayRate.hybrid.baseAirbnbMedian,
