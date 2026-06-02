@@ -277,13 +277,6 @@ function OtaVisibilityStatusBadge({ status }: { status: OtaVisibilityStatus | nu
   );
 }
 
-function otaVisibilityStep(status: OtaVisibilityStatus | null | undefined): number {
-  if (status === "found" || status === "not_found" || status === "error") return 100;
-  if (status === "running") return 60;
-  if (status === "queued") return 25;
-  return 0;
-}
-
 function OtaVisibilityPanel({ propertyId }: { propertyId?: number }) {
   const { toast } = useToast();
   const [data, setData] = useState<OtaVisibilityResponse | null>(null);
@@ -344,48 +337,6 @@ function OtaVisibilityPanel({ propertyId }: { propertyId?: number }) {
       setLoading(false);
     }
   };
-
-  const runBoth = async () => {
-    if (!propertyId || loading || running.booking || running.vrbo) return;
-    setLoading(true);
-    setRunning({ booking: true, vrbo: true });
-    try {
-      await Promise.all((["booking", "vrbo"] as const).map(async (platform) => {
-        const response = await fetch(`/api/builder/ota-visibility/${propertyId}/start`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ platform }),
-        });
-        if (!response.ok) {
-          const payload = await response.json().catch(() => null) as { error?: string } | null;
-          throw new Error(payload?.error || `Could not start ${platform} visibility search (${response.status})`);
-        }
-      }));
-      await loadVisibility();
-    } catch (error) {
-      toast({
-        title: "Visibility search failed",
-        description: error instanceof Error ? error.message : "Could not start both OTA searches.",
-        variant: "destructive",
-      });
-      setRunning({});
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const bookingJob = data?.booking ?? null;
-  const vrboJob = data?.vrbo ?? null;
-  const overallProgress = Math.round((otaVisibilityStep(bookingJob?.status) + otaVisibilityStep(vrboJob?.status)) / 2);
-  const activeCount = Number(!!running.booking) + Number(!!running.vrbo);
-  const finishedCount = [bookingJob, vrboJob].filter((job) => job?.status === "found" || job?.status === "not_found" || job?.status === "error").length;
-  const progressLabel = activeCount > 0
-    ? `${activeCount} search${activeCount === 1 ? "" : "es"} running`
-    : finishedCount === 2
-      ? "Both searches finished"
-      : finishedCount === 1
-        ? "1 of 2 searches finished"
-        : "Ready to search";
 
   const renderJob = (platform: OtaVisibilityPlatform, label: string) => {
     const job = data?.[platform] ?? null;
@@ -453,40 +404,19 @@ function OtaVisibilityPanel({ propertyId }: { propertyId?: number }) {
           <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--muted)" }}>
             Finds the listing in Booking.com and VRBO search results for the next Guesty-available date window, then logs dates, page, and result position.
           </p>
-          <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--faint)" }}>
-            Run both starts Booking.com and VRBO together; each card updates from queued to running to finished.
-          </p>
         </div>
         <button
           type="button"
           className="glb-btn glb-btn-primary"
           disabled={loading || running.booking || running.vrbo}
-          onClick={() => void runBoth()}
+          onClick={() => {
+            void runPlatform("booking");
+            void runPlatform("vrbo");
+          }}
           data-testid="btn-ota-visibility-all"
         >
-          {loading || running.booking || running.vrbo ? "Running…" : "Run both"}
+          Run both
         </button>
-      </div>
-      <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12, background: "var(--bg-card)", marginBottom: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
-          <span style={{ fontSize: 12, fontWeight: 700 }}>{progressLabel}</span>
-          <span style={{ fontSize: 12, fontWeight: 700 }}>{overallProgress}%</span>
-        </div>
-        <div style={{ height: 8, borderRadius: 999, background: "#e5e7eb", overflow: "hidden" }}>
-          <div
-            style={{
-              width: `${overallProgress}%`,
-              height: "100%",
-              borderRadius: 999,
-              background: "linear-gradient(90deg, #3aa7b4, #1d4ed8)",
-              transition: "width .25s ease",
-            }}
-          />
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, fontSize: 11, color: "var(--muted)" }}>
-          <span>Booking.com: {bookingJob?.status?.replace("_", " ") ?? "not run"}</span>
-          <span>VRBO: {vrboJob?.status?.replace("_", " ") ?? "not run"}</span>
-        </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
         {renderJob("booking", "Booking.com")}

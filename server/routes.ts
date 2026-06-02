@@ -17651,6 +17651,17 @@ export async function registerRoutes(
     return res.json(result);
   });
 
+  app.post("/api/admin/availability/clear-scanner-blocks", async (req: Request, res: Response) => {
+    const session = res.locals.portalSession as { role?: string } | undefined;
+    if (session?.role && session.role !== "admin") {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    const dryRun = req.query.dryRun === "1" || req.body?.dryRun === true;
+    const { clearTrackedScannerBlocks } = await import("./scanner-block-cleanup");
+    const result = await clearTrackedScannerBlocks({ dryRun });
+    return res.status(result.failed > 0 ? 207 : 200).json(result);
+  });
+
   // GET /api/availability/overrides/:propertyId
   app.get("/api/availability/overrides/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
