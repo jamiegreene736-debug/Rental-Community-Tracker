@@ -2906,7 +2906,7 @@ function AdminDashboard() {
                     )}
                   </Button>
                 </DialogTrigger>
-                <DialogContent className="max-w-3xl">
+                <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-3xl overflow-y-auto">
                   <DialogHeader>
                     <DialogTitle>Bulk market pricing queue</DialogTitle>
                   </DialogHeader>
