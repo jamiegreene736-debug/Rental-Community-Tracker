@@ -78,7 +78,7 @@ import {
 } from "./sidecar-lane";
 import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
-import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply } from "./auto-reply";
+import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts } from "./auto-reply";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import {
@@ -35616,6 +35616,9 @@ CONSTRAINTS
   app.get("/api/inbox/auto-reply/logs", async (req, res) => {
     try {
       const limit = Math.min(parseInt((req.query.limit as string) ?? "50", 10) || 50, 200);
+      await dismissHandledAutoReplyDrafts(limit).catch((err: any) => {
+        console.warn(`[auto-reply/logs] stale draft cleanup skipped: ${err?.message ?? err}`);
+      });
       const logs = await storage.getAutoReplyLogs(limit);
       res.json(logs);
     } catch (err: any) {

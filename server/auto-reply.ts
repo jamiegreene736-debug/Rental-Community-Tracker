@@ -8,7 +8,7 @@ import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { fallbackWalkForResort } from "../shared/walking-distance";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
-import type { InsertAutoReplyLog } from "@shared/schema";
+import type { AutoReplyLog, InsertAutoReplyLog } from "@shared/schema";
 
 type AutoReplyStatus = "sent" | "drafted" | "flagged" | "dismissed" | "error";
 
@@ -408,28 +408,85 @@ function pickPostToReplyTo(posts: GuestyPost[] | undefined): GuestyPost | null {
   if (!posts || posts.length === 0) return null;
   const conversational = posts.filter((p) => !isSystemPost(p));
 
-  const ts = (p: any): number => {
-    const v = p.createdAt ?? p.sentAt ?? p.postedAt;
-    const t = v ? new Date(v).getTime() : NaN;
-    return Number.isFinite(t) ? t : 0;
-  };
-
   const incoming = conversational.filter(isIncomingPost);
   if (incoming.length === 0) return null;
-  incoming.sort((a, b) => ts(b) - ts(a));
+  incoming.sort((a, b) => postTimestampMs(b) - postTimestampMs(a));
   const latestIncoming = incoming[0];
   if (!latestIncoming?._id) return null;
 
   const host = conversational.filter(isHostPost);
   if (host.length === 0) return latestIncoming;
-  host.sort((a, b) => ts(b) - ts(a));
+  host.sort((a, b) => postTimestampMs(b) - postTimestampMs(a));
   const latestHost = host[0];
 
   // Host's last message is more recent than the guest's last —
   // they've already handled it. Skip.
-  if (ts(latestHost) > ts(latestIncoming)) return null;
+  if (postTimestampMs(latestHost) > postTimestampMs(latestIncoming)) return null;
 
   return latestIncoming;
+}
+
+function postTimestampMs(p: any): number {
+  const v = p?.createdAt ?? p?.sentAt ?? p?.postedAt;
+  const t = v ? new Date(v).getTime() : NaN;
+  return Number.isFinite(t) ? t : 0;
+}
+
+function logCreatedAtMs(log: Pick<AutoReplyLog, "createdAt">): number {
+  const value = log.createdAt instanceof Date ? log.createdAt.getTime() : new Date(log.createdAt).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function isPendingApprovalLog(log: Pick<AutoReplyLog, "status" | "replySent">): boolean {
+  return !log.replySent && (log.status === "drafted" || log.status === "flagged" || log.status === "error");
+}
+
+function hasManualHostReplyAfterTrigger(log: AutoReplyLog, posts: GuestyPost[]): boolean {
+  const conversational = posts.filter((p) => !isSystemPost(p));
+  const triggerPost = conversational.find((p) => p._id === log.triggerPostId);
+  const triggerTime = triggerPost ? postTimestampMs(triggerPost) : logCreatedAtMs(log);
+  if (triggerTime <= 0) return false;
+  return conversational.some((p) => isHostPost(p) && postTimestampMs(p) > triggerTime);
+}
+
+async function dismissHandledDraftsForConversation(
+  conversationId: string,
+  posts: GuestyPost[],
+  logs?: AutoReplyLog[],
+): Promise<number> {
+  const candidates = (logs ?? await storage.getAutoReplyLogs(200))
+    .filter((log) => log.conversationId === conversationId && isPendingApprovalLog(log));
+  let dismissed = 0;
+  for (const log of candidates) {
+    if (!hasManualHostReplyAfterTrigger(log, posts)) continue;
+    await storage.updateAutoReplyLog(log.id, {
+      status: "dismissed",
+      errorMessage: null,
+    });
+    dismissed++;
+  }
+  return dismissed;
+}
+
+export async function dismissHandledAutoReplyDrafts(limit = 200): Promise<number> {
+  const logs = (await storage.getAutoReplyLogs(limit)).filter(isPendingApprovalLog);
+  const byConversation = new Map<string, AutoReplyLog[]>();
+  for (const log of logs) {
+    const list = byConversation.get(log.conversationId) ?? [];
+    list.push(log);
+    byConversation.set(log.conversationId, list);
+  }
+
+  let dismissed = 0;
+  for (const [conversationId, conversationLogs] of Array.from(byConversation.entries())) {
+    const posts = await fetchConversationPosts(conversationId);
+    if (posts.length === 0) continue;
+    dismissed += await dismissHandledDraftsForConversation(conversationId, posts, conversationLogs);
+  }
+  if (dismissed > 0) {
+    console.log(`[auto-reply] Dismissed ${dismissed} stale approval draft(s) after manual host replies`);
+  }
+  return dismissed;
 }
 
 async function sendReply(conversationId: string, body: string, moduleField: { type?: string } | undefined) {
@@ -870,7 +927,10 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
         const fetchedPosts = await fetchConversationPosts(conv._id);
         const posts = fetchedPosts.length > 0 ? fetchedPosts : (thread?.posts ?? conv.posts ?? []);
         const latest = pickPostToReplyTo(posts);
-        if (!latest || !latest._id) continue;
+        if (!latest || !latest._id) {
+          await dismissHandledDraftsForConversation(conv._id, posts);
+          continue;
+        }
         const conversationalPosts = posts.filter((p) => !isSystemPost(p));
         const isInitialContact = !conversationalPosts.some(isHostPost);
 

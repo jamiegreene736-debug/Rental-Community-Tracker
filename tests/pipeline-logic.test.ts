@@ -1334,6 +1334,7 @@ try {
 }
 
 const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+const autoReplySource = readFileSync(new URL("../server/auto-reply.ts", import.meta.url), "utf8");
 const homeSource = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
 const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
 const unitReplacementSource = readFileSync(new URL("../client/src/components/unit-replacement-flow.tsx", import.meta.url), "utf8");
@@ -1365,6 +1366,27 @@ assert.match(
   "dashboard draft rows must prefer per-unit bedroom sums over inferred title text",
 );
 console.log("  ✓ combo draft bedroom counts stay structured from selection through dashboard");
+
+assert.match(
+  routeSource,
+  /dismissHandledAutoReplyDrafts\(limit\)/,
+  "AI Draft Approval logs endpoint must remove stale drafts before returning queue items",
+);
+assert.match(
+  autoReplySource,
+  /hasManualHostReplyAfterTrigger/,
+  "auto-reply scheduler must detect manual host replies after the guest trigger post",
+);
+assert.match(
+  autoReplySource,
+  /status: "dismissed"/,
+  "manual host replies should dismiss stale AI approval drafts automatically",
+);
+assert.match(
+  autoReplySource,
+  /await dismissHandledDraftsForConversation\(conv\._id, posts\)/,
+  "auto-reply polling must clean stale drafts when a thread no longer needs a host reply",
+);
 
 assert.equal(MAX_BUY_IN_WALK_MINUTES, 10, "buy-in unit walking-distance guardrail should stay at 10 minutes");
 console.log("  ✓ buy-in walking-distance guardrail is pinned at 10 minutes");
