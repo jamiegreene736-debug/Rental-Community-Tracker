@@ -311,7 +311,7 @@ function paymentLineLabel(item: any): string {
 function compactCommunityName(name: string): string {
   const trimmed = name.trim();
   const known: Record<string, string> = {
-    "Regency at Poipu Kai": "Regency",
+    "Regency at Poipu Kai": "Regency Poipu",
     "Mauna Kai Princeville": "Mauna Kai",
     "Kaha Lani Resort": "Kaha Lani",
     "Makahuena at Poipu": "Makahuena",
@@ -319,8 +319,8 @@ function compactCommunityName(name: string): string {
   };
   if (known[trimmed]) return known[trimmed];
   const withoutSuffix = trimmed.replace(/\s+(Resort|Villas?|Condos?|Townhomes?)$/i, "").trim();
-  if (withoutSuffix.length <= 14) return withoutSuffix;
-  return withoutSuffix.split(/\s+/).slice(0, 2).join(" ");
+  if (withoutSuffix.length <= 18) return withoutSuffix;
+  return withoutSuffix.split(/\s+/).slice(0, 3).join(" ");
 }
 
 function normalizeCommunityUnitCountKey(name: string): string {
@@ -3354,7 +3354,7 @@ function AdminDashboard() {
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
                 <TableHead className="w-[72px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[118px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
+                <TableHead className="w-[110px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
                   <div className="flex items-center justify-center gap-1">
                     <span>Photos</span>
                     <Button
@@ -3372,7 +3372,7 @@ function AdminDashboard() {
                     </Button>
                   </div>
                 </TableHead>
-                <TableHead className="w-[168px] max-w-[168px] px-1">
+                <TableHead className="w-[158px] max-w-[158px] px-1">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3385,7 +3385,7 @@ function AdminDashboard() {
                     <SortIcon field="name" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[88px] px-1">
+                <TableHead className="w-[124px] px-1">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3398,7 +3398,7 @@ function AdminDashboard() {
                     <SortIcon field="community" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[88px] px-1" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
+                <TableHead className="w-[82px] px-0.5" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3411,7 +3411,7 @@ function AdminDashboard() {
                     <SortIcon field="minimumStay" />
                   </Button>
                 </TableHead>
-                <TableHead className="text-right w-[86px] px-1">
+                <TableHead className="text-right w-[78px] px-0.5">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3424,7 +3424,7 @@ function AdminDashboard() {
                     <SortIcon field="baseRate" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[62px] px-1">
+                <TableHead className="w-[58px] px-0.5">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-0.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -3760,7 +3760,7 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
-                  <TableCell className="max-w-[168px] px-1 py-2">
+                  <TableCell className="max-w-[158px] px-1 py-2">
                     <div className="min-w-0">
                       <span className="font-medium text-sm leading-tight block truncate" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`} title={property.name}>
                         {property.name}
@@ -3771,23 +3771,23 @@ function AdminDashboard() {
                   <TableCell className="px-1 py-2">
                     <Badge
                       variant={communityVariant(property.pricingArea)}
-                      className="no-default-hover-elevate no-default-active-elevate block max-w-[78px] truncate text-xs"
+                      className="no-default-hover-elevate no-default-active-elevate block max-w-[114px] truncate text-xs"
                       data-testid={`badge-community-${property.id}`}
                       title={property.community}
                     >
                       {compactCommunityName(property.community)}
                     </Badge>
                   </TableCell>
-                  <TableCell className="px-1 py-2">
+                  <TableCell className="px-0.5 py-2">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Badge
                             variant="outline"
                             className={
-                              minStay.tone === "warn" ? "max-w-[78px] truncate bg-amber-50 border-amber-200 text-amber-800 cursor-help"
-                              : minStay.tone === "ok" ? "max-w-[78px] truncate bg-emerald-50 border-emerald-200 text-emerald-800 cursor-help"
-                              : "max-w-[78px] truncate bg-blue-50 border-blue-200 text-blue-800 cursor-help"
+                              minStay.tone === "warn" ? "max-w-[76px] truncate bg-amber-50 border-amber-200 text-amber-800 cursor-help"
+                              : minStay.tone === "ok" ? "max-w-[76px] truncate bg-emerald-50 border-emerald-200 text-emerald-800 cursor-help"
+                              : "max-w-[76px] truncate bg-blue-50 border-blue-200 text-blue-800 cursor-help"
                             }
                             data-testid={`badge-minimum-stay-${property.id}`}
                           >
@@ -3804,10 +3804,10 @@ function AdminDashboard() {
                       </Tooltip>
                     </TooltipProvider>
                   </TableCell>
-                  <TableCell className="px-1 py-2 text-right text-sm tabular-nums" data-testid={`text-base-rate-${property.id}`}>
+                  <TableCell className="px-0.5 py-2 text-right text-sm tabular-nums" data-testid={`text-base-rate-${property.id}`}>
                     ${(baseRates.get(property.id) ?? 0).toLocaleString()}
                   </TableCell>
-                  <TableCell className="px-1 py-2">
+                  <TableCell className="px-0.5 py-2">
                     <span className="block truncate text-sm text-muted-foreground" title={property.island}>{property.island}</span>
                   </TableCell>
                   <TableCell className="px-1 py-2 text-center">
