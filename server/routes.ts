@@ -94,9 +94,7 @@ import {
   getCommunityRegion,
   getBuyInRate,
   getSeasonForMonth,
-  normalizeSeasonalBasis,
   suggestPricingArea,
-  SEASON_MULTIPLIERS,
   type SeasonType,
 } from "@shared/pricing-rates";
 import {
@@ -809,71 +807,23 @@ const build24MonthPricingWindow = (): Array<{ yearMonth: string; season: SeasonT
 function marketRateBasisForMonth(args: {
   community: string;
   bedrooms: number;
-  propertyId: number;
   yearMonth: string;
   season: SeasonType;
   row?: Awaited<ReturnType<typeof storage.getPropertyMarketRates>>[number] | null;
-}): number {
-  const { community, bedrooms, propertyId, yearMonth, season, row } = args;
+}): number | null {
+  const { community, bedrooms, yearMonth, season, row } = args;
   const monthly = row?.monthlyRates && typeof row.monthlyRates === "object"
     ? parsePositivePricingRate((row.monthlyRates as Record<string, any>)[yearMonth]?.medianNightly)
     : null;
-  if (monthly != null) {
-    return clampSuspiciousAirbnbBuyInRate({
-      community,
-      bedrooms,
-      rate: monthly,
-      source: typeof row?.source === "string" ? row.source : null,
-      season,
-    });
-  }
+  if (monthly == null) return null;
 
-  const low = parsePositivePricingRate(row?.medianNightly);
-  if (low != null) {
-    const normalized = normalizeSeasonalBasis(
-      community,
-      low,
-      parsePositivePricingRate(row?.medianNightlyHigh),
-      parsePositivePricingRate(row?.medianNightlyHoliday),
-    );
-    if (season === "HIGH" && normalized.high != null) {
-      return clampSuspiciousAirbnbBuyInRate({
-        community,
-        bedrooms,
-        rate: normalized.high,
-        source: typeof row?.source === "string" ? row.source : null,
-        season,
-      });
-    }
-    if (season === "HOLIDAY" && normalized.holiday != null) {
-      return clampSuspiciousAirbnbBuyInRate({
-        community,
-        bedrooms,
-        rate: normalized.holiday,
-        source: typeof row?.source === "string" ? row.source : null,
-        season,
-      });
-    }
-    if (season === "LOW") {
-      return clampSuspiciousAirbnbBuyInRate({
-        community,
-        bedrooms,
-        rate: normalized.low,
-        source: typeof row?.source === "string" ? row.source : null,
-        season,
-      });
-    }
-    const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
-    return clampSuspiciousAirbnbBuyInRate({
-      community,
-      bedrooms,
-      rate: Math.round(low * SEASON_MULTIPLIERS[region][season]),
-      source: typeof row?.source === "string" ? row.source : null,
-      season,
-    });
-  }
-
-  return getBuyInRate(community, bedrooms, propertyId > 0 ? undefined : propertyId, season, yearMonth);
+  return clampSuspiciousAirbnbBuyInRate({
+    community,
+    bedrooms,
+    rate: monthly,
+    source: typeof row?.source === "string" ? row.source : null,
+    season,
+  });
 }
 
 async function buildBulkGuestySeasonalPlan(
@@ -906,6 +856,7 @@ async function buildBulkGuestySeasonalPlan(
   const rowByBR = new Map<number, (typeof rows)[number]>();
   for (const row of rows) rowByBR.set(row.bedrooms, row);
   const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+  const missingMonthlyRates = new Set<string>();
   const monthlyRates = build24MonthPricingWindow().map(({ yearMonth }) => {
     const season = getSeasonForMonth(yearMonth, region);
     let buyIn = 0;
@@ -914,18 +865,28 @@ async function buildBulkGuestySeasonalPlan(
       const unitBuyIn = marketRateBasisForMonth({
         community,
         bedrooms: unit.bedrooms,
-        propertyId,
         yearMonth,
         season,
         row: rowByBR.get(unit.bedrooms),
       });
-      if (unitBuyIn <= 0) continue;
+      if (unitBuyIn == null) {
+        missingMonthlyRates.add(`${yearMonth} ${unit.bedrooms}BR`);
+        continue;
+      }
       buyIn += unitBuyIn;
       // Match the pricing table: ceil margin per unit, then sum (not ceil on combined buy-in).
       price += cleanBaseRateFromBuyInServer(unitBuyIn, targetMargin);
     }
     return { yearMonth, buyIn, price };
   }).filter((row) => row.buyIn > 0 && row.price > 0);
+
+  if (missingMonthlyRates.size > 0) {
+    const examples = Array.from(missingMonthlyRates).slice(0, 8);
+    const more = missingMonthlyRates.size > examples.length ? ` and ${missingMonthlyRates.size - examples.length} more` : "";
+    throw new Error(
+      `Market pricing push requires live monthly SearchAPI Airbnb p40 rates for every unit/month; missing ${examples.join(", ")}${more}. Re-run the market pricing refresh; refusing LOW/HIGH/HOLIDAY fallback.`,
+    );
+  }
 
   return { listingId, monthlyRates, units, targetMargin };
 }

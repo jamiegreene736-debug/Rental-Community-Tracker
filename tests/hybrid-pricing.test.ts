@@ -117,6 +117,11 @@ assert.equal(
   false,
   "draft market pricing refresh must not pass listing marketing title as Airbnb q=",
 );
+assert.equal(
+  routesSource.includes("refusing LOW/HIGH/HOLIDAY fallback"),
+  true,
+  "bulk market pricing push must fail closed instead of applying broad seasonal fallback rates",
+);
 
 const originalFetch = globalThis.fetch;
 const originalSearchApiKey = process.env.SEARCHAPI_API_KEY;
