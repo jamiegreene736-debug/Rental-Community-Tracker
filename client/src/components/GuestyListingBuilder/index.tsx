@@ -184,7 +184,7 @@ const CSS = `
 type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
 type GuestyListing = GuestyListingSummary;
 type LogEntry = BuildStepEntry & { icon: string };
-type DataPushRow = "descriptions" | "bedding" | "amenities";
+type DataPushRow = "descriptions" | "bedding" | "amenities" | "bookable";
 type DataPushStatus = "success" | "error";
 type DataPushLog = Partial<Record<DataPushRow, { pushedAt: string; status: DataPushStatus; message: string }>>;
 type ComplianceLookupResult = {
@@ -2474,10 +2474,40 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
   }, [amenityPushState, pushAmenitiesToGuesty, recordDataPush, toast]);
 
+  const pushBookableToGuestyOnce = useCallback(async () => {
+    if (!selectedId) throw new Error("Select a Guesty listing first.");
+    if (dataPushLog.bookable?.status === "success") {
+      return { changed: false, message: "Bookable status was already pushed once." };
+    }
+    if (channelStatus?.isListed) {
+      recordDataPush("bookable", "success", "Already bookable in Guesty; no update sent");
+      return { changed: false, message: "Listing was already bookable in Guesty." };
+    }
+
+    const status = await guestyService.listOnChannelsAndVerify(selectedId);
+    setChannelStatus(status);
+    if (!status.isListed) {
+      const message = describeChannelVerification(status);
+      recordDataPush("bookable", "error", message);
+      throw new Error(message);
+    }
+
+    const message = describeChannelVerification(status);
+    recordDataPush("bookable", "success", message);
+    return { changed: true, message };
+  }, [
+    selectedId,
+    dataPushLog.bookable?.status,
+    channelStatus?.isListed,
+    recordDataPush,
+    describeChannelVerification,
+  ]);
+
   const handlePushPropertyDataPreview = useCallback(async () => {
     if (!selectedId || dataPushBusy || building || conn !== "connected") return;
     setDataPushBusy(true);
     const failures: string[] = [];
+    let bookableChanged = false;
 
     try {
       await pushDescriptionsToGuesty(false);
@@ -2506,6 +2536,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       recordDataPush("amenities", "error", message);
     }
 
+    try {
+      const bookable = await pushBookableToGuestyOnce();
+      bookableChanged = bookable.changed;
+    } catch (e) {
+      const message = (e as Error).message;
+      failures.push(`Bookable status: ${message}`);
+    }
+
     setDataPushBusy(false);
     if (failures.length > 0) {
       toast({
@@ -2519,7 +2557,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
     toast({
       title: "Property data pushed to Guesty",
-      description: "Descriptions, bedding/sqft, and amenities were updated.",
+      description: bookableChanged
+        ? "Descriptions, bedding/sqft, amenities, and bookable status were updated."
+        : "Descriptions, bedding/sqft, and amenities were updated. Bookable status was already handled.",
       duration: 7000,
     });
   }, [
@@ -2530,6 +2570,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     pushDescriptionsToGuesty,
     syncBeddingAndSqftToGuesty,
     pushAmenitiesToGuesty,
+    pushBookableToGuestyOnce,
     recordDataPush,
     toast,
   ]);
@@ -4243,6 +4284,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   ["descriptions", "Descriptions"] as const,
                   ["bedding", "Bedding + sqft"] as const,
                   ["amenities", "Amenities"] as const,
+                  ["bookable", "Bookable"] as const,
                 ]).map(([key, label]) => {
                   const entry = dataPushLog[key];
                   return (
@@ -4252,6 +4294,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                       title={entry?.message}
                       data-testid={`data-push-log-${key}`}
                     >
+                      <span aria-hidden="true">{entry ? statusIcon(entry.status) : "…"}</span>
                       <strong>{label}</strong>
                       <span>{formatDataPushTime(entry?.pushedAt)}</span>
                     </div>
