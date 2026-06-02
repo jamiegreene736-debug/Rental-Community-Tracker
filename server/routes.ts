@@ -32114,7 +32114,7 @@ Return ONLY compact JSON with this exact shape:
             const largerValue = parsePositiveRate((largerPayload as any)?.medianNightly);
             if (smallerValue == null || largerValue == null) continue;
             const cap = Math.round(smallerValue * ratio);
-            if (largerValue > cap) {
+            if (largerValue > cap && (largerPayload as any)?.hybrid?.baseAirbnbMedian == null) {
               (largerMonthly as Record<string, any>)[yearMonth] = {
                 ...(largerPayload as any),
                 medianNightly: sameRateShape((largerPayload as any).medianNightly, cap),

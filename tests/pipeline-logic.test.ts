@@ -1374,6 +1374,10 @@ assert.equal(
   1,
   "draft market pricing should only register one route",
 );
+assert.ok(
+  routeSource.includes("largerPayload as any)?.hybrid?.baseAirbnbMedian == null"),
+  "fresh SearchAPI monthly market rows must not be adjacent-bedroom capped before client hydration",
+);
 console.log("  ✓ market-pricing routes are not shadowed by legacy handlers");
 
 assert.equal(
