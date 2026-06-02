@@ -1418,6 +1418,14 @@ assert.ok(
   "pricing-tab market-rate refresh should enter the SearchAPI Airbnb seasonal pricing path used by the dashboard queue",
 );
 assert.ok(
+  routeSource.includes("shouldCancel,"),
+  "bulk market pricing should pass the cancel hook into the monthly SearchAPI pricing engine",
+);
+assert.ok(
+  routeSource.includes('phase: "cancelling"'),
+  "bulk market pricing cancel should visibly mark the active item as cancelling",
+);
+assert.ok(
   routeSource.indexOf('label: "Running SearchAPI Airbnb seasonal pricing"') < routeSource.indexOf('fetchMultiChannelBuyInBySeason({'),
   "pricing-tab refresh route should hit SearchAPI Airbnb seasonal pricing before any legacy sidecar season-band code",
 );

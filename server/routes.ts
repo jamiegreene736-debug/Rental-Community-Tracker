@@ -976,6 +976,7 @@ async function refreshHybridPricingForDraft(
   propertyId: number,
   fallbackLabel: string,
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>,
+  shouldCancel?: () => boolean | Promise<boolean>,
 ): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const draftId = Math.abs(propertyId);
   let draft = await storage.getCommunityDraft(draftId);
@@ -1000,6 +1001,7 @@ async function refreshHybridPricingForDraft(
     triggerType: "Manual Update",
     notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
     onMonthScanned,
+    shouldCancel,
   });
 }
 
@@ -1077,7 +1079,26 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
 
+  const currentItemPercent = (fallback: number) => {
+    const percent = Number(item.progress?.percent);
+    return Number.isFinite(percent) ? percent : fallback;
+  };
+
+  const shouldCancel = async () => {
+    if (job.cancelRequested) return true;
+    const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
+    if (latestJob?.cancelRequested) {
+      job.cancelRequested = true;
+      item.progress = { phase: "cancelling", percent: currentItemPercent(10), label: "Cancellation requested; stopping before the next SearchAPI month" };
+      item.heartbeatAt = Date.now();
+      await persistBulkPricingJob(job);
+      return true;
+    }
+    return false;
+  };
+
   const onMonthScanned = async (event: HybridMonthScannedEvent) => {
+    if (await shouldCancel()) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     item.progress = {
       phase: "searchapi-airbnb",
       percent: Math.min(79, Math.round(10 + (70 * (event.monthOffset + 1)) / event.horizonMonths)),
@@ -1093,12 +1114,13 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   };
 
   const pricingResult = item.propertyId < 0
-    ? await refreshHybridPricingForDraft(item.propertyId, item.label, onMonthScanned)
+    ? await refreshHybridPricingForDraft(item.propertyId, item.label, onMonthScanned, shouldCancel)
     : await refreshHybridPricingForProperty({
       propertyId: item.propertyId,
       triggerType: "Manual Update",
       notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
       onMonthScanned,
+      shouldCancel,
     });
   item.progress = {
     phase: "searchapi-airbnb",
@@ -1252,7 +1274,15 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
               level: "warn",
               meta: { propertyId: item.propertyId, attempt: item.attemptCount, error: message },
             });
-            await new Promise((resolve) => setTimeout(resolve, BULK_PRICING_RETRY_BACKOFF_MS));
+            const retryDeadline = Date.now() + BULK_PRICING_RETRY_BACKOFF_MS;
+            while (Date.now() < retryDeadline) {
+              const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
+              if (latestJob?.cancelRequested) {
+                job.cancelRequested = true;
+                throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+              }
+              await new Promise((resolve) => setTimeout(resolve, Math.min(1000, retryDeadline - Date.now())));
+            }
           } else {
             item.status = "failed";
             item.finishedAt = Date.now();
@@ -32011,12 +32041,27 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/pricing/bulk-refresh/:jobId/cancel", async (req, res) => {
     const job = await loadBulkPricingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk pricing job not found" });
+    const now = Date.now();
+    const activeLease = job.status === "running" && job.lockExpiresAt != null && job.lockExpiresAt > now;
     job.cancelRequested = true;
     for (const item of job.items) {
       if (item.status === "queued") {
         item.status = "cancelled";
+        item.error = "Cancelled by operator";
+        item.progress = { phase: "cancelled", percent: 100, label: "Cancelled before starting" };
         item.finishedAt = Date.now();
         item.heartbeatAt = Date.now();
+      } else if (item.status === "running") {
+        item.error = "Cancellation requested";
+        const percent = Number(item.progress?.percent);
+        item.progress = { phase: "cancelling", percent: Number.isFinite(percent) ? percent : 0, label: "Cancellation requested; stopping before the next SearchAPI month" };
+        item.heartbeatAt = Date.now();
+        if (!activeLease) {
+          item.status = "cancelled";
+          item.error = "Cancelled by operator";
+          item.progress = { phase: "cancelled", percent: 100, label: "Cancelled stale running item" };
+          item.finishedAt = Date.now();
+        }
       }
     }
     if (job.status === "queued") {

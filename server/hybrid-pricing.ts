@@ -21,6 +21,8 @@ export type HybridMonthScannedEvent = {
   sampleCount: number;
 };
 
+const hybridPricingCancelledError = () => Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+
 export type HybridLayerBreakdown = {
   layer: number;
   name: string;
@@ -589,6 +591,7 @@ export async function refreshHybridPricingForTarget(args: {
   searchName?: string;
   asOf?: Date;
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
+  shouldCancel?: () => boolean | Promise<boolean>;
 }): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const { storage } = await import("./storage");
   const asOf = args.asOf ?? new Date();
@@ -602,6 +605,7 @@ export async function refreshHybridPricingForTarget(args: {
     .sort((a, b) => a - b);
 
   for (const bedrooms of bedroomCounts) {
+    if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
     const previous = (await storage.getPropertyMarketRates(args.propertyId)).find((r) => r.bedrooms === bedrooms);
     const monthlyRates: Record<string, HybridMonthlyRate> = {};
     const seasonalMedians: Record<LegacySeason, number[]> = { LOW: [], HIGH: [], HOLIDAY: [] };
@@ -610,9 +614,11 @@ export async function refreshHybridPricingForTarget(args: {
     const stayNights = HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights;
 
     for (let monthOffset = 0; monthOffset < horizonMonths; monthOffset += 1) {
+      if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
       let airbnb: Awaited<ReturnType<typeof fetchAirbnbMedianNightly>> | null = null;
       let window = { yearMonth: "", checkIn: "", checkOut: "" };
       for (let attempt = 0; attempt < 4; attempt += 1) {
+        if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
         window = hybridPricingWindowForMonth(asOf, monthOffset, stayNights);
         airbnb = await fetchAirbnbMedianNightly({
           community: args.community,
@@ -621,6 +627,7 @@ export async function refreshHybridPricingForTarget(args: {
           checkOut: window.checkOut,
           searchName,
         });
+        if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
         if (airbnb.medianNightly != null) break;
       }
       if (!window.checkIn) {
@@ -793,6 +800,7 @@ export async function refreshHybridPricingForProperty(args: {
   notes?: string;
   asOf?: Date;
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
+  shouldCancel?: () => boolean | Promise<boolean>;
 }): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
   const config = PROPERTY_UNIT_CONFIGS[args.propertyId];
   if (!config) throw new Error(`Property ${args.propertyId} is not configured for hybrid pricing`);
@@ -806,6 +814,7 @@ export async function refreshHybridPricingForProperty(args: {
     notes: args.notes,
     asOf: args.asOf,
     onMonthScanned: args.onMonthScanned,
+    shouldCancel: args.shouldCancel,
   });
 }
 
