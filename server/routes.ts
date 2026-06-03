@@ -3289,6 +3289,10 @@ type ScrapeOptions = {
   scrapingBeeTimeoutMs?: number;
 };
 
+// Preflight photo fetch, builder rescrape, and replacement find-unit run on
+// Railway — opening the operator's local Chrome is unexpected there.
+const SCRAPE_WITHOUT_SIDECAR: ScrapeOptions = { sidecarWalletMs: 0 };
+
 async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
   try {
     const resp = await fetch(url, {
@@ -23346,7 +23350,7 @@ Return ONLY compact JSON with this exact shape:
       }
 
       const listingFacts: ListingFacts = {};
-      const scraped = await scrapeListingPhotos(sourceUrl, undefined, listingFacts);
+      const scraped = await scrapeListingPhotos(sourceUrl, undefined, listingFacts, SCRAPE_WITHOUT_SIDECAR);
       if (!scraped.length) {
         return res.status(502).json({ error: "Scraper returned zero photos. The page may have bot-detection or changed layout." });
       }
@@ -24883,7 +24887,7 @@ Return ONLY compact JSON with this exact shape:
       attempts++;
       console.log(`[find-replacement] Trying: ${url}`);
       try {
-        const photos = await scrapeListingPhotos(url);
+        const photos = await scrapeListingPhotos(url, undefined, undefined, SCRAPE_WITHOUT_SIDECAR);
         if (photos.length >= 3) {
           // Extract unit identifier from URL path
           const unitMatch = url.match(/apt-([a-z0-9]+)/i)
@@ -26060,7 +26064,7 @@ Return ONLY compact JSON with this exact shape:
           }
           const facts: ListingFacts = {};
           const scraped = await withStepTimeout(
-            scrapeListingPhotos(link, undefined, facts, { sidecarWalletMs: 20_000 }),
+            scrapeListingPhotos(link, undefined, facts, SCRAPE_WITHOUT_SIDECAR),
             PHOTO_SCRAPE_TIMEOUT_MS,
             [] as ScrapedPhoto[],
             `equivalent photo scrape ${link}`,
@@ -26202,7 +26206,7 @@ Return ONLY compact JSON with this exact shape:
           let candidateFacts: ListingFacts = {};
           try {
             const scraped = await withStepTimeout(
-              scrapeListingPhotos(sourceUrl, undefined, candidateFacts, { sidecarWalletMs: 20_000 }),
+              scrapeListingPhotos(sourceUrl, undefined, candidateFacts, SCRAPE_WITHOUT_SIDECAR),
               PHOTO_SCRAPE_TIMEOUT_MS,
               [] as ScrapedPhoto[],
               `photo scrape ${sourceUrl}`,
@@ -26468,7 +26472,7 @@ Return ONLY compact JSON with this exact shape:
     try {
       const folderPath = path.join(process.cwd(), "client/public/photos", folder);
       const listingFacts: ListingFacts = {};
-      const scraped = await scrapeListingPhotos(url, undefined, listingFacts);
+      const scraped = await scrapeListingPhotos(url, undefined, listingFacts, SCRAPE_WITHOUT_SIDECAR);
       if (!scraped.length) {
         console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
         return { ok: false, folder, savedCount: 0, error: "Replacement listing returned 0 photos" };
@@ -29160,8 +29164,8 @@ Return ONLY compact JSON with this exact shape:
           const photos = await scrapeListingPhotos(candidate.url, undefined, facts, isBoundedDiscovery ? {
             detailTimeoutMs: Math.min(28_000, remainingBudgetMs ?? 28_000),
             scrapingBeeTimeoutMs: Math.min(18_000, remainingBudgetMs ?? 18_000),
-            sidecarWalletMs: Math.min(12_000, remainingBudgetMs ?? 12_000),
-          } : undefined);
+            ...SCRAPE_WITHOUT_SIDECAR,
+          } : SCRAPE_WITHOUT_SIDECAR);
           if (photos.length === 0) {
             console.warn(`[fetch-unit-photos] ${candidate.source} candidate returned 0 photos: ${candidate.url}`);
             continue;
@@ -29217,7 +29221,7 @@ Return ONLY compact JSON with this exact shape:
       // wizard ignores facts so this is additive (combo always returns
       // an empty facts object — no behavior change for combo).
       const facts: ListingFacts = {};
-      const photos = await scrapeListingPhotos(listingUrl, undefined, facts);
+      const photos = await scrapeListingPhotos(listingUrl, undefined, facts, SCRAPE_WITHOUT_SIDECAR);
       const scrapedBR = facts.bedrooms ?? null;
       const expectedBedrooms = requestedBedrooms ?? minimumBedrooms;
       if (expectedBedrooms && scrapedBR !== null && scrapedBR !== expectedBedrooms) {

@@ -1723,6 +1723,22 @@ assert.ok(
   routeSource.includes("normalizePlatformCheckCity"),
   "platform-check API must normalize a full mailing address sent as city",
 );
+assert.ok(
+  routeSource.includes("const SCRAPE_WITHOUT_SIDECAR: ScrapeOptions = { sidecarWalletMs: 0 }"),
+  "preflight photo paths must define a no-sidecar scrape option",
+);
+assert.ok(
+  routeSource.includes("scrapeListingPhotos(sourceUrl, undefined, listingFacts, SCRAPE_WITHOUT_SIDECAR)"),
+  "builder rescrape must not open local Chrome when Apify omits bedroom facts",
+);
+assert.ok(
+  routeSource.includes("...SCRAPE_WITHOUT_SIDECAR"),
+  "fetch-unit-photos must not enqueue zillow_photo_scrape on the local sidecar",
+);
+assert.ok(
+  routeSource.includes("scrapeListingPhotos(sourceUrl, undefined, candidateFacts, SCRAPE_WITHOUT_SIDECAR)"),
+  "replacement find-unit must not open local Chrome during preflight",
+);
 console.log("  ✓ replacement search budget and follow-up expanded mode are guarded");
 
 assert.equal(
