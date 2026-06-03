@@ -336,4 +336,21 @@ export async function ensureRuntimeSchema(): Promise<void> {
     )
   `);
   console.log("[schema] ensured property_compliance_overrides table");
+
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS top_market_scan_cache (
+      market_key text PRIMARY KEY,
+      city text NOT NULL,
+      state text NOT NULL,
+      tag text,
+      six_bedroom_possible boolean NOT NULL DEFAULT false,
+      seven_eight_bedroom_possible boolean NOT NULL DEFAULT false,
+      qualifying_count integer NOT NULL DEFAULT 0,
+      communities jsonb NOT NULL DEFAULT '[]'::jsonb,
+      error text,
+      scanned_at timestamp NOT NULL DEFAULT now(),
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured top_market_scan_cache table");
 }
