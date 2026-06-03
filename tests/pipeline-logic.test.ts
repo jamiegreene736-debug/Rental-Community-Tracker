@@ -1737,12 +1737,12 @@ assert.equal(
 assert.equal(
   validateCommunityStreetAddress({
     communityName: "Waikoloa Beach Villas",
-    city: "Waikoloa",
+    city: "Mauna Kea",
     state: "Hawaii",
     streetAddress: "69-180 Waikoloa Beach Dr",
   }).ok,
   true,
-  "Waikoloa Beach Villas canonical address should pass dashboard draft validation",
+  "Waikoloa Beach Villas should accept Mauna Kea as the queued market city while validating its canonical street",
 );
 console.log("  ✓ Waikoloa Beach Villas canonical address validates for bulk combo draft saves");
 
@@ -1759,12 +1759,12 @@ assert.equal(
 assert.equal(
   validateCommunityStreetAddress({
     communityName: "Mauna Lani Point",
-    city: "Waikoloa",
+    city: "Mauna Kea",
     state: "Hawaii",
     streetAddress: "68-1050 Mauna Lani Point Dr",
   }).ok,
   true,
-  "Mauna Lani Point should accept Waikoloa as the market city while validating its canonical street",
+  "Mauna Lani Point should accept Mauna Kea as the queued market city while validating its canonical street",
 );
 console.log("  ✓ Mauna Lani Point canonical address validates for bulk combo draft saves");
 
