@@ -1850,6 +1850,26 @@ assert.ok(
   routeSource.includes("hawaiiStreetSlugKey"),
   "replacement discovery must accept Hawaii hyphenated street slugs when URL parsing misses the root",
 );
+assert.ok(
+  routeSource.includes("const DISCOVERY_SEARCH_TIMEOUT_MS = 15_000"),
+  "replacement Google discovery must not reuse the 8s platform-check SearchAPI timeout",
+);
+assert.ok(
+  routeSource.includes("DISCOVERY_QUERY_CONCURRENCY"),
+  "replacement discovery should run SearchAPI queries in parallel batches",
+);
+assert.ok(
+  routeSource.includes("if (suppliedStreetRoot) addCandidateUrl(link, \"zillow\");"),
+  "replacement Apify Zillow supplement must not over-filter known resort streets like 92-1070 Olani",
+);
+assert.ok(
+  routeSource.includes("(?:[-\\\\s]+\\\\d{1,4})?[-\\\\s]+"),
+  "Hawaii street slug matching must allow an optional unit token between the street number and name",
+);
+assert.ok(
+  routeSource.includes("site:zillow.com \"Coconut Plantation\" Ko Olina condo"),
+  "Ko Olina replacement discovery must include Coconut Plantation-specific SearchAPI probes",
+);
 console.log("  ✓ replacement search budget and follow-up expanded mode are guarded");
 
 assert.equal(

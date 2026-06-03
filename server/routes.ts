@@ -25364,7 +25364,9 @@ Return ONLY compact JSON with this exact shape:
     const APIFY_SUPPLEMENT_BUDGET_MS = expandedSearch ? 100_000 : 75_000;
     const DISCOVERY_CANDIDATE_TARGET = expandedSearch ? 28 : 20;
     const APIFY_SKIP_WHEN_CANDIDATES_AT = expandedSearch ? 18 : 12;
+    const DISCOVERY_SEARCH_TIMEOUT_MS = 15_000;
     const PLATFORM_SEARCH_TIMEOUT_MS = 8_000;
+    const DISCOVERY_QUERY_CONCURRENCY = 6;
     const PHOTO_SCRAPE_TIMEOUT_MS = 45_000;
     const PLATFORM_CHECK_RESERVE_MS = 12_000;
     const PHOTO_PIPELINE_RESERVE_MS = PHOTO_SCRAPE_TIMEOUT_MS + 10_000;
@@ -25625,6 +25627,15 @@ Return ONLY compact JSON with this exact shape:
       for (const allowed of allowedRoots) {
         const slugKey = hawaiiStreetSlugKey(allowed);
         if (!slugKey) continue;
+        const [n1, n2, ...restParts] = slugKey.split("-");
+        const streetToken = restParts.join("-");
+        if (n1 && n2 && streetToken) {
+          const slugPattern = new RegExp(
+            `${escapeRegExp(n1)}[-\\s]+${escapeRegExp(n2)}(?:[-\\s]+\\d{1,4})?[-\\s]+${escapeRegExp(streetToken)}`,
+            "i",
+          );
+          if (slugPattern.test(hay) || slugPattern.test(hyphenHay)) return true;
+        }
         if (hay.includes(slugKey.replace(/-/g, " ")) || hyphenHay.includes(slugKey)) return true;
       }
       return false;
@@ -25717,6 +25728,9 @@ Return ONLY compact JSON with this exact shape:
       if (/keauhou/i.test(communityName)) return { city: "Kailua-Kona", state: "Hawaii" };
       if (/menehune\s+shores|kihei/i.test(communityName)) return { city: "Kihei", state: "Hawaii" };
       if (/poipu|pili mai|regency/i.test(communityName)) return { city: "Koloa", state: "Hawaii" };
+      if (/ko\s*olina|coconut\s*plantation|waialii|\bolani\b/i.test(`${communityName} ${communityAddress}`)) {
+        return { city: "Kapolei", state: "Hawaii" };
+      }
       return null;
     };
 
@@ -25819,6 +25833,23 @@ Return ONLY compact JSON with this exact shape:
         `"${communityName}" "${communityAddress}" condo`,
       );
     }
+    if (/olani|waialii|ko\s*olina|coconut\s*plantation/i.test(`${communityName} ${communityAddress} ${canonicalStreet}`)) {
+      const koOlinaCity = communityLocForQueries?.city ?? "Kapolei";
+      const koOlinaState = communityLocForQueries?.state ?? "Hawaii";
+      const hawaiiStreetPair = (communityAddress || canonicalStreet).match(/\b(\d{1,2})-(\d{2,5})\b/);
+      const streetPairTerm = hawaiiStreetPair ? `"${hawaiiStreetPair[1]}-${hawaiiStreetPair[2]}"` : "";
+      searchQueries.unshift(
+        ...(streetPairTerm ? [
+          `site:zillow.com ${streetPairTerm} Olani ${koOlinaCity}`,
+          `site:realtor.com ${streetPairTerm} Olani`,
+          `site:redfin.com ${streetPairTerm} Olani ${koOlinaCity}`,
+        ] : []),
+        `site:zillow.com Olani St "${koOlinaCity}" "${koOlinaState}"`,
+        `site:realtor.com "Coconut Plantation" "${koOlinaCity}"`,
+        `site:redfin.com Olani St "${koOlinaCity}" condo`,
+        `site:zillow.com "Coconut Plantation" Ko Olina condo`,
+      );
+    }
     // PR #338: VRBO query branch removed (operator directive).
     // Replacement photos must come from real-estate sources only —
     // OTA photos create a feedback loop with the photo-listing
@@ -25855,53 +25886,55 @@ Return ONLY compact JSON with this exact shape:
       console.error(`[find-unit] Resuming candidate checks on ${candidates.length} pre-discovered URL(s) (skipDiscovery)`);
     }
 
-    for (const siteQuery of searchQueries) {
-      if (skipDiscovery) break;
-      if (candidates.length >= DISCOVERY_CANDIDATE_TARGET) {
-        console.warn(
-          `[find-unit] stopping discovery early — ${candidates.length} candidates (target ${DISCOVERY_CANDIDATE_TARGET})`,
-        );
-        break;
-      }
-      if (!hasDiscoveryBudget()) {
-        console.warn(`[find-unit] discovery budget exhausted after ${discoveryElapsedMs()}ms — skipping remaining SearchAPI queries`);
-        break;
-      }
-      try {
-        console.error(`[find-unit] Searching: ${siteQuery}`);
-        const searchResp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=${expandedSearch ? 20 : 10}&api_key=${searchApiKey}`,
-          { signal: AbortSignal.timeout(PLATFORM_SEARCH_TIMEOUT_MS) },
-        );
-        if (!searchResp.ok) {
-          console.error(`[find-unit] SearchAPI HTTP ${searchResp.status}`);
-          continue;
-        }
-        const searchData = await searchResp.json() as any;
-        const results: any[] = searchData.organic_results || [];
-        console.error(`[find-unit] Got ${results.length} Google results`);
+    const suppliedStreetRoot = streetRootFromListingAddress(canonicalStreet || communityAddress);
+    let discoveryOrganicHits = 0;
+    let discoveryFilteredHits = 0;
 
-        for (const r of results) {
-          const link: string = r.link || "";
-          const source = detectSource(link);
-          if (!source) continue;
-          const thumbnail: string = r.thumbnail || r.rich_snippet?.top?.detected_extensions?.thumbnail || "";
-          addCandidateUrl(link, source, `${r.title || ""} ${r.snippet || ""}`, thumbnail, directAllowedRoots);
+    const runDiscoveryQuery = async (siteQuery: string) => {
+      console.error(`[find-unit] Searching: ${siteQuery}`);
+      const searchResp = await fetch(
+        `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=${expandedSearch ? 20 : 10}&api_key=${searchApiKey}`,
+        { signal: AbortSignal.timeout(DISCOVERY_SEARCH_TIMEOUT_MS) },
+      );
+      if (!searchResp.ok) {
+        console.error(`[find-unit] SearchAPI HTTP ${searchResp.status} for "${siteQuery}"`);
+        return;
+      }
+      const searchData = await searchResp.json() as any;
+      const results: any[] = searchData.organic_results || [];
+      console.error(`[find-unit] Got ${results.length} Google results for "${siteQuery}"`);
+      discoveryOrganicHits += results.length;
+      for (const r of results) {
+        const link: string = r.link || "";
+        const source = detectSource(link);
+        if (!source) continue;
+        const before = candidates.length;
+        const thumbnail: string = r.thumbnail || r.rich_snippet?.top?.detected_extensions?.thumbnail || "";
+        addCandidateUrl(link, source, `${r.title || ""} ${r.snippet || ""}`, thumbnail, directAllowedRoots);
+        if (candidates.length === before) discoveryFilteredHits += 1;
+      }
+    };
+
+    if (!skipDiscovery) {
+      for (let i = 0; i < searchQueries.length; i += DISCOVERY_QUERY_CONCURRENCY) {
+        if (candidates.length >= DISCOVERY_CANDIDATE_TARGET) {
+          console.warn(
+            `[find-unit] stopping discovery early — ${candidates.length} candidates (target ${DISCOVERY_CANDIDATE_TARGET})`,
+          );
+          break;
         }
-        // PR #329: removed the per-query break-out cap. The previous
-        // cap of 15 caused a real bug: with 9 queries (5 Zillow + 2
-        // Realtor + 2 Redfin), Zillow's first 1.5 queries filled the
-        // cap before the Realtor/Redfin queries ever ran. Operator
-        // saw "15 candidates (15 Zillow)" with 0 Realtor + 0 Redfin
-        // even though Path A's whole point was to source from those.
-        //
-        // Without the cap, all 9 queries fire (max ~90 candidates,
-        // realistically 30-50 after dedupe). The candidate-processing
-        // loop below early-returns the moment a viable unit is found,
-        // and we sort by source priority next so for-sale (Realtor +
-        // Redfin) candidates get checked first.
-      } catch (e: any) {
-        console.error(`[find-unit] Search error: ${e?.message}`);
+        if (!hasDiscoveryBudget()) {
+          console.warn(`[find-unit] discovery budget exhausted after ${discoveryElapsedMs()}ms — skipping remaining SearchAPI queries`);
+          break;
+        }
+        const batch = searchQueries.slice(i, i + DISCOVERY_QUERY_CONCURRENCY);
+        await Promise.all(batch.map(async (siteQuery) => {
+          try {
+            await runDiscoveryQuery(siteQuery);
+          } catch (e: any) {
+            console.error(`[find-unit] Search error for "${siteQuery}": ${e?.message}`);
+          }
+        }));
       }
     }
 
@@ -25915,11 +25948,15 @@ Return ONLY compact JSON with this exact shape:
     const allowedRoots = repeatedCandidateRoots();
     if (directRoot) allowedRoots.add(directRoot);
     for (const root of communityAddressRoots) allowedRoots.add(root);
+    const forceApifyDiscovery = !skipDiscovery
+      && candidates.length === 0
+      && !!communityLoc
+      && (!!suppliedStreetRoot || allowedRoots.size > 0);
     if (
       !skipDiscovery
-      && candidates.length < APIFY_SKIP_WHEN_CANDIDATES_AT
+      && (forceApifyDiscovery || candidates.length < APIFY_SKIP_WHEN_CANDIDATES_AT)
       && communityLoc
-      && allowedRoots.size > 0
+      && (!!suppliedStreetRoot || allowedRoots.size > 0)
       && hasDiscoveryBudget()
     ) {
       const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({
@@ -25950,8 +25987,15 @@ Return ONLY compact JSON with this exact shape:
         "Apify replacement supplement",
       );
       const beforeApify = candidates.length;
-      for (const link of realtorApifyUrls) addCandidateUrl(link, "realtor", "", "", allowedRoots);
-      for (const link of zillowApifyUrls) addCandidateUrl(link, "zillow", "", "", allowedRoots);
+      const apifyRealtorRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;
+      for (const link of realtorApifyUrls) addCandidateUrl(link, "realtor", "", "", apifyRealtorRoots);
+      // Known resort street (e.g. 92-1070 Olani): do not filter Apify Zillow through
+      // repeatedCandidateRoots — Ko Olina slugs embed unit numbers between the
+      // Hawaii street pair and "Olani", which fetch-unit-photos already handles.
+      for (const link of zillowApifyUrls) {
+        if (suppliedStreetRoot) addCandidateUrl(link, "zillow");
+        else addCandidateUrl(link, "zillow", "", "", allowedRoots);
+      }
       console.error(
         `[find-unit] Apify supplement: cities=${apifyDiscoveryCities.join("|")}, state=${communityLoc.state}, ` +
         `roots=${Array.from(allowedRoots).join(", ")}, zillow=${zillowApifyUrls.length}, ` +
@@ -26561,7 +26605,11 @@ Return ONLY compact JSON with this exact shape:
 
     let diagnostic: string;
     if (totalCandidates === 0) {
-      diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com${cleanChannel && cleanChannel !== "vrbo" ? " / site:vrbo.com" : ""} searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
+      if (discoveryOrganicHits > 0 && discoveryFilteredHits > 0) {
+        diagnostic = `Google returned ${discoveryOrganicHits} listing link(s) for "${communityAddress}" / "${communityName}", but all ${discoveryFilteredHits} were filtered out because they did not match the resort street (${Array.from(directAllowedRoots ?? []).join(", ") || communityAddress}). Try Expand Search or verify the community street on the draft.`;
+      } else {
+        diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com${cleanChannel && cleanChannel !== "vrbo" ? " / site:vrbo.com" : ""} searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
+      }
     } else {
       const parts: string[] = [];
       if (budgetStopped) parts.push(`stopped after checking ${attempts.length}/${totalCandidates} candidates to avoid a stuck request`);
