@@ -11,11 +11,24 @@ export function topMarketScanCacheKey(city: string, state: string): string {
 
 export type TopMarketScanCacheRow = typeof topMarketScanCacheRows.$inferSelect;
 
+function isMissingTopMarketScanCacheTable(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  return /42P01|does not exist|relation .*top_market_scan_cache.* does not exist/i.test(message);
+}
+
 export async function loadTopMarketScanCacheMap(): Promise<Map<string, TopMarketScanCacheRow>> {
-  const rows = await db.select().from(topMarketScanCacheRows);
-  const map = new Map<string, TopMarketScanCacheRow>();
-  for (const row of rows) map.set(row.marketKey, row);
-  return map;
+  try {
+    const rows = await db.select().from(topMarketScanCacheRows);
+    const map = new Map<string, TopMarketScanCacheRow>();
+    for (const row of rows) map.set(row.marketKey, row);
+    return map;
+  } catch (err) {
+    if (isMissingTopMarketScanCacheTable(err)) {
+      console.warn("[top-market-scan-cache] table missing — returning empty cache map until schema is ensured");
+      return new Map();
+    }
+    throw err;
+  }
 }
 
 export async function upsertTopMarketScanCache(params: {
@@ -30,21 +43,9 @@ export async function upsertTopMarketScanCache(params: {
   const communities = Array.isArray(params.communities) ? params.communities : [];
   const sixBedroomPossible = communities.some((c) => hasSixBedroomComboPotential(c as any));
   const sevenEightBedroomPossible = communities.some((c) => hasSevenEightBedroomComboPotential(c as any));
-  await db.insert(topMarketScanCacheRows).values({
-    marketKey,
-    city: params.city.trim(),
-    state: params.state.trim(),
-    tag: params.tag ?? null,
-    sixBedroomPossible,
-    sevenEightBedroomPossible,
-    qualifyingCount: communities.length,
-    communities,
-    error: params.error ?? null,
-    scannedAt: now,
-    updatedAt: now,
-  }).onConflictDoUpdate({
-    target: topMarketScanCacheRows.marketKey,
-    set: {
+  try {
+    await db.insert(topMarketScanCacheRows).values({
+      marketKey,
       city: params.city.trim(),
       state: params.state.trim(),
       tag: params.tag ?? null,
@@ -55,8 +56,30 @@ export async function upsertTopMarketScanCache(params: {
       error: params.error ?? null,
       scannedAt: now,
       updatedAt: now,
-    },
-  });
+    }).onConflictDoUpdate({
+      target: topMarketScanCacheRows.marketKey,
+      set: {
+        city: params.city.trim(),
+        state: params.state.trim(),
+        tag: params.tag ?? null,
+        sixBedroomPossible,
+        sevenEightBedroomPossible,
+        qualifyingCount: communities.length,
+        communities,
+        error: params.error ?? null,
+        scannedAt: now,
+        updatedAt: now,
+      },
+    });
+  } catch (err) {
+    if (isMissingTopMarketScanCacheTable(err)) {
+      console.error(
+        `[top-market-scan-cache] cannot save ${params.city}, ${params.state} — top_market_scan_cache table missing`,
+      );
+      return;
+    }
+    throw err;
+  }
 }
 
 export function serializeTopMarketScanCacheRow(row: TopMarketScanCacheRow) {

@@ -495,6 +495,11 @@ export default function AddCommunity() {
   const [topMarketCacheStats, setTopMarketCacheStats] = useState<{ total: number; cached: number; uncached: number } | null>(null);
   const [selectedMarkets, setSelectedMarkets] = useState<Set<string>>(new Set());
   const keyFor = (m: { city: string; state: string }) => `${m.city}|${m.state}`;
+  const countCachedComboScans = (markets: SeedMarket[] | null, total: number) => {
+    if (!markets) return { cached: 0, uncached: total };
+    const cached = markets.filter((m) => typeof m.sixBedroomPossible === "boolean").length;
+    return { cached, uncached: Math.max(0, total - cached) };
+  };
   const formatComboRange = (low?: number | null, high?: number | null) => {
     if (!low && !high) return "Range TBD";
     if (low && high) return `$${low.toLocaleString()}-${high.toLocaleString()}/night`;
@@ -1117,8 +1122,9 @@ export default function AddCommunity() {
       cache?: { total: number; cached: number; uncached: number; refreshJobId?: string | null };
     };
     const list = data.seeds ?? data.markets ?? [];
+    const total = data.cache?.total ?? list.length;
     setSeedMarkets(list);
-    setTopMarketCacheStats(data.cache ?? null);
+    setTopMarketCacheStats(data.cache ?? countCachedComboScans(list, total));
     setCacheRefreshJobId(data.cache?.refreshJobId ?? null);
     setCacheRefreshRunning(!!data.cache?.refreshJobId);
     setSelectedMarkets(new Set(list.map(keyFor)));
@@ -1160,16 +1166,24 @@ export default function AddCommunity() {
         setSeedMarkets((prev) => {
           if (!prev) return prev;
           const freshByKey = new Map((job.markets ?? []).map((m) => [keyFor(m), m]));
-          return prev.map((seed) => {
+          const next = prev.map((seed) => {
             const fresh = freshByKey.get(keyFor(seed));
-            if (!fresh || fresh.status !== "done") return seed;
+            if (!fresh || (fresh.status !== "done" && fresh.status !== "error")) return seed;
             return {
               ...seed,
               sixBedroomPossible: fresh.sixBedroomPossible ?? (fresh.communities ?? []).some(hasSixBedroomComboPotential),
               sevenEightBedroomPossible: fresh.sevenEightBedroomPossible ?? (fresh.communities ?? []).some(hasSevenEightBedroomComboPotential),
               qualifyingCount: fresh.count,
+              scannedAt: new Date().toISOString(),
+              scanError: fresh.error ?? null,
             };
           });
+          setTopMarketCacheStats((stats) => {
+            const total = stats?.total ?? next.length;
+            const counts = countCachedComboScans(next, total);
+            return { total, ...counts };
+          });
+          return next;
         });
         const terminal = job.status === "done" || job.status === "error" || job.status === "cancelled";
         setCacheRefreshRunning(!terminal);
