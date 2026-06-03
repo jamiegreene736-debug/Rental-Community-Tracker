@@ -1686,16 +1686,36 @@ assert.ok(
   "replacement search should use most of Railway's request window before giving up",
 );
 assert.ok(
-  routeSource.includes("const DISCOVERY_BUDGET_MS = expandedSearch ? 95_000 : 80_000"),
+  routeSource.includes("const DISCOVERY_BUDGET_MS = expandedSearch ? 70_000 : 60_000"),
   "replacement discovery must cap SearchAPI/Apify time so candidate checks keep budget",
+);
+assert.ok(
+  routeSource.includes("const DISCOVERY_CANDIDATE_TARGET = expandedSearch ? 28 : 20"),
+  "replacement discovery must stop once enough candidates are queued for checking",
 );
 assert.ok(
   routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
   "replacement search must reserve a dedicated candidate-check budget after discovery",
 );
 assert.ok(
-  routeSource.includes("hasRouteBudget(PHOTO_SCRAPE_TIMEOUT_MS + 15_000)"),
+  routeSource.includes("hasRouteBudget(PLATFORM_CHECK_RESERVE_MS)"),
+  "replacement search must keep checking more candidates until platform-check reserve is exhausted",
+);
+assert.ok(
+  routeSource.includes("hasRouteBudget(PHOTO_PIPELINE_RESERVE_MS)"),
   "replacement search must not start a photo scrape it cannot finish inside the route budget",
+);
+assert.ok(
+  routeSource.includes("skipDiscovery"),
+  "replacement find-unit must support continuation passes without re-running discovery",
+);
+assert.ok(
+  routeSource.includes("uncheckedCandidates"),
+  "replacement diagnostics must return unchecked candidates for job continuation",
+);
+assert.ok(
+  preflightJobsSource.includes("MAX_REPLACEMENT_FIND_CONTINUATIONS"),
+  "replacement background job must continue checking when route budget stops early",
 );
 assert.ok(
   preflightJobsSource.includes("REPLACEMENT_FIND_UNIT_LOOPBACK_TIMEOUT_MS = 350_000"),
