@@ -2670,6 +2670,14 @@ assert.ok(
   liveSearchSectionBody.includes("visibilitychange"),
   "LiveSearchSection should refetch find-buy-in when the tab becomes visible again",
 );
+assert.ok(
+  bookingsSource.includes("function shouldAutoTriggerAlternativeScout"),
+  "bookings page should auto-scout alternatives for multi-unit bookings with partial attachables",
+);
+assert.ok(
+  liveSearchSectionBody.includes("shouldAutoTriggerAlternativeScout(reservation, attachableCount)"),
+  "LiveSearchSection should auto-trigger alternative scout when combo coverage is incomplete",
+);
 console.log("  ✓ LiveSearchSection auto alternative scout hook placement");
 
 const bookingsComboSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
