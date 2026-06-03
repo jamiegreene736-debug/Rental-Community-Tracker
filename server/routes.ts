@@ -27398,6 +27398,20 @@ Return ONLY compact JSON with this exact shape:
     const heartbeatAt = item.heartbeatAt ?? item.startedAt;
     return !!heartbeatAt && Date.now() - heartbeatAt > BULK_COMBO_LISTING_STALE_MS;
   };
+  const finishBulkComboListingJobStatus = (job: BulkComboListingJob) => {
+    refreshBulkComboListingCounts(job);
+    const hasActiveItems = job.items.some((item) => item.status === "queued" || item.status === "running");
+    if (job.cancelRequested) {
+      job.status = "cancelled";
+    } else if (hasActiveItems) {
+      job.status = "queued";
+      job.finishedAt = null;
+    } else if (job.failed > 0 && job.completed === 0) {
+      job.status = "failed";
+    } else {
+      job.status = "completed";
+    }
+  };
   const persistBulkComboListingSnapshot = async (job: BulkComboListingJob) => {
     refreshBulkComboListingCounts(job);
     const now = new Date(job.updatedAt || Date.now());
@@ -27489,6 +27503,47 @@ Return ONLY compact JSON with this exact shape:
       items,
     };
   };
+  const recoverStaleBulkComboListingJob = async (job: BulkComboListingJob, source: string): Promise<number> => {
+    if (job.status !== "queued" && job.status !== "running") return 0;
+    if (activeBulkComboListingJobIds.has(job.id)) return 0;
+    const now = Date.now();
+    const leaseExpired = !job.lockExpiresAt || job.lockExpiresAt < now;
+
+    let reset = 0;
+    let dropped = 0;
+    for (const item of job.items) {
+      if (item.status !== "running" || (!leaseExpired && !isBulkComboListingStale(item))) continue;
+      if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
+        item.status = "failed";
+        item.phase = "failed";
+        item.message = `Worker heartbeat went stale after ${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS} attempts; dropping this listing`;
+        item.error = item.message;
+        item.finishedAt = now;
+        item.heartbeatAt = now;
+        dropped += 1;
+      } else {
+        item.status = "queued";
+        item.phase = "retrying";
+        item.message = "Previous worker heartbeat went stale; retrying this listing";
+        item.error = null;
+        item.finishedAt = null;
+        item.heartbeatAt = null;
+        reset += 1;
+      }
+    }
+
+    if (!leaseExpired && reset === 0 && dropped === 0) return 0;
+    job.lockedBy = null;
+    job.lockExpiresAt = null;
+    job.updatedAt = now;
+    finishBulkComboListingJobStatus(job);
+    await persistBulkComboListingSnapshot(job);
+    await queueEvent("bulk-combo-listing", job.id, "stale-worker-recovered", "Recovered stale bulk combo listing worker", {
+      level: dropped > 0 ? "warn" : "info",
+      meta: { source, reset, dropped, leaseExpired },
+    });
+    return reset + dropped;
+  };
   const maybeResumeBulkComboListingJob = (job: BulkComboListingJob | null) => {
     if (!job) return;
     if ((job.status === "queued" || job.status === "running") && !activeBulkComboListingJobIds.has(job.id)) {
@@ -27513,8 +27568,8 @@ Return ONLY compact JSON with this exact shape:
     job.updatedAt = now;
     await db
       .update(bulkComboListingJobRows)
-      .set({ updatedAt: new Date(now) })
-      .where(eq(bulkComboListingJobRows.id, job.id));
+      .set({ lockedBy: QUEUE_WORKER_ID, lockExpiresAt: queueLockExpiry(), updatedAt: new Date(now) })
+      .where(and(eq(bulkComboListingJobRows.id, job.id), eq(bulkComboListingJobRows.lockedBy, QUEUE_WORKER_ID)));
     await db
       .update(bulkComboListingJobItemRows)
       .set({ heartbeatAt: new Date(now), updatedAt: new Date(now) })
@@ -27970,13 +28025,11 @@ Return ONLY compact JSON with this exact shape:
         }
         job.finishedAt = Date.now();
         job.updatedAt = Date.now();
-        refreshBulkComboListingCounts(job);
-        if (job.cancelRequested) job.status = "cancelled";
-        else if (job.failed > 0 && job.completed === 0) job.status = "failed";
-        else job.status = "completed";
+        finishBulkComboListingJobStatus(job);
         await persistBulkComboListingSnapshot(job);
+        const finalStatus = job.status as BulkComboListingStatus;
         await queueEvent("bulk-combo-listing", job.id, job.status, `Bulk combo listing job ${job.status}`, {
-          level: job.status === "failed" ? "error" : "info",
+          level: finalStatus === "failed" ? "error" : "info",
           meta: { completed: job.completed, failed: job.failed, cancelled: job.cancelled },
         });
         console.log(`[bulk-combo-listings] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed`);
@@ -27984,23 +28037,40 @@ Return ONLY compact JSON with this exact shape:
         const failedJob = await loadBulkComboListingJob(jobId);
         if (failedJob) {
           const cancelled = e?.cancelled || failedJob.cancelRequested;
-          failedJob.status = cancelled ? "cancelled" : "failed";
-          failedJob.finishedAt = Date.now();
+          const errorMessage = queueErrorLabel(e, "Bulk combo listing failed");
+          failedJob.finishedAt = cancelled ? Date.now() : null;
           failedJob.updatedAt = Date.now();
           failedJob.items.forEach((item) => {
             if (item.status !== "queued" && item.status !== "running") return;
-            item.status = cancelled ? "cancelled" : "failed";
-            item.phase = failedJob.status;
-            item.message = cancelled ? "Cancelled by operator" : queueErrorLabel(e, "Bulk combo listing failed");
-            item.error = item.message;
-            item.finishedAt = Date.now();
-            item.heartbeatAt = Date.now();
+            if (cancelled) {
+              item.status = "cancelled";
+              item.phase = "cancelled";
+              item.message = "Cancelled by operator";
+              item.error = item.message;
+              item.finishedAt = Date.now();
+              item.heartbeatAt = Date.now();
+              return;
+            }
+            if (item.status === "running") {
+              item.status = "failed";
+              item.phase = "failed";
+              item.message = errorMessage;
+              item.error = errorMessage;
+              item.finishedAt = Date.now();
+              item.heartbeatAt = Date.now();
+              return;
+            }
+            item.phase = "queued";
+            item.message = "Queued after queue worker recovery";
           });
-          refreshBulkComboListingCounts(failedJob);
+          finishBulkComboListingJobStatus(failedJob);
           await persistBulkComboListingSnapshot(failedJob).catch(() => {});
-          await queueEvent("bulk-combo-listing", failedJob.id, failedJob.status, cancelled ? "Bulk combo listing queue cancelled" : "Bulk combo listing queue failed", {
+          if (!cancelled && failedJob.status === "queued") {
+            setTimeout(() => void runBulkComboListingJob(failedJob.id), 30_000).unref?.();
+          }
+          await queueEvent("bulk-combo-listing", failedJob.id, failedJob.status, cancelled ? "Bulk combo listing queue cancelled" : "Bulk combo listing queue recovered after worker failure", {
             level: cancelled ? "warn" : "error",
-            meta: { error: e?.message ?? String(e) },
+            meta: { error: e?.message ?? String(e), status: failedJob.status },
           });
         }
       } finally {
@@ -28148,6 +28218,7 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/community/bulk-combo-listing-jobs/:jobId", async (req, res) => {
     const job = await loadBulkComboListingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk combo listing job not found" });
+    await recoverStaleBulkComboListingJob(job, "job-poll");
     maybeResumeBulkComboListingJob(job);
     const events = await db
       .select()
@@ -28217,6 +28288,8 @@ Return ONLY compact JSON with this exact shape:
     ]);
     const rows = Array.from(new Map([...activeRows, ...recentRows].map((row) => [row.id, row])).values());
     const jobs = (await Promise.all(rows.map((row) => loadBulkComboListingJob(row.id)))).filter(Boolean) as BulkComboListingJob[];
+    await Promise.all(jobs.map((job) => recoverStaleBulkComboListingJob(job, "queue-poll")));
+    jobs.forEach(maybeResumeBulkComboListingJob);
     res.json({
       jobs: jobs.map(serializeBulkComboListingJob),
       active: jobs.filter((job) => job.status === "queued" || job.status === "running"),
@@ -28308,20 +28381,20 @@ Return ONLY compact JSON with this exact shape:
           lt(comboPhotoFetchJobRows.updatedAt, staleBefore),
           or(isNull(comboPhotoFetchJobRows.lockExpiresAt), lt(comboPhotoFetchJobRows.lockExpiresAt, now)),
         ));
-      await db
-        .update(bulkComboListingJobRows)
-        .set({
-          status: "failed",
-          lockedBy: null,
-          lockExpiresAt: null,
-          finishedAt: now,
-          updatedAt: now,
-        })
+      const staleBulkComboListingRows = await db
+        .select({ id: bulkComboListingJobRows.id })
+        .from(bulkComboListingJobRows)
         .where(and(
           eq(bulkComboListingJobRows.status, "running"),
           lt(bulkComboListingJobRows.updatedAt, staleBefore),
           or(isNull(bulkComboListingJobRows.lockExpiresAt), lt(bulkComboListingJobRows.lockExpiresAt, now)),
         ));
+      for (const row of staleBulkComboListingRows) {
+        const job = await loadBulkComboListingJob(row.id);
+        if (!job) continue;
+        await recoverStaleBulkComboListingJob(job, "stale-cleanup");
+        maybeResumeBulkComboListingJob(job);
+      }
       await db
         .update(communityPricingRefreshJobRows)
         .set({
