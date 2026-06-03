@@ -7,9 +7,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  auditTopMarketSevenEightFromCuratedSeeds,
   hasSevenEightBedroomComboPotential,
   parseCommunityResearchJsonArray,
   researchCommunitiesForCity,
+  TOP_MARKET_SEEDS,
 } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 import {
@@ -1516,6 +1518,13 @@ try {
   const piliMai = poipuSeeds.find((c) => c.name === "Pili Mai");
   assert.ok(piliMai && !hasSevenEightBedroomComboPotential(piliMai!), "Pili Mai (2/3BR only) should not claim 7/8BR");
   console.log("  ✓ 7/8BR combo potential requires 4BR inventory");
+
+  const princeville = await researchCommunitiesForCity("Princeville", "Hawaii");
+  const kaiulani = princeville.find((c) => c.name === "Kaiulani of Princeville");
+  assert.ok(kaiulani && hasSevenEightBedroomComboPotential(kaiulani), "Kaiulani should enable 7/8BR in Princeville");
+  const cliffs = princeville.find((c) => c.name === "The Cliffs at Princeville");
+  assert.ok(cliffs && hasSevenEightBedroomComboPotential(cliffs), "The Cliffs should enable 7/8BR in Princeville");
+  console.log("  ✓ Princeville curated seeds include 4BR townhome/condo inventory");
 } finally {
   globalThis.fetch = originalFetch;
   if (originalSearchKey == null) delete process.env.SEARCHAPI_API_KEY;
@@ -2038,6 +2047,28 @@ assert.equal(
   6,
 );
 console.log("  ✓ typical combo labels distinguish 2×same-BR vs mixed-BR pairs");
+
+assert.equal(TOP_MARKET_SEEDS.length, 86, "top markets sweep should cover 86 markets");
+const topMarketAudit = auditTopMarketSevenEightFromCuratedSeeds();
+assert.equal(topMarketAudit.length, 86);
+const sevenEightMarkets = topMarketAudit.filter((row) => row.sevenEight);
+const marketHasSevenEight = (city: string, state: string) =>
+  sevenEightMarkets.some((row) => row.city === city && row.state === state);
+assert.ok(marketHasSevenEight("Poipu", "Hawaii"), "Poipu should have 7/8BR via Regency 4BR inventory");
+assert.ok(marketHasSevenEight("Koloa", "Hawaii"), "Koloa should share Poipu Kai 7/8BR seeds");
+assert.ok(marketHasSevenEight("Princeville", "Hawaii"), "Princeville should have Kaiulani/Cliffs 4BR inventory");
+assert.ok(marketHasSevenEight("Hanalei", "Hawaii"), "Hanalei should inherit Princeville north-shore 4BR seeds");
+assert.ok(marketHasSevenEight("Destin", "Florida"), "Destin should have Emerald Towers 4BR condos");
+assert.ok(marketHasSevenEight("Panama City Beach", "Florida"), "Panama City Beach should have Shores of Panama 4BR condos");
+assert.ok(
+  !marketHasSevenEight("Fort Myers Beach", "Florida"),
+  "Fort Myers Beach seeds should not claim 7/8BR without 4BR inventory",
+);
+const seededFourBedroom = topMarketAudit.filter((row) => row.fourBedroomCommunities.length > 0);
+assert.ok(seededFourBedroom.length >= 8, "multiple top markets should surface curated 4BR communities");
+console.log(
+  `  ✓ top-market 4BR audit: ${sevenEightMarkets.length}/86 markets with curated 7/8BR potential`,
+);
 
 assert.match(
   routeSource,
