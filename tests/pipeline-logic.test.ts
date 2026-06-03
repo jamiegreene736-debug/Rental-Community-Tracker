@@ -1686,6 +1686,14 @@ assert.ok(
   "replacement search should use most of Railway's request window before giving up",
 );
 assert.ok(
+  routeSource.includes("const DISCOVERY_BUDGET_MS = expandedSearch ? 95_000 : 80_000"),
+  "replacement discovery must cap SearchAPI/Apify time so candidate checks keep budget",
+);
+assert.ok(
+  routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
+  "replacement search must reserve a dedicated candidate-check budget after discovery",
+);
+assert.ok(
   routeSource.includes("hasRouteBudget(PHOTO_SCRAPE_TIMEOUT_MS + 15_000)"),
   "replacement search must not start a photo scrape it cannot finish inside the route budget",
 );
