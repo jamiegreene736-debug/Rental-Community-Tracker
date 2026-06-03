@@ -1266,6 +1266,46 @@ function alternativeScoutCommunitiesForDisplay(scout: AlternativeScoutResponse |
   );
 }
 
+function groupAlternativeScoutSamplesByPlan(
+  samples: AlternativeScoutSample[],
+  passingPlans?: number[][],
+): Array<{ label: string; bedrooms: number; samples: AlternativeScoutSample[] }> {
+  const plans = (passingPlans ?? []).filter((plan) => plan.length > 0);
+  if (plans.length === 0) {
+    const byBedroom = new Map<number, AlternativeScoutSample[]>();
+    for (const sample of samples) {
+      const br = Number(sample.bedrooms);
+      if (!Number.isFinite(br) || br <= 0) continue;
+      const bucket = byBedroom.get(br) ?? [];
+      bucket.push(sample);
+      byBedroom.set(br, bucket);
+    }
+    return Array.from(byBedroom.entries())
+      .sort(([a], [b]) => b - a)
+      .map(([bedrooms, legSamples]) => ({
+        label: `${bedrooms}BR`,
+        bedrooms,
+        samples: legSamples,
+      }));
+  }
+  const seenPlan = new Set<string>();
+  const legs: Array<{ label: string; bedrooms: number; samples: AlternativeScoutSample[] }> = [];
+  for (const plan of plans) {
+    const planKey = plan.join("+");
+    if (seenPlan.has(planKey)) continue;
+    seenPlan.add(planKey);
+    for (const bedrooms of plan) {
+      const legSamples = samples.filter((sample) => Number(sample.bedrooms) === bedrooms);
+      legs.push({
+        label: `${planKey}BR combo · ${bedrooms}BR`,
+        bedrooms,
+        samples: legSamples,
+      });
+    }
+  }
+  return legs;
+}
+
 function formatAirbnbInventoryCounts(counts?: Record<string, number>): string | null {
   if (!counts) return null;
   const parts = Object.entries(counts)
@@ -2213,6 +2253,7 @@ function AlternativeBuyInWorkflowPanel({
             const sidecar = sidecarResults[result.community];
             const inventoryText = formatAirbnbInventoryCounts(result.airbnbCountsByBedroom ?? result.countsByBedroom);
             const airbnbSamples = (result.samples ?? []).filter((sample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url));
+            const sampleGroups = groupAlternativeScoutSamplesByPlan(airbnbSamples, result.passingPlans);
             const directMatches = (result.directBookingProbes ?? []).flatMap((probe) =>
               probe.directMatches.map((match) => ({ ...match, airbnbTitle: probe.title })),
             );
@@ -2258,20 +2299,27 @@ function AlternativeBuyInWorkflowPanel({
                 )}
                 {(airbnbSamples.length > 0 || directMatches.length > 0 || (result.directBookingProbes?.length ?? 0) > 0) && (
                   <div className="mt-1 space-y-1 rounded bg-slate-50 px-2 py-1.5 text-[11px]">
-                    {airbnbSamples.length > 0 && (
-                      <div className="space-y-0.5">
-                        <p className="font-medium text-slate-900">Airbnb listings checked</p>
-                        {airbnbSamples.slice(0, 6).map((sample) => (
-                          <a
-                            key={sample.url}
-                            href={sample.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="block truncate text-sky-800 underline underline-offset-2"
-                            title={sample.title}
-                          >
-                            {sample.bedrooms ? `${sample.bedrooms}BR · ` : ""}{sample.title}
-                          </a>
+                    {sampleGroups.length > 0 && (
+                      <div className="space-y-1">
+                        <p className="font-medium text-slate-900">Airbnb listings checked (Google Lens)</p>
+                        {sampleGroups.map((group) => (
+                          <div key={`${result.community}-${group.label}`} className="space-y-0.5">
+                            <p className="text-[10px] font-medium text-slate-700">{group.label}</p>
+                            {group.samples.length > 0 ? group.samples.slice(0, 4).map((sample) => (
+                              <a
+                                key={sample.url}
+                                href={sample.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="block truncate text-sky-800 underline underline-offset-2"
+                                title={sample.title}
+                              >
+                                {sample.bedrooms ? `${sample.bedrooms}BR · ` : ""}{sample.title}
+                              </a>
+                            )) : (
+                              <p className="text-[10px] text-muted-foreground">No sample link saved for this leg</p>
+                            )}
+                          </div>
                         ))}
                       </div>
                     )}
@@ -3000,21 +3048,27 @@ type ListingPairWalkResponse = {
 function ComboOptionWalkDistance({
   picks,
   community,
+  proximityCommunity,
 }: {
   picks: AutoFillComboOption["picks"];
   community: string;
+  proximityCommunity?: string;
 }) {
-  const listings = picks.slice(0, 2).map((pick) => ({ url: pick.url, title: pick.title }));
+  const listings = picks.slice(0, 2).map((pick) => ({
+    url: String(pick.originalSourceUrl || pick.airbnbAnchorUrl || pick.url || "").trim(),
+    title: String(pick.title || "").trim() || `${pick.bedrooms}BR listing`,
+  }));
+  const walkCommunity = proximityCommunity?.trim() || community;
   const query = useQuery<ListingPairWalkResponse>({
-    queryKey: ["/api/tools/listing-pair-proximity", community, listings[0]?.url, listings[1]?.url],
+    queryKey: ["/api/tools/listing-pair-proximity", walkCommunity, listings[0]?.url, listings[1]?.url],
     queryFn: async () => {
       const response = await apiRequest("POST", "/api/tools/listing-pair-proximity", {
         listings,
-        community,
+        community: walkCommunity,
       });
       return response.json() as Promise<ListingPairWalkResponse>;
     },
-    enabled: listings.length === 2 && !!listings[0]?.url && !!listings[1]?.url,
+    enabled: listings.length === 2 && /^https?:\/\//i.test(listings[0]?.url ?? "") && /^https?:\/\//i.test(listings[1]?.url ?? ""),
     staleTime: 10 * 60 * 1000,
   });
 
@@ -3036,8 +3090,10 @@ function ComboOptionWalkDistance({
             <Loader2 className="h-3 w-3 animate-spin" />
             <span>Estimating walking distance between units…</span>
           </>
+        ) : !/^https?:\/\//i.test(listings[0]?.url ?? "") || !/^https?:\/\//i.test(listings[1]?.url ?? "") ? (
+          <span>Walking distance needs two listing URLs</span>
         ) : query.isError || !query.data ? (
-          <span>Walking distance unavailable</span>
+          <span>Walking distance unavailable{query.error instanceof Error ? ` (${query.error.message})` : ""}</span>
         ) : (
           <>
             <Badge className={`${isTooFar ? "bg-red-700" : "bg-sky-700"} text-white text-[9px]`}>
@@ -3456,7 +3512,13 @@ function ComboComparisonPanel({
               </details>
             )}
             {displayedTotal != null && displayedPicks.length >= 2 && (
-              <ComboOptionWalkDistance picks={displayedPicks} community={community} />
+              <ComboOptionWalkDistance
+                picks={displayedPicks}
+                community={community}
+                proximityCommunity={displayedPicks.some((pick) => (pick as { community?: string }).community)
+                  ? (displayedPicks.find((pick) => (pick as { community?: string }).community) as { community?: string } | undefined)?.community
+                  : undefined}
+              />
             )}
           </div>
         )})}
