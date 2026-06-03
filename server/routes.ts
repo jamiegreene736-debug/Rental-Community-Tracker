@@ -146,6 +146,7 @@ import {
   discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
   inferCommunityStreetAddress,
+  normalizeCommunityAddressToken,
   resolveBulkComboListingStreet,
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
@@ -27750,6 +27751,14 @@ Return ONLY compact JSON with this exact shape:
       addressHint: community.addressHint,
     });
     if (streetAddress) item.streetAddress = streetAddress;
+    const rule = communityAddressRuleForName(community.name);
+    if (rule) {
+      const allowedCities = [rule.city, ...(rule.cityAliases ?? [])].map(normalizeCommunityAddressToken);
+      const cityToken = normalizeCommunityAddressToken(community.city || "");
+      if (!cityToken || !allowedCities.includes(cityToken)) {
+        community.city = rule.city;
+      }
+    }
     if (!String(item.pricingArea ?? "").trim() && community.name) {
       item.pricingArea = suggestPricingArea(community.city, community.state, community.name) || item.pricingArea;
     }
@@ -28146,7 +28155,11 @@ Return ONLY compact JSON with this exact shape:
       label: item.label,
       communityName: community.name,
       streetAddress: item.streetAddress,
-      city: community.city,
+      city: discoveryCityForPhotoSearch({
+        city: community.city,
+        communityName: community.name,
+        streetAddress: item.streetAddress,
+      }) || community.city,
       state: community.state,
       unit1,
       unit2,

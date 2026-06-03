@@ -2124,6 +2124,36 @@ assert.ok(
 console.log("  ✓ Ko Olina Beach Villas + Coconut Plantation canonical addresses validate for bulk combo draft saves");
 
 assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "The Cliffs at Princeville",
+    city: "Hanalei",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "3811 Edward Rd",
+  "bulk combo queue should use The Cliffs canonical address when queued from a north-shore city search",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "The Cliffs at Princeville",
+    city: "Hanalei",
+    state: "Hawaii",
+    streetAddress: "3811 Edward Rd",
+  }).ok,
+  true,
+  "The Cliffs at Princeville should accept Hanalei as the research city while using the Princeville street",
+);
+assert.ok(
+  discoverySearchCitiesForPhotoSearch({
+    communityName: "The Cliffs at Princeville",
+    city: "Hanalei",
+    streetAddress: "3811 Edward Rd",
+  }).includes("Princeville"),
+  "The Cliffs photo discovery should search Princeville, not only Hanalei",
+);
+console.log("  ✓ The Cliffs at Princeville canonical address validates for bulk combo draft saves");
+
+assert.equal(
   resolveBulkComboListingStreet({
     communityName: "Ko Olina Beach Villas",
     city: "Kapolei",

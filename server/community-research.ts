@@ -935,6 +935,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Princeville condo resort with individually rented units up to 4BR suites; supports 3BR+4BR and 4BR+4BR combo inventory.",
     availableBedrooms: [1, 2, 3, 4],
     estimatedTotalUnits: 202,
+    addressHint: "3811 Edward Rd",
   },
   // Gulf Coast — curated 4BR condo towers for top-market combo badges when
   // SearchAPI/Claude scans have not yet populated the cache.
