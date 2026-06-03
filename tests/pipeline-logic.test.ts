@@ -2636,3 +2636,17 @@ assert.ok(
   "listing-pair-proximity route should exist",
 );
 console.log("  ✓ combo option walking distance UI + API");
+
+assert.ok(
+  bookingsComboSource.includes("alternative-scout-direct-probes"),
+  "alternative buy-in workflow should probe Google Lens direct sites before sidecar",
+);
+assert.ok(
+  bookingsComboSource.includes("Google Lens direct booking matches"),
+  "alternative buy-in community cards should list Lens direct booking URLs",
+);
+assert.ok(
+  routesSource.includes('app.post("/api/operations/alternative-scout-direct-probes"'),
+  "alternative-scout-direct-probes route should exist",
+);
+console.log("  ✓ alternative scout direct booking probe UI + API");
