@@ -466,6 +466,32 @@ assert.match(
   /communityResearchSearches/,
   "city research history should have a dedicated table instead of overloading sidecar search variations",
 );
+const sidecarLaneSource = readFileSync("server/sidecar-lane.ts", "utf8");
+assert.match(
+  schemaSource,
+  /workResourceLocks/,
+  "shared resource locks must be schema-backed so long sidecar producers survive restarts and timeouts",
+);
+assert.match(
+  sidecarLaneSource,
+  /SIDECAR_LANE_RESOURCE_KEY = "sidecar-browser"/,
+  "sidecar lane should protect one shared Chrome/browser resource",
+);
+assert.match(
+  sidecarLaneSource,
+  /onConflictDoUpdate[\s\S]*workResourceLocks\.expiresAt[\s\S]*workResourceLocks\.ownerType/,
+  "sidecar lane acquisition must atomically keep other buy-in/combo producers out while the lock is active",
+);
+assert.match(
+  routesSource,
+  /ownerType: "bulk-combo-listing"/,
+  "bulk combo listing queue must participate in the shared sidecar lane",
+);
+assert.match(
+  routesSource,
+  /ownerType: "find-buy-in"/,
+  "Operations find-buy-in must participate in the shared sidecar lane",
+);
 console.log("  ✓ combo photo and city research state stay observable");
 
 // Case 7: Primary Bathroom — valid (has \"Primary\" + \"Bathroom\").
@@ -2743,6 +2769,10 @@ assert.ok(
 assert.ok(
   liveSearchSectionBody.includes("visibilitychange"),
   "LiveSearchSection should refetch find-buy-in when the tab becomes visible again",
+);
+assert.ok(
+  bookingsSource.includes("sidecarLaneSummary"),
+  "Operations progress should surface when find-buy-in is waiting behind another sidecar lane owner",
 );
 assert.ok(
   bookingsSource.includes("function shouldAutoTriggerAlternativeScout"),

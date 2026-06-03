@@ -517,6 +517,22 @@ type SidecarQueueRequest = {
   activeSec?: number;
 };
 
+type SidecarLaneOwner = {
+  ownerType: string;
+  ownerId: string;
+  label: string;
+  acquiredAt: number;
+  heartbeatAt: number;
+  leaseExpiresAt: number;
+};
+
+type SidecarLaneWaiter = {
+  ownerType: string;
+  ownerId: string;
+  label: string;
+  enqueuedAt: number;
+};
+
 type SidecarQueueStatus = {
   total: number;
   pending: number;
@@ -542,6 +558,13 @@ type SidecarQueueStatus = {
     updatedAt?: string | null;
   }>;
   searchVariations?: SidecarSearchVariationSummary[];
+  sidecarLane?: {
+    resourceKey?: string;
+    leaseMs?: number;
+    busy: boolean;
+    owner: SidecarLaneOwner | null;
+    waiting: SidecarLaneWaiter[];
+  };
 };
 
 type OtaSearchProviderKey = "airbnb" | "vrbo" | "booking";
@@ -2510,6 +2533,10 @@ function activeSidecarCount(status: SidecarQueueStatus | null | undefined): numb
   return Math.max(0, (status?.pending ?? 0) + (status?.inProgress ?? 0));
 }
 
+function sidecarLaneActive(status: SidecarQueueStatus | null | undefined): boolean {
+  return !!status?.sidecarLane?.owner || (status?.sidecarLane?.waiting?.length ?? 0) > 0;
+}
+
 function sidecarNewestRequestMs(status: SidecarQueueStatus | null | undefined): number | null {
   if (!status?.newestRequestAt) return null;
   const ms = Date.parse(status.newestRequestAt);
@@ -2566,8 +2593,21 @@ function sidecarQueueProgressValue(status: SidecarQueueStatus | null | undefined
   const active = activeSidecarCount(status);
   const total = Math.max(1, status.total, status.pending + status.inProgress + status.completed + status.failed);
   const done = Math.max(0, status.completed + status.failed);
+  if (active <= 0 && sidecarLaneActive(status)) return 18;
   if (active <= 0) return done > 0 ? 100 : 12;
   return Math.max(8, Math.min(96, Math.round((done / total) * 100)));
+}
+
+function sidecarLaneSummary(status: SidecarQueueStatus | null | undefined): string {
+  const lane = status?.sidecarLane;
+  if (!lane) return "";
+  if (lane.owner?.label) return `lane held by ${lane.owner.label}`;
+  const waiting = lane.waiting ?? [];
+  if (waiting.length > 0) {
+    const first = waiting[0]?.label || "next scan";
+    return `${waiting.length} waiting for lane${first ? ` · next: ${first}` : ""}`;
+  }
+  return "";
 }
 
 function sidecarOpSummary(status: SidecarQueueStatus | null | undefined): string {
@@ -2659,14 +2699,18 @@ function SidecarQueueProgress({
   const { toast } = useToast();
   const [isStopping, setIsStopping] = useState(false);
   const active = activeSidecarCount(status);
-  if (!forceVisible && active <= 0) return null;
+  const laneActive = sidecarLaneActive(status);
+  if (!forceVisible && active <= 0 && !laneActive) return null;
 
   const total = status ? Math.max(1, status.total, status.pending + status.inProgress + status.completed + status.failed) : 0;
   const opSummary = sidecarOpSummary(status);
+  const laneSummary = sidecarLaneSummary(status);
   const message = status
     ? active > 0
-      ? `${label}: ${status.inProgress} running, ${status.pending} queued, ${status.completed + status.failed}/${total} finished${opSummary ? ` · ${opSummary}` : ""}.`
-      : `${label}: queue idle${status.completed + status.failed > 0 ? ` after ${status.completed + status.failed} finished job${status.completed + status.failed === 1 ? "" : "s"}` : ""}.`
+      ? `${label}: ${status.inProgress} running, ${status.pending} queued, ${status.completed + status.failed}/${total} finished${opSummary ? ` · ${opSummary}` : ""}${laneSummary ? ` · ${laneSummary}` : ""}.`
+      : laneSummary
+        ? `${label}: ${laneSummary}.`
+        : `${label}: queue idle${status.completed + status.failed > 0 ? ` after ${status.completed + status.failed} finished job${status.completed + status.failed === 1 ? "" : "s"}` : ""}.`
     : `${label}: waiting for queue status.`;
 
   const stopSidecar = async () => {
@@ -2697,7 +2741,7 @@ function SidecarQueueProgress({
     <div className={`border border-blue-200 bg-blue-50/70 text-blue-900 rounded-md px-3 py-2 text-[11px] space-y-1.5 ${className}`}>
       <div className="flex items-center justify-between gap-3">
         <span className="inline-flex items-center gap-2">
-          {active > 0 && <RefreshCw className="h-3 w-3 animate-spin shrink-0" />}
+          {(active > 0 || laneActive) && <RefreshCw className="h-3 w-3 animate-spin shrink-0" />}
           <span>{message}</span>
         </span>
         {status?.oldestPendingAgeSec != null && status.pending > 0 && (
@@ -2705,7 +2749,7 @@ function SidecarQueueProgress({
             oldest {Math.round(status.oldestPendingAgeSec)}s
           </span>
         )}
-        {active > 0 && (
+        {(active > 0 || laneActive) && (
           <Button
             type="button"
             size="sm"

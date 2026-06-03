@@ -1,4 +1,9 @@
-type SidecarLaneOwnerType = "availability-scan" | "bulk-combo-listing" | "bulk-pricing" | "pricing-refresh" | "find-buy-in";
+import { and, eq, sql } from "drizzle-orm";
+import { workResourceLocks, type WorkResourceLock } from "@shared/schema";
+import { db } from "./db";
+
+const SIDECAR_LANE_OWNER_TYPES = ["availability-scan", "bulk-combo-listing", "bulk-pricing", "pricing-refresh", "find-buy-in"] as const;
+type SidecarLaneOwnerType = typeof SIDECAR_LANE_OWNER_TYPES[number];
 
 type SidecarLaneOwner = {
   ownerType: SidecarLaneOwnerType;
@@ -27,6 +32,7 @@ type SidecarLaneWaiter = {
 };
 
 const SIDECAR_LANE_LEASE_MS = 10 * 60 * 1000;
+const SIDECAR_LANE_RESOURCE_KEY = "sidecar-browser";
 const DEFAULT_WAIT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_POLL_MS = 5_000;
 
@@ -38,6 +44,38 @@ const nowMs = () => Date.now();
 
 const cloneOwner = (value: SidecarLaneOwner | null) => value ? { ...value } : null;
 const cloneWaiter = (value: SidecarLaneWaiter) => ({ ...value });
+
+function dateMs(value: Date | string | number | null | undefined): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (!value) return 0;
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function toOwnerType(value: string | null | undefined): SidecarLaneOwnerType | null {
+  if (!value) return null;
+  return (SIDECAR_LANE_OWNER_TYPES as readonly string[]).includes(value)
+    ? value as SidecarLaneOwnerType
+    : null;
+}
+
+function ownerFromLock(row: WorkResourceLock): SidecarLaneOwner | null {
+  const ownerType = toOwnerType(row.ownerType);
+  if (!ownerType) return null;
+  const heartbeatAt = dateMs(row.heartbeatAt) || nowMs();
+  return {
+    ownerType,
+    ownerId: row.ownerId,
+    label: row.ownerLabel,
+    acquiredAt: dateMs(row.acquiredAt) || heartbeatAt,
+    heartbeatAt,
+    leaseExpiresAt: dateMs(row.expiresAt) || heartbeatAt + SIDECAR_LANE_LEASE_MS,
+  };
+}
+
+function logPersistentLockError(action: string, e: unknown): void {
+  console.warn(`[sidecar-lane] ${action} failed:`, e instanceof Error ? e.message : e);
+}
 
 function isExpired(value: SidecarLaneOwner | null): boolean {
   return !!value && value.leaseExpiresAt < nowMs();
@@ -83,6 +121,166 @@ function setOwner(ownerType: SidecarLaneOwnerType, ownerId: string, label: strin
   return owner;
 }
 
+function setPersistentOwner(value: SidecarLaneOwner): SidecarLaneOwner {
+  owner = { ...value };
+  return owner;
+}
+
+async function markPersistentOwnerStatus(
+  ownerType: SidecarLaneOwnerType,
+  ownerId: string,
+  status: "released" | "cancelled" | "expired",
+): Promise<void> {
+  const now = new Date();
+  await db
+    .update(workResourceLocks)
+    .set({
+      status,
+      expiresAt: now,
+      updatedAt: now,
+    })
+    .where(and(
+      eq(workResourceLocks.resourceKey, SIDECAR_LANE_RESOURCE_KEY),
+      eq(workResourceLocks.ownerType, ownerType),
+      eq(workResourceLocks.ownerId, ownerId),
+    ));
+}
+
+async function markExpiredPersistentOwner(): Promise<void> {
+  const now = new Date();
+  await db
+    .update(workResourceLocks)
+    .set({
+      status: "expired",
+      expiresAt: now,
+      updatedAt: now,
+    })
+    .where(and(
+      eq(workResourceLocks.resourceKey, SIDECAR_LANE_RESOURCE_KEY),
+      eq(workResourceLocks.status, "active"),
+      sql`${workResourceLocks.expiresAt} <= ${now}`,
+    ));
+}
+
+async function loadPersistentOwner(): Promise<SidecarLaneOwner | null> {
+  const [row] = await db
+    .select()
+    .from(workResourceLocks)
+    .where(eq(workResourceLocks.resourceKey, SIDECAR_LANE_RESOURCE_KEY))
+    .limit(1);
+  if (!row) return null;
+  const current = ownerFromLock(row);
+  if (!current || row.status !== "active" || current.leaseExpiresAt <= nowMs()) {
+    if (row.status === "active") {
+      await markExpiredPersistentOwner();
+    }
+    return null;
+  }
+  return current;
+}
+
+async function syncOwnerFromPersistentLock(): Promise<void> {
+  const persistentOwner = await loadPersistentOwner();
+  owner = persistentOwner;
+}
+
+async function claimPersistentOwner(
+  ownerType: SidecarLaneOwnerType,
+  ownerId: string,
+  label: string,
+): Promise<SidecarLaneOwner | null> {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + SIDECAR_LANE_LEASE_MS);
+  const [row] = await db
+    .insert(workResourceLocks)
+    .values({
+      resourceKey: SIDECAR_LANE_RESOURCE_KEY,
+      ownerType,
+      ownerId,
+      ownerLabel: label,
+      status: "active",
+      acquiredAt: now,
+      heartbeatAt: now,
+      expiresAt,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: workResourceLocks.resourceKey,
+      set: {
+        ownerType,
+        ownerId,
+        ownerLabel: label,
+        status: "active",
+        acquiredAt: sql`case when ${workResourceLocks.ownerType} = ${ownerType} and ${workResourceLocks.ownerId} = ${ownerId} and ${workResourceLocks.status} = 'active' then ${workResourceLocks.acquiredAt} else ${now} end`,
+        heartbeatAt: now,
+        expiresAt,
+        updatedAt: now,
+      },
+      where: sql`${workResourceLocks.status} <> 'active'
+        or ${workResourceLocks.expiresAt} <= ${now}
+        or (${workResourceLocks.ownerType} = ${ownerType} and ${workResourceLocks.ownerId} = ${ownerId})`,
+    })
+    .returning();
+  const claimed = row ? ownerFromLock(row) : null;
+  return sameOwner(claimed, ownerType, ownerId) ? claimed : null;
+}
+
+async function refreshPersistentOwner(
+  ownerType: SidecarLaneOwnerType,
+  ownerId: string,
+  label: string,
+): Promise<SidecarLaneOwner | null> {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + SIDECAR_LANE_LEASE_MS);
+  const [row] = await db
+    .update(workResourceLocks)
+    .set({
+      ownerLabel: label,
+      heartbeatAt: now,
+      expiresAt,
+      updatedAt: now,
+    })
+    .where(and(
+      eq(workResourceLocks.resourceKey, SIDECAR_LANE_RESOURCE_KEY),
+      eq(workResourceLocks.ownerType, ownerType),
+      eq(workResourceLocks.ownerId, ownerId),
+      eq(workResourceLocks.status, "active"),
+      sql`${workResourceLocks.expiresAt} > ${now}`,
+    ))
+    .returning();
+  return row ? ownerFromLock(row) : null;
+}
+
+function createLaneHandle(
+  current: SidecarLaneOwner,
+  options: Pick<AcquireSidecarLaneOptions, "ownerType" | "ownerId" | "label">,
+): {
+  acquiredAt: number;
+  heartbeat: () => void;
+  release: () => void;
+} {
+  return {
+    acquiredAt: current.acquiredAt,
+    heartbeat: () => {
+      if (!sameOwner(owner, options.ownerType, options.ownerId)) return;
+      setOwner(options.ownerType, options.ownerId, options.label);
+      void refreshPersistentOwner(options.ownerType, options.ownerId, options.label)
+        .then((refreshed) => {
+          if (refreshed && sameOwner(owner, options.ownerType, options.ownerId)) {
+            setPersistentOwner(refreshed);
+          }
+        })
+        .catch((e) => logPersistentLockError("heartbeat", e));
+    },
+    release: () => {
+      cancelledOwners.delete(ownerKey(options.ownerType, options.ownerId));
+      if (sameOwner(owner, options.ownerType, options.ownerId)) owner = null;
+      void markPersistentOwnerStatus(options.ownerType, options.ownerId, "released")
+        .catch((e) => logPersistentLockError("release", e));
+    },
+  };
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -90,6 +288,8 @@ function sleep(ms: number) {
 export function getSidecarLaneStatus() {
   clearExpiredOwner();
   return {
+    resourceKey: SIDECAR_LANE_RESOURCE_KEY,
+    leaseMs: SIDECAR_LANE_LEASE_MS,
     busy: !!owner,
     owner: cloneOwner(owner),
     waiting: waiters.map(cloneWaiter),
@@ -124,6 +324,10 @@ export function clearActiveSidecarLane(reason = "sidecar lane cleared by operato
   owner: SidecarLaneOwner | null;
 } {
   const result = cancelActiveSidecarLane(reason);
+  if (result.owner) {
+    void markPersistentOwnerStatus(result.owner.ownerType, result.owner.ownerId, "cancelled")
+      .catch((e) => logPersistentLockError("cancel", e));
+  }
   owner = null;
   waiters = [];
   return result;
@@ -142,6 +346,7 @@ export async function acquireSidecarLane(options: AcquireSidecarLaneOptions): Pr
 
   while (true) {
     clearExpiredOwner();
+    await syncOwnerFromPersistentLock();
     if (await options.shouldCancel?.()) {
       removeWaiter(options.ownerType, options.ownerId);
       throw Object.assign(new Error("Cancelled while waiting for Chrome sidecar lane"), { cancelled: true });
@@ -152,20 +357,12 @@ export async function acquireSidecarLane(options: AcquireSidecarLaneOptions): Pr
     }
 
     if (sameOwner(owner, options.ownerType, options.ownerId)) {
-      removeWaiter(options.ownerType, options.ownerId);
-      const current = setOwner(options.ownerType, options.ownerId, options.label);
-      return {
-        acquiredAt: current.acquiredAt,
-        heartbeat: () => {
-          if (sameOwner(owner, options.ownerType, options.ownerId)) {
-            setOwner(options.ownerType, options.ownerId, options.label);
-          }
-        },
-        release: () => {
-          cancelledOwners.delete(ownerKey(options.ownerType, options.ownerId));
-          if (sameOwner(owner, options.ownerType, options.ownerId)) owner = null;
-        },
-      };
+      const current = await claimPersistentOwner(options.ownerType, options.ownerId, options.label);
+      if (current) {
+        removeWaiter(options.ownerType, options.ownerId);
+        return createLaneHandle(setPersistentOwner(current), options);
+      }
+      await syncOwnerFromPersistentLock();
     }
 
     if (!enqueued && !hasWaiter(options.ownerType, options.ownerId)) {
@@ -181,21 +378,13 @@ export async function acquireSidecarLane(options: AcquireSidecarLaneOptions): Pr
     }
 
     if (!owner && firstWaiterIs(options.ownerType, options.ownerId)) {
-      removeWaiter(options.ownerType, options.ownerId);
-      cancelledOwners.delete(ownerKey(options.ownerType, options.ownerId));
-      const current = setOwner(options.ownerType, options.ownerId, options.label);
-      return {
-        acquiredAt: current.acquiredAt,
-        heartbeat: () => {
-          if (sameOwner(owner, options.ownerType, options.ownerId)) {
-            setOwner(options.ownerType, options.ownerId, options.label);
-          }
-        },
-        release: () => {
-          cancelledOwners.delete(ownerKey(options.ownerType, options.ownerId));
-          if (sameOwner(owner, options.ownerType, options.ownerId)) owner = null;
-        },
-      };
+      const current = await claimPersistentOwner(options.ownerType, options.ownerId, options.label);
+      if (current) {
+        removeWaiter(options.ownerType, options.ownerId);
+        cancelledOwners.delete(ownerKey(options.ownerType, options.ownerId));
+        return createLaneHandle(setPersistentOwner(current), options);
+      }
+      await syncOwnerFromPersistentLock();
     }
 
     if (nowMs() - startedAt > waitTimeoutMs) {

@@ -84,6 +84,22 @@ export const insertSidecarSearchVariationSchema = createInsertSchema(sidecarSear
 export type InsertSidecarSearchVariation = z.infer<typeof insertSidecarSearchVariationSchema>;
 export type SidecarSearchVariation = typeof sidecarSearchVariations.$inferSelect;
 
+export const workResourceLocks = pgTable("work_resource_locks", {
+  resourceKey: text("resource_key").primaryKey(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  ownerLabel: text("owner_label").notNull(),
+  status: text("status").notNull().default("active"),
+  acquiredAt: timestamp("acquired_at").defaultNow().notNull(),
+  heartbeatAt: timestamp("heartbeat_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type WorkResourceLock = typeof workResourceLocks.$inferSelect;
+export type InsertWorkResourceLock = typeof workResourceLocks.$inferInsert;
+
 export const communityResearchSearches = pgTable("community_research_searches", {
   id: serial("id").primaryKey(),
   cityKey: text("city_key").notNull().unique(),
