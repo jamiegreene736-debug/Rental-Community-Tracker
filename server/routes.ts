@@ -8826,6 +8826,138 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/admin/cleanup-waikiki-4br-drafts
+  // One-shot cleanup for 4BR Waikiki combo drafts removed from the dashboard.
+  // Idempotent — safe to run multiple times. Targets only the named Waikiki
+  // communities with combinedBedrooms=4 and a Honolulu/Hawaii location signal.
+  app.post("/api/admin/cleanup-waikiki-4br-drafts", async (_req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { and, eq, ilike, inArray, or } = await import("drizzle-orm");
+      const {
+        bulkComboListingJobItems,
+        communityDrafts,
+        communityPricingRefreshJobs,
+        photoLabels,
+        photoListingAlerts,
+        photoListingChecks,
+        pricingUpdateLogs,
+        propertyMarketRates,
+      } = await import("@shared/schema");
+
+      const nameMatch = or(
+        ilike(communityDrafts.name, "%Waikiki Banyan%"),
+        ilike(communityDrafts.listingTitle, "%Waikiki Banyan%"),
+        ilike(communityDrafts.name, "%Waikiki Beach Tower%"),
+        ilike(communityDrafts.listingTitle, "%Waikiki Beach Tower%"),
+        ilike(communityDrafts.name, "%Waikiki Shore%"),
+        ilike(communityDrafts.listingTitle, "%Waikiki Shore%"),
+        ilike(communityDrafts.name, "%Waikiki Sunset%"),
+        ilike(communityDrafts.listingTitle, "%Waikiki Sunset%"),
+      );
+      const locationMatch = or(
+        ilike(communityDrafts.city, "%Waikiki%"),
+        ilike(communityDrafts.city, "%Honolulu%"),
+        ilike(communityDrafts.state, "%Hawaii%"),
+        ilike(communityDrafts.state, "HI"),
+      );
+
+      const targetDrafts = await db
+        .select({
+          id: communityDrafts.id,
+          name: communityDrafts.name,
+          listingTitle: communityDrafts.listingTitle,
+          combinedBedrooms: communityDrafts.combinedBedrooms,
+        })
+        .from(communityDrafts)
+        .where(and(eq(communityDrafts.combinedBedrooms, 4), nameMatch, locationMatch));
+
+      const draftIds = targetDrafts.map((draft) => draft.id);
+      if (draftIds.length === 0) {
+        return res.json({
+          matchedDrafts: [],
+          communityDrafts: 0,
+          bulkComboListingJobItemsUnlinked: 0,
+          communityPricingRefreshJobs: 0,
+          propertyMarketRates: 0,
+          pricingUpdateLogs: 0,
+          photoLabels: 0,
+          photoListingChecks: 0,
+          photoListingAlerts: 0,
+        });
+      }
+
+      const negativeDraftIds = draftIds.map((id) => -id);
+      const photoFolders = draftIds.flatMap((id) => [
+        `draft-${id}-unit-a`,
+        `draft-${id}-unit-b`,
+        `community-draft-${id}`,
+      ]);
+
+      const pricingJobsDeleted = await db
+        .delete(communityPricingRefreshJobs)
+        .where(inArray(communityPricingRefreshJobs.draftId, draftIds))
+        .returning({ id: communityPricingRefreshJobs.id });
+
+      const propertyMarketRatesDeleted = await db
+        .delete(propertyMarketRates)
+        .where(inArray(propertyMarketRates.propertyId, negativeDraftIds))
+        .returning({ id: propertyMarketRates.id });
+
+      const pricingUpdateLogsDeleted = await db
+        .delete(pricingUpdateLogs)
+        .where(inArray(pricingUpdateLogs.propertyId, negativeDraftIds))
+        .returning({ id: pricingUpdateLogs.id });
+
+      const photoLabelsDeleted = await db
+        .delete(photoLabels)
+        .where(inArray(photoLabels.folder, photoFolders))
+        .returning({ id: photoLabels.id });
+
+      const photoListingChecksDeleted = await db
+        .delete(photoListingChecks)
+        .where(inArray(photoListingChecks.photoFolder, photoFolders))
+        .returning({ id: photoListingChecks.id });
+
+      const photoListingAlertsDeleted = await db
+        .delete(photoListingAlerts)
+        .where(inArray(photoListingAlerts.photoFolder, photoFolders))
+        .returning({ id: photoListingAlerts.id });
+
+      const bulkComboListingJobItemsUnlinked = await db
+        .update(bulkComboListingJobItems)
+        .set({ draftId: null })
+        .where(inArray(bulkComboListingJobItems.draftId, draftIds))
+        .returning({ id: bulkComboListingJobItems.id });
+
+      const draftsDeleted = await db
+        .delete(communityDrafts)
+        .where(inArray(communityDrafts.id, draftIds))
+        .returning({
+          id: communityDrafts.id,
+          name: communityDrafts.name,
+          listingTitle: communityDrafts.listingTitle,
+          combinedBedrooms: communityDrafts.combinedBedrooms,
+        });
+
+      return res.json({
+        matchedDrafts: targetDrafts,
+        communityDrafts: draftsDeleted.length,
+        deletedDrafts: draftsDeleted,
+        bulkComboListingJobItemsUnlinked: bulkComboListingJobItemsUnlinked.length,
+        communityPricingRefreshJobs: pricingJobsDeleted.length,
+        propertyMarketRates: propertyMarketRatesDeleted.length,
+        pricingUpdateLogs: pricingUpdateLogsDeleted.length,
+        photoLabels: photoLabelsDeleted.length,
+        photoListingChecks: photoListingChecksDeleted.length,
+        photoListingAlerts: photoListingAlertsDeleted.length,
+      });
+    } catch (err: any) {
+      console.error("[admin/cleanup-waikiki-4br-drafts] error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // ========== OPERATIONS: FIND BUY-IN ACROSS ALL SOURCES ==========
   //
   // Fan-out search across Airbnb, Vrbo/Booking.com, and Google-discovered

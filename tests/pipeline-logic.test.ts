@@ -244,6 +244,28 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /\/api\/admin\/cleanup-waikiki-4br-drafts/,
+  "admin cleanup must expose a narrow route for deleting existing Waikiki 4BR dashboard drafts",
+);
+assert.match(
+  routesSource,
+  /eq\(communityDrafts\.combinedBedrooms, 4\)/,
+  "Waikiki cleanup must only delete 4BR dashboard drafts",
+);
+for (const communityName of ["Waikiki Banyan", "Waikiki Beach Tower", "Waikiki Shore", "Waikiki Sunset"]) {
+  assert.match(
+    routesSource,
+    new RegExp(communityName),
+    `Waikiki cleanup must explicitly target ${communityName}`,
+  );
+}
+assert.match(
+  routesSource,
+  /propertyMarketRates\.propertyId, negativeDraftIds/,
+  "Waikiki cleanup must remove market-rate rows keyed by negative draft ids",
+);
+assert.match(
+  routesSource,
   /upsertCommunityResearchSearch/,
   "community research results must be persisted after manual city searches",
 );
