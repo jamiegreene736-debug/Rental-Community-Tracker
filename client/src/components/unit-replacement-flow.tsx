@@ -74,6 +74,7 @@ export type UnitStub = {
   // Display metadata — optional, used to disambiguate units in the dropdown.
   positionLabel?: string;      // e.g. "Unit A", "Unit B" — their position in the property.
   replacementLabel?: string;   // e.g. "Unit #13D" — set if this unit already has an active swap.
+  replacementSourceUrl?: string;
 };
 
 // Per-platform verdict from the server's SERP-based availability check.
@@ -175,10 +176,18 @@ export function UnitReplacementFlow({
       setSwapError(null);
       return;
     }
-    if (job.status === "failed") {
+    if (job.status === "completed" || job.status === "failed") {
       setStage("error");
       setResult(null);
-      if (!restored) setSwapError(job.error || "Search failed. Please try again.");
+      if (!restored) {
+        setSwapError(
+          job.error
+            || job.message
+            || (job.status === "completed"
+              ? "Search finished without a replacement unit. Please try again or expand the search."
+              : "Search failed. Please try again."),
+        );
+      }
     }
   };
 
@@ -200,11 +209,16 @@ export function UnitReplacementFlow({
           credentials: "include",
         });
         if (!resp.ok) {
-          if (resp.status === 404 && !cancelled) {
+          if (!cancelled) {
             saveReplacementJobRef(propertyId, null);
             setReplacementJobId(null);
-            setStage("idle");
             setSearchStartedAt(null);
+            setStage("error");
+            setSwapError(
+              resp.status === 404
+                ? "Replacement search session expired (server restarted or job not found). Please run Find Replacement Unit again."
+                : `Could not check search status (HTTP ${resp.status}). Please try again.`,
+            );
           }
           return;
         }

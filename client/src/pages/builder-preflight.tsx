@@ -1515,6 +1515,7 @@ export default function BuilderPreflight() {
                 photoFolder: u.photoFolder,
                 positionLabel: `Unit ${String.fromCharCode(65 + i)}`,
                 replacementLabel: unitOverrides[u.id]?.unitLabel,
+                replacementSourceUrl: unitOverrides[u.id]?.sourceUrl,
               }))}
               communityFolder={property.communityPhotoFolder}
               communityName={property.complexName}
