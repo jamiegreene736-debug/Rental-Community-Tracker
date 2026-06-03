@@ -1940,6 +1940,48 @@ console.log("  ✓ Mauna Lani Point canonical address validates for bulk combo d
 console.log("  ✓ Mauna Lani Point preflight photo-discovery cities + name aliases");
 
 assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Honua Kai Resort",
+    city: "Kaanapali",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "130 Kai Malina Pkwy",
+  "bulk combo queue should use Honua Kai canonical address instead of an empty market-only payload",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Honua Kai Resort",
+    city: "Kaanapali",
+    state: "Hawaii",
+    streetAddress: "130 Kai Malina Pkwy",
+  }).ok,
+  true,
+  "Honua Kai should accept Kaanapali as the queued market city while validating its canonical street",
+);
+assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Kaanapali Alii",
+    city: "Kaanapali",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "50 Nohea Kai Dr",
+  "bulk combo queue should use Kaanapali Alii canonical address instead of an empty market-only payload",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Kaanapali Alii",
+    city: "Kaanapali",
+    state: "Hawaii",
+    streetAddress: "50 Nohea Kai Dr",
+  }).ok,
+  true,
+  "Kaanapali Alii should accept Kaanapali as the queued market city while validating its canonical street",
+);
+console.log("  ✓ Honua Kai + Kaanapali Alii canonical addresses validate for bulk combo draft saves");
+
+assert.equal(
   validateCommunityStreetAddress({
     communityName: "Pili Mai",
     city: "Koloa",

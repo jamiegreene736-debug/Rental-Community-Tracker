@@ -29,6 +29,8 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Poipu Kapili"], street: "2221 Kapili Rd", city: "Koloa", state: "HI" },
   { names: ["Poipu Shores"], street: "1775 Pe'e Rd", city: "Koloa", state: "HI" },
   { names: ["Manualoha at Poipu Kai"], street: "2371 Ho'ohu Road", city: "Koloa", state: "HI" },
+  { names: ["Honua Kai Resort", "Honua Kai", "Honua Kai Resort & Spa"], street: "130 Kai Malina Pkwy", city: "Lahaina", cityAliases: ["Kaanapali", "Ka'anapali", "Kapalua", "Napili", "Honokowai"], state: "HI" },
+  { names: ["Kaanapali Alii", "Kaanapali Ali'i"], street: "50 Nohea Kai Dr", city: "Lahaina", cityAliases: ["Kaanapali", "Ka'anapali"], state: "HI" },
 ];
 
 export function normalizeCommunityAddressToken(value: string): string {
