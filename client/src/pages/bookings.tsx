@@ -6046,7 +6046,9 @@ export default function Bookings() {
       updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
       const sidecarQueue = alternativeCommunitiesForSidecar(response);
       if (sidecarQueue.length > 0) {
-        startAutoAlternativeSidecarScan(reservation);
+        // Defer until scout state is committed so the auto-scan driver effect
+        // always sees workflow.scout + isRunning in the same render.
+        queueMicrotask(() => startAutoAlternativeSidecarScan(reservation));
       }
       if (!opts?.auto) {
         toast({

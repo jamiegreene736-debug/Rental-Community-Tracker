@@ -12252,11 +12252,13 @@ export async function registerRoutes(
       Math.max(25_000, routeRemainingMs() - 10_000),
     );
     const googleHotelsBudgetMs = Math.min(45_000, Math.max(12_000, routeRemainingMs() - 12_000));
-    const [airbnb, booking, vrbo, googleHotelsRows] = await Promise.all([
+    const [airbnb, googleHotelsRows] = await Promise.all([
       withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-searchapi", airbnbSidecarAbort.abort),
+      withTimeout(googleHotelsPromise, googleHotelsBudgetMs, [] as GoogleHotelsBuyInCandidate[], "google-hotels-searchapi", googleHotelsAbort.abort),
+    ]);
+    const [booking, vrbo] = await Promise.all([
       withTimeout(bookingPromise, sidecarSourceBudgetMs, [] as Candidate[], "booking-sidecar", bookingSidecarAbort.abort),
       withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo", vrboSidecarAbort.abort),
-      withTimeout(googleHotelsPromise, googleHotelsBudgetMs, [] as GoogleHotelsBuyInCandidate[], "google-hotels-searchapi", googleHotelsAbort.abort),
     ]);
     const googleHotels: Candidate[] = googleHotelsRows.map((row) => ({ ...row }));
     let pmGoogle: Candidate[] = [];
