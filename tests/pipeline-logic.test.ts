@@ -1649,6 +1649,26 @@ assert.match(
   /\/api\/preflight\/replacement-find-jobs/,
   "preflight replacement search must run on a server-side job so tab close does not abort find-unit",
 );
+assert.ok(
+  routeSource.includes("const discoveryCities = discoverySearchCitiesForPhotoSearch({"),
+  "replacement find-unit must use the same Zillow discovery cities as preflight photo fetch",
+);
+assert.ok(
+  routeSource.includes("const addressRule = communityAddressRuleForName(communityName);"),
+  "replacement find-unit must prefer canonical resort city over mailing-city payloads like Mauna Kea",
+);
+assert.ok(
+  unitReplacementSource.includes("Replacement search session expired"),
+  "lost replacement job polls must surface an error instead of silently resetting to idle",
+);
+assert.ok(
+  unitReplacementSource.includes("Search finished without a replacement unit"),
+  "completed replacement jobs without a unit must show an error state",
+);
+assert.ok(
+  preflightSource.includes("replacementSourceUrl: unitOverrides[u.id]?.sourceUrl"),
+  "preflight replacement flow must pass active swap URLs so follow-up searches use expanded mode",
+);
 console.log("  ✓ replacement search budget and follow-up expanded mode are guarded");
 
 assert.equal(
