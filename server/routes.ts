@@ -7877,6 +7877,70 @@ export async function registerRoutes(
     };
   }
 
+  async function estimateListingPairProximity(
+    listings: Array<{ url: string; title: string }>,
+    communityName: string | null,
+  ) {
+    const pair = listings
+      .map((listing) => ({
+        url: String(listing.url ?? "").trim(),
+        title: String(listing.title ?? "").trim(),
+      }))
+      .filter((listing) => listing.url && listing.title)
+      .slice(0, 2);
+    if (pair.length < 2) return null;
+
+    const loc = communityName ? COMMUNITY_LOCATION_BY_KEY[communityName] : undefined;
+    const resortName = loc?.searchName ?? communityName ?? undefined;
+    const units = await Promise.all(
+      pair.map(async (listing) => {
+        const guess = buildAddressGuess(
+          { notes: listing.title, airbnbListingUrl: listing.url, propertyName: listing.title },
+          communityName,
+          loc,
+        );
+        const scraped = guess.source === "saved"
+          ? null
+          : await scrapeAddressFromListingUrl(listing.url).catch(() => null);
+        const scrapedUnitToken = extractAddressUnitToken(scraped);
+        const finalGuess: ListingAddressGuess = scraped
+          ? { ...guess, address: scraped, source: "scraped", unitToken: scrapedUnitToken ?? guess.unitToken }
+          : guess;
+        return {
+          listingUrl: listing.url,
+          title: finalGuess.title || listing.title,
+          unitToken: finalGuess.unitToken,
+          address: finalGuess.address,
+          addressSource: finalGuess.source,
+        };
+      }),
+    );
+
+    const exactAddressCount = units.filter((unit) => {
+      if (unit.addressSource !== "saved" && unit.addressSource !== "scraped") return false;
+      return Boolean(extractAddressUnitToken(unit.address));
+    }).length;
+
+    let walk = await walkBetween(units[0].address, units[1].address, resortName).catch(() => fallbackWalkForResort(resortName));
+    if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
+      walk = fallbackWalkForResort(resortName);
+    }
+
+    return {
+      community: communityName,
+      resortName,
+      units,
+      walk,
+      confidence: exactAddressCount >= 2 && walk.source === "geocoded"
+        ? "exact-address" as const
+        : walk.source === "geocoded"
+          ? "listing-title" as const
+          : "resort-default" as const,
+      withinLimit: walk.minutes <= MAX_BUY_IN_WALK_MINUTES,
+      maxMinutes: MAX_BUY_IN_WALK_MINUTES,
+    };
+  }
+
   app.get("/api/bookings/:reservationId/unit-proximity", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
@@ -23477,6 +23541,24 @@ Return ONLY compact JSON with this exact shape:
       res.json(result);
     } catch (e: any) {
       res.json(fallbackWalkForResort(resort));
+    }
+  });
+
+  // Walking distance between two candidate combo listings (pre-attach).
+  app.post("/api/tools/listing-pair-proximity", async (req, res) => {
+    const listings = Array.isArray(req.body?.listings) ? req.body.listings : [];
+    const community = String(req.body?.community ?? "").trim() || null;
+    if (listings.length < 2) {
+      return res.status(400).json({ error: "listings array with at least two { url, title } entries required" });
+    }
+    try {
+      const proximity = await estimateListingPairProximity(listings, community);
+      if (!proximity) {
+        return res.status(400).json({ error: "Could not resolve addresses for both listings" });
+      }
+      res.json({ status: "ready", ...proximity, generatedAt: new Date().toISOString() });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to estimate listing pair proximity", message: err.message });
     }
   });
 
