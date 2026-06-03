@@ -1898,6 +1898,14 @@ assert.ok(
   "replacement diagnostics must count same-community duplicate rejections",
 );
 assert.ok(
+  routeSource.includes("skipped-outside-resort"),
+  "replacement find-unit must reject listings outside the resort street (URL-only match, not snippet context)",
+);
+assert.ok(
+  routeSource.includes("Match on the listing URL only. Snippet/title context often mentions"),
+  "replacement find-unit resort gate must not trust Google snippet address mentions",
+);
+assert.ok(
   routeSource.includes("const canonicalStreet = inferCommunityStreetAddress({"),
   "replacement find-unit must resolve canonical resort street when folder map is missing (e.g. Waikoloa)",
 );
@@ -1920,6 +1928,14 @@ assert.ok(
 assert.ok(
   routeSource.includes('"skipped-internal-duplicate": 0'),
   "replacement diagnostics must count same-community duplicate rejections",
+);
+assert.ok(
+  routeSource.includes("skipped-outside-resort"),
+  "replacement find-unit must reject listings outside the resort street (URL-only match, not snippet context)",
+);
+assert.ok(
+  routeSource.includes("Match on the listing URL only. Snippet/title context often mentions"),
+  "replacement find-unit resort gate must not trust Google snippet address mentions",
 );
 assert.ok(
   routeSource.includes("const addressRule = communityAddressRuleForName(communityName);"),
@@ -1990,8 +2006,8 @@ assert.ok(
   "replacement discovery should run SearchAPI queries in parallel batches",
 );
 assert.ok(
-  routeSource.includes("if (suppliedStreetRoot) addCandidateUrl(link, \"zillow\");"),
-  "replacement Apify Zillow supplement must not over-filter known resort streets like 92-1070 Olani",
+  routeSource.includes("const zillowApifyRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;"),
+  "replacement Apify Zillow supplement must filter through the canonical resort street without skipping roots entirely",
 );
 assert.ok(
   routeSource.includes("(?:[-\\\\s]+\\\\d{1,4})?[-\\\\s]+"),
