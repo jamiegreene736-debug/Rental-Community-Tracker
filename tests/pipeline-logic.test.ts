@@ -8,7 +8,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseCommunityResearchJsonArray, researchCommunitiesForCity } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
-import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "../shared/community-addresses";
+import {
+  discoveryCityForPhotoSearch,
+  discoveryCommunityNameAliases,
+  inferCommunityStreetAddress,
+  validateCommunityStreetAddress,
+} from "../shared/community-addresses";
 import { checkCommunityType } from "../shared/community-type";
 import { unitVerificationClaims } from "../shared/folder-unit-map";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
@@ -1745,6 +1750,21 @@ assert.equal(
   "Waikoloa Beach Villas should accept Mauna Kea as the queued market city while validating its canonical street",
 );
 console.log("  ✓ Waikoloa Beach Villas canonical address validates for bulk combo draft saves");
+
+assert.equal(
+  discoveryCityForPhotoSearch({
+    city: "Mauna Kea",
+    communityName: "Waikoloa Beach Villas",
+    streetAddress: "69-180 Waikoloa Beach Dr",
+  }),
+  "Waikoloa",
+  "preflight Find Photos should search Waikoloa, not Mauna Kea mailing city",
+);
+assert.ok(
+  discoveryCommunityNameAliases("Waikoloa Villas").includes("Waikoloa Beach Villas"),
+  "Waikoloa Villas draft title should alias to Waikoloa Beach Villas for Zillow discovery",
+);
+console.log("  ✓ Waikoloa preflight photo-discovery city + name aliases");
 
 assert.equal(
   inferCommunityStreetAddress({

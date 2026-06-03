@@ -859,7 +859,9 @@ export default function AddCommunity() {
     let cancelled = false;
     const fetchJob = async () => {
       try {
-        const resp = await fetch(`/api/community/scan-top-markets-job/${encodeURIComponent(sweepJobId)}`);
+        const resp = await fetch(`/api/community/scan-top-markets-job/${encodeURIComponent(sweepJobId)}`, {
+          credentials: "include",
+        });
         if (!resp.ok) {
           if (resp.status === 404) {
             setSweepRunning(false);
@@ -1104,7 +1106,7 @@ export default function AddCommunity() {
   }, [sweepJobId]);
 
   const loadTopMarketSeeds = useCallback(async () => {
-    const resp = await fetch("/api/community/top-markets/seeds");
+    const resp = await fetch("/api/community/top-markets/seeds", { credentials: "include" });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       throw new Error(text || `HTTP ${resp.status}`);
@@ -1142,7 +1144,9 @@ export default function AddCommunity() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const resp = await fetch(`/api/community/scan-top-markets-job/${encodeURIComponent(cacheRefreshJobId)}`);
+        const resp = await fetch(`/api/community/scan-top-markets-job/${encodeURIComponent(cacheRefreshJobId)}`, {
+          credentials: "include",
+        });
         if (!resp.ok) {
           if (resp.status === 404 && !cancelled) {
             setCacheRefreshJobId(null);
@@ -1230,6 +1234,7 @@ export default function AddCommunity() {
       const resp = await fetch("/api/community/scan-top-markets-job", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ markets: picked, maxMarkets: picked.length }),
       });
       if (!resp.ok) {
@@ -1255,6 +1260,7 @@ export default function AddCommunity() {
     try {
       const resp = await fetch(`/api/community/scan-top-markets-job/${encodeURIComponent(sweepJobId)}/cancel`, {
         method: "POST",
+        credentials: "include",
       });
       const data = await resp.json().catch(() => null);
       if (data?.job) applySweepJob(data.job);
