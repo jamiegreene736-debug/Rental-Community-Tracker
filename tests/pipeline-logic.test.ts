@@ -1661,6 +1661,14 @@ assert.ok(
   "replacement search should use most of Railway's request window before giving up",
 );
 assert.ok(
+  routeSource.includes("hasRouteBudget(PHOTO_SCRAPE_TIMEOUT_MS + 15_000)"),
+  "replacement search must not start a photo scrape it cannot finish inside the route budget",
+);
+assert.ok(
+  preflightJobsSource.includes("REPLACEMENT_FIND_UNIT_LOOPBACK_TIMEOUT_MS = 350_000"),
+  "replacement background job must outlive find-unit route budget plus a photo-scrape step",
+);
+assert.ok(
   routeSource.includes("!budgetStopped"),
   "replacement diagnostics must not claim the candidate cap was checked when the route stopped early",
 );

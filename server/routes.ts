@@ -26108,7 +26108,7 @@ Return ONLY compact JSON with this exact shape:
     let budgetStopped = false;
     const candidatesToCheck = candidates.slice(0, MAX_CANDIDATES_TO_CHECK);
     for (const candidate of candidatesToCheck) {
-      if (!hasRouteBudget(10_000)) {
+      if (!hasRouteBudget(PHOTO_SCRAPE_TIMEOUT_MS + 15_000)) {
         budgetStopped = true;
         console.warn(`[find-unit] route budget nearly exhausted after ${attempts.length}/${candidates.length} candidates`);
         break;
