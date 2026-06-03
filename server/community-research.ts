@@ -655,6 +655,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Turtle Bay/Kuilima condo and townhome community with legal vacation-rental inventory near Oahu's North Shore.",
     availableBedrooms: [1, 2, 3],
     estimatedTotalUnits: 400,
+    addressHint: "57-101 Kuilima Dr",
   },
   {
     city: OAHU_LEEWARD_CITY_PATTERN,

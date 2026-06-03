@@ -1683,6 +1683,18 @@ console.log("  ✓ Waipouli address hint validates for bulk combo draft saves");
 
 assert.equal(
   validateCommunityStreetAddress({
+    communityName: "Kuilima Estates",
+    city: "Kahuku",
+    state: "Hawaii",
+    streetAddress: "57-101 Kuilima Dr",
+  }).ok,
+  true,
+  "valid Hawaii hyphenated Kuilima resort addresses should pass community draft validation",
+);
+console.log("  ✓ Kuilima hyphenated address validates for bulk combo draft saves");
+
+assert.equal(
+  validateCommunityStreetAddress({
     communityName: "Pili Mai",
     city: "Koloa",
     state: "HI",
