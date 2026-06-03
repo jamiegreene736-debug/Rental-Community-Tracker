@@ -29662,6 +29662,30 @@ Return ONLY compact JSON with this exact shape:
         );
       }
       const triedCandidateUrls: string[] = [];
+      let bestRepresentativeFallback: {
+        candidate: { url: string; source: DiscoverySource };
+        photos: ScrapedPhoto[];
+        facts: ListingFacts;
+        scrapedBedrooms: number;
+      } | null = null;
+      const considerRepresentativeFallback = (
+        candidate: { url: string; source: DiscoverySource },
+        photos: ScrapedPhoto[],
+        facts: ListingFacts,
+      ) => {
+        const scrapedBedrooms = facts.bedrooms ?? null;
+        if (!requestedBedrooms || requestedBedrooms < 3) return;
+        if (scrapedBedrooms === null || scrapedBedrooms < 2 || scrapedBedrooms >= requestedBedrooms) return;
+        if (photos.length === 0) return;
+        if (
+          bestRepresentativeFallback &&
+          bestRepresentativeFallback.scrapedBedrooms >= scrapedBedrooms &&
+          bestRepresentativeFallback.photos.length >= photos.length
+        ) {
+          return;
+        }
+        bestRepresentativeFallback = { candidate, photos, facts: { ...facts }, scrapedBedrooms };
+      };
       for (const candidate of candidatesToTry) {
         if (discoveryWallBudgetMs !== null && discoveryElapsedMs() >= discoveryWallBudgetMs) {
           console.warn(
@@ -29687,6 +29711,7 @@ Return ONLY compact JSON with this exact shape:
           }
           const scrapedBR = facts.bedrooms ?? null;
           if (requestedBedrooms && scrapedBR !== null && scrapedBR !== requestedBedrooms) {
+            considerRepresentativeFallback(candidate, photos, facts);
             console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
             continue;
           }
@@ -29709,6 +29734,24 @@ Return ONLY compact JSON with this exact shape:
         } catch (e: any) {
           console.warn(`[fetch-unit-photos] candidate scrape failed for ${candidate.url}: ${e.message}`);
         }
+      }
+
+      if (bestRepresentativeFallback) {
+        const { candidate, photos, facts, scrapedBedrooms } = bestRepresentativeFallback;
+        console.log(
+          `[fetch-unit-photos] representative fallback community="${communityName ?? ""}" ` +
+          `requestedBR=${requestedBedrooms} scrapedBR=${scrapedBedrooms} photos=${photos.length} ` +
+          `source=${candidate.source} url=${candidate.url} elapsedMs=${Date.now() - startedAt}`,
+        );
+        res.json({
+          photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+          sourceUrl: candidate.url,
+          foundVia: "search",
+          facts,
+          representativeFallback: true,
+          note: `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved a representative ${scrapedBedrooms}BR photo source from the same property.`,
+        });
+        return;
       }
 
       if (!listingUrl) {
