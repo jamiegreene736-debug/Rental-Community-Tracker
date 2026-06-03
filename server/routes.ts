@@ -92,6 +92,7 @@ import {
 import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts } from "./auto-reply";
+import { loopbackRequestHeaders } from "./auth";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import {
@@ -26861,38 +26862,6 @@ Return ONLY compact JSON with this exact shape:
       if (controllers && controllers.size === 0) activeQueueAbortControllers.delete(key);
     };
   };
-  const queueCircuitBreakers = new Map<string, { failures: number; firstFailureAt: number; cooldownUntil: number }>();
-  const QUEUE_CIRCUIT_FAILURE_WINDOW_MS = 3 * 60 * 1000;
-  const QUEUE_CIRCUIT_COOLDOWN_MS = 2 * 60 * 1000;
-  const queueCircuitKeyForUrl = (url: string) => {
-    try {
-      const parsed = new URL(url);
-      return `${parsed.hostname}${parsed.pathname}`;
-    } catch {
-      return url;
-    }
-  };
-  const assertQueueCircuitOpen = (key: string) => {
-    const state = queueCircuitBreakers.get(key);
-    if (!state) return;
-    if (state.cooldownUntil > Date.now()) {
-      const label = key.startsWith("127.0.0.1/") || key.startsWith("localhost/") ? "Temporary queue endpoint cooldown" : "Temporary vendor cooldown";
-      throw new Error(`${label} for ${key}; retry after ${new Date(state.cooldownUntil).toLocaleTimeString()}`);
-    }
-    if (state.cooldownUntil) queueCircuitBreakers.delete(key);
-  };
-  const recordQueueCircuitSuccess = (key: string) => {
-    queueCircuitBreakers.delete(key);
-  };
-  const recordQueueCircuitFailure = (key: string) => {
-    const now = Date.now();
-    const prior = queueCircuitBreakers.get(key);
-    const fresh = prior && now - prior.firstFailureAt <= QUEUE_CIRCUIT_FAILURE_WINDOW_MS
-      ? { ...prior, failures: prior.failures + 1 }
-      : { failures: 1, firstFailureAt: now, cooldownUntil: 0 };
-    if (fresh.failures >= 3) fresh.cooldownUntil = now + QUEUE_CIRCUIT_COOLDOWN_MS;
-    queueCircuitBreakers.set(key, fresh);
-  };
   const queueEvent = async (
     jobType: string,
     jobId: string,
@@ -27170,8 +27139,6 @@ Return ONLY compact JSON with this exact shape:
     return overlap / Math.min(a.length, b.length) >= 0.8;
   };
   const fetchComboPhotoJson = async (url: string, body: unknown, options: { abortKey?: string; signal?: AbortSignal; timeoutMs?: number } = {}) => {
-    const circuitKey = queueCircuitKeyForUrl(url);
-    assertQueueCircuitOpen(circuitKey);
     const controller = new AbortController();
     const unregister = registerQueueAbortController(options.abortKey, controller);
     const abortFromParent = () => {
@@ -27187,16 +27154,14 @@ Return ONLY compact JSON with this exact shape:
     try {
       const resp = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: loopbackRequestHeaders(),
         body: JSON.stringify(body),
         signal: controller.signal,
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data?.error || data?.message || `HTTP ${resp.status}`);
-      recordQueueCircuitSuccess(circuitKey);
       return data as any;
     } catch (e: any) {
-      if (e?.name !== "AbortError") recordQueueCircuitFailure(circuitKey);
       if (e?.name === "AbortError") throw new Error("Photo fetch timed out");
       throw e;
     } finally {

@@ -136,6 +136,15 @@ function isLoopback(req: Request): boolean {
   return sock === "127.0.0.1" || sock === "::ffff:127.0.0.1" || sock === "::1";
 }
 
+/** Headers for same-process HTTP self-calls (queue workers, schedulers). */
+export function loopbackRequestHeaders(contentType = "application/json"): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (contentType) headers["Content-Type"] = contentType;
+  const secret = process.env.ADMIN_SECRET ?? "";
+  if (secret) headers["X-Admin-Secret"] = secret;
+  return headers;
+}
+
 function isPublicPath(path: string): boolean {
   if (PUBLIC_PATH_EXACT.has(path)) return true;
   for (const prefix of PUBLIC_PATH_PREFIXES) {
