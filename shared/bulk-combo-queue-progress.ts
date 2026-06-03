@@ -52,6 +52,7 @@ function photosSubProgress(item: BulkComboProgressItem): number {
   if (/unit b/.test(msg)) return 38;
   if (u1 > 0) return 28;
   if (/unit a/.test(msg)) return 18;
+  if (/ota preflight|listed on/.test(msg)) return 22;
   return 12;
 }
 

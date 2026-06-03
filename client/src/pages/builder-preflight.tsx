@@ -809,6 +809,24 @@ export default function BuilderPreflight() {
     && (!photoFetchJobForUnit(unitId)
       || photoFetchJobForUnit(unitId)!.status === "queued"
       || photoFetchJobForUnit(unitId)!.status === "running");
+
+  const unitsNeedingPhotos = property?.units.filter((u) => (u.photos?.length ?? 0) === 0) ?? [];
+  const showFindAllPhotosButton = unitsNeedingPhotos.length >= 2;
+  const anyUnitNeedingPhotosFetching = unitsNeedingPhotos.some((u) => isPhotoFetchActive(u.id));
+
+  const handleScrapePhotosForAllUnits = async () => {
+    if (id >= 0 || !property) return;
+    const targets = property.units
+      .map((unit, i) => ({ unit, unitIndex: (i === 0 ? 0 : 1) as 0 | 1 }))
+      .filter(
+        ({ unit }) => (unit.photos?.length ?? 0) === 0 && !isPhotoFetchActive(unit.id),
+      );
+    if (targets.length < 2) return;
+    await Promise.all(
+      targets.map(({ unit, unitIndex }) => handleScrapePhotosForUnit(unitIndex, unit)),
+    );
+  };
+
   const actualProgress = totalUnits > 0 ? (completedCount / totalUnits) * 100 : 0;
   const elapsedSeconds = checkStartedAt ? Math.max(progressTick, Math.floor((Date.now() - checkStartedAt) / 1000)) : 0;
   const activeProgressCap = totalUnits > 0
@@ -869,7 +887,30 @@ export default function BuilderPreflight() {
             results so a bad first match isn't a dead end. */}
         {isPromotedDraft && (
           <Card className="p-6 mb-6">
-            <h2 className="text-base font-semibold mb-1">Photo Sources</h2>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+              <h2 className="text-base font-semibold">Photo Sources</h2>
+              {showFindAllPhotosButton && (
+                <Button
+                  size="sm"
+                  onClick={() => void handleScrapePhotosForAllUnits()}
+                  disabled={anyUnitNeedingPhotosFetching}
+                  className="h-8 text-xs"
+                  data-testid="button-scrape-photos-all-units"
+                >
+                  {anyUnitNeedingPhotosFetching ? (
+                    <>
+                      <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                      Finding photos for all units…
+                    </>
+                  ) : (
+                    <>
+                      <Search className="h-3 w-3 mr-1" />
+                      Find Photos for All Units
+                    </>
+                  )}
+                </Button>
+              )}
+            </div>
             {(() => {
               const allUnitsHavePhotos = property.units.length > 0
                 && property.units.every((unit) => (unit.photos?.length ?? 0) > 0);
@@ -898,9 +939,10 @@ export default function BuilderPreflight() {
               return (
                 <p className="text-sm text-muted-foreground mb-4">
                   The reverse-image-search half of the Platform Check below needs
-                  photos to scan. Click <strong>Find Photos</strong> for each unit
-                  and we&apos;ll search Zillow for a representative listing at{" "}
-                  <strong>{property.complexName}</strong>, scrape its photos, and
+                  photos to scan. Click <strong>Find Photos for All Units</strong>{" "}
+                  (or <strong>Find Photos</strong> per unit) and we&apos;ll search
+                  Zillow for representative listings at{" "}
+                  <strong>{property.complexName}</strong>, scrape their photos, and
                   save them to the draft. Then click <strong>Run check</strong>{" "}
                   on the Platform Check.
                 </p>

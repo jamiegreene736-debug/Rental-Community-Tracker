@@ -23,6 +23,7 @@ import {
   validateCommunityStreetAddress,
 } from "../shared/community-addresses";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "../shared/bulk-combo-queue-progress";
+import { MAX_COMBO_PHOTO_OTA_ATTEMPTS } from "../server/combo-ota-preflight";
 import { checkCommunityType } from "../shared/community-type";
 import {
   formatTypicalComboLabel,
@@ -215,6 +216,16 @@ assert.match(
   preflightSource,
   /\/api\/preflight\/photo-fetch-jobs/,
   "preflight Find Photos must run on a server-side job so tab close does not abort discovery",
+);
+assert.match(
+  preflightSource,
+  /handleScrapePhotosForAllUnits[\s\S]*Promise\.all/,
+  "preflight must start photo-fetch jobs for all units needing photos in parallel",
+);
+assert.match(
+  preflightSource,
+  /button-scrape-photos-all-units/,
+  "preflight must expose Find Photos for All Units when two or more units lack photos",
 );
 assert.match(
   preflightJobsSource,
@@ -2117,6 +2128,11 @@ assert.ok(
   bulkComboRemainingMs({ status: "queued", phase: "queued" }, { queueAhead: 1 })! > 600_000,
   "queued item behind another should estimate more than ten minutes remaining",
 );
+assert.ok(
+  bulkComboProgressPercent({ status: "running", phase: "photos", message: "OTA preflight (12 photos)" }) >= 20,
+  "OTA preflight message should advance photos sub-progress",
+);
+assert.equal(MAX_COMBO_PHOTO_OTA_ATTEMPTS, 8, "combo photo OTA retry cap");
 console.log("  ✓ bulk combo queue progress + ETA helpers");
 
 const honuaKaiTypical = inferTypicalComboPair({ availableBedrooms: [1, 2, 3] });
