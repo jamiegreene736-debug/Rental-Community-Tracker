@@ -127,7 +127,13 @@ import {
 } from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
-import { communityAddressRuleForName, inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
+import {
+  communityAddressRuleForName,
+  discoveryCityForPhotoSearch,
+  discoveryCommunityNameAliases,
+  inferCommunityStreetAddress,
+  validateCommunityStreetAddress,
+} from "@shared/community-addresses";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
@@ -28729,6 +28735,8 @@ Return ONLY compact JSON with this exact shape:
         rememberRoot(link, title, snippet);
       };
 
+      const discoveryCity = discoveryCityForPhotoSearch({ city, communityName, streetAddress });
+      const communityNames = discoveryCommunityNameAliases(communityName);
       const zillowQueries: string[] = [];
       const realtorQueries: string[] = [];
       const redfinQueries: string[] = [];
@@ -28738,25 +28746,27 @@ Return ONLY compact JSON with this exact shape:
         realtorQueries.push(`site:realtor.com "${streetAddress}"`);
         redfinQueries.push(`site:redfin.com "${streetAddress}"`);
         homesQueries.push(`site:homes.com "${streetAddress}"`);
+        if (discoveryCity && discoveryCity !== city) {
+          zillowQueries.push(`site:zillow.com "${streetAddress}" "${discoveryCity}" "${state ?? ""}"`.replace(/\s+/g, " ").trim());
+        }
       }
       const brHint = requestedBedrooms ? `${requestedBedrooms} bedroom` : "";
-      if (brHint) {
-        zillowQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim());
-        realtorQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:realtor.com`.replace(/\s+/g, " ").trim());
-        redfinQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:redfin.com`.replace(/\s+/g, " ").trim());
-        homesQueries.push(`"${communityName}" ${city ?? ""} ${state ?? ""} ${brHint} site:homes.com`.replace(/\s+/g, " ").trim());
+      for (const name of communityNames) {
+        if (brHint) {
+          zillowQueries.push(`"${name}" ${discoveryCity ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim());
+          realtorQueries.push(`"${name}" ${discoveryCity ?? ""} ${state ?? ""} ${brHint} site:realtor.com`.replace(/\s+/g, " ").trim());
+          redfinQueries.push(`"${name}" ${discoveryCity ?? ""} ${state ?? ""} ${brHint} site:redfin.com`.replace(/\s+/g, " ").trim());
+          homesQueries.push(`"${name}" ${discoveryCity ?? ""} ${state ?? ""} ${brHint} site:homes.com`.replace(/\s+/g, " ").trim());
+        }
+        zillowQueries.push(`site:zillow.com "${name}" ${discoveryCity ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+        realtorQueries.push(`site:realtor.com "${name}" ${discoveryCity ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+        redfinQueries.push(`site:redfin.com "${name}" ${discoveryCity ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+        homesQueries.push(`site:homes.com "${name}" ${discoveryCity ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+        zillowQueries.push(`site:zillow.com "${name}"`);
+        realtorQueries.push(`site:realtor.com "${name}"`);
+        redfinQueries.push(`site:redfin.com "${name}"`);
+        homesQueries.push(`site:homes.com "${name}"`);
       }
-      zillowQueries.push(`site:zillow.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
-      realtorQueries.push(`site:realtor.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
-      redfinQueries.push(`site:redfin.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
-      homesQueries.push(`site:homes.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
-      // Last-ditch: bare quoted community name, no city/state. Catches
-      // distinctive names ("Pili Mai", named resort communities) that
-      // Google indexes well even without geographic disambiguation.
-      zillowQueries.push(`site:zillow.com "${communityName}"`);
-      realtorQueries.push(`site:realtor.com "${communityName}"`);
-      redfinQueries.push(`site:redfin.com "${communityName}"`);
-      homesQueries.push(`site:homes.com "${communityName}"`);
 
       const runDiscoveryQueries = async (queries: string[], pattern: RegExp, source: DiscoverySource) => {
         await Promise.all(queries.map(async (q) => {
@@ -28789,7 +28799,8 @@ Return ONLY compact JSON with this exact shape:
         runDiscoveryQueries(homesQueries, /homes\.com\/property\//i, "homes"),
       ]);
 
-      if (city && state) {
+      const apifyCity = discoveryCity || city;
+      if (apifyCity && state) {
         const roots = repeatedRoots();
         const focusedZillowCandidates = candidateUrls.filter((candidate) => candidate.source === "zillow").length;
         const hasEnoughFocusedCandidates = candidateLimit !== null
@@ -28801,8 +28812,8 @@ Return ONLY compact JSON with this exact shape:
             : 300;
           const apifySearchTimeoutMs = isBoundedDiscovery ? 45_000 : 180_000;
           const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
-            harvestZillowUrlsViaApifySearch(city, state, apifyMaxItems, apifySearchTimeoutMs),
-            harvestRealtorUrlsViaApifySearch(city, state, apifyMaxItems, apifySearchTimeoutMs),
+            harvestZillowUrlsViaApifySearch(apifyCity, state, apifyMaxItems, apifySearchTimeoutMs),
+            harvestRealtorUrlsViaApifySearch(apifyCity, state, apifyMaxItems, apifySearchTimeoutMs),
           ]);
           for (const link of zillowApifyUrls) addCandidate(link, "zillow", "", "", roots);
           for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", roots);

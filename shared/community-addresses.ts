@@ -21,7 +21,7 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Waikiki Banyan", "Aston at the Waikiki Banyan"], street: "201 Ohua Ave", city: "Honolulu", state: "HI" },
   { names: ["Waikiki Sunset", "Aston Waikiki Sunset"], street: "229 Paoakalani Ave", city: "Honolulu", state: "HI" },
   { names: ["Island Colony", "Island Colony Waikiki"], street: "445 Seaside Ave", city: "Honolulu", state: "HI" },
-  { names: ["Waikoloa Beach Villas", "Beach Villas at Waikoloa Beach Resort"], street: "69-180 Waikoloa Beach Dr", city: "Waikoloa", cityAliases: ["Mauna Kea"], state: "HI" },
+  { names: ["Waikoloa Beach Villas", "Waikoloa Villas", "Beach Villas at Waikoloa Beach Resort"], street: "69-180 Waikoloa Beach Dr", city: "Waikoloa", cityAliases: ["Mauna Kea"], state: "HI" },
   { names: ["Mauna Lani Point"], street: "68-1050 Mauna Lani Point Dr", city: "Kamuela", cityAliases: ["Waikoloa", "Puako", "Mauna Lani", "Mauna Kea", "Waimea"], state: "HI" },
   { names: ["Windsor Hills", "Windsor Hills Resort"], street: "2600 N Old Lake Wilson Rd", city: "Kissimmee", state: "FL" },
   { names: ["Pink Shell Beach Resort", "Pink Shell Beach Resort and Marina", "Pink Shell Resort", "Pink Shell"], street: "275 Estero Blvd", city: "Fort Myers Beach", state: "FL" },
@@ -132,4 +132,30 @@ export function validateCommunityStreetAddress(input: {
   }
 
   return { ok: true, streetAddress: rule.street };
+}
+
+/** City Zillow/Google index listings under (may differ from draft mailing city). */
+export function discoveryCityForPhotoSearch(input: {
+  city?: string | null;
+  communityName?: string | null;
+  streetAddress?: string | null;
+}): string {
+  const rule = communityAddressRuleForName(input.communityName);
+  if (rule?.city) return rule.city;
+  const city = String(input.city ?? "").trim();
+  const street = String(input.streetAddress ?? "").trim();
+  const community = String(input.communityName ?? "").trim();
+  if (/waikoloa/i.test(street) || /waikoloa/i.test(community)) return "Waikoloa";
+  if (/\bmauna kea\b/i.test(city) && /waikoloa|69[- ]?180/i.test(`${street} ${community}`)) return "Waikoloa";
+  return city;
+}
+
+/** Resort name variants for SearchAPI discovery (draft title vs Zillow building name). */
+export function discoveryCommunityNameAliases(name: string | null | undefined): string[] {
+  const base = String(name ?? "").trim();
+  if (!base) return [];
+  const aliases = new Set<string>([base]);
+  const rule = communityAddressRuleForName(base);
+  for (const alt of rule?.names ?? []) aliases.add(alt);
+  return Array.from(aliases).filter(Boolean);
 }
