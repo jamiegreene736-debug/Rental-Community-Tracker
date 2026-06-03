@@ -37,6 +37,9 @@ export type PreflightReplacementFindJob = {
 };
 
 const JOB_TTL_MS = 2 * 60 * 60 * 1000;
+// find-unit ROUTE_BUDGET_MS is up to 285s (expanded) and may still run one
+// PHOTO_SCRAPE_TIMEOUT_MS step that started just inside the budget guard.
+const REPLACEMENT_FIND_UNIT_LOOPBACK_TIMEOUT_MS = 350_000;
 const photoFetchJobs = new Map<string, PreflightPhotoFetchJob>();
 const replacementFindJobs = new Map<string, PreflightReplacementFindJob>();
 const activePhotoFetchJobIds = new Set<string>();
@@ -288,7 +291,11 @@ async function runPreflightReplacementFindJob(
       progress: 12,
       startedAt: Date.now(),
     });
-    const data = await postJson(`${loopbackBaseUrl()}/api/replacement/find-unit`, body, 290_000);
+    const data = await postJson(
+      `${loopbackBaseUrl()}/api/replacement/find-unit`,
+      body,
+      REPLACEMENT_FIND_UNIT_LOOPBACK_TIMEOUT_MS,
+    );
     if (data.error) {
       touchReplacementJob(job, {
         status: "failed",
