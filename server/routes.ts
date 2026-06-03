@@ -26,6 +26,12 @@ import type { BuyIn } from "@shared/schema";
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import {
+  inferCombinedBedroomsFromDraft,
+  positiveDraftInteger,
+  resolveComboUnitBedrooms,
+  resolveDraftUnitBedrooms,
+} from "@shared/draft-unit-bedrooms";
 import path from "path";
 import fs from "fs";
 import sharp from "sharp";
@@ -849,11 +855,10 @@ async function buildBulkGuestySeasonalPlan(
     const draft = await storage.getCommunityDraft(Math.abs(propertyId));
     if (!draft) return null;
     const isSingle = (draft as any).singleListing === true;
-    const unit1Bedrooms = inferCommunityDraftBedroomCount(draft, "unit1") ?? (Number(draft.combinedBedrooms ?? 0) || 2);
-    const unit2Bedrooms = inferCommunityDraftBedroomCount(draft, "unit2") ?? 2;
+    const resolved = resolveComboUnitBedrooms(draft);
     units = isSingle
-      ? [{ bedrooms: unit1Bedrooms }]
-      : [{ bedrooms: unit1Bedrooms }, { bedrooms: unit2Bedrooms }];
+      ? [{ bedrooms: resolved.unit1 }]
+      : [{ bedrooms: resolved.unit1 }, { bedrooms: resolved.unit2 }];
     community = communityKeyForDraft(draft);
   }
 
@@ -4187,22 +4192,14 @@ function unitSlotsForCommunityDraft(draft: any, sourceListingId?: string): Array
 }> {
   const community = communityKeyForDraft(draft);
   const isSingle = draft?.singleListing === true;
-  const combinedBedrooms = inferCombinedCommunityDraftBedroomCount(draft);
-  const unit1Bedrooms = inferCommunityDraftBedroomCount(draft, "unit1")
-    ?? (isSingle ? combinedBedrooms : null);
-  let unit2Bedrooms = isSingle ? null : inferCommunityDraftBedroomCount(draft, "unit2");
-
-  if (!isSingle && !unit2Bedrooms && combinedBedrooms && unit1Bedrooms && combinedBedrooms > unit1Bedrooms) {
-    unit2Bedrooms = combinedBedrooms - unit1Bedrooms;
-  }
+  const resolved = resolveComboUnitBedrooms(draft);
 
   if (isSingle) {
-    const bedrooms = unit1Bedrooms ?? combinedBedrooms;
-    return bedrooms
+    return resolved.unit1 > 0
       ? [{
           unitId: "main",
-          unitLabel: unitLabelFromDraftAddress(draft?.unit1Address, `${bedrooms}BR Guesty listing`),
-          bedrooms,
+          unitLabel: unitLabelFromDraftAddress(draft?.unit1Address, `${resolved.unit1}BR Guesty listing`),
+          bedrooms: resolved.unit1,
           sourceListingId,
           community,
           adHoc: true,
@@ -4210,28 +4207,24 @@ function unitSlotsForCommunityDraft(draft: any, sourceListingId?: string): Array
       : [];
   }
 
-  let unitBedrooms = [unit1Bedrooms, unit2Bedrooms]
-    .filter((bedrooms): bedrooms is number => !!bedrooms && bedrooms > 0);
-  if (unitBedrooms.length === 0 && combinedBedrooms) {
-    unitBedrooms = combinedBedrooms % 2 === 0
-      ? [combinedBedrooms / 2, combinedBedrooms / 2]
-      : [Math.ceil(combinedBedrooms / 2), Math.floor(combinedBedrooms / 2)];
-  }
-  if (unitBedrooms.length === 1 && combinedBedrooms && combinedBedrooms > unitBedrooms[0]) {
-    unitBedrooms.push(combinedBedrooms - unitBedrooms[0]);
-  }
-
-  return unitBedrooms.map((bedrooms, index) => ({
-    unitId: index === 0 ? "unit-a" : "unit-b",
-    unitLabel: unitLabelFromDraftAddress(
-      index === 0 ? draft?.unit1Address : draft?.unit2Address,
-      index === 0 ? "Unit A" : "Unit B",
-    ),
-    bedrooms,
-    sourceListingId,
-    community,
-    adHoc: true,
-  }));
+  return [
+    {
+      unitId: "unit-a",
+      unitLabel: unitLabelFromDraftAddress(draft?.unit1Address, "Unit A"),
+      bedrooms: resolved.unit1,
+      sourceListingId,
+      community,
+      adHoc: true,
+    },
+    {
+      unitId: "unit-b",
+      unitLabel: unitLabelFromDraftAddress(draft?.unit2Address, "Unit B"),
+      bedrooms: resolved.unit2,
+      sourceListingId,
+      community,
+      adHoc: true,
+    },
+  ];
 }
 
 function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unknown> | null {
@@ -4285,76 +4278,40 @@ function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unkn
   };
 }
 
-function positiveDraftInteger(value: unknown): number | null {
-  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
 async function persistInferredComboDraftBedrooms(draft: any): Promise<any | null> {
   if (!draft || draft.singleListing === true) return null;
-  if (positiveDraftInteger(draft.unit1Bedrooms) || positiveDraftInteger(draft.unit2Bedrooms)) return null;
-  const combinedBedrooms = inferCombinedCommunityDraftBedroomCount(draft);
-  if (!combinedBedrooms || combinedBedrooms < 2 || combinedBedrooms % 2 !== 0) return null;
+  const resolved = resolveComboUnitBedrooms(draft);
+  const current1 = positiveDraftInteger(draft.unit1Bedrooms);
+  const current2 = positiveDraftInteger(draft.unit2Bedrooms);
+  const currentCombined = positiveDraftInteger(draft.combinedBedrooms);
+  if (
+    current1 === resolved.unit1 &&
+    current2 === resolved.unit2 &&
+    currentCombined === resolved.combined
+  ) {
+    return null;
+  }
 
-  const perUnitBedrooms = combinedBedrooms / 2;
   const repaired = await storage.updateCommunityDraft(draft.id, {
-    unit1Bedrooms: perUnitBedrooms,
-    unit2Bedrooms: perUnitBedrooms,
-    combinedBedrooms,
+    unit1Bedrooms: resolved.unit1,
+    unit2Bedrooms: resolved.unit2,
+    combinedBedrooms: resolved.combined,
   } as any);
   if (repaired) {
     console.log(
-      `[draft-bedrooms] inferred combo bedrooms for draft ${draft.id}: ` +
-      `combined=${combinedBedrooms}, units=${perUnitBedrooms}+${perUnitBedrooms}`,
+      `[draft-bedrooms] repaired combo bedrooms for draft ${draft.id}: ` +
+      `combined=${resolved.combined}, units=${resolved.unit1}+${resolved.unit2}`,
     );
   }
   return repaired ?? null;
 }
 
 function inferCombinedCommunityDraftBedroomCount(draft: any): number | null {
-  const structured = positiveDraftInteger(draft?.combinedBedrooms);
-  if (structured) return structured;
-
-  const text = [
-    draft?.listingTitle,
-    draft?.bookingTitle,
-    draft?.name,
-    draft?.unitTypes,
-    draft?.listingDescription,
-  ].filter(Boolean).join(" ");
-  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  return match ? positiveDraftInteger(match[1]) : null;
+  return inferCombinedBedroomsFromDraft(draft);
 }
 
 function inferCommunityDraftBedroomCount(draft: any, unitKey: "unit1" | "unit2"): number | null {
-  const stored = unitKey === "unit1" ? draft?.unit1Bedrooms : draft?.unit2Bedrooms;
-  const combined = draft?.singleListing === true ? inferCombinedCommunityDraftBedroomCount(draft) : null;
-  const fromStructured = positiveDraftInteger(stored) ?? positiveDraftInteger(combined);
-  if (fromStructured) return fromStructured;
-
-  const unitText = [
-    unitKey === "unit1" ? draft?.unit1Description : draft?.unit2Description,
-    unitKey === "unit1" ? draft?.unit1Bedding : draft?.unit2Bedding,
-    unitKey === "unit1" ? draft?.unit1ShortDescription : draft?.unit2ShortDescription,
-    unitKey === "unit1" ? draft?.unit1LongDescription : draft?.unit2LongDescription,
-  ].filter(Boolean).join(" ");
-  const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  if (unitMatch) return positiveDraftInteger(unitMatch[1]);
-
-  if (draft?.singleListing !== true) {
-    const comboBedrooms = inferCombinedCommunityDraftBedroomCount(draft);
-    return comboBedrooms && comboBedrooms % 2 === 0 ? comboBedrooms / 2 : null;
-  }
-
-  const text = [
-    draft?.listingTitle,
-    draft?.bookingTitle,
-    draft?.name,
-    draft?.unitTypes,
-    draft?.listingDescription,
-  ].filter(Boolean).join(" ");
-  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  return match ? positiveDraftInteger(match[1]) : null;
+  return resolveDraftUnitBedrooms(draft, unitKey);
 }
 
 function parseGuestyAddress(listing: any): { full: string; city: string; state: string; streetAddress: string | null } {

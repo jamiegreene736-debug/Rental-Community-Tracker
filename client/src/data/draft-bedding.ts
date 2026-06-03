@@ -12,6 +12,7 @@
 // confirm the unit's real layout.
 
 import type { CommunityDraft } from "@shared/schema";
+import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import type {
   PropertyBeddingConfig,
   UnitBeddingConfig,
@@ -106,35 +107,6 @@ function positiveInteger(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function inferBedroomCount(draft: CommunityDraft, unitKey: "unit1" | "unit2"): number {
-  const stored = unitKey === "unit1" ? draft.unit1Bedrooms : draft.unit2Bedrooms;
-  const combined = (draft as any).singleListing === true ? draft.combinedBedrooms : null;
-  const fromStructured = positiveInteger(stored) ?? positiveInteger(combined);
-  if (fromStructured) return fromStructured;
-
-  const unitText = [
-    unitKey === "unit1" ? draft.unit1Description : draft.unit2Description,
-    unitKey === "unit1" ? draft.unit1Bedding : draft.unit2Bedding,
-    unitKey === "unit1" ? draft.unit1ShortDescription : draft.unit2ShortDescription,
-    unitKey === "unit1" ? draft.unit1LongDescription : draft.unit2LongDescription,
-  ].filter(Boolean).join(" ");
-  const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  const fromUnitText = unitMatch ? positiveInteger(unitMatch[1]) : null;
-  if (fromUnitText) return fromUnitText;
-  if ((draft as any).singleListing !== true) return 2;
-
-  const text = [
-    draft.listingTitle,
-    draft.bookingTitle,
-    draft.name,
-    draft.unitTypes,
-    draft.listingDescription,
-  ].filter(Boolean).join(" ");
-  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  const fromText = match ? positiveInteger(match[1]) : null;
-  return fromText ?? 2;
-}
-
 function defaultBathrooms(bathroomCount: number, hasMasterEnsuite: boolean): BathroomDetail[] {
   const fullCount = Math.floor(bathroomCount);
   const halfCount = bathroomCount - fullCount > 0 ? 1 : 0;
@@ -196,8 +168,8 @@ export function buildDraftBeddingConfig(
   draft: CommunityDraft,
   propertyId: number,
 ): PropertyBeddingConfig {
-  const u1Br = inferBedroomCount(draft, "unit1");
-  const u2Br = inferBedroomCount(draft, "unit2");
+  const u1Br = resolveDraftUnitBedrooms(draft, "unit1");
+  const u2Br = resolveDraftUnitBedrooms(draft, "unit2");
   const unit1 = unitFromDraft(`draft${draft.id}-unit-a`, "A", u1Br, draft.unit1Bathrooms, draft.unit1Bedding);
   const unit2 = unitFromDraft(`draft${draft.id}-unit-b`, "B", u2Br, draft.unit2Bathrooms, draft.unit2Bedding);
   return {

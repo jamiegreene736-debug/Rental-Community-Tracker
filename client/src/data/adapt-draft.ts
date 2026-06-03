@@ -17,6 +17,7 @@ import { buildDraftPropertyPricing } from "@/data/draft-pricing";
 import { buildDraftBeddingConfig } from "@/data/draft-bedding";
 import { registerDraftBeddingDefaults, type PropertyBeddingConfig } from "@/data/bedding-config";
 import { registerDraftPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
+import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 
 // Sample license placeholders for promoted drafts. Active properties
 // in unit-builder-data have hand-curated values for the four
@@ -345,40 +346,6 @@ function unitNumberFromAddress(address: string | null): string {
   return trailing?.[1] ? trailing[1].toUpperCase() : "A";
 }
 
-function positiveInteger(value: unknown): number | null {
-  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-function inferDraftBedroomCount(draft: CommunityDraft, unitKey: "unit1" | "unit2"): number {
-  const stored = unitKey === "unit1" ? draft.unit1Bedrooms : draft.unit2Bedrooms;
-  const combined = (draft as any).singleListing === true ? draft.combinedBedrooms : null;
-  const fromStructured = positiveInteger(stored) ?? positiveInteger(combined);
-  if (fromStructured) return fromStructured;
-
-  const unitText = [
-    unitKey === "unit1" ? draft.unit1Description : draft.unit2Description,
-    unitKey === "unit1" ? draft.unit1Bedding : draft.unit2Bedding,
-    unitKey === "unit1" ? draft.unit1ShortDescription : draft.unit2ShortDescription,
-    unitKey === "unit1" ? draft.unit1LongDescription : draft.unit2LongDescription,
-  ].filter(Boolean).join(" ");
-  const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  const fromUnitText = unitMatch ? positiveInteger(unitMatch[1]) : null;
-  if (fromUnitText) return fromUnitText;
-  if ((draft as any).singleListing !== true) return 2;
-
-  const text = [
-    draft.listingTitle,
-    draft.bookingTitle,
-    draft.name,
-    draft.unitTypes,
-    draft.listingDescription,
-  ].filter(Boolean).join(" ");
-  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  const fromText = match ? positiveInteger(match[1]) : null;
-  return fromText ?? 2;
-}
-
 function descriptionForDraft(draft: CommunityDraft): string {
   const text = draft.listingDescription ?? "";
   if ((draft as any).singleListing !== true) return text;
@@ -395,8 +362,8 @@ export function adaptDraftToPropertyUnitBuilder(
   draft: CommunityDraft,
   photoFiles: Record<string, string[]> = {},
 ): PropertyUnitBuilder {
-  const u1Br = inferDraftBedroomCount(draft, "unit1");
-  const u2Br = inferDraftBedroomCount(draft, "unit2");
+  const u1Br = resolveDraftUnitBedrooms(draft, "unit1");
+  const u2Br = resolveDraftUnitBedrooms(draft, "unit2");
   const blank = "";
   const licenseSamples = sampleLicensesForLocation(draft.city, draft.state);
   const realDraftValue = (value: unknown): string | undefined => {

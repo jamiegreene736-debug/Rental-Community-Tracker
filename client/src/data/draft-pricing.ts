@@ -13,6 +13,7 @@
 // schedule shape — operators can compare them apples-to-apples.
 
 import type { CommunityDraft } from "@shared/schema";
+import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import {
   type PropertyPricing,
   type UnitPricing,
@@ -70,35 +71,6 @@ function positiveMoney(value: unknown): number | null {
     ? value
     : Number.parseFloat(String(value ?? "").replace(/[$,]/g, ""));
   return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-function inferDraftBedroomCount(draft: CommunityDraft, unitKey: "unit1" | "unit2"): number {
-  const stored = unitKey === "unit1" ? draft.unit1Bedrooms : draft.unit2Bedrooms;
-  const combined = (draft as any).singleListing === true ? draft.combinedBedrooms : null;
-  const fromStructured = positiveInteger(stored) ?? positiveInteger(combined);
-  if (fromStructured) return fromStructured;
-
-  const unitText = [
-    unitKey === "unit1" ? draft.unit1Description : draft.unit2Description,
-    unitKey === "unit1" ? draft.unit1Bedding : draft.unit2Bedding,
-    unitKey === "unit1" ? draft.unit1ShortDescription : draft.unit2ShortDescription,
-    unitKey === "unit1" ? draft.unit1LongDescription : draft.unit2LongDescription,
-  ].filter(Boolean).join(" ");
-  const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  const fromUnitText = unitMatch ? positiveInteger(unitMatch[1]) : null;
-  if (fromUnitText) return fromUnitText;
-  if ((draft as any).singleListing !== true) return 2;
-
-  const text = [
-    draft.listingTitle,
-    draft.bookingTitle,
-    draft.name,
-    draft.unitTypes,
-    draft.listingDescription,
-  ].filter(Boolean).join(" ");
-  const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-  const fromText = match ? positiveInteger(match[1]) : null;
-  return fromText ?? 2;
 }
 
 // Pick a base buy-in for a single unit. Order of preference:
@@ -159,8 +131,8 @@ export function buildDraftPropertyPricing(
       : draft.name;
 
   const isSingle = (draft as any).singleListing === true;
-  const u1Br = inferDraftBedroomCount(draft, "unit1");
-  const u2Br = inferDraftBedroomCount(draft, "unit2");
+  const u1Br = resolveDraftUnitBedrooms(draft, "unit1");
+  const u2Br = resolveDraftUnitBedrooms(draft, "unit2");
 
   const unit1BaseBuyIn = baseBuyInForUnit(draft, u1Br, region);
   const unit2BaseBuyIn = baseBuyInForUnit(draft, u2Br, region);

@@ -73,6 +73,7 @@ import { getBuyInRate } from "@shared/pricing-rates";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
+import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { usePortalSession } from "@/lib/auth";
 
@@ -1389,48 +1390,8 @@ function AdminDashboard() {
       const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
       return Number.isFinite(n) && n > 0 ? n : null;
     };
-    const inferCombinedBedrooms = (d: CommunityDraft): number | null => {
-      const stored = positiveInt(d.combinedBedrooms);
-      if (stored) return stored;
-      const text = [
-        d.listingTitle,
-        d.bookingTitle,
-        d.name,
-        d.unitTypes,
-        d.listingDescription,
-      ].filter(Boolean).join(" ");
-      const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-      return positiveInt(match?.[1]);
-    };
-    const inferBedrooms = (d: CommunityDraft, unitKey: "unit1" | "unit2") => {
-      const stored = unitKey === "unit1" ? d.unit1Bedrooms : d.unit2Bedrooms;
-      const combined = (d as any).singleListing === true ? inferCombinedBedrooms(d) : null;
-      const structured = positiveInt(stored) ?? positiveInt(combined);
-      if (structured) return structured;
-
-      const unitText = [
-        unitKey === "unit1" ? (d as any).unit1Description : (d as any).unit2Description,
-        unitKey === "unit1" ? d.unit1Bedding : d.unit2Bedding,
-        unitKey === "unit1" ? (d as any).unit1ShortDescription : (d as any).unit2ShortDescription,
-        unitKey === "unit1" ? (d as any).unit1LongDescription : (d as any).unit2LongDescription,
-      ].filter(Boolean).join(" ");
-      const unitMatch = unitText.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-      if (unitMatch) return positiveInt(unitMatch[1]) ?? 0;
-      if ((d as any).singleListing !== true) {
-        const combinedBedrooms = inferCombinedBedrooms(d);
-        return combinedBedrooms && combinedBedrooms % 2 === 0 ? combinedBedrooms / 2 : 0;
-      }
-
-      const text = [
-        d.listingTitle,
-        d.bookingTitle,
-        d.name,
-        d.unitTypes,
-        d.listingDescription,
-      ].filter(Boolean).join(" ");
-      const match = text.match(/(\d{1,2})\s*(?:br|bd|bed(?:room)?s?)/i);
-      return positiveInt(match?.[1]) ?? 0;
-    };
+    const inferBedrooms = (d: CommunityDraft, unitKey: "unit1" | "unit2") =>
+      resolveDraftUnitBedrooms(d, unitKey);
     const inferSleeps = (d: CommunityDraft, bedrooms: number) => {
       const stored = positiveInt(d.unit1MaxGuests);
       if (stored) return stored;
