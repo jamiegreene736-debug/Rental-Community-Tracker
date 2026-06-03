@@ -2746,6 +2746,16 @@ function normalizeDestinationGuardText(value) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function vrboSearchDestinationFromUrl(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ""));
+    if (!/(^|\.)vrbo\.com$/i.test(url.hostname) || !/\/search/i.test(url.pathname)) return "";
+    return normalizeDestinationGuardText(url.searchParams.get("destination") || "");
+  } catch {
+    return "";
+  }
+}
+
 function destinationGuardTokens(...values) {
   const stop = new Set([
     "resort",
@@ -2781,6 +2791,22 @@ function stateMatchesExpectedDestination(state, ...expectedValues) {
   if (!state) return false;
   const expectedText = normalizeDestinationGuardText(expectedValues.filter(Boolean).join(" "));
   const haystack = normalizeDestinationGuardText(`${state.url ?? ""} ${state.title ?? ""} ${state.bodyExcerpt ?? ""}`);
+  const urlDestination = vrboSearchDestinationFromUrl(state?.url ?? "");
+  const genericLocationTokens = new Set([
+    "hawaii", "koloa", "kauai", "island", "states", "america", "united", "beach", "county",
+  ]);
+  const resortTokens = destinationGuardTokens(...expectedValues)
+    .filter((token) => !genericLocationTokens.has(token));
+  if (urlDestination) {
+    if (resortTokens.length >= 2) {
+      const hits = resortTokens.filter((token) => urlDestination.includes(token)).length;
+      const required = Math.min(2, resortTokens.length);
+      if (hits < required) return false;
+    }
+    if (/\bpoipu\b/.test(expectedText) && /\bkai\b/.test(expectedText) && /\bbrennecke\b/.test(urlDestination)) {
+      return false;
+    }
+  }
   const tokens = destinationGuardTokens(...expectedValues);
   if (tokens.length === 0) return true;
   if (tokens.every((token) => haystack.includes(token))) return true;
@@ -2790,10 +2816,12 @@ function stateMatchesExpectedDestination(state, ...expectedValues) {
       return true;
     }
   }
-  if (/\bpoipu\s+kai\b/.test(expectedText)) {
+  // Only use the relaxed Poipu-Kai body heuristic when VRBO did not land on a
+  // contradictory /search?destination= URL (e.g. Brennecke Beach in Koloa).
+  if (!urlDestination && /\bpoipu\s+kai\b/.test(expectedText)) {
     return /\bpoipu\b/.test(haystack) &&
       /\b(kai|koloa|kauai)\b/.test(haystack) &&
-      !/\b(kissimmee|orlando|florida)\b/.test(haystack);
+      !/\b(kissimmee|orlando|florida|brennecke)\b/.test(haystack);
   }
   return false;
 }
@@ -4245,7 +4273,9 @@ async function runOtaSearchVariants(id, label, variants, runVariant, options = {
         candidateCount: Array.isArray(cards) ? cards.length : 0,
       });
       allCards.push(...cards);
-      const signature = options.stopAfterDuplicateResults ? candidateResultSetSignature(cards) : "";
+      const signature = options.stopAfterDuplicateResults && Array.isArray(cards) && cards.length > 0
+        ? candidateResultSetSignature(cards)
+        : "";
       if (signature) {
         const count = (duplicateResultCounts.get(signature) || 0) + 1;
         duplicateResultCounts.set(signature, count);
@@ -4488,13 +4518,35 @@ async function readVrboHomepageFormSnapshot(targetPage) {
           el.getAttribute?.("placeholder"),
         ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
       }
+      const isPlaceholderDestination = (text) => /^where\s*to\??$/i.test(String(text || "").trim());
+      const destinationSelectors = [
+        'input[name="destination"]',
+        "#destination_form_field",
+        'input[id*="destination" i]',
+        'input[placeholder*="Where" i]',
+        '[role="combobox"][aria-label*="Where" i]',
+      ];
+      let destination = "";
+      for (const selector of destinationSelectors) {
+        const el = document.querySelector(selector);
+        if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
+        const rawValue = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+          ? String(el.value || "").replace(/\s+/g, " ").trim()
+          : String(el.textContent || el.getAttribute?.("value") || "").replace(/\s+/g, " ").trim();
+        if (rawValue.length >= 3 && rawValue.length <= 180 && !isPlaceholderDestination(rawValue)) {
+          destination = rawValue;
+          break;
+        }
+      }
       const controls = Array.from(document.querySelectorAll("input, button, [role='button'], [role='textbox'], [aria-label], [data-stid]"))
         .filter((el) => el instanceof HTMLElement && isVisible(el))
         .map((el) => ({ text: textOf(el), cls: String(el.className || "") }));
-      const destination = controls
-        .filter(({ text, cls }) => /destination|where to|where\?/i.test(`${text} ${cls}`) || /destination/i.test(cls))
-        .map(({ text }) => text)
-        .find((text) => text.length >= 3 && text.length <= 180) || "";
+      if (!destination) {
+        destination = controls
+          .filter(({ text, cls }) => /destination|where to|where\?/i.test(`${text} ${cls}`) || /destination/i.test(cls))
+          .map(({ text }) => text)
+          .find((text) => text.length >= 3 && text.length <= 180 && !isPlaceholderDestination(text)) || "";
+      }
       const dates = controls
         .filter(({ text }) => /\b(?:dates?|check[\s-]*in|check[\s-]*out|arrival|departure)\b/i.test(text))
         .map(({ text }) => text)
@@ -5374,6 +5426,27 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   log(`vrbo_search ${id}: entered dates via VRBO homepage controls (${checkIn}→${checkOut})`);
   const visibleSearchWasAuthoritative = Boolean(primedDestination && pmDateEntryComplete(dateEntry));
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
+  // VRBO often resets the destination to a geolocated default (e.g. Brennecke
+  // Beach) after the calendar closes. Re-assert the dropdown selection before Search.
+  const postDateSnapshot = await readVrboHomepageFormSnapshot(page);
+  const postDateCheck = vrboHomepageFormMatchesRequest(
+    postDateSnapshot,
+    checkIn,
+    checkOut,
+    effectiveSearchTerm,
+    destination,
+  );
+  if (!postDateCheck.destinationOk) {
+    log(
+      `vrbo_search ${id}: destination drifted after date entry` +
+      `${postDateSnapshot?.destination ? ` (field="${String(postDateSnapshot.destination).slice(0, 80)}")` : ""}; re-selecting "${effectiveSearchTerm}"`,
+    );
+    await fillVrboDestinationField(page, typedQuery, "vrbo_search_post_dates", {
+      targetSuggestion: variant?.suggestionText || effectiveSearchTerm,
+      requestId: id,
+    }).catch(() => null);
+    await dismissObstructions(page, "vrbo_search_post_dates").catch(() => []);
+  }
   let formSnapshot = await readVrboHomepageFormSnapshot(page);
   let formCheck = vrboHomepageFormMatchesRequest(formSnapshot, checkIn, checkOut, effectiveSearchTerm, destination);
   if (!formCheck.destinationOk || !formCheck.datesOk) {
