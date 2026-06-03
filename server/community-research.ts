@@ -1511,7 +1511,8 @@ export async function researchCommunitiesForCity(
   // timeshares, condo-hotels, and large branded resort chains.
   const commonExclusions = '-hotel -timeshare -"condo hotel" -"condo-hotel" -marriott -hilton -westin -sheraton -hyatt -"vacation club" -villa -"single family"';
 
-  // Combo queries focus on individually-owned 2BR/3BR mix (combinable).
+  // Combo queries focus on individually-owned 2BR/3BR/4BR/5BR mix
+  // so the scan can flag 6BR, 7BR, and 8BR two-unit potential.
   // Single-listing queries expand to lists/round-ups of "best vacation
   // rental resorts/condos in {city}" — those pages routinely name 5–10
   // specific resorts (Santa Maria Resort, Sandcastle Beach Club, etc.)
@@ -1525,13 +1526,15 @@ export async function researchCommunitiesForCity(
         `"${cityForQuery}" "${stateForQuery}" beach resort condo 2BR 3BR vacation rental airbnb ${commonExclusions}`,
       ]
     : [
-        `"${cityForQuery}" "${stateForQuery}" (condo OR condominium) complex vacation rental 2-bedroom OR 3-bedroom airbnb vrbo individually owned ${commonExclusions} -efficiency -studio`,
-        `"${cityForQuery}" "${stateForQuery}" townhome OR townhouse cluster 3 bedroom vacation rental airbnb individually owned ${commonExclusions} -studio`,
-        `"${cityForQuery}" "${stateForQuery}" beach condo resort 2BR 3BR individually owned vacation rental ${commonExclusions} -efficiency`,
+        `"${cityForQuery}" "${stateForQuery}" (condo OR condominium) complex vacation rental 2-bedroom OR 3-bedroom OR 4-bedroom airbnb vrbo individually owned ${commonExclusions} -efficiency -studio`,
+        `"${cityForQuery}" "${stateForQuery}" townhome OR townhouse cluster 3 bedroom OR 4 bedroom vacation rental airbnb individually owned ${commonExclusions} -studio`,
+        `"${cityForQuery}" "${stateForQuery}" beach condo resort 2BR 3BR 4BR individually owned vacation rental ${commonExclusions} -efficiency`,
         `"${cityForQuery}" "${stateForQuery}" "2 bedroom" "condo" "vacation rental" resort ${commonExclusions}`,
         `"${cityForQuery}" "${stateForQuery}" "3 bedroom" "condo" OR "townhome" "vacation rental" ${commonExclusions}`,
+        `"${cityForQuery}" "${stateForQuery}" "4 bedroom" "condo" OR "townhome" "vacation rental" ${commonExclusions}`,
+        `"${cityForQuery}" "${stateForQuery}" "5 bedroom" "condo" OR "townhome" "vacation rental" ${commonExclusions}`,
         ...(knownComboNames
-          ? [`"${cityForQuery}" "${stateForQuery}" (${knownComboNames}) condo townhome vacation rental 2BR 3BR ${commonExclusions}`]
+          ? [`"${cityForQuery}" "${stateForQuery}" (${knownComboNames}) condo townhome vacation rental 2BR 3BR 4BR 5BR ${commonExclusions}`]
           : []),
         // Extra HI-specific queries for exhaustive coverage on any Hawaii city (used only for HI to keep non-HI sweeps fast).
         ...(isHawaii ? [
@@ -1695,6 +1698,7 @@ THE BUSINESS MODEL:
 
 CONCRETE EXAMPLES of what we want:
   ✅ Santa Maria Resort (Fort Myers Beach, FL) — condo building, mostly 2BR/3BR units, individually owned, all listed on Airbnb/VRBO. Combining 2×3BR = 6BR. This is the gold standard.
+  ✅ Larger-bedroom opportunity — a resort with 3BR + 4BR or 4BR + 4BR attached condo/townhome inventory can support 7BR/8BR combo listings.
   ✅ Pili Mai (Poipu Kai, HI) — townhome complex, 2BR/3BR, individually owned.
   ✅ Kaha Lani (Kauai) — beachfront condo complex, 2BR/3BR.
   ⚠️ BB&T / Bay Beach & Tennis (Bonita Springs, FL) — mostly efficiency/1BR. 2×1BR = 2BR is WEAK. combinabilityScore 20–35.
@@ -1712,8 +1716,9 @@ STRICT QUALIFYING CRITERIA:
 SCORING:
   confidenceScore (0–100): sure this is individually-owned condo/townhome? 90+ household name, 70–89 very likely, 50–69 probably, <50 don't include.
   combinabilityScore (0–100): value of combining 2 units?
-    90+: mostly 3BR → 2×3BR = 6BR (ideal)
-    70–89: 2BR/3BR mix → 4BR–6BR
+    95+: common 4BR+ inventory, or 3BR+4BR / 4BR+4BR combinations → 7BR/8BR potential
+    90–94: mostly 3BR → 2×3BR = 6BR (ideal)
+    70–89: 2BR/3BR/4BR mix → 4BR–8BR
     50–69: mostly 2BR → 4BR combined
     30–49: mostly 1BR → 2BR combined (marginal)
     <30: mostly studios → skip
@@ -1749,6 +1754,8 @@ ${unique.length
 
 Output JSON array. Each element:
 {"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"estimatedBedroomUnitCounts":{"2":N,"3":N},"minimumStayNights":N|null,"minimumStayEvidence":"short source-backed note or empty","minimumStaySourceUrl":"source url or empty","combinedBedroomsTypical":N,"unitTypes":"...","confidenceScore":0-100,"combinabilityScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":false,"addressHint":"optional e.g. 2611 Kiahuna Plantation Dr"}
+
+When credible public evidence shows 4BR or 5BR attached condo/townhome units, include those values in availableBedrooms and estimatedBedroomUnitCounts. Do not invent them; absence of 4BR/5BR evidence should remain absent so the UI can show "No 7/8BR combo".
 
 Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Max ${isHawaii ? 15 : 10} results${isHawaii ? " (exhaustive for Hawaii cities)" : ""}. Sort by (confidenceScore + combinabilityScore) descending. No markdown, no prose.`;
 
@@ -1949,108 +1956,109 @@ export type TopMarketSeed = {
   estimatedComboLow: number;
   estimatedComboHigh: number;
   sixBedroomPossible?: boolean;
+  sevenEightBedroomPossible?: boolean;
 };
 
 export const TOP_MARKET_SEEDS: TopMarketSeed[] = [
   // Gulf Coast Florida — classic condo country
-  { city: "Fort Myers Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 450, estimatedComboHigh: 850, sixBedroomPossible: true },
-  { city: "Destin",              state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 500, estimatedComboHigh: 950, sixBedroomPossible: true },
-  { city: "Panama City Beach",   state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 375, estimatedComboHigh: 750, sixBedroomPossible: true },
-  { city: "Santa Rosa Beach",    state: "Florida",        tag: "30A",        estimatedComboLow: 650, estimatedComboHigh: 1200, sixBedroomPossible: true },
-  { city: "Naples",              state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 500, estimatedComboHigh: 950, sixBedroomPossible: true },
+  { city: "Fort Myers Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 450, estimatedComboHigh: 850, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Destin",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 500, estimatedComboHigh: 950, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Panama City Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 375, estimatedComboHigh: 750, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Santa Rosa Beach",    state: "Florida",        tag: "30A",        estimatedComboLow: 650, estimatedComboHigh: 1200, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Naples",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 500, estimatedComboHigh: 950, sixBedroomPossible: true, sevenEightBedroomPossible: true },
   // Atlantic Florida + Southeast
-  { city: "Clearwater Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 450, estimatedComboHigh: 850, sixBedroomPossible: true },
-  { city: "Hilton Head",         state: "South Carolina", tag: "Atlantic",   estimatedComboLow: 500, estimatedComboHigh: 1000, sixBedroomPossible: true },
-  { city: "Myrtle Beach",        state: "South Carolina", tag: "Atlantic",   estimatedComboLow: 300, estimatedComboHigh: 650, sixBedroomPossible: true },
+  { city: "Clearwater Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 450, estimatedComboHigh: 850, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Hilton Head",    state: "South Carolina", tag: "Atlantic",   estimatedComboLow: 500, estimatedComboHigh: 1000, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Myrtle Beach",    state: "South Carolina", tag: "Atlantic",   estimatedComboLow: 300, estimatedComboHigh: 650, sixBedroomPossible: true, sevenEightBedroomPossible: true },
   // Gulf Alabama
-  { city: "Gulf Shores",         state: "Alabama",        tag: "Gulf Coast", estimatedComboLow: 350, estimatedComboHigh: 700, sixBedroomPossible: true },
-  { city: "Orange Beach",        state: "Alabama",        tag: "Gulf Coast", estimatedComboLow: 425, estimatedComboHigh: 850, sixBedroomPossible: true },
+  { city: "Gulf Shores",    state: "Alabama",        tag: "Gulf Coast", estimatedComboLow: 350, estimatedComboHigh: 700, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Orange Beach",    state: "Alabama",        tag: "Gulf Coast", estimatedComboLow: 425, estimatedComboHigh: 850, sixBedroomPossible: true, sevenEightBedroomPossible: true },
   // Tennessee Smokies — condo/cabin mix (cabins dominate; fewer shared-wall 3BR condo pairs)
-  { city: "Gatlinburg",          state: "Tennessee",      tag: "Smokies",    estimatedComboLow: 450, estimatedComboHigh: 900, sixBedroomPossible: false },
-  { city: "Pigeon Forge",        state: "Tennessee",      tag: "Smokies",    estimatedComboLow: 450, estimatedComboHigh: 900, sixBedroomPossible: false },
+  { city: "Gatlinburg",    state: "Tennessee",      tag: "Smokies",    estimatedComboLow: 450, estimatedComboHigh: 900, sixBedroomPossible: false, sevenEightBedroomPossible: false },
+  { city: "Pigeon Forge",    state: "Tennessee",      tag: "Smokies",    estimatedComboLow: 450, estimatedComboHigh: 900, sixBedroomPossible: false, sevenEightBedroomPossible: false },
   // Mountain West — ski condos
-  { city: "Breckenridge",        state: "Colorado",       tag: "Ski",        estimatedComboLow: 700, estimatedComboHigh: 1400, sixBedroomPossible: true },
-  { city: "Park City",           state: "Utah",           tag: "Ski",        estimatedComboLow: 750, estimatedComboHigh: 1500, sixBedroomPossible: true },
-  { city: "Mammoth Lakes",       state: "California",     tag: "Ski",        estimatedComboLow: 650, estimatedComboHigh: 1300, sixBedroomPossible: true },
+  { city: "Breckenridge",    state: "Colorado",       tag: "Ski",        estimatedComboLow: 700, estimatedComboHigh: 1400, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Park City",    state: "Utah",           tag: "Ski",        estimatedComboLow: 750, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Mammoth Lakes",    state: "California",     tag: "Ski",        estimatedComboLow: 650, estimatedComboHigh: 1300, sixBedroomPossible: true, sevenEightBedroomPossible: true },
   // Desert / SoCal
-  { city: "Palm Springs",        state: "California",     tag: "Desert",     estimatedComboLow: 550, estimatedComboHigh: 1100, sixBedroomPossible: true },
+  { city: "Palm Springs",    state: "California",     tag: "Desert",     estimatedComboLow: 550, estimatedComboHigh: 1100, sixBedroomPossible: true, sevenEightBedroomPossible: false },
   // Texas coast
-  { city: "South Padre Island",  state: "Texas",          tag: "Gulf Coast", estimatedComboLow: 300, estimatedComboHigh: 650, sixBedroomPossible: true },
-  { city: "Galveston",           state: "Texas",          tag: "Gulf Coast", estimatedComboLow: 325, estimatedComboHigh: 700, sixBedroomPossible: true },
+  { city: "South Padre Island",    state: "Texas",          tag: "Gulf Coast", estimatedComboLow: 300, estimatedComboHigh: 650, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Galveston",    state: "Texas",          tag: "Gulf Coast", estimatedComboLow: 325, estimatedComboHigh: 700, sixBedroomPossible: true, sevenEightBedroomPossible: true },
   // Hawaii - operator home market. These are intentionally city/area
   // seeds, not individual resort names; the research pipeline then
   // discovers the actual condo/townhome communities inside each market.
   // Kauai
-  { city: "Koloa",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 850, estimatedComboHigh: 1900, sixBedroomPossible: true },
-  { city: "Poipu",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 900, estimatedComboHigh: 2000, sixBedroomPossible: true },
-  { city: "Princeville",         state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 850, estimatedComboHigh: 1800, sixBedroomPossible: true },
-  { city: "Hanalei",             state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 900, estimatedComboHigh: 2000, sixBedroomPossible: true },
-  { city: "Wainiha",             state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 800, estimatedComboHigh: 1800, sixBedroomPossible: true },
-  { city: "Haena",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 850, estimatedComboHigh: 1900, sixBedroomPossible: true },
-  { city: "Kilauea",             state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 750, estimatedComboHigh: 1600, sixBedroomPossible: true },
-  { city: "Kapaa",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true },
-  { city: "Wailua",              state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true },
-  { city: "Waipouli",            state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 725, estimatedComboHigh: 1550, sixBedroomPossible: true },
-  { city: "Lihue",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true },
-  { city: "Nawiliwili",          state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true },
-  { city: "Puhi",                state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true },
-  { city: "Kalaheo",             state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true },
-  { city: "Lawai",               state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true },
-  { city: "Eleele",              state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true },
-  { city: "Hanapepe",            state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true },
-  { city: "Port Allen",          state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true },
-  { city: "Waimea",              state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true },
-  { city: "Kekaha",              state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 575, estimatedComboHigh: 1200, sixBedroomPossible: true },
-  { city: "Kaumakani",           state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 575, estimatedComboHigh: 1200, sixBedroomPossible: true },
-  { city: "Numila",              state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 575, estimatedComboHigh: 1200, sixBedroomPossible: true },
+  { city: "Koloa",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 850, estimatedComboHigh: 1900, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Poipu",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 900, estimatedComboHigh: 2000, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Princeville",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 850, estimatedComboHigh: 1800, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Hanalei",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 900, estimatedComboHigh: 2000, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Wainiha",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 800, estimatedComboHigh: 1800, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Haena",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 850, estimatedComboHigh: 1900, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kilauea",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 750, estimatedComboHigh: 1600, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kapaa",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Wailua",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Waipouli",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 725, estimatedComboHigh: 1550, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Lihue",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Nawiliwili",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Puhi",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kalaheo",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Lawai",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Eleele",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Hanapepe",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Port Allen",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Waimea",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kekaha",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 575, estimatedComboHigh: 1200, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kaumakani",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 575, estimatedComboHigh: 1200, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Numila",    state: "Hawaii",         tag: "Hawaii - Kauai",       estimatedComboLow: 575, estimatedComboHigh: 1200, sixBedroomPossible: true, sevenEightBedroomPossible: false },
   // Maui
-  { city: "Kihei",               state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 850, estimatedComboHigh: 1700, sixBedroomPossible: true },
-  { city: "Wailea",              state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2300, sixBedroomPossible: true },
-  { city: "Makena",              state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2300, sixBedroomPossible: true },
-  { city: "Maalaea",             state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 750, estimatedComboHigh: 1600, sixBedroomPossible: true },
-  { city: "Lahaina",             state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 900, estimatedComboHigh: 2100, sixBedroomPossible: true },
-  { city: "Kaanapali",           state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2400, sixBedroomPossible: true },
-  { city: "Kapalua",             state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2400, sixBedroomPossible: true },
-  { city: "Napili-Honokowai",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 850, estimatedComboHigh: 1900, sixBedroomPossible: true },
-  { city: "Kahana",              state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 850, estimatedComboHigh: 1900, sixBedroomPossible: true },
-  { city: "Honokowai",           state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 800, estimatedComboHigh: 1800, sixBedroomPossible: true },
-  { city: "Wailuku",             state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true },
-  { city: "Kahului",             state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 625, estimatedComboHigh: 1300, sixBedroomPossible: true },
-  { city: "Paia",                state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true },
-  { city: "Hana",                state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true },
+  { city: "Kihei",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 850, estimatedComboHigh: 1700, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Wailea",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2300, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Makena",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2300, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Maalaea",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 750, estimatedComboHigh: 1600, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Lahaina",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 900, estimatedComboHigh: 2100, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kaanapali",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2400, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Kapalua",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 1000, estimatedComboHigh: 2400, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Napili-Honokowai",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 850, estimatedComboHigh: 1900, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kahana",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 850, estimatedComboHigh: 1900, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Honokowai",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 800, estimatedComboHigh: 1800, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Wailuku",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 650, estimatedComboHigh: 1400, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kahului",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 625, estimatedComboHigh: 1300, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Paia",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Hana",    state: "Hawaii",         tag: "Hawaii - Maui",        estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: false },
   // Big Island
-  { city: "Kailua-Kona",         state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 750, estimatedComboHigh: 1500, sixBedroomPossible: true },
-  { city: "Keauhou",             state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 775, estimatedComboHigh: 1600, sixBedroomPossible: true },
-  { city: "Holualoa",            state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true },
-  { city: "Captain Cook",        state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 675, estimatedComboHigh: 1400, sixBedroomPossible: true },
-  { city: "Waikoloa",            state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 800, estimatedComboHigh: 1700, sixBedroomPossible: true },
-  { city: "Kohala Coast",        state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 950, estimatedComboHigh: 2200, sixBedroomPossible: true },
-  { city: "Mauna Lani",          state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 950, estimatedComboHigh: 2200, sixBedroomPossible: true },
-  { city: "Mauna Kea",           state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 950, estimatedComboHigh: 2200, sixBedroomPossible: true },
-  { city: "Puako",               state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 875, estimatedComboHigh: 1900, sixBedroomPossible: true },
-  { city: "Kamuela",             state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true },
-  { city: "Hilo",                state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 550, estimatedComboHigh: 1200, sixBedroomPossible: true },
-  { city: "Volcano",             state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 550, estimatedComboHigh: 1200, sixBedroomPossible: true },
-  { city: "Pahoa",               state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 500, estimatedComboHigh: 1100, sixBedroomPossible: true },
-  { city: "Punaluu",             state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 500, estimatedComboHigh: 1100, sixBedroomPossible: true },
-  { city: "Pahala",              state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 500, estimatedComboHigh: 1100, sixBedroomPossible: true },
-  { city: "Naalehu",             state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 500, estimatedComboHigh: 1100, sixBedroomPossible: true },
+  { city: "Kailua-Kona",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 750, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Keauhou",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 775, estimatedComboHigh: 1600, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Holualoa",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Captain Cook",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 675, estimatedComboHigh: 1400, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Waikoloa",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 800, estimatedComboHigh: 1700, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Kohala Coast",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 950, estimatedComboHigh: 2200, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Mauna Lani",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 950, estimatedComboHigh: 2200, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Mauna Kea",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 950, estimatedComboHigh: 2200, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Puako",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 875, estimatedComboHigh: 1900, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Kamuela",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 700, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Hilo",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 550, estimatedComboHigh: 1200, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Volcano",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 550, estimatedComboHigh: 1200, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Pahoa",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 500, estimatedComboHigh: 1100, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Punaluu",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 500, estimatedComboHigh: 1100, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Pahala",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 500, estimatedComboHigh: 1100, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Naalehu",    state: "Hawaii",         tag: "Hawaii - Big Island",  estimatedComboLow: 500, estimatedComboHigh: 1100, sixBedroomPossible: true, sevenEightBedroomPossible: false },
   // Oahu
-  { city: "Kapolei",             state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 850, estimatedComboHigh: 1800, sixBedroomPossible: true },
-  { city: "Ko Olina",            state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 950, estimatedComboHigh: 2100, sixBedroomPossible: true },
-  { city: "Honolulu",            state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 700, estimatedComboHigh: 1600, sixBedroomPossible: true },
-  { city: "Waikiki",             state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 750, estimatedComboHigh: 1700, sixBedroomPossible: true },
-  { city: "Kailua",              state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 750, estimatedComboHigh: 1700, sixBedroomPossible: true },
-  { city: "Kaneohe",             state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 650, estimatedComboHigh: 1500, sixBedroomPossible: true },
-  { city: "Kahuku",              state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 800, estimatedComboHigh: 1800, sixBedroomPossible: true },
-  { city: "Turtle Bay",          state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 900, estimatedComboHigh: 2000, sixBedroomPossible: true },
-  { city: "Haleiwa",             state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 700, estimatedComboHigh: 1600, sixBedroomPossible: true },
-  { city: "Laie",                state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 650, estimatedComboHigh: 1450, sixBedroomPossible: true },
-  { city: "Waianae",             state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 600, estimatedComboHigh: 1350, sixBedroomPossible: true },
-  { city: "Makaha",              state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 600, estimatedComboHigh: 1350, sixBedroomPossible: true },
-  { city: "Ewa Beach",           state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 650, estimatedComboHigh: 1450, sixBedroomPossible: true },
+  { city: "Kapolei",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 850, estimatedComboHigh: 1800, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Ko Olina",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 950, estimatedComboHigh: 2100, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Honolulu",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 700, estimatedComboHigh: 1600, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Waikiki",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 750, estimatedComboHigh: 1700, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kailua",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 750, estimatedComboHigh: 1700, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kaneohe",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 650, estimatedComboHigh: 1500, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Kahuku",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 800, estimatedComboHigh: 1800, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Turtle Bay",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 900, estimatedComboHigh: 2000, sixBedroomPossible: true, sevenEightBedroomPossible: true },
+  { city: "Haleiwa",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 700, estimatedComboHigh: 1600, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Laie",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 650, estimatedComboHigh: 1450, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Waianae",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 600, estimatedComboHigh: 1350, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Makaha",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 600, estimatedComboHigh: 1350, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Ewa Beach",    state: "Hawaii",         tag: "Hawaii - Oahu",        estimatedComboLow: 650, estimatedComboHigh: 1450, sixBedroomPossible: true, sevenEightBedroomPossible: false },
   // Molokai and Lanai
-  { city: "Kaunakakai",          state: "Hawaii",         tag: "Hawaii - Molokai",     estimatedComboLow: 450, estimatedComboHigh: 950, sixBedroomPossible: true },
-  { city: "Maunaloa",            state: "Hawaii",         tag: "Hawaii - Molokai",     estimatedComboLow: 450, estimatedComboHigh: 950, sixBedroomPossible: true },
-  { city: "Lanai City",          state: "Hawaii",         tag: "Hawaii - Lanai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true },
+  { city: "Kaunakakai",    state: "Hawaii",         tag: "Hawaii - Molokai",     estimatedComboLow: 450, estimatedComboHigh: 950, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Maunaloa",    state: "Hawaii",         tag: "Hawaii - Molokai",     estimatedComboLow: 450, estimatedComboHigh: 950, sixBedroomPossible: true, sevenEightBedroomPossible: false },
+  { city: "Lanai City",    state: "Hawaii",         tag: "Hawaii - Lanai",       estimatedComboLow: 600, estimatedComboHigh: 1300, sixBedroomPossible: true, sevenEightBedroomPossible: false },
 ];

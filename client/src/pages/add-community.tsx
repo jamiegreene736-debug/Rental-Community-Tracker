@@ -220,18 +220,49 @@ function formatResortUnitMix(community: CommunityResult): string | null {
 }
 
 function hasSixBedroomComboPotential(community: CommunityResult): boolean {
-  if (typeof community.combinedBedroomsTypical === "number" && community.combinedBedroomsTypical >= 6) {
-    return true;
-  }
-  if ((community.availableBedrooms ?? []).some((bedrooms) => Number.isFinite(bedrooms) && bedrooms >= 3)) {
-    return true;
-  }
-  if (community.estimatedBedroomUnitCounts) {
-    for (const [bedrooms, count] of Object.entries(community.estimatedBedroomUnitCounts)) {
-      if (Number(bedrooms) >= 3 && Number(count) > 0) return true;
+  return hasBedroomPairPotential(community, [[3, 3]]) ||
+    community.combinedBedroomsTypical === 6;
+}
+
+function getBedroomCounts(community: CommunityResult): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const [rawBedrooms, rawCount] of Object.entries(community.estimatedBedroomUnitCounts ?? {})) {
+    const bedrooms = Math.round(Number(String(rawBedrooms).replace(/[^\d.]/g, "")));
+    const count = Math.round(Number(rawCount));
+    if (Number.isFinite(bedrooms) && bedrooms > 0 && Number.isFinite(count) && count > 0) {
+      counts.set(bedrooms, Math.max(counts.get(bedrooms) ?? 0, count));
     }
   }
-  return /\b(?:3|4)\s*(?:br|bd|bed(?:room)?s?)\b/i.test(community.bedroomMix ?? "");
+  return counts;
+}
+
+function getAvailableBedrooms(community: CommunityResult): Set<number> {
+  const bedrooms = new Set<number>();
+  for (const value of community.availableBedrooms ?? []) {
+    const normalized = Math.round(Number(value));
+    if (Number.isFinite(normalized) && normalized > 0) bedrooms.add(normalized);
+  }
+  getBedroomCounts(community).forEach((_count, bedroom) => bedrooms.add(bedroom));
+  return bedrooms;
+}
+
+function hasBedroomPairPotential(community: CommunityResult, pairs: Array<[number, number]>): boolean {
+  const counts = getBedroomCounts(community);
+  const availableBedrooms = getAvailableBedrooms(community);
+
+  for (const [first, second] of pairs) {
+    if (!availableBedrooms.has(first) || !availableBedrooms.has(second)) continue;
+    if (first === second && counts.size > 0 && (counts.get(first) ?? 0) < 2) continue;
+    return true;
+  }
+
+  return false;
+}
+
+function hasSevenEightBedroomComboPotential(community: CommunityResult): boolean {
+  return hasBedroomPairPotential(community, [[3, 4], [2, 5], [4, 4], [3, 5]]) ||
+    community.combinedBedroomsTypical === 7 ||
+    community.combinedBedroomsTypical === 8;
 }
 
 function formatMinimumStay(community: CommunityResult): { label: string; tone: "ok" | "warn" | "unknown"; evidence?: string } {
@@ -384,6 +415,7 @@ export default function AddCommunity() {
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
     sixBedroomPossible?: boolean;
+    sevenEightBedroomPossible?: boolean;
     status: "pending" | "running" | "done" | "error" | "cancelled";
     count?: number;
     communities?: CommunityResult[];
@@ -409,7 +441,15 @@ export default function AddCommunity() {
   // markets the moment the user clicks the button.
   type SweepPhase = "setup" | "running";
   const [sweepPhase, setSweepPhase] = useState<SweepPhase>("setup");
-  type SeedMarket = { city: string; state: string; tag: string; estimatedComboLow?: number; estimatedComboHigh?: number; sixBedroomPossible?: boolean };
+  type SeedMarket = {
+    city: string;
+    state: string;
+    tag: string;
+    estimatedComboLow?: number;
+    estimatedComboHigh?: number;
+    sixBedroomPossible?: boolean;
+    sevenEightBedroomPossible?: boolean;
+  };
   const [seedMarkets, setSeedMarkets] = useState<SeedMarket[] | null>(null);
   const [selectedMarkets, setSelectedMarkets] = useState<Set<string>>(new Set());
   const keyFor = (m: { city: string; state: string }) => `${m.city}|${m.state}`;
@@ -517,6 +557,9 @@ export default function AddCommunity() {
       sixBedroomPossible: market.status === "done"
         ? (market.communities ?? []).some(hasSixBedroomComboPotential)
         : market.sixBedroomPossible,
+      sevenEightBedroomPossible: market.status === "done"
+        ? (market.communities ?? []).some(hasSevenEightBedroomComboPotential)
+        : market.sevenEightBedroomPossible,
     })));
     setSweepPhase("running");
     const terminal = job.status === "done" || job.status === "error" || job.status === "cancelled";
@@ -1078,6 +1121,7 @@ export default function AddCommunity() {
       estimatedComboLow: m.estimatedComboLow,
       estimatedComboHigh: m.estimatedComboHigh,
       sixBedroomPossible: m.sixBedroomPossible,
+      sevenEightBedroomPossible: m.sevenEightBedroomPossible,
       status: "pending",
     })));
     setSweepJobId(null);
@@ -2324,16 +2368,36 @@ export default function AddCommunity() {
                                           className="accent-primary mt-1"
                                         />
                                         <span className="min-w-0 flex-1">
-                                          <span className="block font-medium leading-snug flex items-center gap-1">
+                                          <span className="block font-medium leading-snug">
                                             {m.city}, {m.state}
-                                            {m.sixBedroomPossible && (
-                                              <span
-                                                className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700"
-                                                title="Has evidence for a 6BR combo using 3BR+ condo/townhome inventory"
-                                              >
-                                                6BR combo: yes
-                                              </span>
-                                            )}
+                                          </span>
+                                          <span className="mt-1 flex flex-wrap gap-1">
+                                            <span
+                                              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                                m.sixBedroomPossible
+                                                  ? "bg-emerald-50 text-emerald-700"
+                                                  : "bg-slate-100 text-slate-600"
+                                              }`}
+                                              title={m.sixBedroomPossible
+                                                ? "Has evidence for a 6BR combo using two 3BR condo/townhome units"
+                                                : "No two-3BR 6BR combo potential is currently flagged for this market"}
+                                            >
+                                              {m.sixBedroomPossible ? <CheckCircle2 className="h-3 w-3 mr-1" /> : <XCircle className="h-3 w-3 mr-1" />}
+                                              6BR combo: {m.sixBedroomPossible ? "yes" : "no"}
+                                            </span>
+                                            <span
+                                              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                                m.sevenEightBedroomPossible
+                                                  ? "bg-sky-50 text-sky-700"
+                                                  : "bg-slate-100 text-slate-600"
+                                              }`}
+                                              title={m.sevenEightBedroomPossible
+                                                ? "Has evidence for 7BR/8BR combo potential using 3BR+4BR, 2BR+5BR, 4BR+4BR, or 3BR+5BR attached inventory"
+                                                : "No 7BR/8BR combo potential is currently flagged for this market"}
+                                            >
+                                              {m.sevenEightBedroomPossible ? <CheckCircle2 className="h-3 w-3 mr-1" /> : <XCircle className="h-3 w-3 mr-1" />}
+                                              7/8BR combo: {m.sevenEightBedroomPossible ? "yes" : "no"}
+                                            </span>
                                           </span>
                                           <span className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
                                             <DollarSign className="h-3 w-3" />
@@ -2393,19 +2457,36 @@ export default function AddCommunity() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <p className="font-semibold text-sm flex items-center gap-1">
-                              {m.city}, {m.state}
-                              {m.sixBedroomPossible && (
-                                <Badge
-                                  variant="outline"
-                                  className="border-emerald-200 bg-emerald-50 text-[10px] text-emerald-700"
-                                  title="Has evidence for a 6BR combo using 3BR+ condo/townhome inventory"
-                                >
-                                  6BR combo: yes
-                                </Badge>
-                              )}
-                            </p>
+                            <p className="font-semibold text-sm">{m.city}, {m.state}</p>
                             {m.tag && <Badge variant="outline" className="text-[10px]">{m.tag}</Badge>}
+                            <Badge
+                              variant="outline"
+                              className={`text-[10px] ${
+                                m.sixBedroomPossible
+                                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                  : "border-slate-200 bg-slate-50 text-slate-600"
+                              }`}
+                              title={m.sixBedroomPossible
+                                ? "Has evidence for a 6BR combo using two 3BR condo/townhome units"
+                                : "No two-3BR 6BR combo potential is currently flagged for this market"}
+                            >
+                              {m.sixBedroomPossible ? <CheckCircle2 className="h-3 w-3 mr-1" /> : <XCircle className="h-3 w-3 mr-1" />}
+                              6BR combo: {m.sixBedroomPossible ? "yes" : "no"}
+                            </Badge>
+                            <Badge
+                              variant="outline"
+                              className={`text-[10px] ${
+                                m.sevenEightBedroomPossible
+                                  ? "border-sky-200 bg-sky-50 text-sky-700"
+                                  : "border-slate-200 bg-slate-50 text-slate-600"
+                              }`}
+                              title={m.sevenEightBedroomPossible
+                                ? "Has evidence for 7BR/8BR combo potential using 3BR+4BR, 2BR+5BR, 4BR+4BR, or 3BR+5BR attached inventory"
+                                : "No 7BR/8BR combo potential is currently flagged for this market"}
+                            >
+                              {m.sevenEightBedroomPossible ? <CheckCircle2 className="h-3 w-3 mr-1" /> : <XCircle className="h-3 w-3 mr-1" />}
+                              7/8BR combo: {m.sevenEightBedroomPossible ? "yes" : "no"}
+                            </Badge>
                             <Badge variant="outline" className="text-[10px] border-emerald-200 bg-emerald-50 text-emerald-700">
                               <DollarSign className="h-3 w-3 mr-1" />
                               {formatComboRange(m.estimatedComboLow, m.estimatedComboHigh)}
