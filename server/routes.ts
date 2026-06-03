@@ -8829,7 +8829,7 @@ export async function registerRoutes(
   // POST /api/admin/cleanup-waikiki-4br-drafts
   // One-shot cleanup for 4BR Waikiki combo drafts removed from the dashboard.
   // Idempotent — safe to run multiple times. Targets only the named Waikiki
-  // communities with combinedBedrooms=4 and a Honolulu/Hawaii location signal.
+  // communities with a 4BR draft signal and a Honolulu/Hawaii location signal.
   app.post("/api/admin/cleanup-waikiki-4br-drafts", async (_req, res) => {
     try {
       const { db } = await import("./db");
@@ -8867,10 +8867,21 @@ export async function registerRoutes(
           id: communityDrafts.id,
           name: communityDrafts.name,
           listingTitle: communityDrafts.listingTitle,
+          bookingTitle: communityDrafts.bookingTitle,
           combinedBedrooms: communityDrafts.combinedBedrooms,
         })
         .from(communityDrafts)
-        .where(and(eq(communityDrafts.combinedBedrooms, 4), nameMatch, locationMatch));
+        .where(and(
+          or(
+            eq(communityDrafts.combinedBedrooms, 4),
+            ilike(communityDrafts.listingTitle, "%4BR%"),
+            ilike(communityDrafts.listingTitle, "%4 BR%"),
+            ilike(communityDrafts.bookingTitle, "%4BR%"),
+            ilike(communityDrafts.bookingTitle, "%4 BR%"),
+          ),
+          nameMatch,
+          locationMatch,
+        ));
 
       const draftIds = targetDrafts.map((draft) => draft.id);
       if (draftIds.length === 0) {
@@ -8937,6 +8948,7 @@ export async function registerRoutes(
           id: communityDrafts.id,
           name: communityDrafts.name,
           listingTitle: communityDrafts.listingTitle,
+          bookingTitle: communityDrafts.bookingTitle,
           combinedBedrooms: communityDrafts.combinedBedrooms,
         });
 

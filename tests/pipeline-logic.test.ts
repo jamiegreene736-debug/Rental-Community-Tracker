@@ -249,8 +249,8 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /eq\(communityDrafts\.combinedBedrooms, 4\)/,
-  "Waikiki cleanup must only delete 4BR dashboard drafts",
+  /eq\(communityDrafts\.combinedBedrooms, 4\)[\s\S]*communityDrafts\.bookingTitle, "%4BR%"/,
+  "Waikiki cleanup must delete dashboard drafts with structured or title-based 4BR signals",
 );
 for (const communityName of ["Waikiki Banyan", "Waikiki Beach Tower", "Waikiki Shore", "Waikiki Sunset"]) {
   assert.match(
