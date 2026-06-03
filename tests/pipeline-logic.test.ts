@@ -1704,6 +1704,27 @@ assert.equal(
 );
 console.log("  ✓ bulk and Pricing tab market pricing stay on SearchAPI Airbnb path, not sidecar");
 
+const multichannelBuyInSource = readFileSync(new URL("../server/multichannel-buy-in.ts", import.meta.url), "utf8");
+assert.ok(
+  multichannelBuyInSource.includes("const searchApiResults = await Promise.all(searchApiOps)"),
+  "multichannel buy-in should await SearchAPI before starting browser sidecar ops",
+);
+assert.ok(
+  multichannelBuyInSource.indexOf("const searchApiResults = await Promise.all(searchApiOps)") <
+    multichannelBuyInSource.indexOf("const [sidecarBrowserResults, pmResults] = await Promise.all"),
+  "multichannel buy-in should finish SearchAPI before VRBO/Booking sidecar enqueue",
+);
+assert.ok(
+  routeSource.includes("const [airbnb, googleHotelsRows] = await Promise.all"),
+  "find-buy-in should run SearchAPI Airbnb + Google Hotels before sidecar VRBO/Booking",
+);
+assert.ok(
+  routeSource.indexOf("const [airbnb, googleHotelsRows] = await Promise.all") <
+    routeSource.indexOf("const [booking, vrbo] = await Promise.all"),
+  "find-buy-in should finish SearchAPI before VRBO/Booking sidecar searches",
+);
+console.log("  ✓ buy-in SearchAPI phases complete before local-Chrome sidecar phases");
+
 assert.equal(
   routeSource.includes("/api/builder/push-channel-markups"),
   false,

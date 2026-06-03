@@ -1427,8 +1427,11 @@ export async function fetchMultiChannelBuyInByBR(args: {
       })());
     }
   }
-  const [searchApiResults, sidecarBrowserResults, pmResults] = await Promise.all([
-    Promise.all(searchApiOps).then((groups) => groups.flat()),
+  // Finish SearchAPI (Airbnb + Google Hotels) before enqueueing local-Chrome
+  // VRBO/Booking work so API scans do not compete with the sidecar queue and
+  // the Airbnb baseline is ready before browser-backed channels run.
+  const searchApiResults = await Promise.all(searchApiOps).then((groups) => groups.flat());
+  const [sidecarBrowserResults, pmResults] = await Promise.all([
     Promise.all(sidecarOps).then((groups) => groups.flat()),
     Promise.all(pmOps).then((groups) => groups.flat()),
   ]);
