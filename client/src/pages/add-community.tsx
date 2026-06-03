@@ -1157,6 +1157,11 @@ export default function AddCommunity() {
           if (resp.status === 404 && !cancelled) {
             setCacheRefreshJobId(null);
             setCacheRefreshRunning(false);
+            try {
+              await loadTopMarketSeeds();
+            } catch {
+              /* server may restart refresh after deploy */
+            }
           }
           return;
         }

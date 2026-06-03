@@ -137,6 +137,15 @@ app.get("/api/auth/session", (_req, res) => {
       startAvailabilityScheduler();
       startPhotoListingScheduler();
       startBookingConfirmationScheduler();
+      const startTopMarketCacheRefresh = app.get("startTopMarketCacheRefresh") as
+        | (() => Promise<unknown>)
+        | undefined;
+      if (startTopMarketCacheRefresh) {
+        void startTopMarketCacheRefresh().catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err ?? "");
+          console.warn("[top-market-scan-cache] boot refresh failed:", message);
+        });
+      }
     },
   );
 })();
