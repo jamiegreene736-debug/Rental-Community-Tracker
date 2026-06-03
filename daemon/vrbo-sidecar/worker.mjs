@@ -4078,7 +4078,17 @@ async function selectVisibleDestinationSuggestion(targetPage, searchTerm, label 
         })
         .filter(Boolean)
         .sort((a, b) => b.score - a.score);
-      const best = candidates[0];
+      let best = candidates[0] ?? null;
+      if (targetNorm) {
+        const anchored = candidates.filter(({ norm }) => {
+          if (norm === targetNorm) return true;
+          if (norm.includes(targetNorm) || targetNorm.includes(norm)) return true;
+          const targetParts = targetNorm.split(/\s+/).filter(Boolean);
+          const candTokens = tokenSet(norm);
+          return targetParts.length >= 2 && targetParts.every((token) => candTokens.has(token));
+        });
+        if (anchored.length) best = anchored.sort((a, b) => b.score - a.score)[0];
+      }
       if (!best || best.score < 40) return null;
       try { best.el.scrollIntoView?.({ block: "center", inline: "center" }); } catch {}
       best.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
@@ -4331,20 +4341,43 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
         return true;
       }
     }
-    if (filled && !suggestion) {
+    if (filled && !suggestion && !targetSuggestion) {
       log(`${label}: destination suggestion was not confirmed for "${searchTerm}"; refusing to submit a provider default/geolocated search`);
       return false;
     }
     if (filled) {
+      let resolvedSuggestion = String(suggestion || targetSuggestion || inputTerm || searchTerm || "").trim();
+      if (
+        targetSuggestion &&
+        resolvedSuggestion &&
+        !bookingSuggestionMatchesVariant(resolvedSuggestion, targetSuggestion)
+      ) {
+        const corrected = await chooseVisibleDestinationSuggestion(
+          page,
+          String(targetSuggestion),
+          `${label}_home_correct`,
+          targetSuggestion,
+          { requestId },
+        ).catch(() => null);
+        if (corrected && bookingSuggestionMatchesVariant(corrected, targetSuggestion)) {
+          resolvedSuggestion = corrected;
+        } else {
+          log(
+            `${label}: autocomplete drifted to "${resolvedSuggestion}"; ` +
+            `using intended destination "${targetSuggestion}" for the dated results URL`,
+          );
+          resolvedSuggestion = String(targetSuggestion).trim();
+        }
+      }
       if (submitAfterSearch) {
         await withSoftTimeout(clickVisibleSearchSubmit(page, `${label}_home`, { requestId }), PAGE_SETTLE_MS + 2_000, null);
         await boundedPageDelay(page, 1_200);
         await maybeClearVrboChallenge("after-homepage-submit");
-        log(`${label}: primed public homepage search with "${inputTerm}" → "${suggestion}"`);
+        log(`${label}: primed public homepage search with "${inputTerm}" → "${resolvedSuggestion}"`);
       } else {
-        log(`${label}: entered public homepage search term "${inputTerm}" → "${suggestion}"`);
+        log(`${label}: entered public homepage search term "${inputTerm}" → "${resolvedSuggestion}"`);
       }
-      return true;
+      return { ok: true, suggestion: resolvedSuggestion };
     }
   } catch (e) {
     if (e instanceof SidecarCancelledError || e instanceof VrboHardBlockError || e instanceof ProviderBrowserUnavailableError) throw e;
@@ -5773,6 +5806,37 @@ async function waitForBookingResultsSurface(targetPage, id, effectiveSearchTerm)
   return diagnostics;
 }
 
+function bookingRequiredTargetTokens(params, effectiveSearchTerm, typedQuery, destination) {
+  const mode = params?.variationMode && typeof params.variationMode === "object" ? params.variationMode : {};
+  const modeTokens = Array.isArray(mode.filterTokens)
+    ? mode.filterTokens.map((token) => String(token || "").toLowerCase().trim()).filter((token) => token.length >= 3)
+    : [];
+  const resortTokens = otaQueryTokens(
+    otaBaseSearchQuery(effectiveSearchTerm, destination) || typedQuery || effectiveSearchTerm,
+  );
+  const cityTokens = otaRequiredCityTokens(destination);
+  return Array.from(new Set([...modeTokens, ...resortTokens, ...cityTokens])).slice(0, 5);
+}
+
+function bookingCardMatchMinHits(tokens) {
+  if (!Array.isArray(tokens) || tokens.length === 0) return 0;
+  if (tokens.length <= 2) return tokens.length;
+  return Math.min(tokens.length, Math.max(2, tokens.length - 1));
+}
+
+function bookingHaystackMatchesTargetTokens(haystack, tokens) {
+  if (!Array.isArray(tokens) || tokens.length === 0) return true;
+  const norm = String(haystack || "").toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  const hits = tokens.filter((token) => norm.includes(token)).length;
+  return hits >= bookingCardMatchMinHits(tokens);
+}
+
+function bookingSuggestionMatchesVariant(selected, variantTerm) {
+  const variantTokens = otaQueryTokens(variantTerm);
+  if (!variantTokens.length) return true;
+  return bookingHaystackMatchesTargetTokens(selected, variantTokens);
+}
+
 function bookingStateHasRequestedDates(state, checkIn, checkOut) {
   try {
     const url = new URL(String(state?.url || ""));
@@ -5806,7 +5870,7 @@ function bookingStateHasTargetSearchQuery(state, requiredTargetTokens = []) {
       url.searchParams.get("dest_type"),
     ].filter(Boolean).join(" ").toLowerCase().replace(/[^a-z0-9]+/g, " ");
     if (!searchText.trim()) return true;
-    return requiredTargetTokens.every((token) => searchText.includes(token));
+    return bookingHaystackMatchesTargetTokens(searchText, requiredTargetTokens);
   } catch {}
   return true;
 }
@@ -6433,7 +6497,8 @@ async function runBookingSearchVariant(id, params, variant = null) {
   // ss=Koloa). Keep the dropdown-confirmed destination gate above, then
   // apply the exact resort text, dates, and bedroom filter through the
   // results URL so we do not loop through broad Koloa variants.
-  const datedSearchUrl = buildBookingDatedSearchUrl(effectiveSearchTerm, checkIn, checkOut, bedrooms);
+  const datedSearchTerm = String(variant?.suggestionText || variant?.searchTerm || effectiveSearchTerm).trim();
+  const datedSearchUrl = buildBookingDatedSearchUrl(datedSearchTerm, checkIn, checkOut, bedrooms);
   await page.goto(datedSearchUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopOtaProviderIfBlocked(page, "booking_search", id);
@@ -6462,12 +6527,8 @@ async function runBookingSearchVariant(id, params, variant = null) {
     throw new Error("Booking.com bot wall — refresh cookies or retry after proxy rotation");
   }
   const expectedNights = nightsBetween(checkIn, checkOut);
-  const requiredTargetTokens = String(typedQuery || effectiveSearchTerm || "")
-    .toLowerCase()
-    .replace(/\bresorts?\b/g, " ")
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 3 && !new Set(["the", "and", "for", "near", "with", "at"]).has(token))
-    .slice(0, 4);
+  const requiredTargetTokens = bookingRequiredTargetTokens(params, datedSearchTerm, typedQuery, destination);
+  const requiredTargetMinHits = bookingCardMatchMinHits(requiredTargetTokens);
   if (!bookingStateHasTargetSearchQuery(state, requiredTargetTokens)) {
     throw new ProviderBrowserUnavailableError(
       `Booking.com results URL no longer includes required resort-prefix token(s) ${requiredTargetTokens.join("+")}; refusing broad city-only results.`,
@@ -6495,7 +6556,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
     );
   }
 
-  const cards = await page.evaluate(({ minBd, expectedNights, requiredTargetTokens }) => {
+  const cards = await page.evaluate(({ minBd, expectedNights, requiredTargetTokens, requiredTargetMinHits }) => {
     const cardSet = new Set();
     for (const selector of [
       '[data-testid="property-card"]',
@@ -6587,9 +6648,12 @@ async function runBookingSearchVariant(id, params, variant = null) {
         continue;
       }
       const targetHaystack = `${title} ${url} ${fullText}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      const targetHits = Array.isArray(requiredTargetTokens)
+        ? requiredTargetTokens.filter((token) => targetHaystack.includes(token)).length
+        : 0;
       const hasRequiredTarget = !Array.isArray(requiredTargetTokens) ||
         requiredTargetTokens.length === 0 ||
-        requiredTargetTokens.every((token) => targetHaystack.includes(token));
+        targetHits >= (requiredTargetMinHits || requiredTargetTokens.length);
       // Booking renders price fragments in two different places. On some
       // cards [price-and-discounted-price] is only the nightly rate while
       // the full card text also contains the stay total (e.g.
@@ -6657,7 +6721,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
       });
     }
     return { out, drops, totalSeen: cards.length, firstCardSample };
-  }, { minBd: bedrooms, expectedNights, requiredTargetTokens });
+  }, { minBd: bedrooms, expectedNights, requiredTargetTokens, requiredTargetMinHits });
   const resultCards = cards.out || [];
   log(
     `booking_search ${id}: ${resultCards.length} cards for "${effectiveSearchTerm}" ` +
