@@ -606,7 +606,16 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay";
+type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay";
+
+function displayPropertyId(property: Pick<Property, "id" | "draftId">): string {
+  const numericId = property.draftId ? 900000 + property.draftId : 100000 + property.id;
+  return String(numericId).padStart(6, "0");
+}
+
+function propertyIdSortValue(property: Pick<Property, "id" | "draftId">): number {
+  return Number(displayPropertyId(property));
+}
 
 // Total nightly buy-in cost across all units (sum of per-unit rates from
 // shared/pricing-rates). Multi-unit properties get parsed from unitDetails
@@ -1545,6 +1554,7 @@ function AdminDashboard() {
       result = result.filter(
         (p) =>
           p.name.toLowerCase().includes(lower) ||
+          displayPropertyId(p).includes(lower) ||
           p.community.toLowerCase().includes(lower) ||
           p.location.toLowerCase().includes(lower) ||
           p.unitDetails.toLowerCase().includes(lower)
@@ -1561,6 +1571,11 @@ function AdminDashboard() {
       result = result.filter((p) => p.multiUnit === isMulti);
     }
     result = [...result].sort((a, b) => {
+      if (sortField === "propertyId") {
+        const aId = propertyIdSortValue(a);
+        const bId = propertyIdSortValue(b);
+        return sortDir === "asc" ? aId - bId : bId - aId;
+      }
       if (sortField === "unitCount") {
         const aCount = communityUnitCountSortValue(a);
         const bCount = communityUnitCountSortValue(b);
@@ -3490,10 +3505,11 @@ function AdminDashboard() {
               <col style={{ width: "5.5%" }} />
               <col style={{ width: "2.1%" }} />
               <col style={{ width: "1.8%" }} />
+              <col style={{ width: "5.6%" }} />
               <col style={{ width: "6.5%" }} />
               <col style={{ width: "7.5%" }} />
-              <col style={{ width: "13%" }} />
-              <col style={{ width: "28%" }} />
+              <col style={{ width: "11%" }} />
+              <col style={{ width: "24.4%" }} />
               <col style={{ width: "9.2%" }} />
               <col style={{ width: "7.6%" }} />
               <col style={{ width: "5.4%" }} />
@@ -3521,6 +3537,19 @@ function AdminDashboard() {
                 <TableHead className="w-[78px] sticky left-0 bg-background z-10">Actions</TableHead>
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
+                <TableHead className="w-[80px] text-center px-0.5">
+                  <Button
+                    variant="ghost"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    onClick={() => handleSort("propertyId")}
+                    data-testid="button-sort-property-id"
+                    id="button-sort-property-id"
+                    aria-label="Sort by property ID"
+                  >
+                    Property ID
+                    <SortIcon field="propertyId" />
+                  </Button>
+                </TableHead>
                 <TableHead className="w-[86px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
                 <TableHead className="w-[112px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
                   <div className="flex items-center justify-center gap-1">
@@ -3776,6 +3805,11 @@ function AdminDashboard() {
                       </Tooltip>
                     </TooltipProvider>
                   </TableCell>
+                  <TableCell className="px-0.5 py-2 text-center" data-testid={`cell-property-id-${property.id}`}>
+                    <span className="font-mono text-sm font-medium tabular-nums">
+                      {displayPropertyId(property)}
+                    </span>
+                  </TableCell>
                   <TableCell className="px-0.5 py-2 text-center">
                     {(() => {
                       // Dashboard channel indicators: three badges per row
@@ -4004,7 +4038,7 @@ function AdminDashboard() {
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={14} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={15} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>
