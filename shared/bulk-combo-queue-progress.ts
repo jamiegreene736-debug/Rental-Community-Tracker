@@ -1,6 +1,6 @@
 /** Step budgets aligned with server BULK_COMBO_LISTING_STEP_TIMEOUTS_MS in routes.ts */
 export const BULK_COMBO_STEP_BUDGET_MS: Record<string, number> = {
-  photos: 7 * 60_000,
+  photos: 12 * 60_000,
   copy: 90_000,
   save: 60_000,
   persist: 90_000,

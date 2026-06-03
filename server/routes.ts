@@ -146,6 +146,7 @@ import {
   discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
   inferCommunityStreetAddress,
+  resolveBulkComboListingStreet,
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "@shared/bulk-combo-queue-progress";
@@ -27695,10 +27696,24 @@ Return ONLY compact JSON with this exact shape:
   const BULK_COMBO_LISTING_STALE_MS = 5 * 60 * 1000;
   const BULK_COMBO_LISTING_RETRY_BACKOFF_MS = [15_000, 45_000];
   const BULK_COMBO_LISTING_STEP_TIMEOUTS_MS: Record<string, number> = {
-    photos: 7 * 60 * 1000,
-    copy: 90_000,
-    save: 60_000,
-    persist: 90_000,
+    photos: 12 * 60 * 1000,
+    copy: 120_000,
+    save: 120_000,
+    persist: 120_000,
+  };
+  const hydrateBulkComboListingItem = (item: BulkComboListingItem) => {
+    const community = item.community || {};
+    const streetAddress = resolveBulkComboListingStreet({
+      communityName: community.name,
+      city: community.city,
+      state: community.state,
+      streetAddress: item.streetAddress,
+      addressHint: community.addressHint,
+    });
+    if (streetAddress) item.streetAddress = streetAddress;
+    if (!String(item.pricingArea ?? "").trim() && community.name) {
+      item.pricingArea = suggestPricingArea(community.city, community.state, community.name) || item.pricingArea;
+    }
   };
   const toBulkComboMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
@@ -27816,6 +27831,7 @@ Return ONLY compact JSON with this exact shape:
         heartbeatAt: toBulkComboMs(row.heartbeatAt),
       };
     });
+    for (const item of items) hydrateBulkComboListingItem(item);
     const createdAt = toBulkComboMs(jobRow.createdAt) ?? Date.now();
     const updatedAt = toBulkComboMs(jobRow.updatedAt) ?? createdAt;
     return {
@@ -28066,6 +28082,7 @@ Return ONLY compact JSON with this exact shape:
     ].join(":");
   };
   const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
+    hydrateBulkComboListingItem(item);
     if (item.draftId) {
       item.status = "completed";
       item.phase = "done";
@@ -28143,18 +28160,25 @@ Return ONLY compact JSON with this exact shape:
       unit1: { bedrooms: pairing.unit1Beds, url: "", address: undefined },
       unit2: { bedrooms: pairing.unit2Beds, url: "", address: undefined },
       suggestedRate: pairing.estimatedSellRate,
-    }, { abortKey }));
+    }, { abortKey, timeoutMs: 120_000 }));
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
-    const inferredStreetAddress = inferCommunityStreetAddress({
+    hydrateBulkComboListingItem(item);
+    const streetAddress = item.streetAddress || "";
+    const addressCheck = validateCommunityStreetAddress({
       communityName: community.name,
       city: community.city,
       state: community.state,
-      unitAddresses: [item.streetAddress],
-      addressHint: community.addressHint,
+      streetAddress,
     });
-    const streetAddress = inferredStreetAddress || item.streetAddress || "";
-    let draftId = await findExistingBulkComboDraftId(item, generated, streetAddress);
+    if (!addressCheck.ok) {
+      throw new Error(`Dashboard save step failed: ${addressCheck.error}`);
+    }
+    const validatedStreet = addressCheck.streetAddress;
+    item.streetAddress = validatedStreet;
+    job.updatedAt = Date.now();
+    await persistBulkComboListingSnapshot(job);
+    let draftId = await findExistingBulkComboDraftId(item, generated, validatedStreet);
     const idempotencyKey = bulkComboIdempotencyKey(job.id, item);
     if (draftId) {
       item.draftId = draftId;
@@ -28198,7 +28222,7 @@ Return ONLY compact JSON with this exact shape:
         bookingTitle: generated.bookingTitle ?? generated.title ?? null,
         propertyType: generated.propertyType ?? "Condominium",
         pricingArea: item.pricingArea || suggestPricingArea(community.city, community.state, community.name),
-        streetAddress,
+        streetAddress: validatedStreet,
         listingDescription: generated.description ?? null,
         neighborhood: generated.neighborhood ?? null,
         transit: generated.transit ?? null,
@@ -28207,38 +28231,36 @@ Return ONLY compact JSON with this exact shape:
         touristTaxAccount: item.touristTaxAccount || null,
         queueIdempotencyKey: idempotencyKey,
         status: "draft_ready",
-      }, { abortKey }));
+      }, { abortKey, timeoutMs: 120_000 }));
       draftId = Number(saveData?.id);
     }
-    if (Number.isFinite(draftId) && draftId > 0) {
-      item.draftId = draftId;
-      await runBulkComboListingStep(job, item, "persist", "Persisting photos and starting pricing", async () => {
-        if (item.unit1Photos.length > 0 || item.unit2Photos.length > 0) {
-          await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
-            unit1Photos: item.unit1Photos.map((p) => p.url),
-            unit2Photos: item.unit2Photos.map((p) => p.url),
-            unit1SourceUrl: item.unit1SourceUrl,
-            unit2SourceUrl: item.unit2SourceUrl,
-          }, { abortKey }).catch((e: any) => {
-            item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`;
-          });
-        }
-      });
-      fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
-      // Run the extensive photo-listing-scanner preflight (reverse image SearchAPI + platform checks)
-      // so bulk-added combo drafts automatically populate photo_listing_checks. This ensures
-      // the "not listed on VRBO/Airbnb/Booking" gate used in builder-preflight is respected
-      // for bulk flows exactly as for manual unit addition.
-      void runPhotoListingCheckForFolders([
-        `draft-${draftId}-unit-a`,
-        `draft-${draftId}-unit-b`,
-      ]).catch(() => null);
-      await enqueueCommunityPricingRefreshJob(draftId).catch((e: any) => {
-        item.message = `Draft saved; pricing queue warning: ${e?.message ?? e}`;
-      });
+    if (!Number.isFinite(draftId) || draftId <= 0) {
+      throw new Error("Dashboard save step failed: save did not return a draft id");
     }
+    item.draftId = draftId;
+    await runBulkComboListingStep(job, item, "persist", "Persisting photos and starting pricing", async () => {
+      if (item.unit1Photos.length > 0 || item.unit2Photos.length > 0) {
+        await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
+          unit1Photos: item.unit1Photos.map((p) => p.url),
+          unit2Photos: item.unit2Photos.map((p) => p.url),
+          unit1SourceUrl: item.unit1SourceUrl,
+          unit2SourceUrl: item.unit2SourceUrl,
+        }, { abortKey, timeoutMs: 120_000 }).catch((e: any) => {
+          item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`;
+        });
+      }
+    });
+    fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
+    void runPhotoListingCheckForFolders([
+      `draft-${draftId}-unit-a`,
+      `draft-${draftId}-unit-b`,
+    ]).catch(() => null);
+    await enqueueCommunityPricingRefreshJob(draftId).catch((e: any) => {
+      item.message = `Draft saved; pricing queue warning: ${e?.message ?? e}`;
+    });
     item.phase = "done";
-    item.message = item.draftId ? `Draft #${item.draftId} saved to dashboard` : "Draft saved to dashboard";
+    item.message = `Draft #${item.draftId} saved to dashboard`;
+    item.status = "completed";
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
   };
@@ -28472,16 +28494,20 @@ Return ONLY compact JSON with this exact shape:
     const items: BulkComboListingItem[] = inputs.slice(0, 12).map((input, index) => {
       const communityName = input.community?.name || "Community";
       const label = `${communityName} ${input.pairing?.unit1Beds ?? "?"}BR + ${input.pairing?.unit2Beds ?? "?"}BR`;
-      const streetAddress = String(input.streetAddress || inferCommunityStreetAddress({
+      const streetAddress = resolveBulkComboListingStreet({
         communityName,
         city: input.community?.city,
         state: input.community?.state,
-        unitAddresses: [],
+        streetAddress: input.streetAddress,
         addressHint: input.community?.addressHint,
-      }) || "").trim();
+      });
+      const pricingArea = String(input.pricingArea || "").trim()
+        || suggestPricingArea(input.community?.city, input.community?.state, communityName)
+        || "";
       return {
         ...input,
         streetAddress,
+        pricingArea,
         id: input.id || `item_${index + 1}`,
         label,
         status: "queued",
