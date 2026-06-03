@@ -3383,6 +3383,9 @@ async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: str
     for (const m of Array.from(html.matchAll(/https?:\/\/[^"'\s<>)]+(?:listingphotos\.sierrastatic\.com|cbhomes\.com\/p\/)[^"'\s<>)]+/gi))) {
       pushPhoto(m[0]);
     }
+    for (const m of Array.from(html.matchAll(/https?:\/\/[^"'\s<>)]+\.cdn-redfin\.com[^"'\s<>)]+/gi))) {
+      pushPhoto(m[0]);
+    }
     for (const m of Array.from(html.matchAll(/<img[^>]+(?:src|data-src|data-lazy-src)=["']([^"']+)["'][^>]*>/gi))) {
       pushPhoto(m[1]);
     }
@@ -3612,6 +3615,26 @@ async function scrapeListingPhotos(
       return result.urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
     }
     if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
+  }
+
+  // Redfin / Homes.com: fetch JSON-LD + embedded gallery URLs before
+  // launching headless Chromium. Railway's Playwright path often
+  // returns only og:image for Redfin, which fails the replacement
+  // photo-count gate even when the listing has a full gallery.
+  if (/redfin\.com|homes\.com/i.test(primaryUrl)) {
+    const result = await scrapeGenericRealEstateViaFetch(primaryUrl);
+    if (listingFacts) {
+      if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
+      if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;
+      if (result.facts.homeType != null) listingFacts.homeType = result.facts.homeType;
+      if (result.facts.homeStatus != null) listingFacts.homeStatus = result.facts.homeStatus;
+      if (result.facts.propertySubType != null) listingFacts.propertySubType = result.facts.propertySubType;
+      if (result.facts.photoCount != null) listingFacts.photoCount = result.facts.photoCount;
+    }
+    if (result.urls.length > 0) {
+      const host = /redfin\.com/i.test(primaryUrl) ? "Redfin" : "Homes.com";
+      return result.urls.map((u) => ({ url: u, title: `${host} listing photo`, source: host, sourceLink: primaryUrl }));
+    }
   }
 
   const isKnownRealEstateHost = /(?:zillow\.com|realtor\.com|redfin\.com|homes\.com)/i.test(primaryUrl);
@@ -25559,10 +25582,28 @@ Return ONLY compact JSON with this exact shape:
       return new Set(repeated.length > 0 ? repeated : Array.from(harvestRootCounts.keys()));
     };
 
-    const candidateRootMatches = (url: string, allowedRoots: Set<string>): boolean => {
+    const hawaiiStreetSlugKey = (root: string): string | null => {
+      const parts = root.split(/\s+/).filter(Boolean);
+      if (parts.length < 3) return null;
+      const nums = parts.filter((p) => /^\d+$/.test(p));
+      if (nums.length < 2) return null;
+      const name = parts.find((p) => !/^\d+$/.test(p) && !/^(st|rd|dr|ave|blvd|ln|way|cir|ct|pkwy|pl|ter|trail)$/i.test(p));
+      if (!name) return null;
+      return `${nums[0]}-${nums[1]}-${name}`;
+    };
+
+    const candidateRootMatches = (url: string, allowedRoots: Set<string>, contextText = ""): boolean => {
       if (allowedRoots.size === 0) return false;
       const root = streetRootFromListingAddress(parseListingAddressFromUrl(url));
-      return !!root && allowedRoots.has(root);
+      if (root && allowedRoots.has(root)) return true;
+      const hay = `${url} ${contextText}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      const hyphenHay = hay.replace(/\s+/g, "-");
+      for (const allowed of allowedRoots) {
+        const slugKey = hawaiiStreetSlugKey(allowed);
+        if (!slugKey) continue;
+        if (hay.includes(slugKey.replace(/-/g, " ")) || hyphenHay.includes(slugKey)) return true;
+      }
+      return false;
     };
 
     const communityKnownAddressRoots = (): Set<string> => {
@@ -25591,7 +25632,7 @@ Return ONLY compact JSON with this exact shape:
       if (!link) return;
       const lower = unitSwapListingKey(link);
       if (!lower || candidateUrlSet.has(lower) || skipUrlSet.has(lower)) return;
-      if (allowedRoots && allowedRoots.size > 0 && !candidateRootMatches(link, allowedRoots)) return;
+      if (allowedRoots && allowedRoots.size > 0 && !candidateRootMatches(link, allowedRoots, contextText)) return;
       const detected = detectSource(link);
       if (detected !== source) return;
       let unitNumber = extractUnitNumber(link, source, contextText);
@@ -26099,7 +26140,7 @@ Return ONLY compact JSON with this exact shape:
             : directRoot
             ? new Set([directRoot])
             : null;
-          if (equivalentAllowedRoots?.size && !candidateRootMatches(link, equivalentAllowedRoots)) continue;
+          if (equivalentAllowedRoots?.size && !candidateRootMatches(link, equivalentAllowedRoots, `${hit?.title || ""} ${hit?.snippet || ""}`)) continue;
           let altUnit = extractUnitNumber(link, source, `${hit?.title || ""} ${hit?.snippet || ""}`);
           if (!altUnit) altUnit = unit;
           if (unit && altUnit && normalizeSearchText(unit).replace(/\s+/g, "") !== normalizeSearchText(altUnit).replace(/\s+/g, "")) {
@@ -26256,7 +26297,7 @@ Return ONLY compact JSON with this exact shape:
             );
             scrapedPhotoUrls = scraped.map((p) => p.url);
           } catch { scrapedPhotoUrls = []; }
-          if (expandedSearch && scrapedPhotoUrls.length < MIN_PHOTOS) {
+          if (scrapedPhotoUrls.length < MIN_PHOTOS) {
             const alternate = await findEquivalentPhotoSource({
               sourceUrl,
               source,
