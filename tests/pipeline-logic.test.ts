@@ -218,6 +218,16 @@ assert.match(
   "preflight Find Photos must run on a server-side job so tab close does not abort discovery",
 );
 assert.match(
+  preflightSource,
+  /handleScrapePhotosForAllUnits[\s\S]*Promise\.all/,
+  "preflight must start photo-fetch jobs for all units needing photos in parallel",
+);
+assert.match(
+  preflightSource,
+  /button-scrape-photos-all-units/,
+  "preflight must expose Find Photos for All Units when two or more units lack photos",
+);
+assert.match(
   preflightJobsSource,
   /preflightPhotoDiscoveryAttempts/,
   "preflight photo-fetch jobs must reuse the shared discovery attempt caps",
