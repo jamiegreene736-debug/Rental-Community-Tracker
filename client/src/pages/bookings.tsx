@@ -2618,9 +2618,16 @@ function useSidecarQueueStatus(enabled: boolean): { status: SidecarQueueStatus |
 
     tick();
     const id = setInterval(tick, enabled ? 1_500 : 10_000);
+    const refreshOnFocus = () => {
+      if (document.visibilityState === "visible") void tick();
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    document.addEventListener("visibilitychange", refreshOnFocus);
     return () => {
       cancelled = true;
       clearInterval(id);
+      window.removeEventListener("focus", refreshOnFocus);
+      document.removeEventListener("visibilitychange", refreshOnFocus);
     };
   }, [enabled]);
 
@@ -4416,7 +4423,7 @@ export default function Bookings() {
   // to fix TDZ ReferenceError "Cannot access '...' before initialization" (minified 'jt')
   // when the Operations (/bookings) page mounts. The definition was after the early
   // useRef/useEffect that close over the name during component body execution.
-  const runAlternativeSidecarSearch = async (reservation: GuestyReservation, community: string) => {
+  const runAlternativeSidecarSearch = async (reservation: GuestyReservation, community: string, opts?: { forceRefresh?: boolean }) => {
     const resId = reservation._id;
     const resForData: GuestyReservation = (reservation as any).slots ? reservation : (rawReservationsRef.current.find((r) => r._id === resId) || (reservation as any));
     if (!(resForData as any).slots) {
@@ -4447,8 +4454,8 @@ export default function Bookings() {
         checkIn,
         checkOut,
         community: communitySearchTerm,
-        nocache: "1",
       });
+      if (opts?.forceRefresh) params.set("nocache", "1");
       if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
       const data = await fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
       updateAlternativeWorkflow(resId, {
@@ -8402,7 +8409,7 @@ export default function Bookings() {
 	                                <AlternativeBuyInWorkflowPanel
 	                                  workflow={alternativeWorkflows[r._id]}
 	                                  onScout={() => scoutAlternativeCommunities(r, advice)}
-	                                  onRunCommunity={(community) => runAlternativeSidecarSearch(r, community)}
+	                                  onRunCommunity={(community) => runAlternativeSidecarSearch(r, community, { forceRefresh: true })}
 	                                  onDraftMessage={() => draftAlternativeGuestMessage(r)}
 	                                  autoScan={autoAltScans[r._id] ?? null}
 	                                  onStartAutoScan={() => startAutoAlternativeSidecarScan(r)}
@@ -8604,7 +8611,7 @@ export default function Bookings() {
                                 enableGroundFloorRequirement={selectedHasBuyInConfig}
                                 alternativeWorkflow={alternativeWorkflows[r._id]}
                                 onScoutAlternatives={(advice, opts) => scoutAlternativeCommunities(r, advice, opts)}
-                                onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(r, community)}
+                                onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(r, community, { forceRefresh: true })}
                                 onDraftAlternativeMessage={() => draftAlternativeGuestMessage(r)}
                                 autoAltScan={autoAltScans[r._id] ?? null}
                                 onStartAutoAltScan={() => startAutoAlternativeSidecarScan(r)}
@@ -9293,7 +9300,7 @@ export default function Bookings() {
               enableGroundFloorRequirement={selectedHasBuyInConfig}
               alternativeWorkflow={alternativeWorkflows[picker.reservation._id]}
               onScoutAlternatives={(advice, opts) => scoutAlternativeCommunities(picker.reservation, advice, opts)}
-              onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(picker.reservation, community)}
+              onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(picker.reservation, community, { forceRefresh: true })}
               onDraftAlternativeMessage={() => draftAlternativeGuestMessage(picker.reservation)}
               autoAltScan={autoAltScans[picker.reservation._id] ?? null}
               onStartAutoAltScan={() => startAutoAlternativeSidecarScan(picker.reservation)}
@@ -10972,9 +10979,9 @@ function LiveSearchSection({
   // Auto-fires when the component mounts (i.e. when user clicks "Find buy-in").
   // No gating button — the whole point of the workflow is to see cheap live
   // options immediately without maintaining a manual portfolio of buy-ins.
-  const { data, isLoading, isFetching, isError, error, dataUpdatedAt, isPlaceholderData } = useQuery<FindBuyInResponse>({
+  const { data, isLoading, isFetching, isError, error, dataUpdatedAt, isPlaceholderData, refetch } = useQuery<FindBuyInResponse>({
     queryKey: ["/api/operations/find-buy-in", propertyId, listingId, slot.community, slot.bedrooms, checkInYmd, checkOutYmd, groundFloorNeededForThisSlot, rerunUntriedOnly, refreshNonce],
-    queryFn: ({ signal }) => {
+    queryFn: () => {
       const noCache = refreshNonce > 0 ? "&nocache=1" : "";
       const groundFloorParam = groundFloorNeededForThisSlot ? "&groundFloor=required" : "";
       const rerunParam = rerunUntriedOnly ? "&rerunUntried=1" : "";
@@ -10982,9 +10989,8 @@ function LiveSearchSection({
       if (listingId) context.set("listingId", listingId);
       if (slot.community) context.set("community", slot.community);
       const contextSuffix = context.toString() ? `&${context.toString()}` : "";
-      return apiGetJson<FindBuyInResponse>(
+      return fetchFindBuyInWithRetry(
         `/api/operations/find-buy-in?propertyId=${propertyId}&bedrooms=${slot.bedrooms}&checkIn=${checkInYmd}&checkOut=${checkOutYmd}${groundFloorParam}${rerunParam}${noCache}${contextSuffix}`,
-        signal,
       );
     },
     enabled: searchEnabled && !!checkInYmd && !!checkOutYmd && !groundRequirementLoading,
@@ -10994,6 +11000,19 @@ function LiveSearchSection({
   });
   const sidecarQueue = useSidecarQueueStatus(isLoading || isFetching || !!data);
   const liveSearchSidecarActive = isSidecarStatusForSearch(sidecarQueue.status, searchStartedAtMs);
+  useEffect(() => {
+    if (!searchEnabled) return;
+    const resumeIfVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (isLoading || isFetching) void refetch();
+    };
+    window.addEventListener("focus", resumeIfVisible);
+    document.addEventListener("visibilitychange", resumeIfVisible);
+    return () => {
+      window.removeEventListener("focus", resumeIfVisible);
+      document.removeEventListener("visibilitychange", resumeIfVisible);
+    };
+  }, [searchEnabled, isLoading, isFetching, refetch]);
   const refreshLiveSearch = () => {
     setRerunUntriedOnly(false);
     setSearchStartedAtMs(Date.now());
