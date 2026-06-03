@@ -133,7 +133,7 @@ export default function Builder() {
   const baseProperty = staticProperty ?? draftProperty;
   const [unitSwaps, setUnitSwaps] = useState<Record<string, BuilderUnitSwap>>({});
   useEffect(() => {
-    if (!baseProperty || !Number.isFinite(propertyId) || propertyId < 0) {
+    if (!baseProperty || !Number.isFinite(propertyId)) {
       setUnitSwaps({});
       return;
     }

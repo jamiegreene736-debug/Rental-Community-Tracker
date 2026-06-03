@@ -526,6 +526,33 @@ export default function BuilderPreflight() {
 
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
+  // Replacement photos live in a separate folder until commit; fetch counts
+  // so Photo Sources reflects the swapped unit, not the original scrape.
+  const [overridePhotoCounts, setOverridePhotoCounts] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const folders = Object.entries(unitOverrides)
+      .map(([unitId, o]) => [unitId, o.photoFolder] as const)
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string" && !!entry[1]);
+    if (!folders.length) {
+      setOverridePhotoCounts({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const counts: Record<string, number> = {};
+      await Promise.all(folders.map(async ([unitId, folder]) => {
+        try {
+          const r = await fetch(`/api/photos/community/${encodeURIComponent(folder)}`, { credentials: "include" });
+          if (!r.ok) return;
+          const data = await r.json();
+          const files = Array.isArray(data?.files) ? data.files as string[] : [];
+          counts[unitId] = files.filter((f) => /\.(?:jpe?g|png|webp)$/i.test(f)).length;
+        } catch { /* ignore */ }
+      }));
+      if (!cancelled) setOverridePhotoCounts(counts);
+    })();
+    return () => { cancelled = true; };
+  }, [unitOverrides]);
 
   const isCheckRunning = platformChecking || checkingUnitIds.size > 0;
   useEffect(() => {
@@ -586,6 +613,10 @@ export default function BuilderPreflight() {
     try {
       await fetch(`/api/unit-swaps/commit/${id}`, { method: "PATCH" });
       setSwapsCommitted(true);
+      if (isPromotedDraft) {
+        const updated = await loadDraftPropertyByNegativeId(id);
+        if (updated) setDraftProperty(updated);
+      }
     } catch { /* best effort */ } finally {
       setCommitting(false);
     }
@@ -631,6 +662,11 @@ export default function BuilderPreflight() {
     }
     return { ...u, _overrideAddress: undefined, _isReplaced: false, _replacedLabel: undefined, _replacedSourceUrl: undefined, _originalUnitNumber: u.unitNumber };
   });
+
+  const photoCountForUnit = (unitId: string, fallback: number) =>
+    unitOverrides[unitId]?.photoFolder
+      ? (overridePhotoCounts[unitId] ?? fallback)
+      : fallback;
 
   const addressRule = communityAddressRuleForName(property.complexName);
   const city =
@@ -919,9 +955,10 @@ export default function BuilderPreflight() {
               )}
             </div>
             {(() => {
-              const allUnitsHavePhotos = property.units.length > 0
-                && property.units.every((unit) => (unit.photos?.length ?? 0) > 0);
-              const someUnitsHavePhotos = property.units.some((unit) => (unit.photos?.length ?? 0) > 0);
+              const allUnitsHavePhotos = effectiveUnits.length > 0
+                && effectiveUnits.every((unit) => photoCountForUnit(unit.id, unit.photos?.length ?? 0) > 0);
+              const someUnitsHavePhotos = effectiveUnits.some((unit) =>
+                photoCountForUnit(unit.id, unit.photos?.length ?? 0) > 0);
               if (allUnitsHavePhotos) {
                 return (
                   <p className="text-sm text-muted-foreground mb-4">
@@ -956,11 +993,13 @@ export default function BuilderPreflight() {
               );
             })()}
             <div className="space-y-3">
-              {property.units.map((unit, i) => {
-                const folderHasPhotos = (unit.photos?.length ?? 0) > 0;
+              {effectiveUnits.map((unit, i) => {
+                const savedPhotoCount = photoCountForUnit(unit.id, unit.photos?.length ?? 0);
+                const folderHasPhotos = savedPhotoCount > 0;
                 const skippedCount = (skippedUrlsByUnit[unit.id] ?? []).length;
                 const isScrapingThisUnit = isPhotoFetchActive(unit.id);
                 const unitProgress = photoFetchProgressValue(unit.id);
+                const isReplaced = !!unitOverrides[unit.id];
                 return (
                   <div key={unit.id} className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-medium w-20 flex-shrink-0">
@@ -968,6 +1007,11 @@ export default function BuilderPreflight() {
                     </span>
                     <span className="text-xs text-muted-foreground flex-1">
                       {unit.bedrooms}BR · ~{unit.sqft || "?"} sqft
+                      {isReplaced && (unit as any)._replacedLabel ? (
+                        <span className="block text-[10px] text-green-700 dark:text-green-400 truncate">
+                          → {(unit as any)._replacedLabel}
+                        </span>
+                      ) : null}
                     </span>
                     <Button
                       size="sm"
@@ -989,7 +1033,7 @@ export default function BuilderPreflight() {
                     </Button>
                     {folderHasPhotos && (
                       <Badge variant="outline" className="text-[10px] flex-shrink-0">
-                        {unit.photos.length} on file
+                        {savedPhotoCount} on file
                       </Badge>
                     )}
                     {skippedCount > 0 && !folderHasPhotos && (
