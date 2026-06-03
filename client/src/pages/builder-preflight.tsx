@@ -20,6 +20,7 @@ import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "@/data/uni
 import { loadDraftPropertyByNegativeId } from "@/data/adapt-draft";
 import { apiRequest } from "@/lib/queryClient";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
+import { OperationFailureActions } from "@/components/OperationFailureActions";
 import { useToast } from "@/hooks/use-toast";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import {
@@ -328,6 +329,7 @@ export default function BuilderPreflight() {
   // Track URLs the operator has already accepted/rejected so the
   // "Try another" path skips them. Reset when the property changes.
   const [skippedUrlsByUnit, setSkippedUrlsByUnit] = useState<Record<string, string[]>>({});
+  const photoFetchStartPayloadByUnit = useRef<Record<string, Record<string, unknown>>>({});
 
   const activePhotoFetchUnitIds = Object.entries(photoFetchJobIdsByUnit)
     .filter(([unitId, jobId]) => {
@@ -478,7 +480,7 @@ export default function BuilderPreflight() {
         ...(currentSourceUrl ? [currentSourceUrl] : []),
         ...siblingSourceUrls,
       ]));
-      const resp = await apiRequest("POST", "/api/preflight/photo-fetch-jobs", {
+      const startPayload = {
         draftId,
         propertyId: id,
         unitId: unit.id,
@@ -491,7 +493,9 @@ export default function BuilderPreflight() {
         skipUrls,
         replacingExistingPhotos,
         skipFirst: skipUrls.length === 0 && replacingExistingPhotos ? 1 : 0,
-      });
+      };
+      photoFetchStartPayloadByUnit.current[unit.id] = startPayload;
+      const resp = await apiRequest("POST", "/api/preflight/photo-fetch-jobs", startPayload);
       const data = await resp.json();
       if (!data?.job?.id) throw new Error("Photo fetch job did not start");
       setPhotoFetchJobIdsByUnit((prev) => {
@@ -1052,6 +1056,27 @@ export default function BuilderPreflight() {
                       <span className="text-[10px] text-muted-foreground flex-shrink-0">
                         skipped {skippedCount}
                       </span>
+                    )}
+                    {photoFetchJobForUnit(unit.id)?.status === "failed" && (
+                      <div className="basis-full space-y-1 rounded-md border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-900">
+                        <p>{photoFetchJobForUnit(unit.id)?.error || photoFetchJobForUnit(unit.id)?.message}</p>
+                        <OperationFailureActions
+                          jobType="preflight-photo-fetch"
+                          jobId={photoFetchJobForUnit(unit.id)?.id}
+                          startPayload={photoFetchStartPayloadByUnit.current[unit.id]}
+                          onRemediated={({ job }) => {
+                            if (job && typeof job === "object" && "id" in job) {
+                              const next = job as PreflightPhotoFetchJob;
+                              setPhotoFetchJobIdsByUnit((prev) => {
+                                const updated = { ...prev, [unit.id]: next.id };
+                                savePhotoFetchJobIds(id, updated);
+                                return updated;
+                              });
+                              applyPhotoFetchJob(unit.id, next);
+                            }
+                          }}
+                        />
+                      </div>
                     )}
                     {isScrapingThisUnit && (
                       <div className="basis-full rounded-md border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-900">

@@ -54,6 +54,7 @@ import {
   bulkComboRemainingMs,
   formatBulkComboEta,
 } from "@shared/bulk-combo-queue-progress";
+import { OperationFailureActions } from "@/components/OperationFailureActions";
 import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
 
 const US_STATES = [
@@ -2894,6 +2895,29 @@ export default function AddCommunity() {
                             </div>
                           </div>
                           {item.error && <p className="mt-1 text-xs text-red-700">{item.error}</p>}
+                          {item.status === "failed" && (
+                            <div className="mt-2">
+                              <OperationFailureActions
+                                jobType="bulk-combo-listing"
+                                jobId={job.id}
+                                itemKey={item.id}
+                                onRemediated={async () => {
+                                  if (!bulkComboJobId) return;
+                                  try {
+                                    const resp = await fetch(
+                                      `/api/community/bulk-combo-listing-jobs/${encodeURIComponent(bulkComboJobId)}`,
+                                      { credentials: "include" },
+                                    );
+                                    if (resp.ok) {
+                                      const data = await resp.json();
+                                      if (data.job) setBulkComboJob(data.job);
+                                      if (Array.isArray(data.events)) setBulkComboEvents(data.events);
+                                    }
+                                  } catch { /* poll will catch up */ }
+                                }}
+                              />
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -3649,6 +3673,29 @@ export default function AddCommunity() {
                   </div>
                 );
               })()
+            )}
+
+            {photoFetchJob?.status === "failed" && photoFetchJobId && (
+              <div className="mb-4 flex flex-col gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                <p>{photoFetchJob.items?.[0]?.error || photoFetchJob.items?.[0]?.message || "Photo fetch failed."}</p>
+                <OperationFailureActions
+                  jobType="combo-photo-fetch"
+                  jobId={photoFetchJobId}
+                  itemKey={photoFetchJob.items?.[0]?.id}
+                  onRemediated={async () => {
+                    try {
+                      const resp = await fetch(
+                        `/api/community/photo-fetch-jobs/${encodeURIComponent(photoFetchJobId)}`,
+                        { credentials: "include" },
+                      );
+                      if (resp.ok) {
+                        const data = await resp.json();
+                        if (data.job) applyPhotoFetchJob(data.job);
+                      }
+                    } catch { /* ignore */ }
+                  }}
+                />
+              </div>
             )}
 
             {!photosLoading && (

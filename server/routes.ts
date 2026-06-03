@@ -59,6 +59,10 @@ import {
   startPreflightPhotoFetchJob,
   startPreflightReplacementFindJob,
 } from "./preflight-background-jobs";
+import {
+  registerOperationDiagnosticsRoutes,
+  setOperationDiagnosticsQueueHooks,
+} from "./operation-diagnostics-api";
 import { consultGrokAboutSingleListing } from "./grok-single-listing-consult";
 import { consultGrokAboutCitywideCandidates } from "./grok-citywide-candidate-consult";
 import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
@@ -28974,6 +28978,12 @@ Return ONLY compact JSON with this exact shape:
       sidecar,
       sidecarLane: getSidecarLaneStatus(),
     });
+  });
+
+  registerOperationDiagnosticsRoutes(app);
+  setOperationDiagnosticsQueueHooks({
+    resumeBulkComboListing: (jobId) => { void runBulkComboListingJob(jobId); },
+    resumeComboPhotoFetch: (jobId) => { void runComboPhotoFetchJob(jobId); },
   });
 
   app.get("/api/sidecar-lane/status", async (_req, res) => {
