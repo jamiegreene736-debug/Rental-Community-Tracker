@@ -25343,11 +25343,17 @@ Return ONLY compact JSON with this exact shape:
     // after a first one succeeded. Keep a small response reserve, but use more
     // of the available request window before giving up.
     const ROUTE_BUDGET_MS = expandedSearch ? 285_000 : 260_000;
+    // Discovery (SearchAPI + Apify) must not consume the whole route budget before
+    // candidate checks run — expanded searches were stopping at ~9/58 with
+    // "avoid a stuck request" because platform/photo work had almost no time left.
+    const DISCOVERY_BUDGET_MS = expandedSearch ? 95_000 : 80_000;
     const APIFY_SUPPLEMENT_BUDGET_MS = expandedSearch ? 100_000 : 75_000;
     const PLATFORM_SEARCH_TIMEOUT_MS = 12_000;
     const PHOTO_SCRAPE_TIMEOUT_MS = 45_000;
     const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 80 : 45;
-    const hasRouteBudget = (reserveMs = 0) => Date.now() + reserveMs < routeStartedAt + ROUTE_BUDGET_MS;
+    const discoveryElapsedMs = () => Date.now() - routeStartedAt;
+    const hasDiscoveryBudget = () => discoveryElapsedMs() < DISCOVERY_BUDGET_MS;
+    let hasRouteBudget = (reserveMs = 0) => Date.now() + reserveMs < routeStartedAt + ROUTE_BUDGET_MS;
     const withStepTimeout = async <T,>(
       promise: Promise<T>,
       ms: number,
@@ -25811,6 +25817,10 @@ Return ONLY compact JSON with this exact shape:
     }
 
     for (const siteQuery of searchQueries) {
+      if (!hasDiscoveryBudget()) {
+        console.warn(`[find-unit] discovery budget exhausted after ${discoveryElapsedMs()}ms — skipping remaining SearchAPI queries`);
+        break;
+      }
       try {
         console.error(`[find-unit] Searching: ${siteQuery}`);
         const searchResp = await fetch(
@@ -25859,13 +25869,17 @@ Return ONLY compact JSON with this exact shape:
     const allowedRoots = repeatedCandidateRoots();
     if (directRoot) allowedRoots.add(directRoot);
     for (const root of communityAddressRoots) allowedRoots.add(root);
-    if (communityLoc && allowedRoots.size > 0) {
+    if (communityLoc && allowedRoots.size > 0 && hasDiscoveryBudget()) {
       const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({
         city: bodyLocation?.city ?? communityLoc.city,
         communityName,
         streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
       }))].slice(0, 3);
       const perCityMax = Math.max(20, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)));
+      const apifyBudgetMs = Math.min(
+        APIFY_SUPPLEMENT_BUDGET_MS,
+        Math.max(5_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
+      );
       const [zillowApifyUrls, realtorApifyUrls] = await withStepTimeout(
         Promise.all([
           Promise.all(
@@ -25879,7 +25893,7 @@ Return ONLY compact JSON with this exact shape:
             ),
           ).then((rows) => [...new Set(rows.flat())]),
         ]),
-        APIFY_SUPPLEMENT_BUDGET_MS,
+        apifyBudgetMs,
         [[], []] as [string[], string[]],
         "Apify replacement supplement",
       );
@@ -25917,6 +25931,18 @@ Return ONLY compact JSON with this exact shape:
     );
 
     console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted by bedroom/source priority)`);
+
+    const candidatePhaseStartedAt = Date.now();
+    const candidateBudgetMs = Math.max(
+      expandedSearch ? 165_000 : 150_000,
+      ROUTE_BUDGET_MS - (candidatePhaseStartedAt - routeStartedAt),
+    );
+    hasRouteBudget = (reserveMs = 0) =>
+      Date.now() + reserveMs < candidatePhaseStartedAt + candidateBudgetMs;
+    console.error(
+      `[find-unit] Candidate-check budget: ${candidateBudgetMs}ms ` +
+      `(discovery took ${candidatePhaseStartedAt - routeStartedAt}ms, route cap ${ROUTE_BUDGET_MS}ms)`,
+    );
 
     // Step 2 — Per-candidate platform check across the enforced
     // platform(s): all three for default replacement, or only
