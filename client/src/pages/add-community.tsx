@@ -41,7 +41,12 @@ import { estimateNewCommunityScore, gradeColor, gradeBg } from "@/data/quality-s
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { checkCommunityType } from "@shared/community-type";
-import { formatTypicalComboLabel, inferTypicalComboPair } from "@shared/community-combo";
+import {
+  formatTypicalComboLabel,
+  inferTypicalComboPair,
+  isComboPairingAvailable,
+  pickBestAvailableComboPairing,
+} from "@shared/community-combo";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 import {
@@ -131,8 +136,7 @@ const comboKeyForPairing = (pairing: Pick<SuggestedPairing, "unit1Beds" | "unit2
   return b1 <= b2 ? `${b1}+${b2}` : `${b2}+${b1}`;
 };
 
-const isPairingAvailable = (pairing: SuggestedPairing): boolean =>
-  pairing.availability === "available" || (!pairing.alreadyExists && !pairing.reserved && pairing.availability !== "existing" && pairing.availability !== "reserved");
+const isPairingAvailable = (pairing: SuggestedPairing): boolean => isComboPairingAvailable(pairing);
 
 type SuggestedPairing = {
   unit1Beds: number;
@@ -1347,7 +1351,7 @@ export default function AddCommunity() {
       // Auto-select best unused combo type (surgical automation per user request).
       // Skips manual "choose combo type" when a strong unused recommendation exists.
       // If community already has e.g. 3+3, prefers next best like 2+3 if available.
-      const best = pairings.find(isPairingAvailable) || null;
+      const best = pickBestAvailableComboPairing(pairings) ?? null;
       if (best) {
         setSelectedPairing(best);
         setSelectedUnit1({ url: "", title: `Unit A — ${best.unit1Beds}BR`, bedrooms: best.unit1Beds, price: best.estimatedUnit1Rate, source: "Algorithm" });
@@ -1428,7 +1432,7 @@ export default function AddCommunity() {
       });
       const data = await res.json();
       const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
-      const best = pairings.find(isPairingAvailable);
+      const best = pickBestAvailableComboPairing(pairings);
       if (!best) {
         toast({ title: "All combos already used", description: "Open the community and choose Queue duplicate anyway if you intentionally want another listing.", variant: "destructive" });
         return;
@@ -1488,7 +1492,7 @@ export default function AddCommunity() {
           });
           const data = await res.json();
           const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
-          const best = pairings.find(isPairingAvailable);
+          const best = pickBestAvailableComboPairing(pairings);
           if (!best) continue;
           const pricingArea = suggestPricingArea(community.city, community.state, community.name);
           items.push({
@@ -3311,7 +3315,7 @@ export default function AddCommunity() {
                 {suggestedPairings.some(isPairingAvailable) ? (
                   <p className="mt-2 text-xs text-blue-900">
                     Next unused: {(() => {
-                      const next = suggestedPairings.find(isPairingAvailable);
+                      const next = pickBestAvailableComboPairing(suggestedPairings);
                       return next ? `${next.unit1Beds}+${next.unit2Beds}BR` : "None";
                     })()}
                   </p>
