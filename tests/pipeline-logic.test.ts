@@ -1382,6 +1382,28 @@ assert.match(
 );
 console.log("  ✓ VRBO homepage search guards stay strict on destination drift");
 
+assert.match(
+  workerSource,
+  /function bookingRequiredTargetTokens/,
+  "Booking card filtering should use server filter tokens plus resort/city context",
+);
+assert.match(
+  workerSource,
+  /bookingCardMatchMinHits/,
+  "Booking card filtering should allow partial token matches for resort-area inventory",
+);
+assert.match(
+  workerSource,
+  /targetSuggestion[\s\S]*anchored/,
+  "Booking autocomplete should prefer the intended variant suggestion over a higher-scoring property row",
+);
+assert.match(
+  workerSource,
+  /datedSearchTerm = String\(variant\?\.suggestionText/,
+  "Booking dated results URL should use the confirmed variant destination text",
+);
+console.log("  ✓ Booking.com search keeps variant destination and relaxes card token matching");
+
 // ---------- Community research/type guards ----------
 console.log("\ncommunity research/type suite");
 
