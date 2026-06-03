@@ -229,6 +229,16 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /location root[\s\S]*does not match requested/,
+  "bounded unit photo discovery must reject off-street candidates instead of accepting broad-city fallback photos",
+);
+assert.match(
+  routesSource,
+  /photo set duplicates .*existing photo source/,
+  "one-sided preflight photo persistence must compare against the sibling unit's existing source proof",
+);
+assert.match(
+  routesSource,
   /resolverProof/,
   "fetch-unit-photos must return resolver proof so diagnostics can self-fix based on exact evidence",
 );
@@ -251,6 +261,11 @@ assert.match(
   preflightJobsSource,
   /Only \$\{saved\} photo/,
   "preflight photo jobs must fail when persistence saves fewer than the required independent photos",
+);
+assert.match(
+  preflightJobsSource,
+  /reserveDraftPhotoProof[\s\S]*compareUnitPhotoProofs/,
+  "parallel preflight unit photo jobs must reserve proof so Unit A and Unit B cannot save the same gallery",
 );
 assert.match(
   preflightPhotoDiscoverySource,
@@ -300,6 +315,17 @@ const duplicateProof = compareUnitPhotoProofs(acceptedUnitProof, buildUnitPhotoR
   facts: { bedrooms: 3 },
 }));
 assert.equal(duplicateProof.duplicate, true, "same-source/same-photo proof must be treated as duplicate combo evidence");
+const relaxedUnitProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/relaxed11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/relaxed22222-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/relaxed33333-test.jpg" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/456_zpid/",
+  relaxedSearch: true,
+  facts: { bedrooms: 2 },
+});
+assert.equal(relaxedUnitProof.status, "review", "relaxed bedroom fallback proof must not be marked fully accepted");
 assert.equal(MIN_INDEPENDENT_UNIT_PHOTOS, 3, "photo proof minimum should remain aligned with combo/preflight acceptance");
 assert.match(
   preflightSource,
@@ -363,8 +389,8 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /isBoundedDiscovery && suppliedStreetRoot\) addCandidate\(link, "zillow"\)/,
-  "bounded preflight must admit Apify Zillow URLs without over-broad street-root filtering",
+  /isBoundedDiscovery && suppliedStreetRoot[\s\S]*listingStreetRoot\(link\) === suppliedStreetRoot[\s\S]*addCandidate\(link, "zillow"\)/,
+  "bounded preflight must only admit Apify Zillow URLs that match the requested resort street root",
 );
 assert.match(
   routesSource,

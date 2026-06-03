@@ -29534,6 +29534,7 @@ Return ONLY compact JSON with this exact shape:
       : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
         ? Math.round(Number(bedrooms))
         : null;
+    const relaxedBedroomDiscovery = !listingUrl && bedrooms === "any";
     const minimumBedrooms = Number.isFinite(Number(minBedrooms)) && Number(minBedrooms) > 0
       ? Math.round(Number(minBedrooms))
       : null;
@@ -29585,6 +29586,8 @@ Return ONLY compact JSON with this exact shape:
       const seen = new Set<string>();
       const harvestRootCounts = new Map<string, number>();
       const suppliedStreetRoot = streetRootFromListingAddress(streetAddress ?? null);
+      const listingStreetRoot = (url: string) =>
+        streetRootFromListingAddress(parseListingAddressFromUrl(url));
       if (suppliedStreetRoot) harvestRootCounts.set(suppliedStreetRoot, 2);
       const rememberRoot = (link: string, title = "", snippet = "") => {
         const root = streetRootFromListingAddress(
@@ -29723,8 +29726,11 @@ Return ONLY compact JSON with this exact shape:
             ? new Set([suppliedStreetRoot])
             : roots;
           for (const link of zillowApifyUrls) {
-            if (isBoundedDiscovery && suppliedStreetRoot) addCandidate(link, "zillow");
-            else addCandidate(link, "zillow", "", "", roots);
+            if (isBoundedDiscovery && suppliedStreetRoot) {
+              if (listingStreetRoot(link) === suppliedStreetRoot) addCandidate(link, "zillow");
+            } else {
+              addCandidate(link, "zillow", "", "", roots);
+            }
           }
           for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", apifyRealtorRoots);
           console.log(
@@ -29744,8 +29750,6 @@ Return ONLY compact JSON with this exact shape:
       // Prefer Zillow/Realtor (reliable photo scrapers). Redfin often returns
       // 0 photos on Railway and should not consume bounded preflight attempts.
       const canonicalStreetRoot = suppliedStreetRoot;
-      const listingStreetRoot = (url: string) =>
-        streetRootFromListingAddress(parseListingAddressFromUrl(url));
       const photoScrapeSourcePriority: Record<DiscoverySource, number> = {
         zillow: 0,
         realtor: 1,
@@ -29828,8 +29832,17 @@ Return ONLY compact JSON with this exact shape:
           );
           break;
         }
-        const facts: ListingFacts = {};
         triedCandidateUrls.push(candidate.url);
+        const candidateStreetRoot = listingStreetRoot(candidate.url);
+        const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
+        if (isBoundedDiscovery && canonicalStreetRoot && candidateStreetRoot !== canonicalStreetRoot && !isConfiguredPhotoSource) {
+          console.warn(
+            `[fetch-unit-photos] skipping ${candidate.url}: location root ${candidateStreetRoot ?? "none"} ` +
+            `does not match requested ${canonicalStreetRoot}`,
+          );
+          continue;
+        }
+        const facts: ListingFacts = {};
         try {
           const remainingBudgetMs = discoveryWallBudgetMs === null
             ? null
@@ -29866,6 +29879,7 @@ Return ONLY compact JSON with this exact shape:
             requestedBedrooms,
             minimumBedrooms,
             facts,
+            relaxedSearch: relaxedBedroomDiscovery,
           });
           res.json({
             photos: responsePhotos,
@@ -29908,6 +29922,7 @@ Return ONLY compact JSON with this exact shape:
           minimumBedrooms,
           facts,
           representativeFallback: true,
+          relaxedSearch: relaxedBedroomDiscovery,
         });
         res.json({
           photos: responsePhotos,
@@ -29954,6 +29969,7 @@ Return ONLY compact JSON with this exact shape:
               facts,
               representativeFallback: true,
               reusedConfiguredSource: true,
+              relaxedSearch: relaxedBedroomDiscovery,
             });
             res.json({
               photos: responsePhotos,
@@ -29990,6 +30006,7 @@ Return ONLY compact JSON with this exact shape:
           foundVia: "search",
           requestedBedrooms,
           minimumBedrooms,
+          relaxedSearch: relaxedBedroomDiscovery,
         });
         return res.json({
           photos: [],
@@ -33967,6 +33984,37 @@ Return ONLY compact JSON with this exact shape:
       sourceUrl: unit2SourceUrl,
       foundVia: "persist-photos",
     });
+    const PHOTOS_BASE = path.join(process.cwd(), "client/public/photos");
+    const readPersistedUnitProof = async (folder: string | null | undefined): Promise<UnitPhotoResolverProof | null> => {
+      if (!folder || !/^[a-zA-Z0-9_-]+$/.test(folder)) return null;
+      try {
+        const sourcePath = path.join(PHOTOS_BASE, folder, "_source.json");
+        const sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8"));
+        const proof = sourceDoc?.unitPhotoResolverProof;
+        return proof && typeof proof === "object" ? proof as UnitPhotoResolverProof : null;
+      } catch {
+        return null;
+      }
+    };
+    const duplicatePersistResponse = (
+      unitLabel: "Unit A" | "Unit B",
+      unitProof: UnitPhotoResolverProof,
+      siblingLabel: "Unit A" | "Unit B",
+      siblingProof: UnitPhotoResolverProof,
+    ) => {
+      const comparison = compareUnitPhotoProofs(unitProof, siblingProof);
+      if (!comparison.duplicate) return false;
+      res.status(409).json({
+        error: `${unitLabel} photo set duplicates ${siblingLabel}'s existing photo source. Pick a different photo source before saving.`,
+        diagnostic: {
+          comparison,
+          unitProof,
+          siblingProof,
+          selfFix: [`retry ${unitLabel} with ${siblingLabel}'s source URL blocked and continue candidate search until the overlap is below the duplicate threshold`],
+        },
+      });
+      return true;
+    };
     if (unit1Urls.length > 0 && unit2Urls.length > 0) {
       if (unit1Proof.status === "rejected" || unit2Proof.status === "rejected") {
         return res.status(409).json({
@@ -33991,8 +34039,17 @@ Return ONLY compact JSON with this exact shape:
         });
       }
     }
+    if (unit1Urls.length > 0 && unit2Urls.length === 0) {
+      const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
+      const siblingProof = await readPersistedUnitProof(draft?.unit2PhotoFolder);
+      if (siblingProof && duplicatePersistResponse("Unit A", unit1Proof, "Unit B", siblingProof)) return;
+    }
+    if (unit2Urls.length > 0 && unit1Urls.length === 0) {
+      const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
+      const siblingProof = await readPersistedUnitProof(draft?.unit1PhotoFolder);
+      if (siblingProof && duplicatePersistResponse("Unit B", unit2Proof, "Unit A", siblingProof)) return;
+    }
 
-    const PHOTOS_BASE = path.join(process.cwd(), "client/public/photos");
     const MAX_PER_UNIT = 25;
 
     const downloadOne = async (url: string, folderPath: string, idx: number): Promise<boolean> => {
