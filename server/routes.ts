@@ -52,6 +52,12 @@ import { getApifyVrboDebugSnapshot } from "./apify-vrbo";
 import { getOutscraperVrboDebugSnapshot } from "./outscraper-vrbo";
 import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { consultGrokAboutFindUnit } from "./grok-find-unit-consult";
+import {
+  getPreflightPhotoFetchJob,
+  getPreflightReplacementFindJob,
+  startPreflightPhotoFetchJob,
+  startPreflightReplacementFindJob,
+} from "./preflight-background-jobs";
 import { consultGrokAboutSingleListing } from "./grok-single-listing-consult";
 import { consultGrokAboutCitywideCandidates } from "./grok-citywide-candidate-consult";
 import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
@@ -24656,6 +24662,69 @@ Return ONLY compact JSON with this exact shape:
     }
 
     res.json({ results });
+  });
+
+  // Background jobs so preflight photo discovery / replacement search survive tab close.
+  app.post("/api/preflight/photo-fetch-jobs", async (req, res) => {
+    const body = (req.body ?? {}) as {
+      draftId?: number;
+      propertyId?: number;
+      unitId?: string;
+      unitIndex?: 0 | 1;
+      bedrooms?: number;
+      communityName?: string;
+      streetAddress?: string;
+      city?: string;
+      state?: string;
+      skipUrls?: string[];
+      replacingExistingPhotos?: boolean;
+      skipFirst?: number;
+    };
+    const draftId = Number(body.draftId);
+    const propertyId = Number(body.propertyId);
+    const unitId = typeof body.unitId === "string" ? body.unitId.trim() : "";
+    const unitIndex = body.unitIndex === 1 ? 1 : 0;
+    const bedrooms = Number(body.bedrooms);
+    const communityName = typeof body.communityName === "string" ? body.communityName.trim() : "";
+    if (!Number.isFinite(draftId) || draftId <= 0) return res.status(400).json({ error: "draftId required" });
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "propertyId required" });
+    if (!unitId) return res.status(400).json({ error: "unitId required" });
+    if (!Number.isFinite(bedrooms) || bedrooms <= 0) return res.status(400).json({ error: "bedrooms required" });
+    if (!communityName) return res.status(400).json({ error: "communityName required" });
+    const job = startPreflightPhotoFetchJob({
+      draftId,
+      propertyId,
+      unitId,
+      unitIndex,
+      bedrooms,
+      communityName,
+      streetAddress: body.streetAddress,
+      city: body.city,
+      state: body.state,
+      skipUrls: body.skipUrls,
+      replacingExistingPhotos: body.replacingExistingPhotos === true,
+      skipFirst: body.skipFirst,
+    });
+    res.status(202).json({ job });
+  });
+
+  app.get("/api/preflight/photo-fetch-jobs/:jobId", (req, res) => {
+    const job = getPreflightPhotoFetchJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Photo fetch job not found" });
+    res.json({ job });
+  });
+
+  app.post("/api/preflight/replacement-find-jobs", async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (!body.communityFolder) return res.status(400).json({ error: "communityFolder required" });
+    const job = startPreflightReplacementFindJob(body);
+    res.status(202).json({ job });
+  });
+
+  app.get("/api/preflight/replacement-find-jobs/:jobId", (req, res) => {
+    const job = getPreflightReplacementFindJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Replacement find job not found" });
+    res.json({ job });
   });
 
   // ========== FIND REPLACEMENT LISTING ==========

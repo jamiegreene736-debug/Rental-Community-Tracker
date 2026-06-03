@@ -21,6 +21,35 @@ import {
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
 
+type PreflightReplacementFindJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  phase: string;
+  message: string;
+  progress: number;
+  error: string | null;
+  unit: ReplacementUnitData | null;
+};
+
+const replacementJobStorageKey = (propertyId: number) => `preflight.replacementFindJob.v1:${propertyId}`;
+const loadReplacementJobRef = (propertyId: number): { jobId: string; targetUnitId: string } | null => {
+  try {
+    const raw = localStorage.getItem(replacementJobStorageKey(propertyId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { jobId?: string; targetUnitId?: string };
+    if (parsed?.jobId && parsed?.targetUnitId) return { jobId: parsed.jobId, targetUnitId: parsed.targetUnitId };
+    return null;
+  } catch {
+    return null;
+  }
+};
+const saveReplacementJobRef = (propertyId: number, ref: { jobId: string; targetUnitId: string } | null) => {
+  try {
+    if (!ref) localStorage.removeItem(replacementJobStorageKey(propertyId));
+    else localStorage.setItem(replacementJobStorageKey(propertyId), JSON.stringify(ref));
+  } catch { /* ignore */ }
+};
+
 function humanizeApiError(err: unknown, fallback: string) {
   const raw = err instanceof Error ? err.message : typeof err === "string" ? err : "";
   const stripped = raw.replace(/^\d+:\s*/, "").trim();
@@ -122,9 +151,79 @@ export function UnitReplacementFlow({
   // URLs the user explicitly skipped via "Try another" — fed back into
   // the next find-unit call so we don't surface the same listing again.
   const [extraSkipUrls, setExtraSkipUrls] = useState<string[]>([]);
+  const [replacementJobId, setReplacementJobId] = useState<string | null>(() =>
+    loadReplacementJobRef(propertyId)?.jobId ?? null,
+  );
+  const [replacementJob, setReplacementJob] = useState<PreflightReplacementFindJob | null>(null);
 
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
   const hasActiveReplacement = allUnits.some(u => Boolean(u.replacementSourceUrl));
+
+  const applyReplacementJob = (job: PreflightReplacementFindJob, restored = false) => {
+    setReplacementJob(job);
+    if (job.status === "queued" || job.status === "running") {
+      setStage(job.phase === "checking" ? "checking" : "searching");
+      if (!searchStartedAt) setSearchStartedAt(Date.now());
+      return;
+    }
+    setSearchStartedAt(null);
+    saveReplacementJobRef(propertyId, null);
+    setReplacementJobId(null);
+    if (job.status === "completed" && job.unit) {
+      setStage("found");
+      setResult(job.unit);
+      setSwapError(null);
+      return;
+    }
+    if (job.status === "failed") {
+      setStage("error");
+      setResult(null);
+      if (!restored) setSwapError(job.error || "Search failed. Please try again.");
+    }
+  };
+
+  useEffect(() => {
+    const stored = loadReplacementJobRef(propertyId);
+    if (!stored?.jobId) return;
+    if (stored.targetUnitId !== selectedUnitId) return;
+    setReplacementJobId(stored.jobId);
+    setSearchStartedAt((prev) => prev ?? Date.now());
+    setStage("searching");
+  }, [propertyId, selectedUnitId]);
+
+  useEffect(() => {
+    if (!replacementJobId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(`/api/preflight/replacement-find-jobs/${encodeURIComponent(replacementJobId)}`, {
+          credentials: "include",
+        });
+        if (!resp.ok) {
+          if (resp.status === 404 && !cancelled) {
+            saveReplacementJobRef(propertyId, null);
+            setReplacementJobId(null);
+            setStage("idle");
+            setSearchStartedAt(null);
+          }
+          return;
+        }
+        const data = await resp.json();
+        if (!cancelled && data.job) applyReplacementJob(data.job as PreflightReplacementFindJob);
+      } catch {
+        // keep polling
+      }
+    };
+    poll();
+    const terminal = replacementJob?.status === "completed" || replacementJob?.status === "failed";
+    if (terminal) return () => { cancelled = true; };
+    const interval = window.setInterval(poll, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replacementJobId, replacementJob?.status, propertyId, selectedUnitId]);
 
   const isWorking = stage === "searching" || stage === "checking";
   useEffect(() => {
@@ -141,11 +240,10 @@ export function UnitReplacementFlow({
     setSearchStartedAt(Date.now());
     setProgressTick(0);
     setStage("searching");
-    setTimeout(() => setStage(s => s === "searching" ? "checking" : s), 2000);
     const nextExtra = opts.extraSkip ? [...extraSkipUrls, opts.extraSkip] : extraSkipUrls;
     if (opts.extraSkip) setExtraSkipUrls(nextExtra);
     try {
-      const resp = await apiRequest("POST", "/api/replacement/find-unit", {
+      const resp = await apiRequest("POST", "/api/preflight/replacement-find-jobs", {
         communityFolder,
         communityName,
         propertyAddress,
@@ -159,18 +257,13 @@ export function UnitReplacementFlow({
         expandedSearch: expanded,
       });
       const data = await resp.json();
-      if (data.error) {
-        setStage("error");
-        setResult(null);
-        setSwapError(data.error);
-      } else {
-        setStage("found");
-        setResult(data.unit);
-      }
+      if (!data?.job?.id) throw new Error("Replacement search did not start");
+      setReplacementJobId(data.job.id as string);
+      saveReplacementJobRef(propertyId, { jobId: data.job.id, targetUnitId: selectedUnit.id });
+      applyReplacementJob(data.job as PreflightReplacementFindJob);
     } catch (err) {
       setStage("error");
       setSwapError(humanizeApiError(err, "Failed to connect. Please try again."));
-    } finally {
       setSearchStartedAt(null);
     }
   }
@@ -222,13 +315,15 @@ export function UnitReplacementFlow({
   const elapsedSeconds = searchStartedAt
     ? Math.max(progressTick, Math.floor((Date.now() - searchStartedAt) / 1000))
     : 0;
-  const progressPercent = stage === "searching"
-    ? Math.min(42, 10 + elapsedSeconds * 2.2)
-    : stage === "checking"
-      ? Math.min(94, 42 + Math.max(0, elapsedSeconds - 2) * 0.75)
-      : stage === "found"
-        ? 100
-        : 0;
+  const progressPercent = replacementJob && (replacementJob.status === "queued" || replacementJob.status === "running")
+    ? Math.min(94, Math.max(8, replacementJob.progress))
+    : stage === "searching"
+      ? Math.min(42, 10 + elapsedSeconds * 2.2)
+      : stage === "checking"
+        ? Math.min(94, 42 + Math.max(0, elapsedSeconds - 2) * 0.75)
+        : stage === "found"
+          ? 100
+          : 0;
   const elapsedLabel = elapsedSeconds >= 60
     ? `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`
     : `${elapsedSeconds}s`;
@@ -288,11 +383,12 @@ export function UnitReplacementFlow({
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 <span>
-                  {stage === "searching"
-                    ? lastSearchExpanded
-                      ? "Expanded search across Zillow, Realtor, Redfin, and Homes.com…"
-                      : "Searching Zillow, Realtor, and Redfin…"
-                    : "Checking Airbnb, VRBO, and Booking.com for conflicts…"}
+                  {replacementJob?.message
+                    || (stage === "searching"
+                      ? lastSearchExpanded
+                        ? "Expanded search across Zillow, Realtor, Redfin, and Homes.com…"
+                        : "Searching Zillow, Realtor, and Redfin…"
+                      : "Checking Airbnb, VRBO, and Booking.com for conflicts…")}
                 </span>
               </div>
               <div className="space-y-1.5">
@@ -313,13 +409,15 @@ export function UnitReplacementFlow({
                 <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
                   <span>{Math.round(progressPercent)}% · {elapsedLabel}</span>
                   <span className="text-right">
-                    {stage === "searching"
-                      ? lastSearchExpanded
-                        ? "Finding more real-estate candidates"
-                        : "Finding real-estate candidates"
-                      : elapsedSeconds > 90
-                        ? "Still checking candidates; this can take a few minutes"
-                        : "Verifying candidate is not already listed"}
+                    {replacementJobId
+                      ? "Safe to leave this tab — search continues on server"
+                      : stage === "searching"
+                        ? lastSearchExpanded
+                          ? "Finding more real-estate candidates"
+                          : "Finding real-estate candidates"
+                        : elapsedSeconds > 90
+                          ? "Still checking candidates; this can take a few minutes"
+                          : "Verifying candidate is not already listed"}
                   </span>
                 </div>
               </div>
