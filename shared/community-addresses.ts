@@ -71,6 +71,28 @@ export function communityAddressRuleForName(name: string | null | undefined): Co
   ) ?? null;
 }
 
+/** Mailing city from "street, city, HI 96707" or "street, city, Hawaii". */
+export function parseCityFromMailingAddress(address: string | null | undefined): string | null {
+  const trimmed = String(address ?? "").trim();
+  if (!trimmed) return null;
+  const withZip = trimmed.match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d/);
+  if (withZip) return withZip[1].trim();
+  const parts = trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+  if (parts.length >= 3) return parts[parts.length - 2];
+  if (parts.length === 2) return parts[1];
+  return null;
+}
+
+/** Recover city when a full address was sent as the platform-check `city` param. */
+export function normalizePlatformCheckCity(city: string, mailingAddress?: string): string {
+  const raw = String(city ?? "").trim();
+  if (!raw) return parseCityFromMailingAddress(mailingAddress) ?? "";
+  if (/,/.test(raw) && /\d/.test(raw)) {
+    return parseCityFromMailingAddress(raw) ?? raw;
+  }
+  return raw;
+}
+
 export function streetRootFromAddress(value: string | null | undefined): string {
   const raw = String(value ?? "").trim();
   if (!raw) return "";

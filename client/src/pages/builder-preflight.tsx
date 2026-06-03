@@ -22,7 +22,11 @@ import { apiRequest } from "@/lib/queryClient";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 import { useToast } from "@/hooks/use-toast";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
-import { inferCommunityStreetAddress } from "@shared/community-addresses";
+import {
+  communityAddressRuleForName,
+  inferCommunityStreetAddress,
+  parseCityFromMailingAddress,
+} from "@shared/community-addresses";
 
 type PreflightPhotoFetchJob = {
   id: string;
@@ -628,9 +632,12 @@ export default function BuilderPreflight() {
     return { ...u, _overrideAddress: undefined, _isReplaced: false, _replacedLabel: undefined, _replacedSourceUrl: undefined, _originalUnitNumber: u.unitNumber };
   });
 
-  // Extract city from address like "4460 Nehe Rd, Lihue, HI 96766"
-  const cityMatch = property.address.match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d/);
-  const city = cityMatch ? cityMatch[1].trim() : property.address;
+  const addressRule = communityAddressRuleForName(property.complexName);
+  const city =
+    parseCityFromMailingAddress(property.address)
+    || addressRule?.city
+    || property.complexName;
+  const searchCommunityName = property.complexName?.trim() || property.propertyName;
 
   // ── Check one unit at a time, updating results as each completes ──────────
   const runPlatformCheck = async (
@@ -666,7 +673,7 @@ export default function BuilderPreflight() {
           photoFolder: hasUnitPhoto ? unit.photoFolder : "",
         }];
         const params = new URLSearchParams({
-          name: property.propertyName,
+          name: searchCommunityName,
           city,
           units: JSON.stringify(unitPayload),
           photoMode: fullPhotoAudit ? "full" : "sample",

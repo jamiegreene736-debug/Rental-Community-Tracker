@@ -19,6 +19,8 @@ import {
   discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
   inferCommunityStreetAddress,
+  normalizePlatformCheckCity,
+  parseCityFromMailingAddress,
   resolveBulkComboListingStreet,
   validateCommunityStreetAddress,
 } from "../shared/community-addresses";
@@ -1709,6 +1711,18 @@ assert.ok(
   preflightSource.includes("replacementSourceUrl: unitOverrides[u.id]?.sourceUrl"),
   "preflight replacement flow must pass active swap URLs so follow-up searches use expanded mode",
 );
+assert.ok(
+  preflightSource.includes("parseCityFromMailingAddress(property.address)"),
+  "preflight platform check must parse Kapolei from Hawaii mailing addresses",
+);
+assert.ok(
+  preflightSource.includes("name: searchCommunityName"),
+  "preflight platform check must search by resort/community name, not listing title",
+);
+assert.ok(
+  routeSource.includes("normalizePlatformCheckCity"),
+  "platform-check API must normalize a full mailing address sent as city",
+);
 console.log("  ✓ replacement search budget and follow-up expanded mode are guarded");
 
 assert.equal(
@@ -2128,6 +2142,16 @@ assert.ok(
     streetAddress: "92-102 Waialii Pl",
   }).includes("Kapolei"),
   "Ko Olina Beach Villas photo discovery should search Kapolei, not only the draft mailing city",
+);
+assert.equal(
+  parseCityFromMailingAddress("92-1070 Olani St, Kapolei, Hawaii"),
+  "Kapolei",
+  "preflight platform check must parse city when the state is spelled out instead of HI + zip",
+);
+assert.equal(
+  normalizePlatformCheckCity("92-1070 Olani St, Kapolei, Hawaii"),
+  "Kapolei",
+  "platform-check API must recover Kapolei when the client sends the full mailing address as city",
 );
 console.log("  ✓ Ko Olina Beach Villas + Coconut Plantation canonical addresses validate for bulk combo draft saves");
 
