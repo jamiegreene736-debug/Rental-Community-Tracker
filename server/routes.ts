@@ -90,6 +90,11 @@ import {
   medianRate,
 } from "./community-research";
 import {
+  loadTopMarketScanCacheMap,
+  topMarketScanCacheKey,
+  upsertTopMarketScanCache,
+} from "./top-market-scan-cache";
+import {
   BUY_IN_RATES,
   CHANNEL_HOST_FEE,
   clampSuspiciousAirbnbBuyInRate,
@@ -33323,9 +33328,58 @@ Return ONLY compact JSON with this exact shape:
     createdAt: number;
     updatedAt: number;
     cancelRequested?: boolean;
+    cacheRefresh?: boolean;
   };
   const topMarketJobs = new Map<string, TopMarketJob>();
+  let topMarketCacheRefreshJobId: string | null = null;
   const TOP_MARKET_JOB_TTL_MS = 1000 * 60 * 60 * 6;
+  const activeTopMarketCacheRefreshJob = (): TopMarketJob | null => {
+    if (topMarketCacheRefreshJobId) {
+      const job = topMarketJobs.get(topMarketCacheRefreshJobId);
+      if (job && (job.status === "queued" || job.status === "running")) return job;
+      topMarketCacheRefreshJobId = null;
+    }
+    for (const job of topMarketJobs.values()) {
+      if (job.cacheRefresh && (job.status === "queued" || job.status === "running")) {
+        topMarketCacheRefreshJobId = job.id;
+        return job;
+      }
+    }
+    return null;
+  };
+  const enqueueTopMarketScanJob = (
+    requested: Array<{ city: string; state: string; tag?: string; estimatedComboLow?: number; estimatedComboHigh?: number }>,
+    options?: { maxMarkets?: number; cacheRefresh?: boolean },
+  ): TopMarketJob => {
+    const limit = Math.min(
+      requested.length,
+      Math.max(1, options?.maxMarkets ?? requested.length),
+    );
+    const markets = requested.slice(0, limit).map((m) => ({
+      city: m.city,
+      state: m.state,
+      tag: m.tag,
+      estimatedComboLow: m.estimatedComboLow,
+      estimatedComboHigh: m.estimatedComboHigh,
+      status: "pending" as const,
+    }));
+    const id = `tmj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const now = Date.now();
+    const job: TopMarketJob = {
+      id,
+      status: "queued",
+      markets,
+      totalCommunities: 0,
+      topCommunity: null,
+      createdAt: now,
+      updatedAt: now,
+      cacheRefresh: options?.cacheRefresh === true,
+    };
+    topMarketJobs.set(id, job);
+    if (job.cacheRefresh) topMarketCacheRefreshJobId = id;
+    void runTopMarketJob(job);
+    return job;
+  };
   const pruneTopMarketJobs = () => {
     const cutoff = Date.now() - TOP_MARKET_JOB_TTL_MS;
     for (const [id, job] of topMarketJobs.entries()) {
@@ -33354,6 +33408,9 @@ Return ONLY compact JSON with this exact shape:
           market.status = "cancelled";
           job.status = "cancelled";
           job.updatedAt = Date.now();
+          if (job.cacheRefresh && topMarketCacheRefreshJobId === job.id) {
+            topMarketCacheRefreshJobId = null;
+          }
           console.log(`[scan-top-markets-job] ${job.id} cancelled`);
           return;
         }
@@ -33384,17 +33441,37 @@ Return ONLY compact JSON with this exact shape:
           market.error = e?.message || "Market scan failed";
           console.error(`[scan-top-markets-job] ${job.id} ${market.city}, ${market.state} error:`, market.error);
         } finally {
+          try {
+            await upsertTopMarketScanCache({
+              city: market.city,
+              state: market.state,
+              tag: market.tag,
+              communities: market.communities ?? [],
+              error: market.error ?? null,
+            });
+          } catch (cacheErr: any) {
+            console.warn(
+              `[top-market-scan-cache] save failed for ${market.city}, ${market.state}:`,
+              cacheErr?.message || cacheErr,
+            );
+          }
           job.updatedAt = Date.now();
         }
       }
       job.status = job.markets.every((m) => m.status === "error") ? "error" : "done";
       if (job.status === "error") job.error = "All selected markets failed";
       job.updatedAt = Date.now();
+      if (job.cacheRefresh && topMarketCacheRefreshJobId === job.id) {
+        topMarketCacheRefreshJobId = null;
+      }
       console.log(`[scan-top-markets-job] ${job.id} done: ${job.totalCommunities} communities across ${job.markets.length} markets`);
     } catch (e: any) {
       job.status = "error";
       job.error = e?.message || "Top-market job failed";
       job.updatedAt = Date.now();
+      if (job.cacheRefresh && topMarketCacheRefreshJobId === job.id) {
+        topMarketCacheRefreshJobId = null;
+      }
       console.error(`[scan-top-markets-job] ${job.id} fatal error:`, job.error);
     }
   };
@@ -33406,30 +33483,27 @@ Return ONLY compact JSON with this exact shape:
     const body = (req.body ?? {}) as {
       markets?: Array<{ city: string; state: string; tag?: string; estimatedComboLow?: number; estimatedComboHigh?: number }>;
       maxMarkets?: number;
+      refreshCache?: boolean;
     };
     const requested = body.markets && body.markets.length > 0 ? body.markets : TOP_MARKET_SEEDS;
-    const limit = Math.min(requested.length, Math.max(1, body.maxMarkets ?? 12));
-    const markets = requested.slice(0, limit).map((m) => ({
-      city: m.city,
-      state: m.state,
-      tag: m.tag,
-      estimatedComboLow: m.estimatedComboLow,
-      estimatedComboHigh: m.estimatedComboHigh,
-      status: "pending" as const,
-    }));
-    const id = `tmj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const now = Date.now();
-    const job: TopMarketJob = {
-      id,
-      status: "queued",
-      markets,
-      totalCommunities: 0,
-      topCommunity: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    topMarketJobs.set(id, job);
-    void runTopMarketJob(job);
+    let marketsToScan = requested;
+    if (body.refreshCache) {
+      const cacheMap = await loadTopMarketScanCacheMap();
+      marketsToScan = requested.filter(
+        (m) => !cacheMap.has(topMarketScanCacheKey(m.city, m.state)),
+      );
+      if (marketsToScan.length === 0) {
+        return res.status(200).json({
+          job: null,
+          message: "All requested markets are already cached",
+          cache: { total: requested.length, cached: requested.length, uncached: 0 },
+        });
+      }
+    }
+    const job = enqueueTopMarketScanJob(marketsToScan, {
+      maxMarkets: body.maxMarkets,
+      cacheRefresh: body.refreshCache === true,
+    });
     res.status(202).json({ job: serializeTopMarketJob(job) });
   });
 
@@ -33459,7 +33533,7 @@ Return ONLY compact JSON with this exact shape:
     };
 
     const requested = body.markets && body.markets.length > 0 ? body.markets : TOP_MARKET_SEEDS;
-    const limit = Math.min(requested.length, Math.max(1, body.maxMarkets ?? 12));
+    const limit = Math.min(requested.length, Math.max(1, body.maxMarkets ?? requested.length));
     const markets = requested.slice(0, limit);
 
     res.setHeader("Content-Type", "application/x-ndjson");
@@ -33500,9 +33574,19 @@ Return ONLY compact JSON with this exact shape:
         const sevenEightBedroomPossible = communities.some(hasSevenEightBedroomComboPotential);
         emit({ type: "market-done", city, state, tag, estimatedComboLow, estimatedComboHigh, sixBedroomPossible, sevenEightBedroomPossible, count: communities.length, communities });
         console.log(`[scan-top-markets] ${city}, ${state}: ${communities.length} qualifying`);
+        try {
+          await upsertTopMarketScanCache({ city, state, tag, communities });
+        } catch (cacheErr: any) {
+          console.warn(`[top-market-scan-cache] save failed for ${city}, ${state}:`, cacheErr?.message || cacheErr);
+        }
       } catch (e: any) {
         console.error(`[scan-top-markets] ${city}, ${state} error:`, e.message);
         emit({ type: "market-error", city, state, tag, estimatedComboLow, estimatedComboHigh, error: e.message });
+        try {
+          await upsertTopMarketScanCache({ city, state, tag, communities: [], error: e.message });
+        } catch (cacheErr: any) {
+          console.warn(`[top-market-scan-cache] failure save failed for ${city}, ${state}:`, cacheErr?.message || cacheErr);
+        }
       }
     }
 
@@ -33517,9 +33601,57 @@ Return ONLY compact JSON with this exact shape:
   });
 
   // GET /api/community/top-markets/seeds
-  // Returns the curated seed list so the UI can show a preview / checkboxes.
-  app.get("/api/community/top-markets/seeds", (_req, res) => {
-    res.json({ seeds: TOP_MARKET_SEEDS, markets: TOP_MARKET_SEEDS });
+  // Returns the curated seed list merged with persisted combo-scan cache.
+  // When uncached markets remain, auto-starts a background cache-refresh job.
+  app.get("/api/community/top-markets/seeds", async (_req, res) => {
+    try {
+      const cacheMap = await loadTopMarketScanCacheMap();
+      const seeds = TOP_MARKET_SEEDS.map((seed) => {
+        const row = cacheMap.get(topMarketScanCacheKey(seed.city, seed.state));
+        if (!row) return seed;
+        return {
+          ...seed,
+          sixBedroomPossible: row.sixBedroomPossible,
+          sevenEightBedroomPossible: row.sevenEightBedroomPossible,
+          qualifyingCount: row.qualifyingCount,
+          scannedAt: row.scannedAt?.toISOString?.() ?? row.scannedAt,
+          scanError: row.error,
+        };
+      });
+      const cachedCount = TOP_MARKET_SEEDS.filter(
+        (s) => cacheMap.has(topMarketScanCacheKey(s.city, s.state)),
+      ).length;
+      const uncachedMarkets = TOP_MARKET_SEEDS.filter(
+        (s) => !cacheMap.has(topMarketScanCacheKey(s.city, s.state)),
+      );
+      let refreshJob = activeTopMarketCacheRefreshJob();
+      if (
+        !refreshJob &&
+        uncachedMarkets.length > 0 &&
+        process.env.SEARCHAPI_API_KEY
+      ) {
+        refreshJob = enqueueTopMarketScanJob(uncachedMarkets, {
+          maxMarkets: uncachedMarkets.length,
+          cacheRefresh: true,
+        });
+        console.log(
+          `[top-market-scan-cache] auto-started refresh for ${uncachedMarkets.length} uncached markets (job ${refreshJob.id})`,
+        );
+      }
+      res.json({
+        seeds,
+        markets: seeds,
+        cache: {
+          total: TOP_MARKET_SEEDS.length,
+          cached: cachedCount,
+          uncached: uncachedMarkets.length,
+          refreshJobId: refreshJob?.id ?? null,
+        },
+      });
+    } catch (err: any) {
+      console.error("[top-market-scan-cache] seeds lookup failed:", err?.message || err);
+      res.status(500).json({ error: err?.message || "Failed to load top markets" });
+    }
   });
 
   // GET /api/community/city-suggest?state=Florida&query=des
