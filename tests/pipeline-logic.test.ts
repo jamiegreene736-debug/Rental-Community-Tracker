@@ -1739,6 +1739,30 @@ assert.ok(
   "replacement diagnostics must count same-community duplicate rejections",
 );
 assert.ok(
+  routeSource.includes("const canonicalStreet = inferCommunityStreetAddress({"),
+  "replacement find-unit must resolve canonical resort street when folder map is missing (e.g. Waikoloa)",
+);
+assert.ok(
+  routeSource.includes("if (canonicalStreetRoot) harvestRootCounts.set(canonicalStreetRoot, 2);"),
+  "replacement find-unit must pre-seed street roots so Apify supplement can run before SearchAPI hits",
+);
+assert.ok(
+  routeSource.includes("const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({"),
+  "replacement find-unit Apify supplement must search all discovery cities, not only the first",
+);
+assert.ok(
+  preflightSource.includes("const replacementStreetAddress = inferCommunityStreetAddress({"),
+  "preflight replacement flow must pass canonical resort street like Find Photos does",
+);
+assert.ok(
+  preflightSource.includes("setReplacementSkipUrl(skipReplacementUrl);"),
+  "Change replacement must skip the unit being replaced so search can find a different one",
+);
+assert.ok(
+  routeSource.includes('"skipped-internal-duplicate": 0'),
+  "replacement diagnostics must count same-community duplicate rejections",
+);
+assert.ok(
   routeSource.includes("const addressRule = communityAddressRuleForName(communityName);"),
   "replacement find-unit must prefer canonical resort city over mailing-city payloads like Mauna Kea",
 );
