@@ -7,7 +7,7 @@ import { db } from "./db";
 import { eq } from "drizzle-orm";
 
 /** Bump when combo-badge logic changes so cached market flags are recomputed. */
-export const TOP_MARKET_SCAN_CACHE_LOGIC_VERSION = 2;
+export const TOP_MARKET_SCAN_CACHE_LOGIC_VERSION = 3;
 
 const TOP_MARKET_SCAN_CACHE_VERSION_KEY = "__top_market_scan_cache_logic_version__";
 

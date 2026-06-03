@@ -905,6 +905,68 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     estimatedTotalUnits: 150,
   },
   {
+    city: KAUAI_NORTH_CITY_PATTERN,
+    state: /^(hi|hawaii)$/i,
+    name: "Kaiulani of Princeville",
+    unitTypes: "townhomes",
+    bedroomMix: "3BR and 4BR townhomes",
+    combinedBedroomsTypical: 7,
+    confidenceScore: 86,
+    combinabilityScore: 74,
+    sourceUrl: "https://www.hawaiigaga.com/kaiulani-of-princeville-rentals.aspx",
+    researchSummary: "Princeville townhome community above Anini Beach with individually owned 3BR and 4BR vacation rentals; supports 3BR+4BR=7BR combos.",
+    availableBedrooms: [3, 4],
+    estimatedTotalUnits: 76,
+    estimatedBedroomUnitCounts: { "3": 40, "4": 36 },
+    addressHint: "4100 Queen Emma's Dr",
+  },
+  {
+    city: KAUAI_NORTH_CITY_PATTERN,
+    state: /^(hi|hawaii)$/i,
+    name: "The Cliffs at Princeville",
+    unitTypes: "condos",
+    bedroomMix: "1BR, 2BR, 3BR, and 4BR suites",
+    combinedBedroomsTypical: 8,
+    confidenceScore: 84,
+    combinabilityScore: 72,
+    sourceUrl: "https://www.cliffsatprinceville.com/princeville-vacation-rentals/",
+    researchSummary: "Princeville condo resort with individually rented units up to 4BR suites; supports 3BR+4BR and 4BR+4BR combo inventory.",
+    availableBedrooms: [1, 2, 3, 4],
+    estimatedTotalUnits: 202,
+  },
+  // Gulf Coast — curated 4BR condo towers for top-market combo badges when
+  // SearchAPI/Claude scans have not yet populated the cache.
+  {
+    city: /^destin$/i,
+    state: /^(fl|florida)$/i,
+    name: "Emerald Towers",
+    unitTypes: "condos",
+    bedroomMix: "2BR, 3BR, and 4BR gulf-front condos",
+    combinedBedroomsTypical: 8,
+    confidenceScore: 82,
+    combinabilityScore: 70,
+    sourceUrl: "https://www.ecvr.com/emerald-towers-condos/",
+    researchSummary: "Destin gulf-front condominium tower with individually owned 2BR/3BR/4BR vacation-rental condos.",
+    availableBedrooms: [2, 3, 4],
+    estimatedTotalUnits: 240,
+    estimatedBedroomUnitCounts: { "2": 80, "3": 100, "4": 60 },
+  },
+  {
+    city: /^panama city beach$/i,
+    state: /^(fl|florida)$/i,
+    name: "Shores of Panama",
+    unitTypes: "condos",
+    bedroomMix: "2BR, 3BR, and 4BR condos",
+    combinedBedroomsTypical: 8,
+    confidenceScore: 80,
+    combinabilityScore: 68,
+    sourceUrl: "https://www.panamacitybeach.com/shores-of-panama/",
+    researchSummary: "Panama City Beach high-rise condo resort with individually owned units through 4BR; strong 3BR+4BR combo potential.",
+    availableBedrooms: [2, 3, 4],
+    estimatedTotalUnits: 520,
+    estimatedBedroomUnitCounts: { "2": 180, "3": 220, "4": 120 },
+  },
+  {
     city: KAUAI_EAST_CITY_PATTERN,
     state: /^(hi|hawaii)$/i,
     name: "Waipouli Beach Resort",
@@ -984,7 +1046,7 @@ function knownSingleListingSeedsForCity(city: string, state: string): Researched
     }));
 }
 
-function knownComboSeedsForCity(city: string, state: string): ResearchedCommunity[] {
+export function knownComboSeedsForCity(city: string, state: string): ResearchedCommunity[] {
   return KNOWN_COMBO_COMMUNITY_SEEDS
     .filter((seed) => seed.city.test(city.trim()) && seed.state.test(state.trim()))
     .filter((seed) => checkCommunityType(seed.unitTypes, seed.researchSummary).eligible)
@@ -1067,6 +1129,30 @@ function hasBedroomPairComboPotential(
 
 export function hasKnownSixBedroomComboMarketPotential(city: string, state: string): boolean {
   return knownComboSeedsForCity(city, state).some(hasSixBedroomComboPotential);
+}
+
+/** Snapshot of curated 4BR / 7-8BR coverage for all top-market seeds (no SearchAPI). */
+export function auditTopMarketSevenEightFromCuratedSeeds(): Array<{
+  city: string;
+  state: string;
+  tag: string;
+  seedCount: number;
+  sevenEight: boolean;
+  fourBedroomCommunities: string[];
+}> {
+  return TOP_MARKET_SEEDS.map((market) => {
+    const communities = knownComboSeedsForCity(market.city, market.state);
+    return {
+      city: market.city,
+      state: market.state,
+      tag: market.tag,
+      seedCount: communities.length,
+      sevenEight: communities.some(hasSevenEightBedroomComboPotential),
+      fourBedroomCommunities: communities
+        .filter((c) => (c.availableBedrooms ?? []).includes(4))
+        .map((c) => c.name),
+    };
+  });
 }
 
 function normalizeCommunityName(value: unknown): string {
