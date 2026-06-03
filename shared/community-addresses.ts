@@ -2,6 +2,7 @@ export type CommunityAddressRule = {
   names: string[];
   street: string;
   city: string;
+  cityAliases?: string[];
   state: string;
 };
 
@@ -20,6 +21,8 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Waikiki Banyan", "Aston at the Waikiki Banyan"], street: "201 Ohua Ave", city: "Honolulu", state: "HI" },
   { names: ["Waikiki Sunset", "Aston Waikiki Sunset"], street: "229 Paoakalani Ave", city: "Honolulu", state: "HI" },
   { names: ["Island Colony", "Island Colony Waikiki"], street: "445 Seaside Ave", city: "Honolulu", state: "HI" },
+  { names: ["Waikoloa Beach Villas", "Beach Villas at Waikoloa Beach Resort"], street: "69-180 Waikoloa Beach Dr", city: "Waikoloa", state: "HI" },
+  { names: ["Mauna Lani Point"], street: "68-1050 Mauna Lani Point Dr", city: "Kamuela", cityAliases: ["Waikoloa", "Puako", "Mauna Lani", "Waimea"], state: "HI" },
   { names: ["Windsor Hills", "Windsor Hills Resort"], street: "2600 N Old Lake Wilson Rd", city: "Kissimmee", state: "FL" },
   { names: ["Pink Shell Beach Resort", "Pink Shell Beach Resort and Marina", "Pink Shell Resort", "Pink Shell"], street: "275 Estero Blvd", city: "Fort Myers Beach", state: "FL" },
   // Additional Poipu/Koloa addresses for new combo seeds (enables geo-bbox unit search in /api/community/search-units and refresh-pricing)
@@ -117,7 +120,8 @@ export function validateCommunityStreetAddress(input: {
   if (!rule) return { ok: true, streetAddress: street };
 
   const sameStreet = normalizeCommunityAddressToken(street) === normalizeCommunityAddressToken(rule.street);
-  const sameCity = !input.city || normalizeCommunityAddressToken(input.city) === normalizeCommunityAddressToken(rule.city);
+  const allowedCities = [rule.city, ...(rule.cityAliases ?? [])].map(normalizeCommunityAddressToken);
+  const sameCity = !input.city || allowedCities.includes(normalizeCommunityAddressToken(input.city));
   const sameState = !input.state || stateAbbrev(input.state) === rule.state;
   if (!sameStreet || !sameCity || !sameState) {
     return {

@@ -806,6 +806,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Waikoloa Beach Resort condominium community with 2BR/3BR vacation-rental units.",
     availableBedrooms: [2, 3],
     estimatedTotalUnits: 120,
+    addressHint: "69-180 Waikoloa Beach Dr",
   },
   {
     city: BIG_ISLAND_RESORT_CITY_PATTERN,
@@ -848,6 +849,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Mauna Lani condominium resort with large 1BR/2BR/3BR vacation rentals.",
     availableBedrooms: [1, 2, 3],
     estimatedTotalUnits: 116,
+    addressHint: "68-1050 Mauna Lani Point Dr",
   },
   {
     city: KAUAI_NORTH_CITY_PATTERN,

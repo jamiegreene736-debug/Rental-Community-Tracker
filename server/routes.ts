@@ -26491,7 +26491,8 @@ Return ONLY compact JSON with this exact shape:
     const state = queueCircuitBreakers.get(key);
     if (!state) return;
     if (state.cooldownUntil > Date.now()) {
-      throw new Error(`Temporary vendor cooldown for ${key}; retry after ${new Date(state.cooldownUntil).toLocaleTimeString()}`);
+      const label = key.startsWith("127.0.0.1/") || key.startsWith("localhost/") ? "Temporary queue endpoint cooldown" : "Temporary vendor cooldown";
+      throw new Error(`${label} for ${key}; retry after ${new Date(state.cooldownUntil).toLocaleTimeString()}`);
     }
     if (state.cooldownUntil) queueCircuitBreakers.delete(key);
   };

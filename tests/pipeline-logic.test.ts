@@ -1725,6 +1725,50 @@ assert.equal(
 console.log("  ✓ Kuilima hyphenated address validates for bulk combo draft saves");
 
 assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Waikoloa Beach Villas",
+    city: "Waikoloa",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "69-180 Waikoloa Beach Dr",
+  "bulk combo queue should use Waikoloa Beach Villas canonical address before dashboard save",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Waikoloa Beach Villas",
+    city: "Waikoloa",
+    state: "Hawaii",
+    streetAddress: "69-180 Waikoloa Beach Dr",
+  }).ok,
+  true,
+  "Waikoloa Beach Villas canonical address should pass dashboard draft validation",
+);
+console.log("  ✓ Waikoloa Beach Villas canonical address validates for bulk combo draft saves");
+
+assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Mauna Lani Point",
+    city: "Waikoloa",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "68-1050 Mauna Lani Point Dr",
+  "bulk combo queue should use Mauna Lani Point canonical address before dashboard save",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Mauna Lani Point",
+    city: "Waikoloa",
+    state: "Hawaii",
+    streetAddress: "68-1050 Mauna Lani Point Dr",
+  }).ok,
+  true,
+  "Mauna Lani Point should accept Waikoloa as the market city while validating its canonical street",
+);
+console.log("  ✓ Mauna Lani Point canonical address validates for bulk combo draft saves");
+
+assert.equal(
   validateCommunityStreetAddress({
     communityName: "Pili Mai",
     city: "Koloa",
