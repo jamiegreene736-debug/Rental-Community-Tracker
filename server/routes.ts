@@ -28951,7 +28951,7 @@ Return ONLY compact JSON with this exact shape:
         ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
         : null;
       const isBoundedDiscovery = candidateLimit !== null;
-      const discoveryWallBudgetMs = isBoundedDiscovery ? 115_000 : null;
+      const discoveryWallBudgetMs = isBoundedDiscovery ? 175_000 : null;
       const discoveryElapsedMs = () => Date.now() - startedAt;
       const requestedStateAbbr = String(state ?? "").trim().toLowerCase().match(/^(hi|hawaii)$/) ? "hi" : null;
       const urlStatePattern = /(?:^|[-_/])([A-Z]{2})(?:[-_/]|$)/i;
@@ -29061,8 +29061,8 @@ Return ONLY compact JSON with this exact shape:
         runDiscoveryQueries(homesQueries, /homes\.com\/property\//i, "homes"),
       ]);
 
-      const apifyCity = discoveryCity || city;
-      if (apifyCity && state) {
+      const apifyCities = [...new Set(discoverySearchCitiesForPhotoSearch({ city, communityName, streetAddress }))].slice(0, 3);
+      if (apifyCities.length > 0 && state) {
         const roots = repeatedRoots();
         const focusedScrapeableCandidates = candidateUrls.filter(
           (candidate) => candidate.source === "zillow" || candidate.source === "realtor",
@@ -29070,15 +29070,27 @@ Return ONLY compact JSON with this exact shape:
         const hasEnoughFocusedCandidates = candidateLimit !== null
           ? focusedScrapeableCandidates >= Math.min(2, candidateLimit)
           : false;
-        if (roots.size > 0 && !hasEnoughFocusedCandidates) {
+        // Mauna Lani / Waikoloa: SearchAPI often surfaces Zillow URLs that
+        // scrape to 0 photos on Railway; skipping Apify in that case leaves
+        // only dead links. When we know the resort street, always supplement.
+        const runApifySupplement = roots.size > 0 && (
+          !hasEnoughFocusedCandidates
+          || (isBoundedDiscovery && !!suppliedStreetRoot)
+        );
+        if (runApifySupplement) {
           const apifyMaxItems = candidateLimit
             ? Math.max(30, Math.min(80, candidateLimit * 8))
             : 300;
-          const apifySearchTimeoutMs = isBoundedDiscovery ? 45_000 : 180_000;
-          const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
-            harvestZillowUrlsViaApifySearch(apifyCity, state, apifyMaxItems, apifySearchTimeoutMs),
-            harvestRealtorUrlsViaApifySearch(apifyCity, state, apifyMaxItems, apifySearchTimeoutMs),
-          ]);
+          const apifySearchTimeoutMs = isBoundedDiscovery ? 55_000 : 180_000;
+          const perCityMax = Math.max(20, Math.ceil(apifyMaxItems / apifyCities.length));
+          const zillowByCity = await Promise.all(
+            apifyCities.map((apifyCity) => harvestZillowUrlsViaApifySearch(apifyCity, state, perCityMax, apifySearchTimeoutMs)),
+          );
+          const realtorByCity = await Promise.all(
+            apifyCities.map((apifyCity) => harvestRealtorUrlsViaApifySearch(apifyCity, state, perCityMax, apifySearchTimeoutMs)),
+          );
+          const zillowApifyUrls = [...new Set(zillowByCity.flat())];
+          const realtorApifyUrls = [...new Set(realtorByCity.flat())];
           // Bounded preflight with a known resort street: do not filter Apify
           // Zillow through the broad repeatedRoots set (many Olani rows). That
           // was dropping every homedetails URL while Redfin filled the pool.
@@ -29092,12 +29104,12 @@ Return ONLY compact JSON with this exact shape:
           for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", apifyRealtorRoots);
           console.log(
             `[fetch-unit-photos] Apify supplement for "${communityName}": ` +
-            `zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
+            `cities=${apifyCities.join("|")} zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
             `roots=${Array.from(roots).join(", ") || "none"} total=${candidateUrls.length}`,
           );
         } else {
           console.log(
-            hasEnoughFocusedCandidates
+            hasEnoughFocusedCandidates && !(isBoundedDiscovery && suppliedStreetRoot)
               ? `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because focused discovery already found ${focusedScrapeableCandidates} Zillow/Realtor candidates`
               : `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because no resort street root was discovered`,
           );
@@ -29125,7 +29137,7 @@ Return ONLY compact JSON with this exact shape:
       let orderedCandidates = candidateUrls;
       if (isBoundedDiscovery) {
         const scrapeable = candidateUrls.filter((c) => c.source === "zillow" || c.source === "realtor");
-        orderedCandidates = scrapeable.length > 0 ? scrapeable : candidateUrls;
+        orderedCandidates = scrapeable;
         if (canonicalStreetRoot) {
           const onStreet = orderedCandidates.filter((c) => listingStreetRoot(c.url) === canonicalStreetRoot);
           const offStreet = orderedCandidates.filter((c) => listingStreetRoot(c.url) !== canonicalStreetRoot);
@@ -29208,7 +29220,7 @@ Return ONLY compact JSON with this exact shape:
           sourceUrl: null,
           foundVia: "search",
           triedCandidateUrls,
-          note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${candidatesToTry.length} candidate${candidatesToTry.length === 1 ? "" : "s"}.`,
+          note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${triedCandidateUrls.length} candidate${triedCandidateUrls.length === 1 ? "" : "s"}.`,
         });
       }
     }

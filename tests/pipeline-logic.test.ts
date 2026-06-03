@@ -236,7 +236,7 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /discoveryWallBudgetMs = isBoundedDiscovery \? 115_000 : null/,
+  /discoveryWallBudgetMs = isBoundedDiscovery \? 175_000 : null/,
   "bounded preflight photo discovery must have a hard wall budget",
 );
 assert.match(
@@ -256,8 +256,18 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /isBoundedDiscovery[\s\S]*orderedCandidates = scrapeable\.length > 0 \? scrapeable : candidateUrls/,
+  /isBoundedDiscovery[\s\S]*orderedCandidates = scrapeable;/,
   "bounded preflight photo discovery must only try Zillow/Realtor scrapers, not Redfin",
+);
+assert.match(
+  routesSource,
+  /runApifySupplement = roots\.size > 0 &&/,
+  "fetch-unit-photos must still run Apify when a canonical resort street is known",
+);
+assert.match(
+  routesSource,
+  /apifyCities\.map\(\(apifyCity\) => harvestZillowUrlsViaApifySearch/,
+  "fetch-unit-photos must search multiple Zillow index cities for Mauna Lani-style resorts",
 );
 assert.match(
   routesSource,
