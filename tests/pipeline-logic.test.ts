@@ -21,6 +21,7 @@ import {
   inferCommunityStreetAddress,
   validateCommunityStreetAddress,
 } from "../shared/community-addresses";
+import { bulkComboProgressPercent, bulkComboRemainingMs } from "../shared/bulk-combo-queue-progress";
 import { checkCommunityType } from "../shared/community-type";
 import {
   formatTypicalComboLabel,
@@ -2029,6 +2030,61 @@ assert.equal(
   "Kaanapali Alii should accept Kaanapali as the queued market city while validating its canonical street",
 );
 console.log("  ✓ Honua Kai + Kaanapali Alii canonical addresses validate for bulk combo draft saves");
+
+assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Ko Olina Beach Villas",
+    city: "Ko Olina",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "92-102 Waialii Pl",
+  "bulk combo queue should use Ko Olina Beach Villas canonical address instead of an empty market-only payload",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Ko Olina Beach Villas",
+    city: "Ko Olina",
+    state: "Hawaii",
+    streetAddress: "92-102 Waialii Pl",
+  }).ok,
+  true,
+  "Ko Olina Beach Villas should accept Ko Olina as the queued market city while validating its canonical street",
+);
+assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Coconut Plantation at Ko Olina",
+    city: "Ko Olina",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "92-1070 Olani St",
+  "bulk combo queue should use Coconut Plantation canonical address instead of an empty market-only payload",
+);
+assert.ok(
+  discoverySearchCitiesForPhotoSearch({
+    city: "Ko Olina",
+    communityName: "Ko Olina Beach Villas",
+    streetAddress: "92-102 Waialii Pl",
+  }).includes("Kapolei"),
+  "Ko Olina Beach Villas photo discovery should search Kapolei, not only the draft mailing city",
+);
+console.log("  ✓ Ko Olina Beach Villas + Coconut Plantation canonical addresses validate for bulk combo draft saves");
+
+assert.equal(
+  bulkComboProgressPercent({ status: "queued", phase: "queued" }),
+  2,
+  "queued bulk combo items should show minimal progress",
+);
+assert.ok(
+  bulkComboProgressPercent({ status: "running", phase: "photos", message: "Searching for Unit B photos" }) >= 30,
+  "photos phase with Unit B message should be past the halfway mark of the photo step",
+);
+assert.ok(
+  bulkComboRemainingMs({ status: "queued", phase: "queued" }, { queueAhead: 1 })! > 600_000,
+  "queued item behind another should estimate more than ten minutes remaining",
+);
+console.log("  ✓ bulk combo queue progress + ETA helpers");
 
 const honuaKaiTypical = inferTypicalComboPair({ availableBedrooms: [1, 2, 3] });
 assert.deepEqual(honuaKaiTypical, { unitBeds: 3, secondUnitBeds: 3, totalBeds: 6 });

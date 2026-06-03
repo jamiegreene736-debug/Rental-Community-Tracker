@@ -148,6 +148,7 @@ import {
   inferCommunityStreetAddress,
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
+import { bulkComboProgressPercent, bulkComboRemainingMs } from "@shared/bulk-combo-queue-progress";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
@@ -25583,13 +25584,28 @@ Return ONLY compact JSON with this exact shape:
       rememberCandidateRoot(link, contextText);
     };
 
+    const discoveryCities = discoverySearchCitiesForPhotoSearch({
+      city: bodyLocation?.city,
+      communityName,
+      streetAddress: normalizedStreetAddress || addressStreet || folderCommunityAddress || communityAddress,
+    });
+    const discoveryCommunityNames = discoveryCommunityNameAliases(communityName);
+
     const resolveCommunityLocation = (): { city: string; state: string } | null => {
+      const addressRule = communityAddressRuleForName(communityName);
+      if (addressRule) {
+        const state = /^hi$/i.test(addressRule.state) ? "Hawaii" : addressRule.state;
+        return { city: addressRule.city, state };
+      }
       const exact = Object.values(COMMUNITY_LOCATION_BY_KEY).find((loc) =>
         loc.searchName.toLowerCase() === communityName.toLowerCase()
         || (loc.streetAddress && streetRootFromListingAddress(loc.streetAddress) === streetRootFromListingAddress(communityAddress)),
       );
       if (exact) return { city: exact.city, state: exact.state };
-      if (bodyLocation) return bodyLocation;
+      if (bodyLocation) {
+        const city = discoveryCities[0] || bodyLocation.city;
+        return { city, state: bodyLocation.state };
+      }
       if (/princeville/i.test(communityName)) return { city: "Princeville", state: "Hawaii" };
       if (/kaha lani/i.test(communityName)) return { city: "Wailua", state: "Hawaii" };
       if (/kekaha/i.test(communityName)) return { city: "Kekaha", state: "Hawaii" };
@@ -25618,18 +25634,25 @@ Return ONLY compact JSON with this exact shape:
       return simple || name.trim();
     };
     const searchCommunityAliases = Array.from(new Set([
+      ...discoveryCommunityNames,
       communityName,
       simplifyCommunityNameForSearch(communityName),
       ...(directRoot ? [
         directRoot.replace(/^\d{2,6}\s+/, "").replace(/\b(?:blvd|rd|st|ave|dr|ln|way|cir|ct|pkwy|pl|ter|trail)\b$/i, "").trim(),
       ] : []),
     ].filter(Boolean)));
+    const queryState = communityLocForQueries?.state ?? bodyLocation?.state ?? "Hawaii";
     const locationTerms = communityLocForQueries
-      ? [`"${communityLocForQueries.city}"`, `"${communityLocForQueries.state}"`, `"${stateToAbbrev(communityLocForQueries.state)}"`]
+      ? [`"${communityLocForQueries.city}"`, `"${queryState}"`, `"${stateToAbbrev(queryState)}"`]
       : [];
-    const citySearchQuery = communityLocForQueries?.city
-      ? [`site:zillow.com "${communityName}" "${communityLocForQueries.city}"`]
-      : [];
+    const citySearchQuery = discoveryCities.flatMap((searchCity) => {
+      if (!searchCity) return [];
+      return [
+        `site:zillow.com "${communityName}" "${searchCity}"`,
+        `site:realtor.com "${communityName}" "${searchCity}"`,
+        `site:redfin.com "${communityName}" "${searchCity}"`,
+      ];
+    });
     const bedroomQueries = requiredBedroomCount
       ? [
           `site:zillow.com "${communityAddress}" "${requiredBedroomCount} bedroom"`,
@@ -27949,12 +27972,30 @@ Return ONLY compact JSON with this exact shape:
     finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
     lockedBy: job.lockedBy,
     lockExpiresAt: job.lockExpiresAt ? new Date(job.lockExpiresAt).toISOString() : null,
-    items: job.items.map((item) => ({
-      ...item,
-      startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
-      finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
-      heartbeatAt: item.heartbeatAt ? new Date(item.heartbeatAt).toISOString() : null,
-    })),
+    items: job.items.map((item, index) => {
+      const queueAhead = job.items.slice(0, index).filter((other) =>
+        other.id !== item.id && (other.status === "running" || other.status === "queued"),
+      ).length;
+      const progressItem = {
+        status: item.status,
+        phase: item.phase,
+        message: item.message,
+        startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
+        unit1Photos: item.unit1Photos,
+        unit2Photos: item.unit2Photos,
+      };
+      return {
+        ...item,
+        progressPercent: bulkComboProgressPercent(progressItem),
+        etaSeconds: (() => {
+          const ms = bulkComboRemainingMs(progressItem, { queueAhead });
+          return ms == null ? null : Math.max(0, Math.ceil(ms / 1000));
+        })(),
+        startedAt: progressItem.startedAt,
+        finishedAt: item.finishedAt ? new Date(item.finishedAt).toISOString() : null,
+        heartbeatAt: item.heartbeatAt ? new Date(item.heartbeatAt).toISOString() : null,
+      };
+    }),
   });
   const normalizeQueueText = (value: unknown) =>
     String(value ?? "")
