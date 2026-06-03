@@ -108,6 +108,24 @@ export const communityResearchSearches = pgTable("community_research_searches", 
 export type CommunityResearchSearch = typeof communityResearchSearches.$inferSelect;
 export type InsertCommunityResearchSearch = typeof communityResearchSearches.$inferInsert;
 
+/** Cached top-market combo scan (6BR / 7–8BR potential per city seed). */
+export const topMarketScanCache = pgTable("top_market_scan_cache", {
+  marketKey: text("market_key").primaryKey(),
+  city: text("city").notNull(),
+  state: text("state").notNull(),
+  tag: text("tag"),
+  sixBedroomPossible: boolean("six_bedroom_possible").notNull().default(false),
+  sevenEightBedroomPossible: boolean("seven_eight_bedroom_possible").notNull().default(false),
+  qualifyingCount: integer("qualifying_count").notNull().default(0),
+  communities: jsonb("communities").$type<unknown[]>().default(sql`'[]'::jsonb`).notNull(),
+  error: text("error"),
+  scannedAt: timestamp("scanned_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type TopMarketScanCache = typeof topMarketScanCache.$inferSelect;
+export type InsertTopMarketScanCache = typeof topMarketScanCache.$inferInsert;
+
 export const propertyBuyInMarkets = pgTable("property_buy_in_markets", {
   propertyId: integer("property_id").primaryKey(),
   baseCommunity: text("base_community").notNull(),

@@ -262,6 +262,45 @@ function hasSevenEightBedroomComboPotential(community: CommunityResult): boolean
   return hasBedroomPairPotential(community, [[3, 4], [2, 5], [4, 4], [3, 5]]);
 }
 
+type SeedComboBadge = {
+  className: string;
+  title: string;
+  label: string;
+  icon: "yes" | "no" | "pending";
+};
+
+function seedComboBadge(possible: boolean | undefined, kind: "six" | "sevenEight"): SeedComboBadge {
+  const prefix = kind === "six" ? "6BR combo" : "7/8BR combo";
+  if (possible === true) {
+    return {
+      className: kind === "six" ? "bg-emerald-50 text-emerald-700" : "bg-sky-50 text-sky-700",
+      title: kind === "six"
+        ? "Cached scan: two 3BR units can combine into a 6BR combo"
+        : "Cached scan: 7BR/8BR combo potential confirmed",
+      label: `${prefix}: yes`,
+      icon: "yes",
+    };
+  }
+  if (possible === false) {
+    return {
+      className: "bg-slate-100 text-slate-600",
+      title: kind === "six"
+        ? "Cached scan: no two-3BR 6BR combo potential"
+        : "Cached scan: no 7BR/8BR combo potential",
+      label: `${prefix}: no`,
+      icon: "no",
+    };
+  }
+  return {
+    className: "bg-amber-50 text-amber-700",
+    title: kind === "six"
+      ? "Run the market scan to verify 6BR combo potential"
+      : "Run the market scan to verify 7BR/8BR combo potential",
+    label: `${prefix}: scan needed`,
+    icon: "pending",
+  };
+}
+
 function formatMinimumStay(community: CommunityResult): { label: string; tone: "ok" | "warn" | "unknown"; evidence?: string } {
   const nights = community.minimumStayNights;
   const evidence = community.minimumStayEvidence?.trim() || undefined;
@@ -446,8 +485,14 @@ export default function AddCommunity() {
     estimatedComboHigh?: number;
     sixBedroomPossible?: boolean;
     sevenEightBedroomPossible?: boolean;
+    qualifyingCount?: number;
+    scannedAt?: string;
+    scanError?: string | null;
   };
   const [seedMarkets, setSeedMarkets] = useState<SeedMarket[] | null>(null);
+  const [cacheRefreshJobId, setCacheRefreshJobId] = useState<string | null>(null);
+  const [cacheRefreshRunning, setCacheRefreshRunning] = useState(false);
+  const [topMarketCacheStats, setTopMarketCacheStats] = useState<{ total: number; cached: number; uncached: number } | null>(null);
   const [selectedMarkets, setSelectedMarkets] = useState<Set<string>>(new Set());
   const keyFor = (m: { city: string; state: string }) => `${m.city}|${m.state}`;
   const formatComboRange = (low?: number | null, high?: number | null) => {
@@ -1058,6 +1103,26 @@ export default function AddCommunity() {
     setSweepPhase("setup");
   }, [sweepJobId]);
 
+  const loadTopMarketSeeds = useCallback(async () => {
+    const resp = await fetch("/api/community/top-markets/seeds");
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(text || `HTTP ${resp.status}`);
+    }
+    const data = await resp.json() as {
+      seeds?: SeedMarket[];
+      markets?: SeedMarket[];
+      cache?: { total: number; cached: number; uncached: number; refreshJobId?: string | null };
+    };
+    const list = data.seeds ?? data.markets ?? [];
+    setSeedMarkets(list);
+    setTopMarketCacheStats(data.cache ?? null);
+    setCacheRefreshJobId(data.cache?.refreshJobId ?? null);
+    setCacheRefreshRunning(!!data.cache?.refreshJobId);
+    setSelectedMarkets(new Set(list.map(keyFor)));
+    return data;
+  }, []);
+
   const openSweepSetup = useCallback(async () => {
     setSweepOpen(true);
     if (sweepJobId && sweepRunning) {
@@ -1065,24 +1130,64 @@ export default function AddCommunity() {
       return;
     }
     resetSweepToMarketPicker();
-    if (!seedMarkets) {
-      try {
-        const resp = await fetch("/api/community/top-markets/seeds");
-        const data = await resp.json() as {
-          seeds?: SeedMarket[];
-          markets?: SeedMarket[];
-        };
-        const list = data.seeds ?? data.markets ?? [];
-        setSeedMarkets(list);
-        // Pre-select everything so the user can hit Run immediately if
-        // they want the original auto-all behavior. They can uncheck what
-        // they don't want.
-        setSelectedMarkets(new Set(list.map(keyFor)));
-      } catch (e: any) {
-        toast({ title: "Couldn't load market list", description: e.message, variant: "destructive" });
-      }
+    try {
+      await loadTopMarketSeeds();
+    } catch (e: any) {
+      toast({ title: "Couldn't load market list", description: e.message, variant: "destructive" });
     }
-  }, [seedMarkets, sweepJobId, sweepRunning, resetSweepToMarketPicker, toast]);
+  }, [sweepJobId, sweepRunning, resetSweepToMarketPicker, loadTopMarketSeeds, toast]);
+
+  useEffect(() => {
+    if (!cacheRefreshJobId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(`/api/community/scan-top-markets-job/${encodeURIComponent(cacheRefreshJobId)}`);
+        if (!resp.ok) {
+          if (resp.status === 404 && !cancelled) {
+            setCacheRefreshJobId(null);
+            setCacheRefreshRunning(false);
+          }
+          return;
+        }
+        const data = await resp.json();
+        const job = data.job as TopMarketJobPayload | undefined;
+        if (!job || cancelled) return;
+        setSeedMarkets((prev) => {
+          if (!prev) return prev;
+          const freshByKey = new Map((job.markets ?? []).map((m) => [keyFor(m), m]));
+          return prev.map((seed) => {
+            const fresh = freshByKey.get(keyFor(seed));
+            if (!fresh || fresh.status !== "done") return seed;
+            return {
+              ...seed,
+              sixBedroomPossible: fresh.sixBedroomPossible ?? (fresh.communities ?? []).some(hasSixBedroomComboPotential),
+              sevenEightBedroomPossible: fresh.sevenEightBedroomPossible ?? (fresh.communities ?? []).some(hasSevenEightBedroomComboPotential),
+              qualifyingCount: fresh.count,
+            };
+          });
+        });
+        const terminal = job.status === "done" || job.status === "error" || job.status === "cancelled";
+        setCacheRefreshRunning(!terminal);
+        if (terminal && !cancelled) {
+          setCacheRefreshJobId(null);
+          try {
+            await loadTopMarketSeeds();
+          } catch {
+            /* best-effort resync */
+          }
+        }
+      } catch (e: any) {
+        if (!cancelled) console.warn("[add-community] cache refresh poll failed", e?.message || e);
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [cacheRefreshJobId, loadTopMarketSeeds]);
 
   const toggleMarket = (m: { city: string; state: string }) => {
     setSelectedMarkets((prev) => {
@@ -2302,7 +2407,7 @@ export default function AddCommunity() {
                   </h2>
                   <p className="text-xs text-muted-foreground">
                     {sweepPhase === "setup"
-                      ? "Check the markets you want to research. Each one takes ~90s. Start with 2–3 to keep the wait short."
+                      ? "Combo potential badges are cached server-side for all top markets. A background scan fills any missing markets automatically (~90s each)."
                       : "Running the finder across your selected markets. Each takes ~90s."}
                   </p>
                 </div>
@@ -2332,7 +2437,18 @@ export default function AddCommunity() {
                         <span className="text-muted-foreground ml-2">
                           {selectedMarkets.size} of {seedMarkets.length} selected
                         </span>
+                        {topMarketCacheStats && (
+                          <span className="text-muted-foreground">
+                            · {topMarketCacheStats.cached}/{topMarketCacheStats.total} combo scans cached
+                          </span>
+                        )}
                       </div>
+                      {cacheRefreshRunning && (
+                        <div className="mb-3 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                          Server is scanning uncached top markets in the background. Badges update as each city finishes.
+                        </div>
+                      )}
                       {(() => {
                         const byTag: Record<string, typeof seedMarkets> = {};
                         for (const m of seedMarkets) {
@@ -2349,6 +2465,8 @@ export default function AddCommunity() {
                                   {markets.map((m) => {
                                     const k = keyFor(m);
                                     const checked = selectedMarkets.has(k);
+                                    const sixBedroomCombo = seedComboBadge(m.sixBedroomPossible, "six");
+                                    const sevenEightBedroomCombo = seedComboBadge(m.sevenEightBedroomPossible, "sevenEight");
                                     return (
                                       <label
                                         key={k}
@@ -2368,18 +2486,30 @@ export default function AddCommunity() {
                                           </span>
                                           <span className="mt-1 flex flex-wrap gap-1">
                                             <span
-                                              className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700"
-                                              title="Run the market scan to verify whether the researched communities support a 6BR combo using two 3BR condo/townhome units"
+                                              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${sixBedroomCombo.className}`}
+                                              title={sixBedroomCombo.title}
                                             >
-                                              <Search className="h-3 w-3 mr-1" />
-                                              6BR combo: scan needed
+                                              {sixBedroomCombo.icon === "yes" ? (
+                                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                                              ) : sixBedroomCombo.icon === "no" ? (
+                                                <XCircle className="h-3 w-3 mr-1" />
+                                              ) : (
+                                                <Search className="h-3 w-3 mr-1" />
+                                              )}
+                                              {sixBedroomCombo.label}
                                             </span>
                                             <span
-                                              className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700"
-                                              title="Run the market scan to verify whether the researched communities support 7BR/8BR combos using 3BR+4BR, 2BR+5BR, 4BR+4BR, or 3BR+5BR attached inventory"
+                                              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${sevenEightBedroomCombo.className}`}
+                                              title={sevenEightBedroomCombo.title}
                                             >
-                                              <Search className="h-3 w-3 mr-1" />
-                                              7/8BR combo: scan needed
+                                              {sevenEightBedroomCombo.icon === "yes" ? (
+                                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                                              ) : sevenEightBedroomCombo.icon === "no" ? (
+                                                <XCircle className="h-3 w-3 mr-1" />
+                                              ) : (
+                                                <Search className="h-3 w-3 mr-1" />
+                                              )}
+                                              {sevenEightBedroomCombo.label}
                                             </span>
                                           </span>
                                           <span className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
