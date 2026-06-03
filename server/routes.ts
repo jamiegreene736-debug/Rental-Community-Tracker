@@ -1070,10 +1070,11 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
 
   const onMonthScanned = async (event: HybridMonthScannedEvent) => {
     if (await shouldCancel()) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+    const confidenceLabel = event.confidence ? `; confidence ${event.confidence.score}% ${event.confidence.level}` : "";
     item.progress = {
       phase: "searchapi-airbnb",
       percent: Math.min(79, Math.round(10 + (70 * (event.monthOffset + 1)) / event.horizonMonths)),
-      label: `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) -> P40 $${event.medianNightly}/night`,
+      label: `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) -> P40 $${event.medianNightly}/night${confidenceLabel}`,
       currentMonth: event.yearMonth,
       monthsScanned: event.monthOffset + 1,
       horizonMonths: event.horizonMonths,
@@ -4223,7 +4224,17 @@ function unitSlotsForCommunityDraft(draft: any, sourceListingId?: string): Array
 }
 
 function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unknown> | null {
-  const confidences: Array<{ score: number; level?: string; acceptedCandidates?: number; rejectedCandidates?: number; sampleCount?: number }> = [];
+  const confidences: Array<{
+    score: number;
+    level?: string;
+    acceptedCandidates?: number;
+    rejectedCandidates?: number;
+    sampleCount?: number;
+    exactBedroomCandidates?: number;
+    unknownBedroomCandidates?: number;
+    communityMatchedCandidates?: number;
+    geoVerifiedCandidates?: number;
+  }> = [];
   for (const row of rows) {
     const monthlyRates = row?.monthlyRates;
     if (!monthlyRates || typeof monthlyRates !== "object" || Array.isArray(monthlyRates)) continue;
@@ -4238,12 +4249,17 @@ function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unkn
         acceptedCandidates: Number(confidence.acceptedCandidates) || 0,
         rejectedCandidates: Number(confidence.rejectedCandidates) || 0,
         sampleCount: Number(confidence.sampleCount) || 0,
+        exactBedroomCandidates: Number(confidence.exactBedroomCandidates) || 0,
+        unknownBedroomCandidates: Number(confidence.unknownBedroomCandidates) || 0,
+        communityMatchedCandidates: Number(confidence.communityMatchedCandidates) || 0,
+        geoVerifiedCandidates: Number(confidence.geoVerifiedCandidates) || 0,
       });
     }
   }
   if (confidences.length === 0) return null;
   const score = Math.round(confidences.reduce((sum, confidence) => sum + confidence.score, 0) / confidences.length);
-  const level = score >= 90 ? "green" : score >= 75 ? "yellow" : "red";
+  const minScore = Math.min(...confidences.map((confidence) => confidence.score));
+  const level = minScore < 75 ? "red" : score >= 90 ? "green" : "yellow";
   return {
     score,
     level,
@@ -4251,6 +4267,10 @@ function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unkn
     acceptedCandidates: confidences.reduce((sum, confidence) => sum + (confidence.acceptedCandidates || 0), 0),
     rejectedCandidates: confidences.reduce((sum, confidence) => sum + (confidence.rejectedCandidates || 0), 0),
     sampleCount: confidences.reduce((sum, confidence) => sum + (confidence.sampleCount || 0), 0),
+    exactBedroomCandidates: confidences.reduce((sum, confidence) => sum + (confidence.exactBedroomCandidates || 0), 0),
+    unknownBedroomCandidates: confidences.reduce((sum, confidence) => sum + (confidence.unknownBedroomCandidates || 0), 0),
+    communityMatchedCandidates: confidences.reduce((sum, confidence) => sum + (confidence.communityMatchedCandidates || 0), 0),
+    geoVerifiedCandidates: confidences.reduce((sum, confidence) => sum + (confidence.geoVerifiedCandidates || 0), 0),
   };
 }
 

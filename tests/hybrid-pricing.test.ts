@@ -273,6 +273,95 @@ try {
   else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
 }
 
+process.env.SEARCHAPI_API_KEY = "test-key";
+globalThis.fetch = (async () => {
+  return new Response(JSON.stringify({
+    properties: [
+      {
+        name: "Poipu Kai 3 bedroom condo outside Koloa",
+        gps_coordinates: { latitude: 21.955, longitude: -159.36 },
+        price: { extracted_total_price: 2100 },
+      },
+      {
+        name: "Poipu Kai 3 bedroom condo inside resort",
+        gps_coordinates: { latitude: 21.883, longitude: -159.466 },
+        price: { extracted_total_price: 2800 },
+      },
+    ],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}) as typeof fetch;
+try {
+  const fencedPoipuBasis = await fetchAirbnbMedianNightly({
+    community: "Poipu Kai",
+    bedrooms: 3,
+    checkIn: "2027-09-01",
+    checkOut: "2027-09-08",
+  });
+  assert.equal(fencedPoipuBasis.medianNightly, 400);
+  assert.equal(fencedPoipuBasis.sampleCount, 1);
+  assert.equal(fencedPoipuBasis.evidence?.rejectCounts.geography, 1);
+  assert.equal(fencedPoipuBasis.evidence?.acceptedGeoVerifiedCandidates, 1);
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+  else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+}
+
+process.env.SEARCHAPI_API_KEY = "test-key";
+globalThis.fetch = (async () => {
+  return new Response(JSON.stringify({
+    properties: Array.from({ length: 10 }, (_, index) => ({
+      name: `Koloa resort suite ${index + 1}`,
+      gps_coordinates: { latitude: 21.883 + (index * 0.0001), longitude: -159.466 },
+      price: { extracted_total_price: 2100 + (index * 70) },
+    })),
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}) as typeof fetch;
+try {
+  const unparsedBedroomBasis = await fetchAirbnbMedianNightly({
+    community: "Poipu Kai",
+    bedrooms: 3,
+    checkIn: "2027-10-01",
+    checkOut: "2027-10-08",
+  });
+  assert.equal(unparsedBedroomBasis.sampleCount, 10);
+  assert.equal(unparsedBedroomBasis.confidence?.exactBedroomCandidates, 0);
+  assert.equal(unparsedBedroomBasis.confidence?.unknownBedroomCandidates, 10);
+  assert.equal(unparsedBedroomBasis.confidence?.level, "red");
+  assert.ok((unparsedBedroomBasis.confidence?.score ?? 100) <= 74);
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+  else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+}
+
+process.env.SEARCHAPI_API_KEY = "test-key";
+globalThis.fetch = (async () => {
+  return new Response(JSON.stringify({
+    properties: Array.from({ length: 8 }, (_, index) => ({
+      name: `Unmapped Confidence Resort 3 bedroom condo ${index + 1}`,
+      bedrooms: 3,
+      price: { extracted_total_price: 2100 + (index * 70) },
+    })),
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}) as typeof fetch;
+try {
+  const unfencedBasis = await fetchAirbnbMedianNightly({
+    community: "Unmapped Confidence Resort",
+    bedrooms: 3,
+    checkIn: "2027-11-01",
+    checkOut: "2027-11-08",
+  });
+  assert.equal(unfencedBasis.sampleCount, 8);
+  assert.equal(unfencedBasis.evidence?.geoConstraint.kind, "none");
+  assert.equal(unfencedBasis.confidence?.level, "red");
+  assert.ok((unfencedBasis.confidence?.score ?? 100) <= 69);
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+  else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+}
+
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
   hybridPricingSource.includes('source: "airbnb"'),
@@ -330,6 +419,10 @@ assert.equal(
 assert.ok(
   hybridPricingSource.includes("deletePropertyMarketRate(args.propertyId, bedrooms)"),
   "empty Airbnb SearchAPI samples should clear stale market-rate rows instead of retaining static or old data",
+);
+assert.ok(
+  hybridPricingSource.includes('airbnb.confidence.level === "red"'),
+  "red market-rate confidence should fail closed before saving stale rows or pushing Guesty pricing",
 );
 assert.ok(
   !hybridPricingSource.includes("sampled once"),

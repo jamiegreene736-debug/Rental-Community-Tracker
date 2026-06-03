@@ -145,6 +145,7 @@ export type MarketRateCandidateEvidence = {
   nightly: number | null;
   bedrooms: number | null;
   communityMatched?: boolean;
+  geoMatched?: boolean | null;
   accepted: boolean;
   reason: string;
 };
@@ -159,10 +160,18 @@ export type MarketRateEvidence = {
   totalCandidates: number;
   acceptedCandidates: number;
   rejectedCandidates: number;
+  acceptedExactBedroomCandidates: number;
+  acceptedUnknownBedroomCandidates: number;
+  acceptedCommunityMatchedCandidates: number;
+  acceptedGeoVerifiedCandidates: number;
   acceptedPreview: MarketRateCandidateEvidence[];
   rejectedPreview: MarketRateCandidateEvidence[];
   rejectCounts: Record<string, number>;
   searchContract: Record<string, string>;
+  geoConstraint: {
+    kind: "curated-bounds" | "center-radius" | "none";
+    description: string;
+  };
 };
 
 export type MarketRateConfidence = {
@@ -173,6 +182,10 @@ export type MarketRateConfidence = {
   sampleCount: number;
   acceptedCandidates: number;
   rejectedCandidates: number;
+  exactBedroomCandidates?: number;
+  unknownBedroomCandidates?: number;
+  communityMatchedCandidates?: number;
+  geoVerifiedCandidates?: number;
   percentileBasis: number;
 };
 
@@ -383,6 +396,82 @@ function parsedListingBedrooms(candidate: any): number | null {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
+function numberFromCandidate(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number.parseFloat(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function candidateCoordinates(candidate: any): { lat: number; lng: number } | null {
+  const sources = [
+    candidate?.gps_coordinates,
+    candidate?.gpsCoordinates,
+    candidate?.coordinates,
+    candidate?.coordinate,
+    candidate,
+  ];
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    const lat = numberFromCandidate(source.latitude ?? source.lat);
+    const lng = numberFromCandidate(source.longitude ?? source.lng ?? source.lon);
+    if (lat != null && lng != null && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { lat, lng };
+  }
+  return null;
+}
+
+function geoConstraintForMarket(community: string): {
+  kind: "curated-bounds" | "center-radius" | "none";
+  params: Record<string, string>;
+  description: string;
+} {
+  const bounds = BUY_IN_MARKET_BOUNDS[community];
+  if (bounds) {
+    return {
+      kind: "curated-bounds",
+      params: {
+        sw_lat: String(bounds.sw_lat),
+        sw_lng: String(bounds.sw_lng),
+        ne_lat: String(bounds.ne_lat),
+        ne_lng: String(bounds.ne_lng),
+      },
+      description: "curated resort/market bounding box",
+    };
+  }
+  const location = BUY_IN_MARKET_LOCATIONS[community];
+  if (location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) {
+    const halfDeg = 0.02;
+    return {
+      kind: "center-radius",
+      params: {
+        sw_lat: String(location.lat - halfDeg),
+        sw_lng: String(location.lng - halfDeg),
+        ne_lat: String(location.lat + halfDeg),
+        ne_lng: String(location.lng + halfDeg),
+      },
+      description: "center-radius fallback bounding box",
+    };
+  }
+  return { kind: "none", params: {}, description: "no configured geographic constraint" };
+}
+
+function candidateGeoMatch(candidate: any, params: Record<string, string>): boolean | null {
+  const coords = candidateCoordinates(candidate);
+  if (!coords) return null;
+  const swLat = numberFromCandidate(params.sw_lat);
+  const swLng = numberFromCandidate(params.sw_lng);
+  const neLat = numberFromCandidate(params.ne_lat);
+  const neLng = numberFromCandidate(params.ne_lng);
+  if (swLat == null || swLng == null || neLat == null || neLng == null) return null;
+  const pad = 0.003;
+  return coords.lat >= swLat - pad &&
+    coords.lat <= neLat + pad &&
+    coords.lng >= swLng - pad &&
+    coords.lng <= neLng + pad;
+}
+
 function listingTextMatchesCommunity(candidate: any, community: string, query: string): boolean {
   const haystack = [
     listingTitle(candidate),
@@ -412,30 +501,37 @@ function previewPush<T>(items: T[], item: T, limit = 5): void {
 function scoreMarketRateConfidence(args: {
   evidence: MarketRateEvidence;
   basis: ReturnType<typeof marketPricingBasis>;
-  hasLocationConstraint: boolean;
 }): MarketRateConfidence {
-  const { evidence, basis, hasLocationConstraint } = args;
+  const { evidence, basis } = args;
   const accepted = evidence.acceptedCandidates;
-  const exactParsed = evidence.acceptedPreview.filter((candidate) => candidate.bedrooms === evidence.requestedBedrooms).length;
-  const unknownParsed = evidence.acceptedPreview.filter((candidate) => candidate.bedrooms == null).length;
-  const communityMatches = evidence.acceptedPreview.filter((candidate) => candidate.communityMatched).length;
-  const sampleScore = accepted >= 12 ? 35 : accepted >= 8 ? 30 : accepted >= 5 ? 24 : accepted >= 3 ? 16 : accepted > 0 ? 8 : 0;
+  const exactParsed = evidence.acceptedExactBedroomCandidates;
+  const unknownParsed = evidence.acceptedUnknownBedroomCandidates;
+  const communityMatches = evidence.acceptedCommunityMatchedCandidates;
+  const geoVerified = evidence.acceptedGeoVerifiedCandidates;
+  const sampleScore = accepted >= 15 ? 28 : accepted >= 10 ? 24 : accepted >= 6 ? 18 : accepted >= 3 ? 10 : accepted > 0 ? 4 : 0;
   const queryScore = evidence.query.trim() ? 15 : 0;
-  const locationScore = hasLocationConstraint ? 15 : 8;
-  const bedroomScore = exactParsed > 0 || unknownParsed > 0 ? 20 : 12;
-  const communityScore = communityMatches > 0 ? 10 : 4;
+  const locationScore = evidence.geoConstraint.kind === "curated-bounds" ? 20 : evidence.geoConstraint.kind === "center-radius" ? 10 : 0;
+  const geoEvidenceScore = geoVerified >= 3 ? 5 : geoVerified > 0 ? 3 : 0;
+  const bedroomScore = exactParsed >= 5 ? 22 : exactParsed >= 3 ? 18 : exactParsed > 0 ? 12 : unknownParsed >= 8 ? 8 : unknownParsed > 0 ? 4 : 0;
+  const communityScore = communityMatches >= 5 ? 12 : communityMatches >= 2 ? 8 : communityMatches > 0 ? 4 : 0;
   const basisSpread = basis.percentile && basis.median ? Math.abs(basis.median - basis.percentile) / Math.max(1, basis.median) : 0;
   const dispersionScore = basisSpread <= 0.2 ? 10 : basisSpread <= 0.35 ? 6 : 2;
-  const rejectionPenalty = evidence.rejectedCandidates > accepted * 3 ? 8 : evidence.rejectedCandidates > accepted * 2 ? 4 : 0;
-  const score = Math.max(0, Math.min(100, sampleScore + queryScore + locationScore + bedroomScore + communityScore + dispersionScore - rejectionPenalty));
+  const rejectionPenalty = evidence.rejectedCandidates > accepted * 3 ? 12 : evidence.rejectedCandidates > accepted * 2 ? 8 : evidence.rejectedCandidates > accepted ? 4 : 0;
+  let score = Math.max(0, Math.min(100, sampleScore + queryScore + locationScore + geoEvidenceScore + bedroomScore + communityScore + dispersionScore - rejectionPenalty));
+  if (accepted < 3) score = Math.min(score, 69);
+  if (exactParsed === 0) score = Math.min(score, 74);
+  if (evidence.geoConstraint.kind === "none") score = Math.min(score, 69);
+  if (evidence.geoConstraint.kind === "center-radius") score = Math.min(score, 84);
+  if (basisSpread > 0.45) score = Math.min(score, 79);
   const level: MarketRateConfidence["level"] = score >= 90 ? "green" : score >= 75 ? "yellow" : "red";
   const reasons = [
-    `${accepted} accepted exact-${evidence.requestedBedrooms}BR candidate${accepted === 1 ? "" : "s"}`,
-    hasLocationConstraint ? "geo-constrained SearchAPI query" : "no configured geo constraint",
-    communityMatches > 0 ? `${communityMatches} preview candidate community text match${communityMatches === 1 ? "" : "es"}` : "community match inferred from query/location only",
+    `${accepted} accepted candidate${accepted === 1 ? "" : "s"} (${exactParsed} exact-${evidence.requestedBedrooms}BR, ${unknownParsed} unparsed)`,
+    `${evidence.geoConstraint.description}${geoVerified > 0 ? `; ${geoVerified} coordinate-verified` : ""}`,
+    communityMatches > 0 ? `${communityMatches} accepted candidate community text match${communityMatches === 1 ? "" : "es"}` : "community match inferred from query/location only",
     `basis p${MARKET_PRICING_PERCENTILE}${basis.median != null ? `, median $${basis.median}` : ""}`,
   ];
   if (evidence.rejectedCandidates > 0) reasons.push(`${evidence.rejectedCandidates} rejected by existing filters`);
+  if (level === "red") reasons.push("red confidence blocks save/push for this month");
   return {
     score,
     level,
@@ -444,6 +540,10 @@ function scoreMarketRateConfidence(args: {
     sampleCount: accepted,
     acceptedCandidates: accepted,
     rejectedCandidates: evidence.rejectedCandidates,
+    exactBedroomCandidates: exactParsed,
+    unknownBedroomCandidates: unknownParsed,
+    communityMatchedCandidates: communityMatches,
+    geoVerifiedCandidates: geoVerified,
     percentileBasis: MARKET_PRICING_PERCENTILE,
   };
 }
@@ -472,26 +572,7 @@ export function curatedAirbnbSearchQueries(community: string, hint?: string): st
 }
 
 export function airbnbSearchGeoParamsForMarket(community: string): Record<string, string> {
-  const bounds = BUY_IN_MARKET_BOUNDS[community];
-  if (bounds) {
-    return {
-      sw_lat: String(bounds.sw_lat),
-      sw_lng: String(bounds.sw_lng),
-      ne_lat: String(bounds.ne_lat),
-      ne_lng: String(bounds.ne_lng),
-    };
-  }
-  const location = BUY_IN_MARKET_LOCATIONS[community];
-  if (location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) {
-    const halfDeg = 0.02;
-    return {
-      sw_lat: String(location.lat - halfDeg),
-      sw_lng: String(location.lng - halfDeg),
-      ne_lat: String(location.lat + halfDeg),
-      ne_lng: String(location.lng + halfDeg),
-    };
-  }
-  return {};
+  return geoConstraintForMarket(community).params;
 }
 
 async function fetchAirbnbMedianNightlyForQuery(args: {
@@ -503,8 +584,7 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
   apiKey: string;
   nights: number;
 }): Promise<{ rates: number[]; evidence: MarketRateEvidence; confidence: MarketRateConfidence | null; noResultsError: string | null }> {
-  const location = BUY_IN_MARKET_LOCATIONS[args.community];
-  const bounds = BUY_IN_MARKET_BOUNDS[args.community];
+  const geoConstraint = geoConstraintForMarket(args.community);
   const params: Record<string, string> = {
     engine: "airbnb",
     q: args.query,
@@ -516,7 +596,7 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
     currency: "USD",
     api_key: args.apiKey,
   };
-  Object.assign(params, airbnbSearchGeoParamsForMarket(args.community));
+  Object.assign(params, geoConstraint.params);
   const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
   if (!response.ok) throw new Error(`SearchAPI Airbnb HTTP ${response.status}`);
   const data = await response.json() as any;
@@ -530,6 +610,10 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
     totalCandidates: Array.isArray(data?.properties) ? data.properties.length : 0,
     acceptedCandidates: 0,
     rejectedCandidates: 0,
+    acceptedExactBedroomCandidates: 0,
+    acceptedUnknownBedroomCandidates: 0,
+    acceptedCommunityMatchedCandidates: 0,
+    acceptedGeoVerifiedCandidates: 0,
     acceptedPreview: [],
     rejectedPreview: [],
     rejectCounts: {},
@@ -538,6 +622,10 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
         .filter(([key]) => key !== "api_key")
         .map(([key, value]) => [key, String(value)]),
     ),
+    geoConstraint: {
+      kind: geoConstraint.kind,
+      description: geoConstraint.description,
+    },
   };
   if (data?.error) {
     const message = `SearchAPI Airbnb: ${data.error}`;
@@ -549,14 +637,23 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
   const rates: number[] = [];
   for (const [index, candidate] of (Array.isArray(data?.properties) ? data.properties : []).entries()) {
     const parsedBedrooms = parsedListingBedrooms(candidate);
+    const communityMatched = listingTextMatchesCommunity(candidate, args.community, args.query);
+    const geoMatched = candidateGeoMatch(candidate, geoConstraint.params);
     const baseEvidence = {
       page: 1,
       position: index + 1,
       title: listingTitle(candidate),
       url: listingUrl(candidate),
       bedrooms: parsedBedrooms,
-      communityMatched: listingTextMatchesCommunity(candidate, args.community, args.query),
+      communityMatched,
+      geoMatched,
     };
+    if (geoMatched === false) {
+      evidence.rejectedCandidates += 1;
+      evidence.rejectCounts.geography = (evidence.rejectCounts.geography || 0) + 1;
+      previewPush(evidence.rejectedPreview, { ...baseEvidence, nightly: null, accepted: false, reason: "outside market bounds" });
+      continue;
+    }
     if (!listingMatchesBedrooms(candidate, args.bedrooms)) {
       evidence.rejectedCandidates += 1;
       evidence.rejectCounts.bedrooms = (evidence.rejectCounts.bedrooms || 0) + 1;
@@ -573,6 +670,10 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
     }
     rates.push(nightly);
     evidence.acceptedCandidates += 1;
+    if (parsedBedrooms === args.bedrooms) evidence.acceptedExactBedroomCandidates += 1;
+    else if (parsedBedrooms == null) evidence.acceptedUnknownBedroomCandidates += 1;
+    if (communityMatched) evidence.acceptedCommunityMatchedCandidates += 1;
+    if (geoMatched === true) evidence.acceptedGeoVerifiedCandidates += 1;
     previewPush(evidence.acceptedPreview, { ...baseEvidence, nightly, accepted: true, reason: "accepted by existing filters" });
   }
   const basis = marketPricingBasis(rates);
@@ -583,7 +684,6 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
       ? scoreMarketRateConfidence({
         evidence,
         basis,
-        hasLocationConstraint: Boolean((location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) || bounds),
       })
       : null,
     noResultsError: null,
@@ -762,21 +862,31 @@ function seasonalBasisSummary(
 function summarizeMarketRateConfidence(confidences: MarketRateConfidence[]): MarketRateConfidence | null {
   if (confidences.length === 0) return null;
   const score = Math.round(confidences.reduce((sum, confidence) => sum + confidence.score, 0) / confidences.length);
-  const level: MarketRateConfidence["level"] = score >= 90 ? "green" : score >= 75 ? "yellow" : "red";
+  const minScore = Math.min(...confidences.map((confidence) => confidence.score));
+  const level: MarketRateConfidence["level"] = minScore < 75 ? "red" : score >= 90 ? "green" : "yellow";
   const acceptedCandidates = confidences.reduce((sum, confidence) => sum + confidence.acceptedCandidates, 0);
   const rejectedCandidates = confidences.reduce((sum, confidence) => sum + confidence.rejectedCandidates, 0);
+  const exactBedroomCandidates = confidences.reduce((sum, confidence) => sum + (confidence.exactBedroomCandidates || 0), 0);
+  const unknownBedroomCandidates = confidences.reduce((sum, confidence) => sum + (confidence.unknownBedroomCandidates || 0), 0);
+  const communityMatchedCandidates = confidences.reduce((sum, confidence) => sum + (confidence.communityMatchedCandidates || 0), 0);
+  const geoVerifiedCandidates = confidences.reduce((sum, confidence) => sum + (confidence.geoVerifiedCandidates || 0), 0);
   return {
     score,
     level,
     summary: `${score}% ${level} confidence across ${confidences.length} monthly scan${confidences.length === 1 ? "" : "s"}`,
     reasons: [
-      `${acceptedCandidates} accepted candidates across ${confidences.length} month${confidences.length === 1 ? "" : "s"}`,
+      `${acceptedCandidates} accepted candidates across ${confidences.length} month${confidences.length === 1 ? "" : "s"} (${exactBedroomCandidates} exact-bedroom, ${unknownBedroomCandidates} unparsed bedroom)`,
+      `${geoVerifiedCandidates} coordinate-verified and ${communityMatchedCandidates} community-text matched accepted candidates`,
       `${rejectedCandidates} rejected by existing filters`,
       `rate basis is p${MARKET_PRICING_PERCENTILE}`,
     ],
     sampleCount: acceptedCandidates,
     acceptedCandidates,
     rejectedCandidates,
+    exactBedroomCandidates,
+    unknownBedroomCandidates,
+    communityMatchedCandidates,
+    geoVerifiedCandidates,
     percentileBasis: MARKET_PRICING_PERCENTILE,
   };
 }
@@ -856,6 +966,15 @@ export async function refreshHybridPricingForTarget(args: {
         throw new Error(
           `SearchAPI Airbnb returned no usable exact-${bedrooms}BR samples for ${searchName} ` +
           `${window.yearMonth} (${window.checkIn} to ${window.checkOut}); static fallback is disabled for market-rate refreshes.`,
+        );
+      }
+      if (!airbnb.confidence || airbnb.confidence.level === "red") {
+        await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
+        const details = airbnb.confidence?.reasons?.length ? ` ${airbnb.confidence.reasons.join("; ")}` : "";
+        throw new Error(
+          `SearchAPI Airbnb confidence too low for ${searchName} exact-${bedrooms}BR ` +
+          `${window.yearMonth} (${window.checkIn} to ${window.checkOut}): ` +
+          `${airbnb.confidence?.summary ?? "not scored"}.${details}`,
         );
       }
       const previousYearMonth = monthOffset > 0 ? dateOnly(monthStart(asOf, monthOffset - 1)).slice(0, 7) : null;
