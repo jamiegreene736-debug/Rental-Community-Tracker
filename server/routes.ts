@@ -44,6 +44,7 @@ import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
 import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations";
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
+import { fetchGoogleHotelsBuyInCandidates, type GoogleHotelsBuyInCandidate } from "./google-hotels-buy-in";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
@@ -10117,13 +10118,11 @@ export async function registerRoutes(
 	    // Result-cache fast path. Honors a `?nocache=1` query for the
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
-    // 2026-05-22 buy-in methodology: Airbnb, VRBO, and Booking.com
-    // are searched only through the local Playwright/Chrome sidecar.
-    // PM/direct websites are no longer scraped or searched for rates.
-    // Airbnb images may still be reverse-searched to surface a direct
-    // booking link; that link inherits the Airbnb rate and is never
-    // scraped for price.
-    const includePm = false;
+    // OTA: Airbnb (SearchAPI) + VRBO/Booking (sidecar). PM scrapers and
+    // Google Hotels supplement are on unless FIND_BUY_IN_PM_ENABLED=0 or
+    // ?includePm=0. Direct PM pages found via Lens still inherit Airbnb proof.
+    const includePmDefault = process.env.FIND_BUY_IN_PM_ENABLED !== "0";
+    const includePm = includePmDefault && req.query.includePm !== "0";
     const airbnbDirectLensEnabled = req.query.directLens !== "0";
     const propertyUnitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
     const googleDiscoveryEnabled = airbnbDirectLensEnabled;
@@ -10141,7 +10140,7 @@ export async function registerRoutes(
     const otaSearchBedrooms = buyInBedroomFloor;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-direct-v3-strict|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-pm-gh-v1|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     const noCache = req.query.nocache === "1" || FIND_BUY_IN_TTL_MS <= 0;
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -11270,9 +11269,42 @@ export async function registerRoutes(
       }
     })();
 
+    let googleHotelsRawCount = 0;
+    let googleHotelsReason = "";
+    const googleHotelsAbort = makeSidecarAbort("google-hotels-searchapi");
+    const googleHotelsPromise: Promise<GoogleHotelsBuyInCandidate[]> = (async () => {
+      try {
+        if (!apiKey) {
+          googleHotelsReason = "SEARCHAPI_API_KEY not configured";
+          return [];
+        }
+        const bboxCenter = bounds
+          ? { lat: (bounds.sw_lat + bounds.ne_lat) / 2, lng: (bounds.sw_lng + bounds.ne_lng) / 2 }
+          : undefined;
+        const r = await fetchGoogleHotelsBuyInCandidates({
+          apiKey,
+          checkIn,
+          checkOut,
+          nights,
+          bedrooms: otaSearchBedrooms,
+          buyInBedroomFloor,
+          community,
+          resortName,
+          searchLocation,
+          bboxCenter,
+          signal: googleHotelsAbort.signal,
+        });
+        googleHotelsRawCount = r.rawCount;
+        googleHotelsReason = r.reason;
+        return r.candidates;
+      } catch (e: any) {
+        console.error(`[find-buy-in] google hotels error:`, e?.message ?? e);
+        noteSourceError("Google Hotels SearchAPI", e);
+        return [];
+      }
+    })();
+
     // ── Booking.com: website search through the local Chrome sidecar ──
-    // Same 2026-05-01 operator directive as Airbnb: no Google Hotels
-    // engine and no Google organic site-search for buy-in pricing.
     // Drive booking.com itself with destination, dates, and bedroom
     // filter. Search cards seed detail verification below.
     let bookingRawCount = 0;
@@ -11827,23 +11859,6 @@ export async function registerRoutes(
     const kpDiscovered: Candidate[] = [];
     const pm: Candidate[] = [];
 
-    // Await the new VRP sources in parallel with the others and surface them
-    // as first-class "pm" candidates (direct API, high quality for combos).
-    const [kvrUnits, pbhUnits, irkUnits, kpUnits] = await Promise.all([
-      kvrDiscoveryPromise,
-      pbhDiscoveryPromise,
-      irkDiscoveryPromise,
-      kpDiscoveryPromise,
-    ]);
-    kvrDiscovered.push(...kvrUnits);
-    pbhDiscovered.push(...pbhUnits);
-    irkDiscovered.push(...irkUnits);
-    kpDiscovered.push(...kpUnits);
-
-    // Make the new direct VRP sources contribute to the main candidate pool
-    // (so they appear in cheapest results and can be used for combos).
-    pm.push(...kvrUnits, ...pbhUnits, ...irkUnits, ...kpUnits);
-
     // ── Gather Vacations inventory (PR #332) ──────────────────────────────
     // gathervacations.com runs a customised vrp_main fork — the plugin's
     // standard rate-quote AJAX is stripped, but every unit page server-
@@ -12236,12 +12251,15 @@ export async function registerRoutes(
       FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS,
       Math.max(25_000, routeRemainingMs() - 10_000),
     );
-    const [airbnb, booking, vrbo] = await Promise.all([
+    const googleHotelsBudgetMs = Math.min(45_000, Math.max(12_000, routeRemainingMs() - 12_000));
+    const [airbnb, booking, vrbo, googleHotelsRows] = await Promise.all([
       withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-searchapi", airbnbSidecarAbort.abort),
       withTimeout(bookingPromise, sidecarSourceBudgetMs, [] as Candidate[], "booking-sidecar", bookingSidecarAbort.abort),
       withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo", vrboSidecarAbort.abort),
+      withTimeout(googleHotelsPromise, googleHotelsBudgetMs, [] as GoogleHotelsBuyInCandidate[], "google-hotels-searchapi", googleHotelsAbort.abort),
     ]);
-    const pmGoogle: Candidate[] = [];
+    const googleHotels: Candidate[] = googleHotelsRows.map((row) => ({ ...row }));
+    let pmGoogle: Candidate[] = [];
     const pmWebsiteSidecarDiscovered: Candidate[] = [];
     const spDiscovered: Candidate[] = [];
     const pkDiscovered: Candidate[] = [];
@@ -12251,7 +12269,77 @@ export async function registerRoutes(
     const gvDiscovered: Candidate[] = [];
     const slAlekonaDiscovered: Candidate[] = [];
     const slPrincevilleDiscovered: Candidate[] = [];
-    // (kvr/pbh/irk/kp + pm decls hoisted earlier to fix TDZ 'LR' + Railway build)
+    let pmSearchApiFinderCandidates: Candidate[] = [];
+    pm.push(...googleHotels);
+    if (includePm) {
+      const pmBudgetMs = Math.min(90_000, Math.max(15_000, routeRemainingMs() - 25_000));
+      const [
+        pmGoogleResult,
+        spResult,
+        pkResult,
+        cbResult,
+        pikoResult,
+        evrhiResult,
+        kvrResult,
+        pbhResult,
+        irkResult,
+        kpResult,
+        gvResult,
+        slAlekonaResult,
+        slPrincevilleResult,
+        pmWebsiteResult,
+        pmFinderResult,
+      ] = await Promise.all([
+        withTimeout(pmPromise, pmBudgetMs, [] as Candidate[], "pm-google-discovery"),
+        withTimeout(spDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-suite-paradise"),
+        withTimeout(pkDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-parrish"),
+        withTimeout(cbDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-cb-island"),
+        withTimeout(pikoDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-piko"),
+        withTimeout(evrhiDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-evrhi"),
+        withTimeout(kvrDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-kvr"),
+        withTimeout(pbhDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-pbh"),
+        withTimeout(irkDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-irk"),
+        withTimeout(kpDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-kp"),
+        withTimeout(gvDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-gather"),
+        withTimeout(slAlekonaDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-streamline-alekona"),
+        withTimeout(slPrincevilleDiscoveryPromise, pmBudgetMs, [] as Candidate[], "pm-streamline-princeville"),
+        withTimeout(pmWebsiteSidecarPromise, pmBudgetMs, [] as Candidate[], "pm-website-sidecar"),
+        withTimeout(pmSearchApiFinderPromise, pmBudgetMs, [] as Candidate[], "pm-searchapi-finder"),
+      ]);
+      pmGoogle = pmGoogleResult;
+      spDiscovered.push(...spResult);
+      pkDiscovered.push(...pkResult);
+      cbDiscovered.push(...cbResult);
+      pikoDiscovered.push(...pikoResult);
+      evrhiDiscovered.push(...evrhiResult);
+      kvrDiscovered.push(...kvrResult);
+      pbhDiscovered.push(...pbhResult);
+      irkDiscovered.push(...irkResult);
+      kpDiscovered.push(...kpResult);
+      gvDiscovered.push(...gvResult);
+      slAlekonaDiscovered.push(...slAlekonaResult);
+      slPrincevilleDiscovered.push(...slPrincevilleResult);
+      pmWebsiteSidecarDiscovered.push(...pmWebsiteResult);
+      pmSearchApiFinderCandidates = pmFinderResult;
+      pmRawCount = pmGoogleResult.length;
+      pm.push(
+        ...pmGoogleResult,
+        ...spResult,
+        ...pkResult,
+        ...cbResult,
+        ...pikoResult,
+        ...evrhiResult,
+        ...kvrResult,
+        ...pbhResult,
+        ...irkResult,
+        ...kpResult,
+        ...gvResult,
+        ...slAlekonaResult,
+        ...slPrincevilleResult,
+        ...pmWebsiteResult,
+        ...pmFinderResult,
+      );
+    }
 
     // ── Path B: reverse-image search the top Airbnb candidates ───────────
     // Airbnb listings can't be sublet (Airbnb's TOS bars commercial
@@ -12302,11 +12390,6 @@ export async function registerRoutes(
       confidence: number;
     };
     async function lensMatches(imgUrl: string): Promise<AirbnbDirectLensMatch[]> {
-      // PR #314: short-circuit when PM Google-discovery is disabled.
-      // Google Lens (engine=google_lens) is a Google search surface
-      // and was 403'd alongside engine=google. Operator directive:
-      // skip PM photo-matching while disabled — find-buy-in falls
-      // back to direct Airbnb/Booking/Vrbo + known-URL VRP_SITES.
       if (!googleDiscoveryEnabled) return [];
       try {
         const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey || "" });
@@ -12594,15 +12677,6 @@ export async function registerRoutes(
         });
       }
     }
-    // PM SearchAPI finder intentionally removed from the buy-in path.
-    // SearchAPI is allowed here only for Airbnb Google Lens reverse-image
-    // lookup, never for Google SERP PM discovery.
-    const pmSearchApiFinderCandidates: Candidate[] = [];
-
-    // ── Direct-site verification disabled by design ────────────────
-    // Buy-in now uses the OTA result page as the source of truth. Direct
-    // links found from Airbnb photos are click-through context only and
-    // keep Airbnb's date-specific proof; no PM URL is opened or scraped.
     const sidecarBatchVerifiedUrls = new Set<string>();
     const sidecarVerifyTargets: Candidate[] = [];
     const sidecarVerifySeen = new Set<string>();
@@ -12665,9 +12739,9 @@ export async function registerRoutes(
         .map(([label, bucket]) => `${label} (${bucket.count}; e.g. ${bucket.examples.join(" | ")})`);
       return rows.join("; ");
     };
-    // Direct links found from Airbnb photos inherit Airbnb's verified
-    // availability/price. Do not open or scrape the direct site.
-    const sidecarVerifyPool: Candidate[] = [];
+    const sidecarVerifyPool: Candidate[] = includePm
+      ? [...pm, ...pmSearchApiFinderCandidates].filter((c) => c.source === "pm" && (c.nightlyPrice <= 0 || c.totalPrice <= 0))
+      : [];
     for (const c of sidecarVerifyPool) {
       const key = c.url ? sidecarVerifyKey(c.url) : "";
       if (!c.url || c.verified || sidecarVerifySeen.has(key)) continue;
@@ -13351,6 +13425,17 @@ export async function registerRoutes(
         message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}; bedroom filter applied server-side after shared VRBO provider search${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
       }),
       enrichProviderDiagnostic({
+        source: "Google Hotels",
+        status: sourceStatus(["google-hotels-searchapi"], ["Google Hotels"], googleHotelsRawCount, googleHotels.length, pricedCount(googleHotels), verifiedYesCount(googleHotels), "No Google Hotels vacation-rental rows matched resort/bedroom filters", googleHotelsRawCount > 0, googleHotelsReason),
+        searched: googleHotelsRawCount > 0 || !!apiKey,
+        raw: googleHotelsRawCount,
+        kept: googleHotels.length,
+        priced: pricedCount(googleHotels),
+        verified: verifiedYesCount(googleHotels),
+        accessPattern: "SearchAPI google_hotels engine (vacation_rental)",
+        message: googleHotelsReason || `Google Hotels kept ${googleHotels.length} candidate(s).`,
+      }),
+      enrichProviderDiagnostic({
         source: "Booking.com",
         status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com search-result card produced a bedroom-matching rate", bookingSidecarOnline, bookingSidecarReason),
         searched: bookingSidecarOnline,
@@ -13382,9 +13467,13 @@ export async function registerRoutes(
         kept: sidecarBatchVerifiedUrls.size,
         priced: sidecarVerifyTargets.filter((c) => c.verified === "yes" && c.totalPrice > 0).length,
         verified: preVerifyYes,
-        accessPattern: "disabled for auto-buy-in; search-result pages and authorized PM APIs are source of truth",
+        accessPattern: includePm
+          ? "sidecar PM widget verification for unpriced discovery URLs"
+          : "disabled when PM search is off",
         message: sidecarVerifyTargets.length === 0
-          ? "Skipped by design: search-result pages are the source of truth for rates and availability."
+          ? (includePm
+            ? "No unpriced PM URLs needed sidecar widget verification in this scan."
+            : "PM sidecar verification skipped (FIND_BUY_IN_PM_ENABLED=0 or includePm=0).")
           : `Checked ${sidecarBatchVerifiedUrls.size}/${sidecarVerifyTargets.length}; autoWidgetChecks=${sidecarAutoWidgetTargetCount}; skippedForBudget=${sidecarVerifySkippedForBudget}; yes=${preVerifyYes}, no=${preVerifyNo}, unclear=${preVerifyUnclear}${sidecarReasonSummary ? `; top outcomes: ${sidecarReasonSummary}` : ""}.`,
       }),
     ];
@@ -13469,7 +13558,8 @@ export async function registerRoutes(
       + `airbnb=${airbnb.length}/${airbnbRawCount} (searchApi=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
       + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (website sidecar search cards) `
-      + `directLens=${photoMatchPmCandidates.length}/${totalPhotoMatches} (PM SearchAPI/site scraping disabled; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
+      + `googleHotels=${googleHotels.length}/${googleHotelsRawCount} · `
+      + `directLens=${photoMatchPmCandidates.length}/${totalPhotoMatches} (includePm=${includePm}; pmPool=${pm.length}; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} priceFloor=${JSON.stringify(targetFilterPriceDropped)} · `
       + `photoMatchesUnderAirbnb=${totalPhotoMatches} · `
       + `bookable-priced=${priced.length} pre-verify=${preVerifyAttempted} (yes=${preVerifyYes} no=${preVerifyNo} unclear=${preVerifyUnclear}) cheapest-verified=${verifiedCheapest.length}`
@@ -13494,9 +13584,20 @@ export async function registerRoutes(
       // Backward-compatible source breakdown for the PM/direct section.
       // PM scrapers are intentionally not attempted; this reports only
       // Airbnb Google Lens direct-link matches.
-      pmSourceBreakdown: [
-        { label: "Airbnb Google Lens direct links", count: photoMatchPmCandidates.length },
-      ],
+      pmSourceBreakdown: includePm
+        ? [
+            { label: "Google Hotels (SearchAPI)", count: googleHotels.length },
+            { label: "PM Google discovery", count: pmGoogle.length },
+            { label: "Suite Paradise sitemap", count: spDiscovered.length },
+            { label: "VRP/Streamline API scrapers", count: pkDiscovered.length + cbDiscovered.length + pikoDiscovered.length + evrhiDiscovered.length + kvrDiscovered.length + pbhDiscovered.length + irkDiscovered.length + kpDiscovered.length + gvDiscovered.length + slAlekonaDiscovered.length + slPrincevilleDiscovered.length },
+            { label: "PM website sidecar", count: pmWebsiteSidecarDiscovered.length },
+            { label: "SearchAPI PM finder", count: pmSearchApiFinderCandidates.length },
+            { label: "Airbnb Google Lens direct links", count: photoMatchPmCandidates.length },
+          ]
+        : [
+            { label: "Google Hotels (SearchAPI)", count: googleHotels.length },
+            { label: "Airbnb Google Lens direct links", count: photoMatchPmCandidates.length },
+          ],
       debug: {
         rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromKvrSitemap: kvrDiscovered.length, pmFromPbhSitemap: pbhDiscovered.length, pmFromIrkSitemap: irkDiscovered.length, pmFromKpSitemap: kpDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: {
