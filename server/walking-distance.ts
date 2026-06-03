@@ -6,7 +6,7 @@
 // built subdivisions are common gaps), we fall back to SearchAPI's
 // `google_maps` engine — which inherits Google's address coverage and
 // resolves things like "9000 Treasure Trove Lane, Kissimmee, FL"
-// (Caribe Cove Resort) that OSM doesn't have. Cache key is shared
+// that OSM doesn't have. Cache key is shared
 // across both providers; a positive hit from either is sticky.
 
 import {

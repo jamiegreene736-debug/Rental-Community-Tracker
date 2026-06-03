@@ -8641,45 +8641,164 @@ export async function registerRoutes(
   // tied to propertyIds that were stripped from PROPERTY_UNIT_CONFIGS.
   // Idempotent — safe to run multiple times. Returns counts per table.
   app.post("/api/admin/cleanup-removed-properties", async (_req, res) => {
-    const REMOVED_PROPERTY_IDS = [7, 10, 12, 14, 21, 26, 28, 31, 36];
+    const REMOVED_PROPERTY_IDS = [7, 10, 12, 14, 21, 26, 28, 31, 36, 37];
     try {
       // Lazy-import drizzle helpers + tables so we don't pay the import cost
       // on every request.
       const { db } = await import("./db");
-      const { inArray } = await import("drizzle-orm");
-      const { buyIns, guestyPropertyMap, availabilityScans, unitSwaps } = await import("@shared/schema");
+      const { ilike, inArray, or } = await import("drizzle-orm");
+      const {
+        availabilityScans,
+        builderBookingRules,
+        bulkPricingRefreshJobItems,
+        buyIns,
+        communityDrafts,
+        guestyPropertyMap,
+        lodgifyBookings,
+        lodgifyPropertyMap,
+        manualReservations,
+        photoLabels,
+        pricingUpdateLogs,
+        propertyBuyInMarkets,
+        propertyComplianceOverrides,
+        propertyMarketRates,
+        reservationCancellationAudits,
+        scannerBlocks,
+        scannerOverrides,
+        scannerRunHistory,
+        scannerSchedule,
+        unitSwaps,
+      } = await import("@shared/schema");
+
+      const removedNameMatch = "%Caribe%";
 
       const buyInsDeleted = await db
         .delete(buyIns)
-        .where(inArray(buyIns.propertyId, REMOVED_PROPERTY_IDS))
+        .where(or(inArray(buyIns.propertyId, REMOVED_PROPERTY_IDS), ilike(buyIns.propertyName, removedNameMatch)))
         .returning({ id: buyIns.id });
 
-      const mapsDeleted = await db
+      const guestyMapsDeleted = await db
         .delete(guestyPropertyMap)
         .where(inArray(guestyPropertyMap.propertyId, REMOVED_PROPERTY_IDS))
         .returning({ id: guestyPropertyMap.id });
 
+      const lodgifyMapsDeleted = await db
+        .delete(lodgifyPropertyMap)
+        .where(inArray(lodgifyPropertyMap.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: lodgifyPropertyMap.id });
+
       const scansDeleted = await db
         .delete(availabilityScans)
-        .where(inArray(availabilityScans.propertyId, REMOVED_PROPERTY_IDS))
+        .where(or(inArray(availabilityScans.propertyId, REMOVED_PROPERTY_IDS), ilike(availabilityScans.community, removedNameMatch)))
         .returning({ id: availabilityScans.id });
 
       let swapsDeleted: { id: number }[] = [];
       try {
         swapsDeleted = await db
           .delete(unitSwaps)
-          .where(inArray(unitSwaps.propertyId, REMOVED_PROPERTY_IDS))
+          .where(or(inArray(unitSwaps.propertyId, REMOVED_PROPERTY_IDS), ilike(unitSwaps.communityFolder, removedNameMatch)))
           .returning({ id: unitSwaps.id });
       } catch {
         // unit_swaps may not exist or may not have propertyId — safe to skip
       }
 
+      const propertyBuyInMarketsDeleted = await db
+        .delete(propertyBuyInMarkets)
+        .where(inArray(propertyBuyInMarkets.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ propertyId: propertyBuyInMarkets.propertyId });
+
+      const reservationCancellationAuditsDeleted = await db
+        .delete(reservationCancellationAudits)
+        .where(inArray(reservationCancellationAudits.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: reservationCancellationAudits.id });
+
+      const manualReservationsDeleted = await db
+        .delete(manualReservations)
+        .where(inArray(manualReservations.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: manualReservations.id });
+
+      const lodgifyBookingsDeleted = await db
+        .delete(lodgifyBookings)
+        .where(inArray(lodgifyBookings.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: lodgifyBookings.id });
+
+      const bulkPricingItemsDeleted = await db
+        .delete(bulkPricingRefreshJobItems)
+        .where(inArray(bulkPricingRefreshJobItems.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: bulkPricingRefreshJobItems.id });
+
+      const propertyMarketRatesDeleted = await db
+        .delete(propertyMarketRates)
+        .where(inArray(propertyMarketRates.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: propertyMarketRates.id });
+
+      const pricingUpdateLogsDeleted = await db
+        .delete(pricingUpdateLogs)
+        .where(or(inArray(pricingUpdateLogs.propertyId, REMOVED_PROPERTY_IDS), ilike(pricingUpdateLogs.propertyName, removedNameMatch)))
+        .returning({ id: pricingUpdateLogs.id });
+
+      const bookingRulesDeleted = await db
+        .delete(builderBookingRules)
+        .where(inArray(builderBookingRules.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: builderBookingRules.id });
+
+      const complianceOverridesDeleted = await db
+        .delete(propertyComplianceOverrides)
+        .where(inArray(propertyComplianceOverrides.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ propertyId: propertyComplianceOverrides.propertyId });
+
+      const schedulesDeleted = await db
+        .delete(scannerSchedule)
+        .where(inArray(scannerSchedule.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: scannerSchedule.id });
+
+      const runHistoryDeleted = await db
+        .delete(scannerRunHistory)
+        .where(inArray(scannerRunHistory.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: scannerRunHistory.id });
+
+      const blocksDeleted = await db
+        .delete(scannerBlocks)
+        .where(inArray(scannerBlocks.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: scannerBlocks.id });
+
+      const overridesDeleted = await db
+        .delete(scannerOverrides)
+        .where(inArray(scannerOverrides.propertyId, REMOVED_PROPERTY_IDS))
+        .returning({ id: scannerOverrides.id });
+
+      const draftsDeleted = await db
+        .delete(communityDrafts)
+        .where(ilike(communityDrafts.name, removedNameMatch))
+        .returning({ id: communityDrafts.id });
+
+      const photoLabelsDeleted = await db
+        .delete(photoLabels)
+        .where(ilike(photoLabels.folder, removedNameMatch))
+        .returning({ id: photoLabels.id });
+
       return res.json({
         removedPropertyIds: REMOVED_PROPERTY_IDS,
         buyIns: buyInsDeleted.length,
-        guestyPropertyMap: mapsDeleted.length,
+        guestyPropertyMap: guestyMapsDeleted.length,
+        lodgifyPropertyMap: lodgifyMapsDeleted.length,
         availabilityScans: scansDeleted.length,
         unitSwaps: swapsDeleted.length,
+        propertyBuyInMarkets: propertyBuyInMarketsDeleted.length,
+        reservationCancellationAudits: reservationCancellationAuditsDeleted.length,
+        manualReservations: manualReservationsDeleted.length,
+        lodgifyBookings: lodgifyBookingsDeleted.length,
+        bulkPricingRefreshJobItems: bulkPricingItemsDeleted.length,
+        propertyMarketRates: propertyMarketRatesDeleted.length,
+        pricingUpdateLogs: pricingUpdateLogsDeleted.length,
+        builderBookingRules: bookingRulesDeleted.length,
+        propertyComplianceOverrides: complianceOverridesDeleted.length,
+        scannerSchedule: schedulesDeleted.length,
+        scannerRunHistory: runHistoryDeleted.length,
+        scannerBlocks: blocksDeleted.length,
+        scannerOverrides: overridesDeleted.length,
+        communityDrafts: draftsDeleted.length,
+        photoLabels: photoLabelsDeleted.length,
       });
     } catch (err: any) {
       console.error("[admin/cleanup] error:", err);
@@ -15284,7 +15403,6 @@ export async function registerRoutes(
     32: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 2 }] },
     33: { community: "Pili Mai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     34: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
-    37: { community: "Windsor Hills", units: [{ bedrooms: 3 }] },
   };
 
   const COMMUNITY_SEARCH_LOCATIONS: Record<string, string> = BUY_IN_MARKET_SEARCH_LOCATIONS;
@@ -24209,7 +24327,7 @@ Return ONLY compact JSON with this exact shape:
     // photo_listing_checks. When the scanner has a fresh "found"
     // verdict for a folder, that's a stronger signal than anything our
     // live search can produce in a single request — so promote it
-    // unconditionally. This was the bug behind a Caribe Cove preflight
+    // unconditionally. This was the bug behind a draft preflight
     // saying "Not Found — Likely Safe to Use" for unit-621 / unit-423
     // while the dashboard's photo-listing-alert banner showed both
     // units flipped to "found" the day before.
@@ -28389,7 +28507,7 @@ Return ONLY compact JSON with this exact shape:
       redfinQueries.push(`site:redfin.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
       homesQueries.push(`site:homes.com "${communityName}" ${city ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
       // Last-ditch: bare quoted community name, no city/state. Catches
-      // distinctive names ("Pili Mai", "Caribe Cove Resort") that
+      // distinctive names ("Pili Mai", named resort communities) that
       // Google indexes well even without geographic disambiguation.
       zillowQueries.push(`site:zillow.com "${communityName}"`);
       realtorQueries.push(`site:realtor.com "${communityName}"`);
@@ -30619,8 +30737,7 @@ Return ONLY compact JSON with this exact shape:
   // gates the engine results, which is much more reliable than the
   // name-only filter the original /search-units path uses. Many real
   // listings at a resort don't name the resort in their title or
-  // description (e.g. Caribe Cove condos call themselves "Disney
-  // Vacation Condo") so a name-only path returns 0 listings even when
+  // description, so a name-only path returns 0 listings even when
   // the resort has dozens listed. Without `streetAddress`, the endpoint
   // falls back to the same name-token filter as /search-units.
   //
@@ -35466,8 +35583,8 @@ ${resortFeeNote ? `- Resort fee note to include exactly once in summary or space
 OUTPUT — return ONLY valid JSON with this exact shape:
 
 {
-  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. Examples: 'Beautiful 4BR for 10 in Caribe Cove!', 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 14 near Disney!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
-  "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Examples: 'Caribe Cove - 4BR Condos - Sleeps 10', 'Poipu Kai - 7BR Resort - Sleeps 16', 'Princeville - 5BR Condos - Sleeps 14'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
+  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. Examples: 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 14 near Disney!', 'Beautiful 4BR for 10 in Kissimmee!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
+  "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Examples: 'Poipu Kai - 7BR Resort - Sleeps 16', 'Princeville - 5BR Condos - Sleeps 14', 'Windsor Hills - 4BR Condos - Sleeps 10'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
   "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity). Do NOT mention 'two separate units' or 'individually owned' or 'representative accommodations' here — the builder adds combo setup at the top and unit-assignment language at the bottom.",
   "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' / unit-assignment language; the builder adds those separately.",

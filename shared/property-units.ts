@@ -38,7 +38,6 @@ export const PROPERTY_UNIT_CONFIGS: Record<number, PropertyUnitConfig> = {
   32: { community: "Pili Mai",          enableGoogleLensDiscovery: true, looseResortPhotoProof: true, units: [{ unitId: "A",     unitLabel: "Townhome A",      bedrooms: 3 }, { unitId: "B",     unitLabel: "Townhome B",      bedrooms: 2 }] },
   33: { community: "Pili Mai",          enableGoogleLensDiscovery: true, looseResortPhotoProof: true, units: [{ unitId: "A",     unitLabel: "Townhome A",      bedrooms: 3 }, { unitId: "B",     unitLabel: "Townhome B",      bedrooms: 3 }] },
   34: { community: "Poipu Kai",         enableGoogleLensDiscovery: true, looseResortPhotoProof: true, units: [{ unitId: "A",     unitLabel: "Unit A",          bedrooms: 3 }, { unitId: "B",     unitLabel: "Unit B",          bedrooms: 3 }] },
-  37: { community: "Windsor Hills",     units: [{ unitId: "main",  unitLabel: "Main Condo",      bedrooms: 3 }] },
 };
 
 export function getPropertyUnits(propertyId: number): UnitConfig[] {

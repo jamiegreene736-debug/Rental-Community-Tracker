@@ -269,8 +269,7 @@ export function sampleLicensesForLocation(city: string, state: string, context?:
 // distinguish stale samples from operator-typed values.
 //
 // Drafts saved before the fully-formed sample values landed have the
-// older annotated placeholder stored as `draft.strPermit` (Caribe Cove
-// in particular carries the pre-FL-detection generic fallback). Treating
+// older annotated placeholder stored as `draft.strPermit`. Treating
 // those as "no real value" lets the freshly adapted draft display the
 // new, fully-formed county-specific sample without the operator having
 // to clear the field by hand.
@@ -572,8 +571,8 @@ export async function loadDraftFullDataByNegativeId(
     }),
   );
 
-  // Backfill: drafts saved before community-photos auto-fetch landed
-  // (e.g. Caribe Cove) have an empty `community-draft-<id>` folder.
+  // Backfill: drafts saved before community-photos auto-fetch landed have an
+  // empty `community-draft-<id>` folder.
   // Fire-and-forget the persist endpoint so the next builder load
   // shows them. The endpoint is idempotent — it clears + re-saves the
   // folder each time, so re-running on a populated folder is safe but

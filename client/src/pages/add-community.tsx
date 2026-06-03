@@ -576,7 +576,7 @@ export default function AddCommunity() {
   // approximation.
   const [editedPricingArea, setEditedPricingArea] = useState<string>("");
   // Single complex-level street address. Most resort communities (Pili
-  // Mai, Caribe Cove, etc.) live at one canonical street address shared
+  // Mai, named resort communities, etc.) live at one canonical street address shared
   // across all units; the preflight Platform Check appends "Unit X" to
   // it for per-unit text-search matching. Optional — blank falls back
   // to "city, state".

@@ -158,11 +158,6 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     aliases: [/\b(?:southern\s+dunes|haines\s+city|davenport)\b/i],
     searchLocation: "Southern Dunes, Haines City, Florida",
   },
-  "Caribe Cove": {
-    key: "Caribe Cove",
-    aliases: [/\bcaribe\s+cove\b/i],
-    searchLocation: "Caribe Cove Resort, Kissimmee, Florida",
-  },
   "Florida Generic": {
     key: "Florida Generic",
     aliases: [/\bflorida\b/i],
@@ -185,9 +180,8 @@ export const SIMILAR_BUY_IN_MARKETS: Record<string, string[]> = {
   "Poipu Oceanfront": ["Poipu Brenneckes", "Kapaa Beachfront", "Kekaha Beachfront"],
   "Kapaa Beachfront": ["Princeville"],
   "Princeville": ["Kapaa Beachfront"],
-  "Windsor Hills": ["Caribe Cove", "Southern Dunes"],
-  "Caribe Cove": ["Windsor Hills", "Southern Dunes"],
-  "Southern Dunes": ["Windsor Hills", "Caribe Cove"],
+  "Windsor Hills": ["Southern Dunes"],
+  "Southern Dunes": ["Windsor Hills"],
 };
 
 export const BUY_IN_MARKET_PLATFORM_SEARCH_TERMS: Record<string, BuyInPlatformSearchTerms> = Object.fromEntries(

@@ -2306,7 +2306,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   //      builder expect the correct push target to be ready.
   //   2. Reset the dropdown to "" when navigating to a property that
   //      has no mapping. Without this reset, switching from a draft
-  //      (e.g. Caribe Cove, propertyId -1, no Guesty listing yet) to
+  //      (e.g. propertyId -1, no Guesty listing yet) to
   //      another property left the dropdown stuck on the previously-
   //      selected listing — and the property-keyed tabs (pricing,
   //      bedding, photos) showed the new property's data while the
@@ -3830,7 +3830,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 // property-keyed tabs (pricing schedule, bedding, photos)
                 // keep showing the previous property's data, which is
                 // exactly the bug the operator hit when switching from
-                // Caribe Cove to a Hawaii listing. The auto-select effect
+                // an unmapped draft to a Hawaii listing. The auto-select effect
                 // above will set selectedId on the new page.
                 if (newId) {
                   const mapped = propertyMap.find((m) => m.guestyListingId === newId);

@@ -570,15 +570,6 @@ console.log("\npricing tables suite");
 import { getBuyInRate, suggestPricingArea, BUY_IN_RATES, setLivePropertyMarketRates } from "../shared/pricing-rates";
 import { resolveBuyInMarket, searchLocationForBuyInMarket } from "../shared/buy-in-market";
 
-// Caribe Cove (Kissimmee, FL) is the operator-validated 2BR low tier —
-// $125/unit base × 2 units = $250 buy-in, matching what the unit
-// actually rents for on Airbnb/VRBO including taxes + fees. If this
-// number drifts up the dashboard reverts to its old $1,080-for-two-2BR
-// behavior that triggered the original bug report.
-assert.equal(getBuyInRate("Caribe Cove", 2), 125, "Caribe Cove 2BR base should be $125");
-assert.equal(BUY_IN_RATES["Caribe Cove"]?.region, "florida");
-console.log("  ✓ Caribe Cove 2BR pinned at $125");
-
 // Pili Mai 5BR is priced as its actual 3BR + 2BR component buy-ins, not
 // as a single 5BR villa comp. The operator-verified September 8-15, 2026
 // Airbnb buy-in comps are $532 for 3BR and $384 for 2BR.
@@ -660,14 +651,12 @@ assert.equal(
 );
 console.log("  ✓ monthly SearchAPI Airbnb medians bypass static fallback caps");
 
-// suggestPricingArea: a Kissimmee draft named "Caribe Cove" should
-// resolve to "Caribe Cove" via the new community-name match — not to
-// "Windsor Hills" via the city regex. Same draft without the name
-// should still default to Windsor Hills.
+// suggestPricingArea: a Kissimmee draft with no remaining named market match
+// should default to the Windsor Hills tier.
 assert.equal(
-  suggestPricingArea("Kissimmee", "Florida", "Caribe Cove Resort"),
-  "Caribe Cove",
-  "community name should override city default",
+  suggestPricingArea("Kissimmee", "Florida", "Unknown Resort"),
+  "Windsor Hills",
+  "unknown Kissimmee community should use city default",
 );
 assert.equal(
   suggestPricingArea("Kissimmee", "Florida"),
@@ -730,7 +719,7 @@ import { extractBedroomsFromListing } from "../server/community-research";
 
 // SearchAPI's airbnb engine never returns `bedrooms` as a top-level
 // number — the count lives in the title. These cases mirror the real
-// shapes Caribe Cove returned during a prod probe (PR that introduced
+// shapes returned during a prod probe (PR that introduced
 // this test). If the engine starts returning a structured `bedrooms`
 // field one day we can simplify, but until then this regex path is
 // what stands between the engine and a useful pricing sample.

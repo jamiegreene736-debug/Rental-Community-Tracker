@@ -1186,13 +1186,11 @@ export function extractBedroomsFromListing(p: any): number {
 //      `sw_lat`/`ne_lat`/`sw_lng`/`ne_lng` AND post-filters listings
 //      whose `gps_coordinates` fall outside that box. This is the most
 //      reliable path: many listings don't name the resort in title or
-//      description (e.g. Caribe Cove condos call themselves "Disney
-//      Vacation Condo") so a name-only filter drops them all.
+//      description, so a name-only filter can drop them all.
 //   2. If `addressHint` is missing or geocode fails, the function falls
 //      back to token-based name match: every word of length ≥3 in the
 //      community name must appear in title or description. Looser than
-//      a substring match but tight enough to filter "Caribe Royale" out
-//      of a Caribe Cove search.
+//      a substring match but tight enough to filter similarly named resorts.
 //
 // Returns rates grouped by bedroom count + a `bboxApplied` flag so callers
 // can distinguish "geocoded path used (high confidence)" from "name-token
@@ -1202,8 +1200,8 @@ export function extractBedroomsFromListing(p: any): number {
 // BBOX_HALF_DEG = 0.015° ≈ 1.65km at FL/HI latitudes. Started at 0.005°
 // (~500m) to fit a single resort, but Airbnb anonymizes coordinates until
 // a booking is confirmed — typically ±0.5-1.0km offset from the actual
-// unit. A 500m box dropped every Caribe Cove listing on the live engine
-// even though the resort has 16+ listings on Airbnb. 1.65km is wide
+// unit. A 500m box can drop valid listings on the live engine when Airbnb
+// anonymizes coordinates. 1.65km is wide
 // enough to absorb the anonymization without picking up neighbors —
 // for resort-dense areas (Kissimmee, Poipu) the next nearest condo
 // complex is generally >2km away.
@@ -1595,8 +1593,7 @@ export async function researchCommunitiesForCity(
   // Google JSON. That swept in headline "from $X" rates (often 1-night
   // quotes), peak-season screenshots from review sites, and rates from
   // unrelated nearby properties — producing a `low` ~3x the actual cost
-  // basis. For Caribe Cove specifically (operator-validated 2BR ≈ $125
-  // all-in), the regex hack returned null entirely on Florida pages
+  // basis. In Florida probes, the regex hack could return null entirely
   // because Google snippets don't carry that exact format. Replacing
   // it with the priced-engine lookup is both more accurate AND more
   // reliable — same methodology as `/api/community/search-units`.
@@ -1655,7 +1652,7 @@ EXAMPLES of resorts that qualify (use these as a recall anchor):
   Fort Myers Beach, FL: Santa Maria Resort, Sandcastle Beach Club, Diamond Head Beach Resort, Pointe Estero Resort, Surf & Sun Beach Resort, Casa Playa Beach Resort, Estero Beach & Tennis Club, Sea Castle Condominiums, Mariner's Boathouse & Beach Resort, The Sunset Beach Club.
   Destin, FL: Silver Shells Beach Resort, Sandestin Beach Resort, Henderson Park Inn, Crystal Beach, Emerald Towers, Sterling Shores, Mainsail Condominiums.
   Panama City Beach, FL: Edgewater Beach Resort, Calypso Resort, Splash Resort, Aqua Resort, Long Beach Resort, Shores of Panama.
-  Kissimmee/Orlando, FL: Windsor Hills Resort, Caribe Cove Resort, Reunion Resort, Encore Resort, Solterra Resort, Champions Gate, Vista Cay Resort, Storey Lake Resort.
+  Kissimmee/Orlando, FL: Windsor Hills Resort, Reunion Resort, Encore Resort, Solterra Resort, Champions Gate, Vista Cay Resort, Storey Lake Resort.
   Lihue/Kapaa/Poipu, HI: Pili Mai, Kaha Lani Resort, Lae Nani, Lawai Beach Resort, Whalers Cove, Poipu Kapili, Regency at Poipu Kai.
 
 DISQUALIFIED:
@@ -1669,10 +1666,9 @@ SCORING:
 
 Use (1) the search results below AND (2) your own world knowledge. **You MAY (and should) add UP TO 15 well-known condo/townhouse resorts from your own knowledge** that fit "${city}, ${state}", marked fromWorldKnowledge:true. Aim for 15–20 total entries when the city has that many known resorts. **For any city named in the EXAMPLES list above, you MUST surface every example resort listed for that city as fromWorldKnowledge entries** unless you have a specific reason to disqualify one.
 
-CRITICAL: For each resort, return availableBedrooms as an array of integers — the bedroom counts that resort actually offers (e.g. Santa Maria Resort: [2, 3]; Pili Mai: [2, 3, 4]; Caribe Cove: [2, 3, 4]; Reunion Resort: [2, 3, 4, 5, 6, 7, 8]). Only include bedroom counts you are confident the resort offers. If you don't know, return an empty array []. The wizard uses this to render bedroom buttons — wrong counts cause failed Zillow lookups, missing counts hide valid options. Default to including 2 and 3 if you're sure the resort exists but uncertain about exact mix. NEVER include studio/0 or 1 unless the resort is genuinely studio/1BR-dominated.
+CRITICAL: For each resort, return availableBedrooms as an array of integers — the bedroom counts that resort actually offers (e.g. Santa Maria Resort: [2, 3]; Pili Mai: [2, 3, 4]; Reunion Resort: [2, 3, 4, 5, 6, 7, 8]). Only include bedroom counts you are confident the resort offers. If you don't know, return an empty array []. The wizard uses this to render bedroom buttons — wrong counts cause failed Zillow lookups, missing counts hide valid options. Default to including 2 and 3 if you're sure the resort exists but uncertain about exact mix. NEVER include studio/0 or 1 unless the resort is genuinely studio/1BR-dominated.
 
 ALSO CRITICAL: For each resort, return estimatedTotalUnits — your best estimate of the TOTAL number of condo/townhouse units in the resort (rough is fine). The wizard sorts by this descending and shows the biggest 10 first. Examples:
-  - Caribe Cove (Kissimmee): ~250 units
   - Reunion Resort (Kissimmee): ~2000 units across the whole community
   - Santa Maria Resort (Fort Myers Beach): ~75 units (single-tower condo)
   - Pili Mai (Poipu Kai): ~140 townhomes

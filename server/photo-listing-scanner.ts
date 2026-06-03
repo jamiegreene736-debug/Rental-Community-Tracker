@@ -160,7 +160,7 @@ async function dynamicVerificationTokensForFolder(folder: string): Promise<strin
           draft?.state,
         ].filter(Boolean).join(", ");
         const tokens = unitVerificationClaims(unitLabel, address);
-        // Published draft combo listings like Caribe Cove can have real
+        // Published draft combo listings can have real
         // representative unit photo folders but no concrete condo number yet.
         // Do not block those forever: authorized-URL suppression plus the
         // two-distinct-photo threshold still guards against one-off resort
@@ -656,7 +656,7 @@ export async function listScanableFolders(): Promise<string[]> {
 
   // Published drafts can have valid local photo folders without any
   // photo-label rows and without a unit-swap row. Santa Maria hit this
-  // path as a single listing; Caribe Cove hit the same shape as a
+  // path as a single listing; some draft listings hit the same shape as a
   // published combo draft with draft-1-unit-a / draft-1-unit-b photos.
   // Seed these folders from drafts so the scheduler and dashboard use
   // the same scan universe.

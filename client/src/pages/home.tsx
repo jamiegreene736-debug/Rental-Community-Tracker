@@ -370,8 +370,6 @@ const ESTIMATED_COMMUNITY_UNIT_COUNTS: Record<string, number> = {
   [normalizeCommunityUnitCountKey("Fairway Villas Waikoloa")]: 165,
   [normalizeCommunityUnitCountKey("Banyan Harbor")]: 148,
   [normalizeCommunityUnitCountKey("Bonita National")]: 1450,
-  [normalizeCommunityUnitCountKey("Caribe Cove")]: 250,
-  [normalizeCommunityUnitCountKey("Caribe Cove Resort")]: 250,
 };
 
 function communityUnitCountFor(communityName: string, explicit?: number | null): number | null {
