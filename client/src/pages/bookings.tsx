@@ -300,6 +300,24 @@ type AlternativeScoutSample = {
   bedrooms?: number;
 };
 
+type AlternativeScoutDirectMatch = {
+  url: string;
+  domain: string;
+  title: string;
+  matchedPhotoCount: number;
+  minConfidence: number;
+  maxConfidence: number;
+};
+
+type AlternativeScoutDirectProbe = {
+  airbnbUrl: string;
+  title: string;
+  bedrooms?: number;
+  directMatches: AlternativeScoutDirectMatch[];
+  status: "done" | "error" | "skipped";
+  message?: string;
+};
+
 type AlternativeScoutResult = {
   community: string;
   searchTerm: string;
@@ -309,6 +327,8 @@ type AlternativeScoutResult = {
   recommended: boolean;
   reason: string;
   countsByBedroom?: Record<string, number>;
+  airbnbCountsByBedroom?: Record<string, number>;
+  directBookingProbes?: AlternativeScoutDirectProbe[];
   passingPlans?: number[][];
   replacementPlans?: number[][];
   oceanfrontComparable?: boolean;
@@ -1230,6 +1250,50 @@ function alternativeCommunitiesForSidecar(scout: AlternativeScoutResponse): Alte
   );
 }
 
+function alternativeScoutCommunitiesForDisplay(scout: AlternativeScoutResponse | undefined): AlternativeScoutResult[] {
+  if (!scout) return [];
+  const byCommunity = new Map<string, AlternativeScoutResult>();
+  for (const row of [
+    ...(scout.scouted ?? []),
+    ...(scout.results ?? []),
+    ...(scout.discoveredResorts ?? []),
+    ...(scout.rejected ?? []),
+  ]) {
+    if (!byCommunity.has(row.community)) byCommunity.set(row.community, row);
+  }
+  return Array.from(byCommunity.values()).sort(
+    (a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999),
+  );
+}
+
+function formatAirbnbInventoryCounts(counts?: Record<string, number>): string | null {
+  if (!counts) return null;
+  const parts = Object.entries(counts)
+    .map(([br, count]) => [Number.parseInt(br, 10), Number(count)] as const)
+    .filter(([br, count]) => Number.isFinite(br) && br > 0 && Number.isFinite(count) && count > 0)
+    .sort((a, b) => b[0] - a[0])
+    .map(([br, count]) => `${count}× ${br}BR`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function mergeScoutDirectProbes(
+  scout: AlternativeScoutResponse,
+  probesByCommunity: Record<string, { listings?: AlternativeScoutDirectProbe[] }>,
+): AlternativeScoutResponse {
+  const enrich = (row: AlternativeScoutResult): AlternativeScoutResult => ({
+    ...row,
+    directBookingProbes: probesByCommunity[row.community]?.listings ?? row.directBookingProbes ?? [],
+  });
+  return {
+    ...scout,
+    results: (scout.results ?? []).map(enrich),
+    recommended: (scout.recommended ?? []).map(enrich),
+    scouted: (scout.scouted ?? []).map(enrich),
+    discoveredResorts: (scout.discoveredResorts ?? []).map(enrich),
+    rejected: (scout.rejected ?? []).map(enrich),
+  };
+}
+
 type TwoUnitBedroomCombo = { bedrooms: number[] };
 
 type AutoFillGroundCandidatePool = {
@@ -2097,20 +2161,7 @@ function AlternativeBuyInWorkflowPanel({
 }) {
   const active = workflow?.activeCommunity ?? null;
   const sidecarResults = workflow?.sidecarResults ?? {};
-  const communities = (() => {
-    const scouted = workflow?.scout?.scouted ?? workflow?.scout?.results ?? [];
-    const byCommunity = new Map<string, AlternativeScoutResult>();
-    for (const row of scouted) byCommunity.set(row.community, row);
-    for (const row of workflow?.scout?.discoveredResorts ?? []) {
-      if (!byCommunity.has(row.community)) byCommunity.set(row.community, row);
-    }
-    for (const row of workflow?.scout?.rejected ?? []) {
-      if (!byCommunity.has(row.community)) byCommunity.set(row.community, row);
-    }
-    return Array.from(byCommunity.values()).sort(
-      (a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999),
-    );
-  })();
+  const communities = alternativeScoutCommunitiesForDisplay(workflow?.scout);
   const scoutSources = alternativeScoutSourceSummary(workflow?.scout);
   const completeReplacementSet = bestAlternativeReplacementSet(workflow);
   const replacementPlanText = alternativeReplacementNeedText(workflow);
@@ -2139,8 +2190,8 @@ function AlternativeBuyInWorkflowPanel({
             </p>
           )}
         </div>
-        <Button size="sm" variant="outline" className="h-7 bg-white" onClick={onScout} disabled={active === "scouting"}>
-          {active === "scouting" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
+        <Button size="sm" variant="outline" className="h-7 bg-white" onClick={onScout} disabled={active === "scouting" || active === "direct-probing"}>
+          {active === "scouting" || active === "direct-probing" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
           Scout similar areas
         </Button>
         {onStartAutoScan && communities.length > 0 && !completeReplacementSet && (
@@ -2149,7 +2200,7 @@ function AlternativeBuyInWorkflowPanel({
               <XCircle className="mr-1 h-3.5 w-3.5" /> Stop auto sidecar
             </Button>
           ) : (
-            <Button size="sm" className="h-7 bg-sky-600 hover:bg-sky-700 text-white" onClick={onStartAutoScan} disabled={active === "scouting"}>
+            <Button size="sm" className="h-7 bg-sky-600 hover:bg-sky-700 text-white" onClick={onStartAutoScan} disabled={active === "scouting" || active === "direct-probing"}>
               <Zap className="mr-1 h-3.5 w-3.5" /> Auto sidecar until combo (20min)
             </Button>
           )
@@ -2160,6 +2211,11 @@ function AlternativeBuyInWorkflowPanel({
           {communities.map((result) => {
             const running = active === result.community;
             const sidecar = sidecarResults[result.community];
+            const inventoryText = formatAirbnbInventoryCounts(result.airbnbCountsByBedroom ?? result.countsByBedroom);
+            const airbnbSamples = (result.samples ?? []).filter((sample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url));
+            const directMatches = (result.directBookingProbes ?? []).flatMap((probe) =>
+              probe.directMatches.map((match) => ({ ...match, airbnbTitle: probe.title })),
+            );
             return (
               <div key={result.community} className="rounded border bg-white/80 px-2 py-2">
                 <div className="flex items-start justify-between gap-2">
@@ -2172,12 +2228,23 @@ function AlternativeBuyInWorkflowPanel({
                       Airbnb scout: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} passed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
                       <UnitTypeConfidenceBadge confidence={sidecar?.cheapest?.[0]?.unitTypeConfidence} />
                     </p>
+                    {inventoryText && (
+                      <p className="mt-0.5 text-[11px] font-medium text-sky-900">
+                        Airbnb inventory: {inventoryText}
+                      </p>
+                    )}
                     <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.reason}</p>
+                    {active === "direct-probing" && (
+                      <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] text-sky-800">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Google Lens direct-site probe running…
+                      </span>
+                    )}
                     {autoScan && autoScan.scanned.includes(result.community) && (
                       <span className="mt-0.5 inline-block text-[10px] px-1 rounded bg-sky-200 text-sky-800">auto-scanned</span>
                     )}
                   </div>
-                  <Button size="sm" className="h-7 shrink-0" onClick={() => onRunCommunity(result.community)} disabled={running}>
+                  <Button size="sm" className="h-7 shrink-0" onClick={() => onRunCommunity(result.community)} disabled={running || active === "direct-probing"}>
                     {running ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <MonitorPlay className="mr-1 h-3.5 w-3.5" />}
                     Sidecar
                   </Button>
@@ -2188,6 +2255,48 @@ function AlternativeBuyInWorkflowPanel({
                     {sidecar.cheapest?.[0]?.totalPrice ? ` · best ${fmtMoney(sidecar.cheapest[0].totalPrice)}` : ""}
                     <UnitTypeConfidenceBadge confidence={sidecar.cheapest?.[0]?.unitTypeConfidence} />
                   </p>
+                )}
+                {(airbnbSamples.length > 0 || directMatches.length > 0 || (result.directBookingProbes?.length ?? 0) > 0) && (
+                  <div className="mt-1 space-y-1 rounded bg-slate-50 px-2 py-1.5 text-[11px]">
+                    {airbnbSamples.length > 0 && (
+                      <div className="space-y-0.5">
+                        <p className="font-medium text-slate-900">Airbnb listings checked</p>
+                        {airbnbSamples.slice(0, 6).map((sample) => (
+                          <a
+                            key={sample.url}
+                            href={sample.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="block truncate text-sky-800 underline underline-offset-2"
+                            title={sample.title}
+                          >
+                            {sample.bedrooms ? `${sample.bedrooms}BR · ` : ""}{sample.title}
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                    {directMatches.length > 0 ? (
+                      <div className="space-y-0.5 border-t border-slate-200 pt-1">
+                        <p className="font-medium text-slate-900">Google Lens direct booking matches</p>
+                        {directMatches.map((match) => (
+                          <a
+                            key={match.url}
+                            href={match.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="block truncate text-emerald-800 underline underline-offset-2"
+                            title={match.title}
+                          >
+                            {match.domain} · {match.matchedPhotoCount} interior photos · ≥{Math.round(match.minConfidence * 100)}% match
+                          </a>
+                        ))}
+                      </div>
+                    ) : result.directBookingProbes && result.directBookingProbes.length > 0 && active !== "direct-probing" ? (
+                      <p className="border-t border-slate-200 pt-1 text-muted-foreground">
+                        No direct booking site passed the strict Google Lens threshold (5+ interior photo matches at ≥95% confidence).
+                      </p>
+                    ) : null}
+                  </div>
                 )}
               </div>
             );
@@ -6170,7 +6279,29 @@ export default function Bookings() {
         minAirbnbResults: 1,
       }).then((r) => r.json()) as AlternativeScoutResponse;
       updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
-      const sidecarQueue = alternativeCommunitiesForSidecar(response);
+
+      const probeCommunities = alternativeScoutCommunitiesForDisplay(response)
+        .map((row) => ({
+          community: row.community,
+          samples: (row.samples ?? []).filter((sample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url)),
+        }))
+        .filter((row) => row.samples.length > 0);
+
+      let enrichedScout = response;
+      if (probeCommunities.length > 0) {
+        updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: "direct-probing" });
+        try {
+          const probeResponse = await apiRequest("POST", "/api/operations/alternative-scout-direct-probes", {
+            communities: probeCommunities,
+          }).then((r) => r.json()) as { probesByCommunity?: Record<string, { listings?: AlternativeScoutDirectProbe[] }> };
+          enrichedScout = mergeScoutDirectProbes(response, probeResponse.probesByCommunity ?? {});
+        } catch (probeError: any) {
+          console.warn("[alternative-scout] direct booking probe failed", probeError?.message ?? probeError);
+        }
+      }
+
+      updateAlternativeWorkflow(reservation._id, { scout: enrichedScout, activeCommunity: null });
+      const sidecarQueue = alternativeCommunitiesForSidecar(enrichedScout);
       if (sidecarQueue.length > 0) {
         // Defer until scout state is committed so the auto-scan driver effect
         // always sees workflow.scout + isRunning in the same render.

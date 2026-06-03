@@ -7449,6 +7449,7 @@ export async function registerRoutes(
               recommended: true,
               reason: `Airbnb scout passed ${passingPlans[0].join("+")}BR replacement at ${d.community} (${d.driveTime ?? `~${d.driveMinutesFromBase} min drive`} via SearchAPI Google Maps)`,
               countsByBedroom,
+              airbnbCountsByBedroom: countsByBedroom,
               passingPlans,
               replacementPlans,
               driveMinutesFromBase: d.driveMinutesFromBase,
@@ -7567,6 +7568,7 @@ export async function registerRoutes(
             recommended: finalRecommended,
             reason: finalReason,
             countsByBedroom: mergedCounts,
+            airbnbCountsByBedroom: countsByBedroom,
             passingPlans: mergedPassingPlans,
             replacementPlans,
             oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
@@ -14221,6 +14223,111 @@ export async function registerRoutes(
       console.error("[direct-booking-sites] error:", err);
       return res.status(500).json({ error: err?.message ?? "Failed to scan direct booking sites" });
     }
+  });
+
+  // Probe strict Google Lens direct-booking matches for alternative-scout Airbnb samples
+  // before the sidecar queue starts. Reuses direct-booking-sites thresholds (5+ interior
+  // photos at >=95% confidence, PM/direct domains only).
+  app.post("/api/operations/alternative-scout-direct-probes", async (req: Request, res: Response) => {
+    const communities = Array.isArray(req.body?.communities) ? req.body.communities : [];
+    if (communities.length === 0) {
+      return res.status(400).json({ error: "communities array required" });
+    }
+    const port = process.env.PORT || "5000";
+    const directEndpoint = `http://127.0.0.1:${port}/api/operations/direct-booking-sites`;
+    const probesByCommunity: Record<string, { listings: Array<{
+      airbnbUrl: string;
+      title: string;
+      bedrooms?: number;
+      directMatches: Array<{
+        url: string;
+        domain: string;
+        title: string;
+        matchedPhotoCount: number;
+        minConfidence: number;
+        maxConfidence: number;
+      }>;
+      status: "done" | "error" | "skipped";
+      message?: string;
+    }> }> = {};
+
+    const communityRows = communities
+      .map((row: any) => ({
+        community: String(row?.community ?? "").trim(),
+        samples: Array.isArray(row?.samples) ? row.samples : [],
+      }))
+      .filter((row) => row.community);
+
+    await mapLimited(communityRows, 2, async (row) => {
+      const loc = BUY_IN_MARKET_LOCATIONS[row.community];
+      const resortName = loc?.searchName ?? row.community;
+      const airbnbSamples = row.samples
+        .map((sample: any) => ({
+          url: String(sample?.url ?? "").trim(),
+          title: String(sample?.title ?? "Airbnb listing").trim() || "Airbnb listing",
+          bedrooms: Number(sample?.bedrooms) || undefined,
+        }))
+        .filter((sample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url))
+        .slice(0, 3);
+
+      const listings = await mapLimited(airbnbSamples, 1, async (sample) => {
+        try {
+          const response = await fetch(directEndpoint, {
+            method: "POST",
+            headers: loopbackRequestHeaders(),
+            body: JSON.stringify({
+              sourceUrl: sample.url,
+              title: sample.title,
+              resortName,
+              community: row.community,
+            }),
+            signal: AbortSignal.timeout(120_000),
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            return {
+              airbnbUrl: sample.url,
+              title: sample.title,
+              bedrooms: sample.bedrooms,
+              directMatches: [],
+              status: "error" as const,
+              message: body?.error ? String(body.error) : `HTTP ${response.status}`,
+            };
+          }
+          const directMatches = (Array.isArray(body?.matches) ? body.matches : [])
+            .filter((match: any) => match?.platformKey === "pm")
+            .map((match: any) => ({
+              url: String(match.url ?? ""),
+              domain: String(match.domain ?? ""),
+              title: String(match.title ?? match.domain ?? "Direct booking site"),
+              matchedPhotoCount: Number(match.matchedPhotoCount ?? 0) || 0,
+              minConfidence: Number(match.minConfidence ?? match.confidence ?? 0) || 0,
+              maxConfidence: Number(match.maxConfidence ?? match.confidence ?? 0) || 0,
+            }))
+            .filter((match) => match.url);
+          return {
+            airbnbUrl: sample.url,
+            title: sample.title,
+            bedrooms: sample.bedrooms,
+            directMatches,
+            status: "done" as const,
+            message: body?.message ? String(body.message) : undefined,
+          };
+        } catch (err: any) {
+          return {
+            airbnbUrl: sample.url,
+            title: sample.title,
+            bedrooms: sample.bedrooms,
+            directMatches: [],
+            status: "error" as const,
+            message: err?.message ?? String(err),
+          };
+        }
+      });
+      probesByCommunity[row.community] = { listings };
+    });
+
+    return res.json({ probesByCommunity, generatedAt: new Date().toISOString() });
   });
 
   // POST /api/buy-ins/:id/listing-sites
