@@ -39,6 +39,7 @@ export function normalizeCommunityAddressToken(value: string): string {
     .replace(/\b(street)\b/g, "st")
     .replace(/\b(avenue)\b/g, "ave")
     .replace(/\b(boulevard)\b/g, "blvd")
+    .replace(/\b(highway)\b/g, "hwy")
     .replace(/\b(apartment|apt|unit|suite|ste|building|bldg|#)\s*[a-z0-9-]+\b/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
@@ -68,14 +69,14 @@ export function streetRootFromAddress(value: string | null | undefined): string 
   if (!raw) return "";
   return raw.split(",")[0]
     .replace(/\b(?:apartment|apt|unit|suite|ste|building|bldg|#)\s*[a-z0-9-]+\b/gi, "")
-    .replace(/\b(Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Trl|Trail)\s+[A-Za-z]?\d{1,5}[A-Za-z]?\b$/i, "$1")
+    .replace(/\b(Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Hwy|Highway|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Trl|Trail)\s+[A-Za-z]?\d{1,5}[A-Za-z]?\b$/i, "$1")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 export function isLikelyStreetAddress(value: string | null | undefined): boolean {
   const street = streetRootFromAddress(value);
-  return /\b\d{1,6}\s+[A-Za-z0-9' .-]+(?:Rd|Road|Dr|Drive|St|Street|Ave|Avenue|Ln|Lane|Blvd|Boulevard|Way|Cir|Circle|Ct|Court|Pl|Place|Trl|Trail|Pkwy|Parkway)\b/i.test(street);
+  return /\b\d{1,6}(?:-\d{1,6})?\s+[A-Za-z0-9' .-]+(?:Rd|Road|Dr|Drive|St|Street|Ave|Avenue|Ln|Lane|Hwy|Highway|Blvd|Boulevard|Way|Cir|Circle|Ct|Court|Pl|Place|Trl|Trail|Pkwy|Parkway)\b/i.test(street);
 }
 
 export function inferCommunityStreetAddress(input: {

@@ -27628,6 +27628,7 @@ Return ONLY compact JSON with this exact shape:
       city: community.city,
       state: community.state,
       unitAddresses: [],
+      addressHint: community.addressHint,
     });
     let draftId = await findExistingBulkComboDraftId(item, generated, streetAddress);
     const idempotencyKey = bulkComboIdempotencyKey(job.id, item);
@@ -27937,6 +27938,7 @@ Return ONLY compact JSON with this exact shape:
         city: input.community?.city,
         state: input.community?.state,
         unitAddresses: [],
+        addressHint: input.community?.addressHint,
       }) || "").trim();
       return {
         ...input,

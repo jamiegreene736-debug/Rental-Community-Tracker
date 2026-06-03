@@ -907,6 +907,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Kapaa/Waipouli beachfront condominium resort with 1BR/2BR/3BR vacation rental inventory.",
     availableBedrooms: [1, 2, 3],
     estimatedTotalUnits: 196,
+    addressHint: "4-820 Kuhio Hwy",
   },
   {
     city: KAUAI_EAST_CITY_PATTERN,

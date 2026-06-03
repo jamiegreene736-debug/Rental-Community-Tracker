@@ -1659,6 +1659,29 @@ assert.equal(
 console.log("  ✓ Pili Mai canonical address beats stale unit/source address");
 
 assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Waipouli Beach Resort",
+    city: "Waipouli",
+    state: "Hawaii",
+    unitAddresses: [],
+    addressHint: "4-820 Kuhio Hwy",
+  }),
+  "4-820 Kuhio Hwy",
+  "bulk combo queue should preserve researched address hints for communities without hardcoded rules",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Waipouli Beach Resort",
+    city: "Waipouli",
+    state: "Hawaii",
+    streetAddress: "4-820 Kuhio Hwy",
+  }).ok,
+  true,
+  "valid Hawaii highway resort addresses should not fail community draft save validation",
+);
+console.log("  ✓ Waipouli address hint validates for bulk combo draft saves");
+
+assert.equal(
   validateCommunityStreetAddress({
     communityName: "Pili Mai",
     city: "Koloa",
