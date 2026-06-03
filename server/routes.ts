@@ -136,6 +136,7 @@ import { checkCommunityType } from "@shared/community-type";
 import {
   communityAddressRuleForName,
   discoveryCityForPhotoSearch,
+  discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
   inferCommunityStreetAddress,
   validateCommunityStreetAddress,
@@ -28693,6 +28694,7 @@ Return ONLY compact JSON with this exact shape:
       };
 
       const discoveryCity = discoveryCityForPhotoSearch({ city, communityName, streetAddress });
+      const discoveryCities = discoverySearchCitiesForPhotoSearch({ city, communityName, streetAddress });
       const communityNames = discoveryCommunityNameAliases(communityName);
       const zillowQueries: string[] = [];
       const realtorQueries: string[] = [];
@@ -28703,22 +28705,26 @@ Return ONLY compact JSON with this exact shape:
         realtorQueries.push(`site:realtor.com "${streetAddress}"`);
         redfinQueries.push(`site:redfin.com "${streetAddress}"`);
         homesQueries.push(`site:homes.com "${streetAddress}"`);
-        if (discoveryCity && discoveryCity !== city) {
-          zillowQueries.push(`site:zillow.com "${streetAddress}" "${discoveryCity}" "${state ?? ""}"`.replace(/\s+/g, " ").trim());
+        for (const searchCity of discoveryCities) {
+          if (searchCity && searchCity !== city) {
+            zillowQueries.push(`site:zillow.com "${streetAddress}" "${searchCity}" "${state ?? ""}"`.replace(/\s+/g, " ").trim());
+          }
         }
       }
       const brHint = requestedBedrooms ? `${requestedBedrooms} bedroom` : "";
       for (const name of communityNames) {
-        if (brHint) {
-          zillowQueries.push(`"${name}" ${discoveryCity ?? ""} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim());
-          realtorQueries.push(`"${name}" ${discoveryCity ?? ""} ${state ?? ""} ${brHint} site:realtor.com`.replace(/\s+/g, " ").trim());
-          redfinQueries.push(`"${name}" ${discoveryCity ?? ""} ${state ?? ""} ${brHint} site:redfin.com`.replace(/\s+/g, " ").trim());
-          homesQueries.push(`"${name}" ${discoveryCity ?? ""} ${state ?? ""} ${brHint} site:homes.com`.replace(/\s+/g, " ").trim());
+        for (const searchCity of discoveryCities) {
+          if (brHint) {
+            zillowQueries.push(`"${name}" ${searchCity} ${state ?? ""} ${brHint} site:zillow.com`.replace(/\s+/g, " ").trim());
+            realtorQueries.push(`"${name}" ${searchCity} ${state ?? ""} ${brHint} site:realtor.com`.replace(/\s+/g, " ").trim());
+            redfinQueries.push(`"${name}" ${searchCity} ${state ?? ""} ${brHint} site:redfin.com`.replace(/\s+/g, " ").trim());
+            homesQueries.push(`"${name}" ${searchCity} ${state ?? ""} ${brHint} site:homes.com`.replace(/\s+/g, " ").trim());
+          }
+          zillowQueries.push(`site:zillow.com "${name}" ${searchCity} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+          realtorQueries.push(`site:realtor.com "${name}" ${searchCity} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+          redfinQueries.push(`site:redfin.com "${name}" ${searchCity} ${state ?? ""}`.replace(/\s+/g, " ").trim());
+          homesQueries.push(`site:homes.com "${name}" ${searchCity} ${state ?? ""}`.replace(/\s+/g, " ").trim());
         }
-        zillowQueries.push(`site:zillow.com "${name}" ${discoveryCity ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
-        realtorQueries.push(`site:realtor.com "${name}" ${discoveryCity ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
-        redfinQueries.push(`site:redfin.com "${name}" ${discoveryCity ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
-        homesQueries.push(`site:homes.com "${name}" ${discoveryCity ?? ""} ${state ?? ""}`.replace(/\s+/g, " ").trim());
         zillowQueries.push(`site:zillow.com "${name}"`);
         realtorQueries.push(`site:realtor.com "${name}"`);
         redfinQueries.push(`site:redfin.com "${name}"`);
@@ -28790,7 +28796,12 @@ Return ONLY compact JSON with this exact shape:
 
       // Prefer sources with direct photo payloads first; Realtor often rate
       // limits or returns empty galleries in dense resort-condo searches.
+      const canonicalStreetRoot = suppliedStreetRoot;
       candidateUrls.sort((a, b) => {
+        const rootFor = (url: string) => streetRootFromListingAddress(parseListingAddressFromUrl(url));
+        const aOnStreet = canonicalStreetRoot && rootFor(a.url) === canonicalStreetRoot ? 0 : 1;
+        const bOnStreet = canonicalStreetRoot && rootFor(b.url) === canonicalStreetRoot ? 0 : 1;
+        if (aOnStreet !== bOnStreet) return aOnStreet - bOnStreet;
         const priority: Record<DiscoverySource, number> = { zillow: 0, redfin: 1, homes: 2, realtor: 3 };
         return priority[a.source] - priority[b.source];
       });
@@ -28799,6 +28810,7 @@ Return ONLY compact JSON with this exact shape:
       const candidatesToTry = candidateLimit
         ? candidateUrls.slice(offset, offset + candidateLimit)
         : candidateUrls.slice(offset);
+      const triedCandidateUrls: string[] = [];
       for (const candidate of candidatesToTry) {
         if (discoveryWallBudgetMs !== null && discoveryElapsedMs() >= discoveryWallBudgetMs) {
           console.warn(
@@ -28808,6 +28820,7 @@ Return ONLY compact JSON with this exact shape:
           break;
         }
         const facts: ListingFacts = {};
+        triedCandidateUrls.push(candidate.url);
         try {
           const remainingBudgetMs = discoveryWallBudgetMs === null
             ? null
@@ -28858,6 +28871,7 @@ Return ONLY compact JSON with this exact shape:
           photos: [],
           sourceUrl: null,
           foundVia: "search",
+          triedCandidateUrls,
           note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${candidatesToTry.length} candidate${candidatesToTry.length === 1 ? "" : "s"}.`,
         });
       }

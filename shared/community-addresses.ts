@@ -22,7 +22,7 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Waikiki Sunset", "Aston Waikiki Sunset"], street: "229 Paoakalani Ave", city: "Honolulu", state: "HI" },
   { names: ["Island Colony", "Island Colony Waikiki"], street: "445 Seaside Ave", city: "Honolulu", state: "HI" },
   { names: ["Waikoloa Beach Villas", "Waikoloa Villas", "Beach Villas at Waikoloa Beach Resort"], street: "69-180 Waikoloa Beach Dr", city: "Waikoloa", cityAliases: ["Mauna Kea"], state: "HI" },
-  { names: ["Mauna Lani Point"], street: "68-1050 Mauna Lani Point Dr", city: "Kamuela", cityAliases: ["Waikoloa", "Puako", "Mauna Lani", "Mauna Kea", "Waimea"], state: "HI" },
+  { names: ["Mauna Lani Point", "Mauna Lani Point Condominium", "Mauna Lani"], street: "68-1050 Mauna Lani Point Dr", city: "Kamuela", cityAliases: ["Waikoloa", "Puako", "Mauna Lani", "Mauna Kea", "Waimea"], state: "HI" },
   { names: ["Windsor Hills", "Windsor Hills Resort"], street: "2600 N Old Lake Wilson Rd", city: "Kissimmee", state: "FL" },
   { names: ["Pink Shell Beach Resort", "Pink Shell Beach Resort and Marina", "Pink Shell Resort", "Pink Shell"], street: "275 Estero Blvd", city: "Fort Myers Beach", state: "FL" },
   // Additional Poipu/Koloa addresses for new combo seeds (enables geo-bbox unit search in /api/community/search-units and refresh-pricing)
@@ -140,14 +140,39 @@ export function discoveryCityForPhotoSearch(input: {
   communityName?: string | null;
   streetAddress?: string | null;
 }): string {
+  const cities = discoverySearchCitiesForPhotoSearch(input);
+  return cities[0] ?? String(input.city ?? "").trim();
+}
+
+/**
+ * SearchAPI / Apify city terms for photo discovery. Resort mailing cities
+ * (e.g. Mauna Kea) often differ from Zillow index cities (Kamuela, Waikoloa).
+ */
+export function discoverySearchCitiesForPhotoSearch(input: {
+  city?: string | null;
+  communityName?: string | null;
+  streetAddress?: string | null;
+}): string[] {
   const rule = communityAddressRuleForName(input.communityName);
-  if (rule?.city) return rule.city;
   const city = String(input.city ?? "").trim();
   const street = String(input.streetAddress ?? "").trim();
   const community = String(input.communityName ?? "").trim();
-  if (/waikoloa/i.test(street) || /waikoloa/i.test(community)) return "Waikoloa";
-  if (/\bmauna kea\b/i.test(city) && /waikoloa|69[- ]?180/i.test(`${street} ${community}`)) return "Waikoloa";
-  return city;
+  const cities = new Set<string>();
+  if (rule?.city) cities.add(rule.city);
+  if (city) cities.add(city);
+  for (const alias of rule?.cityAliases ?? []) {
+    if (alias) cities.add(alias);
+  }
+  if (/waikoloa/i.test(street) || /waikoloa/i.test(community)) cities.add("Waikoloa");
+  if (/\bmauna kea\b/i.test(city) && /waikoloa|69[- ]?180/i.test(`${street} ${community}`)) {
+    cities.add("Waikoloa");
+  }
+  if (/mauna\s+lani/i.test(community) || /mauna\s+lani\s+point/i.test(street)) {
+    cities.add("Waikoloa");
+    cities.add("Mauna Lani");
+    cities.add("Kamuela");
+  }
+  return Array.from(cities).filter(Boolean).slice(0, 4);
 }
 
 /** Resort name variants for SearchAPI discovery (draft title vs Zillow building name). */
