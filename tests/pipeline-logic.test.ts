@@ -2849,4 +2849,16 @@ assert.ok(
   routesSource.includes('app.post("/api/operations/alternative-scout-direct-probes"'),
   "alternative-scout-direct-probes route should exist",
 );
+assert.ok(
+  routesSource.includes("type DirectBookingProof"),
+  "direct booking discovery should expose a structured proof ledger",
+);
+assert.ok(
+  routesSource.includes("direct PM price/availability must be verified before recording"),
+  "Lens-discovered direct rows should not inherit Airbnb price as direct proof",
+);
+assert.ok(
+  bookingsComboSource.includes("directProofShortLabel"),
+  "bookings UI should display direct proof level for Lens/direct matches",
+);
 console.log("  ✓ alternative scout direct booking probe UI + API");

@@ -38,7 +38,7 @@ import sharp from "sharp";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
-import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-availability";
+import { verifyPmAvailability, verifyPmAvailabilityBatch, type VerifyAvailabilityResult } from "./verify-pm-availability";
 import { captchaAutomationUnavailable } from "./captcha-policy";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
@@ -7161,6 +7161,10 @@ export async function registerRoutes(
     }
 
     const allUnits: any[] = [];
+    const nights = Math.max(
+      1,
+      Math.round((new Date(`${checkOut}T12:00:00`).getTime() - new Date(`${checkIn}T12:00:00`).getTime()) / 86_400_000),
+    );
 
     try {
       // Run the main direct sources in parallel (with modest limits)
@@ -7213,13 +7217,33 @@ export async function registerRoutes(
       countsByBedroom[String(br)] = (countsByBedroom[String(br)] || 0) + 1;
       if (!samplesByBedroom[String(br)]) samplesByBedroom[String(br)] = [];
       if (samplesByBedroom[String(br)].length < 3) {
+        const totalPrice = roundedProofNumber(unit.totalPrice);
+        const nightlyPrice = roundedProofNumber(unit.nightlyPrice) ?? (totalPrice ? roundedProofNumber(totalPrice / nights) : undefined);
+        const sourceLabel = unit.sourceLabel || "Direct PM";
+        let domain: string | undefined;
+        try {
+          domain = unit.url ? new URL(unit.url).hostname.replace(/^www\./, "") : undefined;
+        } catch {
+          domain = undefined;
+        }
         samplesByBedroom[String(br)].push({
           title: unit.title || unit.name || `${community} Direct`,
           url: unit.url,
           image: unit.image || "",
-          totalPrice: unit.totalPrice,
-          sourceLabel: unit.sourceLabel || "Direct PM",
+          totalPrice,
+          nightlyPrice,
+          sourceLabel,
           bedrooms: br,
+          proof: buildDirectPmInventoryProof({
+            url: unit.url,
+            domain,
+            sourceLabel,
+            checkIn,
+            checkOut,
+            totalPrice,
+            nightlyPrice,
+            reason: `${sourceLabel} returned this ${br}BR unit while searching direct PM inventory for ${checkIn} to ${checkOut}.`,
+          }),
         });
       }
     }
@@ -9131,6 +9155,44 @@ export async function registerRoutes(
   type FindBuyInInFlightEntry = { promise: Promise<any>; startedAt: number };
   const findBuyInCache = new Map<string, FindBuyInCacheEntry>();
   const findBuyInInFlight = new Map<string, FindBuyInInFlightEntry>();
+  type DirectBookingProof = {
+    verdict: "same_unit_direct_page" | "direct_price_available" | "direct_unavailable" | "needs_review";
+    summary: string;
+    sameUnit: {
+      status: "passed" | "not_checked";
+      method: "google_lens_private_photos" | "direct_pm_inventory";
+      matchedPhotoCount?: number;
+      minConfidence?: number;
+      maxConfidence?: number;
+      requiredPhotoCount?: number;
+      requiredConfidence?: number;
+      matchedPhotoRoles?: string[];
+      reason: string;
+    };
+    directPage: {
+      status: "passed" | "needs_review";
+      method: "pm_domain_url_shape" | "direct_pm_inventory";
+      url?: string;
+      domain?: string;
+      reason: string;
+    };
+    availability: {
+      status: "date_specific_available" | "date_specific_unavailable" | "unclear" | "not_checked";
+      method: "direct_pm_inventory" | "stagehand_direct_page" | "sidecar_direct_page" | "not_scraped";
+      checkIn?: string;
+      checkOut?: string;
+      finalUrl?: string;
+      reason: string;
+    };
+    price: {
+      status: "date_specific_quote" | "airbnb_anchor_only" | "unavailable" | "unclear" | "not_checked";
+      method: "direct_pm_inventory" | "stagehand_direct_page" | "sidecar_direct_page" | "airbnb_searchapi_anchor" | "not_scraped";
+      totalPrice?: number | null;
+      nightlyPrice?: number | null;
+      currency?: "USD";
+      reason: string;
+    };
+  };
   type ReverseImageListingMatch = {
     platformKey: "airbnb" | "vrbo" | "booking" | "pm" | "other";
     platform: string;
@@ -9140,6 +9202,7 @@ export async function registerRoutes(
     source: string;
     position: number;
     confidence?: number;
+    proof?: DirectBookingProof;
   };
   type ReverseImageListingCacheEntry = { value: { checkedUrl: string; matches: ReverseImageListingMatch[]; rawCount: number }; expiresAt: number };
   const reverseImageListingCache = new Map<string, ReverseImageListingCacheEntry>();
@@ -9160,6 +9223,7 @@ export async function registerRoutes(
     matchedPhotoCount?: number;
     minConfidence?: number;
     maxConfidence?: number;
+    proof?: DirectBookingProof;
   };
   type BuyInListingSitesCacheEntry = {
     value: {
@@ -9175,6 +9239,202 @@ export async function registerRoutes(
     expiresAt: number;
   };
   const buyInListingSitesCache = new Map<string, BuyInListingSitesCacheEntry>();
+
+  const roundedProofNumber = (value: unknown): number | undefined => {
+    const n = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(n) ? Math.round(n * 100) / 100 : undefined;
+  };
+
+  const buildLensDirectBookingProof = (args: {
+    url: string;
+    domain: string;
+    matchedPhotoCount: number;
+    minConfidence: number;
+    maxConfidence?: number;
+    matchedPhotoRoles?: string[];
+    requiredPhotoCount: number;
+    requiredConfidence: number;
+    anchorTotalPrice?: number | null;
+    anchorNightlyPrice?: number | null;
+    checkIn?: string;
+    checkOut?: string;
+  }): DirectBookingProof => {
+    const minConfidence = Math.round((Number(args.minConfidence) || 0) * 1000) / 1000;
+    const maxConfidence = Math.round((Number(args.maxConfidence ?? args.minConfidence) || 0) * 1000) / 1000;
+    const total = roundedProofNumber(args.anchorTotalPrice);
+    const nightly = roundedProofNumber(args.anchorNightlyPrice);
+    return {
+      verdict: "same_unit_direct_page",
+      summary: `Same-unit direct page proven by ${args.matchedPhotoCount}+ Airbnb listing photo matches; direct PM price/availability is not proven yet.`,
+      sameUnit: {
+        status: "passed",
+        method: "google_lens_private_photos",
+        matchedPhotoCount: args.matchedPhotoCount,
+        minConfidence,
+        maxConfidence,
+        requiredPhotoCount: args.requiredPhotoCount,
+        requiredConfidence: args.requiredConfidence,
+        matchedPhotoRoles: Array.from(new Set(args.matchedPhotoRoles ?? [])).filter(Boolean),
+        reason: `Google Lens matched ${args.matchedPhotoCount} distinct Airbnb listing photos to this PM/direct URL at >=${Math.round(args.requiredConfidence * 100)}% confidence.`,
+      },
+      directPage: {
+        status: "passed",
+        method: "pm_domain_url_shape",
+        url: args.url,
+        domain: args.domain,
+        reason: "URL survived direct-booking domain filters and landing-page/detail-page checks.",
+      },
+      availability: {
+        status: "not_checked",
+        method: "not_scraped",
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        reason: "The direct PM page has not returned its own date-specific availability result yet.",
+      },
+      price: {
+        status: total || nightly ? "airbnb_anchor_only" : "not_checked",
+        method: total || nightly ? "airbnb_searchapi_anchor" : "not_scraped",
+        totalPrice: total ?? null,
+        nightlyPrice: nightly ?? null,
+        currency: "USD",
+        reason: total || nightly
+          ? "Displayed price is the Airbnb SearchAPI anchor for the same unit and dates, not a direct PM quote."
+          : "No direct PM quote has been checked yet.",
+      },
+    };
+  };
+
+  const buildDirectPmInventoryProof = (args: {
+    url?: string;
+    domain?: string;
+    sourceLabel: string;
+    checkIn: string;
+    checkOut: string;
+    totalPrice?: number | null;
+    nightlyPrice?: number | null;
+    reason?: string;
+  }): DirectBookingProof => ({
+    verdict: "direct_price_available",
+    summary: `${args.sourceLabel} returned a date-specific direct PM quote for ${args.checkIn} to ${args.checkOut}.`,
+    sameUnit: {
+      status: "passed",
+      method: "direct_pm_inventory",
+      reason: `${args.sourceLabel} returned this unit from its own direct PM inventory/search for the requested stay.`,
+    },
+    directPage: {
+      status: "passed",
+      method: "direct_pm_inventory",
+      url: args.url,
+      domain: args.domain,
+      reason: "Direct PM source returned this listing URL.",
+    },
+    availability: {
+      status: "date_specific_available",
+      method: "direct_pm_inventory",
+      checkIn: args.checkIn,
+      checkOut: args.checkOut,
+      reason: args.reason ?? "Direct PM source returned the unit as available for the requested dates.",
+    },
+    price: {
+      status: "date_specific_quote",
+      method: "direct_pm_inventory",
+      totalPrice: roundedProofNumber(args.totalPrice) ?? null,
+      nightlyPrice: roundedProofNumber(args.nightlyPrice) ?? null,
+      currency: "USD",
+      reason: "Price came from the direct PM source for this stay window.",
+    },
+  });
+
+  const proofFromAvailabilityVerifier = (args: {
+    baseProof: DirectBookingProof;
+    result: VerifyAvailabilityResult;
+    checkIn: string;
+    checkOut: string;
+    nights: number;
+    method?: "stagehand_direct_page" | "sidecar_direct_page";
+  }): DirectBookingProof => {
+    const method = args.method ?? "stagehand_direct_page";
+    const nightly = roundedProofNumber(args.result.nightlyPriceUsd);
+    const total = nightly ? roundedProofNumber(nightly * Math.max(1, args.nights)) : null;
+    if (args.result.available === "yes") {
+      return {
+        ...args.baseProof,
+        verdict: "direct_price_available",
+        summary: nightly
+          ? `Same-unit direct page proven by photos; direct PM page also showed availability at about $${nightly}/night.`
+          : "Same-unit direct page proven by photos; direct PM page showed availability, but no price was extracted.",
+        availability: {
+          status: "date_specific_available",
+          method,
+          checkIn: args.checkIn,
+          checkOut: args.checkOut,
+          finalUrl: args.result.finalUrl,
+          reason: args.result.reason,
+        },
+        price: nightly
+          ? {
+              status: "date_specific_quote",
+              method,
+              totalPrice: total,
+              nightlyPrice: nightly,
+              currency: "USD",
+              reason: "Direct PM availability verifier extracted this price from the PM page for the requested dates.",
+            }
+          : {
+              status: "unclear",
+              method,
+              totalPrice: null,
+              nightlyPrice: null,
+              currency: "USD",
+              reason: "Direct PM page showed availability, but the verifier did not extract a price.",
+            },
+      };
+    }
+    if (args.result.available === "no") {
+      return {
+        ...args.baseProof,
+        verdict: "direct_unavailable",
+        summary: "Same-unit direct page was found, but the direct PM page reported this stay as unavailable.",
+        availability: {
+          status: "date_specific_unavailable",
+          method,
+          checkIn: args.checkIn,
+          checkOut: args.checkOut,
+          finalUrl: args.result.finalUrl,
+          reason: args.result.reason,
+        },
+        price: {
+          status: "unavailable",
+          method,
+          totalPrice: null,
+          nightlyPrice: null,
+          currency: "USD",
+          reason: "Direct PM page reported the requested stay as unavailable.",
+        },
+      };
+    }
+    return {
+      ...args.baseProof,
+      verdict: "needs_review",
+      summary: "Same-unit direct page was found, but direct PM availability/price proof is inconclusive.",
+      availability: {
+        status: "unclear",
+        method,
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        finalUrl: args.result.finalUrl,
+        reason: args.result.reason,
+      },
+      price: {
+        status: "unclear",
+        method,
+        totalPrice: null,
+        nightlyPrice: null,
+        currency: "USD",
+        reason: "Direct PM verifier did not extract a date-specific quote.",
+      },
+    };
+  };
   // Buy-in scans must always hit live SearchAPI + sidecar work — no HTTP result cache.
   const FIND_BUY_IN_TTL_MS = 0;
   const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
@@ -10712,12 +10972,14 @@ export async function registerRoutes(
         matchedPhotoCount?: number;
         minConfidence?: number;
         maxConfidence?: number;
+        proof?: DirectBookingProof;
       }>;
       directBookingUrl?: string;
       directBookingHost?: string;
       directBookingConfidence?: "high" | "medium" | "low";
       directBookingSource?: "airbnb_image_reverse_search";
       directBookingReason?: string;
+      directProof?: DirectBookingProof;
       // For PM candidates discovered via reverse-image match against
       // an Airbnb listing: track the anchor for traceability only.
       // The PM URL must earn its own verified date-specific quote before
@@ -12616,9 +12878,9 @@ export async function registerRoutes(
     }
     // Lens multiple visible photos per priced Airbnb card, capped
     // defensively so a redesigned Airbnb infinite-scroll page cannot
-    // create an unbounded SearchAPI bill. The direct page is link-only:
-    // we do not scrape it, and any direct-link row keeps the Airbnb
-    // date-specific rate.
+    // create an unbounded SearchAPI bill. Lens proves same-unit identity
+    // only; direct-link rows stay unpriced until the PM page verifier
+    // returns its own date-specific result.
     const TOP_AIRBNB_FOR_LENS = 12;
     const AIRBNB_LENS_IMAGES_PER_CANDIDATE = 8;
     const AIRBNB_LENS_TOTAL_IMAGE_BUDGET = 96;
@@ -12708,8 +12970,28 @@ export async function registerRoutes(
         photoMatchesByUrl.set(candidateUrl, strictMatches);
       });
     }
+    const directLensProofForAnchor = (
+      anchor: Candidate,
+      match: { url: string; domain: string; matchedPhotoCount: number; minConfidence: number; maxConfidence?: number },
+    ): DirectBookingProof => buildLensDirectBookingProof({
+      url: match.url,
+      domain: match.domain,
+      matchedPhotoCount: match.matchedPhotoCount,
+      minConfidence: match.minConfidence,
+      maxConfidence: match.maxConfidence,
+      matchedPhotoRoles: ["airbnb-gallery"],
+      requiredPhotoCount: AIRBNB_DIRECT_LENS_MIN_PHOTO_MATCHES,
+      requiredConfidence: AIRBNB_DIRECT_LENS_MIN_CONFIDENCE,
+      anchorTotalPrice: anchor.totalPrice,
+      anchorNightlyPrice: anchor.nightlyPrice,
+      checkIn,
+      checkOut,
+    });
     const airbnbWithMatches: Candidate[] = airbnb.map((c) => {
-      const matches = photoMatchesByUrl.get(c.url) ?? [];
+      const matches = (photoMatchesByUrl.get(c.url) ?? []).map((match) => ({
+        ...match,
+        proof: directLensProofForAnchor(c, match),
+      }));
       const direct = matches[0];
       return {
         ...c,
@@ -12721,21 +13003,25 @@ export async function registerRoutes(
         directBookingConfidence: direct ? "high" : undefined,
         directBookingSource: direct ? "airbnb_image_reverse_search" : undefined,
         directBookingReason: direct
-          ? `Google Lens found ${direct.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain. Rate shown remains the Airbnb date-specific rate; the direct site was not scraped.`
+          ? `Google Lens found ${direct.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain. This proves a same-unit direct page; PM price/availability still needs direct proof.`
           : undefined,
+        directProof: direct?.proof,
       };
     });
 
-    // Promote photo-match URLs into the PM/direct source as link-only rows.
+    // Promote photo-match URLs into the PM/direct source as proof-pending rows.
     //
-    // Each match becomes a priced PM-shaped Candidate for backward
-    // compatibility with the existing UI model. Reasoning:
+    // Each match becomes a PM-shaped Candidate, but NOT a verified/priced
+    // buy-in by itself. Reasoning:
     //   - Photos match → it's the same physical unit
-    //   - Airbnb shows the unit as available + priced for these dates
-    //   - The direct URL is useful as a click-through, but is not scraped.
+    //   - Airbnb shows an anchor price for those dates
+    //   - The direct URL is useful as a click-through
+    //   - The PM URL must still return its own availability/price before
+    //     it can enter cheapest/auto-fill.
     //
-    // The rate is intentionally inherited from Airbnb and clearly labeled
-    // as such. The direct page is never opened for a quote in this flow.
+    // The Airbnb anchor price is kept in `airbnbAnchorPrice` and in the
+    // proof ledger for traceability only. It is not copied into
+    // totalPrice/nightlyPrice until direct PM verification succeeds.
     //
     // Two filters keep noise out:
     //   a. mentionsResort(url + title) — drops matches at neighboring
@@ -12762,7 +13048,10 @@ export async function registerRoutes(
         photoMatchBedroomMismatchDropped += (photoMatchesByUrl.get(anchor.url)?.length ?? 0);
         continue;
       }
-      const matches = photoMatchesByUrl.get(anchor.url) ?? [];
+      const matches = (photoMatchesByUrl.get(anchor.url) ?? []).map((match) => ({
+        ...match,
+        proof: directLensProofForAnchor(anchor, match),
+      }));
       // No resort filter on photo-matches per operator direction
       // ("max candidates over price accuracy"). The Airbnb engine
       // already filtered the anchor by location bounds + resort name;
@@ -12815,6 +13104,7 @@ export async function registerRoutes(
           continue;
         }
         existingPmUrls.add(m.url);
+        const proof = m.proof ?? directLensProofForAnchor(anchor, m);
         photoMatchPmCandidates.push({
           source: "pm",
           sourceLabel: `Direct link (${m.domain})`,
@@ -12828,21 +13118,20 @@ export async function registerRoutes(
           originalSourceUrl: m.url,
           url: withStayDates("pm", m.url),
           title: m.title || `Match on ${m.domain}`,
-          nightlyPrice: anchor.nightlyPrice,
-          totalPrice: anchor.totalPrice,
+          nightlyPrice: 0,
+          totalPrice: 0,
           bedrooms: anchorBedrooms,
           image: anchor.image,
-          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}). Direct site was not scraped; rate shown is the Airbnb date-specific rate for this same listing.`,
+          snippet: `Same-unit direct page found from ${m.matchedPhotoCount}+ Airbnb photo matches. Airbnb anchor showed $${anchor.totalPrice.toLocaleString()} for these dates; direct PM price/availability must be verified before recording.`,
           airbnbAnchorUrl: anchor.url,
           airbnbAnchorPrice: anchor.totalPrice,
           directBookingUrl: m.url,
           directBookingHost: m.domain,
           directBookingConfidence: "high",
           directBookingSource: "airbnb_image_reverse_search",
-          directBookingReason: `Google Lens found ${m.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain; PM page was linked only, not scraped.`,
-          verified: "yes",
-          verifiedNightlyPrice: anchor.nightlyPrice,
-          verifiedReason: `Strict Airbnb Lens direct-link proof: ${m.matchedPhotoCount}+ distinct listing photos matched this direct/PM URL at >=${Math.round(AIRBNB_DIRECT_LENS_MIN_CONFIDENCE * 100)}% confidence. Price is inherited from Airbnb for the requested dates; direct site was not scraped.`,
+          directBookingReason: `Google Lens found ${m.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain. This is same-unit proof only until the direct PM page returns its own date-specific quote.`,
+          directProof: proof,
+          photoMatches: [{ url: m.url, title: m.title, domain: m.domain, matchedPhotoCount: m.matchedPhotoCount, minConfidence: m.minConfidence, maxConfidence: m.maxConfidence, proof }],
         });
       }
     }
@@ -12909,7 +13198,7 @@ export async function registerRoutes(
       return rows.join("; ");
     };
     const sidecarVerifyPool: Candidate[] = includePm
-      ? [...pm, ...pmSearchApiFinderCandidates].filter((c) => c.source === "pm" && (c.nightlyPrice <= 0 || c.totalPrice <= 0))
+      ? [...pm, ...photoMatchPmCandidates, ...pmSearchApiFinderCandidates].filter((c) => c.source === "pm" && (c.nightlyPrice <= 0 || c.totalPrice <= 0))
       : [];
     for (const c of sidecarVerifyPool) {
       const key = c.url ? sidecarVerifyKey(c.url) : "";
@@ -12997,6 +13286,31 @@ export async function registerRoutes(
                   c.nightlyPrice = roundCurrency(r.nightlyPrice);
                   c.totalPrice = roundCurrency(r.nightlyPrice * nights);
                   c.verifiedNightlyPrice = c.nightlyPrice;
+                }
+              }
+              if (c.directProof) {
+                const proofNightly =
+                  typeof r.nightlyPrice === "number" && r.nightlyPrice > 0
+                    ? r.nightlyPrice
+                    : typeof r.totalPrice === "number" && r.totalPrice > 0
+                      ? r.totalPrice / nights
+                      : null;
+                c.directProof = proofFromAvailabilityVerifier({
+                  baseProof: c.directProof,
+                  result: {
+                    available: r.available,
+                    nightlyPriceUsd: proofNightly,
+                    reason: r.reason,
+                    finalUrl: c.url,
+                    ms: 0,
+                  },
+                  checkIn,
+                  checkOut,
+                  nights,
+                  method: "sidecar_direct_page",
+                });
+                if (Array.isArray(c.photoMatches)) {
+                  c.photoMatches = c.photoMatches.map((match) => ({ ...match, proof: c.directProof }));
                 }
               }
             }
@@ -13145,10 +13459,8 @@ export async function registerRoutes(
     // Combined priced pool across all bookable sources.
     //
     // Airbnb rows are date-specific by construction and remain in this
-    // priced staging pool, but the final cheapest/buy-in gate below now
-    // rejects raw Airbnb rows. An Airbnb-backed buy-in must be promoted
-    // through Google Lens to a likely direct booking URL; that promoted
-    // direct-link row keeps the Airbnb date-specific price.
+    // priced staging pool. Lens-discovered PM rows only join this pool
+    // after direct PM verification supplies a real date-specific price.
     //
     // Operator directive 2026-04-29 (PR #306): include Vrbo fully in
     // cheapest as well. The TOS-sublet posture is the same as Airbnb's
@@ -13161,16 +13473,16 @@ export async function registerRoutes(
     // nightlyPrice > 0 filter).
     //
     // Booking.com and Vrbo are sidecar-priced from their own search pages.
-    // Direct-link rows are Lens matches under an Airbnb anchor and keep the
-    // Airbnb date-specific price; the direct site is not scraped.
+    // Direct-link rows are Lens matches under an Airbnb anchor, then
+    // checked against the PM page before they can be priced/verified.
     const priced: Candidate[] = [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget]
       .filter((c) => c.nightlyPrice > 0)
       .filter((c) => c.source === "airbnb" || c.verified === "yes")
       .filter((c) => !groundFloorOnly || c.groundFloorStatus === "confirmed")
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
-    // No direct-site pre-verification. OTA search pages and Airbnb Lens are
-    // the only buy-in inputs; direct links are shown with Airbnb-backed proof.
+    // Direct PM verification is attempted above for proof-pending PM rows.
+    // Pre-verify stats report how many direct pages returned their own answer.
     const preVerifyAttempted = sidecarBatchVerifiedUrls.size;
     const preVerifyYes = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "yes").length;
     const preVerifyNo = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "no").length;
@@ -13186,10 +13498,10 @@ export async function registerRoutes(
     //
     // Verified-only. The cheapest panel is the operator's "buy these"
     // recommendation. OTA rows are verified by their own search pages;
-    // direct-link rows are verified by the Airbnb anchor that supplied
-    // the date-specific availability and price.
+    // direct-link rows are included only when the direct PM page verifier
+    // returned its own date-specific availability/price.
     //
-    // - "yes"     → in. OTA search result or Airbnb-backed direct link.
+    // - "yes"     → in. OTA search result or direct PM page verified.
     // - "no"      → out. Confirmed unavailable.
     // - "unclear" → out of CHEAPEST, but stays in `sources.pm` so the
     //               operator can review.
@@ -14078,6 +14390,15 @@ export async function registerRoutes(
     const sourceTitle = String(req.body?.title ?? "Airbnb listing").trim() || "Airbnb listing";
     const resortName = String(req.body?.resortName ?? "").trim();
     const community = String(req.body?.community ?? resortName ?? "").trim();
+    const checkIn = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkIn ?? "")) ? String(req.body.checkIn) : "";
+    const checkOut = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkOut ?? "")) ? String(req.body.checkOut) : "";
+    const nights = checkIn && checkOut
+      ? Math.max(1, Math.round((new Date(`${checkOut}T12:00:00`).getTime() - new Date(`${checkIn}T12:00:00`).getTime()) / 86_400_000))
+      : 1;
+    const anchorTotalPrice = roundedProofNumber(req.body?.anchorTotalPrice);
+    const anchorNightlyPrice = roundedProofNumber(req.body?.anchorNightlyPrice)
+      ?? (anchorTotalPrice && nights > 0 ? roundedProofNumber(anchorTotalPrice / nights) : undefined);
+    const verifyAvailabilityRequested = req.body?.verifyAvailability === true;
     if (!sourceUrl) return res.status(400).json({ error: "sourceUrl required" });
     if (!/airbnb\.[^/]+\/rooms\//i.test(sourceUrl)) {
       return res.status(400).json({ error: "direct booking scan only supports Airbnb room listings" });
@@ -14092,7 +14413,7 @@ export async function registerRoutes(
     try {
       const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
       const sourceKey = normalizeListingSurfaceKey(sourceUrl);
-      const cacheKey = `buy-in-sites:v5-strict:${sourceKey}`;
+      const cacheKey = `buy-in-sites:v6-proof:${sourceKey}:${checkIn || "nodate"}:${checkOut || "nodate"}:${verifyAvailabilityRequested ? "verify" : "lens"}`;
       evictExpiredBuyInListingSites();
       const cached = buyInListingSitesCache.get(cacheKey);
       if (useCache && cached && cached.expiresAt > Date.now()) {
@@ -14227,20 +14548,37 @@ export async function registerRoutes(
         }
       }
 
-      const matches: BuyInListingSiteMatch[] = Array.from(evidenceBySurface.values())
+      let matches: BuyInListingSiteMatch[] = Array.from(evidenceBySurface.values())
         .map((ev) => {
           const representativePhoto = ev.photos[0];
           const minConfidence = ev.confidences.length ? Math.min(...ev.confidences) : 0;
           const maxConfidence = ev.confidences.length ? Math.max(...ev.confidences) : 0;
+          const matchedPhotoCount = ev.photos.length;
+          const roundedMin = Math.round(minConfidence * 1000) / 1000;
+          const roundedMax = Math.round(maxConfidence * 1000) / 1000;
           return {
             ...ev.firstMatch,
             matchedPhotoUrl: representativePhoto.url,
             matchedPhotoRole: representativePhoto.role ?? "interior",
             matchedPhotoLabel: representativePhoto.label,
             matchedPhotoCategory: representativePhoto.category,
-            matchedPhotoCount: ev.photos.length,
-            minConfidence: Math.round(minConfidence * 1000) / 1000,
-            maxConfidence: Math.round(maxConfidence * 1000) / 1000,
+            matchedPhotoCount,
+            minConfidence: roundedMin,
+            maxConfidence: roundedMax,
+            proof: buildLensDirectBookingProof({
+              url: ev.firstMatch.url,
+              domain: ev.firstMatch.domain,
+              matchedPhotoCount,
+              minConfidence: roundedMin,
+              maxConfidence: roundedMax,
+              matchedPhotoRoles: ev.photos.map((photo) => photo.role ?? "interior"),
+              requiredPhotoCount: strictDirectMinPhotoMatches,
+              requiredConfidence: strictDirectMinConfidence,
+              anchorTotalPrice,
+              anchorNightlyPrice,
+              checkIn: checkIn || undefined,
+              checkOut: checkOut || undefined,
+            }),
           };
         })
         .filter((match) =>
@@ -14258,6 +14596,43 @@ export async function registerRoutes(
           || a.domain.localeCompare(b.domain);
       });
 
+      let directAvailabilityVerifiedCount = 0;
+      if (verifyAvailabilityRequested && checkIn && checkOut && matches.length > 0) {
+        const anthropicKey = process.env.ANTHROPIC_API_KEY;
+        const bbApiKey = process.env.BROWSERBASE_API_KEY;
+        const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+        if (anthropicKey && bbApiKey && bbProjectId) {
+          const urls = Array.from(new Set(matches.map((match) => match.url))).slice(0, 3);
+          try {
+            const verifyResults = await verifyPmAvailabilityBatch({
+              urls,
+              checkIn,
+              checkOut,
+              anthropicKey,
+              bbApiKey,
+              bbProjectId,
+              maxUrls: 3,
+            });
+            matches = matches.map((match) => {
+              const result = verifyResults[match.url];
+              if (!result || !match.proof) return match;
+              const proof = proofFromAvailabilityVerifier({
+                baseProof: match.proof,
+                result,
+                checkIn,
+                checkOut,
+                nights,
+                method: "stagehand_direct_page",
+              });
+              if (proof.availability.status === "date_specific_available") directAvailabilityVerifiedCount++;
+              return { ...match, proof };
+            });
+          } catch (e: any) {
+            console.warn(`[direct-booking-sites] availability verifier failed for ${sourceUrl.slice(0, 80)}:`, e?.message ?? e);
+          }
+        }
+      }
+
       const searchedCount = auditedPhotos.filter((photo) => photo.searched).length;
       console.log(
         `[direct-booking-sites] ${community || resortName} ${sourceUrl.slice(0, 72)} candidatePhotos=${candidatePhotos.length} lensPhotos=${searchedCount} rawLensRows=${rawCount} strictPmMatches=${matches.length}`,
@@ -14269,6 +14644,7 @@ export async function registerRoutes(
         photos: auditedPhotos,
         matches: matches.slice(0, 25),
         rawCount,
+        directAvailabilityVerifiedCount,
         generatedAt: new Date().toISOString(),
         ...(scraped.length === 0
           ? { message: scrapeError
@@ -14295,10 +14671,12 @@ export async function registerRoutes(
   // before the sidecar queue starts. Reuses direct-booking-sites thresholds (5+ interior
   // photos at >=95% confidence, PM/direct domains only).
   app.post("/api/operations/alternative-scout-direct-probes", async (req: Request, res: Response) => {
-    const communities = Array.isArray(req.body?.communities) ? req.body.communities : [];
+    const communities: any[] = Array.isArray(req.body?.communities) ? req.body.communities : [];
     if (communities.length === 0) {
       return res.status(400).json({ error: "communities array required" });
     }
+    const checkIn = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkIn ?? "")) ? String(req.body.checkIn) : "";
+    const checkOut = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkOut ?? "")) ? String(req.body.checkOut) : "";
     const port = process.env.PORT || "5000";
     const directEndpoint = `http://127.0.0.1:${port}/api/operations/direct-booking-sites`;
     const probesByCommunity: Record<string, { listings: Array<{
@@ -14312,28 +14690,48 @@ export async function registerRoutes(
         matchedPhotoCount: number;
         minConfidence: number;
         maxConfidence: number;
+        proof?: DirectBookingProof;
       }>;
       status: "done" | "error" | "skipped";
       message?: string;
     }> }> = {};
 
-    const communityRows = communities
+    type AlternativeScoutProbeCommunityRow = { community: string; samples: any[] };
+    type AlternativeScoutProbeAirbnbSample = {
+      url: string;
+      title: string;
+      bedrooms?: number;
+      totalPrice?: number;
+      nightlyPrice?: number;
+    };
+    type AlternativeScoutProbeDirectMatch = {
+      url: string;
+      domain: string;
+      title: string;
+      matchedPhotoCount: number;
+      minConfidence: number;
+      maxConfidence: number;
+      proof?: DirectBookingProof;
+    };
+    const communityRows: AlternativeScoutProbeCommunityRow[] = communities
       .map((row: any) => ({
         community: String(row?.community ?? "").trim(),
         samples: Array.isArray(row?.samples) ? row.samples : [],
       }))
-      .filter((row) => row.community);
+      .filter((row: AlternativeScoutProbeCommunityRow) => row.community);
 
     await mapLimited(communityRows, 2, async (row) => {
       const loc = BUY_IN_MARKET_LOCATIONS[row.community];
       const resortName = loc?.searchName ?? row.community;
-      const airbnbSamples = row.samples
+      const airbnbSamples: AlternativeScoutProbeAirbnbSample[] = row.samples
         .map((sample: any) => ({
           url: String(sample?.url ?? "").trim(),
           title: String(sample?.title ?? "Airbnb listing").trim() || "Airbnb listing",
           bedrooms: Number(sample?.bedrooms) || undefined,
+          totalPrice: roundedProofNumber(sample?.totalPrice),
+          nightlyPrice: roundedProofNumber(sample?.nightlyPrice),
         }))
-        .filter((sample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url))
+        .filter((sample: AlternativeScoutProbeAirbnbSample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url))
         .slice(0, 3);
 
       const listings = await mapLimited(airbnbSamples, 1, async (sample) => {
@@ -14346,8 +14744,13 @@ export async function registerRoutes(
               title: sample.title,
               resortName,
               community: row.community,
+              checkIn,
+              checkOut,
+              anchorTotalPrice: sample.totalPrice,
+              anchorNightlyPrice: sample.nightlyPrice,
+              verifyAvailability: Boolean(checkIn && checkOut),
             }),
-            signal: AbortSignal.timeout(120_000),
+            signal: AbortSignal.timeout(180_000),
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok) {
@@ -14360,7 +14763,7 @@ export async function registerRoutes(
               message: body?.error ? String(body.error) : `HTTP ${response.status}`,
             };
           }
-          const directMatches = (Array.isArray(body?.matches) ? body.matches : [])
+          const directMatches: AlternativeScoutProbeDirectMatch[] = (Array.isArray(body?.matches) ? body.matches : [])
             .filter((match: any) => match?.platformKey === "pm")
             .map((match: any) => ({
               url: String(match.url ?? ""),
@@ -14369,8 +14772,9 @@ export async function registerRoutes(
               matchedPhotoCount: Number(match.matchedPhotoCount ?? 0) || 0,
               minConfidence: Number(match.minConfidence ?? match.confidence ?? 0) || 0,
               maxConfidence: Number(match.maxConfidence ?? match.confidence ?? 0) || 0,
+              proof: match.proof,
             }))
-            .filter((match) => match.url);
+            .filter((match: AlternativeScoutProbeDirectMatch) => match.url);
           return {
             airbnbUrl: sample.url,
             title: sample.title,
