@@ -632,6 +632,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Ko Olina beachfront condo resort with 2BR/3BR vacation-rental villas in shared-wall condominium towers.",
     availableBedrooms: [2, 3],
     estimatedTotalUnits: 247,
+    addressHint: "92-102 Waialii Pl",
   },
   {
     city: OAHU_WEST_CITY_PATTERN,
@@ -646,6 +647,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     researchSummary: "Ko Olina townhome community with recurring 2BR/3BR vacation-rental inventory suitable for bundled adjacent-unit products.",
     availableBedrooms: [2, 3],
     estimatedTotalUnits: 270,
+    addressHint: "92-1070 Olani St",
   },
   {
     city: OAHU_NORTH_CITY_PATTERN,

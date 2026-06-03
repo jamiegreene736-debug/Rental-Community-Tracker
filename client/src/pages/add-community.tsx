@@ -44,6 +44,11 @@ import { checkCommunityType } from "@shared/community-type";
 import { formatTypicalComboLabel, inferTypicalComboPair } from "@shared/community-combo";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
+import {
+  bulkComboProgressPercent,
+  bulkComboRemainingMs,
+  formatBulkComboEta,
+} from "@shared/bulk-combo-queue-progress";
 import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
 
 const US_STATES = [
@@ -562,6 +567,10 @@ export default function AddCommunity() {
       heartbeatAt?: string | null;
       startedAt?: string | null;
       finishedAt?: string | null;
+      progressPercent?: number;
+      etaSeconds?: number | null;
+      unit1Photos?: Array<{ url: string }>;
+      unit2Photos?: Array<{ url: string }>;
     }>;
   };
   type QueueJobEventPayload = {
@@ -2159,6 +2168,12 @@ export default function AddCommunity() {
   const visibleBulkComboRunning = visibleBulkComboItems.filter(({ item }) => item.status === "running").length;
   const visibleBulkComboQueued = visibleBulkComboItems.filter(({ item }) => item.status === "queued").length;
 
+  const bulkComboQueueAhead = (job: BulkComboListingJobPayload, itemId: string) => {
+    const index = job.items.findIndex((entry) => entry.id === itemId);
+    if (index <= 0) return 0;
+    return job.items.slice(0, index).filter((entry) => entry.status === "running" || entry.status === "queued").length;
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-4xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
@@ -2834,15 +2849,31 @@ export default function AddCommunity() {
                         : item.status === "cancelled" ? "bg-slate-50 text-slate-600 border-slate-200"
                         : item.status === "running" ? "bg-blue-50 text-blue-700 border-blue-200"
                         : "bg-amber-50 text-amber-700 border-amber-200";
+                      const progressValue = typeof item.progressPercent === "number"
+                        ? Math.min(100, Math.max(0, Math.round(item.progressPercent)))
+                        : bulkComboProgressPercent(item);
+                      const etaLabel = typeof item.etaSeconds === "number"
+                        ? formatBulkComboEta(item.etaSeconds * 1000)
+                        : formatBulkComboEta(bulkComboRemainingMs(item, { queueAhead: bulkComboQueueAhead(job, item.id) }));
+                      const showProgress = item.status === "running" || item.status === "queued" || item.status === "completed";
                       return (
                         <div key={`${job.id}:${item.id}`} className="border-b px-3 py-3 last:border-b-0">
                           <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
+                            <div className="min-w-0 flex-1">
                               <p className="truncate text-sm font-medium">{item.label}</p>
                               <p className="mt-0.5 truncate text-xs text-muted-foreground">
                                 {item.message || item.error || "Waiting for its turn"}
                               </p>
-                              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                              {showProgress && (
+                                <div className="mt-2 space-y-1">
+                                  <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                                    <span>{progressValue}%</span>
+                                    {etaLabel ? <span className="shrink-0 tabular-nums">{etaLabel}</span> : null}
+                                  </div>
+                                  <Progress value={progressValue} className="h-1.5" />
+                                </div>
+                              )}
+                              <p className="mt-1.5 text-[11px] text-muted-foreground">
                                 Phase: {item.phase || "queued"} · attempts {item.attemptCount ?? 0}
                                 {item.heartbeatAt ? ` · heartbeat ${new Date(item.heartbeatAt).toLocaleTimeString()}` : ""}
                                 {visibleBulkComboJobs.length > 1 ? ` · job ${job.id}` : ""}
@@ -2851,10 +2882,12 @@ export default function AddCommunity() {
                                 <p className="mt-0.5 text-xs text-emerald-700">Saved as dashboard draft #{item.draftId}</p>
                               )}
                             </div>
-                            <Badge variant="outline" className={`shrink-0 capitalize ${tone}`}>
-                              {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-                              {item.status}
-                            </Badge>
+                            <div className="flex shrink-0 flex-col items-end gap-1">
+                              <Badge variant="outline" className={`capitalize ${tone}`}>
+                                {item.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                                {item.status}
+                              </Badge>
+                            </div>
                           </div>
                           {item.error && <p className="mt-1 text-xs text-red-700">{item.error}</p>}
                         </div>

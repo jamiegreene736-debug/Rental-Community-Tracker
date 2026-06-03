@@ -31,6 +31,8 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Manualoha at Poipu Kai"], street: "2371 Ho'ohu Road", city: "Koloa", state: "HI" },
   { names: ["Honua Kai Resort", "Honua Kai", "Honua Kai Resort & Spa"], street: "130 Kai Malina Pkwy", city: "Lahaina", cityAliases: ["Kaanapali", "Ka'anapali", "Kapalua", "Napili", "Honokowai"], state: "HI" },
   { names: ["Kaanapali Alii", "Kaanapali Ali'i"], street: "50 Nohea Kai Dr", city: "Lahaina", cityAliases: ["Kaanapali", "Ka'anapali"], state: "HI" },
+  { names: ["Ko Olina Beach Villas", "Beach Villas at Ko Olina", "Beach Villas Ko Olina"], street: "92-102 Waialii Pl", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
+  { names: ["Coconut Plantation at Ko Olina", "Coconut Plantation", "Coconut Plantation Ko Olina"], street: "92-1070 Olani St", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
 ];
 
 export function normalizeCommunityAddressToken(value: string): string {
@@ -173,6 +175,10 @@ export function discoverySearchCitiesForPhotoSearch(input: {
     cities.add("Waikoloa");
     cities.add("Mauna Lani");
     cities.add("Kamuela");
+  }
+  if (/ko\s*olina|koolina/i.test(community) || /waialii|olani/i.test(street)) {
+    cities.add("Kapolei");
+    cities.add("Ko Olina");
   }
   return Array.from(cities).filter(Boolean).slice(0, 4);
 }
