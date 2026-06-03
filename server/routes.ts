@@ -145,6 +145,7 @@ import {
   discoveryCityForPhotoSearch,
   discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
+  hawaiiHyphenStreetSlugTokens,
   inferCommunityStreetAddress,
   normalizeCommunityAddressToken,
   normalizePlatformCheckCity,
@@ -25385,6 +25386,13 @@ Return ONLY compact JSON with this exact shape:
     const requiredBedroomCount = Number.isFinite(parsedRequiredBedrooms) && parsedRequiredBedrooms > 0
       ? Math.round(parsedRequiredBedrooms)
       : null;
+    const hawaiiStreetSlugTokens = (() => {
+      const merged = new Set<string>();
+      for (const source of [communityAddress, normalizedStreetAddress, folderCommunityAddress]) {
+        for (const token of hawaiiHyphenStreetSlugTokens(source)) merged.add(token);
+      }
+      return merged;
+    })();
 
     // Detect which source a Google-result URL belongs to. URL must
     // be a per-listing detail page, not a search-results or category
@@ -25459,6 +25467,7 @@ Return ONLY compact JSON with this exact shape:
         const parts = slug.split("-");
         for (let i = parts.length - 1; i >= 1; i--) {
           const part = parts[i].toUpperCase();
+          if (hawaiiStreetSlugTokens.has(part)) continue;
           if (/^[A-Z]?\d{1,4}[A-Z]?$/.test(part) && !/^\d{5}$/.test(part)) {
             return part;
           }
@@ -25472,8 +25481,10 @@ Return ONLY compact JSON with this exact shape:
         const addrSlug = slug.split("_")[0] || "";
         const parts = addrSlug.split("-");
         for (let i = parts.length - 1; i >= 1; i--) {
-          if (/^[A-Z]?\d{1,4}$/i.test(parts[i]) && !/^\d{5}$/.test(parts[i])) {
-            return parts[i].toUpperCase();
+          const part = parts[i].toUpperCase();
+          if (hawaiiStreetSlugTokens.has(part)) continue;
+          if (/^[A-Z]?\d{1,4}$/i.test(part) && !/^\d{5}$/.test(part)) {
+            return part;
           }
         }
       }
@@ -25484,8 +25495,10 @@ Return ONLY compact JSON with this exact shape:
         const slug = url.match(/redfin\.com\/.+?\/([^/]+)\/home\//i)?.[1] || "";
         const parts = slug.split("-");
         for (let i = parts.length - 1; i >= 1; i--) {
-          if (/^[A-Z]?\d{1,4}$/i.test(parts[i]) && !/^\d{5}$/.test(parts[i])) {
-            return parts[i].toUpperCase();
+          const part = parts[i].toUpperCase();
+          if (hawaiiStreetSlugTokens.has(part)) continue;
+          if (/^[A-Z]?\d{1,4}$/i.test(part) && !/^\d{5}$/.test(parts[i])) {
+            return part;
           }
         }
       }
@@ -25493,8 +25506,10 @@ Return ONLY compact JSON with this exact shape:
         const slug = url.match(/homes\.com\/property\/([^/?]+)/i)?.[1] || "";
         const parts = slug.split("-");
         for (let i = parts.length - 1; i >= 1; i--) {
+          const part = parts[i].toUpperCase();
+          if (hawaiiStreetSlugTokens.has(part)) continue;
           if (/^[A-Z]?\d{1,4}[A-Z]?$/i.test(parts[i]) && !/^\d{5}$/.test(parts[i])) {
-            return parts[i].toUpperCase();
+            return part;
           }
         }
       }
@@ -25573,6 +25588,8 @@ Return ONLY compact JSON with this exact shape:
         const slug = link.match(/homedetails\/([^/]+)\//)?.[1] || "";
         const parts = slug.split("-");
         for (let i = parts.length - 1; i >= 1; i--) {
+          const part = parts[i].toUpperCase();
+          if (hawaiiStreetSlugTokens.has(part)) continue;
           if (/^\d{2,4}$/.test(parts[i]) && parseInt(parts[i]) < 1000) {
             unitNumber = parts[i];
             break;
