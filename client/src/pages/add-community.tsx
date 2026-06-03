@@ -2275,11 +2275,9 @@ export default function AddCommunity() {
                                         <span className="min-w-0 flex-1">
                                           <span className="block font-medium leading-snug flex items-center gap-1">
                                             {m.city}, {m.state}
-                                            {m.sixBedroomPossible && (
-                                              <span title="6BR combo possible (two 3BR condos)">
-                                                <BedDouble className="h-3 w-3 text-blue-600" />
-                                              </span>
-                                            )}
+                                            <span title={m.sixBedroomPossible ? "Yes - supports 6BR combo (two 3BR condos)" : "No - does not support 6BR combo"}>
+                                              <BedDouble className={`h-3 w-3 ${m.sixBedroomPossible ? "text-emerald-600" : "text-gray-400"}`} />
+                                            </span>
                                           </span>
                                           <span className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
                                             <DollarSign className="h-3 w-3" />
@@ -2340,11 +2338,9 @@ export default function AddCommunity() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="font-semibold text-sm flex items-center gap-1">
                               {m.city}, {m.state}
-                              {m.sixBedroomPossible && (
-                                <span title="6BR combo possible (two 3BR condos)">
-                                  <BedDouble className="h-3.5 w-3.5 text-blue-600" />
-                                </span>
-                              )}
+                              <span title={m.sixBedroomPossible ? "Yes - supports 6BR combo (two 3BR condos)" : "No - does not support 6BR combo"}>
+                                <BedDouble className={`h-3.5 w-3.5 ${m.sixBedroomPossible ? "text-emerald-600" : "text-gray-400"}`} />
+                              </span>
                             </p>
                             {m.tag && <Badge variant="outline" className="text-[10px]">{m.tag}</Badge>}
                             <Badge variant="outline" className="text-[10px] border-emerald-200 bg-emerald-50 text-emerald-700">
