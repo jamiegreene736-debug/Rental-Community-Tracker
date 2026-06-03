@@ -29772,6 +29772,38 @@ Return ONLY compact JSON with this exact shape:
         return;
       }
 
+      if (
+        configuredPhotoSourceUrl &&
+        configuredPhotoSourceKey &&
+        skipSet.has(configuredPhotoSourceKey) &&
+        requestedBedrooms &&
+        requestedBedrooms >= 3
+      ) {
+        const facts: ListingFacts = {};
+        try {
+          const photos = await scrapeListingPhotos(configuredPhotoSourceUrl, undefined, facts, SCRAPE_WITHOUT_SIDECAR);
+          if (photos.length > 0) {
+            console.log(
+              `[fetch-unit-photos] reused configured representative source community="${communityName ?? ""}" ` +
+              `requestedBR=${requestedBedrooms} photos=${photos.length} url=${configuredPhotoSourceUrl} ` +
+              `elapsedMs=${Date.now() - startedAt}`,
+            );
+            res.json({
+              photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+              sourceUrl: configuredPhotoSourceUrl,
+              foundVia: "search",
+              facts,
+              representativeFallback: true,
+              reusedConfiguredSource: true,
+              note: `No distinct exact ${requestedBedrooms}BR listing was found for "${communityName}", so this reused the configured property photo gallery for representative photos.`,
+            });
+            return;
+          }
+        } catch (e: any) {
+          console.warn(`[fetch-unit-photos] configured representative source failed for ${configuredPhotoSourceUrl}: ${e.message}`);
+        }
+      }
+
       if (!listingUrl) {
         // No matching real-estate listing — return empty so the page's
         // empty state covers it. Not an error.
