@@ -25289,9 +25289,17 @@ Return ONLY compact JSON with this exact shape:
       }
       return null;
     };
-    const rawCommunityAddress = folderBodyConflict
-      ? normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName
-      : normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName;
+    const canonicalStreet = inferCommunityStreetAddress({
+      communityName,
+      city: bodyLocation?.city,
+      state: bodyLocation?.state,
+      streetAddress: normalizedStreetAddress || addressStreet,
+      addressHint: normalizedStreetAddress || addressStreet || folderCommunityAddress,
+    }) || communityAddressRuleForName(communityName)?.street || "";
+    const rawCommunityAddress = canonicalStreet
+      || (folderBodyConflict
+        ? normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName
+        : normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName);
     const primaryCommunityAddress = knownCommunityPrimaryAddress();
     const communityAddress = primaryCommunityAddress || rawCommunityAddress;
     console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}, expanded=${expandedSearch}`);
@@ -25382,6 +25390,8 @@ Return ONLY compact JSON with this exact shape:
       ...Array.from(sameCommunityExclusions.urlKeys),
     ]);
     const harvestRootCounts = new Map<string, number>();
+    const canonicalStreetRoot = streetRootFromListingAddress(canonicalStreet || null);
+    if (canonicalStreetRoot) harvestRootCounts.set(canonicalStreetRoot, 2);
     const parsedRequiredBedrooms = Number(requiredBedrooms);
     const requiredBedroomCount = Number.isFinite(parsedRequiredBedrooms) && parsedRequiredBedrooms > 0
       ? Math.round(parsedRequiredBedrooms)
@@ -25561,6 +25571,8 @@ Return ONLY compact JSON with this exact shape:
         const root = streetRootFromListingAddress(value ?? null);
         if (root) roots.add(root);
       };
+      add(canonicalStreet);
+      add(communityAddressRuleForName(communityName)?.street);
       add(folderCommunityAddress);
       add(normalizedStreetAddress);
       add(addressStreet);
@@ -25807,10 +25819,24 @@ Return ONLY compact JSON with this exact shape:
     if (directRoot) allowedRoots.add(directRoot);
     for (const root of communityAddressRoots) allowedRoots.add(root);
     if (communityLoc && allowedRoots.size > 0) {
+      const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({
+        city: bodyLocation?.city ?? communityLoc.city,
+        communityName,
+        streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
+      }))].slice(0, 3);
+      const perCityMax = Math.max(20, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)));
       const [zillowApifyUrls, realtorApifyUrls] = await withStepTimeout(
         Promise.all([
-          harvestZillowUrlsViaApifySearch(communityLoc.city, communityLoc.state, 300),
-          harvestRealtorUrlsViaApifySearch(communityLoc.city, communityLoc.state, 300),
+          Promise.all(
+            apifyDiscoveryCities.map((searchCity) =>
+              harvestZillowUrlsViaApifySearch(searchCity, communityLoc!.state, perCityMax),
+            ),
+          ).then((rows) => [...new Set(rows.flat())]),
+          Promise.all(
+            apifyDiscoveryCities.map((searchCity) =>
+              harvestRealtorUrlsViaApifySearch(searchCity, communityLoc!.state, perCityMax),
+            ),
+          ).then((rows) => [...new Set(rows.flat())]),
         ]),
         APIFY_SUPPLEMENT_BUDGET_MS,
         [[], []] as [string[], string[]],
@@ -25820,7 +25846,7 @@ Return ONLY compact JSON with this exact shape:
       for (const link of realtorApifyUrls) addCandidateUrl(link, "realtor", "", "", allowedRoots);
       for (const link of zillowApifyUrls) addCandidateUrl(link, "zillow", "", "", allowedRoots);
       console.error(
-        `[find-unit] Apify supplement: city=${communityLoc.city}, state=${communityLoc.state}, ` +
+        `[find-unit] Apify supplement: cities=${apifyDiscoveryCities.join("|")}, state=${communityLoc.state}, ` +
         `roots=${Array.from(allowedRoots).join(", ")}, zillow=${zillowApifyUrls.length}, ` +
         `realtor=${realtorApifyUrls.length}, added=${candidates.length - beforeApify}`,
       );
@@ -26391,6 +26417,7 @@ Return ONLY compact JSON with this exact shape:
 	      "skipped-found": 0,
 	      "skipped-photo-found": 0,
 	      "skipped-unknown-strict": 0,
+      "skipped-internal-duplicate": 0,
       "skipped-bedroom-mismatch": 0,
       "skipped-too-few-photos": 0,
       "skipped-vision-rejected": 0,
@@ -26416,6 +26443,7 @@ Return ONLY compact JSON with this exact shape:
 	      if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on ${cleanChannel ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}`);
 	      if (breakdown["skipped-photo-found"] > 0) parts.push(`${breakdown["skipped-photo-found"]} had 2+ strong private-photo matches on the enforced channel`);
 	      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
+      if (breakdown["skipped-internal-duplicate"] > 0) parts.push(`${breakdown["skipped-internal-duplicate"]} already used by another listing in this community`);
       if (breakdown["skipped-bedroom-mismatch"] > 0) parts.push(`${breakdown["skipped-bedroom-mismatch"]} had too few bedrooms`);
       if (breakdown["skipped-too-few-photos"] > 0) parts.push(`${breakdown["skipped-too-few-photos"]} had too few photos`);
       if (breakdown["skipped-vision-rejected"] > 0) parts.push(`${breakdown["skipped-vision-rejected"]} failed the bedroom/bathroom vision check`);

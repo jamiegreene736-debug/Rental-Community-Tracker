@@ -1715,6 +1715,10 @@ assert.match(
   "preflight replacement search must run on a server-side job so tab close does not abort find-unit",
 );
 assert.ok(
+  routeSource.includes("const discoveryCities = discoverySearchCitiesForPhotoSearch({"),
+  "replacement find-unit must use the same Zillow discovery cities as preflight photo fetch",
+);
+assert.ok(
   routeSource.includes("const canonicalStreet = inferCommunityStreetAddress({"),
   "replacement find-unit must resolve canonical resort street when folder map is missing (e.g. Waikoloa)",
 );

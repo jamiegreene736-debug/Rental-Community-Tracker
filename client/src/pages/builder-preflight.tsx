@@ -520,6 +520,7 @@ export default function BuilderPreflight() {
   const [lastCheckWasFullAudit, setLastCheckWasFullAudit] = useState(false);
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
   const [replacementTargetId, setReplacementTargetId] = useState<string | null>(null);
+  const [replacementSkipUrl, setReplacementSkipUrl] = useState<string | null>(null);
   const [swapsCommitted, setSwapsCommitted] = useState(false);
   const [committing, setCommitting] = useState(false);
   const autoRunFired = useRef(false);
@@ -813,6 +814,7 @@ export default function BuilderPreflight() {
     setUnitOverrides(updatedOverrides);
     setShowReplacementFlow(false);
     setReplacementTargetId(null);
+    setReplacementSkipUrl(null);
 
     // Re-run the platform check with updated units
     const updatedUnits = property.units.map(u => {
@@ -891,6 +893,16 @@ export default function BuilderPreflight() {
     ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
     : property.units[0];
   const parsedReplacementAddress = parsePropertyAddress(property.address);
+  const replacementStreetAddress = inferCommunityStreetAddress({
+    communityName: property.complexName,
+    city: parsedReplacementAddress.city,
+    state: parsedReplacementAddress.state,
+    addressHint: parsedReplacementAddress.street || property.address,
+  }) || parsedReplacementAddress.street;
+  const replacementSkipUrls = Array.from(new Set([
+    ...Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean),
+    ...(replacementSkipUrl ? [replacementSkipUrl] : []),
+  ]));
 
   return (
     <div className="min-h-screen bg-background">
@@ -1276,8 +1288,10 @@ export default function BuilderPreflight() {
                               variant="outline"
                               className="h-7 px-2 text-xs border-green-400 dark:border-green-600 text-green-800 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/40"
                               onClick={async () => {
+                                const skipReplacementUrl = unitOverrides[origUnit.id]?.sourceUrl ?? null;
                                 setSwapsCommitted(false);
                                 await handleUndoSwap(origUnit.id);
+                                setReplacementSkipUrl(skipReplacementUrl);
                                 setReplacementTargetId(origUnit.id);
                                 setShowReplacementFlow(true);
                               }}
@@ -1302,6 +1316,7 @@ export default function BuilderPreflight() {
                             className="h-7 px-2 text-xs border-amber-400 dark:border-amber-600 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
                             onClick={() => {
                               setSwapsCommitted(false);
+                              setReplacementSkipUrl(null);
                               setReplacementTargetId(origUnit.id);
                               setShowReplacementFlow(true);
                             }}
@@ -1577,6 +1592,7 @@ export default function BuilderPreflight() {
               variant="outline"
               onClick={() => {
                 setReplacementTargetId(null);
+                setReplacementSkipUrl(null);
                 setShowReplacementFlow(v => !v);
               }}
               className="sm:w-auto"
@@ -1613,12 +1629,12 @@ export default function BuilderPreflight() {
               communityFolder={property.communityPhotoFolder}
               communityName={property.complexName}
               propertyAddress={property.address}
-              streetAddress={parsedReplacementAddress.street || undefined}
+              streetAddress={replacementStreetAddress || undefined}
               city={parsedReplacementAddress.city || undefined}
               state={parsedReplacementAddress.state || undefined}
               propertyId={id}
-              skipUrls={Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean)}
-              onClose={() => { setShowReplacementFlow(false); setReplacementTargetId(null); }}
+              skipUrls={replacementSkipUrls}
+              onClose={() => { setShowReplacementFlow(false); setReplacementTargetId(null); setReplacementSkipUrl(null); }}
               onUnitReplaced={handleUnitReplaced}
             />
           </div>
