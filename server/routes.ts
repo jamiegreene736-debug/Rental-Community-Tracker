@@ -38,7 +38,7 @@ import sharp from "sharp";
 import JSZip from "jszip";
 import { chromium } from "playwright";
 import { verifyPmRate } from "./pm-rate-agent";
-import { verifyPmAvailability, verifyPmAvailabilityBatch } from "./verify-pm-availability";
+import { verifyPmAvailability, verifyPmAvailabilityBatch, type VerifyAvailabilityResult } from "./verify-pm-availability";
 import { captchaAutomationUnavailable } from "./captcha-policy";
 import { findAvailableSuiteParadiseUnits } from "./pm-scraper-suite-paradise";
 import { findAvailableVrpUnits, VRP_SITES } from "./pm-scraper-vrp";
@@ -194,6 +194,14 @@ import {
   lensMatchConfidence,
 } from "./photo-match-guardrails";
 import { MAX_COMBO_PHOTO_OTA_ATTEMPTS, runComboOtaPreflight } from "./combo-ota-preflight";
+import {
+  buildUnitPhotoResolverProof,
+  canonicalListingKey,
+  compareUnitPhotoProofs,
+  MIN_INDEPENDENT_UNIT_PHOTOS,
+  summarizeUnitPhotoProof,
+  type UnitPhotoResolverProof,
+} from "./unit-photo-resolver";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { geocode, walkBetween } from "./walking-distance";
@@ -2022,6 +2030,9 @@ const COMMUNITY_SOURCE_URLS: Record<string, { primary: string; fallback?: string
   "Regency at Poipu Kai": {
     primary: "https://www.zillow.com/homedetails/1831-Poipu-Rd-APT-823-Koloa-HI-96756/80152954_zpid/",
     fallback: "https://www.homes.com/property/1831-poipu-rd-koloa-hi-unit-720/gy46glh43cckm/",
+  },
+  "Paniolo Hale": {
+    primary: "https://www.zillow.com/b/paniolo-hale-maunaloa-hi-9NxCHL/",
   },
 };
 
@@ -7150,6 +7161,10 @@ export async function registerRoutes(
     }
 
     const allUnits: any[] = [];
+    const nights = Math.max(
+      1,
+      Math.round((new Date(`${checkOut}T12:00:00`).getTime() - new Date(`${checkIn}T12:00:00`).getTime()) / 86_400_000),
+    );
 
     try {
       // Run the main direct sources in parallel (with modest limits)
@@ -7202,13 +7217,33 @@ export async function registerRoutes(
       countsByBedroom[String(br)] = (countsByBedroom[String(br)] || 0) + 1;
       if (!samplesByBedroom[String(br)]) samplesByBedroom[String(br)] = [];
       if (samplesByBedroom[String(br)].length < 3) {
+        const totalPrice = roundedProofNumber(unit.totalPrice);
+        const nightlyPrice = roundedProofNumber(unit.nightlyPrice) ?? (totalPrice ? roundedProofNumber(totalPrice / nights) : undefined);
+        const sourceLabel = unit.sourceLabel || "Direct PM";
+        let domain: string | undefined;
+        try {
+          domain = unit.url ? new URL(unit.url).hostname.replace(/^www\./, "") : undefined;
+        } catch {
+          domain = undefined;
+        }
         samplesByBedroom[String(br)].push({
           title: unit.title || unit.name || `${community} Direct`,
           url: unit.url,
           image: unit.image || "",
-          totalPrice: unit.totalPrice,
-          sourceLabel: unit.sourceLabel || "Direct PM",
+          totalPrice,
+          nightlyPrice,
+          sourceLabel,
           bedrooms: br,
+          proof: buildDirectPmInventoryProof({
+            url: unit.url,
+            domain,
+            sourceLabel,
+            checkIn,
+            checkOut,
+            totalPrice,
+            nightlyPrice,
+            reason: `${sourceLabel} returned this ${br}BR unit while searching direct PM inventory for ${checkIn} to ${checkOut}.`,
+          }),
         });
       }
     }
@@ -9120,6 +9155,44 @@ export async function registerRoutes(
   type FindBuyInInFlightEntry = { promise: Promise<any>; startedAt: number };
   const findBuyInCache = new Map<string, FindBuyInCacheEntry>();
   const findBuyInInFlight = new Map<string, FindBuyInInFlightEntry>();
+  type DirectBookingProof = {
+    verdict: "same_unit_direct_page" | "direct_price_available" | "direct_unavailable" | "needs_review";
+    summary: string;
+    sameUnit: {
+      status: "passed" | "not_checked";
+      method: "google_lens_private_photos" | "direct_pm_inventory";
+      matchedPhotoCount?: number;
+      minConfidence?: number;
+      maxConfidence?: number;
+      requiredPhotoCount?: number;
+      requiredConfidence?: number;
+      matchedPhotoRoles?: string[];
+      reason: string;
+    };
+    directPage: {
+      status: "passed" | "needs_review";
+      method: "pm_domain_url_shape" | "direct_pm_inventory";
+      url?: string;
+      domain?: string;
+      reason: string;
+    };
+    availability: {
+      status: "date_specific_available" | "date_specific_unavailable" | "unclear" | "not_checked";
+      method: "direct_pm_inventory" | "stagehand_direct_page" | "sidecar_direct_page" | "not_scraped";
+      checkIn?: string;
+      checkOut?: string;
+      finalUrl?: string;
+      reason: string;
+    };
+    price: {
+      status: "date_specific_quote" | "airbnb_anchor_only" | "unavailable" | "unclear" | "not_checked";
+      method: "direct_pm_inventory" | "stagehand_direct_page" | "sidecar_direct_page" | "airbnb_searchapi_anchor" | "not_scraped";
+      totalPrice?: number | null;
+      nightlyPrice?: number | null;
+      currency?: "USD";
+      reason: string;
+    };
+  };
   type ReverseImageListingMatch = {
     platformKey: "airbnb" | "vrbo" | "booking" | "pm" | "other";
     platform: string;
@@ -9129,6 +9202,7 @@ export async function registerRoutes(
     source: string;
     position: number;
     confidence?: number;
+    proof?: DirectBookingProof;
   };
   type ReverseImageListingCacheEntry = { value: { checkedUrl: string; matches: ReverseImageListingMatch[]; rawCount: number }; expiresAt: number };
   const reverseImageListingCache = new Map<string, ReverseImageListingCacheEntry>();
@@ -9149,6 +9223,7 @@ export async function registerRoutes(
     matchedPhotoCount?: number;
     minConfidence?: number;
     maxConfidence?: number;
+    proof?: DirectBookingProof;
   };
   type BuyInListingSitesCacheEntry = {
     value: {
@@ -9164,6 +9239,202 @@ export async function registerRoutes(
     expiresAt: number;
   };
   const buyInListingSitesCache = new Map<string, BuyInListingSitesCacheEntry>();
+
+  const roundedProofNumber = (value: unknown): number | undefined => {
+    const n = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(n) ? Math.round(n * 100) / 100 : undefined;
+  };
+
+  const buildLensDirectBookingProof = (args: {
+    url: string;
+    domain: string;
+    matchedPhotoCount: number;
+    minConfidence: number;
+    maxConfidence?: number;
+    matchedPhotoRoles?: string[];
+    requiredPhotoCount: number;
+    requiredConfidence: number;
+    anchorTotalPrice?: number | null;
+    anchorNightlyPrice?: number | null;
+    checkIn?: string;
+    checkOut?: string;
+  }): DirectBookingProof => {
+    const minConfidence = Math.round((Number(args.minConfidence) || 0) * 1000) / 1000;
+    const maxConfidence = Math.round((Number(args.maxConfidence ?? args.minConfidence) || 0) * 1000) / 1000;
+    const total = roundedProofNumber(args.anchorTotalPrice);
+    const nightly = roundedProofNumber(args.anchorNightlyPrice);
+    return {
+      verdict: "same_unit_direct_page",
+      summary: `Same-unit direct page proven by ${args.matchedPhotoCount}+ Airbnb listing photo matches; direct PM price/availability is not proven yet.`,
+      sameUnit: {
+        status: "passed",
+        method: "google_lens_private_photos",
+        matchedPhotoCount: args.matchedPhotoCount,
+        minConfidence,
+        maxConfidence,
+        requiredPhotoCount: args.requiredPhotoCount,
+        requiredConfidence: args.requiredConfidence,
+        matchedPhotoRoles: Array.from(new Set(args.matchedPhotoRoles ?? [])).filter(Boolean),
+        reason: `Google Lens matched ${args.matchedPhotoCount} distinct Airbnb listing photos to this PM/direct URL at >=${Math.round(args.requiredConfidence * 100)}% confidence.`,
+      },
+      directPage: {
+        status: "passed",
+        method: "pm_domain_url_shape",
+        url: args.url,
+        domain: args.domain,
+        reason: "URL survived direct-booking domain filters and landing-page/detail-page checks.",
+      },
+      availability: {
+        status: "not_checked",
+        method: "not_scraped",
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        reason: "The direct PM page has not returned its own date-specific availability result yet.",
+      },
+      price: {
+        status: total || nightly ? "airbnb_anchor_only" : "not_checked",
+        method: total || nightly ? "airbnb_searchapi_anchor" : "not_scraped",
+        totalPrice: total ?? null,
+        nightlyPrice: nightly ?? null,
+        currency: "USD",
+        reason: total || nightly
+          ? "Displayed price is the Airbnb SearchAPI anchor for the same unit and dates, not a direct PM quote."
+          : "No direct PM quote has been checked yet.",
+      },
+    };
+  };
+
+  const buildDirectPmInventoryProof = (args: {
+    url?: string;
+    domain?: string;
+    sourceLabel: string;
+    checkIn: string;
+    checkOut: string;
+    totalPrice?: number | null;
+    nightlyPrice?: number | null;
+    reason?: string;
+  }): DirectBookingProof => ({
+    verdict: "direct_price_available",
+    summary: `${args.sourceLabel} returned a date-specific direct PM quote for ${args.checkIn} to ${args.checkOut}.`,
+    sameUnit: {
+      status: "passed",
+      method: "direct_pm_inventory",
+      reason: `${args.sourceLabel} returned this unit from its own direct PM inventory/search for the requested stay.`,
+    },
+    directPage: {
+      status: "passed",
+      method: "direct_pm_inventory",
+      url: args.url,
+      domain: args.domain,
+      reason: "Direct PM source returned this listing URL.",
+    },
+    availability: {
+      status: "date_specific_available",
+      method: "direct_pm_inventory",
+      checkIn: args.checkIn,
+      checkOut: args.checkOut,
+      reason: args.reason ?? "Direct PM source returned the unit as available for the requested dates.",
+    },
+    price: {
+      status: "date_specific_quote",
+      method: "direct_pm_inventory",
+      totalPrice: roundedProofNumber(args.totalPrice) ?? null,
+      nightlyPrice: roundedProofNumber(args.nightlyPrice) ?? null,
+      currency: "USD",
+      reason: "Price came from the direct PM source for this stay window.",
+    },
+  });
+
+  const proofFromAvailabilityVerifier = (args: {
+    baseProof: DirectBookingProof;
+    result: VerifyAvailabilityResult;
+    checkIn: string;
+    checkOut: string;
+    nights: number;
+    method?: "stagehand_direct_page" | "sidecar_direct_page";
+  }): DirectBookingProof => {
+    const method = args.method ?? "stagehand_direct_page";
+    const nightly = roundedProofNumber(args.result.nightlyPriceUsd);
+    const total = nightly ? roundedProofNumber(nightly * Math.max(1, args.nights)) : null;
+    if (args.result.available === "yes") {
+      return {
+        ...args.baseProof,
+        verdict: "direct_price_available",
+        summary: nightly
+          ? `Same-unit direct page proven by photos; direct PM page also showed availability at about $${nightly}/night.`
+          : "Same-unit direct page proven by photos; direct PM page showed availability, but no price was extracted.",
+        availability: {
+          status: "date_specific_available",
+          method,
+          checkIn: args.checkIn,
+          checkOut: args.checkOut,
+          finalUrl: args.result.finalUrl,
+          reason: args.result.reason,
+        },
+        price: nightly
+          ? {
+              status: "date_specific_quote",
+              method,
+              totalPrice: total,
+              nightlyPrice: nightly,
+              currency: "USD",
+              reason: "Direct PM availability verifier extracted this price from the PM page for the requested dates.",
+            }
+          : {
+              status: "unclear",
+              method,
+              totalPrice: null,
+              nightlyPrice: null,
+              currency: "USD",
+              reason: "Direct PM page showed availability, but the verifier did not extract a price.",
+            },
+      };
+    }
+    if (args.result.available === "no") {
+      return {
+        ...args.baseProof,
+        verdict: "direct_unavailable",
+        summary: "Same-unit direct page was found, but the direct PM page reported this stay as unavailable.",
+        availability: {
+          status: "date_specific_unavailable",
+          method,
+          checkIn: args.checkIn,
+          checkOut: args.checkOut,
+          finalUrl: args.result.finalUrl,
+          reason: args.result.reason,
+        },
+        price: {
+          status: "unavailable",
+          method,
+          totalPrice: null,
+          nightlyPrice: null,
+          currency: "USD",
+          reason: "Direct PM page reported the requested stay as unavailable.",
+        },
+      };
+    }
+    return {
+      ...args.baseProof,
+      verdict: "needs_review",
+      summary: "Same-unit direct page was found, but direct PM availability/price proof is inconclusive.",
+      availability: {
+        status: "unclear",
+        method,
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        finalUrl: args.result.finalUrl,
+        reason: args.result.reason,
+      },
+      price: {
+        status: "unclear",
+        method,
+        totalPrice: null,
+        nightlyPrice: null,
+        currency: "USD",
+        reason: "Direct PM verifier did not extract a date-specific quote.",
+      },
+    };
+  };
   // Buy-in scans must always hit live SearchAPI + sidecar work — no HTTP result cache.
   const FIND_BUY_IN_TTL_MS = 0;
   const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
@@ -10701,12 +10972,14 @@ export async function registerRoutes(
         matchedPhotoCount?: number;
         minConfidence?: number;
         maxConfidence?: number;
+        proof?: DirectBookingProof;
       }>;
       directBookingUrl?: string;
       directBookingHost?: string;
       directBookingConfidence?: "high" | "medium" | "low";
       directBookingSource?: "airbnb_image_reverse_search";
       directBookingReason?: string;
+      directProof?: DirectBookingProof;
       // For PM candidates discovered via reverse-image match against
       // an Airbnb listing: track the anchor for traceability only.
       // The PM URL must earn its own verified date-specific quote before
@@ -12605,9 +12878,9 @@ export async function registerRoutes(
     }
     // Lens multiple visible photos per priced Airbnb card, capped
     // defensively so a redesigned Airbnb infinite-scroll page cannot
-    // create an unbounded SearchAPI bill. The direct page is link-only:
-    // we do not scrape it, and any direct-link row keeps the Airbnb
-    // date-specific rate.
+    // create an unbounded SearchAPI bill. Lens proves same-unit identity
+    // only; direct-link rows stay unpriced until the PM page verifier
+    // returns its own date-specific result.
     const TOP_AIRBNB_FOR_LENS = 12;
     const AIRBNB_LENS_IMAGES_PER_CANDIDATE = 8;
     const AIRBNB_LENS_TOTAL_IMAGE_BUDGET = 96;
@@ -12697,8 +12970,28 @@ export async function registerRoutes(
         photoMatchesByUrl.set(candidateUrl, strictMatches);
       });
     }
+    const directLensProofForAnchor = (
+      anchor: Candidate,
+      match: { url: string; domain: string; matchedPhotoCount: number; minConfidence: number; maxConfidence?: number },
+    ): DirectBookingProof => buildLensDirectBookingProof({
+      url: match.url,
+      domain: match.domain,
+      matchedPhotoCount: match.matchedPhotoCount,
+      minConfidence: match.minConfidence,
+      maxConfidence: match.maxConfidence,
+      matchedPhotoRoles: ["airbnb-gallery"],
+      requiredPhotoCount: AIRBNB_DIRECT_LENS_MIN_PHOTO_MATCHES,
+      requiredConfidence: AIRBNB_DIRECT_LENS_MIN_CONFIDENCE,
+      anchorTotalPrice: anchor.totalPrice,
+      anchorNightlyPrice: anchor.nightlyPrice,
+      checkIn,
+      checkOut,
+    });
     const airbnbWithMatches: Candidate[] = airbnb.map((c) => {
-      const matches = photoMatchesByUrl.get(c.url) ?? [];
+      const matches = (photoMatchesByUrl.get(c.url) ?? []).map((match) => ({
+        ...match,
+        proof: directLensProofForAnchor(c, match),
+      }));
       const direct = matches[0];
       return {
         ...c,
@@ -12710,21 +13003,25 @@ export async function registerRoutes(
         directBookingConfidence: direct ? "high" : undefined,
         directBookingSource: direct ? "airbnb_image_reverse_search" : undefined,
         directBookingReason: direct
-          ? `Google Lens found ${direct.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain. Rate shown remains the Airbnb date-specific rate; the direct site was not scraped.`
+          ? `Google Lens found ${direct.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain. This proves a same-unit direct page; PM price/availability still needs direct proof.`
           : undefined,
+        directProof: direct?.proof,
       };
     });
 
-    // Promote photo-match URLs into the PM/direct source as link-only rows.
+    // Promote photo-match URLs into the PM/direct source as proof-pending rows.
     //
-    // Each match becomes a priced PM-shaped Candidate for backward
-    // compatibility with the existing UI model. Reasoning:
+    // Each match becomes a PM-shaped Candidate, but NOT a verified/priced
+    // buy-in by itself. Reasoning:
     //   - Photos match → it's the same physical unit
-    //   - Airbnb shows the unit as available + priced for these dates
-    //   - The direct URL is useful as a click-through, but is not scraped.
+    //   - Airbnb shows an anchor price for those dates
+    //   - The direct URL is useful as a click-through
+    //   - The PM URL must still return its own availability/price before
+    //     it can enter cheapest/auto-fill.
     //
-    // The rate is intentionally inherited from Airbnb and clearly labeled
-    // as such. The direct page is never opened for a quote in this flow.
+    // The Airbnb anchor price is kept in `airbnbAnchorPrice` and in the
+    // proof ledger for traceability only. It is not copied into
+    // totalPrice/nightlyPrice until direct PM verification succeeds.
     //
     // Two filters keep noise out:
     //   a. mentionsResort(url + title) — drops matches at neighboring
@@ -12751,7 +13048,10 @@ export async function registerRoutes(
         photoMatchBedroomMismatchDropped += (photoMatchesByUrl.get(anchor.url)?.length ?? 0);
         continue;
       }
-      const matches = photoMatchesByUrl.get(anchor.url) ?? [];
+      const matches = (photoMatchesByUrl.get(anchor.url) ?? []).map((match) => ({
+        ...match,
+        proof: directLensProofForAnchor(anchor, match),
+      }));
       // No resort filter on photo-matches per operator direction
       // ("max candidates over price accuracy"). The Airbnb engine
       // already filtered the anchor by location bounds + resort name;
@@ -12804,6 +13104,7 @@ export async function registerRoutes(
           continue;
         }
         existingPmUrls.add(m.url);
+        const proof = m.proof ?? directLensProofForAnchor(anchor, m);
         photoMatchPmCandidates.push({
           source: "pm",
           sourceLabel: `Direct link (${m.domain})`,
@@ -12817,21 +13118,20 @@ export async function registerRoutes(
           originalSourceUrl: m.url,
           url: withStayDates("pm", m.url),
           title: m.title || `Match on ${m.domain}`,
-          nightlyPrice: anchor.nightlyPrice,
-          totalPrice: anchor.totalPrice,
+          nightlyPrice: 0,
+          totalPrice: 0,
           bedrooms: anchorBedrooms,
           image: anchor.image,
-          snippet: `Same photos as Airbnb listing $${anchor.totalPrice.toLocaleString()} (${anchor.title}). Direct site was not scraped; rate shown is the Airbnb date-specific rate for this same listing.`,
+          snippet: `Same-unit direct page found from ${m.matchedPhotoCount}+ Airbnb photo matches. Airbnb anchor showed $${anchor.totalPrice.toLocaleString()} for these dates; direct PM price/availability must be verified before recording.`,
           airbnbAnchorUrl: anchor.url,
           airbnbAnchorPrice: anchor.totalPrice,
           directBookingUrl: m.url,
           directBookingHost: m.domain,
           directBookingConfidence: "high",
           directBookingSource: "airbnb_image_reverse_search",
-          directBookingReason: `Google Lens found ${m.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain; PM page was linked only, not scraped.`,
-          verified: "yes",
-          verifiedNightlyPrice: anchor.nightlyPrice,
-          verifiedReason: `Strict Airbnb Lens direct-link proof: ${m.matchedPhotoCount}+ distinct listing photos matched this direct/PM URL at >=${Math.round(AIRBNB_DIRECT_LENS_MIN_CONFIDENCE * 100)}% confidence. Price is inherited from Airbnb for the requested dates; direct site was not scraped.`,
+          directBookingReason: `Google Lens found ${m.matchedPhotoCount}+ high-confidence Airbnb listing photo matches on this direct/PM domain. This is same-unit proof only until the direct PM page returns its own date-specific quote.`,
+          directProof: proof,
+          photoMatches: [{ url: m.url, title: m.title, domain: m.domain, matchedPhotoCount: m.matchedPhotoCount, minConfidence: m.minConfidence, maxConfidence: m.maxConfidence, proof }],
         });
       }
     }
@@ -12898,7 +13198,7 @@ export async function registerRoutes(
       return rows.join("; ");
     };
     const sidecarVerifyPool: Candidate[] = includePm
-      ? [...pm, ...pmSearchApiFinderCandidates].filter((c) => c.source === "pm" && (c.nightlyPrice <= 0 || c.totalPrice <= 0))
+      ? [...pm, ...photoMatchPmCandidates, ...pmSearchApiFinderCandidates].filter((c) => c.source === "pm" && (c.nightlyPrice <= 0 || c.totalPrice <= 0))
       : [];
     for (const c of sidecarVerifyPool) {
       const key = c.url ? sidecarVerifyKey(c.url) : "";
@@ -12986,6 +13286,31 @@ export async function registerRoutes(
                   c.nightlyPrice = roundCurrency(r.nightlyPrice);
                   c.totalPrice = roundCurrency(r.nightlyPrice * nights);
                   c.verifiedNightlyPrice = c.nightlyPrice;
+                }
+              }
+              if (c.directProof) {
+                const proofNightly =
+                  typeof r.nightlyPrice === "number" && r.nightlyPrice > 0
+                    ? r.nightlyPrice
+                    : typeof r.totalPrice === "number" && r.totalPrice > 0
+                      ? r.totalPrice / nights
+                      : null;
+                c.directProof = proofFromAvailabilityVerifier({
+                  baseProof: c.directProof,
+                  result: {
+                    available: r.available,
+                    nightlyPriceUsd: proofNightly,
+                    reason: r.reason,
+                    finalUrl: c.url,
+                    ms: 0,
+                  },
+                  checkIn,
+                  checkOut,
+                  nights,
+                  method: "sidecar_direct_page",
+                });
+                if (Array.isArray(c.photoMatches)) {
+                  c.photoMatches = c.photoMatches.map((match) => ({ ...match, proof: c.directProof }));
                 }
               }
             }
@@ -13134,10 +13459,8 @@ export async function registerRoutes(
     // Combined priced pool across all bookable sources.
     //
     // Airbnb rows are date-specific by construction and remain in this
-    // priced staging pool, but the final cheapest/buy-in gate below now
-    // rejects raw Airbnb rows. An Airbnb-backed buy-in must be promoted
-    // through Google Lens to a likely direct booking URL; that promoted
-    // direct-link row keeps the Airbnb date-specific price.
+    // priced staging pool. Lens-discovered PM rows only join this pool
+    // after direct PM verification supplies a real date-specific price.
     //
     // Operator directive 2026-04-29 (PR #306): include Vrbo fully in
     // cheapest as well. The TOS-sublet posture is the same as Airbnb's
@@ -13150,16 +13473,16 @@ export async function registerRoutes(
     // nightlyPrice > 0 filter).
     //
     // Booking.com and Vrbo are sidecar-priced from their own search pages.
-    // Direct-link rows are Lens matches under an Airbnb anchor and keep the
-    // Airbnb date-specific price; the direct site is not scraped.
+    // Direct-link rows are Lens matches under an Airbnb anchor, then
+    // checked against the PM page before they can be priced/verified.
     const priced: Candidate[] = [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget]
       .filter((c) => c.nightlyPrice > 0)
       .filter((c) => c.source === "airbnb" || c.verified === "yes")
       .filter((c) => !groundFloorOnly || c.groundFloorStatus === "confirmed")
       .sort((a, b) => a.nightlyPrice - b.nightlyPrice);
 
-    // No direct-site pre-verification. OTA search pages and Airbnb Lens are
-    // the only buy-in inputs; direct links are shown with Airbnb-backed proof.
+    // Direct PM verification is attempted above for proof-pending PM rows.
+    // Pre-verify stats report how many direct pages returned their own answer.
     const preVerifyAttempted = sidecarBatchVerifiedUrls.size;
     const preVerifyYes = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "yes").length;
     const preVerifyNo = sidecarVerifyTargets.filter((c) => sidecarBatchVerifiedUrls.has(c.url) && c.verified === "no").length;
@@ -13175,10 +13498,10 @@ export async function registerRoutes(
     //
     // Verified-only. The cheapest panel is the operator's "buy these"
     // recommendation. OTA rows are verified by their own search pages;
-    // direct-link rows are verified by the Airbnb anchor that supplied
-    // the date-specific availability and price.
+    // direct-link rows are included only when the direct PM page verifier
+    // returned its own date-specific availability/price.
     //
-    // - "yes"     → in. OTA search result or Airbnb-backed direct link.
+    // - "yes"     → in. OTA search result or direct PM page verified.
     // - "no"      → out. Confirmed unavailable.
     // - "unclear" → out of CHEAPEST, but stays in `sources.pm` so the
     //               operator can review.
@@ -14067,6 +14390,15 @@ export async function registerRoutes(
     const sourceTitle = String(req.body?.title ?? "Airbnb listing").trim() || "Airbnb listing";
     const resortName = String(req.body?.resortName ?? "").trim();
     const community = String(req.body?.community ?? resortName ?? "").trim();
+    const checkIn = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkIn ?? "")) ? String(req.body.checkIn) : "";
+    const checkOut = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkOut ?? "")) ? String(req.body.checkOut) : "";
+    const nights = checkIn && checkOut
+      ? Math.max(1, Math.round((new Date(`${checkOut}T12:00:00`).getTime() - new Date(`${checkIn}T12:00:00`).getTime()) / 86_400_000))
+      : 1;
+    const anchorTotalPrice = roundedProofNumber(req.body?.anchorTotalPrice);
+    const anchorNightlyPrice = roundedProofNumber(req.body?.anchorNightlyPrice)
+      ?? (anchorTotalPrice && nights > 0 ? roundedProofNumber(anchorTotalPrice / nights) : undefined);
+    const verifyAvailabilityRequested = req.body?.verifyAvailability === true;
     if (!sourceUrl) return res.status(400).json({ error: "sourceUrl required" });
     if (!/airbnb\.[^/]+\/rooms\//i.test(sourceUrl)) {
       return res.status(400).json({ error: "direct booking scan only supports Airbnb room listings" });
@@ -14081,7 +14413,7 @@ export async function registerRoutes(
     try {
       const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
       const sourceKey = normalizeListingSurfaceKey(sourceUrl);
-      const cacheKey = `buy-in-sites:v5-strict:${sourceKey}`;
+      const cacheKey = `buy-in-sites:v6-proof:${sourceKey}:${checkIn || "nodate"}:${checkOut || "nodate"}:${verifyAvailabilityRequested ? "verify" : "lens"}`;
       evictExpiredBuyInListingSites();
       const cached = buyInListingSitesCache.get(cacheKey);
       if (useCache && cached && cached.expiresAt > Date.now()) {
@@ -14216,20 +14548,37 @@ export async function registerRoutes(
         }
       }
 
-      const matches: BuyInListingSiteMatch[] = Array.from(evidenceBySurface.values())
+      let matches: BuyInListingSiteMatch[] = Array.from(evidenceBySurface.values())
         .map((ev) => {
           const representativePhoto = ev.photos[0];
           const minConfidence = ev.confidences.length ? Math.min(...ev.confidences) : 0;
           const maxConfidence = ev.confidences.length ? Math.max(...ev.confidences) : 0;
+          const matchedPhotoCount = ev.photos.length;
+          const roundedMin = Math.round(minConfidence * 1000) / 1000;
+          const roundedMax = Math.round(maxConfidence * 1000) / 1000;
           return {
             ...ev.firstMatch,
             matchedPhotoUrl: representativePhoto.url,
             matchedPhotoRole: representativePhoto.role ?? "interior",
             matchedPhotoLabel: representativePhoto.label,
             matchedPhotoCategory: representativePhoto.category,
-            matchedPhotoCount: ev.photos.length,
-            minConfidence: Math.round(minConfidence * 1000) / 1000,
-            maxConfidence: Math.round(maxConfidence * 1000) / 1000,
+            matchedPhotoCount,
+            minConfidence: roundedMin,
+            maxConfidence: roundedMax,
+            proof: buildLensDirectBookingProof({
+              url: ev.firstMatch.url,
+              domain: ev.firstMatch.domain,
+              matchedPhotoCount,
+              minConfidence: roundedMin,
+              maxConfidence: roundedMax,
+              matchedPhotoRoles: ev.photos.map((photo) => photo.role ?? "interior"),
+              requiredPhotoCount: strictDirectMinPhotoMatches,
+              requiredConfidence: strictDirectMinConfidence,
+              anchorTotalPrice,
+              anchorNightlyPrice,
+              checkIn: checkIn || undefined,
+              checkOut: checkOut || undefined,
+            }),
           };
         })
         .filter((match) =>
@@ -14247,6 +14596,43 @@ export async function registerRoutes(
           || a.domain.localeCompare(b.domain);
       });
 
+      let directAvailabilityVerifiedCount = 0;
+      if (verifyAvailabilityRequested && checkIn && checkOut && matches.length > 0) {
+        const anthropicKey = process.env.ANTHROPIC_API_KEY;
+        const bbApiKey = process.env.BROWSERBASE_API_KEY;
+        const bbProjectId = process.env.BROWSERBASE_PROJECT_ID;
+        if (anthropicKey && bbApiKey && bbProjectId) {
+          const urls = Array.from(new Set(matches.map((match) => match.url))).slice(0, 3);
+          try {
+            const verifyResults = await verifyPmAvailabilityBatch({
+              urls,
+              checkIn,
+              checkOut,
+              anthropicKey,
+              bbApiKey,
+              bbProjectId,
+              maxUrls: 3,
+            });
+            matches = matches.map((match) => {
+              const result = verifyResults[match.url];
+              if (!result || !match.proof) return match;
+              const proof = proofFromAvailabilityVerifier({
+                baseProof: match.proof,
+                result,
+                checkIn,
+                checkOut,
+                nights,
+                method: "stagehand_direct_page",
+              });
+              if (proof.availability.status === "date_specific_available") directAvailabilityVerifiedCount++;
+              return { ...match, proof };
+            });
+          } catch (e: any) {
+            console.warn(`[direct-booking-sites] availability verifier failed for ${sourceUrl.slice(0, 80)}:`, e?.message ?? e);
+          }
+        }
+      }
+
       const searchedCount = auditedPhotos.filter((photo) => photo.searched).length;
       console.log(
         `[direct-booking-sites] ${community || resortName} ${sourceUrl.slice(0, 72)} candidatePhotos=${candidatePhotos.length} lensPhotos=${searchedCount} rawLensRows=${rawCount} strictPmMatches=${matches.length}`,
@@ -14258,6 +14644,7 @@ export async function registerRoutes(
         photos: auditedPhotos,
         matches: matches.slice(0, 25),
         rawCount,
+        directAvailabilityVerifiedCount,
         generatedAt: new Date().toISOString(),
         ...(scraped.length === 0
           ? { message: scrapeError
@@ -14284,10 +14671,12 @@ export async function registerRoutes(
   // before the sidecar queue starts. Reuses direct-booking-sites thresholds (5+ interior
   // photos at >=95% confidence, PM/direct domains only).
   app.post("/api/operations/alternative-scout-direct-probes", async (req: Request, res: Response) => {
-    const communities = Array.isArray(req.body?.communities) ? req.body.communities : [];
+    const communities: any[] = Array.isArray(req.body?.communities) ? req.body.communities : [];
     if (communities.length === 0) {
       return res.status(400).json({ error: "communities array required" });
     }
+    const checkIn = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkIn ?? "")) ? String(req.body.checkIn) : "";
+    const checkOut = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkOut ?? "")) ? String(req.body.checkOut) : "";
     const port = process.env.PORT || "5000";
     const directEndpoint = `http://127.0.0.1:${port}/api/operations/direct-booking-sites`;
     const probesByCommunity: Record<string, { listings: Array<{
@@ -14301,28 +14690,48 @@ export async function registerRoutes(
         matchedPhotoCount: number;
         minConfidence: number;
         maxConfidence: number;
+        proof?: DirectBookingProof;
       }>;
       status: "done" | "error" | "skipped";
       message?: string;
     }> }> = {};
 
-    const communityRows = communities
+    type AlternativeScoutProbeCommunityRow = { community: string; samples: any[] };
+    type AlternativeScoutProbeAirbnbSample = {
+      url: string;
+      title: string;
+      bedrooms?: number;
+      totalPrice?: number;
+      nightlyPrice?: number;
+    };
+    type AlternativeScoutProbeDirectMatch = {
+      url: string;
+      domain: string;
+      title: string;
+      matchedPhotoCount: number;
+      minConfidence: number;
+      maxConfidence: number;
+      proof?: DirectBookingProof;
+    };
+    const communityRows: AlternativeScoutProbeCommunityRow[] = communities
       .map((row: any) => ({
         community: String(row?.community ?? "").trim(),
         samples: Array.isArray(row?.samples) ? row.samples : [],
       }))
-      .filter((row) => row.community);
+      .filter((row: AlternativeScoutProbeCommunityRow) => row.community);
 
     await mapLimited(communityRows, 2, async (row) => {
       const loc = BUY_IN_MARKET_LOCATIONS[row.community];
       const resortName = loc?.searchName ?? row.community;
-      const airbnbSamples = row.samples
+      const airbnbSamples: AlternativeScoutProbeAirbnbSample[] = row.samples
         .map((sample: any) => ({
           url: String(sample?.url ?? "").trim(),
           title: String(sample?.title ?? "Airbnb listing").trim() || "Airbnb listing",
           bedrooms: Number(sample?.bedrooms) || undefined,
+          totalPrice: roundedProofNumber(sample?.totalPrice),
+          nightlyPrice: roundedProofNumber(sample?.nightlyPrice),
         }))
-        .filter((sample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url))
+        .filter((sample: AlternativeScoutProbeAirbnbSample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url))
         .slice(0, 3);
 
       const listings = await mapLimited(airbnbSamples, 1, async (sample) => {
@@ -14335,8 +14744,13 @@ export async function registerRoutes(
               title: sample.title,
               resortName,
               community: row.community,
+              checkIn,
+              checkOut,
+              anchorTotalPrice: sample.totalPrice,
+              anchorNightlyPrice: sample.nightlyPrice,
+              verifyAvailability: Boolean(checkIn && checkOut),
             }),
-            signal: AbortSignal.timeout(120_000),
+            signal: AbortSignal.timeout(180_000),
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok) {
@@ -14349,7 +14763,7 @@ export async function registerRoutes(
               message: body?.error ? String(body.error) : `HTTP ${response.status}`,
             };
           }
-          const directMatches = (Array.isArray(body?.matches) ? body.matches : [])
+          const directMatches: AlternativeScoutProbeDirectMatch[] = (Array.isArray(body?.matches) ? body.matches : [])
             .filter((match: any) => match?.platformKey === "pm")
             .map((match: any) => ({
               url: String(match.url ?? ""),
@@ -14358,8 +14772,9 @@ export async function registerRoutes(
               matchedPhotoCount: Number(match.matchedPhotoCount ?? 0) || 0,
               minConfidence: Number(match.minConfidence ?? match.confidence ?? 0) || 0,
               maxConfidence: Number(match.maxConfidence ?? match.confidence ?? 0) || 0,
+              proof: match.proof,
             }))
-            .filter((match) => match.url);
+            .filter((match: AlternativeScoutProbeDirectMatch) => match.url);
           return {
             airbnbUrl: sample.url,
             title: sample.title,
@@ -25895,6 +26310,9 @@ Return ONLY compact JSON with this exact shape:
       return `${nums[0]}-${nums[1]}-${name}`;
     };
 
+    const escapeRegExp = (value: string): string =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
     const candidateRootMatches = (url: string, allowedRoots: Set<string>, _contextText = ""): boolean => {
       if (allowedRoots.size === 0) return false;
       const root = streetRootFromListingAddress(parseListingAddressFromUrl(url));
@@ -26426,9 +26844,6 @@ Return ONLY compact JSON with this exact shape:
       }
       return terms.slice(0, 6);
     };
-
-    const escapeRegExp = (value: string): string =>
-      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
     const hitMatchesDistinctiveTerms = (hit: any, terms: string[]): boolean => {
       if (terms.length === 0) return true;
@@ -27001,8 +27416,8 @@ Return ONLY compact JSON with this exact shape:
     swap: {
       propertyId: number;
       oldUnitId: string;
-      oldBedrooms: number | null;
-      newBedrooms: number | null;
+      oldBedrooms?: number | null;
+      newBedrooms?: number | null;
       newSourceUrl: string;
     },
   ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string }> => {
@@ -27019,6 +27434,21 @@ Return ONLY compact JSON with this exact shape:
         console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
         return { ok: false, folder, savedCount: 0, error: "Replacement listing returned 0 photos" };
       }
+      const resolverProof = buildUnitPhotoResolverProof({
+        photos: scraped.map((photo) => ({ url: photo.url })),
+        sourceUrl: url,
+        foundVia: "replacement-commit",
+        requestedBedrooms: swap.newBedrooms ?? swap.oldBedrooms ?? null,
+        facts: listingFacts,
+      });
+      if (resolverProof.status === "rejected") {
+        return {
+          ok: false,
+          folder,
+          savedCount: 0,
+          error: summarizeUnitPhotoProof("Replacement listing", resolverProof),
+        };
+      }
 
       const result = await downloadAndPrioritize({
         folder,
@@ -27030,6 +27460,15 @@ Return ONLY compact JSON with this exact shape:
         requiredBedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
         requiredBathrooms: listingFacts.bathrooms ?? undefined,
       });
+      console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
+      if (result.kept < MIN_INDEPENDENT_UNIT_PHOTOS) {
+        return {
+          ok: false,
+          folder,
+          savedCount: result.kept,
+          error: `Replacement photo pipeline kept only ${result.kept} photo${result.kept === 1 ? "" : "s"}; at least ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos are required.`,
+        };
+      }
 
       const sourcePath = path.join(folderPath, "_source.json");
       let sourceDoc: any = {};
@@ -27039,13 +27478,15 @@ Return ONLY compact JSON with this exact shape:
         platform: /zillow/i.test(url) ? "zillow" : "other",
         scrapedDate: new Date().toISOString().slice(0, 10),
       };
+      sourceDoc.unitPhotoResolverProof = {
+        ...resolverProof,
+        savedPhotoCount: result.kept,
+      };
       sourceDoc.verificationStatus = "needs-review";
       sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
       sourceDoc.verifiedBy = "unit-swap";
       await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
 
-      console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
-      if (result.kept <= 0) return { ok: false, folder, savedCount: 0, error: "Replacement photo pipeline kept 0 photos" };
       return { ok: true, folder, savedCount: result.kept };
     } catch (e: any) {
       console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
@@ -27266,6 +27707,8 @@ Return ONLY compact JSON with this exact shape:
     state?: string;
     unit1?: ComboPhotoFetchUnit;
     unit2?: ComboPhotoFetchUnit;
+    unit1Proof?: UnitPhotoResolverProof | null;
+    unit2Proof?: UnitPhotoResolverProof | null;
   };
   type ComboPhotoFetchItem = Required<Pick<ComboPhotoFetchItemInput, "id" | "label">> & Omit<ComboPhotoFetchItemInput, "id" | "label"> & {
     status: ComboPhotoFetchStatus;
@@ -27277,6 +27720,8 @@ Return ONLY compact JSON with this exact shape:
     unit2Photos: Array<{ url: string; label?: string }>;
     unit1SourceUrl: string | null;
     unit2SourceUrl: string | null;
+    unit1Proof: UnitPhotoResolverProof | null;
+    unit2Proof: UnitPhotoResolverProof | null;
     error: string | null;
     attemptCount: number;
     heartbeatAt: number | null;
@@ -27353,6 +27798,18 @@ Return ONLY compact JSON with this exact shape:
           status: item.status,
           phase: item.phase,
           message: item.message,
+          payload: {
+            id: item.id,
+            label: item.label,
+            communityName: item.communityName,
+            streetAddress: item.streetAddress,
+            city: item.city,
+            state: item.state,
+            unit1: item.unit1,
+            unit2: item.unit2,
+            unit1Proof: item.unit1Proof,
+            unit2Proof: item.unit2Proof,
+          },
           unit1Photos: item.unit1Photos,
           unit2Photos: item.unit2Photos,
           unit1SourceUrl: item.unit1SourceUrl,
@@ -27391,6 +27848,8 @@ Return ONLY compact JSON with this exact shape:
         unit2Photos: normalizeComboPhotoFetchPhotos(row.unit2Photos),
         unit1SourceUrl: row.unit1SourceUrl ?? null,
         unit2SourceUrl: row.unit2SourceUrl ?? null,
+        unit1Proof: payload.unit1Proof && typeof payload.unit1Proof === "object" ? payload.unit1Proof as UnitPhotoResolverProof : null,
+        unit2Proof: payload.unit2Proof && typeof payload.unit2Proof === "object" ? payload.unit2Proof as UnitPhotoResolverProof : null,
         error: row.error ?? null,
         attemptCount: row.attemptCount ?? 0,
         heartbeatAt: toQueueMs(row.heartbeatAt),
@@ -27475,15 +27934,6 @@ Return ONLY compact JSON with this exact shape:
     })),
   });
   const comboPhotoBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
-  const listingKeyForComboPhotoJob = (raw: string | null | undefined): string => {
-    if (!raw) return "";
-    try {
-      const u = new URL(raw);
-      return `${u.hostname.replace(/^www\./i, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase()}`;
-    } catch {
-      return String(raw).trim().toLowerCase().replace(/[?#].*$/, "").replace(/\/+$/, "");
-    }
-  };
   const photoSetLooksSameForComboPhotoJob = (
     a: Array<{ url: string }>,
     b: Array<{ url: string }>,
@@ -27492,6 +27942,26 @@ Return ONLY compact JSON with this exact shape:
     const keys = new Set(a.map((p) => p.url.replace(/[?#].*$/, "").toLowerCase()));
     const overlap = b.filter((p) => keys.has(p.url.replace(/[?#].*$/, "").toLowerCase())).length;
     return overlap / Math.min(a.length, b.length) >= 0.8;
+  };
+  const normalizeUnitPhotoProofFromFetchResponse = (
+    data: any,
+    photos: Array<{ url: string; label?: string }>,
+    sourceUrl: string | null,
+    body: Record<string, unknown>,
+    relaxedSearch: boolean,
+  ): UnitPhotoResolverProof => {
+    const proof = buildUnitPhotoResolverProof({
+      photos,
+      sourceUrl,
+      foundVia: typeof data?.foundVia === "string" ? data.foundVia : null,
+      requestedBedrooms: body.bedrooms === "any" ? null : Number(body.bedrooms),
+      minimumBedrooms: body.minBedrooms === undefined ? null : Number(body.minBedrooms),
+      facts: data?.facts && typeof data.facts === "object" ? data.facts : null,
+      representativeFallback: data?.representativeFallback === true,
+      reusedConfiguredSource: data?.reusedConfiguredSource === true,
+      relaxedSearch,
+    });
+    return proof;
   };
   const fetchComboPhotoJson = async (url: string, body: unknown, options: { abortKey?: string; signal?: AbortSignal; timeoutMs?: number } = {}) => {
     const controller = new AbortController();
@@ -27530,7 +28000,7 @@ Return ONLY compact JSON with this exact shape:
     unit: ComboPhotoFetchUnit | undefined,
     skipUrls: string[] = [],
     bedroomOverride?: number | "any",
-  ) => unit?.url
+  ): Record<string, unknown> => unit?.url
     ? { url: unit.url, bedrooms: unit.bedrooms ?? undefined }
     : {
         communityName: item.communityName,
@@ -27553,17 +28023,23 @@ Return ONLY compact JSON with this exact shape:
     abortKey?: string,
     signal?: AbortSignal,
     onOtaCheck?: (message: string) => void | Promise<void>,
-  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean }> => {
+  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean; proof: UnitPhotoResolverProof }> => {
     const seenUrls = new Set(blockedUrls.filter(Boolean));
     const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
       { relaxed: false },
       { bedroomOverride: "any", relaxed: true },
     ];
     const apiKey = process.env.SEARCHAPI_API_KEY;
-    let best: { photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean } = {
+    let best: {
+      photos: Array<{ url: string; label?: string }>;
+      sourceUrl: string | null;
+      relaxed: boolean;
+      proof: UnitPhotoResolverProof;
+    } = {
       photos: [],
       sourceUrl: null,
       relaxed: false,
+      proof: buildUnitPhotoResolverProof({ photos: [], sourceUrl: null, requestedBedrooms: unit?.bedrooms ?? null }),
     };
     const maxOtaAttempts = unit?.url ? 1 : MAX_COMBO_PHOTO_OTA_ATTEMPTS;
     let otaSkips = 0;
@@ -27572,10 +28048,11 @@ Return ONLY compact JSON with this exact shape:
       for (const attempt of attempts) {
         if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
         let data: any;
+        const body = buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride);
         try {
           data = await fetchComboPhotoJson(
             `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
-            buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
+            body,
             { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 75_000 },
           );
         } catch (error: any) {
@@ -27585,15 +28062,16 @@ Return ONLY compact JSON with this exact shape:
         }
         const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
         const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
-        const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKeyForComboPhotoJob(u) === listingKeyForComboPhotoJob(sourceUrl));
+        const proof = normalizeUnitPhotoProofFromFetchResponse(data, photos, sourceUrl, body, attempt.relaxed);
+        const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => canonicalListingKey(u) === canonicalListingKey(sourceUrl));
         const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(avoidPhotos, photos);
         if (photos.length > best.photos.length && !duplicateSource && !duplicatePhotos) {
-          best = { photos, sourceUrl, relaxed: attempt.relaxed };
+          best = { photos, sourceUrl, relaxed: attempt.relaxed, proof };
         }
         if (sourceUrl) seenUrls.add(sourceUrl);
-        if (photos.length < 3 || duplicateSource || duplicatePhotos) continue;
+        if (proof.status === "rejected" || duplicateSource || duplicatePhotos) continue;
         if (!apiKey) {
-          return { photos, sourceUrl, relaxed: attempt.relaxed };
+          return { photos, sourceUrl, relaxed: attempt.relaxed, proof };
         }
         const addressGuess =
           parseListingAddressFromUrl(sourceUrl || "") ||
@@ -27603,11 +28081,11 @@ Return ONLY compact JSON with this exact shape:
           apiKey,
           photos.map((p) => p.url),
           addressGuess,
-          item.city,
-          item.state,
+          item.city ?? "",
+          item.state ?? "",
         );
         if (preflight.qualifies) {
-          return { photos, sourceUrl, relaxed: attempt.relaxed };
+          return { photos, sourceUrl, relaxed: attempt.relaxed, proof };
         }
         const listed = preflight.listedOn.length > 0 ? preflight.listedOn.join(", ") : "OTA";
         console.warn(
@@ -27669,14 +28147,17 @@ Return ONLY compact JSON with this exact shape:
     };
     let firstPhotos: Array<{ url: string; label?: string }> = [];
     let firstSourceUrl: string | null = null;
+    let firstProof: UnitPhotoResolverProof | null = null;
     if (canComboPhotoFetchUnit(item, item.unit1)) {
       const first = await runWithHeartbeat("Searching for Unit A photos", () =>
         fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal, otaProgress),
       );
       firstPhotos = first.photos;
       firstSourceUrl = first.sourceUrl;
+      firstProof = first.proof;
       item.unit1Photos = firstPhotos;
       item.unit1SourceUrl = firstSourceUrl;
+      item.unit1Proof = firstProof;
       item.message = `Unit A photos fetched (${firstPhotos.length})`;
       await persistProgress();
     }
@@ -27695,6 +28176,14 @@ Return ONLY compact JSON with this exact shape:
       }
       item.unit2Photos = secondPhotos;
       item.unit2SourceUrl = second.sourceUrl;
+      item.unit2Proof = second.photos.length === secondPhotos.length
+        ? second.proof
+        : buildUnitPhotoResolverProof({
+            photos: secondPhotos,
+            sourceUrl: second.sourceUrl,
+            requestedBedrooms: item.unit2?.bedrooms ?? null,
+            relaxedSearch: second.relaxed,
+          });
       item.message = `Unit B photos fetched (${secondPhotos.length})`;
       if (second.relaxed) item.message = `${item.message}; broader same-community search was used`;
       await persistProgress();
@@ -27702,11 +28191,35 @@ Return ONLY compact JSON with this exact shape:
 
     item.phase = "done";
     const total = item.unit1Photos.length + item.unit2Photos.length;
-    if (item.unit1Photos.length < 3 || item.unit2Photos.length < 3) {
-      item.error = "Photo discovery completed, but one or both units had fewer than 3 independent photos.";
+    const proofFailures: string[] = [];
+    if (!item.unit1Proof || item.unit1Proof.status === "rejected") {
+      proofFailures.push(summarizeUnitPhotoProof("Unit A", item.unit1Proof ?? buildUnitPhotoResolverProof({
+        photos: item.unit1Photos,
+        sourceUrl: item.unit1SourceUrl,
+        requestedBedrooms: item.unit1?.bedrooms ?? null,
+      })));
+    }
+    if (!item.unit2Proof || item.unit2Proof.status === "rejected") {
+      proofFailures.push(summarizeUnitPhotoProof("Unit B", item.unit2Proof ?? buildUnitPhotoResolverProof({
+        photos: item.unit2Photos,
+        sourceUrl: item.unit2SourceUrl,
+        requestedBedrooms: item.unit2?.bedrooms ?? null,
+      })));
+    }
+    if (item.unit1Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS || item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
+      proofFailures.push(`one or both units had fewer than ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos`);
+    }
+    if (item.unit1Proof && item.unit2Proof) {
+      const comparison = compareUnitPhotoProofs(item.unit1Proof, item.unit2Proof);
+      if (comparison.duplicate) {
+        proofFailures.push(`Unit A and Unit B are not independent (${comparison.issues.join(", ") || "duplicate-photo-overlap"}; overlap ${comparison.overlapCount}, ratio ${comparison.overlapRatio.toFixed(2)})`);
+      }
     }
     item.message = total > 0 ? `${total} photos fetched` : "No photos were found";
     await persistProgress();
+    if (proofFailures.length > 0) {
+      throw new Error(`Photo discovery failed proof checks: ${proofFailures.join(" | ")}`);
+    }
   };
   const runComboPhotoFetchJob = async (jobId: string) => {
     if (activeComboPhotoFetchJobIds.has(jobId)) return;
@@ -27747,7 +28260,12 @@ Return ONLY compact JSON with this exact shape:
             item.status = "completed";
             await queueEvent("combo-photo-fetch", job.id, item.phase, "Photo fetch item completed", {
               itemKey: item.id,
-              meta: { unit1Photos: item.unit1Photos.length, unit2Photos: item.unit2Photos.length },
+              meta: {
+                unit1Photos: item.unit1Photos.length,
+                unit2Photos: item.unit2Photos.length,
+                unit1Proof: item.unit1Proof,
+                unit2Proof: item.unit2Proof,
+              },
             });
           } catch (e: any) {
             if (e?.cancelled || job.cancelRequested) {
@@ -27764,7 +28282,11 @@ Return ONLY compact JSON with this exact shape:
             await queueEvent("combo-photo-fetch", job.id, item.phase, item.message, {
               itemKey: item.id,
               level: item.status === "failed" ? "error" : "warn",
-              meta: { error: e?.message ?? String(e) },
+              meta: {
+                error: e?.message ?? String(e),
+                unit1Proof: item.unit1Proof,
+                unit2Proof: item.unit2Proof,
+              },
             });
           } finally {
             item.finishedAt = Date.now();
@@ -27823,6 +28345,8 @@ Return ONLY compact JSON with this exact shape:
       unit2Photos: [],
       unit1SourceUrl: null,
       unit2SourceUrl: null,
+      unit1Proof: null,
+      unit2Proof: null,
       error: null,
       attemptCount: 0,
       heartbeatAt: null,
@@ -28266,6 +28790,7 @@ Return ONLY compact JSON with this exact shape:
   const activeBulkComboListingJobIds = new Set<string>();
   const BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS = 3;
   const BULK_COMBO_LISTING_STALE_MS = 5 * 60 * 1000;
+  const BULK_COMBO_LISTING_RESUME_INTERVAL_MS = 60 * 1000;
   const BULK_COMBO_LISTING_RETRY_BACKOFF_MS = [15_000, 45_000];
   const BULK_COMBO_LISTING_STEP_TIMEOUTS_MS: Record<string, number> = {
     photos: 12 * 60 * 1000,
@@ -28609,11 +29134,11 @@ Return ONLY compact JSON with this exact shape:
     return (draft1Beds === unit1Beds && draft2Beds === unit2Beds) || (draft1Beds === unit2Beds && draft2Beds === unit1Beds);
   };
   const draftSourcesMatchBulkComboItem = (draft: any, item: BulkComboListingItem) => {
-    const item1 = listingKeyForComboPhotoJob(item.unit1SourceUrl);
-    const item2 = listingKeyForComboPhotoJob(item.unit2SourceUrl);
+    const item1 = canonicalListingKey(item.unit1SourceUrl);
+    const item2 = canonicalListingKey(item.unit2SourceUrl);
     if (!item1 || !item2) return false;
-    const draft1 = listingKeyForComboPhotoJob(draft?.unit1Url);
-    const draft2 = listingKeyForComboPhotoJob(draft?.unit2Url);
+    const draft1 = canonicalListingKey(draft?.unit1Url);
+    const draft2 = canonicalListingKey(draft?.unit2Url);
     return (draft1 === item1 && draft2 === item2) || (draft1 === item2 && draft2 === item1);
   };
   const findExistingBulkComboDraftId = async (
@@ -28704,6 +29229,8 @@ Return ONLY compact JSON with this exact shape:
       unit2Photos: [],
       unit1SourceUrl: null,
       unit2SourceUrl: null,
+      unit1Proof: null,
+      unit2Proof: null,
       error: null,
       attemptCount: 0,
       heartbeatAt: null,
@@ -28718,16 +29245,32 @@ Return ONLY compact JSON with this exact shape:
     await persistBulkComboListingSnapshot(job);
     const abortKey = `bulk-combo-listing:${job.id}`;
     await runBulkComboListingStep(job, item, "photos", "Fetching unit photos", async () => {
-      await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
-        item.unit1Photos = updatedPhotoItem.unit1Photos;
-        item.unit2Photos = updatedPhotoItem.unit2Photos;
-        item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
-        item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
-        item.message = updatedPhotoItem.message || item.message;
-        item.heartbeatAt = Date.now();
-        job.updatedAt = Date.now();
-        await persistBulkComboListingSnapshot(job);
-      }, abortKey);
+      try {
+        await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
+          item.unit1Photos = updatedPhotoItem.unit1Photos;
+          item.unit2Photos = updatedPhotoItem.unit2Photos;
+          item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
+          item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
+          item.message = updatedPhotoItem.message || item.message;
+          item.heartbeatAt = Date.now();
+          job.updatedAt = Date.now();
+          await persistBulkComboListingSnapshot(job);
+        }, abortKey);
+      } catch (e: any) {
+        if (job.cancelRequested || e?.cancelled || isBulkComboListingTimeout(e)) throw e;
+        const message = e?.message ?? String(e);
+        if (!/Photo discovery failed proof checks|No photos were found|no-unit-photo-source|missing-source-url/i.test(message)) throw e;
+        item.unit1Photos = photoItem.unit1Photos;
+        item.unit2Photos = photoItem.unit2Photos;
+        item.unit1SourceUrl = photoItem.unit1SourceUrl;
+        item.unit2SourceUrl = photoItem.unit2SourceUrl;
+        item.message = "Photo discovery needs manual review; continuing draft save";
+        await queueEvent("bulk-combo-listing", job.id, "photos-review", item.message, {
+          itemKey: item.id,
+          level: "warn",
+          meta: { error: message },
+        });
+      }
     });
     item.unit1Photos = photoItem.unit1Photos;
     item.unit2Photos = photoItem.unit2Photos;
@@ -29303,6 +29846,8 @@ Return ONLY compact JSON with this exact shape:
         .orderBy(asc(bulkComboListingJobRows.createdAt))
         .limit(5);
       for (const row of rows) {
+        const job = await loadBulkComboListingJob(row.id);
+        await recoverStaleBulkComboListingJob(job, "resume-sweep");
         if (!activeBulkComboListingJobIds.has(row.id)) void runBulkComboListingJob(row.id);
       }
       if (rows.length > 0) console.log(`[bulk-combo-listings] resumed ${rows.length} queued/running DB job(s)`);
@@ -29311,6 +29856,7 @@ Return ONLY compact JSON with this exact shape:
     }
   };
   setTimeout(() => void resumeBulkComboListingJobs(), 2_500).unref?.();
+  setInterval(() => void resumeBulkComboListingJobs(), BULK_COMBO_LISTING_RESUME_INTERVAL_MS).unref?.();
 
   const resumeBulkPricingJobs = async () => {
     try {
@@ -29442,6 +29988,7 @@ Return ONLY compact JSON with this exact shape:
       : Number.isFinite(Number(bedrooms)) && Number(bedrooms) > 0
         ? Math.round(Number(bedrooms))
         : null;
+    const relaxedBedroomDiscovery = !listingUrl && bedrooms === "any";
     const minimumBedrooms = Number.isFinite(Number(minBedrooms)) && Number(minBedrooms) > 0
       ? Math.round(Number(minBedrooms))
       : null;
@@ -29493,6 +30040,8 @@ Return ONLY compact JSON with this exact shape:
       const seen = new Set<string>();
       const harvestRootCounts = new Map<string, number>();
       const suppliedStreetRoot = streetRootFromListingAddress(streetAddress ?? null);
+      const listingStreetRoot = (url: string) =>
+        streetRootFromListingAddress(parseListingAddressFromUrl(url));
       if (suppliedStreetRoot) harvestRootCounts.set(suppliedStreetRoot, 2);
       const rememberRoot = (link: string, title = "", snippet = "") => {
         const root = streetRootFromListingAddress(
@@ -29631,8 +30180,11 @@ Return ONLY compact JSON with this exact shape:
             ? new Set([suppliedStreetRoot])
             : roots;
           for (const link of zillowApifyUrls) {
-            if (isBoundedDiscovery && suppliedStreetRoot) addCandidate(link, "zillow");
-            else addCandidate(link, "zillow", "", "", roots);
+            if (isBoundedDiscovery && suppliedStreetRoot) {
+              if (listingStreetRoot(link) === suppliedStreetRoot) addCandidate(link, "zillow");
+            } else {
+              addCandidate(link, "zillow", "", "", roots);
+            }
           }
           for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", apifyRealtorRoots);
           console.log(
@@ -29652,8 +30204,6 @@ Return ONLY compact JSON with this exact shape:
       // Prefer Zillow/Realtor (reliable photo scrapers). Redfin often returns
       // 0 photos on Railway and should not consume bounded preflight attempts.
       const canonicalStreetRoot = suppliedStreetRoot;
-      const listingStreetRoot = (url: string) =>
-        streetRootFromListingAddress(parseListingAddressFromUrl(url));
       const photoScrapeSourcePriority: Record<DiscoverySource, number> = {
         zillow: 0,
         realtor: 1,
@@ -29677,6 +30227,14 @@ Return ONLY compact JSON with this exact shape:
           if (onStreet.length > 0) orderedCandidates = [...onStreet, ...offStreet];
         }
       }
+      const knownPhotoSourceUrl = COMMUNITY_SOURCE_URLS[communityName]?.primary;
+      if (knownPhotoSourceUrl && !skipSet.has(listingKey(knownPhotoSourceUrl))) {
+        const knownKey = listingKey(knownPhotoSourceUrl);
+        orderedCandidates = [
+          { url: knownPhotoSourceUrl, source: "zillow" as DiscoverySource },
+          ...orderedCandidates.filter((candidate) => listingKey(candidate.url) !== knownKey),
+        ];
+      }
 
       const offset = Math.max(0, Math.min(10, Number(skipFirst ?? 0) || 0));
       const candidatesToTry = candidateLimit
@@ -29692,6 +30250,34 @@ Return ONLY compact JSON with this exact shape:
         );
       }
       const triedCandidateUrls: string[] = [];
+      const configuredPhotoSourceUrl = COMMUNITY_SOURCE_URLS[communityName]?.primary;
+      const configuredPhotoSourceKey = configuredPhotoSourceUrl ? listingKey(configuredPhotoSourceUrl) : null;
+      let bestRepresentativeFallback: {
+        candidate: { url: string; source: DiscoverySource };
+        photos: ScrapedPhoto[];
+        facts: ListingFacts;
+        scrapedBedrooms: number;
+      } | null = null;
+      const considerRepresentativeFallback = (
+        candidate: { url: string; source: DiscoverySource },
+        photos: ScrapedPhoto[],
+        facts: ListingFacts,
+      ) => {
+        const scrapedBedrooms = facts.bedrooms ?? null;
+        const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
+        if (!requestedBedrooms || requestedBedrooms < 3) return;
+        if (scrapedBedrooms === null || scrapedBedrooms >= requestedBedrooms) return;
+        if (!isConfiguredPhotoSource && scrapedBedrooms < 2) return;
+        if (photos.length === 0) return;
+        if (
+          bestRepresentativeFallback &&
+          bestRepresentativeFallback.scrapedBedrooms >= scrapedBedrooms &&
+          bestRepresentativeFallback.photos.length >= photos.length
+        ) {
+          return;
+        }
+        bestRepresentativeFallback = { candidate, photos, facts: { ...facts }, scrapedBedrooms };
+      };
       for (const candidate of candidatesToTry) {
         if (discoveryWallBudgetMs !== null && discoveryElapsedMs() >= discoveryWallBudgetMs) {
           console.warn(
@@ -29700,8 +30286,17 @@ Return ONLY compact JSON with this exact shape:
           );
           break;
         }
-        const facts: ListingFacts = {};
         triedCandidateUrls.push(candidate.url);
+        const candidateStreetRoot = listingStreetRoot(candidate.url);
+        const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
+        if (isBoundedDiscovery && canonicalStreetRoot && candidateStreetRoot !== canonicalStreetRoot && !isConfiguredPhotoSource) {
+          console.warn(
+            `[fetch-unit-photos] skipping ${candidate.url}: location root ${candidateStreetRoot ?? "none"} ` +
+            `does not match requested ${canonicalStreetRoot}`,
+          );
+          continue;
+        }
+        const facts: ListingFacts = {};
         try {
           const remainingBudgetMs = discoveryWallBudgetMs === null
             ? null
@@ -29717,6 +30312,7 @@ Return ONLY compact JSON with this exact shape:
           }
           const scrapedBR = facts.bedrooms ?? null;
           if (requestedBedrooms && scrapedBR !== null && scrapedBR !== requestedBedrooms) {
+            considerRepresentativeFallback(candidate, photos, facts);
             console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
             continue;
           }
@@ -29729,15 +30325,125 @@ Return ONLY compact JSON with this exact shape:
             `source=${candidate.source} photos=${photos.length} url=${candidate.url} ` +
             `elapsedMs=${Date.now() - startedAt}`,
           );
+          const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+          const resolverProof = buildUnitPhotoResolverProof({
+            photos: responsePhotos,
+            sourceUrl: candidate.url,
+            foundVia: "search",
+            requestedBedrooms,
+            minimumBedrooms,
+            facts,
+            relaxedSearch: relaxedBedroomDiscovery,
+          });
           res.json({
-            photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+            photos: responsePhotos,
             sourceUrl: candidate.url,
             foundVia: "search",
             facts,
+            resolverProof,
+            diagnostic: {
+              code: resolverProof.status === "accepted" ? "unit-photo-proof-accepted" : "unit-photo-proof-review",
+              triedCandidateUrls,
+              resolverProof,
+            },
           });
           return;
         } catch (e: any) {
           console.warn(`[fetch-unit-photos] candidate scrape failed for ${candidate.url}: ${e.message}`);
+        }
+      }
+
+      const representativeFallback = bestRepresentativeFallback as {
+        candidate: { url: string; source: DiscoverySource };
+        photos: ScrapedPhoto[];
+        facts: ListingFacts;
+        scrapedBedrooms: number;
+      } | null;
+      if (representativeFallback) {
+        const { candidate, photos, facts, scrapedBedrooms } = representativeFallback;
+        const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
+        console.log(
+          `[fetch-unit-photos] representative fallback community="${communityName ?? ""}" ` +
+          `requestedBR=${requestedBedrooms} scrapedBR=${scrapedBedrooms} photos=${photos.length} ` +
+          `source=${candidate.source} url=${candidate.url} elapsedMs=${Date.now() - startedAt}`,
+        );
+        const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+        const resolverProof = buildUnitPhotoResolverProof({
+          photos: responsePhotos,
+          sourceUrl: candidate.url,
+          foundVia: "search",
+          requestedBedrooms,
+          minimumBedrooms,
+          facts,
+          representativeFallback: true,
+          relaxedSearch: relaxedBedroomDiscovery,
+        });
+        res.json({
+          photos: responsePhotos,
+          sourceUrl: candidate.url,
+          foundVia: "search",
+          facts,
+          representativeFallback: true,
+          resolverProof,
+          diagnostic: {
+            code: "representative-photo-proof",
+            triedCandidateUrls,
+            resolverProof,
+          },
+          note: isConfiguredPhotoSource
+            ? `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved the configured property photo gallery for representative photos.`
+            : `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved a representative ${scrapedBedrooms}BR photo source from the same property.`,
+        });
+        return;
+      }
+
+      if (
+        configuredPhotoSourceUrl &&
+        configuredPhotoSourceKey &&
+        skipSet.has(configuredPhotoSourceKey) &&
+        requestedBedrooms &&
+        requestedBedrooms >= 3
+      ) {
+        const facts: ListingFacts = {};
+        try {
+          const photos = await scrapeListingPhotos(configuredPhotoSourceUrl, undefined, facts, SCRAPE_WITHOUT_SIDECAR);
+          if (photos.length > 0) {
+            console.log(
+              `[fetch-unit-photos] reused configured representative source community="${communityName ?? ""}" ` +
+              `requestedBR=${requestedBedrooms} photos=${photos.length} url=${configuredPhotoSourceUrl} ` +
+              `elapsedMs=${Date.now() - startedAt}`,
+            );
+            const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+            const resolverProof = buildUnitPhotoResolverProof({
+              photos: responsePhotos,
+              sourceUrl: configuredPhotoSourceUrl,
+              foundVia: "search",
+              requestedBedrooms,
+              minimumBedrooms,
+              facts,
+              representativeFallback: true,
+              reusedConfiguredSource: true,
+              relaxedSearch: relaxedBedroomDiscovery,
+            });
+            res.json({
+              photos: responsePhotos,
+              sourceUrl: configuredPhotoSourceUrl,
+              foundVia: "search",
+              facts,
+              representativeFallback: true,
+              reusedConfiguredSource: true,
+              resolverProof,
+              diagnostic: {
+                code: "configured-representative-photo-proof",
+                triedCandidateUrls,
+                resolverProof,
+              },
+              note: `No distinct exact ${requestedBedrooms}BR listing was found for "${communityName}", so this reused the configured property photo gallery for representative photos.`,
+            });
+            return;
+          }
+        } catch (e: any) {
+          console.warn(`[fetch-unit-photos] configured representative source failed for ${configuredPhotoSourceUrl}: ${e.message}`);
         }
       }
 
@@ -29748,11 +30454,27 @@ Return ONLY compact JSON with this exact shape:
           `[fetch-unit-photos] no-match community="${communityName ?? ""}" ` +
           `candidates=${candidatesToTry.length} elapsedMs=${Date.now() - startedAt}`,
         );
+        const resolverProof = buildUnitPhotoResolverProof({
+          photos: [],
+          sourceUrl: null,
+          foundVia: "search",
+          requestedBedrooms,
+          minimumBedrooms,
+          relaxedSearch: relaxedBedroomDiscovery,
+        });
         return res.json({
           photos: [],
           sourceUrl: null,
           foundVia: "search",
           triedCandidateUrls,
+          resolverProof,
+          diagnostic: {
+            code: "no-unit-photo-source",
+            triedCandidateUrls,
+            uncheckedCandidateUrls: candidatesToTry.slice(triedCandidateUrls.length).map((candidate) => candidate.url),
+            resolverProof,
+            selfFix: resolverProof.selfFix,
+          },
           note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${triedCandidateUrls.length} candidate${triedCandidateUrls.length === 1 ? "" : "s"}.`,
         });
       }
@@ -29768,17 +30490,35 @@ Return ONLY compact JSON with this exact shape:
       const facts: ListingFacts = {};
       const photos = await scrapeListingPhotos(listingUrl, undefined, facts, SCRAPE_WITHOUT_SIDECAR);
       const scrapedBR = facts.bedrooms ?? null;
+      const bedroomMismatch = scrapedBR !== null && (
+        requestedBedrooms ? scrapedBR !== requestedBedrooms : !!minimumBedrooms && scrapedBR < minimumBedrooms
+      );
       const expectedBedrooms = requestedBedrooms ?? minimumBedrooms;
-      if (expectedBedrooms && scrapedBR !== null && scrapedBR !== expectedBedrooms) {
+      if (expectedBedrooms && bedroomMismatch) {
         console.log(
           `[fetch-unit-photos] direct mismatch url=${listingUrl} ` +
           `scrapedBR=${scrapedBR} expectedBR=${expectedBedrooms} elapsedMs=${Date.now() - startedAt}`,
         );
+        const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+        const resolverProof = buildUnitPhotoResolverProof({
+          photos: responsePhotos,
+          sourceUrl: listingUrl,
+          foundVia,
+          requestedBedrooms,
+          minimumBedrooms,
+          facts,
+        });
         return res.json({
           photos: [],
           sourceUrl: null,
           foundVia,
           facts,
+          resolverProof,
+          diagnostic: {
+            code: "bedroom-mismatch",
+            resolverProof,
+            selfFix: resolverProof.selfFix,
+          },
           note: `Listing has ${scrapedBR}BR, but ${expectedBedrooms}BR was requested.`,
         });
       }
@@ -29786,15 +30526,35 @@ Return ONLY compact JSON with this exact shape:
         `[fetch-unit-photos] direct success url=${listingUrl} ` +
         `photos=${photos.length} elapsedMs=${Date.now() - startedAt}`,
       );
+      const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+      const resolverProof = buildUnitPhotoResolverProof({
+        photos: responsePhotos,
+        sourceUrl: listingUrl,
+        foundVia,
+        requestedBedrooms,
+        minimumBedrooms,
+        facts,
+      });
       res.json({
-        photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+        photos: responsePhotos,
         sourceUrl: listingUrl,
         foundVia,
         facts,
+        resolverProof,
+        diagnostic: {
+          code: resolverProof.status === "accepted" ? "unit-photo-proof-accepted" : "unit-photo-proof-review",
+          resolverProof,
+        },
       });
     } catch (e: any) {
       console.warn(`[fetch-unit-photos] failed elapsedMs=${Date.now() - startedAt}: ${e.message}`);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({
+        error: e.message,
+        diagnostic: {
+          code: "unit-photo-fetch-error",
+          selfFix: ["retry the same source once, then continue with the next real-estate candidate"],
+        },
+      });
     }
   });
 
@@ -33668,18 +34428,82 @@ Return ONLY compact JSON with this exact shape:
     const unit2Urls = Array.isArray(body.unit2Photos) ? body.unit2Photos.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)) : [];
     const unit1SourceUrl = typeof body.unit1SourceUrl === "string" && /^https?:\/\//i.test(body.unit1SourceUrl) ? body.unit1SourceUrl : null;
     const unit2SourceUrl = typeof body.unit2SourceUrl === "string" && /^https?:\/\//i.test(body.unit2SourceUrl) ? body.unit2SourceUrl : null;
-    const photoKey = (u: string) => u.replace(/[?#].*$/, "").toLowerCase();
+    const unit1Proof = buildUnitPhotoResolverProof({
+      photos: unit1Urls.map((url) => ({ url })),
+      sourceUrl: unit1SourceUrl,
+      foundVia: "persist-photos",
+    });
+    const unit2Proof = buildUnitPhotoResolverProof({
+      photos: unit2Urls.map((url) => ({ url })),
+      sourceUrl: unit2SourceUrl,
+      foundVia: "persist-photos",
+    });
+    const PHOTOS_BASE = path.join(process.cwd(), "client/public/photos");
+    const readPersistedUnitProof = async (folder: string | null | undefined): Promise<UnitPhotoResolverProof | null> => {
+      if (!folder || !/^[a-zA-Z0-9_-]+$/.test(folder)) return null;
+      try {
+        const sourcePath = path.join(PHOTOS_BASE, folder, "_source.json");
+        const sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8"));
+        const proof = sourceDoc?.unitPhotoResolverProof;
+        return proof && typeof proof === "object" ? proof as UnitPhotoResolverProof : null;
+      } catch {
+        return null;
+      }
+    };
+    const duplicatePersistResponse = (
+      unitLabel: "Unit A" | "Unit B",
+      unitProof: UnitPhotoResolverProof,
+      siblingLabel: "Unit A" | "Unit B",
+      siblingProof: UnitPhotoResolverProof,
+    ) => {
+      const comparison = compareUnitPhotoProofs(unitProof, siblingProof);
+      if (!comparison.duplicate) return false;
+      res.status(409).json({
+        error: `${unitLabel} photo set duplicates ${siblingLabel}'s existing photo source. Pick a different photo source before saving.`,
+        diagnostic: {
+          comparison,
+          unitProof,
+          siblingProof,
+          selfFix: [`retry ${unitLabel} with ${siblingLabel}'s source URL blocked and continue candidate search until the overlap is below the duplicate threshold`],
+        },
+      });
+      return true;
+    };
     if (unit1Urls.length > 0 && unit2Urls.length > 0) {
-      const unit1Set = new Set(unit1Urls.map(photoKey));
-      const overlap = unit2Urls.filter((u) => unit1Set.has(photoKey(u))).length;
-      if (overlap / Math.min(unit1Urls.length, unit2Urls.length) >= 0.8) {
+      if (unit1Proof.status === "rejected" || unit2Proof.status === "rejected") {
+        return res.status(409).json({
+          error: "One or both unit photo sets do not have enough independent source proof to save.",
+          diagnostic: {
+            unit1Proof,
+            unit2Proof,
+            selfFix: Array.from(new Set([...unit1Proof.selfFix, ...unit2Proof.selfFix])),
+          },
+        });
+      }
+      const comparison = compareUnitPhotoProofs(unit1Proof, unit2Proof);
+      if (comparison.duplicate) {
         return res.status(409).json({
           error: "Unit A and Unit B photo sets are identical. Pick a different photo source before saving.",
+          diagnostic: {
+            comparison,
+            unit1Proof,
+            unit2Proof,
+            selfFix: ["retry Unit B with Unit A's source URL blocked and continue candidate search until the overlap is below the duplicate threshold"],
+          },
         });
       }
     }
+    if (unit1Urls.length > 0 && unit2Urls.length === 0) {
+      const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
+      const siblingProof = await readPersistedUnitProof(draft?.unit2PhotoFolder);
+      if (siblingProof && duplicatePersistResponse("Unit A", unit1Proof, "Unit B", siblingProof)) return;
+    }
+    if (unit2Urls.length > 0 && unit1Urls.length === 0) {
+      const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
+      const siblingProof = await readPersistedUnitProof(draft?.unit1PhotoFolder);
+      if (siblingProof && duplicatePersistResponse("Unit B", unit2Proof, "Unit A", siblingProof)) return;
+    }
 
-    const PHOTOS_BASE = path.join(process.cwd(), "client/public/photos");
     const MAX_PER_UNIT = 25;
 
     const downloadOne = async (url: string, folderPath: string, idx: number): Promise<boolean> => {
@@ -33709,7 +34533,13 @@ Return ONLY compact JSON with this exact shape:
               : /airbnb\.com/i.test(sourceUrl) ? "airbnb"
                 : "other";
 
-    const persistUnit = async (urls: string[], folder: string, sourceUrl: string | null, unitLabel: string): Promise<{ folder: string; saved: number } | null> => {
+    const persistUnit = async (
+      urls: string[],
+      folder: string,
+      sourceUrl: string | null,
+      unitLabel: string,
+      resolverProof: UnitPhotoResolverProof,
+    ): Promise<{ folder: string; saved: number } | null> => {
       if (urls.length === 0) return null;
       const folderPath = path.join(PHOTOS_BASE, folder);
       // Wipe any prior contents so re-saving doesn't accumulate.
@@ -33728,6 +34558,10 @@ Return ONLY compact JSON with this exact shape:
             source: "add-community-draft",
           },
           unitLabel,
+          unitPhotoResolverProof: {
+            ...resolverProof,
+            savedPhotoCount: saved,
+          },
         }, null, 2));
       }
       return { folder, saved };
@@ -33735,8 +34569,8 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       const [u1, u2] = await Promise.all([
-        persistUnit(unit1Urls, `draft-${draftId}-unit-a`, unit1SourceUrl, "Unit A"),
-        persistUnit(unit2Urls, `draft-${draftId}-unit-b`, unit2SourceUrl, "Unit B"),
+        persistUnit(unit1Urls, `draft-${draftId}-unit-a`, unit1SourceUrl, "Unit A", unit1Proof),
+        persistUnit(unit2Urls, `draft-${draftId}-unit-b`, unit2SourceUrl, "Unit B", unit2Proof),
       ]);
       const update: Record<string, string | null> = {};
       if (u1) {

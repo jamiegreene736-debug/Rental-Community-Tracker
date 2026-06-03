@@ -296,8 +296,49 @@ type AlternativeScoutSample = {
   url: string;
   image?: string;
   totalPrice?: number | null;
+  nightlyPrice?: number | null;
   sourceLabel?: string;
   bedrooms?: number;
+  proof?: DirectBookingProof;
+};
+
+type DirectBookingProof = {
+  verdict: "same_unit_direct_page" | "direct_price_available" | "direct_unavailable" | "needs_review";
+  summary: string;
+  sameUnit: {
+    status: "passed" | "not_checked";
+    method: string;
+    matchedPhotoCount?: number;
+    minConfidence?: number;
+    maxConfidence?: number;
+    requiredPhotoCount?: number;
+    requiredConfidence?: number;
+    matchedPhotoRoles?: string[];
+    reason: string;
+  };
+  directPage: {
+    status: "passed" | "needs_review";
+    method: string;
+    url?: string;
+    domain?: string;
+    reason: string;
+  };
+  availability: {
+    status: "date_specific_available" | "date_specific_unavailable" | "unclear" | "not_checked";
+    method: string;
+    checkIn?: string;
+    checkOut?: string;
+    finalUrl?: string;
+    reason: string;
+  };
+  price: {
+    status: "date_specific_quote" | "airbnb_anchor_only" | "unavailable" | "unclear" | "not_checked";
+    method: string;
+    totalPrice?: number | null;
+    nightlyPrice?: number | null;
+    currency?: "USD";
+    reason: string;
+  };
 };
 
 type AlternativeScoutDirectMatch = {
@@ -307,6 +348,7 @@ type AlternativeScoutDirectMatch = {
   matchedPhotoCount: number;
   minConfidence: number;
   maxConfidence: number;
+  proof?: DirectBookingProof;
 };
 
 type AlternativeScoutDirectProbe = {
@@ -396,6 +438,7 @@ type AutoFillComboOption = {
     directBookingHost?: string;
     directBookingSource?: "airbnb_image_reverse_search";
     directBookingReason?: string;
+    directProof?: DirectBookingProof;
     alternateUrls?: Array<string | null | undefined>;
     photoMatches?: Array<{ url?: string | null }>;
     identityKeys?: Array<string | null | undefined>;
@@ -424,6 +467,7 @@ type AutoFillComboOption = {
       directBookingHost?: string;
       directBookingSource?: "airbnb_image_reverse_search";
       directBookingReason?: string;
+      directProof?: DirectBookingProof;
       alternateUrls?: Array<string | null | undefined>;
       photoMatches?: Array<{ url?: string | null }>;
       identityKeys?: Array<string | null | undefined>;
@@ -517,6 +561,22 @@ type SidecarQueueRequest = {
   activeSec?: number;
 };
 
+type SidecarLaneOwner = {
+  ownerType: string;
+  ownerId: string;
+  label: string;
+  acquiredAt: number;
+  heartbeatAt: number;
+  leaseExpiresAt: number;
+};
+
+type SidecarLaneWaiter = {
+  ownerType: string;
+  ownerId: string;
+  label: string;
+  enqueuedAt: number;
+};
+
 type SidecarQueueStatus = {
   total: number;
   pending: number;
@@ -542,6 +602,13 @@ type SidecarQueueStatus = {
     updatedAt?: string | null;
   }>;
   searchVariations?: SidecarSearchVariationSummary[];
+  sidecarLane?: {
+    resourceKey?: string;
+    leaseMs?: number;
+    busy: boolean;
+    owner: SidecarLaneOwner | null;
+    waiting: SidecarLaneWaiter[];
+  };
 };
 
 type OtaSearchProviderKey = "airbnb" | "vrbo" | "booking";
@@ -2344,9 +2411,9 @@ function AlternativeBuyInWorkflowPanel({
                             target="_blank"
                             rel="noopener noreferrer"
                             className="block truncate text-emerald-800 underline underline-offset-2"
-                            title={match.title}
+                            title={match.proof?.summary ?? match.title}
                           >
-                            {match.domain} · {match.matchedPhotoCount} interior photos · ≥{Math.round(match.minConfidence * 100)}% match
+                            {match.domain} · {match.matchedPhotoCount} photos · ≥{Math.round(match.minConfidence * 100)}% match · {directProofShortLabel(match.proof)}
                           </a>
                         ))}
                       </div>
@@ -2452,6 +2519,36 @@ function directCandidateFitsTarget(
   return true;
 }
 
+function directProofPrice(proof?: DirectBookingProof): { totalPrice: number; nightlyPrice: number | null } | null {
+  if (!proof || proof.price.status !== "date_specific_quote") return null;
+  const total = Number(proof.price.totalPrice ?? 0);
+  const nightly = Number(proof.price.nightlyPrice ?? 0);
+  if (Number.isFinite(total) && total > 0) {
+    return { totalPrice: total, nightlyPrice: Number.isFinite(nightly) && nightly > 0 ? nightly : null };
+  }
+  if (Number.isFinite(nightly) && nightly > 0) {
+    return { totalPrice: 0, nightlyPrice: nightly };
+  }
+  return null;
+}
+
+function directProofVerifiedStatus(proof?: DirectBookingProof): LiveCandidate["verified"] | undefined {
+  if (!proof) return undefined;
+  if (directProofPrice(proof)?.totalPrice) return "yes";
+  if (proof.availability.status === "date_specific_unavailable") return "no";
+  if (proof.availability.status === "unclear") return "unclear";
+  return undefined;
+}
+
+function directProofShortLabel(proof?: DirectBookingProof): string {
+  if (!proof) return "Direct proof not attached";
+  if (proof.price.status === "date_specific_quote") return "Direct PM price proven";
+  if (proof.availability.status === "date_specific_available") return "Direct PM availability proven";
+  if (proof.availability.status === "date_specific_unavailable") return "Direct PM unavailable";
+  if (proof.verdict === "same_unit_direct_page") return "Same-unit page proven";
+  return "Direct proof needs review";
+}
+
 function comboOptionVisiblePicks(
   option: AutoFillComboOption,
   targetResortName: string,
@@ -2510,6 +2607,10 @@ function activeSidecarCount(status: SidecarQueueStatus | null | undefined): numb
   return Math.max(0, (status?.pending ?? 0) + (status?.inProgress ?? 0));
 }
 
+function sidecarLaneActive(status: SidecarQueueStatus | null | undefined): boolean {
+  return !!status?.sidecarLane?.owner || (status?.sidecarLane?.waiting?.length ?? 0) > 0;
+}
+
 function sidecarNewestRequestMs(status: SidecarQueueStatus | null | undefined): number | null {
   if (!status?.newestRequestAt) return null;
   const ms = Date.parse(status.newestRequestAt);
@@ -2566,8 +2667,21 @@ function sidecarQueueProgressValue(status: SidecarQueueStatus | null | undefined
   const active = activeSidecarCount(status);
   const total = Math.max(1, status.total, status.pending + status.inProgress + status.completed + status.failed);
   const done = Math.max(0, status.completed + status.failed);
+  if (active <= 0 && sidecarLaneActive(status)) return 18;
   if (active <= 0) return done > 0 ? 100 : 12;
   return Math.max(8, Math.min(96, Math.round((done / total) * 100)));
+}
+
+function sidecarLaneSummary(status: SidecarQueueStatus | null | undefined): string {
+  const lane = status?.sidecarLane;
+  if (!lane) return "";
+  if (lane.owner?.label) return `lane held by ${lane.owner.label}`;
+  const waiting = lane.waiting ?? [];
+  if (waiting.length > 0) {
+    const first = waiting[0]?.label || "next scan";
+    return `${waiting.length} waiting for lane${first ? ` · next: ${first}` : ""}`;
+  }
+  return "";
 }
 
 function sidecarOpSummary(status: SidecarQueueStatus | null | undefined): string {
@@ -2659,14 +2773,18 @@ function SidecarQueueProgress({
   const { toast } = useToast();
   const [isStopping, setIsStopping] = useState(false);
   const active = activeSidecarCount(status);
-  if (!forceVisible && active <= 0) return null;
+  const laneActive = sidecarLaneActive(status);
+  if (!forceVisible && active <= 0 && !laneActive) return null;
 
   const total = status ? Math.max(1, status.total, status.pending + status.inProgress + status.completed + status.failed) : 0;
   const opSummary = sidecarOpSummary(status);
+  const laneSummary = sidecarLaneSummary(status);
   const message = status
     ? active > 0
-      ? `${label}: ${status.inProgress} running, ${status.pending} queued, ${status.completed + status.failed}/${total} finished${opSummary ? ` · ${opSummary}` : ""}.`
-      : `${label}: queue idle${status.completed + status.failed > 0 ? ` after ${status.completed + status.failed} finished job${status.completed + status.failed === 1 ? "" : "s"}` : ""}.`
+      ? `${label}: ${status.inProgress} running, ${status.pending} queued, ${status.completed + status.failed}/${total} finished${opSummary ? ` · ${opSummary}` : ""}${laneSummary ? ` · ${laneSummary}` : ""}.`
+      : laneSummary
+        ? `${label}: ${laneSummary}.`
+        : `${label}: queue idle${status.completed + status.failed > 0 ? ` after ${status.completed + status.failed} finished job${status.completed + status.failed === 1 ? "" : "s"}` : ""}.`
     : `${label}: waiting for queue status.`;
 
   const stopSidecar = async () => {
@@ -2697,7 +2815,7 @@ function SidecarQueueProgress({
     <div className={`border border-blue-200 bg-blue-50/70 text-blue-900 rounded-md px-3 py-2 text-[11px] space-y-1.5 ${className}`}>
       <div className="flex items-center justify-between gap-3">
         <span className="inline-flex items-center gap-2">
-          {active > 0 && <RefreshCw className="h-3 w-3 animate-spin shrink-0" />}
+          {(active > 0 || laneActive) && <RefreshCw className="h-3 w-3 animate-spin shrink-0" />}
           <span>{message}</span>
         </span>
         {status?.oldestPendingAgeSec != null && status.pending > 0 && (
@@ -2705,7 +2823,7 @@ function SidecarQueueProgress({
             oldest {Math.round(status.oldestPendingAgeSec)}s
           </span>
         )}
-        {active > 0 && (
+        {(active > 0 || laneActive) && (
           <Button
             type="button"
             size="sm"
@@ -3448,7 +3566,9 @@ function ComboComparisonPanel({
                         <span className="block truncate">{pick.sourceLabel} · {pick.title}</span>
                         <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
                           {pick.directBookingSource === "airbnb_image_reverse_search" && (
-                            <span className="text-emerald-700">Airbnb Google Lens match</span>
+                            <span className="text-emerald-700" title={pick.directProof?.summary}>
+                              {directProofShortLabel(pick.directProof)}
+                            </span>
                           )}
                           {pick.originalSourceUrl && pick.originalSourceUrl !== pick.url && (
                             <button
@@ -4985,7 +5105,10 @@ export default function Bookings() {
           throw new Error(`${option.label} has an invalid price for ${slot.unitLabel}.`);
         }
         const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
-          ? ` · Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Direct link only; Airbnb supplied the date-specific price and availability.`
+          ? ` · Airbnb anchor: $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}).`
+          : "";
+        const directProofSuffix = pick.directProof
+          ? ` · Direct proof: ${pick.directProof.summary}`
           : "";
         const lensProvenanceSuffix = pick.airbnbAnchorUrl
           ? " · Found via Airbnb Google Lens search."
@@ -5011,7 +5134,7 @@ export default function Bookings() {
           airbnbListingUrl: pick.url,
           groundFloorStatus: pick.groundFloorStatus ?? "unknown",
           groundFloorEvidence: pick.groundFloorEvidence ?? null,
-          notes: `Manually attached from combo ${option.label} — ${pick.bedrooms}BR ${pick.sourceLabel} — ${pick.title} · Selected from saved auto-fill comparison for ${ci}→${co}.${anchorSuffix}${lensProvenanceSuffix}${identitySuffix}`,
+          notes: `Manually attached from combo ${option.label} — ${pick.bedrooms}BR ${pick.sourceLabel} — ${pick.title} · Selected from saved auto-fill comparison for ${ci}→${co}.${anchorSuffix}${lensProvenanceSuffix}${directProofSuffix}${identitySuffix}`,
           status: "active",
         }).then((r) => r.json());
         if (!createdBuyIn?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -5370,18 +5493,26 @@ export default function Bookings() {
       ): LiveCandidate => {
         const photoRole = match.matchedPhotoRole ? ` (${photoRoleLabel(match.matchedPhotoRole)} photo)` : "";
         const photoLabel = match.matchedPhotoLabel ? `: ${match.matchedPhotoLabel}` : "";
+        const proofPrice = directProofPrice(match.proof);
+        const verified = directProofVerifiedStatus(match.proof);
+        const totalPrice = proofPrice?.totalPrice ?? 0;
+        const nightlyPrice = proofPrice?.nightlyPrice ?? (totalPrice && airbnbCandidate.totalPrice > 0 && airbnbCandidate.nightlyPrice > 0
+          ? Math.round(totalPrice / Math.max(1, Math.round(airbnbCandidate.totalPrice / airbnbCandidate.nightlyPrice)))
+          : 0);
         return {
           source: "pm",
           sourceLabel: `Direct link (${match.domain})`,
           title: match.title || airbnbCandidate.title,
           url: match.url,
-          nightlyPrice: airbnbCandidate.nightlyPrice,
-          totalPrice: airbnbCandidate.totalPrice,
+          nightlyPrice,
+          totalPrice,
           bedrooms: candidateBedrooms(airbnbCandidate, 0) || airbnbCandidate.bedrooms,
           image: airbnbCandidate.image,
-          snippet: `Direct booking site found automatically from this Airbnb listing's photos${photoRole}${photoLabel}. Airbnb supplied the date-specific availability and rate; the direct site was not scraped.`,
+          snippet: match.proof?.summary
+            ? `${match.proof.summary}${photoRole}${photoLabel ? `: ${photoLabel.replace(/^:\s*/, "")}` : ""}`
+            : `Direct booking site found automatically from this Airbnb listing's photos${photoRole}${photoLabel}. Direct PM price/availability was not proven.`,
           alternateUrls: Array.from(new Set([airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])].filter(Boolean) as string[])),
-          photoMatches: [{ url: match.url, title: match.title, domain: match.domain }],
+          photoMatches: [{ url: match.url, title: match.title, domain: match.domain, matchedPhotoCount: match.matchedPhotoCount, minConfidence: match.minConfidence, maxConfidence: match.maxConfidence, proof: match.proof }],
           identityKeys: listingIdentityKeys({
             ...airbnbCandidate,
             alternateUrls: [airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])],
@@ -5391,12 +5522,13 @@ export default function Bookings() {
           airbnbAnchorPrice: airbnbCandidate.totalPrice,
           directBookingUrl: match.url,
           directBookingHost: match.domain,
-          directBookingConfidence: "medium",
+          directBookingConfidence: match.proof?.sameUnit.status === "passed" ? "high" : "medium",
           directBookingSource: "airbnb_image_reverse_search",
-          directBookingReason: `Google Lens found this direct booking site from the Airbnb listing photos${photoRole}${photoLabel}.`,
-          verified: "yes",
-          verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
-          verifiedReason: `Direct link found automatically by Google Lens from Airbnb photos${photoRole}${photoLabel}. Price and availability are inherited from Airbnb for the requested dates; the direct site was not scraped.`,
+          directBookingReason: match.proof?.sameUnit.reason ?? `Google Lens found this direct booking site from the Airbnb listing photos${photoRole}${photoLabel}.`,
+          directProof: match.proof,
+          verified,
+          verifiedNightlyPrice: verified === "yes" ? nightlyPrice : undefined,
+          verifiedReason: match.proof?.price.reason ?? match.proof?.availability.reason ?? match.proof?.summary,
           groundFloorStatus: airbnbCandidate.groundFloorStatus,
           groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
         };
@@ -5415,6 +5547,11 @@ export default function Bookings() {
               title: candidate.title,
               resortName,
               community,
+              checkIn: ci,
+              checkOut: co,
+              anchorTotalPrice: candidate.totalPrice,
+              anchorNightlyPrice: candidate.nightlyPrice,
+              verifyAvailability: false,
             });
             const body = await response.json();
             const matches = Array.isArray(body?.matches)
@@ -5507,6 +5644,13 @@ export default function Bookings() {
               identityKeys,
               verified: listing.verified,
               verifiedReason: listing.verifiedReason,
+              airbnbAnchorUrl: listing.airbnbAnchorUrl,
+              airbnbAnchorPrice: listing.airbnbAnchorPrice,
+              directBookingUrl: listing.directBookingUrl,
+              directBookingHost: listing.directBookingHost,
+              directBookingSource: listing.directBookingSource,
+              directBookingReason: listing.directBookingReason,
+              directProof: listing.directProof,
               groundFloorStatus: listingFloorConfirmed ? listing.groundFloorStatus : (unit.groundFloorStatus ?? listing.groundFloorStatus),
               groundFloorEvidence: listingFloorConfirmed ? listing.groundFloorEvidence : (unit.groundFloorEvidence ?? listing.groundFloorEvidence),
             };
@@ -5642,7 +5786,10 @@ export default function Bookings() {
           ? ` · ⚠️ Airbnb pick — Airbnb TOS prohibits sublet. Operator should handle channel-specific compliance before booking.`
           : "";
         const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
-          ? ` · Photo-matched to Airbnb listing $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}). Direct link only; Airbnb supplied the date-specific price and availability.`
+          ? ` · Airbnb anchor: $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}).`
+          : "";
+        const directProofSuffix = pick.directProof
+          ? ` · Direct proof: ${pick.directProof.summary}`
           : "";
         const lensProvenanceSuffix = pick.directBookingSource === "airbnb_image_reverse_search" || pick.airbnbAnchorUrl
           ? " · Found via Airbnb Google Lens search."
@@ -5674,7 +5821,7 @@ export default function Bookings() {
             airbnbListingUrl: pick.url,
             groundFloorStatus: pick.groundFloorStatus ?? "unknown",
             groundFloorEvidence: pick.groundFloorEvidence ?? null,
-            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${lensProvenanceSuffix}${groundFloorSuffix}${identitySuffix}`,
+            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${lensProvenanceSuffix}${directProofSuffix}${groundFloorSuffix}${identitySuffix}`,
             status: "active",
           }).then((r) => r.json());
           if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -6382,6 +6529,8 @@ export default function Bookings() {
         try {
           const probeResponse = await apiRequest("POST", "/api/operations/alternative-scout-direct-probes", {
             communities: probeCommunities,
+            checkIn,
+            checkOut,
           }).then((r) => r.json()) as { probesByCommunity?: Record<string, { listings?: AlternativeScoutDirectProbe[] }> };
           enrichedScout = mergeScoutDirectProbes(response, probeResponse.probesByCommunity ?? {});
         } catch (probeError: any) {
@@ -9953,12 +10102,21 @@ type LiveCandidate = {
   // unit listed for direct booking). Populated for the top N priced
   // Airbnb candidates server-side. Zero-length when no matches were
   // found OR the candidate isn't in the top-N pool.
-  photoMatches?: Array<{ url: string; title: string; domain: string }>;
+  photoMatches?: Array<{
+    url: string;
+    title: string;
+    domain: string;
+    matchedPhotoCount?: number;
+    minConfidence?: number;
+    maxConfidence?: number;
+    proof?: DirectBookingProof;
+  }>;
   directBookingUrl?: string;
   directBookingHost?: string;
   directBookingConfidence?: "high" | "medium" | "low";
   directBookingSource?: "airbnb_image_reverse_search";
   directBookingReason?: string;
+  directProof?: DirectBookingProof;
   // When this candidate is derived from a grouped physical unit, keep
   // every known listing URL in the cluster so Auto-fill can avoid
   // choosing the same unit again through another channel.
@@ -10002,6 +10160,7 @@ type LiveUnitListing = {
   directBookingHost?: string;
   directBookingSource?: "airbnb_image_reverse_search";
   directBookingReason?: string;
+  directProof?: DirectBookingProof;
   groundFloorStatus?: GroundFloorStatus;
   groundFloorEvidence?: string | null;
 };
@@ -10026,10 +10185,15 @@ type ReverseImageListingMatch = {
   url: string;
   source: string;
   position: number;
+  confidence?: number;
   matchedPhotoUrl?: string;
   matchedPhotoRole?: "main" | "living-room" | "interior";
   matchedPhotoLabel?: string | null;
   matchedPhotoCategory?: string | null;
+  matchedPhotoCount?: number;
+  minConfidence?: number;
+  maxConfidence?: number;
+  proof?: DirectBookingProof;
 };
 
 type ReverseImageLookupState =
@@ -11462,37 +11626,48 @@ function LiveSearchSection({
       directBookingHost: listing.directBookingHost,
       directBookingSource: listing.directBookingSource,
       directBookingReason: listing.directBookingReason,
+      directProof: listing.directProof,
       groundFloorStatus: listingFloorConfirmed ? listing.groundFloorStatus : (u.groundFloorStatus ?? listing.groundFloorStatus),
       groundFloorEvidence: listingFloorConfirmed ? listing.groundFloorEvidence : (u.groundFloorEvidence ?? listing.groundFloorEvidence),
     };
   };
 
-  const directMatchToCandidate = (airbnbCandidate: LiveCandidate, match: ReverseImageListingMatch): LiveCandidate => ({
-    source: "pm",
-    sourceLabel: `Direct link (${match.domain})`,
-    title: match.title || airbnbCandidate.title,
-    url: match.url,
-    originalSourceUrl: match.url,
-    nightlyPrice: airbnbCandidate.nightlyPrice,
-    totalPrice: airbnbCandidate.totalPrice,
-    bedrooms: airbnbCandidate.bedrooms,
-    image: airbnbCandidate.image,
-    snippet: "Direct booking site found from this Airbnb listing's photos. Airbnb supplied the date-specific availability and rate; the direct site was not scraped.",
-    alternateUrls: [airbnbCandidate.url, match.url],
-    identityKeys: airbnbCandidate.identityKeys,
-    airbnbAnchorUrl: airbnbCandidate.url,
-    airbnbAnchorPrice: airbnbCandidate.totalPrice,
-    directBookingUrl: match.url,
-    directBookingHost: match.domain,
-    directBookingConfidence: "medium",
-    directBookingSource: "airbnb_image_reverse_search",
-    directBookingReason: "Google Lens found this direct booking site from the Airbnb listing photos.",
-    verified: "yes",
-    verifiedNightlyPrice: airbnbCandidate.nightlyPrice,
-    verifiedReason: "Direct link found by Google Lens from Airbnb photos. Price and availability are inherited from Airbnb for the requested dates; the direct site was not scraped.",
-    groundFloorStatus: airbnbCandidate.groundFloorStatus,
-    groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
-  });
+  const directMatchToCandidate = (airbnbCandidate: LiveCandidate, match: ReverseImageListingMatch): LiveCandidate => {
+    const proofPrice = directProofPrice(match.proof);
+    const verified = directProofVerifiedStatus(match.proof);
+    const totalPrice = proofPrice?.totalPrice ?? 0;
+    const nightlyPrice = proofPrice?.nightlyPrice ?? (totalPrice && airbnbCandidate.totalPrice > 0 && airbnbCandidate.nightlyPrice > 0
+      ? Math.round(totalPrice / Math.max(1, Math.round(airbnbCandidate.totalPrice / airbnbCandidate.nightlyPrice)))
+      : 0);
+    return {
+      source: "pm",
+      sourceLabel: `Direct link (${match.domain})`,
+      title: match.title || airbnbCandidate.title,
+      url: match.url,
+      originalSourceUrl: match.url,
+      nightlyPrice,
+      totalPrice,
+      bedrooms: airbnbCandidate.bedrooms,
+      image: airbnbCandidate.image,
+      snippet: match.proof?.summary ?? "Direct booking site found from this Airbnb listing's photos. Direct PM price/availability was not proven.",
+      alternateUrls: [airbnbCandidate.url, match.url],
+      identityKeys: airbnbCandidate.identityKeys,
+      airbnbAnchorUrl: airbnbCandidate.url,
+      airbnbAnchorPrice: airbnbCandidate.totalPrice,
+      directBookingUrl: match.url,
+      directBookingHost: match.domain,
+      directBookingConfidence: match.proof?.sameUnit.status === "passed" ? "high" : "medium",
+      directBookingSource: "airbnb_image_reverse_search",
+      directBookingReason: match.proof?.sameUnit.reason ?? "Google Lens found this direct booking site from the Airbnb listing photos.",
+      directProof: match.proof,
+      photoMatches: [{ url: match.url, title: match.title, domain: match.domain, matchedPhotoCount: match.matchedPhotoCount, minConfidence: match.minConfidence, maxConfidence: match.maxConfidence, proof: match.proof }],
+      verified,
+      verifiedNightlyPrice: verified === "yes" ? nightlyPrice : undefined,
+      verifiedReason: match.proof?.price.reason ?? match.proof?.availability.reason ?? match.proof?.summary,
+      groundFloorStatus: airbnbCandidate.groundFloorStatus,
+      groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
+    };
+  };
 
   const runDirectBookingScan = async () => {
     if (directScanRunning || directScanCandidates.length === 0) return;
@@ -11511,6 +11686,11 @@ function LiveSearchSection({
             title: candidate.title,
             resortName: data?.resortName ?? data?.community ?? "",
             community: data?.community ?? "",
+            checkIn: checkInYmd,
+            checkOut: checkOutYmd,
+            anchorTotalPrice: candidate.totalPrice,
+            anchorNightlyPrice: candidate.nightlyPrice,
+            verifyAvailability: true,
           });
           const body = await response.json();
           const matches = Array.isArray(body?.matches)
@@ -11827,9 +12007,9 @@ function LiveSearchSection({
 
       {/* By-source sections.
           Airbnb stays as a priced source plus photo bridge. Vrbo and
-          Booking.com are sidecar-priced. Direct rows are links discovered
-          from Airbnb listing photos; the direct site is not scraped and
-          the displayed rate remains the Airbnb rate. */}
+          Booking.com are sidecar-priced. Direct rows are photo-discovered
+          PM pages and only become priced when the direct verifier proves
+          availability/rate on the PM site itself. */}
       {[
         { key: "airbnb",  label: "Airbnb (sidecar-priced + direct-link Lens)", items: availableAirbnb,  defaultOpen: false },
         { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: false },
@@ -11933,7 +12113,7 @@ function DirectBookingRecommendations({
             Airbnb listings with direct PM sites
           </p>
           <p className="text-[11px] text-sky-900/75 dark:text-sky-200/75 mt-0.5">
-            Scans priced Airbnb listings with the same Find sites photo process, then keeps direct/PM matches only.
+            Scans priced Airbnb listings with Find sites photo proof, then asks the direct PM page for its own date-specific availability/rate when possible.
             {nonAirbnbBaseline !== null ? ` Non-Airbnb baseline: ${fmtMoney(nonAirbnbBaseline)} total.` : " No priced non-Airbnb baseline found."}
           </p>
         </div>
@@ -11960,7 +12140,12 @@ function DirectBookingRecommendations({
         <div className="space-y-2">
           {displayRows.map((row) => {
             const primaryMatch = row.matches[0];
-            const beatsBaseline = nonAirbnbBaseline === null || row.candidate.totalPrice < nonAirbnbBaseline;
+            const primaryProof = primaryMatch.proof;
+            const directPrice = directProofPrice(primaryProof);
+            const comparisonTotal = directPrice?.totalPrice ?? row.candidate.totalPrice;
+            const directQuoteProven = !!directPrice?.totalPrice;
+            const beatsBaseline = nonAirbnbBaseline === null || comparisonTotal < nonAirbnbBaseline;
+            const canRecord = directQuoteProven && beatsBaseline;
             return (
               <div
                 key={row.candidate.url}
@@ -11971,16 +12156,30 @@ function DirectBookingRecommendations({
                 )}
                 <div className="min-w-0 grow">
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    <Badge className="text-[9px] bg-[#FF5A5F] text-white">Airbnb priced</Badge>
-                    <Badge className={`text-[9px] ${beatsBaseline ? "bg-emerald-600 text-white" : "bg-amber-500 text-white"}`}>
-                      {beatsBaseline ? "Cheaper than non-Airbnb" : "Direct site found"}
+                    <Badge className={`text-[9px] ${directQuoteProven ? "bg-emerald-600 text-white" : "bg-sky-700 text-white"}`}>
+                      {directProofShortLabel(primaryProof)}
+                    </Badge>
+                    <Badge className={`text-[9px] ${directQuoteProven && beatsBaseline ? "bg-emerald-600 text-white" : "bg-amber-500 text-white"}`}>
+                      {directQuoteProven
+                        ? beatsBaseline ? "Cheaper than non-Airbnb" : "Direct quote above baseline"
+                        : "Identity proof only"}
                     </Badge>
                     {row.fromCache && <Badge variant="outline" className="text-[9px]">cached</Badge>}
                     <p className="text-sm font-medium truncate">{row.candidate.title}</p>
                   </div>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Airbnb anchor price: <span className="font-semibold text-foreground">{fmtMoney(row.candidate.totalPrice)}</span>
-                    {row.candidate.nightlyPrice > 0 ? ` · ${fmtMoney(row.candidate.nightlyPrice)}/night` : ""}
+                    {directQuoteProven ? (
+                      <>
+                        Direct PM quote: <span className="font-semibold text-foreground">{fmtMoney(directPrice!.totalPrice)}</span>
+                        {directPrice!.nightlyPrice ? ` · ${fmtMoney(directPrice!.nightlyPrice)}/night` : ""}
+                        <span> · Airbnb anchor {fmtMoney(row.candidate.totalPrice)}</span>
+                      </>
+                    ) : (
+                      <>
+                        Airbnb anchor price: <span className="font-semibold text-foreground">{fmtMoney(row.candidate.totalPrice)}</span>
+                        {row.candidate.nightlyPrice > 0 ? ` · ${fmtMoney(row.candidate.nightlyPrice)}/night` : ""}
+                      </>
+                    )}
                   </p>
                   <div className="mt-1 flex flex-wrap gap-1.5">
                     {row.matches.slice(0, 3).map((match) => (
@@ -12011,8 +12210,12 @@ function DirectBookingRecommendations({
                     size="sm"
                     className="h-7 px-2 text-[11px]"
                     onClick={() => onRecord(row.candidate, primaryMatch)}
-                    disabled={!beatsBaseline}
-                    title={beatsBaseline ? "Record this direct PM match as the buy-in" : "Direct site found, but it is not cheaper than the non-Airbnb baseline"}
+                    disabled={!canRecord}
+                    title={canRecord
+                      ? "Record this direct PM match as the buy-in"
+                      : directQuoteProven
+                        ? "Direct quote found, but it is not cheaper than the non-Airbnb baseline"
+                        : "Record is disabled until the direct PM site returns its own date-specific quote"}
                   >
                     <ShoppingCart className="h-3 w-3 mr-1" /> Record
                   </Button>
@@ -12530,7 +12733,9 @@ function ScannedOptionsTable({
                       </a>
                     )}
                     {c.directBookingSource === "airbnb_image_reverse_search" && (
-                      <span className="text-emerald-700">Airbnb Google Lens match</span>
+                      <span className="text-emerald-700" title={c.directProof?.summary}>
+                        {directProofShortLabel(c.directProof)}
+                      </span>
                     )}
                   </div>
                 </TableCell>
@@ -12901,7 +13106,9 @@ function UnitRow({
               )}
               <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px]">
                 {l.directBookingSource === "airbnb_image_reverse_search" && (
-                  <span className="text-emerald-700">Found via Airbnb Google Lens</span>
+                  <span className="text-emerald-700" title={l.directProof?.summary}>
+                    {directProofShortLabel(l.directProof)}
+                  </span>
                 )}
                 {l.airbnbAnchorUrl && (
                   <a
@@ -13030,18 +13237,24 @@ function LiveRow({
             <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
               <Badge variant="outline" className="h-5 border-emerald-300 bg-emerald-50 text-[10px] text-emerald-800">
                 {c.directBookingSource === "airbnb_image_reverse_search"
-                  ? "Found via Airbnb Google Lens"
+                  ? directProofShortLabel(c.directProof)
                   : "Direct link found"}
               </Badge>
               <button
                 type="button"
                 className="max-w-[360px] truncate text-emerald-700 underline-offset-2 hover:underline"
-                title={c.directBookingReason ?? c.directBookingUrl}
+                title={c.directProof?.summary ?? c.directBookingReason ?? c.directBookingUrl}
                 onClick={() => window.open(c.directBookingUrl, "_blank", "noopener,noreferrer")}
               >
                 {c.directBookingHost || sourceLabelForUrl(c.directBookingUrl)}
               </button>
-              <span className="text-muted-foreground">Airbnb rate shown; direct site not scraped</span>
+              <span className="text-muted-foreground">
+                {c.directProof?.price.status === "date_specific_quote"
+                  ? "direct PM quote shown"
+                  : c.directProof?.price.status === "airbnb_anchor_only"
+                    ? "Airbnb anchor only"
+                    : "direct rate not proven"}
+              </span>
             </div>
           )}
         </div>
@@ -13447,7 +13660,10 @@ function RecordBuyInDialog({
         ? [
           `Bought via ${candidate.sourceLabel} — ${candidate.title}`,
           `Found via Airbnb Google Lens search.`,
-          `Direct booking link found from Airbnb photos. Airbnb supplied the date-specific availability and price; direct site was not scraped.`,
+          candidate.directProof?.summary ?? `Direct booking link found from Airbnb photos; direct PM proof was not attached to this row.`,
+          candidate.directProof?.price.status === "date_specific_quote"
+            ? `Direct PM proof: ${candidate.directProof.price.reason}`
+            : `Direct PM proof pending: ${candidate.directProof?.price.reason ?? "no direct PM date-specific quote recorded"}`,
           `Airbnb anchor: ${candidate.airbnbAnchorUrl}`,
         ].join(" · ")
         : `Bought via ${candidate.sourceLabel} — ${candidate.title}`;

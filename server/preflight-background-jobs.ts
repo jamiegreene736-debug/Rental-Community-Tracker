@@ -1,4 +1,11 @@
 import { preflightPhotoDiscoveryAttempts } from "@shared/preflight-photo-discovery";
+import {
+  buildUnitPhotoResolverProof,
+  compareUnitPhotoProofs,
+  MIN_INDEPENDENT_UNIT_PHOTOS,
+  summarizeUnitPhotoProof,
+  type UnitPhotoResolverProof,
+} from "./unit-photo-resolver";
 
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -18,6 +25,8 @@ export type PreflightPhotoFetchJob = {
   unitIndex: 0 | 1;
   savedCount: number | null;
   sourceUrl: string | null;
+  proof: UnitPhotoResolverProof | null;
+  diagnostic: Record<string, unknown> | null;
   error: string | null;
 };
 
@@ -45,6 +54,7 @@ const photoFetchJobs = new Map<string, PreflightPhotoFetchJob>();
 const replacementFindJobs = new Map<string, PreflightReplacementFindJob>();
 const activePhotoFetchJobIds = new Set<string>();
 const activeReplacementFindJobIds = new Set<string>();
+const draftPhotoFetchProofs = new Map<number, Partial<Record<0 | 1, UnitPhotoResolverProof>>>();
 
 import { loopbackRequestHeaders } from "./auth";
 
@@ -62,6 +72,33 @@ function touchPhotoJob(job: PreflightPhotoFetchJob, patch: Partial<PreflightPhot
 function touchReplacementJob(job: PreflightReplacementFindJob, patch: Partial<PreflightReplacementFindJob> = {}) {
   Object.assign(job, patch, { updatedAt: Date.now() });
   replacementFindJobs.set(job.id, job);
+}
+
+function reserveDraftPhotoProof(
+  draftId: number,
+  unitIndex: 0 | 1,
+  proof: UnitPhotoResolverProof,
+): string | null {
+  const entry = draftPhotoFetchProofs.get(draftId) ?? {};
+  const siblingIndex: 0 | 1 = unitIndex === 0 ? 1 : 0;
+  const siblingProof = entry[siblingIndex];
+  if (siblingProof) {
+    const comparison = compareUnitPhotoProofs(proof, siblingProof);
+    if (comparison.duplicate) {
+      return `Unit ${unitIndex === 0 ? "A" : "B"} photo source duplicates Unit ${siblingIndex === 0 ? "A" : "B"} (${comparison.issues.join(", ") || "duplicate-photo-overlap"}; overlap ${comparison.overlapCount}, ratio ${comparison.overlapRatio.toFixed(2)}).`;
+    }
+  }
+  entry[unitIndex] = proof;
+  draftPhotoFetchProofs.set(draftId, entry);
+  return null;
+}
+
+function releaseDraftPhotoProof(draftId: number, unitIndex: 0 | 1, proof: UnitPhotoResolverProof | null): void {
+  if (!proof) return;
+  const entry = draftPhotoFetchProofs.get(draftId);
+  if (!entry || entry[unitIndex] !== proof) return;
+  delete entry[unitIndex];
+  if (!entry[0] && !entry[1]) draftPhotoFetchProofs.delete(draftId);
 }
 
 async function postJson(url: string, body: unknown, timeoutMs: number): Promise<any> {
@@ -129,6 +166,8 @@ export function startPreflightPhotoFetchJob(input: StartPreflightPhotoFetchInput
     unitIndex: input.unitIndex,
     savedCount: null,
     sourceUrl: null,
+    proof: null,
+    diagnostic: null,
     error: null,
   };
   photoFetchJobs.set(id, job);
@@ -145,6 +184,7 @@ async function runPreflightPhotoFetchJob(
   const base = loopbackBaseUrl();
   const replacingExistingPhotos = input.replacingExistingPhotos === true;
   const attempts = preflightPhotoDiscoveryAttempts(input.bedrooms, replacingExistingPhotos);
+  let reservedProof: UnitPhotoResolverProof | null = null;
   try {
     touchPhotoJob(job, {
       status: "running",
@@ -158,6 +198,8 @@ async function runPreflightPhotoFetchJob(
     let photos: Array<{ url: string }> = [];
     let sourceUrl: string | null = null;
     let lastNote: string | undefined;
+    let lastProof: UnitPhotoResolverProof | null = null;
+    let lastDiagnostic: Record<string, unknown> | null = null;
 
     for (let i = 0; i < attempts.length; i += 1) {
       const attempt = attempts[i];
@@ -180,7 +222,27 @@ async function runPreflightPhotoFetchJob(
       lastNote = typeof fetchData?.note === "string" ? fetchData.note : undefined;
       const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
       const nextSourceUrl: string | null = fetchData?.sourceUrl ?? null;
-      if (nextPhotos.length > 0) {
+      const nextProof = fetchData?.resolverProof && typeof fetchData.resolverProof === "object"
+        ? fetchData.resolverProof as UnitPhotoResolverProof
+        : buildUnitPhotoResolverProof({
+            photos: nextPhotos,
+            sourceUrl: nextSourceUrl,
+            foundVia: typeof fetchData?.foundVia === "string" ? fetchData.foundVia : null,
+            requestedBedrooms: attempt.bedrooms === "any" ? null : attempt.bedrooms,
+            minimumBedrooms: attempt.minBedrooms ?? null,
+            facts: fetchData?.facts && typeof fetchData.facts === "object" ? fetchData.facts : null,
+            representativeFallback: fetchData?.representativeFallback === true,
+            reusedConfiguredSource: fetchData?.reusedConfiguredSource === true,
+          });
+      lastProof = nextProof;
+      lastDiagnostic = fetchData?.diagnostic && typeof fetchData.diagnostic === "object"
+        ? fetchData.diagnostic as Record<string, unknown>
+        : null;
+      touchPhotoJob(job, {
+        proof: nextProof,
+        diagnostic: lastDiagnostic,
+      });
+      if (nextPhotos.length > 0 && nextProof.status !== "rejected") {
         photos = nextPhotos;
         sourceUrl = nextSourceUrl;
         break;
@@ -193,13 +255,16 @@ async function runPreflightPhotoFetchJob(
     }
 
     if (photos.length === 0) {
+      const proofSummary = lastProof ? summarizeUnitPhotoProof("Photo search", lastProof) : null;
       touchPhotoJob(job, {
         status: "failed",
         phase: "failed",
-        message: lastNote || `Couldn't find another ${input.bedrooms}BR listing`,
+        message: lastNote || proofSummary || `Couldn't find another ${input.bedrooms}BR listing`,
         progress: 100,
         finishedAt: Date.now(),
-        error: lastNote || `Couldn't find another ${input.bedrooms}BR listing at ${input.communityName}`,
+        error: lastNote || proofSummary || `Couldn't find another ${input.bedrooms}BR listing at ${input.communityName}`,
+        proof: lastProof,
+        diagnostic: lastDiagnostic,
       });
       return;
     }
@@ -209,11 +274,21 @@ async function runPreflightPhotoFetchJob(
       message: "Saving photos to this draft",
       progress: 86,
     });
+    const duplicateReservation = lastProof
+      ? reserveDraftPhotoProof(input.draftId, input.unitIndex, lastProof)
+      : null;
+    if (duplicateReservation) {
+      throw new Error(`${duplicateReservation} Continue candidate search; do not save duplicate photos on both units.`);
+    }
+    reservedProof = lastProof;
     const persistBody = input.unitIndex === 0
       ? { unit1Photos: photos.map((p) => p.url), unit2Photos: [], unit1SourceUrl: sourceUrl }
       : { unit1Photos: [], unit2Photos: photos.map((p) => p.url), unit2SourceUrl: sourceUrl };
     const persistData = await postJson(`${base}/api/community/${input.draftId}/persist-photos`, persistBody, 180_000);
     const saved = input.unitIndex === 0 ? persistData?.unit1?.saved : persistData?.unit2?.saved;
+    if (typeof saved === "number" && saved < MIN_INDEPENDENT_UNIT_PHOTOS) {
+      throw new Error(`Only ${saved} photo${saved === 1 ? "" : "s"} saved after proof checks; at least ${MIN_INDEPENDENT_UNIT_PHOTOS} are required before replacing this unit's gallery.`);
+    }
 
     touchPhotoJob(job, {
       status: "completed",
@@ -223,9 +298,12 @@ async function runPreflightPhotoFetchJob(
       finishedAt: Date.now(),
       savedCount: typeof saved === "number" ? saved : null,
       sourceUrl,
+      proof: lastProof,
+      diagnostic: lastDiagnostic,
       error: null,
     });
   } catch (e: any) {
+    releaseDraftPhotoProof(input.draftId, input.unitIndex, reservedProof);
     touchPhotoJob(job, {
       status: "failed",
       phase: "failed",

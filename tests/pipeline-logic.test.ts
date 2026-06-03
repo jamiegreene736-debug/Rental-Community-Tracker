@@ -43,6 +43,11 @@ import { unitVerificationClaims } from "../shared/folder-unit-map";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
 import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "../server/photo-match-guardrails";
+import {
+  buildUnitPhotoResolverProof,
+  compareUnitPhotoProofs,
+  MIN_INDEPENDENT_UNIT_PHOTOS,
+} from "../server/unit-photo-resolver";
 
 // ---------- Import the internals we want to test ----------
 // The sanity check and fact extractors aren't exported, so we
@@ -213,6 +218,56 @@ assert.match(
   "combo photo fetch discovery must bound candidate scans so Step 4 does not appear stuck on weak markets",
 );
 assert.match(
+  routesSource,
+  /Photo discovery failed proof checks/,
+  "combo photo fetch items must fail instead of completing when either unit lacks independent photo proof",
+);
+assert.match(
+  routesSource,
+  /compareUnitPhotoProofs\(item\.unit1Proof, item\.unit2Proof\)/,
+  "combo photo fetch must compare Unit A and Unit B proof before accepting a combo gallery",
+);
+assert.match(
+  routesSource,
+  /location root[\s\S]*does not match requested/,
+  "bounded unit photo discovery must reject off-street candidates instead of accepting broad-city fallback photos",
+);
+assert.match(
+  routesSource,
+  /photo set duplicates .*existing photo source/,
+  "one-sided preflight photo persistence must compare against the sibling unit's existing source proof",
+);
+assert.match(
+  routesSource,
+  /resolverProof/,
+  "fetch-unit-photos must return resolver proof so diagnostics can self-fix based on exact evidence",
+);
+assert.match(
+  routesSource,
+  /unitPhotoResolverProof/,
+  "persisted draft and replacement photo folders must stamp the resolver proof in _source.json",
+);
+assert.match(
+  routesSource,
+  /result\.kept < MIN_INDEPENDENT_UNIT_PHOTOS/,
+  "replacement commits must reject photo folders with too few kept photos",
+);
+assert.match(
+  preflightJobsSource,
+  /nextProof\.status !== "rejected"/,
+  "preflight photo jobs must keep searching instead of persisting proof-rejected candidates",
+);
+assert.match(
+  preflightJobsSource,
+  /Only \$\{saved\} photo/,
+  "preflight photo jobs must fail when persistence saves fewer than the required independent photos",
+);
+assert.match(
+  preflightJobsSource,
+  /reserveDraftPhotoProof[\s\S]*compareUnitPhotoProofs/,
+  "parallel preflight unit photo jobs must reserve proof so Unit A and Unit B cannot save the same gallery",
+);
+assert.match(
   preflightPhotoDiscoverySource,
   /replacingExistingPhotos \? 10 : 6/,
   "preflight Find Photos must bound candidate scans so a no-match does not run for several minutes",
@@ -227,6 +282,51 @@ assert.doesNotMatch(
   /minBedrooms:/,
   "preflight Find Photos must not require minBedrooms on the relaxed attempt — Zillow often lacks matching BR at the resort",
 );
+const acceptedUnitProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/abc11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc22222-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc33333-test.jpg" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/123_zpid/",
+  requestedBedrooms: 3,
+  facts: { bedrooms: 3 },
+});
+assert.equal(acceptedUnitProof.status, "accepted", "three distinct photos with matching bedrooms should be accepted");
+const sparseUnitProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/abc11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc11111-other-size.jpg?width=960" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/123_zpid/",
+  requestedBedrooms: 3,
+  facts: { bedrooms: 3 },
+});
+assert.equal(sparseUnitProof.status, "rejected", "duplicate photo variants must not count as independent unit proof");
+assert.equal(sparseUnitProof.distinctPhotoCount, 1, "Zillow photo fingerprints should collapse size variants");
+const duplicateProof = compareUnitPhotoProofs(acceptedUnitProof, buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/abc11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc22222-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc33333-test.jpg" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/123_zpid/",
+  requestedBedrooms: 3,
+  facts: { bedrooms: 3 },
+}));
+assert.equal(duplicateProof.duplicate, true, "same-source/same-photo proof must be treated as duplicate combo evidence");
+const relaxedUnitProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/relaxed11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/relaxed22222-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/relaxed33333-test.jpg" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/456_zpid/",
+  relaxedSearch: true,
+  facts: { bedrooms: 2 },
+});
+assert.equal(relaxedUnitProof.status, "review", "relaxed bedroom fallback proof must not be marked fully accepted");
+assert.equal(MIN_INDEPENDENT_UNIT_PHOTOS, 3, "photo proof minimum should remain aligned with combo/preflight acceptance");
 assert.match(
   preflightSource,
   /replacingExistingPhotos[\s\S]*siblingSourceUrls/,
@@ -289,8 +389,8 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /isBoundedDiscovery && suppliedStreetRoot\) addCandidate\(link, "zillow"\)/,
-  "bounded preflight must admit Apify Zillow URLs without over-broad street-root filtering",
+  /isBoundedDiscovery && suppliedStreetRoot[\s\S]*listingStreetRoot\(link\) === suppliedStreetRoot[\s\S]*addCandidate\(link, "zillow"\)/,
+  "bounded preflight must only admit Apify Zillow URLs that match the requested resort street root",
 );
 assert.match(
   routesSource,
@@ -391,6 +491,32 @@ assert.match(
   schemaSource,
   /communityResearchSearches/,
   "city research history should have a dedicated table instead of overloading sidecar search variations",
+);
+const sidecarLaneSource = readFileSync("server/sidecar-lane.ts", "utf8");
+assert.match(
+  schemaSource,
+  /workResourceLocks/,
+  "shared resource locks must be schema-backed so long sidecar producers survive restarts and timeouts",
+);
+assert.match(
+  sidecarLaneSource,
+  /SIDECAR_LANE_RESOURCE_KEY = "sidecar-browser"/,
+  "sidecar lane should protect one shared Chrome/browser resource",
+);
+assert.match(
+  sidecarLaneSource,
+  /onConflictDoUpdate[\s\S]*workResourceLocks\.expiresAt[\s\S]*workResourceLocks\.ownerType/,
+  "sidecar lane acquisition must atomically keep other buy-in/combo producers out while the lock is active",
+);
+assert.match(
+  routesSource,
+  /ownerType: "bulk-combo-listing"/,
+  "bulk combo listing queue must participate in the shared sidecar lane",
+);
+assert.match(
+  routesSource,
+  /ownerType: "find-buy-in"/,
+  "Operations find-buy-in must participate in the shared sidecar lane",
 );
 console.log("  ✓ combo photo and city research state stay observable");
 
@@ -2186,6 +2312,28 @@ assert.equal(
 console.log("  ✓ Waikoloa Beach Villas canonical address validates for bulk combo draft saves");
 
 assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Fairway Villas Waikoloa",
+    city: "Waikoloa",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "69-200 Pohakulana Pl",
+  "bulk combo queue should use Fairway Villas Waikoloa canonical address instead of an empty market-only payload",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Halii Kai",
+    city: "Mauna Kea",
+    state: "Hawaii",
+    streetAddress: "69-1029 Nawahine Pl",
+  }).ok,
+  true,
+  "Halii Kai should accept Mauna Kea as the queued market city while validating its canonical street",
+);
+console.log("  ✓ Fairway Villas + Halii Kai canonical addresses validate for bulk combo draft saves");
+
+assert.equal(
   discoveryCityForPhotoSearch({
     city: "Mauna Kea",
     communityName: "Waikoloa Beach Villas",
@@ -2687,6 +2835,10 @@ assert.ok(
   "LiveSearchSection should refetch find-buy-in when the tab becomes visible again",
 );
 assert.ok(
+  bookingsSource.includes("sidecarLaneSummary"),
+  "Operations progress should surface when find-buy-in is waiting behind another sidecar lane owner",
+);
+assert.ok(
   bookingsSource.includes("function shouldAutoTriggerAlternativeScout"),
   "bookings page should auto-scout alternatives for multi-unit bookings with partial attachables",
 );
@@ -2734,5 +2886,17 @@ assert.ok(
 assert.ok(
   routesSource.includes('app.post("/api/operations/alternative-scout-direct-probes"'),
   "alternative-scout-direct-probes route should exist",
+);
+assert.ok(
+  routesSource.includes("type DirectBookingProof"),
+  "direct booking discovery should expose a structured proof ledger",
+);
+assert.ok(
+  routesSource.includes("direct PM price/availability must be verified before recording"),
+  "Lens-discovered direct rows should not inherit Airbnb price as direct proof",
+);
+assert.ok(
+  bookingsComboSource.includes("directProofShortLabel"),
+  "bookings UI should display direct proof level for Lens/direct matches",
 );
 console.log("  ✓ alternative scout direct booking probe UI + API");
