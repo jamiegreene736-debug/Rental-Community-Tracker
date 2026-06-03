@@ -185,6 +185,7 @@ import {
   isStrongLensMatch,
   lensMatchConfidence,
 } from "./photo-match-guardrails";
+import { MAX_COMBO_PHOTO_OTA_ATTEMPTS, runComboOtaPreflight } from "./combo-ota-preflight";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { walkBetween } from "./walking-distance";
@@ -27015,42 +27016,73 @@ Return ONLY compact JSON with this exact shape:
     avoidPhotos: Array<{ url: string; label?: string }> = [],
     abortKey?: string,
     signal?: AbortSignal,
+    onOtaCheck?: (message: string) => void | Promise<void>,
   ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean }> => {
     const seenUrls = new Set(blockedUrls.filter(Boolean));
     const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
       { relaxed: false },
       { bedroomOverride: "any", relaxed: true },
     ];
+    const apiKey = process.env.SEARCHAPI_API_KEY;
     let best: { photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean } = {
       photos: [],
       sourceUrl: null,
       relaxed: false,
     };
-    for (const attempt of attempts) {
-      if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
-      let data: any;
-      try {
-        data = await fetchComboPhotoJson(
-          `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
-          buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
-          { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 75_000 },
+    const maxOtaAttempts = unit?.url ? 1 : MAX_COMBO_PHOTO_OTA_ATTEMPTS;
+    let otaSkips = 0;
+    while (otaSkips < maxOtaAttempts) {
+      let otaRejectedThisRound = false;
+      for (const attempt of attempts) {
+        if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+        let data: any;
+        try {
+          data = await fetchComboPhotoJson(
+            `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
+            buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
+            { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 75_000 },
+          );
+        } catch (error: any) {
+          if (attempt.relaxed || job.cancelRequested || error?.cancelled) throw error;
+          console.warn(`[combo-photo-fetch] exact photo search failed for ${item.communityName}: ${error?.message ?? error}; retrying relaxed`);
+          continue;
+        }
+        const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
+        const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
+        const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKeyForComboPhotoJob(u) === listingKeyForComboPhotoJob(sourceUrl));
+        const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(avoidPhotos, photos);
+        if (photos.length > best.photos.length && !duplicateSource && !duplicatePhotos) {
+          best = { photos, sourceUrl, relaxed: attempt.relaxed };
+        }
+        if (sourceUrl) seenUrls.add(sourceUrl);
+        if (photos.length < 3 || duplicateSource || duplicatePhotos) continue;
+        if (!apiKey) {
+          return { photos, sourceUrl, relaxed: attempt.relaxed };
+        }
+        const addressGuess =
+          parseListingAddressFromUrl(sourceUrl || "") ||
+          (unit?.address || item.streetAddress || "").trim();
+        await onOtaCheck?.(`OTA preflight (${photos.length} photos)`);
+        const preflight = await runComboOtaPreflight(
+          apiKey,
+          photos.map((p) => p.url),
+          addressGuess,
+          item.city,
+          item.state,
         );
-      } catch (error: any) {
-        if (attempt.relaxed || job.cancelRequested || error?.cancelled) throw error;
-        console.warn(`[combo-photo-fetch] exact photo search failed for ${item.communityName}: ${error?.message ?? error}; retrying relaxed`);
-        continue;
+        if (preflight.qualifies) {
+          return { photos, sourceUrl, relaxed: attempt.relaxed };
+        }
+        const listed = preflight.listedOn.length > 0 ? preflight.listedOn.join(", ") : "OTA";
+        console.warn(
+          `[combo-photo-fetch] ${item.communityName} ${unit?.title ?? "unit"}: photos listed on ${listed} — ${preflight.reason}; trying next listing (${otaSkips + 1}/${MAX_COMBO_PHOTO_OTA_ATTEMPTS})`,
+        );
+        otaSkips += 1;
+        otaRejectedThisRound = true;
+        await onOtaCheck?.(`Listed on ${listed}; searching for different unit photos`);
+        break;
       }
-      const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
-      const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
-      const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKeyForComboPhotoJob(u) === listingKeyForComboPhotoJob(sourceUrl));
-      const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(avoidPhotos, photos);
-      if (photos.length > best.photos.length && !duplicateSource && !duplicatePhotos) {
-        best = { photos, sourceUrl, relaxed: attempt.relaxed };
-      }
-      if (sourceUrl) seenUrls.add(sourceUrl);
-      if (photos.length >= 3 && !duplicateSource && !duplicatePhotos) {
-        return { photos, sourceUrl, relaxed: attempt.relaxed };
-      }
+      if (!otaRejectedThisRound) break;
     }
     return best;
   };
@@ -27095,11 +27127,15 @@ Return ONLY compact JSON with this exact shape:
       throw new Error("No direct listing URL or community/bedroom search data was available");
     }
 
+    const otaProgress = async (message: string) => {
+      item.message = message;
+      await persistProgress();
+    };
     let firstPhotos: Array<{ url: string; label?: string }> = [];
     let firstSourceUrl: string | null = null;
     if (canComboPhotoFetchUnit(item, item.unit1)) {
       const first = await runWithHeartbeat("Searching for Unit A photos", () =>
-        fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal),
+        fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal, otaProgress),
       );
       firstPhotos = first.photos;
       firstSourceUrl = first.sourceUrl;
@@ -27115,7 +27151,7 @@ Return ONLY compact JSON with this exact shape:
     if (canComboPhotoFetchUnit(item, item.unit2)) {
       const skipUrls = firstSourceUrl && !item.unit2?.url ? [firstSourceUrl] : [];
       const second = await runWithHeartbeat("Searching for Unit B photos", () =>
-        fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos, abortKey, signal),
+        fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos, abortKey, signal, otaProgress),
       );
       let secondPhotos = second.photos;
       if (!item.unit2?.url && firstPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(firstPhotos, secondPhotos)) {
