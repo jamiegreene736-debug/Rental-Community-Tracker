@@ -26310,6 +26310,9 @@ Return ONLY compact JSON with this exact shape:
       return `${nums[0]}-${nums[1]}-${name}`;
     };
 
+    const escapeRegExp = (value: string): string =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
     const candidateRootMatches = (url: string, allowedRoots: Set<string>, contextText = ""): boolean => {
       if (allowedRoots.size === 0) return false;
       const root = streetRootFromListingAddress(parseListingAddressFromUrl(url));
@@ -26838,9 +26841,6 @@ Return ONLY compact JSON with this exact shape:
       }
       return terms.slice(0, 6);
     };
-
-    const escapeRegExp = (value: string): string =>
-      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
     const hitMatchesDistinctiveTerms = (hit: any, terms: string[]): boolean => {
       if (terms.length === 0) return true;
