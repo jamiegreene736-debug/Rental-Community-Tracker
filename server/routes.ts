@@ -27961,13 +27961,14 @@ Return ONLY compact JSON with this exact shape:
     }, { abortKey }));
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
-    const streetAddress = item.streetAddress || inferCommunityStreetAddress({
+    const inferredStreetAddress = inferCommunityStreetAddress({
       communityName: community.name,
       city: community.city,
       state: community.state,
-      unitAddresses: [],
+      unitAddresses: [item.streetAddress],
       addressHint: community.addressHint,
     });
+    const streetAddress = inferredStreetAddress || item.streetAddress || "";
     let draftId = await findExistingBulkComboDraftId(item, generated, streetAddress);
     const idempotencyKey = bulkComboIdempotencyKey(job.id, item);
     if (draftId) {

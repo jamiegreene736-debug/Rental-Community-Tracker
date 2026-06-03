@@ -1729,10 +1729,10 @@ assert.equal(
     communityName: "Waikoloa Beach Villas",
     city: "Waikoloa",
     state: "Hawaii",
-    unitAddresses: [],
+    unitAddresses: ["Waikoloa, Hawaii"],
   }),
   "69-180 Waikoloa Beach Dr",
-  "bulk combo queue should use Waikoloa Beach Villas canonical address before dashboard save",
+  "bulk combo queue should use Waikoloa Beach Villas canonical address instead of stale market-only payloads",
 );
 assert.equal(
   validateCommunityStreetAddress({
@@ -1751,10 +1751,10 @@ assert.equal(
     communityName: "Mauna Lani Point",
     city: "Waikoloa",
     state: "Hawaii",
-    unitAddresses: [],
+    unitAddresses: ["Waikoloa, Hawaii"],
   }),
   "68-1050 Mauna Lani Point Dr",
-  "bulk combo queue should use Mauna Lani Point canonical address before dashboard save",
+  "bulk combo queue should use Mauna Lani Point canonical address instead of stale market-only payloads",
 );
 assert.equal(
   validateCommunityStreetAddress({
