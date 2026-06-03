@@ -81,6 +81,7 @@ type CommunityResult = {
   minimumStayNights?: number | null;
   minimumStayEvidence?: string | null;
   minimumStaySourceUrl?: string | null;
+  addressHint?: string;
   /** True when operator already has a draft/listing for this exact resort name+city in community_drafts. */
   hasExistingListing?: boolean;
   existingComboLabels?: string[];
@@ -367,6 +368,7 @@ export default function AddCommunity() {
     tag?: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
+    sixBedroomPossible?: boolean;
     status: "pending" | "running" | "done" | "error" | "cancelled";
     count?: number;
     communities?: CommunityResult[];
@@ -392,7 +394,7 @@ export default function AddCommunity() {
   // markets the moment the user clicks the button.
   type SweepPhase = "setup" | "running";
   const [sweepPhase, setSweepPhase] = useState<SweepPhase>("setup");
-  type SeedMarket = { city: string; state: string; tag: string; estimatedComboLow?: number; estimatedComboHigh?: number };
+  type SeedMarket = { city: string; state: string; tag: string; estimatedComboLow?: number; estimatedComboHigh?: number; sixBedroomPossible?: boolean };
   const [seedMarkets, setSeedMarkets] = useState<SeedMarket[] | null>(null);
   const [selectedMarkets, setSelectedMarkets] = useState<Set<string>>(new Set());
   const keyFor = (m: { city: string; state: string }) => `${m.city}|${m.state}`;
@@ -589,6 +591,7 @@ export default function AddCommunity() {
     city: selectedCommunity?.city,
     state: selectedCommunity?.state,
     unitAddresses: [(selectedUnit1 as any)?.address, (selectedUnit2 as any)?.address],
+    addressHint: (selectedCommunity as any)?.addressHint,
   }), [selectedCommunity, selectedUnit1, selectedUnit2]);
   const licenseProfile = useMemo(() => resolveLicenseComplianceProfile({
     city: selectedCommunity?.city ?? cityInput,
@@ -1040,6 +1043,7 @@ export default function AddCommunity() {
       tag: m.tag,
       estimatedComboLow: m.estimatedComboLow,
       estimatedComboHigh: m.estimatedComboHigh,
+      sixBedroomPossible: m.sixBedroomPossible,
       status: "pending",
     })));
     setSweepJobId(null);
@@ -1098,6 +1102,7 @@ export default function AddCommunity() {
       communityName: community.name,
       city: community.city,
       state: community.state,
+      addressHint: (community as any).addressHint,
     });
     setSelectedCommunity(community);
     setEditedStreetAddress(streetAddress);
@@ -1198,7 +1203,7 @@ export default function AddCommunity() {
   // with almost zero per-resort clicking (no manual combo type choice).
   const quickQueueBestCombo = useCallback(async (community: CommunityResult) => {
     try {
-      const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state });
+      const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state, addressHint: (community as any).addressHint });
       const res = await apiRequest("POST", "/api/community/search-units", {
         communityName: community.name,
         city: community.city,
@@ -1258,7 +1263,7 @@ export default function AddCommunity() {
       const items: any[] = [];
       for (const community of selected) {
         try {
-          const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state });
+          const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state, addressHint: (community as any).addressHint });
           const res = await apiRequest("POST", "/api/community/search-units", {
             communityName: community.name,
             city: community.city,
@@ -2268,7 +2273,14 @@ export default function AddCommunity() {
                                           className="accent-primary mt-1"
                                         />
                                         <span className="min-w-0 flex-1">
-                                          <span className="block font-medium leading-snug">{m.city}, {m.state}</span>
+                                          <span className="block font-medium leading-snug flex items-center gap-1">
+                                            {m.city}, {m.state}
+                                            {m.sixBedroomPossible && (
+                                              <span title="6BR combo possible (two 3BR condos)">
+                                                <BedDouble className="h-3 w-3 text-blue-600" />
+                                              </span>
+                                            )}
+                                          </span>
                                           <span className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
                                             <DollarSign className="h-3 w-3" />
                                             Est. combo rental {formatComboRange(m.estimatedComboLow, m.estimatedComboHigh)}
@@ -2326,7 +2338,14 @@ export default function AddCommunity() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <p className="font-semibold text-sm">{m.city}, {m.state}</p>
+                            <p className="font-semibold text-sm flex items-center gap-1">
+                              {m.city}, {m.state}
+                              {m.sixBedroomPossible && (
+                                <span title="6BR combo possible (two 3BR condos)">
+                                  <BedDouble className="h-3.5 w-3.5 text-blue-600" />
+                                </span>
+                              )}
+                            </p>
                             {m.tag && <Badge variant="outline" className="text-[10px]">{m.tag}</Badge>}
                             <Badge variant="outline" className="text-[10px] border-emerald-200 bg-emerald-50 text-emerald-700">
                               <DollarSign className="h-3 w-3 mr-1" />
