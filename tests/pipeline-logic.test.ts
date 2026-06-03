@@ -1961,6 +1961,16 @@ assert.ok(
 );
 console.log("  ✓ buy-in SearchAPI phases complete before local-Chrome sidecar phases");
 
+assert.ok(
+  routeSource.includes("const allowInFlightJoin = req.query.nocache !== \"1\""),
+  "find-buy-in should keep in-flight dedup unless caller opts out with nocache=1",
+);
+assert.ok(
+  routeSource.includes("client disconnected; continuing detached scan"),
+  "find-buy-in should continue detached scans after the browser tab closes the socket",
+);
+console.log("  ✓ find-buy-in in-flight join survives tab disconnect");
+
 assert.equal(
   routeSource.includes("/api/builder/push-channel-markups"),
   false,
@@ -2651,6 +2661,14 @@ assert.ok(
 assert.ok(
   liveSearchSectionBody.indexOf("onScoutAlternatives(advice, { auto: true })") >= 0,
   "LiveSearchSection should auto-trigger alternative scout after failed search",
+);
+assert.ok(
+  liveSearchSectionBody.includes("return fetchFindBuyInWithRetry("),
+  "LiveSearchSection should use retrying find-buy-in fetch that survives transient disconnects",
+);
+assert.ok(
+  liveSearchSectionBody.includes("visibilitychange"),
+  "LiveSearchSection should refetch find-buy-in when the tab becomes visible again",
 );
 console.log("  ✓ LiveSearchSection auto alternative scout hook placement");
 

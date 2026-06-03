@@ -10294,7 +10294,12 @@ export async function registerRoutes(
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
     const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-pm-gh-v1|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
-    const noCache = req.query.nocache === "1" || FIND_BUY_IN_TTL_MS <= 0;
+    // Result HTTP cache is off by default (FIND_BUY_IN_TTL_MS=0), but in-flight
+    // dedup must stay on unless the caller explicitly opts out with nocache=1.
+    // Backgrounding the Operations tab closes the browser socket; without
+    // detached in-flight scans, every refetch restarts sidecar work from zero.
+    const skipResultCache = req.query.nocache === "1" || FIND_BUY_IN_TTL_MS <= 0;
+    const allowInFlightJoin = req.query.nocache !== "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
     let findBuyInLaneHeartbeat: ReturnType<typeof setInterval> | null = null;
@@ -10331,6 +10336,10 @@ export async function registerRoutes(
       }
       findBuyInLaneRelease?.();
       findBuyInLaneRelease = null;
+      if (nodeRes.writableEnded || nodeRes.destroyed) {
+        console.log(`[find-buy-in] client already gone; scan finished detached ${cacheKey}`);
+        return;
+      }
       if (nodeRes.headersSent) {
         return nodeRes.end(JSON.stringify(body));
       }
@@ -10339,20 +10348,20 @@ export async function registerRoutes(
     const requestAbort = new AbortController();
     nodeRes.on("close", () => {
       stopResponseKeepAlive();
-      if (findBuyInLaneHeartbeat) clearInterval(findBuyInLaneHeartbeat);
-      if (findBuyInLaneCancelPoll) clearInterval(findBuyInLaneCancelPoll);
-      findBuyInLaneRelease?.();
-      findBuyInLaneRelease = null;
       if (responseSettled) return;
-      requestAbort.abort(`find-buy-in client disconnected before completion ${cacheKey}`);
+      // Detached scan: keep sidecar lane + in-flight promise alive so a tab
+      // refocus or in-flight join can pick up the finished result.
+      console.log(`[find-buy-in] client disconnected; continuing detached scan ${cacheKey}`);
     });
-    if (!noCache) {
+    if (!skipResultCache) {
       const cached = findBuyInCache.get(cacheKey);
       if (cached && cached.expiresAt > Date.now()) {
         const ageSec = Math.round((Date.now() - cached.createdAt) / 1000);
         console.log(`[find-buy-in] cache hit ${cacheKey} (age ${ageSec}s)`);
         return sendFindBuyInJson({ ...cached.value, fromCache: true, cacheAgeSec: ageSec });
       }
+    }
+    if (allowInFlightJoin) {
       const inFlight = findBuyInInFlight.get(cacheKey);
       if (inFlight) {
         console.log(`[find-buy-in] in-flight join ${cacheKey}`);
@@ -10372,19 +10381,13 @@ export async function registerRoutes(
     let resolveInFlight: ((value: any) => void) | null = null;
     let rejectInFlight: ((reason?: unknown) => void) | null = null;
     let inFlightSettled = false;
-    if (!noCache) {
+    if (allowInFlightJoin) {
       const promise = new Promise<any>((resolve, reject) => {
         resolveInFlight = resolve;
         rejectInFlight = reject;
       });
       promise.catch(() => {});
       findBuyInInFlight.set(cacheKey, { promise, startedAt: Date.now() });
-      nodeRes.on("close", () => {
-        if (inFlightSettled) return;
-        inFlightSettled = true;
-        findBuyInInFlight.delete(cacheKey);
-        rejectInFlight?.(new Error(`find-buy-in request closed before completing ${cacheKey}`));
-      });
     }
 
     const community = config.community;
