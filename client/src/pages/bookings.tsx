@@ -4159,19 +4159,38 @@ export default function Bookings() {
       updateAlternativeWorkflow(resId, {
         activeCommunity: null,
         sidecarResults: {
-          ...(alternativeWorkflows[resId]?.sidecarResults ?? {}),
+          ...(alternativeWorkflowsRef.current[resId]?.sidecarResults ?? {}),
           [community]: data,
         },
       });
-      toast({
-        title: `Sidecar search finished for ${community}`,
-        description: data.cheapest?.length
-          ? `${data.cheapest.length} verified candidate${data.cheapest.length === 1 ? "" : "s"} returned.`
-          : data.diagnostics?.summary ?? "No verified candidate returned.",
-      });
+      const autoRunning = autoAltScans[resId]?.isRunning && !autoAltScans[resId]?.stopped;
+      if (!autoRunning) {
+        toast({
+          title: `Sidecar search finished for ${community}`,
+          description: data.cheapest?.length
+            ? `${data.cheapest.length} verified candidate${data.cheapest.length === 1 ? "" : "s"} returned.`
+            : data.diagnostics?.summary ?? "No verified candidate returned.",
+        });
+      }
     } catch (error: any) {
-      updateAlternativeWorkflow(resId, { activeCommunity: null });
-      toast({ title: `Sidecar search failed for ${community}`, description: error?.message ?? String(error), variant: "destructive" });
+      updateAlternativeWorkflow(resId, {
+        activeCommunity: null,
+        sidecarResults: {
+          ...(alternativeWorkflowsRef.current[resId]?.sidecarResults ?? {}),
+          [community]: {
+            cheapest: [],
+            diagnostics: {
+              severity: "error",
+              summary: error?.message ?? String(error),
+              generatedAt: new Date().toISOString(),
+            },
+          } as FindBuyInResponse,
+        },
+      });
+      const autoRunning = autoAltScans[resId]?.isRunning && !autoAltScans[resId]?.stopped;
+      if (!autoRunning) {
+        toast({ title: `Sidecar search failed for ${community}`, description: error?.message ?? String(error), variant: "destructive" });
+      }
     }
   };
 
@@ -5983,10 +6002,12 @@ export default function Bookings() {
     && isSidecarStatusForSearch(autoFillSidecarQueue.status, earliestAutoFillStartedAtMs);
 
   const updateAlternativeWorkflow = (reservationId: string, patch: Partial<AlternativeWorkflowState>) => {
-    setAlternativeWorkflows((prev) => ({
-      ...prev,
-      [reservationId]: { ...(prev[reservationId] ?? {}), ...patch },
-    }));
+    setAlternativeWorkflows((prev) => {
+      const nextState = { ...(prev[reservationId] ?? {}), ...patch };
+      const updated = { ...prev, [reservationId]: nextState };
+      alternativeWorkflowsRef.current = updated;
+      return updated;
+    });
   };
 
   const scoutAlternativeCommunities = async (
@@ -6005,7 +6026,9 @@ export default function Bookings() {
       }
       return;
     }
-    if (opts?.auto) {
+    if (!opts?.auto) {
+      autoAlternativeScoutStartedRef.current.delete(reservation._id);
+    } else {
       if (alternativeWorkflowsRef.current[reservation._id]?.scout) return;
       if (autoAlternativeScoutStartedRef.current.has(reservation._id)) return;
       autoAlternativeScoutStartedRef.current.add(reservation._id);
@@ -6021,14 +6044,6 @@ export default function Bookings() {
         minAirbnbResults: 1,
       }).then((r) => r.json()) as AlternativeScoutResponse;
       updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
-      alternativeWorkflowsRef.current = {
-        ...alternativeWorkflowsRef.current,
-        [reservation._id]: {
-          ...(alternativeWorkflowsRef.current[reservation._id] ?? {}),
-          scout: response,
-          activeCommunity: null,
-        },
-      };
       const sidecarQueue = alternativeCommunitiesForSidecar(response);
       if (sidecarQueue.length > 0) {
         startAutoAlternativeSidecarScan(reservation);
@@ -6069,10 +6084,13 @@ export default function Bookings() {
       toast({ title: "No alternatives", description: "No nearby community passed Airbnb inventory proof yet — run Scout similar areas first." });
       return;
     }
-    setAutoAltScans((prev) => ({ ...prev, [resId]: { isRunning: true, scanned: [], foundComboIn: null, stopped: false } }));
-    // The actual sequencing is driven by the reactive useEffect below (watches sidecarResults + auto flag).
-    // We just mark running here; the effect will pick next unscanned and call runAlternative...
-    toast({ title: "Auto sidecar scan started", description: `Will run sidecar on up to ${communities.length} nearby communities until a combo is found.` });
+    setAutoAltScans((prev) => {
+      const cur = prev[resId];
+      if (cur?.isRunning && !cur.stopped) return prev;
+      return { ...prev, [resId]: { isRunning: true, scanned: [], foundComboIn: null, stopped: false } };
+    });
+    // Sequencing is driven by the reactive useEffect below (watches sidecarResults + activeCommunity).
+    toast({ title: "Auto sidecar scan started", description: `Will run sidecar on up to ${communities.length} Airbnb-qualified nearby communit${communities.length === 1 ? "y" : "ies"} until a combo is found.` });
   };
 
   const stopAutoAlternativeSidecarScan = (reservationId: string) => {
@@ -6102,24 +6120,19 @@ export default function Bookings() {
         return;
       }
       const ordered = alternativeCommunitiesForSidecar(wf.scout!);
-      const scanned = scan.scanned ?? [];
-      const next = ordered.find((c) => !scanned.includes(c.community) && !wf.sidecarResults?.[c.community]);
+      const next = ordered.find((c) => !wf.sidecarResults?.[c.community]);
       if (!next) {
         // exhausted
         if (scan.isRunning) {
-          setAutoAltScans((prev) => ({ ...prev, [resId]: { ...scan, isRunning: false, stopped: true } }));
+          setAutoAltScans((prev) => ({ ...prev, [resId]: { ...scan, isRunning: false, stopped: true, scanned: ordered.map((c) => c.community) } }));
           toast({ title: "No combo in 20min alternatives", description: `Scanned all ${ordered.length} nearby communities — none yielded a full replacement combo. Consider cancel.` , variant: "destructive" });
         }
         return;
       }
       if (wf.activeCommunity) return; // one running, wait
-      // mark as about to scan this one (optimistic, run will set active)
-      setAutoAltScans((prev) => {
-        const cur = prev[resId] ?? scan;
-        return { ...prev, [resId]: { ...cur, scanned: [...(cur.scanned ?? []), next.community] } };
-      });
-      // fire the run (it is async internally, will update sidecarResults when done)
-      runAlternativeSidecarSearchRef.current({ _id: resId } as any, next.community);  // cast ok, only needs _id for keying
+      const reservation = rawReservationsRef.current.find((r) => r._id === resId);
+      if (!reservation?.slots?.length) return;
+      runAlternativeSidecarSearchRef.current(reservation, next.community);
     });
   }, [autoAltScans, alternativeWorkflows]);  // run func via ref; avoid re-trigger loops
 
