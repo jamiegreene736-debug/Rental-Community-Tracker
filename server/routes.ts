@@ -28085,11 +28085,19 @@ Return ONLY compact JSON with this exact shape:
   });
 
   app.get("/api/community/bulk-combo-listing-jobs", async (_req, res) => {
-    const rows = await db
-      .select({ id: bulkComboListingJobRows.id })
-      .from(bulkComboListingJobRows)
-      .orderBy(desc(bulkComboListingJobRows.createdAt))
-      .limit(12);
+    const [activeRows, recentRows] = await Promise.all([
+      db
+        .select({ id: bulkComboListingJobRows.id })
+        .from(bulkComboListingJobRows)
+        .where(inArray(bulkComboListingJobRows.status, ["queued", "running"]))
+        .orderBy(asc(bulkComboListingJobRows.createdAt)),
+      db
+        .select({ id: bulkComboListingJobRows.id })
+        .from(bulkComboListingJobRows)
+        .orderBy(desc(bulkComboListingJobRows.createdAt))
+        .limit(12),
+    ]);
+    const rows = Array.from(new Map([...activeRows, ...recentRows].map((row) => [row.id, row])).values());
     const jobs = (await Promise.all(rows.map((row) => loadBulkComboListingJob(row.id)))).filter(Boolean) as BulkComboListingJob[];
     res.json({
       jobs: jobs.map(serializeBulkComboListingJob),

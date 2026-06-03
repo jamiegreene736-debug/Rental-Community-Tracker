@@ -460,6 +460,7 @@ export default function AddCommunity() {
     cancelled: number;
     lockedBy?: string | null;
     lockExpiresAt?: string | null;
+    createdAt?: string | number | null;
     updatedAt?: string | null;
     items: Array<{
       id: string;
@@ -1957,6 +1958,23 @@ export default function AddCommunity() {
   }, [selectedCommunity, selectedUnit1, selectedUnit2, unit1BedroomCount, unit2BedroomCount, combinedBedrooms, suggestedRate, editedTitle, editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress, suggestedStreetAddress, editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB, strPermit, dbprLicense, touristTaxAccount, unit1Photos, unit2Photos, unit1PhotoSourceUrl, unit2PhotoSourceUrl, toast, navigate, queryClient]);
 
   const flaggedPhotos = Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean);
+  const activeBulkComboJobs = bulkComboHistory.filter((job) => job.status === "queued" || job.status === "running");
+  const visibleBulkComboJobs = (() => {
+    const byId = new Map<string, BulkComboListingJobPayload>();
+    if (bulkComboJob) byId.set(bulkComboJob.id, bulkComboJob);
+    for (const job of activeBulkComboJobs) byId.set(job.id, job);
+    return Array.from(byId.values()).sort((a, b) => {
+      const aTime = typeof a.createdAt === "number" ? a.createdAt : Date.parse(String(a.createdAt ?? ""));
+      const bTime = typeof b.createdAt === "number" ? b.createdAt : Date.parse(String(b.createdAt ?? ""));
+      return (Number.isFinite(aTime) ? aTime : 0) - (Number.isFinite(bTime) ? bTime : 0);
+    });
+  })();
+  const visibleBulkComboItems = visibleBulkComboJobs.flatMap((job) => job.items.map((item) => ({ job, item })));
+  const visibleBulkComboCompleted = visibleBulkComboItems.filter(({ item }) => item.status === "completed").length;
+  const visibleBulkComboFailed = visibleBulkComboItems.filter(({ item }) => item.status === "failed").length;
+  const visibleBulkComboCancelled = visibleBulkComboItems.filter(({ item }) => item.status === "cancelled").length;
+  const visibleBulkComboRunning = visibleBulkComboItems.filter(({ item }) => item.status === "running").length;
+  const visibleBulkComboQueued = visibleBulkComboItems.filter(({ item }) => item.status === "queued").length;
 
   return (
     <div className="min-h-screen bg-background">
@@ -2496,7 +2514,7 @@ export default function AddCommunity() {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {bulkComboJob.items.some((item) => item.status === "running" && item.heartbeatAt && Date.now() - new Date(item.heartbeatAt).getTime() > 5 * 60_000) && (
+                  {visibleBulkComboItems.some(({ item }) => item.status === "running" && item.heartbeatAt && Date.now() - new Date(item.heartbeatAt).getTime() > 5 * 60_000) && (
                     <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                       One running item has not heartbeated in more than 5 minutes. The server will clean it up if the lease expires; use Retry failed only after it turns failed.
                     </div>
@@ -2504,25 +2522,27 @@ export default function AddCommunity() {
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     <div className="rounded-md border p-2">
                       <p className="text-xs text-muted-foreground">Status</p>
-                      <p className="text-sm font-semibold capitalize">{bulkComboJob.status}</p>
+                      <p className="text-sm font-semibold capitalize">
+                        {visibleBulkComboJobs.length > 1 ? `${visibleBulkComboJobs.length} active jobs` : bulkComboJob.status}
+                      </p>
                     </div>
                     <div className="rounded-md border p-2">
                       <p className="text-xs text-muted-foreground">Completed</p>
-                      <p className="text-sm font-semibold">{bulkComboJob.completed} / {bulkComboJob.items.length}</p>
+                      <p className="text-sm font-semibold">{visibleBulkComboCompleted} / {visibleBulkComboItems.length}</p>
                     </div>
                     <div className="rounded-md border p-2">
                       <p className="text-xs text-muted-foreground">Failed</p>
-                      <p className="text-sm font-semibold">{bulkComboJob.failed}</p>
+                      <p className="text-sm font-semibold">{visibleBulkComboFailed}</p>
                     </div>
                     <div className="rounded-md border p-2">
                       <p className="text-xs text-muted-foreground">Cancelled</p>
-                      <p className="text-sm font-semibold">{bulkComboJob.cancelled}</p>
+                      <p className="text-sm font-semibold">{visibleBulkComboCancelled}</p>
                     </div>
                   </div>
                   <div className="grid grid-cols-1 gap-2 text-xs text-muted-foreground sm:grid-cols-3">
                     <div className="rounded-md border bg-muted/30 p-2">
-                      <span className="font-medium text-foreground">Current item:</span>{" "}
-                      {typeof bulkComboJob.currentIndex === "number" ? `${bulkComboJob.currentIndex + 1} of ${bulkComboJob.items.length}` : "Waiting"}
+                      <span className="font-medium text-foreground">Items:</span>{" "}
+                      {visibleBulkComboRunning} running, {visibleBulkComboQueued} queued
                     </div>
                     <div className="rounded-md border bg-muted/30 p-2">
                       <span className="font-medium text-foreground">Last heartbeat:</span>{" "}
@@ -2535,7 +2555,7 @@ export default function AddCommunity() {
                   </div>
 
                   <div className="max-h-96 overflow-y-auto rounded-md border">
-                    {bulkComboJob.items.map((item) => {
+                    {visibleBulkComboItems.map(({ job, item }) => {
                       const tone =
                         item.status === "completed" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                         : item.status === "failed" ? "bg-red-50 text-red-700 border-red-200"
@@ -2543,7 +2563,7 @@ export default function AddCommunity() {
                         : item.status === "running" ? "bg-blue-50 text-blue-700 border-blue-200"
                         : "bg-amber-50 text-amber-700 border-amber-200";
                       return (
-                        <div key={item.id} className="border-b px-3 py-3 last:border-b-0">
+                        <div key={`${job.id}:${item.id}`} className="border-b px-3 py-3 last:border-b-0">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                               <p className="truncate text-sm font-medium">{item.label}</p>
@@ -2553,6 +2573,7 @@ export default function AddCommunity() {
                               <p className="mt-0.5 text-[11px] text-muted-foreground">
                                 Phase: {item.phase || "queued"} · attempts {item.attemptCount ?? 0}
                                 {item.heartbeatAt ? ` · heartbeat ${new Date(item.heartbeatAt).toLocaleTimeString()}` : ""}
+                                {visibleBulkComboJobs.length > 1 ? ` · job ${job.id}` : ""}
                               </p>
                               {item.draftId && (
                                 <p className="mt-0.5 text-xs text-emerald-700">Saved as dashboard draft #{item.draftId}</p>
