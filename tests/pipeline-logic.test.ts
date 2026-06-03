@@ -1771,6 +1771,10 @@ assert.ok(
   "lost replacement job polls must surface an error instead of silently resetting to idle",
 );
 assert.ok(
+  unitReplacementSource.includes("isTransientReplacementJobPollStatus"),
+  "replacement job polls must keep polling through transient Railway 502/503/504 responses",
+);
+assert.ok(
   unitReplacementSource.includes("Search finished without a replacement unit"),
   "completed replacement jobs without a unit must show an error state",
 );
