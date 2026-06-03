@@ -2023,6 +2023,9 @@ const COMMUNITY_SOURCE_URLS: Record<string, { primary: string; fallback?: string
     primary: "https://www.zillow.com/homedetails/1831-Poipu-Rd-APT-823-Koloa-HI-96756/80152954_zpid/",
     fallback: "https://www.homes.com/property/1831-poipu-rd-koloa-hi-unit-720/gy46glh43cckm/",
   },
+  "Paniolo Hale": {
+    primary: "https://www.zillow.com/b/paniolo-hale-maunaloa-hi-9NxCHL/",
+  },
 };
 
 // Maps communityPhotoFolder folder names to their display community names
@@ -29647,6 +29650,14 @@ Return ONLY compact JSON with this exact shape:
           if (onStreet.length > 0) orderedCandidates = [...onStreet, ...offStreet];
         }
       }
+      const knownPhotoSourceUrl = COMMUNITY_SOURCE_URLS[communityName]?.primary;
+      if (knownPhotoSourceUrl && !skipSet.has(listingKey(knownPhotoSourceUrl))) {
+        const knownKey = listingKey(knownPhotoSourceUrl);
+        orderedCandidates = [
+          { url: knownPhotoSourceUrl, source: "zillow" as DiscoverySource },
+          ...orderedCandidates.filter((candidate) => listingKey(candidate.url) !== knownKey),
+        ];
+      }
 
       const offset = Math.max(0, Math.min(10, Number(skipFirst ?? 0) || 0));
       const candidatesToTry = candidateLimit
@@ -29662,6 +29673,8 @@ Return ONLY compact JSON with this exact shape:
         );
       }
       const triedCandidateUrls: string[] = [];
+      const configuredPhotoSourceUrl = COMMUNITY_SOURCE_URLS[communityName]?.primary;
+      const configuredPhotoSourceKey = configuredPhotoSourceUrl ? listingKey(configuredPhotoSourceUrl) : null;
       let bestRepresentativeFallback: {
         candidate: { url: string; source: DiscoverySource };
         photos: ScrapedPhoto[];
@@ -29674,8 +29687,10 @@ Return ONLY compact JSON with this exact shape:
         facts: ListingFacts,
       ) => {
         const scrapedBedrooms = facts.bedrooms ?? null;
+        const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
         if (!requestedBedrooms || requestedBedrooms < 3) return;
-        if (scrapedBedrooms === null || scrapedBedrooms < 2 || scrapedBedrooms >= requestedBedrooms) return;
+        if (scrapedBedrooms === null || scrapedBedrooms >= requestedBedrooms) return;
+        if (!isConfiguredPhotoSource && scrapedBedrooms < 2) return;
         if (photos.length === 0) return;
         if (
           bestRepresentativeFallback &&
@@ -29738,6 +29753,7 @@ Return ONLY compact JSON with this exact shape:
 
       if (bestRepresentativeFallback) {
         const { candidate, photos, facts, scrapedBedrooms } = bestRepresentativeFallback;
+        const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
         console.log(
           `[fetch-unit-photos] representative fallback community="${communityName ?? ""}" ` +
           `requestedBR=${requestedBedrooms} scrapedBR=${scrapedBedrooms} photos=${photos.length} ` +
@@ -29749,7 +29765,9 @@ Return ONLY compact JSON with this exact shape:
           foundVia: "search",
           facts,
           representativeFallback: true,
-          note: `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved a representative ${scrapedBedrooms}BR photo source from the same property.`,
+          note: isConfiguredPhotoSource
+            ? `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved the configured property photo gallery for representative photos.`
+            : `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved a representative ${scrapedBedrooms}BR photo source from the same property.`,
         });
         return;
       }
