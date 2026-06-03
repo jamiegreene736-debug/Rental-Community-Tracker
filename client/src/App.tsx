@@ -62,6 +62,7 @@ function Router() {
       <ErrorBoundary>
         <Switch>
           <Route path="/" component={Home} />
+          <Route path="/listing-queue">{() => <AgentRouteGate><AddCommunity /></AgentRouteGate>}</Route>
           <Route path="/add-community">{() => <AgentRouteGate><AddCommunity /></AgentRouteGate>}</Route>
           <Route path="/add-single-listing">{() => <AgentRouteGate><AddSingleListing /></AgentRouteGate>}</Route>
           <Route path="/builder/:propertyId/preflight">{() => <AgentRouteGate><BuilderPreflight /></AgentRouteGate>}</Route>

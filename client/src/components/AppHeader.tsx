@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarSearch, Home, MessageSquare, PhoneMissed } from "lucide-react";
+import { CalendarSearch, Home, ListTodo, MessageSquare, PhoneMissed } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { usePortalSession } from "@/lib/auth";
 
@@ -24,6 +24,7 @@ export default function AppHeader() {
   const isHome = location === "/";
   const isInbox = location.startsWith("/inbox");
   const isOperations = location.startsWith("/bookings");
+  const isListingQueue = location.startsWith("/listing-queue");
   const { data: pendingDraftCount = 0 } = useQuery<number>({
     queryKey: ["/api/inbox/auto-reply/logs", "pending-count"],
     queryFn: async () => {
@@ -81,6 +82,20 @@ export default function AppHeader() {
               <Home className="h-4 w-4 text-[hsl(var(--brand-blue))]" />
               <span className="hidden sm:inline">Home</span>
             </Link>
+            {!isAgent && (
+              <Link
+                href="/listing-queue"
+                className={`inline-flex h-10 items-center gap-2 rounded-lg border px-2 text-sm font-medium transition-colors sm:px-3
+                  ${isListingQueue
+                    ? "border-[hsl(var(--brand-blue)/0.25)] bg-[hsl(var(--brand-blue)/0.07)] text-foreground cursor-default pointer-events-none"
+                    : "border-transparent text-muted-foreground hover:border-[hsl(var(--brand-blue)/0.18)] hover:bg-background"
+                  }`}
+                data-testid="link-header-listing-queue"
+              >
+                <ListTodo className="h-4 w-4 text-[hsl(var(--brand-blue))]" />
+                <span className="hidden lg:inline">Listing Queue</span>
+              </Link>
+            )}
             <Link
               href="/inbox"
               className={`inline-flex h-10 items-center gap-2 rounded-lg border px-2 text-sm font-medium transition-colors sm:px-3

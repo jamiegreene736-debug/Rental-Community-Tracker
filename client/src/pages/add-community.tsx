@@ -259,7 +259,7 @@ function formatMinimumStay(community: CommunityResult): { label: string; tone: "
 }
 
 export default function AddCommunity() {
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -496,6 +496,19 @@ export default function AddCommunity() {
   const [bulkComboJob, setBulkComboJob] = useState<BulkComboListingJobPayload | null>(null);
   const [bulkComboEvents, setBulkComboEvents] = useState<QueueJobEventPayload[]>([]);
   const [bulkComboHistory, setBulkComboHistory] = useState<BulkComboListingJobPayload[]>([]);
+  const closeBulkComboQueue = useCallback(() => {
+    setBulkComboOpen(false);
+    if (location.startsWith("/listing-queue")) {
+      navigate("/add-community");
+    }
+  }, [location, navigate]);
+
+  useEffect(() => {
+    if (location.startsWith("/listing-queue")) {
+      setBulkComboOpen(true);
+    }
+  }, [location]);
+
   const applySweepJob = useCallback((job: TopMarketJobPayload) => {
     if (ignoredSweepJobIdsRef.current.has(job.id)) return;
     setSweepJobId(job.id);
@@ -2457,7 +2470,7 @@ export default function AddCommunity() {
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4"
             onClick={(event) => {
-              if (event.target === event.currentTarget) setBulkComboOpen(false);
+              if (event.target === event.currentTarget) closeBulkComboQueue();
             }}
           >
             <div
@@ -2486,14 +2499,14 @@ export default function AddCommunity() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => setBulkComboOpen(false)}
+                    onClick={closeBulkComboQueue}
                   >
                     Close
                   </Button>
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => setBulkComboOpen(false)}
+                    onClick={closeBulkComboQueue}
                     aria-label="Close bulk combo listing queue"
                     title="Close"
                   >
