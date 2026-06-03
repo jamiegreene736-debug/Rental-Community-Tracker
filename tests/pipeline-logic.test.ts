@@ -247,6 +247,21 @@ assert.match(
   /triedCandidateUrls/,
   "fetch-unit-photos must return exhausted candidate URLs so preflight retries do not rescrape the same listings",
 );
+assert.match(
+  routesSource,
+  /focusedScrapeableCandidates = candidateUrls\.filter\(\s*\(candidate\) => candidate\.source === "zillow" \|\| candidate\.source === "realtor"/,
+  "fetch-unit-photos must not skip Apify supplement when SearchAPI only surfaced Redfin/Homes URLs",
+);
+assert.match(
+  routesSource,
+  /isBoundedDiscovery[\s\S]*scrapeable = orderedCandidates\.filter\(\(c\) => c\.source === "zillow" \|\| c\.source === "realtor"\)/,
+  "bounded preflight photo discovery must try Zillow/Realtor before Redfin candidates that return 0 photos",
+);
+assert.match(
+  routesSource,
+  /Redfin slugs like "92-1070-1-Olani-St"/,
+  "Hawaii Redfin unit slugs must normalize to the same street root as the resort address",
+);
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
 assert.match(
   dashboardSource,
