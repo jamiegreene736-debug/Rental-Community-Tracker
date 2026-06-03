@@ -254,8 +254,13 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /isBoundedDiscovery[\s\S]*scrapeable = orderedCandidates\.filter\(\(c\) => c\.source === "zillow" \|\| c\.source === "realtor"\)/,
-  "bounded preflight photo discovery must try Zillow/Realtor before Redfin candidates that return 0 photos",
+  /isBoundedDiscovery[\s\S]*orderedCandidates = scrapeable\.length > 0 \? scrapeable : candidateUrls/,
+  "bounded preflight photo discovery must only try Zillow/Realtor scrapers, not Redfin",
+);
+assert.match(
+  routesSource,
+  /isBoundedDiscovery && suppliedStreetRoot\) addCandidate\(link, "zillow"\)/,
+  "bounded preflight must admit Apify Zillow URLs without over-broad street-root filtering",
 );
 assert.match(
   routesSource,
