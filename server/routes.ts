@@ -33387,16 +33387,58 @@ Return ONLY compact JSON with this exact shape:
   const topMarketJobs = new Map<string, TopMarketJob>();
   let topMarketCacheRefreshJobId: string | null = null;
   const TOP_MARKET_JOB_TTL_MS = 1000 * 60 * 60 * 6;
+  // Background refresh runs sequentially (~minutes per city). If a deploy
+  // restarts the process or one city hangs, treat the in-memory job as dead
+  // so uncached markets can resume instead of blocking forever at N/86.
+  const TOP_MARKET_CACHE_REFRESH_STALE_MS = 1000 * 60 * 25;
+  const TOP_MARKET_SCAN_MARKET_TIMEOUT_MS = 1000 * 60 * 12;
+  const clearStaleTopMarketCacheRefreshJob = (job: TopMarketJob, reason: string) => {
+    job.status = "cancelled";
+    job.cancelRequested = true;
+    job.error = reason;
+    job.updatedAt = Date.now();
+    if (topMarketCacheRefreshJobId === job.id) topMarketCacheRefreshJobId = null;
+    console.warn(`[top-market-scan-cache] ${reason} (job ${job.id})`);
+  };
+  const withTopMarketScanTimeout = <T>(promise: Promise<T>, label: string): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`${label} timed out after ${TOP_MARKET_SCAN_MARKET_TIMEOUT_MS}ms`));
+      }, TOP_MARKET_SCAN_MARKET_TIMEOUT_MS);
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
   const activeTopMarketCacheRefreshJob = (): TopMarketJob | null => {
+    const consider = (job: TopMarketJob | undefined): TopMarketJob | null => {
+      if (!job || (job.status !== "queued" && job.status !== "running")) return null;
+      if (Date.now() - job.updatedAt > TOP_MARKET_CACHE_REFRESH_STALE_MS) {
+        clearStaleTopMarketCacheRefreshJob(
+          job,
+          `stale cache-refresh job idle for ${TOP_MARKET_CACHE_REFRESH_STALE_MS}ms`,
+        );
+        return null;
+      }
+      return job;
+    };
     if (topMarketCacheRefreshJobId) {
-      const job = topMarketJobs.get(topMarketCacheRefreshJobId);
-      if (job && (job.status === "queued" || job.status === "running")) return job;
+      const job = consider(topMarketJobs.get(topMarketCacheRefreshJobId));
+      if (job) return job;
       topMarketCacheRefreshJobId = null;
     }
     for (const job of topMarketJobs.values()) {
-      if (job.cacheRefresh && (job.status === "queued" || job.status === "running")) {
+      if (!job.cacheRefresh) continue;
+      const active = consider(job);
+      if (active) {
         topMarketCacheRefreshJobId = job.id;
-        return job;
+        return active;
       }
     }
     return null;
@@ -33471,11 +33513,16 @@ Return ONLY compact JSON with this exact shape:
         market.status = "running";
         job.updatedAt = Date.now();
         try {
-          const communities = await annotateCommunitiesWithComboInventory(
-            await researchCommunitiesForCity(market.city, market.state),
-            market.city,
-            market.state,
+          const researched = await withTopMarketScanTimeout(
+            researchCommunitiesForCity(market.city, market.state),
+            `${market.city}, ${market.state} research`,
           );
+          const communities = job.cacheRefresh
+            ? researched
+            : await withTopMarketScanTimeout(
+              annotateCommunitiesWithComboInventory(researched, market.city, market.state),
+              `${market.city}, ${market.state} combo inventory`,
+            );
           market.sixBedroomPossible = communities.some(hasSixBedroomComboPotential);
           market.sevenEightBedroomPossible = communities.some(hasSevenEightBedroomComboPotential);
           market.status = "done";
@@ -33654,6 +33701,26 @@ Return ONLY compact JSON with this exact shape:
     res.end();
   });
 
+  const maybeStartTopMarketCacheRefresh = async (): Promise<TopMarketJob | null> => {
+    if (!process.env.SEARCHAPI_API_KEY) return null;
+    const existing = activeTopMarketCacheRefreshJob();
+    if (existing) return existing;
+    const cacheMap = await loadTopMarketScanCacheMap();
+    const uncachedMarkets = TOP_MARKET_SEEDS.filter(
+      (s) => !cacheMap.has(topMarketScanCacheKey(s.city, s.state)),
+    );
+    if (uncachedMarkets.length === 0) return null;
+    const refreshJob = enqueueTopMarketScanJob(uncachedMarkets, {
+      maxMarkets: uncachedMarkets.length,
+      cacheRefresh: true,
+    });
+    console.log(
+      `[top-market-scan-cache] auto-started refresh for ${uncachedMarkets.length} uncached markets (job ${refreshJob.id})`,
+    );
+    return refreshJob;
+  };
+  app.set("startTopMarketCacheRefresh", maybeStartTopMarketCacheRefresh);
+
   // GET /api/community/top-markets/seeds
   // Returns the curated seed list merged with persisted combo-scan cache.
   // When uncached markets remain, auto-starts a background cache-refresh job.
@@ -33678,20 +33745,7 @@ Return ONLY compact JSON with this exact shape:
       const uncachedMarkets = TOP_MARKET_SEEDS.filter(
         (s) => !cacheMap.has(topMarketScanCacheKey(s.city, s.state)),
       );
-      let refreshJob = activeTopMarketCacheRefreshJob();
-      if (
-        !refreshJob &&
-        uncachedMarkets.length > 0 &&
-        process.env.SEARCHAPI_API_KEY
-      ) {
-        refreshJob = enqueueTopMarketScanJob(uncachedMarkets, {
-          maxMarkets: uncachedMarkets.length,
-          cacheRefresh: true,
-        });
-        console.log(
-          `[top-market-scan-cache] auto-started refresh for ${uncachedMarkets.length} uncached markets (job ${refreshJob.id})`,
-        );
-      }
+      const refreshJob = await maybeStartTopMarketCacheRefresh();
       res.json({
         seeds,
         markets: seeds,
