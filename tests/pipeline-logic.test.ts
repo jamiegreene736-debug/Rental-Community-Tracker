@@ -177,8 +177,13 @@ assert.match(
 );
 assert.match(
   preflightSource,
-  /maxCandidates: currentUnitHasPhotos \? 8 : 6/,
+  /replacingExistingPhotos \? 10 : 6/,
   "preflight Find Photos must bound candidate scans so a no-match does not run for several minutes",
+);
+assert.match(
+  preflightSource,
+  /replacingExistingPhotos[\s\S]*siblingSourceUrls/,
+  "preflight Find different photos must not skip the sibling unit source URL so sparse resorts still have candidates",
 );
 assert.match(
   routesSource,

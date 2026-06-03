@@ -22,6 +22,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 import { useToast } from "@/hooks/use-toast";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+import { inferCommunityStreetAddress } from "@shared/community-addresses";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -321,7 +322,13 @@ export default function BuilderPreflight() {
   const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unit: { id: string; bedrooms: number }) => {
     if (id >= 0 || !property) return; // promoted drafts only
     const draftId = -id;
-    const { street, city, state } = parsePropertyAddress(property.address);
+    const { street: parsedStreet, city, state } = parsePropertyAddress(property.address);
+    const street = inferCommunityStreetAddress({
+      communityName: property.complexName,
+      city,
+      state,
+      addressHint: parsedStreet || property.address,
+    }) || parsedStreet;
     const loadSourceUrl = async (folder?: string): Promise<string | null> => {
       if (!folder) return null;
       try {
@@ -338,30 +345,61 @@ export default function BuilderPreflight() {
     setPhotoFetchTick(0);
     setPhotoFetchPhase("Checking existing photo sources");
     try {
-      const existingSources = await Promise.all(property.units.map((u) => loadSourceUrl(u.photoFolder)));
+      const replacingExistingPhotos = (unit.photos?.length ?? 0) > 0;
+      const currentSourceUrl = await loadSourceUrl(unit.photoFolder);
+      const siblingSourceUrls = replacingExistingPhotos
+        ? []
+        : (await Promise.all(
+            property.units
+              .filter((u) => u.id !== unit.id)
+              .map((u) => loadSourceUrl(u.photoFolder)),
+          )).filter((u): u is string => !!u);
       const skipUrls = Array.from(new Set([
         ...(skippedUrlsByUnit[unit.id] ?? []),
-        ...existingSources.filter((u): u is string => !!u),
+        ...(currentSourceUrl ? [currentSourceUrl] : []),
+        ...siblingSourceUrls,
       ]));
-      const currentUnitHasPhotos = property.units.some((u) => u.id === unit.id && (u.photos?.length ?? 0) > 0);
       setPhotoFetchPhase("Searching real-estate listings");
-      const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", {
-        communityName: property.complexName,
-        streetAddress: street || undefined,
-        city: city || undefined,
-        state: state || undefined,
-        bedrooms: unit.bedrooms,
-        skipUrls,
-        skipFirst: skipUrls.length === 0 && currentUnitHasPhotos ? 1 : 0,
-        maxCandidates: currentUnitHasPhotos ? 8 : 6,
-      });
-      const fetchData = await fetchR.json();
-      const photos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
-      const sourceUrl: string | null = fetchData?.sourceUrl ?? null;
+      const discoveryAttempts: Array<{
+        bedrooms: number | "any";
+        minBedrooms?: number;
+        maxCandidates: number;
+      }> = [
+        { bedrooms: unit.bedrooms, maxCandidates: replacingExistingPhotos ? 10 : 6 },
+        { bedrooms: unit.bedrooms, maxCandidates: replacingExistingPhotos ? 12 : 8 },
+        { bedrooms: "any", minBedrooms: unit.bedrooms, maxCandidates: replacingExistingPhotos ? 12 : 10 },
+      ];
+      let photos: Array<{ url: string }> = [];
+      let sourceUrl: string | null = null;
+      let lastNote: string | undefined;
+      const triedUrls = new Set(skipUrls);
+      for (const attempt of discoveryAttempts) {
+        const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", {
+          communityName: property.complexName,
+          streetAddress: street || undefined,
+          city: city || undefined,
+          state: state || undefined,
+          bedrooms: attempt.bedrooms,
+          minBedrooms: attempt.minBedrooms,
+          skipUrls: Array.from(triedUrls),
+          skipFirst: triedUrls.size === 0 && replacingExistingPhotos ? 1 : 0,
+          maxCandidates: attempt.maxCandidates,
+        });
+        const fetchData = await fetchR.json();
+        lastNote = typeof fetchData?.note === "string" ? fetchData.note : undefined;
+        const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
+        const nextSourceUrl: string | null = fetchData?.sourceUrl ?? null;
+        if (nextPhotos.length > 0) {
+          photos = nextPhotos;
+          sourceUrl = nextSourceUrl;
+          break;
+        }
+        if (nextSourceUrl) triedUrls.add(nextSourceUrl);
+      }
       if (photos.length === 0) {
         toast({
-          title: "No real-estate listing found",
-          description: fetchData?.note || `Couldn't find a representative ${unit.bedrooms}BR listing at ${property.complexName}. The community may not have Zillow/Realtor coverage.`,
+          title: "No more photo candidates",
+          description: lastNote || `Couldn't find another ${unit.bedrooms}BR listing at ${property.complexName} after skipping the sources already on file.`,
           variant: "destructive",
         });
         return;
