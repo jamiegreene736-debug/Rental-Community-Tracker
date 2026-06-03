@@ -16,6 +16,11 @@ import {
   validateCommunityStreetAddress,
 } from "../shared/community-addresses";
 import { checkCommunityType } from "../shared/community-type";
+import {
+  formatTypicalComboLabel,
+  inferTypicalComboPair,
+  normalizeCombinedBedroomsTypical,
+} from "../shared/community-combo";
 import { unitVerificationClaims } from "../shared/folder-unit-map";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
 import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
@@ -1980,6 +1985,27 @@ assert.equal(
   "Kaanapali Alii should accept Kaanapali as the queued market city while validating its canonical street",
 );
 console.log("  ✓ Honua Kai + Kaanapali Alii canonical addresses validate for bulk combo draft saves");
+
+const honuaKaiTypical = inferTypicalComboPair({ availableBedrooms: [1, 2, 3] });
+assert.deepEqual(honuaKaiTypical, { unitBeds: 3, totalBeds: 6 });
+assert.equal(formatTypicalComboLabel(honuaKaiTypical), " · 2×3BR=6BR");
+assert.equal(
+  normalizeCombinedBedroomsTypical({ availableBedrooms: [1, 2, 3], combinedBedroomsTypical: 5 }),
+  6,
+);
+console.log("  ✓ typical combo label uses 2×3BR=6BR math for 1/2/3BR resorts");
+
+assert.match(
+  routeSource,
+  /nameLooksSameCommunity/,
+  "community research should use strict community-name matching for already-in-system flags",
+);
+assert.match(
+  routeSource,
+  /WEAK_COMMUNITY_NAME_TOKENS/,
+  "community research should ignore single-token kai/beach overlaps when flagging existing listings",
+);
+console.log("  ✓ already-in-system uses strict community-name matching");
 
 assert.equal(
   validateCommunityStreetAddress({

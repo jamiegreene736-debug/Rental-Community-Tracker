@@ -1,0 +1,70 @@
+export type TypicalComboBedroomFields = {
+  availableBedrooms?: number[] | null;
+  estimatedBedroomUnitCounts?: Record<string, number> | null;
+  combinedBedroomsTypical?: number | null;
+};
+
+export type TypicalComboPair = { unitBeds: number; totalBeds: number };
+
+function getComboBedroomCounts(community: Pick<TypicalComboBedroomFields, "estimatedBedroomUnitCounts">): Map<number, number> {
+  const counts = new Map<number, number>();
+  if (community.estimatedBedroomUnitCounts) {
+    for (const [bedrooms, count] of Object.entries(community.estimatedBedroomUnitCounts)) {
+      const bedroomCount = Math.round(Number(String(bedrooms).replace(/[^\d.]/g, "")));
+      const unitCount = Math.round(Number(count));
+      if (Number.isFinite(bedroomCount) && bedroomCount > 0 && Number.isFinite(unitCount) && unitCount > 0) {
+        counts.set(bedroomCount, Math.max(counts.get(bedroomCount) ?? 0, unitCount));
+      }
+    }
+  }
+  return counts;
+}
+
+function getComboAvailableBedrooms(community: Pick<TypicalComboBedroomFields, "availableBedrooms" | "estimatedBedroomUnitCounts">): Set<number> {
+  const bedrooms = new Set<number>();
+  for (const value of community.availableBedrooms ?? []) {
+    const normalized = Math.round(Number(value));
+    if (Number.isFinite(normalized) && normalized > 0) bedrooms.add(normalized);
+  }
+  getComboBedroomCounts(community).forEach((_count, bedroom) => bedrooms.add(bedroom));
+  return bedrooms;
+}
+
+/** Best typical two-unit combo for display (same scoring as search-units). */
+export function inferTypicalComboPair(community: TypicalComboBedroomFields): TypicalComboPair | null {
+  const availableTypes = Array.from(getComboAvailableBedrooms(community)).sort((a, b) => a - b);
+  if (availableTypes.length === 0) return null;
+
+  let best: TypicalComboPair | null = null;
+  let bestScore = -1;
+  for (let i = 0; i < availableTypes.length; i += 1) {
+    for (let j = i; j < availableTypes.length; j += 1) {
+      const b1 = availableTypes[i];
+      const b2 = availableTypes[j];
+      const total = b1 + b2;
+      if (total < 3 || total > 10) continue;
+      const counts = getComboBedroomCounts(community);
+      if (b1 === b2 && counts.size > 0 && (counts.get(b1) ?? 0) < 2) continue;
+      const matchScore = (b1 === b2 ? 2 : 0) + Math.min(total / 2, 3);
+      if (matchScore > bestScore) {
+        bestScore = matchScore;
+        best = { unitBeds: b1, totalBeds: total };
+      }
+    }
+  }
+  return best;
+}
+
+export function formatTypicalComboLabel(pair: TypicalComboPair | null | undefined): string {
+  if (!pair) return "";
+  return ` · 2×${pair.unitBeds}BR=${pair.totalBeds}BR`;
+}
+
+export function normalizeCombinedBedroomsTypical(community: TypicalComboBedroomFields): number | undefined {
+  const inferred = inferTypicalComboPair(community);
+  if (inferred) return inferred.totalBeds;
+  const stored = typeof community.combinedBedroomsTypical === "number"
+    ? Math.round(community.combinedBedroomsTypical)
+    : undefined;
+  return stored && stored > 0 ? stored : undefined;
+}

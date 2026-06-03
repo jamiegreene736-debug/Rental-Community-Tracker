@@ -33161,6 +33161,43 @@ Return ONLY compact JSON with this exact shape:
     const hits = ta.filter(t => tb.some(u => u === t || u.includes(t) || t.includes(u) || (u.length > 3 && t.length > 3 && (u.startsWith(t.slice(0, 4)) || t.startsWith(u.slice(0, 4)))))).length;
     return hits / Math.min(ta.length, tb.length) >= 0.5;
   };
+  const WEAK_COMMUNITY_NAME_TOKENS = new Set([
+    "kai", "beach", "bay", "point", "village", "ocean", "shore", "island",
+    "north", "south", "east", "west", "golf", "park", "hawaii", "maui",
+    "kauai", "oahu", "condo", "condos", "villa", "villas",
+  ]);
+  const communityNameTokens = (value: string | null | undefined): string[] => {
+    const stop = /^(resort|condos?|townhomes?|villas?|community|beachfront|the|and|for|sea|at|by)$/i;
+    return String(value ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .filter((token) => token.length > 2 && !stop.test(token));
+  };
+  const tokenMatchesCommunityName = (left: string, right: string): boolean =>
+    left === right
+    || right.includes(left)
+    || left.includes(right)
+    || (right.length > 3 && left.length > 3 && (right.startsWith(left.slice(0, 4)) || left.startsWith(right.slice(0, 4))));
+  // Stricter than nameLooksSame: a single shared token like "kai" must not
+  // mark Honua Kai as already tracked when only Poipu Kai exists in the portfolio.
+  const nameLooksSameCommunity = (a: string | null | undefined, b: string | null | undefined): boolean => {
+    if (!a || !b) return false;
+    const na = String(a).toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    const nb = String(b).toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (!na || !nb) return false;
+    if (na === nb || na.includes(nb) || nb.includes(na)) return true;
+    const ta = communityNameTokens(a);
+    const tb = communityNameTokens(b);
+    if (ta.length === 0 || tb.length === 0) return false;
+    const hits = ta.filter((token) => tb.some((other) => tokenMatchesCommunityName(token, other)));
+    const strongHits = hits.filter((token) => !WEAK_COMMUNITY_NAME_TOKENS.has(token));
+    if (strongHits.length >= 2) return true;
+    if (strongHits.length >= 1 && hits.length >= 2) return true;
+    return hits.length / Math.min(ta.length, tb.length) >= 0.67 && strongHits.length >= 1;
+  };
   const comboKeyForBeds = (unit1Beds: unknown, unit2Beds: unknown): string | null => {
     const b1 = Math.round(Number(unit1Beds));
     const b2 = Math.round(Number(unit2Beds));
@@ -33186,7 +33223,7 @@ Return ONLY compact JSON with this exact shape:
     const city = String(target.city || "").trim();
     const state = String(target.state || "").trim();
     return (
-      nameLooksSame(String(community.name || ""), target.communityName) &&
+      nameLooksSameCommunity(String(community.name || ""), target.communityName) &&
       (!city || nameLooksSame(String(community.city || ""), city)) &&
       (!state || String(community.state || "").trim().toLowerCase() === state.toLowerCase())
     );
@@ -33290,23 +33327,26 @@ Return ONLY compact JSON with this exact shape:
     fallbackCity: string,
     fallbackState: string,
   ) => {
-    let existingNames: string[] = [];
+    let trackedDrafts: Array<{ name?: string | null; city?: string | null; state?: string | null }> = [];
+    let trackedCommunities: string[] = [];
     try {
-      const drafts = await storage.getCommunityDrafts();
-      for (const d of drafts) if (d.name) existingNames.push(String(d.name).toLowerCase().trim());
+      trackedDrafts = await storage.getCommunityDrafts();
     } catch { /* best-effort */ }
     for (const pidStr of Object.keys(PROPERTY_UNIT_CONFIGS)) {
       const cfg = PROPERTY_UNIT_CONFIGS[Number(pidStr)];
-      if (cfg?.community) existingNames.push(cfg.community.toLowerCase().trim());
+      if (cfg?.community) trackedCommunities.push(String(cfg.community));
     }
     for (const community of communities) {
-      const inventory = await getComboInventoryForCommunity({
+      const target = {
         communityName: community.name,
         city: community.city || fallbackCity,
         state: community.state || fallbackState,
-      });
-      const name = String(community.name || "").toLowerCase().trim();
-      community.hasExistingListing = existingNames.some((existing) => nameLooksSame(existing, name)) || inventory.items.length > 0;
+      };
+      const inventory = await getComboInventoryForCommunity(target);
+      const hasTrackedListing = trackedDrafts.some((draft) =>
+        comboCommunityMatches({ name: draft.name, city: draft.city, state: draft.state }, target),
+      ) || trackedCommunities.some((existing) => nameLooksSameCommunity(existing, community.name));
+      community.hasExistingListing = inventory.items.length > 0 || hasTrackedListing;
       community.existingComboLabels = Array.from(inventory.existingKeys).sort().map(comboLabelForKey);
       community.reservedComboLabels = Array.from(inventory.reservedKeys).sort().map(comboLabelForKey);
     }
