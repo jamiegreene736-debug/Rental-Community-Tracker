@@ -147,6 +147,7 @@ import {
   discoveryCommunityNameAliases,
   inferCommunityStreetAddress,
   normalizeCommunityAddressToken,
+  normalizePlatformCheckCity,
   resolveBulkComboListingStreet,
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
@@ -24058,12 +24059,12 @@ Return ONLY compact JSON with this exact shape:
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const name = (req.query.name as string || "").trim();
-    const city = (req.query.city as string || "").trim();
     const unitsParam = (req.query.units as string || "[]");
     if (!name) return res.status(400).json({ error: "name is required" });
 
     let units: { unitId: string; unitNumber: string; address: string; photoFolder?: string }[] = [];
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
+    const city = normalizePlatformCheckCity(String(req.query.city ?? ""), units[0]?.address);
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
     const photoModeRaw = String(req.query.photoMode ?? req.query.photoAudit ?? "").toLowerCase();
     const fullPhotoAudit = photoModeRaw === "full" || photoModeRaw === "all" || photoModeRaw === "unit-audit" || req.query.fullPhotoAudit === "1";
