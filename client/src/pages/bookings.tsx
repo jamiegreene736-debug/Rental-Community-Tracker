@@ -1179,6 +1179,43 @@ function alternativeReplacementNeedText(workflow: AlternativeWorkflowState | und
   return plans.map((plan) => `${plan.join("+")}BR`).join(" or ");
 }
 
+function alternativeScoutSourceKind(result: AlternativeScoutResult): "discovered" | "configured" {
+  return result.isDiscovered ? "discovered" : "configured";
+}
+
+function AlternativeScoutSourceBadge({ result }: { result: AlternativeScoutResult }) {
+  if (alternativeScoutSourceKind(result) === "discovered") {
+    return (
+      <span
+        className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800"
+        title="Found via Google Maps within ~20 min drive; not in buy-in markets config yet"
+      >
+        Discovered
+      </span>
+    );
+  }
+  return (
+    <span
+      className="ml-1 rounded bg-slate-100 px-1 py-0.5 text-[10px] font-medium text-slate-700"
+      title="Configured buy-in market within ~20 min drive"
+    >
+      Configured
+    </span>
+  );
+}
+
+function alternativeScoutSourceSummary(scout: AlternativeScoutResponse | undefined): { configured: number; discovered: number; total: number } | null {
+  if (!scout) return null;
+  const byCommunity = new Map<string, AlternativeScoutResult>();
+  for (const row of [...(scout.scouted ?? []), ...(scout.results ?? []), ...(scout.discoveredResorts ?? [])]) {
+    byCommunity.set(row.community, row);
+  }
+  const unique = Array.from(byCommunity.values());
+  if (unique.length === 0) return null;
+  const discovered = unique.filter((row) => row.isDiscovered).length;
+  return { configured: unique.length - discovered, discovered, total: unique.length };
+}
+
 /** Communities that passed SearchAPI Airbnb inventory proof — eligible for sidecar find-buy-in. */
 function alternativeCommunitiesForSidecar(scout: AlternativeScoutResponse): AlternativeScoutResult[] {
   const byCommunity = new Map<string, AlternativeScoutResult>();
@@ -2064,6 +2101,9 @@ function AlternativeBuyInWorkflowPanel({
     const scouted = workflow?.scout?.scouted ?? workflow?.scout?.results ?? [];
     const byCommunity = new Map<string, AlternativeScoutResult>();
     for (const row of scouted) byCommunity.set(row.community, row);
+    for (const row of workflow?.scout?.discoveredResorts ?? []) {
+      if (!byCommunity.has(row.community)) byCommunity.set(row.community, row);
+    }
     for (const row of workflow?.scout?.rejected ?? []) {
       if (!byCommunity.has(row.community)) byCommunity.set(row.community, row);
     }
@@ -2071,6 +2111,7 @@ function AlternativeBuyInWorkflowPanel({
       (a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999),
     );
   })();
+  const scoutSources = alternativeScoutSourceSummary(workflow?.scout);
   const completeReplacementSet = bestAlternativeReplacementSet(workflow);
   const replacementPlanText = alternativeReplacementNeedText(workflow);
   return (
@@ -2084,7 +2125,12 @@ function AlternativeBuyInWorkflowPanel({
           </p>
           {(workflow?.scout?.nearbyWithinDriveMinutes?.length ?? 0) > 0 && (
             <p className="mt-0.5 text-[11px] opacity-80">
-              Within 20 min: {workflow!.scout!.nearbyWithinDriveMinutes!.map((row) => `${row.community} (~${row.driveMinutes} min)`).join(" · ")}
+              Within 20 min (configured): {workflow!.scout!.nearbyWithinDriveMinutes!.map((row) => `${row.community} (~${row.driveMinutes} min)`).join(" · ")}
+            </p>
+          )}
+          {scoutSources && (
+            <p className="mt-0.5 text-[11px] opacity-80">
+              Scout sources: {scoutSources.configured} configured · {scoutSources.discovered} discovered (Google Maps, not in system yet)
             </p>
           )}
           {replacementPlanText && (
@@ -2118,7 +2164,10 @@ function AlternativeBuyInWorkflowPanel({
               <div key={result.community} className="rounded border bg-white/80 px-2 py-2">
                 <div className="flex items-start justify-between gap-2">
                   <div>
-                    <p className="font-semibold">{result.community}{ (result as any).isDiscovered ? <span className="ml-1 text-[10px] rounded bg-amber-100 px-1 text-amber-700">new</span> : null }</p>
+                    <p className="font-semibold">
+                      {result.community}
+                      <AlternativeScoutSourceBadge result={result} />
+                    </p>
                     <p className="text-[11px] text-muted-foreground">
                       Airbnb scout: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} passed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
                       <UnitTypeConfidenceBadge confidence={sidecar?.cheapest?.[0]?.unitTypeConfidence} />
