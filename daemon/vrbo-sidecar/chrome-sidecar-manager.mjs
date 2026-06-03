@@ -882,6 +882,9 @@ export class ChromeSidecarManager {
     }
 
     if (await this.isCdpReady(instance.cdpUrl)) {
+      if (!(await this.localCdpHasPageTargets(instance.cdpUrl))) {
+        await this.recoverDeadLocalCdp(instance.cdpUrl);
+      }
       await this.enforceLocalWindowMode(instance);
     }
 
@@ -1236,6 +1239,41 @@ export class ChromeSidecarManager {
     const left = this.visibleGridOrigin.left + col * (this.visibleWindowSize.width + this.visibleGridGapX);
     const top = this.visibleGridOrigin.top + row * (this.visibleWindowSize.height + this.visibleGridGapY);
     return { left, top };
+  }
+
+  async localCdpHasPageTargets(cdpUrl) {
+    try {
+      const resp = await fetch(`${trimTrailingSlash(cdpUrl)}/json/list`, {
+        signal: AbortSignal.timeout(2_500),
+      });
+      if (!resp.ok) return false;
+      const targets = await resp.json();
+      return Array.isArray(targets) && targets.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async recoverDeadLocalCdp(cdpUrl) {
+    const instance = this.localInstances.find((row) => row.cdpUrl === cdpUrl);
+    if (!instance) return false;
+    if (await this.localCdpHasPageTargets(cdpUrl)) return true;
+    this.log(`${instance.label} CDP has no page targets; relaunching Chrome…`);
+    await sendBrowserCdpCommand(cdpUrl, "Browser.close", {}, 2_000).catch(() => {});
+    const closeStartedAt = Date.now();
+    while (Date.now() - closeStartedAt < 5_000 && (await this.isCdpReady(cdpUrl))) {
+      await sleep(250);
+    }
+    try {
+      await this.launchLocalChrome(instance);
+    } catch (e) {
+      this.log(`${instance.label} relaunch failed: ${e?.message ?? e}`);
+      return false;
+    }
+    const ready = await this.waitForCdp(cdpUrl, 20_000);
+    if (!ready) return false;
+    await this.enforceLocalWindowMode(instance);
+    return this.localCdpHasPageTargets(cdpUrl);
   }
 
   async isCdpReady(cdpUrl) {

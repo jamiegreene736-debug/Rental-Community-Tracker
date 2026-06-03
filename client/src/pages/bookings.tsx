@@ -5966,11 +5966,30 @@ export default function Bookings() {
         minAirbnbResults: 1,
       }).then((r) => r.json()) as AlternativeScoutResponse;
       updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
+      alternativeWorkflowsRef.current = {
+        ...alternativeWorkflowsRef.current,
+        [reservation._id]: {
+          ...(alternativeWorkflowsRef.current[reservation._id] ?? {}),
+          scout: response,
+          activeCommunity: null,
+        },
+      };
+      const scoutCommunities = [
+        ...(response.scouted ?? []),
+        ...(response.results ?? []),
+        ...(response.rejected ?? []),
+        ...(response.discoveredResorts ?? []),
+      ];
+      if (scoutCommunities.length > 0) {
+        startAutoAlternativeSidecarScan(reservation);
+      }
       toast({
         title: response.recommended.length ? "Alternative communities found" : "No strong alternative community yet",
         description: response.recommended.length
-          ? `${response.recommended.length} community option${response.recommended.length === 1 ? "" : "s"} passed the Airbnb scout threshold.`
-          : "SearchAPI did not find enough Airbnb inventory in the curated nearby communities.",
+          ? `${response.recommended.length} community option${response.recommended.length === 1 ? "" : "s"} passed the Airbnb scout threshold.${scoutCommunities.length > 0 ? " Sidecar queue started for nearby communities." : ""}`
+          : scoutCommunities.length > 0
+            ? "SearchAPI scout finished; sidecar queue started for nearby communities."
+            : "SearchAPI did not find enough Airbnb inventory in the curated nearby communities.",
       });
     } catch (error: any) {
       updateAlternativeWorkflow(reservation._id, { activeCommunity: null });

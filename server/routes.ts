@@ -10976,6 +10976,11 @@ export async function registerRoutes(
         score += 25;
       }
 
+      // SearchAPI Airbnb engine rows are date-verified at search time (same trust
+      // model as VRBO sidecar cards) — without this, verified Airbnb listings stall
+      // below the default 85 attach/auto-pick threshold despite passing resort/BR proof.
+      if (c.source === "airbnb" && c.verified === "yes") score += 30;
+
       // Layer 3: Strong photo proof anchored to correct type
       if (candidateHasResortPhotoProof(c)) score += 20;
 
@@ -11003,7 +11008,6 @@ export async function registerRoutes(
       return true;
     };
     const candidateFinalIdentityRejectReason = async (c: Candidate): Promise<string | null> => {
-      if (c.source === "airbnb") return "Airbnb row has no direct booking link; raw Airbnb cannot be attached";
       if (c.airbnbAnchorUrl && !candidateHasUsableAirbnbDirectLink(c)) {
         return "Airbnb-backed row has no usable direct booking link";
       }
@@ -11024,8 +11028,7 @@ export async function registerRoutes(
       return null;
     };
     const candidateIsFinalAutoPickSafe = async (c: Candidate): Promise<boolean> =>
-      c.source !== "airbnb"
-      && (!c.airbnbAnchorUrl || candidateHasUsableAirbnbDirectLink(c))
+      (!c.airbnbAnchorUrl || candidateHasUsableAirbnbDirectLink(c))
       && (!c.directBookingUrl || candidateHasUsableAirbnbDirectLink(c))
       && candidateFitsTarget(c, { requireBedroomProof: true })
       && satisfiesBuyInBedrooms(candidateBedroomSignal(c))
