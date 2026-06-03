@@ -2351,6 +2351,14 @@ assert.ok(
   "OTA preflight message should advance photos sub-progress",
 );
 assert.equal(MAX_COMBO_PHOTO_OTA_ATTEMPTS, 8, "combo photo OTA retry cap");
+assert.ok(
+  !routeSource.includes("assertQueueCircuitOpen(circuitKey)"),
+  "bulk combo loopback photo fetch must not use endpoint circuit breakers",
+);
+assert.ok(
+  routeSource.includes("headers: loopbackRequestHeaders()"),
+  "bulk combo loopback photo fetch must carry loopback auth headers",
+);
 console.log("  ✓ bulk combo queue progress + ETA helpers");
 
 const honuaKaiTypical = inferTypicalComboPair({ availableBedrooms: [1, 2, 3] });

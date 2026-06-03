@@ -46,6 +46,8 @@ const replacementFindJobs = new Map<string, PreflightReplacementFindJob>();
 const activePhotoFetchJobIds = new Set<string>();
 const activeReplacementFindJobIds = new Set<string>();
 
+import { loopbackRequestHeaders } from "./auth";
+
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
 function newJobId(prefix: string): string {
@@ -65,7 +67,7 @@ function touchReplacementJob(job: PreflightReplacementFindJob, patch: Partial<Pr
 async function postJson(url: string, body: unknown, timeoutMs: number): Promise<any> {
   const resp = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: loopbackRequestHeaders(),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
