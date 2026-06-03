@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Loader2,
   RefreshCw,
@@ -20,6 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
+import { OperationFailureActions } from "@/components/OperationFailureActions";
 
 type PreflightReplacementFindJob = {
   id: string;
@@ -29,6 +30,7 @@ type PreflightReplacementFindJob = {
   progress: number;
   error: string | null;
   unit: ReplacementUnitData | null;
+  diagnostic?: Record<string, unknown> | null;
 };
 
 const replacementJobStorageKey = (propertyId: number) => `preflight.replacementFindJob.v1:${propertyId}`;
@@ -160,6 +162,7 @@ export function UnitReplacementFlow({
     loadReplacementJobRef(propertyId)?.jobId ?? null,
   );
   const [replacementJob, setReplacementJob] = useState<PreflightReplacementFindJob | null>(null);
+  const lastSearchPayloadRef = useRef<Record<string, unknown> | null>(null);
 
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
   const hasActiveReplacement = allUnits.some(u => Boolean(u.replacementSourceUrl));
@@ -263,20 +266,22 @@ export function UnitReplacementFlow({
     setStage("searching");
     const nextExtra = opts.extraSkip ? [...extraSkipUrls, opts.extraSkip] : extraSkipUrls;
     if (opts.extraSkip) setExtraSkipUrls(nextExtra);
+    const startPayload = {
+      communityFolder,
+      communityName,
+      propertyAddress,
+      streetAddress,
+      city,
+      state,
+      propertyId,
+      targetUnitId: selectedUnit.id,
+      requiredBedrooms: selectedUnit.bedrooms,
+      skipUrls: [...skipUrls, ...nextExtra],
+      expandedSearch: expanded,
+    };
+    lastSearchPayloadRef.current = startPayload;
     try {
-      const resp = await apiRequest("POST", "/api/preflight/replacement-find-jobs", {
-        communityFolder,
-        communityName,
-        propertyAddress,
-        streetAddress,
-        city,
-        state,
-        propertyId,
-        targetUnitId: selectedUnit.id,
-        requiredBedrooms: selectedUnit.bedrooms,
-        skipUrls: [...skipUrls, ...nextExtra],
-        expandedSearch: expanded,
-      });
+      const resp = await apiRequest("POST", "/api/preflight/replacement-find-jobs", startPayload);
       const data = await resp.json();
       if (!data?.job?.id) throw new Error("Replacement search did not start");
       setReplacementJobId(data.job.id as string);
@@ -479,13 +484,30 @@ export function UnitReplacementFlow({
             <XCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
             {swapError || "Search failed. Please try again."}
           </p>
-          <Button size="sm" variant="outline" onClick={() => { setStage("idle"); setSwapError(null); }} data-testid="button-retry-unit-search">
-            Try Again
-          </Button>
-          <Button size="sm" onClick={() => search({ expanded: true })} data-testid="button-expand-unit-search">
-            <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
-            Expand Search
-          </Button>
+          <div className="flex flex-wrap gap-2 items-center">
+            <OperationFailureActions
+              jobType="replacement-find"
+              jobId={replacementJobId}
+              startPayload={lastSearchPayloadRef.current ?? undefined}
+              onRemediated={({ job }) => {
+                if (job && typeof job === "object" && "id" in job) {
+                  const next = job as PreflightReplacementFindJob;
+                  setReplacementJobId(next.id);
+                  saveReplacementJobRef(propertyId, { jobId: next.id, targetUnitId: selectedUnit.id });
+                  applyReplacementJob(next, false);
+                  setStage("searching");
+                  setSearchStartedAt(Date.now());
+                }
+              }}
+            />
+            <Button size="sm" variant="outline" onClick={() => { setStage("idle"); setSwapError(null); }} data-testid="button-retry-unit-search">
+              Try Again
+            </Button>
+            <Button size="sm" onClick={() => search({ expanded: true })} data-testid="button-expand-unit-search">
+              <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
+              Expand Search
+            </Button>
+          </div>
         </div>
       )}
 

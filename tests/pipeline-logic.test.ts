@@ -26,6 +26,11 @@ import {
   validateCommunityStreetAddress,
 } from "../shared/community-addresses";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "../shared/bulk-combo-queue-progress";
+import {
+  classifyFailureText,
+  suggestRemediations,
+  buildOperationDiagnostics,
+} from "../shared/operation-diagnostics";
 import { MAX_COMBO_PHOTO_OTA_ATTEMPTS } from "../server/combo-ota-preflight";
 import { checkCommunityType } from "../shared/community-type";
 import {
@@ -2559,3 +2564,42 @@ assert.ok(poipuNearbyOcean.includes("Makahuena"), "Makahuena should be within 20
 assert.ok(!poipuNearbyOcean.includes("Pili Mai"), "Pili Mai is not oceanfront-comparable");
 assert.ok(!poipuNearbyOcean.includes("Kapaa Beachfront"), "Kapaa should be excluded at 20 min for Poipu Kai oceanfront scout");
 console.log("[test] nearby buy-in markets by drive: PASS");
+
+assert.equal(classifyFailureText("HTTP 502 while waiting for sidecar lane").failureClass, "transient");
+assert.equal(classifyFailureText("waiting-sidecar-lane held by bulk combo").failureClass, "sidecar");
+assert.equal(
+  suggestRemediations({
+    jobType: "replacement-find",
+    failureClass: "search-exhausted",
+    errorText: "No eligible replacement",
+    diagnostic: { budgetStopped: true, uncheckedCandidates: [{ url: "https://zillow.com/x" }] },
+  }).some((r) => r.playbook === "continue-search"),
+  true,
+  "replacement diagnostics should offer continue-search when budget stopped with unchecked candidates",
+);
+assert.ok(
+  buildOperationDiagnostics({
+    title: "Test",
+    severity: "error",
+    summary: "failed",
+    context: { jobId: "j1" },
+    remediation: suggestRemediations({
+      jobType: "bulk-combo-listing",
+      failureClass: "address",
+      errorText: "Fix the property address",
+    }),
+  }).report.includes("Suggested actions"),
+  "operation diagnostics report should list remediations",
+);
+const opsApi = readFileSync("server/operation-diagnostics-api.ts", "utf8");
+assert.ok(opsApi.includes('app.get("/api/operations/diagnostics"'), "operations diagnostics route should exist");
+assert.ok(opsApi.includes('app.post("/api/operations/remediate"'), "operations remediate route should exist");
+assert.ok(
+  unitReplacementSource.includes("OperationFailureActions"),
+  "replacement flow should expose Check logs on failure",
+);
+assert.ok(
+  addCommunitySource.includes("OperationFailureActions"),
+  "add-community should expose Check logs for bulk combo and photo fetch failures",
+);
+console.log("  ✓ operation diagnostics + remediate helpers");
