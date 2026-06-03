@@ -997,6 +997,30 @@ function knownComboSeedsForCity(city: string, state: string): ResearchedCommunit
     }));
 }
 
+export function hasSixBedroomComboPotential(
+  community: Pick<ResearchedCommunity, "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">,
+): boolean {
+  if (typeof community.combinedBedroomsTypical === "number" && community.combinedBedroomsTypical >= 6) {
+    return true;
+  }
+
+  if ((community.availableBedrooms ?? []).some((bedrooms) => Number.isFinite(bedrooms) && bedrooms >= 3)) {
+    return true;
+  }
+
+  if (community.estimatedBedroomUnitCounts) {
+    for (const [bedrooms, count] of Object.entries(community.estimatedBedroomUnitCounts)) {
+      if (Number(bedrooms) >= 3 && Number(count) > 0) return true;
+    }
+  }
+
+  return /\b(?:3|4)\s*(?:br|bd|bed(?:room)?s?)\b/i.test(community.bedroomMix ?? "");
+}
+
+export function hasKnownSixBedroomComboMarketPotential(city: string, state: string): boolean {
+  return knownComboSeedsForCity(city, state).some(hasSixBedroomComboPotential);
+}
+
 function normalizeCommunityName(value: unknown): string {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }

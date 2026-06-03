@@ -219,6 +219,21 @@ function formatResortUnitMix(community: CommunityResult): string | null {
   return bedroomMix ? `Bedroom mix: ${bedroomMix}` : null;
 }
 
+function hasSixBedroomComboPotential(community: CommunityResult): boolean {
+  if (typeof community.combinedBedroomsTypical === "number" && community.combinedBedroomsTypical >= 6) {
+    return true;
+  }
+  if ((community.availableBedrooms ?? []).some((bedrooms) => Number.isFinite(bedrooms) && bedrooms >= 3)) {
+    return true;
+  }
+  if (community.estimatedBedroomUnitCounts) {
+    for (const [bedrooms, count] of Object.entries(community.estimatedBedroomUnitCounts)) {
+      if (Number(bedrooms) >= 3 && Number(count) > 0) return true;
+    }
+  }
+  return /\b(?:3|4)\s*(?:br|bd|bed(?:room)?s?)\b/i.test(community.bedroomMix ?? "");
+}
+
 function formatMinimumStay(community: CommunityResult): { label: string; tone: "ok" | "warn" | "unknown"; evidence?: string } {
   const nights = community.minimumStayNights;
   const evidence = community.minimumStayEvidence?.trim() || undefined;
@@ -483,7 +498,12 @@ export default function AddCommunity() {
   const applySweepJob = useCallback((job: TopMarketJobPayload) => {
     if (ignoredSweepJobIdsRef.current.has(job.id)) return;
     setSweepJobId(job.id);
-    setSweepMarkets(job.markets || []);
+    setSweepMarkets((job.markets || []).map((market) => ({
+      ...market,
+      sixBedroomPossible: market.status === "done"
+        ? (market.communities ?? []).some(hasSixBedroomComboPotential)
+        : market.sixBedroomPossible,
+    })));
     setSweepPhase("running");
     const terminal = job.status === "done" || job.status === "error" || job.status === "cancelled";
     setSweepRunning(!terminal);
@@ -2275,9 +2295,14 @@ export default function AddCommunity() {
                                         <span className="min-w-0 flex-1">
                                           <span className="block font-medium leading-snug flex items-center gap-1">
                                             {m.city}, {m.state}
-                                            <span title={m.sixBedroomPossible ? "Yes - supports 6BR combo (two 3BR condos)" : "No - does not support 6BR combo"}>
-                                              <BedDouble className={`h-3 w-3 ${m.sixBedroomPossible ? "text-emerald-600" : "text-gray-400"}`} />
-                                            </span>
+                                            {m.sixBedroomPossible && (
+                                              <span
+                                                className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700"
+                                                title="Has evidence for a 6BR combo using 3BR+ condo/townhome inventory"
+                                              >
+                                                6BR combo: yes
+                                              </span>
+                                            )}
                                           </span>
                                           <span className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
                                             <DollarSign className="h-3 w-3" />
@@ -2338,9 +2363,15 @@ export default function AddCommunity() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="font-semibold text-sm flex items-center gap-1">
                               {m.city}, {m.state}
-                              <span title={m.sixBedroomPossible ? "Yes - supports 6BR combo (two 3BR condos)" : "No - does not support 6BR combo"}>
-                                <BedDouble className={`h-3.5 w-3.5 ${m.sixBedroomPossible ? "text-emerald-600" : "text-gray-400"}`} />
-                              </span>
+                              {m.sixBedroomPossible && (
+                                <Badge
+                                  variant="outline"
+                                  className="border-emerald-200 bg-emerald-50 text-[10px] text-emerald-700"
+                                  title="Has evidence for a 6BR combo using 3BR+ condo/townhome inventory"
+                                >
+                                  6BR combo: yes
+                                </Badge>
+                              )}
                             </p>
                             {m.tag && <Badge variant="outline" className="text-[10px]">{m.tag}</Badge>}
                             <Badge variant="outline" className="text-[10px] border-emerald-200 bg-emerald-50 text-emerald-700">

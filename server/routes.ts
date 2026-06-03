@@ -85,6 +85,8 @@ import {
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
   fetchAmortizedNightlyByBR,
+  hasKnownSixBedroomComboMarketPotential,
+  hasSixBedroomComboPotential,
   medianRate,
 } from "./community-research";
 import {
@@ -32962,6 +32964,10 @@ Return ONLY compact JSON with this exact shape:
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
   });
+  const topMarketSeedWithSixBedroomSignal = <T extends { city: string; state: string }>(market: T): T & { sixBedroomPossible: boolean } => ({
+    ...market,
+    sixBedroomPossible: hasKnownSixBedroomComboMarketPotential(market.city, market.state),
+  });
   const runTopMarketJob = async (job: TopMarketJob) => {
     job.status = "running";
     job.updatedAt = Date.now();
@@ -32985,6 +32991,7 @@ Return ONLY compact JSON with this exact shape:
             market.city,
             market.state,
           );
+          market.sixBedroomPossible = communities.some(hasSixBedroomComboPotential);
           market.status = "done";
           market.count = communities.length;
           market.communities = communities;
@@ -33033,7 +33040,7 @@ Return ONLY compact JSON with this exact shape:
       tag: m.tag,
       estimatedComboLow: m.estimatedComboLow,
       estimatedComboHigh: m.estimatedComboHigh,
-      sixBedroomPossible: m.sixBedroomPossible,
+      sixBedroomPossible: hasKnownSixBedroomComboMarketPotential(m.city, m.state),
       status: "pending" as const,
     }));
     const id = `tmj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -33079,7 +33086,7 @@ Return ONLY compact JSON with this exact shape:
 
     const requested = body.markets && body.markets.length > 0 ? body.markets : TOP_MARKET_SEEDS;
     const limit = Math.min(requested.length, Math.max(1, body.maxMarkets ?? 12));
-    const markets = requested.slice(0, limit);
+    const markets = requested.slice(0, limit).map(topMarketSeedWithSixBedroomSignal);
 
     res.setHeader("Content-Type", "application/x-ndjson");
     res.setHeader("Cache-Control", "no-cache");
@@ -33115,7 +33122,8 @@ Return ONLY compact JSON with this exact shape:
             topCommunity = { score, data: { ...c, tag } };
           }
         }
-        emit({ type: "market-done", city, state, tag, estimatedComboLow, estimatedComboHigh, count: communities.length, communities });
+        const sixBedroomPossible = communities.some(hasSixBedroomComboPotential);
+        emit({ type: "market-done", city, state, tag, estimatedComboLow, estimatedComboHigh, sixBedroomPossible, count: communities.length, communities });
         console.log(`[scan-top-markets] ${city}, ${state}: ${communities.length} qualifying`);
       } catch (e: any) {
         console.error(`[scan-top-markets] ${city}, ${state} error:`, e.message);
@@ -33136,7 +33144,8 @@ Return ONLY compact JSON with this exact shape:
   // GET /api/community/top-markets/seeds
   // Returns the curated seed list so the UI can show a preview / checkboxes.
   app.get("/api/community/top-markets/seeds", (_req, res) => {
-    res.json({ seeds: TOP_MARKET_SEEDS, markets: TOP_MARKET_SEEDS });
+    const seeds = TOP_MARKET_SEEDS.map(topMarketSeedWithSixBedroomSignal);
+    res.json({ seeds, markets: seeds });
   });
 
   // GET /api/community/city-suggest?state=Florida&query=des
