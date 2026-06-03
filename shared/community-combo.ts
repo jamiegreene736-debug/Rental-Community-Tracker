@@ -6,6 +6,44 @@ export type TypicalComboBedroomFields = {
 
 export type TypicalComboPair = { unitBeds: number; secondUnitBeds?: number; totalBeds: number };
 
+export type ComboPairingAvailability = {
+  totalBeds: number;
+  matchScore: number;
+  availability?: "available" | "existing" | "reserved";
+  alreadyExists?: boolean;
+  reserved?: boolean;
+};
+
+export function isComboPairingAvailable(pairing: ComboPairingAvailability): boolean {
+  return (
+    pairing.availability === "available"
+    || (
+      !pairing.alreadyExists
+      && !pairing.reserved
+      && pairing.availability !== "existing"
+      && pairing.availability !== "reserved"
+    )
+  );
+}
+
+/** Prefer the largest unused combo (e.g. 8BR over 6BR when both are open). */
+export function pickBestAvailableComboPairing<T extends ComboPairingAvailability>(
+  pairings: readonly T[],
+): T | undefined {
+  let best: T | undefined;
+  for (const pairing of pairings) {
+    if (!isComboPairingAvailable(pairing)) continue;
+    if (
+      !best
+      || pairing.totalBeds > best.totalBeds
+      || (pairing.totalBeds === best.totalBeds && pairing.matchScore > best.matchScore)
+    ) {
+      best = pairing;
+    }
+  }
+  return best;
+}
+
 function getComboBedroomCounts(community: Pick<TypicalComboBedroomFields, "estimatedBedroomUnitCounts">): Map<number, number> {
   const counts = new Map<number, number>();
   if (community.estimatedBedroomUnitCounts) {
@@ -47,7 +85,7 @@ export function inferTypicalComboPair(community: TypicalComboBedroomFields): Typ
       if (b1 === b2 && counts.size > 0 && (counts.get(b1) ?? 0) < 2) continue;
       const fourBrBoost = availableTypes.includes(4) && (b1 === 4 || b2 === 4) ? 2 : 0;
       const matchScore = (b1 === b2 ? 2 : 0) + Math.min(total / 2, 3) + fourBrBoost;
-      if (matchScore > bestScore) {
+      if (!best || matchScore > bestScore || (matchScore === bestScore && total > best.totalBeds)) {
         bestScore = matchScore;
         best = { unitBeds: b1, secondUnitBeds: b2, totalBeds: total };
       }

@@ -32,6 +32,7 @@ import {
   formatTypicalComboLabel,
   inferTypicalComboPair,
   normalizeCombinedBedroomsTypical,
+  pickBestAvailableComboPairing,
 } from "../shared/community-combo";
 import { unitVerificationClaims } from "../shared/folder-unit-map";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
@@ -1714,8 +1715,28 @@ assert.match(
   "preflight replacement search must run on a server-side job so tab close does not abort find-unit",
 );
 assert.ok(
-  routeSource.includes("const discoveryCities = discoverySearchCitiesForPhotoSearch({"),
-  "replacement find-unit must use the same Zillow discovery cities as preflight photo fetch",
+  routeSource.includes("const canonicalStreet = inferCommunityStreetAddress({"),
+  "replacement find-unit must resolve canonical resort street when folder map is missing (e.g. Waikoloa)",
+);
+assert.ok(
+  routeSource.includes("if (canonicalStreetRoot) harvestRootCounts.set(canonicalStreetRoot, 2);"),
+  "replacement find-unit must pre-seed street roots so Apify supplement can run before SearchAPI hits",
+);
+assert.ok(
+  routeSource.includes("const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({"),
+  "replacement find-unit Apify supplement must search all discovery cities, not only the first",
+);
+assert.ok(
+  preflightSource.includes("const replacementStreetAddress = inferCommunityStreetAddress({"),
+  "preflight replacement flow must pass canonical resort street like Find Photos does",
+);
+assert.ok(
+  preflightSource.includes("setReplacementSkipUrl(skipReplacementUrl);"),
+  "Change replacement must skip the unit being replaced so search can find a different one",
+);
+assert.ok(
+  routeSource.includes('"skipped-internal-duplicate": 0'),
+  "replacement diagnostics must count same-community duplicate rejections",
 );
 assert.ok(
   routeSource.includes("const addressRule = communityAddressRuleForName(communityName);"),
@@ -2281,6 +2302,43 @@ assert.equal(
   6,
 );
 console.log("  ✓ typical combo labels distinguish 2×same-BR vs mixed-BR pairs");
+
+const sixBrPairing = {
+  unit1Beds: 3,
+  unit2Beds: 3,
+  totalBeds: 6,
+  matchScore: 5,
+  availability: "available" as const,
+};
+const eightBrPairing = {
+  unit1Beds: 4,
+  unit2Beds: 4,
+  totalBeds: 8,
+  matchScore: 5,
+  availability: "available" as const,
+};
+assert.equal(
+  pickBestAvailableComboPairing([sixBrPairing, eightBrPairing])?.totalBeds,
+  8,
+  "bulk queue should prefer 8BR over 6BR when both are unused",
+);
+assert.equal(
+  pickBestAvailableComboPairing([
+    { ...sixBrPairing, availability: "existing", alreadyExists: true },
+    eightBrPairing,
+  ])?.totalBeds,
+  8,
+  "bulk queue should fall through to 8BR when 6BR is already built",
+);
+assert.equal(
+  pickBestAvailableComboPairing([
+    { ...eightBrPairing, availability: "reserved", reserved: true, alreadyExists: true },
+    sixBrPairing,
+  ])?.totalBeds,
+  6,
+  "bulk queue should use 6BR when 8BR is already reserved or built",
+);
+console.log("  ✓ pickBestAvailableComboPairing prefers largest unused combo");
 
 assert.equal(TOP_MARKET_SEEDS.length, 86, "top markets sweep should cover 86 markets");
 const topMarketAudit = auditTopMarketSevenEightFromCuratedSeeds();

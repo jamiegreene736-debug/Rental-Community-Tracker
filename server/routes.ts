@@ -35936,7 +35936,7 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
-    pairings.sort((a, b) => b.matchScore - a.matchScore);
+    pairings.sort((a, b) => b.totalBeds - a.totalBeds || b.matchScore - a.matchScore);
 
     console.log(`[search-units] ${communityName}: ${availableTypes.join("BR, ")}BR available, ${pairings.length} pairings, ${airbnbListingCount} listings found`);
 
