@@ -109,6 +109,25 @@ export function inferCommunityStreetAddress(input: {
   return "";
 }
 
+/** Canonical street for bulk-combo queue items (backfills rules added after a job was queued). */
+export function resolveBulkComboListingStreet(input: {
+  communityName?: string | null;
+  city?: string | null;
+  state?: string | null;
+  streetAddress?: string | null;
+  addressHint?: string | null;
+}): string {
+  const trimmed = String(input.streetAddress ?? "").trim();
+  if (trimmed && isLikelyStreetAddress(trimmed)) return streetRootFromAddress(trimmed);
+  return inferCommunityStreetAddress({
+    communityName: input.communityName,
+    city: input.city,
+    state: input.state,
+    unitAddresses: trimmed ? [trimmed] : [],
+    addressHint: input.addressHint,
+  });
+}
+
 export function validateCommunityStreetAddress(input: {
   communityName?: string | null;
   city?: string | null;
@@ -179,6 +198,7 @@ export function discoverySearchCitiesForPhotoSearch(input: {
   if (/ko\s*olina|koolina/i.test(community) || /waialii|olani/i.test(street)) {
     cities.add("Kapolei");
     cities.add("Ko Olina");
+    cities.add("Ewa Beach");
   }
   return Array.from(cities).filter(Boolean).slice(0, 4);
 }

@@ -19,6 +19,7 @@ import {
   discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
   inferCommunityStreetAddress,
+  resolveBulkComboListingStreet,
   validateCommunityStreetAddress,
 } from "../shared/community-addresses";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "../shared/bulk-combo-queue-progress";
@@ -2090,6 +2091,18 @@ assert.ok(
   "Ko Olina Beach Villas photo discovery should search Kapolei, not only the draft mailing city",
 );
 console.log("  ✓ Ko Olina Beach Villas + Coconut Plantation canonical addresses validate for bulk combo draft saves");
+
+assert.equal(
+  resolveBulkComboListingStreet({
+    communityName: "Ko Olina Beach Villas",
+    city: "Kapolei",
+    state: "Hawaii",
+    streetAddress: "",
+  }),
+  "92-102 Waialii Pl",
+  "bulk combo hydrate should backfill canonical street for in-flight queue rows with empty streetAddress",
+);
+console.log("  ✓ bulk combo street backfill helper");
 
 assert.equal(
   bulkComboProgressPercent({ status: "queued", phase: "queued" }),
