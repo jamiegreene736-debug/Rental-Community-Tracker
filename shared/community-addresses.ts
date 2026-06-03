@@ -13,6 +13,7 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Kaha Lani Resort", "Kaha Lani"], street: "4460 Nehe Rd", city: "Lihue", state: "HI" },
   { names: ["Makahuena at Poipu", "Makahuena"], street: "1661 Pe'e Rd", city: "Koloa", state: "HI" },
   { names: ["Kaiulani of Princeville", "Ka'iulani of Princeville", "Kaiulani"], street: "4100 Queen Emma's Dr", city: "Princeville", state: "HI" },
+  { names: ["The Cliffs at Princeville", "Cliffs at Princeville", "The Cliffs Princeville"], street: "3811 Edward Rd", city: "Princeville", cityAliases: ["Hanalei", "Kilauea", "Wainiha", "Haena"], state: "HI" },
   { names: ["Kekaha Beachfront Estate"], street: "8497 Kekaha Rd", city: "Kekaha", state: "HI" },
   { names: ["Keauhou Estates"], street: "78-6855 Ali'i Dr", city: "Kailua-Kona", state: "HI" },
   { names: ["Ilikai", "Ilikai Hotel", "Ilikai Hotel & Luxury Suites", "Ilikai Apt Bldg"], street: "1777 Ala Moana Blvd", city: "Honolulu", state: "HI" },
