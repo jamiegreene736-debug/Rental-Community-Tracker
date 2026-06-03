@@ -36,6 +36,16 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Coconut Plantation at Ko Olina", "Coconut Plantation", "Coconut Plantation Ko Olina"], street: "92-1070 Olani St", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
 ];
 
+/** Tokens from a Hawaii hyphenated street number (e.g. 92-102) that must not be treated as condo unit IDs in listing URL slugs. */
+export function hawaiiHyphenStreetSlugTokens(address: string | null | undefined): Set<string> {
+  const tokens = new Set<string>();
+  const match = String(address ?? "").match(/\b(\d{1,2})-(\d{2,5})\b/);
+  if (!match) return tokens;
+  tokens.add(match[1].toUpperCase());
+  tokens.add(match[2].toUpperCase());
+  return tokens;
+}
+
 export function normalizeCommunityAddressToken(value: string): string {
   return value
     .toLowerCase()

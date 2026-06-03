@@ -18,6 +18,7 @@ import {
   discoveryCityForPhotoSearch,
   discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
+  hawaiiHyphenStreetSlugTokens,
   inferCommunityStreetAddress,
   normalizePlatformCheckCity,
   parseCityFromMailingAddress,
@@ -2189,6 +2190,15 @@ assert.equal(
   normalizePlatformCheckCity("92-1070 Olani St, Kapolei, Hawaii"),
   "Kapolei",
   "platform-check API must recover Kapolei when the client sends the full mailing address as city",
+);
+assert.deepEqual(
+  Array.from(hawaiiHyphenStreetSlugTokens("92-102 Waialii Pl")).sort(),
+  ["102", "92"],
+  "Hawaii street-number tokens must not be mistaken for condo unit IDs in Zillow slugs",
+);
+assert.ok(
+  routeSource.includes("hawaiiStreetSlugTokens.has(part)"),
+  "find-unit must skip Hawaii hyphenated street-number tokens when parsing listing slugs",
 );
 console.log("  ✓ Ko Olina Beach Villas + Coconut Plantation canonical addresses validate for bulk combo draft saves");
 
