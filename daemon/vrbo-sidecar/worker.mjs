@@ -2090,7 +2090,7 @@ async function switchToHeadlessFromCdpFailure(message) {
   return ensureHeadlessBrowser();
 }
 
-async function ensureBrowser() {
+async function ensureBrowser(cdpRecoverAttempt = 0) {
   const allocation = await acquireChromeForRequest();
   if (usingHeadlessRuntime()) return ensureHeadlessBrowser();
   if (browser && context && page && !page.isClosed()) {
@@ -2099,6 +2099,9 @@ async function ensureBrowser() {
   }
   log(`connecting to Chrome via CDP (${allocation.label})…`);
   await verifyActiveChromeHealth("before connect");
+  if (allocation.cdpUrl) {
+    await chromeSidecarManager.recoverDeadLocalCdp(allocation.cdpUrl).catch(() => false);
+  }
   try {
     browser = await chromium.connectOverCDP(allocation.cdpUrl);
     // Never call browser.newContext() over CDP: Playwright issues Browser.setDownloadBehavior,
@@ -2145,6 +2148,16 @@ async function ensureBrowser() {
     const closedCount = await closeExtraTabs("startup tab cleanup", page);
     log(`opened fresh daemon-owned tab; closed ${closedCount} stale tab(s)`);
   } catch (e) {
+    if (isCdpContextManagementError(e) && allocation.cdpUrl && cdpRecoverAttempt < 1) {
+      const recovered = await chromeSidecarManager.recoverDeadLocalCdp(allocation.cdpUrl).catch(() => false);
+      if (recovered) {
+        await teardownBrowser("CDP recover relaunch");
+        browser = null;
+        context = null;
+        page = null;
+        return ensureBrowser(cdpRecoverAttempt + 1);
+      }
+    }
     if (isCdpContextManagementError(e)) {
       return switchToHeadlessFromCdpFailure(`CDP browser setup failed (${e?.message ?? e})`);
     }
@@ -5409,7 +5422,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   // injected /search URL; those URLs appear to raise bot scrutiny and can
   // mask destination drift.
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
-  const dateEntry = await applyOtaSearchDateInputs(page, checkIn, checkOut, "vrbo_search", "vrbo");
+  let dateEntry = await applyOtaSearchDateInputs(page, checkIn, checkOut, "vrbo_search", "vrbo");
   if (!pmDateEntryComplete(dateEntry)) {
     throw new ProviderBrowserUnavailableError(
       `VRBO homepage UI date entry failed for ${checkIn}→${checkOut}; refusing to build an injected search URL.`,
@@ -5433,8 +5446,8 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     postDateSnapshot,
     checkIn,
     checkOut,
-    effectiveSearchTerm,
     destination,
+    typedQuery,
   );
   if (!postDateCheck.destinationOk) {
     log(
@@ -5445,10 +5458,10 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
       targetSuggestion: variant?.suggestionText || effectiveSearchTerm,
       requestId: id,
     }).catch(() => null);
-    await dismissObstructions(page, "vrbo_search_post_dates").catch(() => []);
+    await dismissObstructions(page, "vrbo_search_post_dates", { allowEscape: false }).catch(() => []);
   }
   let formSnapshot = await readVrboHomepageFormSnapshot(page);
-  let formCheck = vrboHomepageFormMatchesRequest(formSnapshot, checkIn, checkOut, effectiveSearchTerm, destination);
+  let formCheck = vrboHomepageFormMatchesRequest(formSnapshot, checkIn, checkOut, destination, typedQuery);
   if (!formCheck.destinationOk || !formCheck.datesOk) {
     log(
       `vrbo_search ${id}: homepage form drift before submit ` +
@@ -5468,7 +5481,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
       );
     }
     formSnapshot = await readVrboHomepageFormSnapshot(page);
-    formCheck = vrboHomepageFormMatchesRequest(formSnapshot, checkIn, checkOut, effectiveSearchTerm, destination);
+    formCheck = vrboHomepageFormMatchesRequest(formSnapshot, checkIn, checkOut, destination, typedQuery);
     if (!formCheck.destinationOk || !formCheck.datesOk) {
       throw new ProviderBrowserUnavailableError(
         `VRBO homepage form did not keep destination/dates before search (${checkIn}→${checkOut}).`,
