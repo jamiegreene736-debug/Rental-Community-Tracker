@@ -24,6 +24,37 @@ import { useToast } from "@/hooks/use-toast";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
 
+type PreflightPhotoFetchJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  phase: string;
+  message: string;
+  progress: number;
+  unitId: string;
+  savedCount: number | null;
+  sourceUrl: string | null;
+  error: string | null;
+};
+
+const photoFetchJobStorageKey = (propertyId: number) => `preflight.photoFetchJob.v1:${propertyId}`;
+const loadPhotoFetchJobIds = (propertyId: number): Record<string, string> => {
+  try {
+    const raw = localStorage.getItem(photoFetchJobStorageKey(propertyId));
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+const savePhotoFetchJobIds = (propertyId: number, next: Record<string, string>) => {
+  try {
+    if (Object.keys(next).length === 0) {
+      localStorage.removeItem(photoFetchJobStorageKey(propertyId));
+    } else {
+      localStorage.setItem(photoFetchJobStorageKey(propertyId), JSON.stringify(next));
+    }
+  } catch { /* ignore */ }
+};
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type UnitPlatformResult = {
@@ -285,19 +316,107 @@ export default function BuilderPreflight() {
   // street address + bedroom count, supplements with Apify when a resort
   // street root is known, then scrapes the first usable detail result.
   // Operator clicks one button per unit; URL paste isn't needed.
-  const [scrapingUnitId, setScrapingUnitId] = useState<string | null>(null);
-  const [photoFetchStartedAt, setPhotoFetchStartedAt] = useState<number | null>(null);
+  const [photoFetchJobIdsByUnit, setPhotoFetchJobIdsByUnit] = useState<Record<string, string>>(() =>
+    id < 0 ? loadPhotoFetchJobIds(id) : {},
+  );
+  const [photoFetchJobsByUnit, setPhotoFetchJobsByUnit] = useState<Record<string, PreflightPhotoFetchJob>>({});
   const [photoFetchTick, setPhotoFetchTick] = useState(0);
-  const [photoFetchPhase, setPhotoFetchPhase] = useState<string | null>(null);
   // Track URLs the operator has already accepted/rejected so the
   // "Try another" path skips them. Reset when the property changes.
   const [skippedUrlsByUnit, setSkippedUrlsByUnit] = useState<Record<string, string[]>>({});
 
+  const activePhotoFetchUnitIds = Object.entries(photoFetchJobIdsByUnit)
+    .filter(([unitId, jobId]) => {
+      const job = photoFetchJobsByUnit[unitId];
+      return jobId && (!job || job.status === "queued" || job.status === "running");
+    })
+    .map(([unitId]) => unitId);
+  const scrapingUnitId = activePhotoFetchUnitIds[0] ?? null;
+
   useEffect(() => {
-    if (!scrapingUnitId) return;
+    if (activePhotoFetchUnitIds.length === 0) return;
     const t = setInterval(() => setPhotoFetchTick((tick) => tick + 1), 1_000);
     return () => clearInterval(t);
-  }, [scrapingUnitId]);
+  }, [activePhotoFetchUnitIds.length]);
+
+  useEffect(() => {
+    if (!id || id >= 0) return;
+    setPhotoFetchJobIdsByUnit(loadPhotoFetchJobIds(id));
+  }, [id]);
+
+  const applyPhotoFetchJob = (unitId: string, job: PreflightPhotoFetchJob, restored = false) => {
+    setPhotoFetchJobsByUnit((prev) => ({ ...prev, [unitId]: job }));
+    const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+    if (!terminal) return;
+    setPhotoFetchJobIdsByUnit((prev) => {
+      const next = { ...prev };
+      delete next[unitId];
+      savePhotoFetchJobIds(id, next);
+      return next;
+    });
+    if (job.status === "completed") {
+      void loadDraftPropertyByNegativeId(id).then((updated) => {
+        if (updated) setDraftProperty(updated);
+      });
+      if (!restored) {
+        toast({
+          title: `Saved ${job.savedCount ?? 0} photo${job.savedCount === 1 ? "" : "s"}`,
+          description: job.sourceUrl
+            ? `From ${new URL(job.sourceUrl).hostname}. Re-run the Platform Check to reverse-image-search them.`
+            : "Re-run the Platform Check below to reverse-image-search them.",
+        });
+        if (job.sourceUrl) {
+          setSkippedUrlsByUnit((prev) => ({
+            ...prev,
+            [unitId]: [...(prev[unitId] ?? []), job.sourceUrl!],
+          }));
+        }
+      }
+    } else if (!restored && job.error) {
+      toast({
+        title: "No more photo candidates",
+        description: job.error,
+        variant: "destructive",
+      });
+    }
+  };
+
+  useEffect(() => {
+    const jobIds = Object.entries(photoFetchJobIdsByUnit).filter(([, jobId]) => !!jobId);
+    if (jobIds.length === 0) return;
+    let cancelled = false;
+    const poll = async () => {
+      for (const [unitId, jobId] of jobIds) {
+        try {
+          const resp = await fetch(`/api/preflight/photo-fetch-jobs/${encodeURIComponent(jobId)}`, {
+            credentials: "include",
+          });
+          if (!resp.ok) {
+            if (resp.status === 404 && !cancelled) {
+              setPhotoFetchJobIdsByUnit((prev) => {
+                const next = { ...prev };
+                delete next[unitId];
+                savePhotoFetchJobIds(id, next);
+                return next;
+              });
+            }
+            continue;
+          }
+          const data = await resp.json();
+          if (!cancelled && data.job) applyPhotoFetchJob(unitId, data.job as PreflightPhotoFetchJob);
+        } catch {
+          // keep polling
+        }
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, photoFetchJobIdsByUnit]);
 
   // Parse street / city / state out of the property's display address
   // ("9000 Treasure Trove Lane, Kissimmee, Florida"). For HI properties
@@ -319,7 +438,7 @@ export default function BuilderPreflight() {
     return { street, city, state };
   };
 
-  const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unit: { id: string; bedrooms: number }) => {
+  const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unit: { id: string; bedrooms: number; photos?: { url: string }[]; photoFolder?: string }) => {
     if (id >= 0 || !property) return; // promoted drafts only
     const draftId = -id;
     const { street: parsedStreet, city, state } = parsePropertyAddress(property.address);
@@ -340,10 +459,6 @@ export default function BuilderPreflight() {
         return null;
       }
     };
-    setScrapingUnitId(unit.id);
-    setPhotoFetchStartedAt(Date.now());
-    setPhotoFetchTick(0);
-    setPhotoFetchPhase("Checking existing photo sources");
     try {
       const replacingExistingPhotos = (unit.photos?.length ?? 0) > 0;
       const currentSourceUrl = await loadSourceUrl(unit.photoFolder);
@@ -359,92 +474,31 @@ export default function BuilderPreflight() {
         ...(currentSourceUrl ? [currentSourceUrl] : []),
         ...siblingSourceUrls,
       ]));
-      setPhotoFetchPhase("Searching real-estate listings");
-      const discoveryAttempts: Array<{
-        bedrooms: number | "any";
-        minBedrooms?: number;
-        maxCandidates: number;
-      }> = [
-        { bedrooms: unit.bedrooms, maxCandidates: replacingExistingPhotos ? 10 : 6 },
-        { bedrooms: unit.bedrooms, maxCandidates: replacingExistingPhotos ? 12 : 8 },
-        // Representative resort photos (UI copy) — Zillow often only surfaces
-        // 1–2BR units at Mauna Lani Point even when the draft is 3BR+3BR.
-        { bedrooms: "any", maxCandidates: replacingExistingPhotos ? 14 : 10 },
-      ];
-      let photos: Array<{ url: string }> = [];
-      let sourceUrl: string | null = null;
-      let lastNote: string | undefined;
-      const triedUrls = new Set(skipUrls);
-      for (const attempt of discoveryAttempts) {
-        const fetchR = await apiRequest("POST", "/api/community/fetch-unit-photos", {
-          communityName: property.complexName,
-          streetAddress: street || undefined,
-          city: city || undefined,
-          state: state || undefined,
-          bedrooms: attempt.bedrooms,
-          minBedrooms: attempt.minBedrooms,
-          skipUrls: Array.from(triedUrls),
-          skipFirst: triedUrls.size === 0 && replacingExistingPhotos ? 1 : 0,
-          maxCandidates: attempt.maxCandidates,
-        });
-        const fetchData = await fetchR.json();
-        lastNote = typeof fetchData?.note === "string" ? fetchData.note : undefined;
-        const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
-        const nextSourceUrl: string | null = fetchData?.sourceUrl ?? null;
-        if (nextPhotos.length > 0) {
-          photos = nextPhotos;
-          sourceUrl = nextSourceUrl;
-          break;
-        }
-        if (nextSourceUrl) triedUrls.add(nextSourceUrl);
-        const exhausted = Array.isArray(fetchData?.triedCandidateUrls)
-          ? (fetchData.triedCandidateUrls as string[])
-          : [];
-        for (const u of exhausted) triedUrls.add(u);
-      }
-      if (photos.length === 0) {
-        toast({
-          title: "No more photo candidates",
-          description: lastNote || `Couldn't find another ${unit.bedrooms}BR listing at ${property.complexName} after skipping the sources already on file.`,
-          variant: "destructive",
-        });
-        return;
-      }
-      setPhotoFetchPhase("Saving photos to this draft");
-      // Pass empty array for the OTHER unit so persist-photos doesn't wipe
-      // its existing folder. The endpoint skips a unit when its URL list
-      // is empty.
-      const persistBody = unitIndex === 0
-        ? { unit1Photos: photos.map((p) => p.url), unit2Photos: [], unit1SourceUrl: sourceUrl }
-        : { unit1Photos: [], unit2Photos: photos.map((p) => p.url), unit2SourceUrl: sourceUrl };
-      const persistR = await apiRequest("POST", `/api/community/${draftId}/persist-photos`, persistBody);
-      const persistData = await persistR.json();
-      const saved = unitIndex === 0 ? persistData?.unit1?.saved : persistData?.unit2?.saved;
-      toast({
-        title: `Saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}`,
-        description: sourceUrl
-          ? `From ${new URL(sourceUrl).hostname}. Re-run the Platform Check to reverse-image-search them.`
-          : "Re-run the Platform Check below to reverse-image-search them.",
+      const resp = await apiRequest("POST", "/api/preflight/photo-fetch-jobs", {
+        draftId,
+        propertyId: id,
+        unitId: unit.id,
+        unitIndex,
+        bedrooms: unit.bedrooms,
+        communityName: property.complexName,
+        streetAddress: street || undefined,
+        city: city || undefined,
+        state: state || undefined,
+        skipUrls,
+        replacingExistingPhotos,
+        skipFirst: skipUrls.length === 0 && replacingExistingPhotos ? 1 : 0,
       });
-      // Track this URL so a subsequent "Try another" click skips it.
-      if (sourceUrl) {
-        setSkippedUrlsByUnit((prev) => ({
-          ...prev,
-          [unit.id]: [...(prev[unit.id] ?? []), sourceUrl],
-        }));
-      }
-      // Refresh property state so unit.photos / photoFolder reflect the
-      // new folder. Without this the next Platform Check still sees the
-      // stale (empty) photos array.
-      const updated = await loadDraftPropertyByNegativeId(id);
-      if (updated) setDraftProperty(updated);
+      const data = await resp.json();
+      if (!data?.job?.id) throw new Error("Photo fetch job did not start");
+      setPhotoFetchJobIdsByUnit((prev) => {
+        const next = { ...prev, [unit.id]: data.job.id as string };
+        savePhotoFetchJobIds(id, next);
+        return next;
+      });
+      applyPhotoFetchJob(unit.id, data.job as PreflightPhotoFetchJob);
+      setPhotoFetchTick(0);
     } catch (e: any) {
       toast({ title: "Scrape failed", description: e?.message || String(e), variant: "destructive" });
-    } finally {
-      setScrapingUnitId(null);
-      setPhotoFetchStartedAt(null);
-      setPhotoFetchTick(0);
-      setPhotoFetchPhase(null);
     }
   };
 
@@ -739,12 +793,22 @@ export default function BuilderPreflight() {
   }
 
   const hasAnyResults = Object.keys(results).length > 0;
-  const photoFetchElapsedSeconds = photoFetchStartedAt
-    ? Math.max(photoFetchTick, Math.floor((Date.now() - photoFetchStartedAt) / 1000))
-    : 0;
-  const photoFetchProgressValue = scrapingUnitId
-    ? Math.min(94, 16 + photoFetchElapsedSeconds * 1.4)
-    : 0;
+  const photoFetchJobForUnit = (unitId: string) => photoFetchJobsByUnit[unitId];
+  const photoFetchElapsedSeconds = photoFetchTick;
+  const photoFetchProgressValue = (unitId: string) => {
+    const job = photoFetchJobForUnit(unitId);
+    if (job && (job.status === "queued" || job.status === "running")) {
+      return Math.min(94, Math.max(8, job.progress));
+    }
+    return scrapingUnitId === unitId ? Math.min(94, 16 + photoFetchElapsedSeconds * 1.4) : 0;
+  };
+  const photoFetchPhaseForUnit = (unitId: string) =>
+    photoFetchJobForUnit(unitId)?.message ?? "Finding photos";
+  const isPhotoFetchActive = (unitId: string) =>
+    !!photoFetchJobIdsByUnit[unitId]
+    && (!photoFetchJobForUnit(unitId)
+      || photoFetchJobForUnit(unitId)!.status === "queued"
+      || photoFetchJobForUnit(unitId)!.status === "running");
   const actualProgress = totalUnits > 0 ? (completedCount / totalUnits) * 100 : 0;
   const elapsedSeconds = checkStartedAt ? Math.max(progressTick, Math.floor((Date.now() - checkStartedAt) / 1000)) : 0;
   const activeProgressCap = totalUnits > 0
@@ -846,7 +910,8 @@ export default function BuilderPreflight() {
               {property.units.map((unit, i) => {
                 const folderHasPhotos = (unit.photos?.length ?? 0) > 0;
                 const skippedCount = (skippedUrlsByUnit[unit.id] ?? []).length;
-                const isScrapingThisUnit = scrapingUnitId === unit.id;
+                const isScrapingThisUnit = isPhotoFetchActive(unit.id);
+                const unitProgress = photoFetchProgressValue(unit.id);
                 return (
                   <div key={unit.id} className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-medium w-20 flex-shrink-0">
@@ -858,7 +923,7 @@ export default function BuilderPreflight() {
                     <Button
                       size="sm"
                       onClick={() => handleScrapePhotosForUnit(i === 0 ? 0 : 1, unit)}
-                      disabled={scrapingUnitId !== null}
+                      disabled={isScrapingThisUnit}
                       className="h-8 text-xs"
                       data-testid={`button-scrape-photos-${unit.id}`}
                     >
@@ -887,10 +952,10 @@ export default function BuilderPreflight() {
                       <div className="basis-full rounded-md border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-900">
                         <div className="mb-1 flex items-center justify-between gap-3">
                           <span className="font-medium">
-                            {photoFetchPhase ?? "Finding photos"}
+                            {photoFetchPhaseForUnit(unit.id)}
                           </span>
                           <span className="text-blue-700">
-                            {photoFetchElapsedSeconds}s elapsed
+                            {Math.round(unitProgress)}% · safe to leave this tab
                           </span>
                         </div>
                         <div
@@ -899,11 +964,11 @@ export default function BuilderPreflight() {
                           aria-label={`Finding photos for Unit ${String.fromCharCode(65 + i)}`}
                           aria-valuemin={0}
                           aria-valuemax={100}
-                          aria-valuenow={Math.round(photoFetchProgressValue)}
+                          aria-valuenow={Math.round(unitProgress)}
                         >
                           <div
                             className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 transition-all duration-700"
-                            style={{ width: `${photoFetchProgressValue}%` }}
+                            style={{ width: `${unitProgress}%` }}
                           />
                         </div>
                       </div>

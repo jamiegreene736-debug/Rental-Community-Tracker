@@ -150,6 +150,8 @@ assert.deepEqual(
   "Kaiulani preflight should check the second selected unit only, not split it into units 6 and 7",
 );
 const preflightSource = readFileSync("client/src/pages/builder-preflight.tsx", "utf8");
+const preflightPhotoDiscoverySource = readFileSync("shared/preflight-photo-discovery.ts", "utf8");
+const preflightJobsSource = readFileSync("server/preflight-background-jobs.ts", "utf8");
 assert.match(
   preflightSource,
   /const hasUnitPhoto = !!\(unit as any\)\.photoFolder;/,
@@ -177,24 +179,34 @@ assert.match(
   "combo photo fetch discovery must bound candidate scans so Step 4 does not appear stuck on weak markets",
 );
 assert.match(
-  preflightSource,
+  preflightPhotoDiscoverySource,
   /replacingExistingPhotos \? 10 : 6/,
   "preflight Find Photos must bound candidate scans so a no-match does not run for several minutes",
 );
 assert.match(
-  preflightSource,
+  preflightPhotoDiscoverySource,
   /bedrooms: "any", maxCandidates: replacingExistingPhotos \? 14 : 10/,
   "preflight Find Photos must fall back to any bedroom count for representative resort photos",
 );
 assert.doesNotMatch(
-  preflightSource,
-  /minBedrooms: unit\.bedrooms/,
+  preflightPhotoDiscoverySource,
+  /minBedrooms:/,
   "preflight Find Photos must not require minBedrooms on the relaxed attempt — Zillow often lacks matching BR at the resort",
 );
 assert.match(
   preflightSource,
   /replacingExistingPhotos[\s\S]*siblingSourceUrls/,
   "preflight Find different photos must not skip the sibling unit source URL so sparse resorts still have candidates",
+);
+assert.match(
+  preflightSource,
+  /\/api\/preflight\/photo-fetch-jobs/,
+  "preflight Find Photos must run on a server-side job so tab close does not abort discovery",
+);
+assert.match(
+  preflightJobsSource,
+  /preflightPhotoDiscoveryAttempts/,
+  "preflight photo-fetch jobs must reuse the shared discovery attempt caps",
 );
 assert.match(
   routesSource,
@@ -1602,6 +1614,11 @@ assert.ok(
 assert.ok(
   unitReplacementSource.includes("onClick={() => search({ expanded: hasActiveReplacement })}"),
   "the initial Find Replacement Unit action should expand automatically when replacing another unit",
+);
+assert.match(
+  unitReplacementSource,
+  /\/api\/preflight\/replacement-find-jobs/,
+  "preflight replacement search must run on a server-side job so tab close does not abort find-unit",
 );
 console.log("  ✓ replacement search budget and follow-up expanded mode are guarded");
 
