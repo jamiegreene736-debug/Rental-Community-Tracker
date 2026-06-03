@@ -32769,6 +32769,17 @@ Return ONLY compact JSON with this exact shape:
     return b1 <= b2 ? `${b1}+${b2}` : `${b2}+${b1}`;
   };
   const comboLabelForKey = (key: string) => `${key.replace("+", "+")}BR`;
+  const FOUR_BEDROOM_COMBO_BLOCKED_COMMUNITIES = [
+    "Waikiki Banyan",
+    "Waikiki Beach Tower",
+    "Waikiki Shore by Outrigger",
+    "Waikiki Sunset",
+  ];
+  const isFourBedroomComboBlockedCommunity = (communityName: string, state?: string): boolean => {
+    const stateKey = String(state || "").trim().toLowerCase();
+    if (stateKey && stateKey !== "hawaii" && stateKey !== "hi") return false;
+    return FOUR_BEDROOM_COMBO_BLOCKED_COMMUNITIES.some((name) => nameLooksSame(communityName, name));
+  };
   const comboCommunityMatches = (
     community: { name?: unknown; city?: unknown; state?: unknown },
     target: { communityName: string; city?: string; state?: string },
@@ -35022,7 +35033,10 @@ Return ONLY compact JSON with this exact shape:
     // Default to 2BR + 3BR if nothing found (most common vacation rental config)
     if (parsedTypes.size === 0) { parsedTypes.add(2); parsedTypes.add(3); }
 
-    const availableTypes = Array.from(parsedTypes).sort((a, b) => a - b);
+    const blockFourBedroomCombos = isFourBedroomComboBlockedCommunity(communityName, state);
+    const availableTypes = Array.from(parsedTypes)
+      .filter((bedrooms) => !(blockFourBedroomCombos && bedrooms === 4))
+      .sort((a, b) => a - b);
 
     // ── 3. Calculate median rate per bedroom type ─────────────────────────────
     // Estimate per-unit nightly rate for each BR type (if not found in search, use location-based estimate)
@@ -35057,6 +35071,7 @@ Return ONLY compact JSON with this exact shape:
       for (let j = i; j < typeArr.length; j++) {
         const b1 = typeArr[i], b2 = typeArr[j];
         const total = b1 + b2;
+        if (blockFourBedroomCombos && total === 4) continue;
         if (total < 3 || total > 10) continue;
         const r1 = baseRatePerBR[b1] ?? b1 * basePricePerBR;
         const r2 = baseRatePerBR[b2] ?? b2 * basePricePerBR;

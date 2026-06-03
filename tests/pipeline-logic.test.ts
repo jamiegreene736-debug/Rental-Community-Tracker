@@ -1328,6 +1328,21 @@ try {
     "South Big Island towns should fall back to the known Punalu'u/Sea Mountain condo candidate",
   );
   console.log("  ✓ South Big Island small towns have a deterministic combo fallback");
+
+  const waikiki = await researchCommunitiesForCity("Waikiki", "Hawaii");
+  const noFourBedroomWaikikiCombos = [
+    "Waikiki Banyan",
+    "Waikiki Beach Tower",
+    "Waikiki Shore by Outrigger",
+    "Waikiki Sunset",
+  ];
+  for (const name of noFourBedroomWaikikiCombos) {
+    const community = waikiki.find((c) => c.name === name);
+    assert.ok(community, `${name} should remain in curated Waikiki research results`);
+    assert.notEqual(community?.combinedBedroomsTypical, 4, `${name} should not advertise a 4BR combo`);
+    assert.ok(!(community?.availableBedrooms ?? []).includes(4), `${name} should not advertise 4BR units`);
+  }
+  console.log("  ✓ selected Waikiki communities no longer advertise 4BR combos");
 } finally {
   globalThis.fetch = originalFetch;
   if (originalSearchKey == null) delete process.env.SEARCHAPI_API_KEY;
@@ -1341,6 +1356,11 @@ const autoReplySource = readFileSync(new URL("../server/auto-reply.ts", import.m
 const homeSource = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
 const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
 const unitReplacementSource = readFileSync(new URL("../client/src/components/unit-replacement-flow.tsx", import.meta.url), "utf8");
+assert.ok(
+  routeSource.includes("FOUR_BEDROOM_COMBO_BLOCKED_COMMUNITIES") && routeSource.includes("total === 4"),
+  "search-units should keep the explicit Waikiki 4BR combo block",
+);
+console.log("  ✓ selected Waikiki communities block 4BR pairing suggestions");
 assert.equal(
   routeSource.includes("${DISCLOSURE}"),
   false,

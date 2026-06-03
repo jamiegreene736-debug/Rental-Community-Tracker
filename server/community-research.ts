@@ -80,7 +80,7 @@ type KnownComboCommunitySeed = {
   availableBedrooms?: number[];
   estimatedTotalUnits?: number;
   estimatedBedroomUnitCounts?: Record<string, number>;
-  combinedBedroomsTypical: number;
+  combinedBedroomsTypical?: number;
   confidenceScore: number;
   combinabilityScore: number;
   researchSummary: string;
@@ -536,11 +536,10 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     name: "Waikiki Shore by Outrigger",
     unitTypes: "condos",
     bedroomMix: "studio, 1BR, and 2BR beachfront condos",
-    combinedBedroomsTypical: 4,
     confidenceScore: 86,
     combinabilityScore: 58,
     sourceUrl: "https://hawaiivacationcondos.outrigger.com/hawaii/oahu/waikiki-shore-by-outrigger/accommodations",
-    researchSummary: "Waikiki beachfront condominium vacation-rental building with studio, 1BR, and rare 2BR condos; viable for 2BR plus 2BR bundles when inventory is available.",
+    researchSummary: "Waikiki beachfront condominium vacation-rental building with studio, 1BR, and rare 2BR condos; keep combo planning below 4BR for this community.",
     availableBedrooms: [1, 2],
     estimatedTotalUnits: 168,
   },
@@ -563,12 +562,11 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     state: /^(hi|hawaii)$/i,
     name: "Waikiki Banyan",
     unitTypes: "condos",
-    bedroomMix: "mostly 1BR condos, some 2BR combo opportunities",
-    combinedBedroomsTypical: 4,
+    bedroomMix: "mostly 1BR condos, limited 2BR inventory",
     confidenceScore: 82,
     combinabilityScore: 54,
     sourceUrl: "https://www.hawaiigaga.com/waikiki-banyan-rentals.aspx",
-    researchSummary: "Large Waikiki condominium resort one block from the beach with active vacation-rental inventory; strongest for adjacent 1BR/2BR-style bundled products.",
+    researchSummary: "Large Waikiki condominium resort one block from the beach with active vacation-rental inventory; keep combo planning below 4BR for this community.",
     availableBedrooms: [1, 2],
     estimatedTotalUnits: 876,
   },
@@ -578,11 +576,10 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     name: "Waikiki Beach Tower",
     unitTypes: "condos",
     bedroomMix: "2BR condos",
-    combinedBedroomsTypical: 4,
     confidenceScore: 82,
     combinabilityScore: 66,
     sourceUrl: "https://www.hawaiigaga.com/waikiki-beach-tower-rentals.aspx",
-    researchSummary: "Waikiki high-rise condo resort with recurring 2BR vacation-rental inventory; suitable for 2BR plus 2BR combo listings.",
+    researchSummary: "Waikiki high-rise condo resort with recurring 2BR vacation-rental inventory; 4BR combo products are intentionally excluded.",
     availableBedrooms: [2],
     estimatedTotalUnits: 140,
   },
@@ -592,11 +589,10 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     name: "Waikiki Sunset",
     unitTypes: "condos",
     bedroomMix: "1BR and 2BR condos",
-    combinedBedroomsTypical: 4,
     confidenceScore: 78,
     combinabilityScore: 56,
     sourceUrl: "https://www.hawaiigaga.com/waikiki-sunset-rentals.aspx",
-    researchSummary: "Waikiki condominium resort with full-kitchen vacation rentals near Kuhio Avenue and the beach.",
+    researchSummary: "Waikiki condominium resort with full-kitchen vacation rentals near Kuhio Avenue and the beach; keep combo planning below 4BR for this community.",
     availableBedrooms: [1, 2],
     estimatedTotalUnits: 435,
   },
