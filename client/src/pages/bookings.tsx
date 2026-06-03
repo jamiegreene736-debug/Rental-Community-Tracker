@@ -1179,6 +1179,20 @@ function alternativeReplacementNeedText(workflow: AlternativeWorkflowState | und
   return plans.map((plan) => `${plan.join("+")}BR`).join(" or ");
 }
 
+/** Communities that passed SearchAPI Airbnb inventory proof — eligible for sidecar find-buy-in. */
+function alternativeCommunitiesForSidecar(scout: AlternativeScoutResponse): AlternativeScoutResult[] {
+  const byCommunity = new Map<string, AlternativeScoutResult>();
+  for (const row of [...(scout.recommended ?? []), ...(scout.results ?? [])]) {
+    if (row.recommended) byCommunity.set(row.community, row);
+  }
+  for (const row of scout.discoveredResorts ?? []) {
+    if (row.recommended && !byCommunity.has(row.community)) byCommunity.set(row.community, row);
+  }
+  return Array.from(byCommunity.values()).sort(
+    (a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999),
+  );
+}
+
 type TwoUnitBedroomCombo = { bedrooms: number[] };
 
 type AutoFillGroundCandidatePool = {
@@ -2065,8 +2079,8 @@ function AlternativeBuyInWorkflowPanel({
         <div>
           <p className="font-semibold">Alternative buy-in workflow</p>
           <p className="text-[11px] opacity-80">
-            Scouts configured buy-in communities within ~20 minutes drive of {workflow?.scout?.baseCommunity ?? "this resort"}
-            {workflow?.scout?.requiresOceanfrontComparable ? " (waterfront only)" : ""}; also discovers other nearby resorts/condo areas (even if not yet in system) for selective sidecar queuing.
+            After the primary buy-in search finishes, nearby communities are scouted on Airbnb (SearchAPI), then sidecar find-buy-in runs only where inventory was confirmed (~20 min drive of {workflow?.scout?.baseCommunity ?? "this resort"}
+            {workflow?.scout?.requiresOceanfrontComparable ? ", waterfront comparable only" : ""}).
           </p>
           {(workflow?.scout?.nearbyWithinDriveMinutes?.length ?? 0) > 0 && (
             <p className="mt-0.5 text-[11px] opacity-80">
@@ -4100,6 +4114,7 @@ export default function Bookings() {
   const [autoAltScans, setAutoAltScans] = useState<Record<string, { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean }>>({});
   const alternativeWorkflowsRef = useRef<Record<string, AlternativeWorkflowState>>({});
   useEffect(() => { alternativeWorkflowsRef.current = alternativeWorkflows; }, [alternativeWorkflows]);
+  const autoAlternativeScoutStartedRef = useRef<Set<string>>(new Set());
   const rawReservationsRef = useRef<GuestyReservation[]>([]);
 
   // Hoisted early (before first reference in the runAlternativeSidecarSearchRef initializer)
@@ -5848,6 +5863,35 @@ export default function Bookings() {
         });
         setAutoFillConfirmationOpen(true);
       }
+      if (!variables?.silent && searchAudits.length > 0) {
+        const comboTargetResortForScout = directBookingTargetResortName(
+          PROPERTY_UNIT_CONFIGS[selectedBuyInPropertyId ?? 0]?.community
+            ?? reservation.slots.find((slot) => slot.community)?.community
+            ?? "",
+        );
+        const comboCommunityForScout = PROPERTY_UNIT_CONFIGS[selectedBuyInPropertyId ?? 0]?.community
+          ?? reservation.slots.find((slot) => slot.community)?.community
+          ?? "";
+        const completeComboOptionsForScout = comboOptions.filter((option) =>
+          comboOptionIsComplete(option, comboTargetResortForScout, comboCommunityForScout),
+        );
+        const noCompleteComboForScout = completeComboOptionsForScout.length === 0;
+        const selectedComboForScout = completeComboOptionsForScout.find((option) => option.selected);
+        const fallbackCostForScout = completeComboOptionsForScout
+          .map((option) => option.totalCost)
+          .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
+          .sort((a, b) => a - b)[0] ?? null;
+        const postFillAdvice = buildBuyInCancellationAdvice({
+          reservation,
+          audits: searchAudits,
+          proposedCost: noCompleteComboForScout ? null : selectedComboForScout?.totalCost ?? fallbackCostForScout,
+          noCompleteCombo: noCompleteComboForScout,
+          attachableVerifiedCount: countAttachableBuyInCandidates(searchAudits),
+        });
+        if (shouldShowAlternativeBuyInWorkflow(postFillAdvice, { noCompleteCombo: noCompleteComboForScout })) {
+          void scoutAlternativeCommunities(reservation, postFillAdvice, { auto: true });
+        }
+      }
       if (variables?.silent) return;
       if (filled.length === 0) {
         const uniqueSummaries = Array.from(
@@ -5945,15 +5989,26 @@ export default function Bookings() {
     }));
   };
 
-  const scoutAlternativeCommunities = async (reservation: GuestyReservation, advice: BuyInCancellationAdvice) => {
+  const scoutAlternativeCommunities = async (
+    reservation: GuestyReservation,
+    advice: BuyInCancellationAdvice,
+    opts?: { auto?: boolean },
+  ) => {
     const meta = reservationPropertyMeta.get(reservation._id);
     const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
     const bedrooms = reservation.slots.find((slot) => !slot.buyIn)?.bedrooms ?? reservation.slots[0]?.bedrooms;
     const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
     const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
     if (!propertyId || !bedrooms || !checkIn || !checkOut) {
-      toast({ title: "Cannot scout alternatives", description: "Missing property, bedroom, or stay dates.", variant: "destructive" });
+      if (!opts?.auto) {
+        toast({ title: "Cannot scout alternatives", description: "Missing property, bedroom, or stay dates.", variant: "destructive" });
+      }
       return;
+    }
+    if (opts?.auto) {
+      if (alternativeWorkflowsRef.current[reservation._id]?.scout) return;
+      if (autoAlternativeScoutStartedRef.current.has(reservation._id)) return;
+      autoAlternativeScoutStartedRef.current.add(reservation._id);
     }
     updateAlternativeWorkflow(reservation._id, { activeCommunity: "scouting" });
     try {
@@ -5974,23 +6029,25 @@ export default function Bookings() {
           activeCommunity: null,
         },
       };
-      const scoutCommunities = [
-        ...(response.scouted ?? []),
-        ...(response.results ?? []),
-        ...(response.rejected ?? []),
-        ...(response.discoveredResorts ?? []),
-      ];
-      if (scoutCommunities.length > 0) {
+      const sidecarQueue = alternativeCommunitiesForSidecar(response);
+      if (sidecarQueue.length > 0) {
         startAutoAlternativeSidecarScan(reservation);
       }
-      toast({
-        title: response.recommended.length ? "Alternative communities found" : "No strong alternative community yet",
-        description: response.recommended.length
-          ? `${response.recommended.length} community option${response.recommended.length === 1 ? "" : "s"} passed the Airbnb scout threshold.${scoutCommunities.length > 0 ? " Sidecar queue started for nearby communities." : ""}`
-          : scoutCommunities.length > 0
-            ? "SearchAPI scout finished; sidecar queue started for nearby communities."
-            : "SearchAPI did not find enough Airbnb inventory in the curated nearby communities.",
-      });
+      if (!opts?.auto) {
+        toast({
+          title: response.recommended.length ? "Alternative communities found" : "No strong alternative community yet",
+          description: response.recommended.length
+            ? `${response.recommended.length} community option${response.recommended.length === 1 ? "" : "s"} passed the Airbnb scout threshold.${sidecarQueue.length > 0 ? " Sidecar queue started for those communities." : ""}`
+            : sidecarQueue.length > 0
+              ? "SearchAPI scout finished; sidecar queue started for Airbnb-qualified nearby communities."
+              : "SearchAPI did not find enough Airbnb inventory in the curated nearby communities.",
+        });
+      } else if (sidecarQueue.length > 0) {
+        toast({
+          title: "Scanning nearby alternatives",
+          description: `Airbnb scout confirmed inventory at ${sidecarQueue.length} nearby communit${sidecarQueue.length === 1 ? "y" : "ies"} — running sidecar verification.`,
+        });
+      }
     } catch (error: any) {
       updateAlternativeWorkflow(reservation._id, { activeCommunity: null });
       toast({ title: "Alternative scout failed", description: error?.message ?? String(error), variant: "destructive" });
@@ -6007,14 +6064,9 @@ export default function Bookings() {
       toast({ title: "No scout results", description: "Run 'Scout similar areas' first.", variant: "destructive" });
       return;
     }
-    const baseComms: AlternativeScoutResult[] = (scout.scouted ?? scout.results ?? []).slice();
-    const rejected = scout.rejected ?? [];
-    const byComm = new Map<string, AlternativeScoutResult>();
-    for (const r of baseComms) byComm.set(r.community, r);
-    for (const r of rejected) if (!byComm.has(r.community)) byComm.set(r.community, r);
-    const communities = Array.from(byComm.values()).sort((a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999));
+    const communities = alternativeCommunitiesForSidecar(scout);
     if (communities.length === 0) {
-      toast({ title: "No alternatives", description: "Scout returned no communities within 20min drive." });
+      toast({ title: "No alternatives", description: "No nearby community passed Airbnb inventory proof yet — run Scout similar areas first." });
       return;
     }
     setAutoAltScans((prev) => ({ ...prev, [resId]: { isRunning: true, scanned: [], foundComboIn: null, stopped: false } }));
@@ -6049,11 +6101,7 @@ export default function Bookings() {
         updateAlternativeWorkflow(resId, { activeCommunity: null });
         return;
       }
-      const comms: AlternativeScoutResult[] = (wf.scout!.scouted ?? wf.scout!.results ?? []).slice();
-      const byC = new Map<string, AlternativeScoutResult>();
-      for (const r of comms) byC.set(r.community, r);
-      for (const r of (wf.scout!.rejected ?? [])) if (!byC.has(r.community)) byC.set(r.community, r);
-      const ordered = Array.from(byC.values()).sort((a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999));
+      const ordered = alternativeCommunitiesForSidecar(wf.scout!);
       const scanned = scan.scanned ?? [];
       const next = ordered.find((c) => !scanned.includes(c.community) && !wf.sidecarResults?.[c.community]);
       if (!next) {
@@ -8220,9 +8268,12 @@ export default function Bookings() {
                                 listingId={selectedListingId}
                                 enableGroundFloorRequirement={selectedHasBuyInConfig}
                                 alternativeWorkflow={alternativeWorkflows[r._id]}
-                                onScoutAlternatives={(advice) => scoutAlternativeCommunities(r, advice)}
+                                onScoutAlternatives={(advice, opts) => scoutAlternativeCommunities(r, advice, opts)}
                                 onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(r, community)}
                                 onDraftAlternativeMessage={() => draftAlternativeGuestMessage(r)}
+                                autoAltScan={autoAltScans[r._id] ?? null}
+                                onStartAutoAltScan={() => startAutoAlternativeSidecarScan(r)}
+                                onStopAutoAltScan={() => stopAutoAlternativeSidecarScan(r._id)}
                               />
                             </div>
                           )}
@@ -8906,9 +8957,12 @@ export default function Bookings() {
               listingId={selectedListingId}
               enableGroundFloorRequirement={selectedHasBuyInConfig}
               alternativeWorkflow={alternativeWorkflows[picker.reservation._id]}
-              onScoutAlternatives={(advice) => scoutAlternativeCommunities(picker.reservation, advice)}
+              onScoutAlternatives={(advice, opts) => scoutAlternativeCommunities(picker.reservation, advice, opts)}
               onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(picker.reservation, community)}
               onDraftAlternativeMessage={() => draftAlternativeGuestMessage(picker.reservation)}
+              autoAltScan={autoAltScans[picker.reservation._id] ?? null}
+              onStartAutoAltScan={() => startAutoAlternativeSidecarScan(picker.reservation)}
+              onStopAutoAltScan={() => stopAutoAlternativeSidecarScan(picker.reservation._id)}
             />
           )}
         </DialogContent>
@@ -9298,6 +9352,9 @@ function CandidateList({
   onScoutAlternatives,
   onRunAlternativeCommunity,
   onDraftAlternativeMessage,
+  autoAltScan,
+  onStartAutoAltScan,
+  onStopAutoAltScan,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
@@ -9305,9 +9362,12 @@ function CandidateList({
   listingId?: string | null;
   enableGroundFloorRequirement?: boolean;
   alternativeWorkflow?: AlternativeWorkflowState;
-  onScoutAlternatives?: (advice: BuyInCancellationAdvice) => void;
+  onScoutAlternatives?: (advice: BuyInCancellationAdvice, opts?: { auto?: boolean }) => void;
   onRunAlternativeCommunity?: (community: string) => void;
   onDraftAlternativeMessage?: () => void;
+  autoAltScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
+  onStartAutoAltScan?: () => void;
+  onStopAutoAltScan?: () => void;
 }) {
   // Existing-buy-ins picker was removed (was here historically): when
   // auto-fill creates buy-in records and the operator detaches them,
@@ -9331,6 +9391,9 @@ function CandidateList({
         onScoutAlternatives={onScoutAlternatives}
         onRunAlternativeCommunity={onRunAlternativeCommunity}
         onDraftAlternativeMessage={onDraftAlternativeMessage}
+        autoAltScan={autoAltScan}
+        onStartAutoAltScan={onStartAutoAltScan}
+        onStopAutoAltScan={onStopAutoAltScan}
       />
     </div>
   );
@@ -10489,6 +10552,9 @@ function LiveSearchSection({
   onScoutAlternatives,
   onRunAlternativeCommunity,
   onDraftAlternativeMessage,
+  autoAltScan,
+  onStartAutoAltScan,
+  onStopAutoAltScan,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
@@ -10496,9 +10562,12 @@ function LiveSearchSection({
   listingId?: string | null;
   enableGroundFloorRequirement?: boolean;
   alternativeWorkflow?: AlternativeWorkflowState;
-  onScoutAlternatives?: (advice: BuyInCancellationAdvice) => void;
+  onScoutAlternatives?: (advice: BuyInCancellationAdvice, opts?: { auto?: boolean }) => void;
   onRunAlternativeCommunity?: (community: string) => void;
   onDraftAlternativeMessage?: () => void;
+  autoAltScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
+  onStartAutoAltScan?: () => void;
+  onStopAutoAltScan?: () => void;
 }) {
   const { toast } = useToast();
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
@@ -10943,6 +11012,26 @@ function LiveSearchSection({
     attachableVerifiedCount: singleSearchAttachableCount,
   });
   const singleSearchNoBookableReplacement = singleSearchAttachableCount === 0 && !!confirmationAudit;
+  const autoAlternativeScoutAfterSearchRef = useRef("");
+  const searchCompletionKey = `${reservation._id}|${refreshNonce}|${data?.diagnostics?.generatedAt ?? dataUpdatedAt ?? ""}`;
+  useEffect(() => {
+    if (!data || isLoading || isFetching || !onScoutAlternatives || !confirmationAudit) return;
+    if (alternativeWorkflow?.scout) return;
+    if (autoAlternativeScoutAfterSearchRef.current === searchCompletionKey) return;
+    if (!shouldShowAlternativeBuyInWorkflow(singleSearchCancellationAdvice, { noCompleteCombo: singleSearchNoBookableReplacement })) return;
+    autoAlternativeScoutAfterSearchRef.current = searchCompletionKey;
+    onScoutAlternatives(singleSearchCancellationAdvice!, { auto: true });
+  }, [
+    data,
+    isLoading,
+    isFetching,
+    onScoutAlternatives,
+    confirmationAudit,
+    alternativeWorkflow?.scout,
+    searchCompletionKey,
+    singleSearchCancellationAdvice,
+    singleSearchNoBookableReplacement,
+  ]);
 
   // Map a unit's primary listing back to a LiveCandidate so the existing
   // record-buy-in dialog can keep its current contract. PRs #275+ will
@@ -11182,6 +11271,9 @@ function LiveSearchSection({
           onScout={() => onScoutAlternatives(singleSearchCancellationAdvice!)}
           onRunCommunity={(community) => onRunAlternativeCommunity?.(community)}
           onDraftMessage={() => onDraftAlternativeMessage?.()}
+          autoScan={autoAltScan ?? null}
+          onStartAutoScan={onStartAutoAltScan}
+          onStopAutoScan={onStopAutoAltScan}
         />
       )}
 
