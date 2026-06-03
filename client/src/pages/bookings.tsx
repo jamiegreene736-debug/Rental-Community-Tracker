@@ -1934,6 +1934,17 @@ function shouldShowAlternativeBuyInWorkflow(
   return advice.score >= 50;
 }
 
+function shouldAutoTriggerAlternativeScout(
+  reservation: GuestyReservation,
+  attachableCount: number,
+): boolean {
+  const emptySlots = reservation.slots.filter((slot) => !slot.buyIn).length;
+  if (attachableCount === 0) return true;
+  // Multi-unit bookings need a full combo — one attachable row for one slot
+  // should still trigger the nearby-community scout.
+  return emptySlots > 1 && attachableCount < emptySlots;
+}
+
 function countAttachableBuyInCandidates(audits: AutoFillSearchAudit[]): number {
   return audits.flatMap((audit) => audit.candidates).filter((candidate) => {
     if (candidate.verified !== "yes") return false;
@@ -6326,11 +6337,20 @@ export default function Bookings() {
       autoAlternativeScoutStartedRef.current.delete(reservation._id);
     } else {
       if (alternativeWorkflowsRef.current[reservation._id]?.scout) return;
-      if (autoAlternativeScoutStartedRef.current.has(reservation._id)) return;
+      const active = alternativeWorkflowsRef.current[reservation._id]?.activeCommunity;
+      if (active === "scouting" || active === "direct-probing") return;
     }
     if (!propertyId || !bedrooms || !checkIn || !checkOut) {
       if (!opts?.auto) {
         toast({ title: "Cannot scout alternatives", description: "Missing property, bedroom, or stay dates.", variant: "destructive" });
+      } else {
+        console.warn("[alternative-scout] auto scout skipped: missing property, bedroom, or stay dates", {
+          reservationId: reservation._id,
+          propertyId,
+          bedrooms,
+          checkIn,
+          checkOut,
+        });
       }
       return;
     }
@@ -11052,7 +11072,17 @@ function LiveSearchSection({
   }, [isError, data, error, propertyId, reservation._id, slot.unitId, slot.bedrooms, checkInYmd, checkOutYmd]);
   const searchDiagnostics = data?.diagnostics ?? hardErrorDiagnostics;
   const confirmationAudit = useMemo<AutoFillSearchAudit | null>(() => {
-    if (!data || !searchDiagnostics) return null;
+    if (!searchDiagnostics) return null;
+    if (!data) {
+      if (!hardErrorDiagnostics) return null;
+      return {
+        bedrooms: slot.bedrooms,
+        generatedAt: searchDiagnostics.generatedAt ?? new Date().toISOString(),
+        counts: {},
+        candidates: [],
+        diagnostics: searchDiagnostics,
+      };
+    }
     const groupedCandidates = (data.cheapestUnits ?? []).flatMap((unit) =>
       (unit.listings ?? []).map((listing): AutoFillAuditCandidate => ({
         source: listing.channel,
@@ -11098,7 +11128,7 @@ function LiveSearchSection({
       candidates: flatCandidates,
       diagnostics: searchDiagnostics,
     };
-  }, [data, searchDiagnostics, slot.bedrooms]);
+  }, [data, searchDiagnostics, hardErrorDiagnostics, slot.bedrooms]);
   const confirmationPayload = useMemo<BuyInSearchConfirmationPayload | null>(() => {
     if (!confirmationAudit) return null;
     const request = confirmationAudit.diagnostics?.request;
@@ -11160,25 +11190,27 @@ function LiveSearchSection({
   // hook after the loading/error early returns, so React skipped it on the
   // loading render and never reliably fired auto alternative scout on completion.
   useEffect(() => {
-    if (!data || isLoading || isFetching || isPlaceholderData || !onScoutAlternatives || !confirmationAudit) return;
+    if ((!data && !hardErrorDiagnostics) || isLoading || isFetching || isPlaceholderData || !onScoutAlternatives || !confirmationAudit) return;
     if (alternativeWorkflow?.scout) return;
     const searchCompletionKey = `${reservation._id}|${refreshNonce}|${searchDiagnostics?.generatedAt ?? dataUpdatedAt ?? ""}`;
     if (autoAlternativeScoutAfterSearchRef.current === searchCompletionKey) return;
     const attachableCount = countAttachableBuyInCandidates([confirmationAudit]);
-    const noBookableReplacement = attachableCount === 0;
-    if (!noBookableReplacement) return;
+    if (!shouldAutoTriggerAlternativeScout(reservation, attachableCount)) return;
+    const emptySlots = reservation.slots.filter((slot) => !slot.buyIn).length;
     const advice = buildBuyInCancellationAdvice({
       reservation,
       audits: [confirmationAudit],
       proposedCost: null,
       currentSlotId: slot.unitId,
+      noCompleteCombo: emptySlots > 1 || attachableCount === 0,
       attachableVerifiedCount: attachableCount,
     });
-    if (!shouldShowAlternativeBuyInWorkflow(advice, { noCompleteCombo: true })) return;
+    if (!shouldShowAlternativeBuyInWorkflow(advice, { noCompleteCombo: emptySlots > 1 || attachableCount === 0 })) return;
     autoAlternativeScoutAfterSearchRef.current = searchCompletionKey;
     onScoutAlternatives(advice, { auto: true });
   }, [
     data,
+    hardErrorDiagnostics,
     isLoading,
     isFetching,
     isPlaceholderData,
@@ -11401,7 +11433,10 @@ function LiveSearchSection({
     currentSlotId: slot.unitId,
     attachableVerifiedCount: singleSearchAttachableCount,
   });
-  const singleSearchNoBookableReplacement = singleSearchAttachableCount === 0 && !!confirmationAudit;
+  const singleSearchNoBookableReplacement = !!confirmationAudit && (
+    singleSearchAttachableCount === 0
+    || reservation.slots.filter((slot) => !slot.buyIn).length > 1
+  );
 
   // Map a unit's primary listing back to a LiveCandidate so the existing
   // record-buy-in dialog can keep its current contract. PRs #275+ will
