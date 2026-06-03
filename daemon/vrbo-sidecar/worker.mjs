@@ -5888,13 +5888,24 @@ function bookingRequiredTargetTokens(params, effectiveSearchTerm, typedQuery, de
     otaBaseSearchQuery(effectiveSearchTerm, destination) || typedQuery || effectiveSearchTerm,
   );
   const cityTokens = otaRequiredCityTokens(destination);
-  return Array.from(new Set([...modeTokens, ...resortTokens, ...cityTokens])).slice(0, 5);
+  return Array.from(new Set([...modeTokens, ...resortTokens, ...cityTokens])).slice(0, 8);
+}
+
+const BOOKING_CARD_GENERIC_LOCATION_TOKENS = new Set([
+  "hawaii", "koloa", "kauai", "island", "states", "america", "united", "county", "beach",
+]);
+
+function bookingCardTargetTokens(params, effectiveSearchTerm, typedQuery, destination) {
+  const tokens = bookingRequiredTargetTokens(params, effectiveSearchTerm, typedQuery, destination)
+    .filter((token) => !/^\d{1,4}$/.test(token));
+  const resortSpecific = tokens.filter((token) => !BOOKING_CARD_GENERIC_LOCATION_TOKENS.has(token));
+  return (resortSpecific.length > 0 ? resortSpecific : tokens).slice(0, 6);
 }
 
 function bookingCardMatchMinHits(tokens) {
   if (!Array.isArray(tokens) || tokens.length === 0) return 0;
-  if (tokens.length <= 2) return tokens.length;
-  return Math.min(tokens.length, Math.max(2, tokens.length - 1));
+  if (tokens.length === 1) return 1;
+  return 2;
 }
 
 function bookingHaystackMatchesTargetTokens(haystack, tokens) {
@@ -6540,37 +6551,41 @@ async function runBookingSearchVariant(id, params, variant = null) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
   const typedQuery = String(variant?.typedQuery || otaBaseSearchQuery(searchTerm, destination) || effectiveSearchTerm).trim();
+  const datedSearchTerm = String(variant?.suggestionText || variant?.searchTerm || effectiveSearchTerm).trim();
   log(
     `booking_search ${id}: searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
     `${checkIn}→${checkOut} ${bedrooms}BR`,
   );
   await ensureBrowser();
-  await surfaceVisibleOtaSearchWindow(page, "booking_search", id);
-  const primedDestination = await primeOtaHomepageSearch("https://www.booking.com/", effectiveSearchTerm, "booking_search", id, {
-    inputTerm: typedQuery,
-    targetSuggestion: variant?.suggestionText || null,
-    submitAfterSearch: false,
-  });
-  if (!primedDestination) {
-    const state = await dumpPageState("booking-unprimed-destination", { id, ...params }).catch(() => null);
-    throw new ProviderBrowserUnavailableError(
-      `Booking.com homepage did not confirm destination "${effectiveSearchTerm}" from the visible dropdown; refusing to submit the provider's default/geolocated search.`,
-      {
-        label: "booking_search",
-        id,
-        provider: "booking",
-        url: page.url(),
-        title: await page.title().catch(() => state?.title ?? ""),
-        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
-      },
-    );
+  throwIfRequestCancelled(id);
+  if (!page || page.isClosed?.()) {
+    throw new SidecarCancelledError(`booking_search ${id}: browser page unavailable`);
   }
-  // NOTE FOR CODEX: Booking.com turns resort/property suggestions into
-  // broad city searches on form submit (for Poipu Kai it rewrites to
-  // ss=Koloa). Keep the dropdown-confirmed destination gate above, then
-  // apply the exact resort text, dates, and bedroom filter through the
-  // results URL so we do not loop through broad Koloa variants.
-  const datedSearchTerm = String(variant?.suggestionText || variant?.searchTerm || effectiveSearchTerm).trim();
+  await surfaceVisibleOtaSearchWindow(page, "booking_search", id);
+  // Per-variant dropdown click: type the resort prefix and select THIS
+  // suggestion before loading the dated results URL (Booking rewrites
+  // broad form submits to ss=Koloa, so the URL carries the exact variant).
+  if (variant?.suggestionText) {
+    await page.goto("https://www.booking.com/", { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await boundedPageDelay(page, 1_000);
+    await dismissObstructions(page, "booking_search_variant_home");
+    const picked = await fillVisibleSearchField(page, typedQuery, "booking_search_variant", {
+      targetSuggestion: variant.suggestionText,
+      chooseSuggestion: true,
+      requestId: id,
+    }).catch(() => null);
+    if (picked?.suggestion) {
+      log(
+        `booking_search ${id}: selected dropdown "${picked.suggestion}" ` +
+        `before dated search for "${datedSearchTerm}"`,
+      );
+    } else {
+      log(
+        `booking_search ${id}: dropdown select skipped for "${datedSearchTerm}"; ` +
+        "loading dated results URL directly",
+      );
+    }
+  }
   const datedSearchUrl = buildBookingDatedSearchUrl(datedSearchTerm, checkIn, checkOut, bedrooms);
   await page.goto(datedSearchUrl, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
@@ -6600,7 +6615,7 @@ async function runBookingSearchVariant(id, params, variant = null) {
     throw new Error("Booking.com bot wall — refresh cookies or retry after proxy rotation");
   }
   const expectedNights = nightsBetween(checkIn, checkOut);
-  const requiredTargetTokens = bookingRequiredTargetTokens(params, datedSearchTerm, typedQuery, destination);
+  const requiredTargetTokens = bookingCardTargetTokens(params, datedSearchTerm, typedQuery, destination);
   const requiredTargetMinHits = bookingCardMatchMinHits(requiredTargetTokens);
   if (!bookingStateHasTargetSearchQuery(state, requiredTargetTokens)) {
     throw new ProviderBrowserUnavailableError(

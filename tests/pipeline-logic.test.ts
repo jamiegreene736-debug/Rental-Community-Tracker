@@ -1389,6 +1389,16 @@ assert.match(
 );
 assert.match(
   workerSource,
+  /function bookingCardTargetTokens/,
+  "Booking card filtering should ignore unit-number tokens like 123 when matching listing cards",
+);
+assert.match(
+  workerSource,
+  /booking_search_variant/,
+  "Booking variant loop should click each autocomplete option before dated results URL",
+);
+assert.match(
+  workerSource,
   /bookingCardMatchMinHits/,
   "Booking card filtering should allow partial token matches for resort-area inventory",
 );
