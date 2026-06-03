@@ -367,7 +367,9 @@ export default function BuilderPreflight() {
       }> = [
         { bedrooms: unit.bedrooms, maxCandidates: replacingExistingPhotos ? 10 : 6 },
         { bedrooms: unit.bedrooms, maxCandidates: replacingExistingPhotos ? 12 : 8 },
-        { bedrooms: "any", minBedrooms: unit.bedrooms, maxCandidates: replacingExistingPhotos ? 12 : 10 },
+        // Representative resort photos (UI copy) — Zillow often only surfaces
+        // 1–2BR units at Mauna Lani Point even when the draft is 3BR+3BR.
+        { bedrooms: "any", maxCandidates: replacingExistingPhotos ? 14 : 10 },
       ];
       let photos: Array<{ url: string }> = [];
       let sourceUrl: string | null = null;
@@ -395,6 +397,10 @@ export default function BuilderPreflight() {
           break;
         }
         if (nextSourceUrl) triedUrls.add(nextSourceUrl);
+        const exhausted = Array.isArray(fetchData?.triedCandidateUrls)
+          ? (fetchData.triedCandidateUrls as string[])
+          : [];
+        for (const u of exhausted) triedUrls.add(u);
       }
       if (photos.length === 0) {
         toast({

@@ -10,6 +10,7 @@ import { parseCommunityResearchJsonArray, researchCommunitiesForCity } from "../
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 import {
   discoveryCityForPhotoSearch,
+  discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
   inferCommunityStreetAddress,
   validateCommunityStreetAddress,
@@ -182,6 +183,16 @@ assert.match(
 );
 assert.match(
   preflightSource,
+  /bedrooms: "any", maxCandidates: replacingExistingPhotos \? 14 : 10/,
+  "preflight Find Photos must fall back to any bedroom count for representative resort photos",
+);
+assert.doesNotMatch(
+  preflightSource,
+  /minBedrooms: unit\.bedrooms/,
+  "preflight Find Photos must not require minBedrooms on the relaxed attempt — Zillow often lacks matching BR at the resort",
+);
+assert.match(
+  preflightSource,
   /replacingExistingPhotos[\s\S]*siblingSourceUrls/,
   "preflight Find different photos must not skip the sibling unit source URL so sparse resorts still have candidates",
 );
@@ -189,6 +200,16 @@ assert.match(
   routesSource,
   /discoveryWallBudgetMs = isBoundedDiscovery \? 115_000 : null/,
   "bounded preflight photo discovery must have a hard wall budget",
+);
+assert.match(
+  routesSource,
+  /discoverySearchCitiesForPhotoSearch/,
+  "fetch-unit-photos must search multiple Zillow index cities for resorts with mailing-city aliases",
+);
+assert.match(
+  routesSource,
+  /triedCandidateUrls/,
+  "fetch-unit-photos must return exhausted candidate URLs so preflight retries do not rescrape the same listings",
 );
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
 assert.match(
@@ -1848,7 +1869,26 @@ assert.equal(
   true,
   "Mauna Lani Point should accept Mauna Kea as the queued market city while validating its canonical street",
 );
+const maunaLaniDiscoveryCities = discoverySearchCitiesForPhotoSearch({
+  city: "Mauna Kea",
+  communityName: "Mauna Lani Point",
+  streetAddress: "68-1050 Mauna Lani Point Dr",
+});
+assert.ok(
+  maunaLaniDiscoveryCities.includes("Kamuela") && maunaLaniDiscoveryCities.includes("Waikoloa"),
+  "Mauna Lani Point photo discovery should search Kamuela and Waikoloa, not only the draft mailing city",
+);
+assert.equal(discoveryCityForPhotoSearch({
+  city: "Mauna Kea",
+  communityName: "Mauna Lani Point",
+  streetAddress: "68-1050 Mauna Lani Point Dr",
+}), "Kamuela");
+assert.ok(
+  discoveryCommunityNameAliases("Mauna Lani Point").some((n) => /mauna lani/i.test(n)),
+  "Mauna Lani Point should expose Mauna Lani name variants for Zillow discovery",
+);
 console.log("  ✓ Mauna Lani Point canonical address validates for bulk combo draft saves");
+console.log("  ✓ Mauna Lani Point preflight photo-discovery cities + name aliases");
 
 assert.equal(
   validateCommunityStreetAddress({
