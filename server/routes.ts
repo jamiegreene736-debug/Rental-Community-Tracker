@@ -7888,16 +7888,21 @@ export async function registerRoutes(
         url: String(listing.url ?? "").trim(),
         title: String(listing.title ?? "").trim(),
       }))
-      .filter((listing) => listing.url && listing.title)
+      .filter((listing) => listing.url && /^https?:\/\//i.test(listing.url))
       .slice(0, 2);
     if (pair.length < 2) return null;
 
-    const loc = communityName ? COMMUNITY_LOCATION_BY_KEY[communityName] : undefined;
+    const loc = communityName
+      ? (COMMUNITY_LOCATION_BY_KEY[communityName] ?? BUY_IN_MARKET_LOCATIONS[communityName])
+      : undefined;
     const resortName = loc?.searchName ?? communityName ?? undefined;
     const units = await Promise.all(
       pair.map(async (listing) => {
+        const listingTitle = String(listing.title ?? "").trim()
+          || String(listing.url ?? "").replace(/^https?:\/\/[^/]+\//, "").slice(0, 120)
+          || "Listing";
         const guess = buildAddressGuess(
-          { notes: listing.title, airbnbListingUrl: listing.url, propertyName: listing.title },
+          { notes: listingTitle, airbnbListingUrl: listing.url, propertyName: listingTitle },
           communityName,
           loc,
         );
@@ -14119,7 +14124,7 @@ export async function registerRoutes(
         try {
           const response = await fetch(lookupEndpoint, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: loopbackRequestHeaders(),
             body: JSON.stringify({
               imageUrl: photo.url,
               sourceUrl,
@@ -14132,6 +14137,9 @@ export async function registerRoutes(
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok) {
+            console.warn(
+              `[direct-booking-sites] Google Lens lookup HTTP ${response.status} for ${sourceUrl.slice(0, 80)} photo ${photosSearched}: ${body?.error ?? "no error body"}`,
+            );
             photo.skippedReason = body?.error ? `Reverse search failed: ${body.error}` : `Reverse search failed (${response.status})`;
             photo.searched = false;
             continue;
@@ -14196,6 +14204,9 @@ export async function registerRoutes(
       });
 
       const searchedCount = auditedPhotos.filter((photo) => photo.searched).length;
+      console.log(
+        `[direct-booking-sites] ${community || resortName} ${sourceUrl.slice(0, 72)} candidatePhotos=${candidatePhotos.length} lensPhotos=${searchedCount} rawLensRows=${rawCount} strictPmMatches=${matches.length}`,
+      );
       const value = {
         buyInId: 0,
         sourceUrl,
@@ -14411,7 +14422,7 @@ export async function registerRoutes(
         try {
           const response = await fetch(lookupEndpoint, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: loopbackRequestHeaders(),
             body: JSON.stringify({
               imageUrl: photo.url,
               sourceUrl,
@@ -23659,9 +23670,38 @@ Return ONLY compact JSON with this exact shape:
       return res.status(400).json({ error: "listings array with at least two { url, title } entries required" });
     }
     try {
-      const proximity = await estimateListingPairProximity(listings, community);
+      const normalized = listings
+        .map((listing: { url?: string; title?: string }) => ({
+          url: String(listing?.url ?? "").trim(),
+          title: String(listing?.title ?? "").trim(),
+        }))
+        .filter((listing) => listing.url && /^https?:\/\//i.test(listing.url))
+        .slice(0, 2);
+      if (normalized.length < 2) {
+        return res.status(400).json({ error: "listings need two distinct http(s) URLs" });
+      }
+      const proximity = await estimateListingPairProximity(normalized, community);
       if (!proximity) {
-        return res.status(400).json({ error: "Could not resolve addresses for both listings" });
+        const loc = community ? (COMMUNITY_LOCATION_BY_KEY[community] ?? BUY_IN_MARKET_LOCATIONS[community]) : undefined;
+        const resortName = loc?.searchName ?? community ?? undefined;
+        const walk = fallbackWalkForResort(resortName);
+        return res.json({
+          status: "ready",
+          community,
+          resortName,
+          units: normalized.map((listing) => ({
+            listingUrl: listing.url,
+            title: listing.title || "Listing",
+            unitToken: null,
+            address: listing.title || resortName || community || "Resort",
+            addressSource: "resort" as const,
+          })),
+          walk,
+          confidence: "resort-default" as const,
+          withinLimit: walk.minutes <= MAX_BUY_IN_WALK_MINUTES,
+          maxMinutes: MAX_BUY_IN_WALK_MINUTES,
+          generatedAt: new Date().toISOString(),
+        });
       }
       res.json({ status: "ready", ...proximity, generatedAt: new Date().toISOString() });
     } catch (err: any) {

@@ -2646,6 +2646,18 @@ assert.ok(
   "alternative buy-in community cards should list Lens direct booking URLs",
 );
 assert.ok(
+  bookingsComboSource.includes("groupAlternativeScoutSamplesByPlan"),
+  "alternative scout cards should group Airbnb samples by combo plan legs",
+);
+assert.ok(
+  bookingsComboSource.includes("BR combo ·"),
+  "alternative scout sample groups should label combo legs",
+);
+assert.ok(
+  routesSource.includes("loopbackRequestHeaders()"),
+  "direct-booking Lens lookups should use loopback auth headers",
+);
+assert.ok(
   routesSource.includes('app.post("/api/operations/alternative-scout-direct-probes"'),
   "alternative-scout-direct-probes route should exist",
 );
