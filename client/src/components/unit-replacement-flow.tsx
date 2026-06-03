@@ -50,6 +50,10 @@ const saveReplacementJobRef = (propertyId: number, ref: { jobId: string; targetU
   } catch { /* ignore */ }
 };
 
+function isTransientReplacementJobPollStatus(status: number): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
 function humanizeApiError(err: unknown, fallback: string) {
   const raw = err instanceof Error ? err.message : typeof err === "string" ? err : "";
   const stripped = raw.replace(/^\d+:\s*/, "").trim();
@@ -209,6 +213,9 @@ export function UnitReplacementFlow({
           credentials: "include",
         });
         if (!resp.ok) {
+          // Railway can return 502/503/504 while find-unit holds the process for
+          // several minutes; the in-memory job keeps running — keep polling.
+          if (isTransientReplacementJobPollStatus(resp.status)) return;
           if (!cancelled) {
             saveReplacementJobRef(propertyId, null);
             setReplacementJobId(null);
@@ -306,6 +313,10 @@ export function UnitReplacementFlow({
       const data = await resp.json();
       const swapId: number = data?.swap?.id ?? 0;
       const photoFolder = typeof data?.photoFolder === "string" ? data.photoFolder : undefined;
+      saveReplacementJobRef(propertyId, null);
+      setReplacementJobId(null);
+      setReplacementJob(null);
+      setSearchStartedAt(null);
       // Notify parent to apply the replacement and re-run the platform check
       onUnitReplaced?.(selectedUnit.id, { ...result, photoFolder }, swapId);
       onClose?.();
