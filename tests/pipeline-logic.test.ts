@@ -2296,6 +2296,28 @@ assert.equal(
 console.log("  ✓ Waikoloa Beach Villas canonical address validates for bulk combo draft saves");
 
 assert.equal(
+  inferCommunityStreetAddress({
+    communityName: "Fairway Villas Waikoloa",
+    city: "Waikoloa",
+    state: "Hawaii",
+    unitAddresses: [],
+  }),
+  "69-200 Pohakulana Pl",
+  "bulk combo queue should use Fairway Villas Waikoloa canonical address instead of an empty market-only payload",
+);
+assert.equal(
+  validateCommunityStreetAddress({
+    communityName: "Halii Kai",
+    city: "Mauna Kea",
+    state: "Hawaii",
+    streetAddress: "69-1029 Nawahine Pl",
+  }).ok,
+  true,
+  "Halii Kai should accept Mauna Kea as the queued market city while validating its canonical street",
+);
+console.log("  ✓ Fairway Villas + Halii Kai canonical addresses validate for bulk combo draft saves");
+
+assert.equal(
   discoveryCityForPhotoSearch({
     city: "Mauna Kea",
     communityName: "Waikoloa Beach Villas",

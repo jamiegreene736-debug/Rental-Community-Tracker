@@ -23,6 +23,8 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Waikiki Sunset", "Aston Waikiki Sunset"], street: "229 Paoakalani Ave", city: "Honolulu", state: "HI" },
   { names: ["Island Colony", "Island Colony Waikiki"], street: "445 Seaside Ave", city: "Honolulu", state: "HI" },
   { names: ["Waikoloa Beach Villas", "Waikoloa Villas", "Beach Villas at Waikoloa Beach Resort"], street: "69-180 Waikoloa Beach Dr", city: "Waikoloa", cityAliases: ["Mauna Kea"], state: "HI" },
+  { names: ["Fairway Villas Waikoloa", "Fairway Villas at Waikoloa", "Waikoloa Fairway Villas", "Fairway Villas Waikoloa Beach Resort"], street: "69-200 Pohakulana Pl", city: "Waikoloa", cityAliases: ["Waikoloa Beach Resort", "Mauna Kea"], state: "HI" },
+  { names: ["Halii Kai", "Hali'i Kai", "Haliʻi Kai", "Halii Kai at Waikoloa", "Hali'i Kai at Waikoloa", "Haliʻi Kai at Waikoloa", "Castle Halii Kai at Waikoloa", "Castle Haliʻi Kai at Waikoloa"], street: "69-1029 Nawahine Pl", city: "Waikoloa", cityAliases: ["Waikoloa Beach Resort", "Mauna Kea"], state: "HI" },
   { names: ["Mauna Lani Point", "Mauna Lani Point Condominium", "Mauna Lani"], street: "68-1050 Mauna Lani Point Dr", city: "Kamuela", cityAliases: ["Waikoloa", "Puako", "Mauna Lani", "Mauna Kea", "Waimea"], state: "HI" },
   { names: ["Windsor Hills", "Windsor Hills Resort"], street: "2600 N Old Lake Wilson Rd", city: "Kissimmee", state: "FL" },
   { names: ["Pink Shell Beach Resort", "Pink Shell Beach Resort and Marina", "Pink Shell Resort", "Pink Shell"], street: "275 Estero Blvd", city: "Fort Myers Beach", state: "FL" },

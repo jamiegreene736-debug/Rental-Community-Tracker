@@ -29214,16 +29214,32 @@ Return ONLY compact JSON with this exact shape:
     await persistBulkComboListingSnapshot(job);
     const abortKey = `bulk-combo-listing:${job.id}`;
     await runBulkComboListingStep(job, item, "photos", "Fetching unit photos", async () => {
-      await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
-        item.unit1Photos = updatedPhotoItem.unit1Photos;
-        item.unit2Photos = updatedPhotoItem.unit2Photos;
-        item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
-        item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
-        item.message = updatedPhotoItem.message || item.message;
-        item.heartbeatAt = Date.now();
-        job.updatedAt = Date.now();
-        await persistBulkComboListingSnapshot(job);
-      }, abortKey);
+      try {
+        await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
+          item.unit1Photos = updatedPhotoItem.unit1Photos;
+          item.unit2Photos = updatedPhotoItem.unit2Photos;
+          item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
+          item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
+          item.message = updatedPhotoItem.message || item.message;
+          item.heartbeatAt = Date.now();
+          job.updatedAt = Date.now();
+          await persistBulkComboListingSnapshot(job);
+        }, abortKey);
+      } catch (e: any) {
+        if (job.cancelRequested || e?.cancelled || isBulkComboListingTimeout(e)) throw e;
+        const message = e?.message ?? String(e);
+        if (!/Photo discovery failed proof checks|No photos were found|no-unit-photo-source|missing-source-url/i.test(message)) throw e;
+        item.unit1Photos = photoItem.unit1Photos;
+        item.unit2Photos = photoItem.unit2Photos;
+        item.unit1SourceUrl = photoItem.unit1SourceUrl;
+        item.unit2SourceUrl = photoItem.unit2SourceUrl;
+        item.message = "Photo discovery needs manual review; continuing draft save";
+        await queueEvent("bulk-combo-listing", job.id, "photos-review", item.message, {
+          itemKey: item.id,
+          level: "warn",
+          meta: { error: message },
+        });
+      }
     });
     item.unit1Photos = photoItem.unit1Photos;
     item.unit2Photos = photoItem.unit2Photos;
