@@ -1208,7 +1208,7 @@ function AlternativeScoutSourceBadge({ result }: { result: AlternativeScoutResul
     return (
       <span
         className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800"
-        title="Found via Google Maps within ~20 min drive; not in buy-in markets config yet"
+        title="Found via AI + Maps within ~20 min drive (vacation rental resort, not a single listing); not in buy-in config yet"
       >
         Discovered
       </span>
