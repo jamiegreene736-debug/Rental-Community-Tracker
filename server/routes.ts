@@ -28760,6 +28760,7 @@ Return ONLY compact JSON with this exact shape:
   const activeBulkComboListingJobIds = new Set<string>();
   const BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS = 3;
   const BULK_COMBO_LISTING_STALE_MS = 5 * 60 * 1000;
+  const BULK_COMBO_LISTING_RESUME_INTERVAL_MS = 60 * 1000;
   const BULK_COMBO_LISTING_RETRY_BACKOFF_MS = [15_000, 45_000];
   const BULK_COMBO_LISTING_STEP_TIMEOUTS_MS: Record<string, number> = {
     photos: 12 * 60 * 1000,
@@ -29815,6 +29816,8 @@ Return ONLY compact JSON with this exact shape:
         .orderBy(asc(bulkComboListingJobRows.createdAt))
         .limit(5);
       for (const row of rows) {
+        const job = await loadBulkComboListingJob(row.id);
+        await recoverStaleBulkComboListingJob(job, "resume-sweep");
         if (!activeBulkComboListingJobIds.has(row.id)) void runBulkComboListingJob(row.id);
       }
       if (rows.length > 0) console.log(`[bulk-combo-listings] resumed ${rows.length} queued/running DB job(s)`);
@@ -29823,6 +29826,7 @@ Return ONLY compact JSON with this exact shape:
     }
   };
   setTimeout(() => void resumeBulkComboListingJobs(), 2_500).unref?.();
+  setInterval(() => void resumeBulkComboListingJobs(), BULK_COMBO_LISTING_RESUME_INTERVAL_MS).unref?.();
 
   const resumeBulkPricingJobs = async () => {
     try {
