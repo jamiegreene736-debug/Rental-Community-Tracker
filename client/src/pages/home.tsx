@@ -3483,8 +3483,8 @@ function AdminDashboard() {
               </Badge>
             </div>
           </div>
-          <div className="overflow-hidden [&>div]:overflow-hidden">
-          <Table id="list-properties" className="w-full table-fixed" style={{ minWidth: 0 }}>
+          <div className="overflow-x-auto overscroll-x-contain [&>div]:overflow-visible">
+          <Table id="list-properties" className="min-w-[1280px] table-fixed">
             <colgroup>
               <col style={{ width: "2.2%" }} />
               <col style={{ width: "5.5%" }} />

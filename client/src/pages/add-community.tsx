@@ -1978,9 +1978,9 @@ export default function AddCommunity() {
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-4xl mx-auto px-4 py-6">
+      <div className="max-w-4xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
         {/* Header */}
-        <div className="mb-6 flex items-center gap-3">
+        <div className="mb-6 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
           <Link href="/">
             <Button variant="ghost" size="sm" data-testid="button-back-home">
               <ArrowLeft className="h-4 w-4 mr-1" /> Dashboard
@@ -2235,14 +2235,14 @@ export default function AddCommunity() {
         {/* ── TOP-MARKETS SWEEP MODAL ─────────────────────────── */}
         {sweepOpen && (
           <div
-            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4"
             onClick={() => !sweepRunning && setSweepOpen(false)}
           >
             <div
-              className="bg-background rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-xl"
+              className="max-h-[calc(100vh-1rem)] w-full max-w-4xl overflow-y-auto rounded-lg bg-background p-3 shadow-xl sm:max-h-[90vh] sm:p-6"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between gap-3 mb-4">
+              <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold flex items-center gap-2">
                     <TrendingUp className="h-5 w-5 text-primary" />
@@ -2254,7 +2254,7 @@ export default function AddCommunity() {
                       : "Running the finder across your selected markets. Each takes ~90s."}
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   {sweepRunning && (
                     <Button variant="destructive" size="sm" onClick={stopSweep}>Stop</Button>
                   )}
@@ -2338,6 +2338,7 @@ export default function AddCommunity() {
                       })()}
                       <div className="mt-5 flex items-center justify-end gap-2">
                         <Button
+                          className="w-full sm:w-auto"
                           onClick={runTopMarketsSweep}
                           disabled={selectedMarkets.size === 0}
                           data-testid="button-run-sweep"
@@ -2406,7 +2407,7 @@ export default function AddCommunity() {
                             {m.status === "cancelled" && <Badge variant="outline">Cancelled</Badge>}
                           </div>
                           {best && (
-                            <div className="text-xs text-muted-foreground mt-1 truncate">
+                            <div className="mt-1 break-words text-xs text-muted-foreground sm:truncate">
                               Best pick: <span className="font-medium text-foreground">{best.name}</span>
                               {best.bedroomMix && <span className="italic ml-1">({best.bedroomMix})</span>}
                               {typeof best.combinabilityScore === "number" && (
@@ -2454,16 +2455,16 @@ export default function AddCommunity() {
 
         {bulkComboOpen && (
           <div
-            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4"
             onClick={(event) => {
               if (event.target === event.currentTarget) setBulkComboOpen(false);
             }}
           >
             <div
-              className="bg-background rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-xl"
+              className="max-h-[calc(100vh-1rem)] w-full max-w-4xl overflow-y-auto rounded-lg bg-background p-3 shadow-xl sm:max-h-[90vh] sm:p-6"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-start justify-between gap-3 mb-4">
+              <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold flex items-center gap-2">
                     <Plus className="h-5 w-5 text-primary" />
@@ -2473,7 +2474,7 @@ export default function AddCommunity() {
                     Creates dashboard drafts one at a time: unit photos, listing copy, draft save, photo persistence, and pricing refresh.
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   {bulkComboJob?.failed ? (
                     <Button variant="outline" size="sm" onClick={retryFailedBulkComboListings}>
                       Retry failed only
@@ -2639,16 +2640,16 @@ export default function AddCommunity() {
         {/* ── STEP 2: Research results ──────────────────────── */}
         {step === 2 && (
           <div id="step-2-content">
-            <div className="flex items-center justify-between mb-4">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
                 <Search className="h-5 w-5 text-primary" />
                 <h2 className="text-lg font-semibold" id="step-2-heading">Step 2: Community Research</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(1)} data-testid="button-back-step1" id="btn-prev-step" aria-label="Go back to Step 1: Select Location">
+              <Button className="w-full sm:w-auto" variant="outline" size="sm" onClick={() => setStep(1)} data-testid="button-back-step1" id="btn-prev-step" aria-label="Go back to Step 1: Select Location">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Change Location
               </Button>
             </div>
-            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+            <div id="summary-panel" className="mb-4 break-words rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground">
               <strong>Location:</strong> {cityInput}, {selectedState} — <strong>{communities.length}</strong> communities found. Select one to continue.
               {researchHistory && (
                 <div className="mt-1 flex flex-wrap items-center gap-1 text-xs">
@@ -2734,7 +2735,7 @@ export default function AddCommunity() {
                   }}
                   data-testid={`card-community-${i}`}
                 >
-                  <div className="flex items-start justify-between gap-4">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap mb-1">
                         <label
@@ -2901,13 +2902,14 @@ export default function AddCommunity() {
                         </p>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex shrink-0 flex-wrap items-center gap-2 sm:flex-nowrap">
                       {c.sourceUrl && (
                         <a href={c.sourceUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}>
                           <Button variant="ghost" size="sm"><ExternalLink className="h-4 w-4" /></Button>
                         </a>
                       )}
                       <Button
+                        className="flex-1 sm:flex-none"
                         size="sm"
                         disabled={!typeCheck.eligible}
                         onClick={(e) => {
@@ -2930,12 +2932,12 @@ export default function AddCommunity() {
         {/* ── STEP 3: Community overview + pairing suggestions ── */}
         {step === 3 && (
           <div id="step-3-content">
-            <div className="flex items-center justify-between mb-4">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
                 <Building2 className="h-5 w-5 text-primary" />
                 <h2 className="text-lg font-semibold" id="step-3-heading">Step 3: Select Unit Combination</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(2)} data-testid="button-back-step2" id="btn-prev-step" aria-label="Go back to Step 2">
+              <Button className="w-full sm:w-auto" variant="outline" size="sm" onClick={() => setStep(2)} data-testid="button-back-step2" id="btn-prev-step" aria-label="Go back to Step 2">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
             </div>
@@ -2960,7 +2962,7 @@ export default function AddCommunity() {
                       <p className="text-sm mt-1">{selectedCommunity.researchSummary}</p>
                     )}
                     {communityProfile && (
-                      <div className="flex items-center gap-4 mt-2 text-sm">
+                      <div className="mt-2 flex flex-col gap-1 text-sm sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
                         {communityProfile.airbnbListingCount > 0 && (
                           <span className="text-muted-foreground">
                             <CheckCircle2 className="h-3.5 w-3.5 inline mr-1 text-green-600" />
@@ -3221,6 +3223,7 @@ export default function AddCommunity() {
 
                 {selectedPairing && (
                   <Button
+                    className="w-full sm:w-auto"
                     onClick={handleConfirmUnits}
                     data-testid="button-confirm-units"
                     id="btn-next-step"
@@ -3262,16 +3265,16 @@ export default function AddCommunity() {
         {/* ── STEP 4: Photos + platform check ──────────────── */}
         {step === 4 && (
           <div id="step-4-content">
-            <div className="flex items-center justify-between mb-4">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
                 <Camera className="h-5 w-5 text-primary" />
                 <h2 className="text-lg font-semibold" id="step-4-heading">Step 4: Photos & Platform Check</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(3)} data-testid="button-back-step3" id="btn-prev-step" aria-label="Go back to Step 3: Select Unit Pair">
+              <Button className="w-full sm:w-auto" variant="outline" size="sm" onClick={() => setStep(3)} data-testid="button-back-step3" id="btn-prev-step" aria-label="Go back to Step 3: Select Unit Pair">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
             </div>
-            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+            <div id="summary-panel" className="mb-4 break-words rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground">
               <strong>Community:</strong> {selectedCommunity?.name} — <strong>Unit 1:</strong> {selectedUnit1?.title} — <strong>Unit 2:</strong> {selectedUnit2?.title}.{" "}
               {unit1Photos.length + unit2Photos.length > 0 ? `${unit1Photos.length + unit2Photos.length} photos loaded.` : photosLoading ? "Loading photos…" : "No photos loaded."}
               {Object.values(photoChecks).filter(v => v !== "checking" && !(v as PhotoCheckResult).clean).length > 0 &&
@@ -3344,11 +3347,11 @@ export default function AddCommunity() {
               <>
                 {(unit1Photos.length > 0 || unit2Photos.length > 0) ? (
                   <>
-                    <div className="flex items-center justify-between mb-4">
+                    <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <p className="text-sm text-muted-foreground">
                         Unit 1: {unit1Photos.length} photo{unit1Photos.length === 1 ? "" : "s"} · Unit 2: {unit2Photos.length} photo{unit2Photos.length === 1 ? "" : "s"}.
                       </p>
-                      <Button variant="outline" size="sm" onClick={handleCheckAllPhotos} data-testid="button-check-all-photos">
+                      <Button className="w-full sm:w-auto" variant="outline" size="sm" onClick={handleCheckAllPhotos} data-testid="button-check-all-photos">
                         <ShieldCheck className="h-4 w-4 mr-2" />
                         Check All Photos
                       </Button>
@@ -3439,7 +3442,7 @@ export default function AddCommunity() {
                   </div>
                 )}
 
-                <Button onClick={handleGenerateListing} data-testid="button-generate-listing" id="btn-next-step" aria-label="Generate listing draft and proceed to Step 5">
+                <Button className="w-full sm:w-auto" onClick={handleGenerateListing} data-testid="button-generate-listing" id="btn-next-step" aria-label="Generate listing draft and proceed to Step 5">
                   <FileText className="h-4 w-4 mr-2" />
                   Generate Listing Draft <ArrowRight className="h-4 w-4 ml-2" />
                 </Button>
@@ -3451,17 +3454,17 @@ export default function AddCommunity() {
         {/* ── STEP 5: Listing draft ─────────────────────────── */}
         {step === 5 && (
           <div id="step-5-content">
-            <div className="flex items-center justify-between mb-4">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
                 <FileText className="h-5 w-5 text-primary" />
                 <h2 className="text-lg font-semibold" id="step-5-heading">Step 5: Listing Draft</h2>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setStep(4)} data-testid="button-back-step4" id="btn-prev-step" aria-label="Go back to Step 4: Photos and Platform Check">
+              <Button className="w-full sm:w-auto" variant="outline" size="sm" onClick={() => setStep(4)} data-testid="button-back-step4" id="btn-prev-step" aria-label="Go back to Step 4: Photos and Platform Check">
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
             </div>
 
-            <div id="summary-panel" className="mb-4 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+            <div id="summary-panel" className="mb-4 break-words rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground">
               <strong>Community:</strong> {selectedCommunity?.name} — <strong>Units:</strong> {selectedUnit1?.title} + {selectedUnit2?.title}.{" "}
               <strong>Combined:</strong> {combinedBedrooms}BR. <strong>Suggested rate:</strong> ${suggestedRate > 0 ? suggestedRate.toLocaleString() : "—"}/night.{" "}
               <strong>Title:</strong> {editedTitle || (listing?.title ?? "Not generated yet")}.
@@ -3725,6 +3728,7 @@ export default function AddCommunity() {
                         type="button"
                         variant="outline"
                         size="sm"
+                        className="w-full sm:w-auto"
                         onClick={() => toast({
                           title: licenseProfile.title,
                           description: licenseProfile.requirements.length
@@ -3768,7 +3772,7 @@ export default function AddCommunity() {
                                   data-testid={`input-${req.key}`}
                                 />
                               ) : (
-                                <div className="rounded-md border border-dashed border-border bg-background px-3 py-2 font-mono text-sm text-muted-foreground" data-testid={`sample-${req.key}`}>
+                                <div className="break-words rounded-md border border-dashed border-border bg-background px-3 py-2 font-mono text-sm text-muted-foreground" data-testid={`sample-${req.key}`}>
                                   sample: {req.sample}
                                 </div>
                               )}
@@ -3780,7 +3784,7 @@ export default function AddCommunity() {
                                 type="button"
                                 variant="outline"
                                 size="sm"
-                                className="mt-2 h-7 px-2 text-xs"
+                                className="mt-2 h-7 w-full px-2 text-xs sm:w-auto"
                                 onClick={() => toast({
                                   title: req.shortLabel,
                                   description: editable
@@ -3812,12 +3816,12 @@ export default function AddCommunity() {
                   </Card>
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <Button onClick={handleSave} disabled={saving} data-testid="button-save-community" id="btn-next-step" aria-label="Save community to dashboard">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                  <Button className="w-full sm:w-auto" onClick={handleSave} disabled={saving} data-testid="button-save-community" id="btn-next-step" aria-label="Save community to dashboard">
                     {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
                     {saving ? "Saving…" : "Save to Dashboard"}
                   </Button>
-                  <Button variant="outline" onClick={handleGenerateListing} disabled={listingLoading} data-testid="button-regenerate" id="button-regenerate-listing" aria-label="Regenerate listing with AI">
+                  <Button className="w-full sm:w-auto" variant="outline" onClick={handleGenerateListing} disabled={listingLoading} data-testid="button-regenerate" id="button-regenerate-listing" aria-label="Regenerate listing with AI">
                     Regenerate with AI
                   </Button>
                 </div>
