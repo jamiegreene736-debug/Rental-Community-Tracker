@@ -2538,6 +2538,9 @@ function streetRootFromListingAddress(address: string | null): string | null {
     // family ("78 6833 ...") so direct resort addresses and listing
     // URL slugs compare to the same root.
     .replace(/\b(\d{1,2})-(\d{3,5})(?=[\s-]+[a-z0-9])/gi, "$1 $2")
+    // Redfin slugs like "92-1070-1-Olani-St" include a unit token between
+    // the Hawaii street number and name; drop it so roots match "92-1070 Olani St".
+    .replace(/\b(\d{1,2})\s+(\d{3,5})\s+\d{1,4}\s+(?=[a-z])/gi, "$1 $2 ")
     .replace(/\s+/g, " ")
     .match(/\b(\d{2,6})\s+([a-z0-9.'-]+(?:\s+[a-z0-9.'-]+){0,4})\s+(blvd|boulevard|rd|road|st|street|ave|avenue|dr|drive|ln|lane|way|cir|circle|ct|court|pkwy|parkway|pl|place|ter|terrace|trail)\b/i);
   if (!m) return null;
@@ -29043,9 +29046,11 @@ Return ONLY compact JSON with this exact shape:
       const apifyCity = discoveryCity || city;
       if (apifyCity && state) {
         const roots = repeatedRoots();
-        const focusedZillowCandidates = candidateUrls.filter((candidate) => candidate.source === "zillow").length;
+        const focusedScrapeableCandidates = candidateUrls.filter(
+          (candidate) => candidate.source === "zillow" || candidate.source === "realtor",
+        ).length;
         const hasEnoughFocusedCandidates = candidateLimit !== null
-          ? candidateUrls.length >= Math.min(2, candidateLimit)
+          ? focusedScrapeableCandidates >= Math.min(2, candidateLimit)
           : false;
         if (roots.size > 0 && !hasEnoughFocusedCandidates) {
           const apifyMaxItems = candidateLimit
@@ -29066,28 +29071,46 @@ Return ONLY compact JSON with this exact shape:
         } else {
           console.log(
             hasEnoughFocusedCandidates
-              ? `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because focused discovery already found ${candidateUrls.length} candidates`
+              ? `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because focused discovery already found ${focusedScrapeableCandidates} Zillow/Realtor candidates`
               : `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because no resort street root was discovered`,
           );
         }
       }
 
-      // Prefer sources with direct photo payloads first; Realtor often rate
-      // limits or returns empty galleries in dense resort-condo searches.
+      // Prefer Zillow/Realtor (reliable photo scrapers). Redfin often returns
+      // 0 photos on Railway and should not consume bounded preflight attempts.
       const canonicalStreetRoot = suppliedStreetRoot;
+      const listingStreetRoot = (url: string) =>
+        streetRootFromListingAddress(parseListingAddressFromUrl(url));
+      const photoScrapeSourcePriority: Record<DiscoverySource, number> = {
+        zillow: 0,
+        realtor: 1,
+        homes: 2,
+        redfin: 3,
+      };
       candidateUrls.sort((a, b) => {
-        const rootFor = (url: string) => streetRootFromListingAddress(parseListingAddressFromUrl(url));
-        const aOnStreet = canonicalStreetRoot && rootFor(a.url) === canonicalStreetRoot ? 0 : 1;
-        const bOnStreet = canonicalStreetRoot && rootFor(b.url) === canonicalStreetRoot ? 0 : 1;
+        const aOnStreet = canonicalStreetRoot && listingStreetRoot(a.url) === canonicalStreetRoot ? 0 : 1;
+        const bOnStreet = canonicalStreetRoot && listingStreetRoot(b.url) === canonicalStreetRoot ? 0 : 1;
         if (aOnStreet !== bOnStreet) return aOnStreet - bOnStreet;
-        const priority: Record<DiscoverySource, number> = { zillow: 0, redfin: 1, homes: 2, realtor: 3 };
-        return priority[a.source] - priority[b.source];
+        return photoScrapeSourcePriority[a.source] - photoScrapeSourcePriority[b.source];
       });
+
+      let orderedCandidates = candidateUrls;
+      if (isBoundedDiscovery && canonicalStreetRoot) {
+        const onStreet = candidateUrls.filter((c) => listingStreetRoot(c.url) === canonicalStreetRoot);
+        const offStreet = candidateUrls.filter((c) => listingStreetRoot(c.url) !== canonicalStreetRoot);
+        if (onStreet.length > 0) orderedCandidates = [...onStreet, ...offStreet];
+      }
+      if (isBoundedDiscovery) {
+        const scrapeable = orderedCandidates.filter((c) => c.source === "zillow" || c.source === "realtor");
+        const other = orderedCandidates.filter((c) => c.source !== "zillow" && c.source !== "realtor");
+        orderedCandidates = [...scrapeable, ...other];
+      }
 
       const offset = Math.max(0, Math.min(10, Number(skipFirst ?? 0) || 0));
       const candidatesToTry = candidateLimit
-        ? candidateUrls.slice(offset, offset + candidateLimit)
-        : candidateUrls.slice(offset);
+        ? orderedCandidates.slice(offset, offset + candidateLimit)
+        : orderedCandidates.slice(offset);
       const triedCandidateUrls: string[] = [];
       for (const candidate of candidatesToTry) {
         if (discoveryWallBudgetMs !== null && discoveryElapsedMs() >= discoveryWallBudgetMs) {
