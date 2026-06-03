@@ -31489,6 +31489,7 @@ Return ONLY compact JSON with this exact shape:
     tag?: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
+    sixBedroomPossible?: boolean;
     status: "pending" | "running" | "done" | "error" | "cancelled";
     count?: number;
     communities?: any[];
@@ -31579,7 +31580,7 @@ Return ONLY compact JSON with this exact shape:
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     pruneTopMarketJobs();
     const body = (req.body ?? {}) as {
-      markets?: Array<{ city: string; state: string; tag?: string; estimatedComboLow?: number; estimatedComboHigh?: number }>;
+      markets?: Array<{ city: string; state: string; tag?: string; estimatedComboLow?: number; estimatedComboHigh?: number; sixBedroomPossible?: boolean }>;
       maxMarkets?: number;
     };
     const requested = body.markets && body.markets.length > 0 ? body.markets : TOP_MARKET_SEEDS;
@@ -31590,6 +31591,7 @@ Return ONLY compact JSON with this exact shape:
       tag: m.tag,
       estimatedComboLow: m.estimatedComboLow,
       estimatedComboHigh: m.estimatedComboHigh,
+      sixBedroomPossible: m.sixBedroomPossible,
       status: "pending" as const,
     }));
     const id = `tmj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -31629,7 +31631,7 @@ Return ONLY compact JSON with this exact shape:
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const body = (req.body ?? {}) as {
-      markets?: Array<{ city: string; state: string; tag?: string; estimatedComboLow?: number; estimatedComboHigh?: number }>;
+      markets?: Array<{ city: string; state: string; tag?: string; estimatedComboLow?: number; estimatedComboHigh?: number; sixBedroomPossible?: boolean }>;
       maxMarkets?: number;
     };
 

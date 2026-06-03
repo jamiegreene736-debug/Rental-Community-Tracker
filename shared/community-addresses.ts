@@ -78,9 +78,14 @@ export function inferCommunityStreetAddress(input: {
   city?: string | null;
   state?: string | null;
   unitAddresses?: Array<string | null | undefined>;
+  addressHint?: string | null;
 }): string {
   const rule = communityAddressRuleForName(input.communityName);
   if (rule) return rule.street;
+
+  if (input.addressHint && isLikelyStreetAddress(input.addressHint)) {
+    return input.addressHint;
+  }
 
   const addresses = (input.unitAddresses ?? []).map(streetRootFromAddress).filter(Boolean);
   if (addresses.length > 0) {
