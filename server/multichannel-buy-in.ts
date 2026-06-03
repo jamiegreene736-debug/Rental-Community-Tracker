@@ -941,7 +941,7 @@ export async function fetchMultiChannelBuyInByBR(args: {
     : args.bedroomCounts;
   const reuseSharedPmSearch = args.reuseSharedPmSearch !== false && sortedBedroomCounts.length > 1;
   const pmSearchCount = reuseSharedPmSearch ? 1 : args.bedroomCounts.length;
-  const pmSearchEnabled = false;
+  const pmSearchEnabled = process.env.FIND_BUY_IN_PM_ENABLED !== "0";
   const progressTotal = args.skipSidecar
     ? (args.skipOta ? 0 : otaSearchBedroomCounts.length * 2)
     : (args.skipOta ? 0 : otaSearchBedroomCounts.length * 4) +
