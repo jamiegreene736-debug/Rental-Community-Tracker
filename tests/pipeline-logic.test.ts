@@ -181,6 +181,17 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /propertyId < 0 && swaps\.length > 0[\s\S]*unit1PhotoFolder/,
+  "commit replacement must point promoted-draft unit photo folders at the replacement gallery",
+);
+const builderPageSource = readFileSync("client/src/pages/builder.tsx", "utf8");
+assert.doesNotMatch(
+  builderPageSource,
+  /propertyId < 0\)\s*\{[\s\S]*setUnitSwaps\(\{\}\)/,
+  "builder must load committed unit swaps for promoted drafts (negative propertyId)",
+);
+assert.match(
+  routesSource,
   /COMBO_PHOTO_FETCH_HEARTBEAT_MS/,
   "combo photo fetch jobs must keep heartbeating while long photo discovery is in progress",
 );

@@ -26588,7 +26588,28 @@ Return ONLY compact JSON with this exact shape:
   app.patch("/api/unit-swaps/commit/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId);
     if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
+    const swaps = latestUnitSwaps(await storage.getUnitSwaps(propertyId));
     await storage.commitUnitSwaps(propertyId);
+    // Promoted drafts (negative propertyId) persist photos under
+    // unit1PhotoFolder / unit2PhotoFolder. Replacement swaps hydrate a
+    // separate replacement-p* folder — point the draft at that folder on
+    // commit so Photo Sources, builder, and scanners read the new unit.
+    if (propertyId < 0 && swaps.length > 0) {
+      const draftId = -propertyId;
+      const draft = await storage.getCommunityDraft(draftId);
+      if (draft) {
+        const update: Record<string, string> = {};
+        for (const swap of swaps) {
+          const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
+          const slot = swap.oldUnitId.match(/-unit-([ab])$/i)?.[1]?.toLowerCase();
+          if (slot === "a") update.unit1PhotoFolder = folder;
+          else if (slot === "b") update.unit2PhotoFolder = folder;
+        }
+        if (Object.keys(update).length > 0) {
+          await storage.updateCommunityDraft(draftId, update as any);
+        }
+      }
+    }
     return res.json({ ok: true });
   });
 
