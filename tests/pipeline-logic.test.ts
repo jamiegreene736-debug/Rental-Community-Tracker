@@ -1810,6 +1810,18 @@ assert.ok(
   routeSource.includes("scrapeListingPhotos(sourceUrl, undefined, candidateFacts, SCRAPE_WITHOUT_SIDECAR)"),
   "replacement find-unit must not open local Chrome during preflight",
 );
+assert.ok(
+  routeSource.includes("if (scrapedPhotoUrls.length < MIN_PHOTOS) {"),
+  "replacement find-unit must try equivalent Zillow sources when the primary scrape is photo-sparse",
+);
+assert.ok(
+  routeSource.includes("cdn-redfin"),
+  "generic real-estate fetch must harvest Redfin CDN gallery URLs",
+);
+assert.ok(
+  routeSource.includes("hawaiiStreetSlugKey"),
+  "replacement discovery must accept Hawaii hyphenated street slugs when URL parsing misses the root",
+);
 console.log("  ✓ replacement search budget and follow-up expanded mode are guarded");
 
 assert.equal(
