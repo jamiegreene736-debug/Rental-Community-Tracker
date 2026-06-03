@@ -194,6 +194,14 @@ import {
   lensMatchConfidence,
 } from "./photo-match-guardrails";
 import { MAX_COMBO_PHOTO_OTA_ATTEMPTS, runComboOtaPreflight } from "./combo-ota-preflight";
+import {
+  buildUnitPhotoResolverProof,
+  canonicalListingKey,
+  compareUnitPhotoProofs,
+  MIN_INDEPENDENT_UNIT_PHOTOS,
+  summarizeUnitPhotoProof,
+  type UnitPhotoResolverProof,
+} from "./unit-photo-resolver";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { geocode, walkBetween } from "./walking-distance";
@@ -26974,8 +26982,8 @@ Return ONLY compact JSON with this exact shape:
     swap: {
       propertyId: number;
       oldUnitId: string;
-      oldBedrooms: number | null;
-      newBedrooms: number | null;
+      oldBedrooms?: number | null;
+      newBedrooms?: number | null;
       newSourceUrl: string;
     },
   ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string }> => {
@@ -26992,6 +27000,21 @@ Return ONLY compact JSON with this exact shape:
         console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
         return { ok: false, folder, savedCount: 0, error: "Replacement listing returned 0 photos" };
       }
+      const resolverProof = buildUnitPhotoResolverProof({
+        photos: scraped.map((photo) => ({ url: photo.url })),
+        sourceUrl: url,
+        foundVia: "replacement-commit",
+        requestedBedrooms: swap.newBedrooms ?? swap.oldBedrooms ?? null,
+        facts: listingFacts,
+      });
+      if (resolverProof.status === "rejected") {
+        return {
+          ok: false,
+          folder,
+          savedCount: 0,
+          error: summarizeUnitPhotoProof("Replacement listing", resolverProof),
+        };
+      }
 
       const result = await downloadAndPrioritize({
         folder,
@@ -27003,6 +27026,15 @@ Return ONLY compact JSON with this exact shape:
         requiredBedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
         requiredBathrooms: listingFacts.bathrooms ?? undefined,
       });
+      console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
+      if (result.kept < MIN_INDEPENDENT_UNIT_PHOTOS) {
+        return {
+          ok: false,
+          folder,
+          savedCount: result.kept,
+          error: `Replacement photo pipeline kept only ${result.kept} photo${result.kept === 1 ? "" : "s"}; at least ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos are required.`,
+        };
+      }
 
       const sourcePath = path.join(folderPath, "_source.json");
       let sourceDoc: any = {};
@@ -27012,13 +27044,15 @@ Return ONLY compact JSON with this exact shape:
         platform: /zillow/i.test(url) ? "zillow" : "other",
         scrapedDate: new Date().toISOString().slice(0, 10),
       };
+      sourceDoc.unitPhotoResolverProof = {
+        ...resolverProof,
+        savedPhotoCount: result.kept,
+      };
       sourceDoc.verificationStatus = "needs-review";
       sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
       sourceDoc.verifiedBy = "unit-swap";
       await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
 
-      console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
-      if (result.kept <= 0) return { ok: false, folder, savedCount: 0, error: "Replacement photo pipeline kept 0 photos" };
       return { ok: true, folder, savedCount: result.kept };
     } catch (e: any) {
       console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
@@ -27239,6 +27273,8 @@ Return ONLY compact JSON with this exact shape:
     state?: string;
     unit1?: ComboPhotoFetchUnit;
     unit2?: ComboPhotoFetchUnit;
+    unit1Proof?: UnitPhotoResolverProof | null;
+    unit2Proof?: UnitPhotoResolverProof | null;
   };
   type ComboPhotoFetchItem = Required<Pick<ComboPhotoFetchItemInput, "id" | "label">> & Omit<ComboPhotoFetchItemInput, "id" | "label"> & {
     status: ComboPhotoFetchStatus;
@@ -27250,6 +27286,8 @@ Return ONLY compact JSON with this exact shape:
     unit2Photos: Array<{ url: string; label?: string }>;
     unit1SourceUrl: string | null;
     unit2SourceUrl: string | null;
+    unit1Proof: UnitPhotoResolverProof | null;
+    unit2Proof: UnitPhotoResolverProof | null;
     error: string | null;
     attemptCount: number;
     heartbeatAt: number | null;
@@ -27326,6 +27364,18 @@ Return ONLY compact JSON with this exact shape:
           status: item.status,
           phase: item.phase,
           message: item.message,
+          payload: {
+            id: item.id,
+            label: item.label,
+            communityName: item.communityName,
+            streetAddress: item.streetAddress,
+            city: item.city,
+            state: item.state,
+            unit1: item.unit1,
+            unit2: item.unit2,
+            unit1Proof: item.unit1Proof,
+            unit2Proof: item.unit2Proof,
+          },
           unit1Photos: item.unit1Photos,
           unit2Photos: item.unit2Photos,
           unit1SourceUrl: item.unit1SourceUrl,
@@ -27364,6 +27414,8 @@ Return ONLY compact JSON with this exact shape:
         unit2Photos: normalizeComboPhotoFetchPhotos(row.unit2Photos),
         unit1SourceUrl: row.unit1SourceUrl ?? null,
         unit2SourceUrl: row.unit2SourceUrl ?? null,
+        unit1Proof: payload.unit1Proof && typeof payload.unit1Proof === "object" ? payload.unit1Proof as UnitPhotoResolverProof : null,
+        unit2Proof: payload.unit2Proof && typeof payload.unit2Proof === "object" ? payload.unit2Proof as UnitPhotoResolverProof : null,
         error: row.error ?? null,
         attemptCount: row.attemptCount ?? 0,
         heartbeatAt: toQueueMs(row.heartbeatAt),
@@ -27448,15 +27500,6 @@ Return ONLY compact JSON with this exact shape:
     })),
   });
   const comboPhotoBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
-  const listingKeyForComboPhotoJob = (raw: string | null | undefined): string => {
-    if (!raw) return "";
-    try {
-      const u = new URL(raw);
-      return `${u.hostname.replace(/^www\./i, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase()}`;
-    } catch {
-      return String(raw).trim().toLowerCase().replace(/[?#].*$/, "").replace(/\/+$/, "");
-    }
-  };
   const photoSetLooksSameForComboPhotoJob = (
     a: Array<{ url: string }>,
     b: Array<{ url: string }>,
@@ -27465,6 +27508,26 @@ Return ONLY compact JSON with this exact shape:
     const keys = new Set(a.map((p) => p.url.replace(/[?#].*$/, "").toLowerCase()));
     const overlap = b.filter((p) => keys.has(p.url.replace(/[?#].*$/, "").toLowerCase())).length;
     return overlap / Math.min(a.length, b.length) >= 0.8;
+  };
+  const normalizeUnitPhotoProofFromFetchResponse = (
+    data: any,
+    photos: Array<{ url: string; label?: string }>,
+    sourceUrl: string | null,
+    body: Record<string, unknown>,
+    relaxedSearch: boolean,
+  ): UnitPhotoResolverProof => {
+    const proof = buildUnitPhotoResolverProof({
+      photos,
+      sourceUrl,
+      foundVia: typeof data?.foundVia === "string" ? data.foundVia : null,
+      requestedBedrooms: body.bedrooms === "any" ? null : Number(body.bedrooms),
+      minimumBedrooms: body.minBedrooms === undefined ? null : Number(body.minBedrooms),
+      facts: data?.facts && typeof data.facts === "object" ? data.facts : null,
+      representativeFallback: data?.representativeFallback === true,
+      reusedConfiguredSource: data?.reusedConfiguredSource === true,
+      relaxedSearch,
+    });
+    return proof;
   };
   const fetchComboPhotoJson = async (url: string, body: unknown, options: { abortKey?: string; signal?: AbortSignal; timeoutMs?: number } = {}) => {
     const controller = new AbortController();
@@ -27503,7 +27566,7 @@ Return ONLY compact JSON with this exact shape:
     unit: ComboPhotoFetchUnit | undefined,
     skipUrls: string[] = [],
     bedroomOverride?: number | "any",
-  ) => unit?.url
+  ): Record<string, unknown> => unit?.url
     ? { url: unit.url, bedrooms: unit.bedrooms ?? undefined }
     : {
         communityName: item.communityName,
@@ -27526,17 +27589,23 @@ Return ONLY compact JSON with this exact shape:
     abortKey?: string,
     signal?: AbortSignal,
     onOtaCheck?: (message: string) => void | Promise<void>,
-  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean }> => {
+  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean; proof: UnitPhotoResolverProof }> => {
     const seenUrls = new Set(blockedUrls.filter(Boolean));
     const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
       { relaxed: false },
       { bedroomOverride: "any", relaxed: true },
     ];
     const apiKey = process.env.SEARCHAPI_API_KEY;
-    let best: { photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean } = {
+    let best: {
+      photos: Array<{ url: string; label?: string }>;
+      sourceUrl: string | null;
+      relaxed: boolean;
+      proof: UnitPhotoResolverProof;
+    } = {
       photos: [],
       sourceUrl: null,
       relaxed: false,
+      proof: buildUnitPhotoResolverProof({ photos: [], sourceUrl: null, requestedBedrooms: unit?.bedrooms ?? null }),
     };
     const maxOtaAttempts = unit?.url ? 1 : MAX_COMBO_PHOTO_OTA_ATTEMPTS;
     let otaSkips = 0;
@@ -27545,10 +27614,11 @@ Return ONLY compact JSON with this exact shape:
       for (const attempt of attempts) {
         if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
         let data: any;
+        const body = buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride);
         try {
           data = await fetchComboPhotoJson(
             `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
-            buildComboPhotoFetchBody(item, unit, Array.from(seenUrls), attempt.bedroomOverride),
+            body,
             { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 75_000 },
           );
         } catch (error: any) {
@@ -27558,15 +27628,16 @@ Return ONLY compact JSON with this exact shape:
         }
         const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
         const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
-        const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => listingKeyForComboPhotoJob(u) === listingKeyForComboPhotoJob(sourceUrl));
+        const proof = normalizeUnitPhotoProofFromFetchResponse(data, photos, sourceUrl, body, attempt.relaxed);
+        const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => canonicalListingKey(u) === canonicalListingKey(sourceUrl));
         const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(avoidPhotos, photos);
         if (photos.length > best.photos.length && !duplicateSource && !duplicatePhotos) {
-          best = { photos, sourceUrl, relaxed: attempt.relaxed };
+          best = { photos, sourceUrl, relaxed: attempt.relaxed, proof };
         }
         if (sourceUrl) seenUrls.add(sourceUrl);
-        if (photos.length < 3 || duplicateSource || duplicatePhotos) continue;
+        if (proof.status === "rejected" || duplicateSource || duplicatePhotos) continue;
         if (!apiKey) {
-          return { photos, sourceUrl, relaxed: attempt.relaxed };
+          return { photos, sourceUrl, relaxed: attempt.relaxed, proof };
         }
         const addressGuess =
           parseListingAddressFromUrl(sourceUrl || "") ||
@@ -27576,11 +27647,11 @@ Return ONLY compact JSON with this exact shape:
           apiKey,
           photos.map((p) => p.url),
           addressGuess,
-          item.city,
-          item.state,
+          item.city ?? "",
+          item.state ?? "",
         );
         if (preflight.qualifies) {
-          return { photos, sourceUrl, relaxed: attempt.relaxed };
+          return { photos, sourceUrl, relaxed: attempt.relaxed, proof };
         }
         const listed = preflight.listedOn.length > 0 ? preflight.listedOn.join(", ") : "OTA";
         console.warn(
@@ -27642,14 +27713,17 @@ Return ONLY compact JSON with this exact shape:
     };
     let firstPhotos: Array<{ url: string; label?: string }> = [];
     let firstSourceUrl: string | null = null;
+    let firstProof: UnitPhotoResolverProof | null = null;
     if (canComboPhotoFetchUnit(item, item.unit1)) {
       const first = await runWithHeartbeat("Searching for Unit A photos", () =>
         fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal, otaProgress),
       );
       firstPhotos = first.photos;
       firstSourceUrl = first.sourceUrl;
+      firstProof = first.proof;
       item.unit1Photos = firstPhotos;
       item.unit1SourceUrl = firstSourceUrl;
+      item.unit1Proof = firstProof;
       item.message = `Unit A photos fetched (${firstPhotos.length})`;
       await persistProgress();
     }
@@ -27668,6 +27742,14 @@ Return ONLY compact JSON with this exact shape:
       }
       item.unit2Photos = secondPhotos;
       item.unit2SourceUrl = second.sourceUrl;
+      item.unit2Proof = second.photos.length === secondPhotos.length
+        ? second.proof
+        : buildUnitPhotoResolverProof({
+            photos: secondPhotos,
+            sourceUrl: second.sourceUrl,
+            requestedBedrooms: item.unit2?.bedrooms ?? null,
+            relaxedSearch: second.relaxed,
+          });
       item.message = `Unit B photos fetched (${secondPhotos.length})`;
       if (second.relaxed) item.message = `${item.message}; broader same-community search was used`;
       await persistProgress();
@@ -27675,11 +27757,35 @@ Return ONLY compact JSON with this exact shape:
 
     item.phase = "done";
     const total = item.unit1Photos.length + item.unit2Photos.length;
-    if (item.unit1Photos.length < 3 || item.unit2Photos.length < 3) {
-      item.error = "Photo discovery completed, but one or both units had fewer than 3 independent photos.";
+    const proofFailures: string[] = [];
+    if (!item.unit1Proof || item.unit1Proof.status === "rejected") {
+      proofFailures.push(summarizeUnitPhotoProof("Unit A", item.unit1Proof ?? buildUnitPhotoResolverProof({
+        photos: item.unit1Photos,
+        sourceUrl: item.unit1SourceUrl,
+        requestedBedrooms: item.unit1?.bedrooms ?? null,
+      })));
+    }
+    if (!item.unit2Proof || item.unit2Proof.status === "rejected") {
+      proofFailures.push(summarizeUnitPhotoProof("Unit B", item.unit2Proof ?? buildUnitPhotoResolverProof({
+        photos: item.unit2Photos,
+        sourceUrl: item.unit2SourceUrl,
+        requestedBedrooms: item.unit2?.bedrooms ?? null,
+      })));
+    }
+    if (item.unit1Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS || item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
+      proofFailures.push(`one or both units had fewer than ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos`);
+    }
+    if (item.unit1Proof && item.unit2Proof) {
+      const comparison = compareUnitPhotoProofs(item.unit1Proof, item.unit2Proof);
+      if (comparison.duplicate) {
+        proofFailures.push(`Unit A and Unit B are not independent (${comparison.issues.join(", ") || "duplicate-photo-overlap"}; overlap ${comparison.overlapCount}, ratio ${comparison.overlapRatio.toFixed(2)})`);
+      }
     }
     item.message = total > 0 ? `${total} photos fetched` : "No photos were found";
     await persistProgress();
+    if (proofFailures.length > 0) {
+      throw new Error(`Photo discovery failed proof checks: ${proofFailures.join(" | ")}`);
+    }
   };
   const runComboPhotoFetchJob = async (jobId: string) => {
     if (activeComboPhotoFetchJobIds.has(jobId)) return;
@@ -27720,7 +27826,12 @@ Return ONLY compact JSON with this exact shape:
             item.status = "completed";
             await queueEvent("combo-photo-fetch", job.id, item.phase, "Photo fetch item completed", {
               itemKey: item.id,
-              meta: { unit1Photos: item.unit1Photos.length, unit2Photos: item.unit2Photos.length },
+              meta: {
+                unit1Photos: item.unit1Photos.length,
+                unit2Photos: item.unit2Photos.length,
+                unit1Proof: item.unit1Proof,
+                unit2Proof: item.unit2Proof,
+              },
             });
           } catch (e: any) {
             if (e?.cancelled || job.cancelRequested) {
@@ -27737,7 +27848,11 @@ Return ONLY compact JSON with this exact shape:
             await queueEvent("combo-photo-fetch", job.id, item.phase, item.message, {
               itemKey: item.id,
               level: item.status === "failed" ? "error" : "warn",
-              meta: { error: e?.message ?? String(e) },
+              meta: {
+                error: e?.message ?? String(e),
+                unit1Proof: item.unit1Proof,
+                unit2Proof: item.unit2Proof,
+              },
             });
           } finally {
             item.finishedAt = Date.now();
@@ -27796,6 +27911,8 @@ Return ONLY compact JSON with this exact shape:
       unit2Photos: [],
       unit1SourceUrl: null,
       unit2SourceUrl: null,
+      unit1Proof: null,
+      unit2Proof: null,
       error: null,
       attemptCount: 0,
       heartbeatAt: null,
@@ -28582,11 +28699,11 @@ Return ONLY compact JSON with this exact shape:
     return (draft1Beds === unit1Beds && draft2Beds === unit2Beds) || (draft1Beds === unit2Beds && draft2Beds === unit1Beds);
   };
   const draftSourcesMatchBulkComboItem = (draft: any, item: BulkComboListingItem) => {
-    const item1 = listingKeyForComboPhotoJob(item.unit1SourceUrl);
-    const item2 = listingKeyForComboPhotoJob(item.unit2SourceUrl);
+    const item1 = canonicalListingKey(item.unit1SourceUrl);
+    const item2 = canonicalListingKey(item.unit2SourceUrl);
     if (!item1 || !item2) return false;
-    const draft1 = listingKeyForComboPhotoJob(draft?.unit1Url);
-    const draft2 = listingKeyForComboPhotoJob(draft?.unit2Url);
+    const draft1 = canonicalListingKey(draft?.unit1Url);
+    const draft2 = canonicalListingKey(draft?.unit2Url);
     return (draft1 === item1 && draft2 === item2) || (draft1 === item2 && draft2 === item1);
   };
   const findExistingBulkComboDraftId = async (
@@ -28677,6 +28794,8 @@ Return ONLY compact JSON with this exact shape:
       unit2Photos: [],
       unit1SourceUrl: null,
       unit2SourceUrl: null,
+      unit1Proof: null,
+      unit2Proof: null,
       error: null,
       attemptCount: 0,
       heartbeatAt: null,
@@ -29739,11 +29858,26 @@ Return ONLY compact JSON with this exact shape:
             `source=${candidate.source} photos=${photos.length} url=${candidate.url} ` +
             `elapsedMs=${Date.now() - startedAt}`,
           );
+          const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+          const resolverProof = buildUnitPhotoResolverProof({
+            photos: responsePhotos,
+            sourceUrl: candidate.url,
+            foundVia: "search",
+            requestedBedrooms,
+            minimumBedrooms,
+            facts,
+          });
           res.json({
-            photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+            photos: responsePhotos,
             sourceUrl: candidate.url,
             foundVia: "search",
             facts,
+            resolverProof,
+            diagnostic: {
+              code: resolverProof.status === "accepted" ? "unit-photo-proof-accepted" : "unit-photo-proof-review",
+              triedCandidateUrls,
+              resolverProof,
+            },
           });
           return;
         } catch (e: any) {
@@ -29751,20 +29885,42 @@ Return ONLY compact JSON with this exact shape:
         }
       }
 
-      if (bestRepresentativeFallback) {
-        const { candidate, photos, facts, scrapedBedrooms } = bestRepresentativeFallback;
+      const representativeFallback = bestRepresentativeFallback as {
+        candidate: { url: string; source: DiscoverySource };
+        photos: ScrapedPhoto[];
+        facts: ListingFacts;
+        scrapedBedrooms: number;
+      } | null;
+      if (representativeFallback) {
+        const { candidate, photos, facts, scrapedBedrooms } = representativeFallback;
         const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
         console.log(
           `[fetch-unit-photos] representative fallback community="${communityName ?? ""}" ` +
           `requestedBR=${requestedBedrooms} scrapedBR=${scrapedBedrooms} photos=${photos.length} ` +
           `source=${candidate.source} url=${candidate.url} elapsedMs=${Date.now() - startedAt}`,
         );
+        const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+        const resolverProof = buildUnitPhotoResolverProof({
+          photos: responsePhotos,
+          sourceUrl: candidate.url,
+          foundVia: "search",
+          requestedBedrooms,
+          minimumBedrooms,
+          facts,
+          representativeFallback: true,
+        });
         res.json({
-          photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+          photos: responsePhotos,
           sourceUrl: candidate.url,
           foundVia: "search",
           facts,
           representativeFallback: true,
+          resolverProof,
+          diagnostic: {
+            code: "representative-photo-proof",
+            triedCandidateUrls,
+            resolverProof,
+          },
           note: isConfiguredPhotoSource
             ? `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved the configured property photo gallery for representative photos.`
             : `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved a representative ${scrapedBedrooms}BR photo source from the same property.`,
@@ -29788,13 +29944,30 @@ Return ONLY compact JSON with this exact shape:
               `requestedBR=${requestedBedrooms} photos=${photos.length} url=${configuredPhotoSourceUrl} ` +
               `elapsedMs=${Date.now() - startedAt}`,
             );
+            const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+            const resolverProof = buildUnitPhotoResolverProof({
+              photos: responsePhotos,
+              sourceUrl: configuredPhotoSourceUrl,
+              foundVia: "search",
+              requestedBedrooms,
+              minimumBedrooms,
+              facts,
+              representativeFallback: true,
+              reusedConfiguredSource: true,
+            });
             res.json({
-              photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+              photos: responsePhotos,
               sourceUrl: configuredPhotoSourceUrl,
               foundVia: "search",
               facts,
               representativeFallback: true,
               reusedConfiguredSource: true,
+              resolverProof,
+              diagnostic: {
+                code: "configured-representative-photo-proof",
+                triedCandidateUrls,
+                resolverProof,
+              },
               note: `No distinct exact ${requestedBedrooms}BR listing was found for "${communityName}", so this reused the configured property photo gallery for representative photos.`,
             });
             return;
@@ -29811,11 +29984,26 @@ Return ONLY compact JSON with this exact shape:
           `[fetch-unit-photos] no-match community="${communityName ?? ""}" ` +
           `candidates=${candidatesToTry.length} elapsedMs=${Date.now() - startedAt}`,
         );
+        const resolverProof = buildUnitPhotoResolverProof({
+          photos: [],
+          sourceUrl: null,
+          foundVia: "search",
+          requestedBedrooms,
+          minimumBedrooms,
+        });
         return res.json({
           photos: [],
           sourceUrl: null,
           foundVia: "search",
           triedCandidateUrls,
+          resolverProof,
+          diagnostic: {
+            code: "no-unit-photo-source",
+            triedCandidateUrls,
+            uncheckedCandidateUrls: candidatesToTry.slice(triedCandidateUrls.length).map((candidate) => candidate.url),
+            resolverProof,
+            selfFix: resolverProof.selfFix,
+          },
           note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${triedCandidateUrls.length} candidate${triedCandidateUrls.length === 1 ? "" : "s"}.`,
         });
       }
@@ -29831,17 +30019,35 @@ Return ONLY compact JSON with this exact shape:
       const facts: ListingFacts = {};
       const photos = await scrapeListingPhotos(listingUrl, undefined, facts, SCRAPE_WITHOUT_SIDECAR);
       const scrapedBR = facts.bedrooms ?? null;
+      const bedroomMismatch = scrapedBR !== null && (
+        requestedBedrooms ? scrapedBR !== requestedBedrooms : !!minimumBedrooms && scrapedBR < minimumBedrooms
+      );
       const expectedBedrooms = requestedBedrooms ?? minimumBedrooms;
-      if (expectedBedrooms && scrapedBR !== null && scrapedBR !== expectedBedrooms) {
+      if (expectedBedrooms && bedroomMismatch) {
         console.log(
           `[fetch-unit-photos] direct mismatch url=${listingUrl} ` +
           `scrapedBR=${scrapedBR} expectedBR=${expectedBedrooms} elapsedMs=${Date.now() - startedAt}`,
         );
+        const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+        const resolverProof = buildUnitPhotoResolverProof({
+          photos: responsePhotos,
+          sourceUrl: listingUrl,
+          foundVia,
+          requestedBedrooms,
+          minimumBedrooms,
+          facts,
+        });
         return res.json({
           photos: [],
           sourceUrl: null,
           foundVia,
           facts,
+          resolverProof,
+          diagnostic: {
+            code: "bedroom-mismatch",
+            resolverProof,
+            selfFix: resolverProof.selfFix,
+          },
           note: `Listing has ${scrapedBR}BR, but ${expectedBedrooms}BR was requested.`,
         });
       }
@@ -29849,15 +30055,35 @@ Return ONLY compact JSON with this exact shape:
         `[fetch-unit-photos] direct success url=${listingUrl} ` +
         `photos=${photos.length} elapsedMs=${Date.now() - startedAt}`,
       );
+      const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+      const resolverProof = buildUnitPhotoResolverProof({
+        photos: responsePhotos,
+        sourceUrl: listingUrl,
+        foundVia,
+        requestedBedrooms,
+        minimumBedrooms,
+        facts,
+      });
       res.json({
-        photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+        photos: responsePhotos,
         sourceUrl: listingUrl,
         foundVia,
         facts,
+        resolverProof,
+        diagnostic: {
+          code: resolverProof.status === "accepted" ? "unit-photo-proof-accepted" : "unit-photo-proof-review",
+          resolverProof,
+        },
       });
     } catch (e: any) {
       console.warn(`[fetch-unit-photos] failed elapsedMs=${Date.now() - startedAt}: ${e.message}`);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({
+        error: e.message,
+        diagnostic: {
+          code: "unit-photo-fetch-error",
+          selfFix: ["retry the same source once, then continue with the next real-estate candidate"],
+        },
+      });
     }
   });
 
@@ -33731,13 +33957,37 @@ Return ONLY compact JSON with this exact shape:
     const unit2Urls = Array.isArray(body.unit2Photos) ? body.unit2Photos.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)) : [];
     const unit1SourceUrl = typeof body.unit1SourceUrl === "string" && /^https?:\/\//i.test(body.unit1SourceUrl) ? body.unit1SourceUrl : null;
     const unit2SourceUrl = typeof body.unit2SourceUrl === "string" && /^https?:\/\//i.test(body.unit2SourceUrl) ? body.unit2SourceUrl : null;
-    const photoKey = (u: string) => u.replace(/[?#].*$/, "").toLowerCase();
+    const unit1Proof = buildUnitPhotoResolverProof({
+      photos: unit1Urls.map((url) => ({ url })),
+      sourceUrl: unit1SourceUrl,
+      foundVia: "persist-photos",
+    });
+    const unit2Proof = buildUnitPhotoResolverProof({
+      photos: unit2Urls.map((url) => ({ url })),
+      sourceUrl: unit2SourceUrl,
+      foundVia: "persist-photos",
+    });
     if (unit1Urls.length > 0 && unit2Urls.length > 0) {
-      const unit1Set = new Set(unit1Urls.map(photoKey));
-      const overlap = unit2Urls.filter((u) => unit1Set.has(photoKey(u))).length;
-      if (overlap / Math.min(unit1Urls.length, unit2Urls.length) >= 0.8) {
+      if (unit1Proof.status === "rejected" || unit2Proof.status === "rejected") {
+        return res.status(409).json({
+          error: "One or both unit photo sets do not have enough independent source proof to save.",
+          diagnostic: {
+            unit1Proof,
+            unit2Proof,
+            selfFix: Array.from(new Set([...unit1Proof.selfFix, ...unit2Proof.selfFix])),
+          },
+        });
+      }
+      const comparison = compareUnitPhotoProofs(unit1Proof, unit2Proof);
+      if (comparison.duplicate) {
         return res.status(409).json({
           error: "Unit A and Unit B photo sets are identical. Pick a different photo source before saving.",
+          diagnostic: {
+            comparison,
+            unit1Proof,
+            unit2Proof,
+            selfFix: ["retry Unit B with Unit A's source URL blocked and continue candidate search until the overlap is below the duplicate threshold"],
+          },
         });
       }
     }
@@ -33772,7 +34022,13 @@ Return ONLY compact JSON with this exact shape:
               : /airbnb\.com/i.test(sourceUrl) ? "airbnb"
                 : "other";
 
-    const persistUnit = async (urls: string[], folder: string, sourceUrl: string | null, unitLabel: string): Promise<{ folder: string; saved: number } | null> => {
+    const persistUnit = async (
+      urls: string[],
+      folder: string,
+      sourceUrl: string | null,
+      unitLabel: string,
+      resolverProof: UnitPhotoResolverProof,
+    ): Promise<{ folder: string; saved: number } | null> => {
       if (urls.length === 0) return null;
       const folderPath = path.join(PHOTOS_BASE, folder);
       // Wipe any prior contents so re-saving doesn't accumulate.
@@ -33791,6 +34047,10 @@ Return ONLY compact JSON with this exact shape:
             source: "add-community-draft",
           },
           unitLabel,
+          unitPhotoResolverProof: {
+            ...resolverProof,
+            savedPhotoCount: saved,
+          },
         }, null, 2));
       }
       return { folder, saved };
@@ -33798,8 +34058,8 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       const [u1, u2] = await Promise.all([
-        persistUnit(unit1Urls, `draft-${draftId}-unit-a`, unit1SourceUrl, "Unit A"),
-        persistUnit(unit2Urls, `draft-${draftId}-unit-b`, unit2SourceUrl, "Unit B"),
+        persistUnit(unit1Urls, `draft-${draftId}-unit-a`, unit1SourceUrl, "Unit A", unit1Proof),
+        persistUnit(unit2Urls, `draft-${draftId}-unit-b`, unit2SourceUrl, "Unit B", unit2Proof),
       ]);
       const update: Record<string, string | null> = {};
       if (u1) {

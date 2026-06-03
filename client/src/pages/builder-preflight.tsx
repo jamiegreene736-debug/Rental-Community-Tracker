@@ -38,6 +38,8 @@ type PreflightPhotoFetchJob = {
   unitId: string;
   savedCount: number | null;
   sourceUrl: string | null;
+  proof?: Record<string, unknown> | null;
+  diagnostic?: Record<string, unknown> | null;
   error: string | null;
 };
 

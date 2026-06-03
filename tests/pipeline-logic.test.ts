@@ -43,6 +43,11 @@ import { unitVerificationClaims } from "../shared/folder-unit-map";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
 import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "../server/photo-match-guardrails";
+import {
+  buildUnitPhotoResolverProof,
+  compareUnitPhotoProofs,
+  MIN_INDEPENDENT_UNIT_PHOTOS,
+} from "../server/unit-photo-resolver";
 
 // ---------- Import the internals we want to test ----------
 // The sanity check and fact extractors aren't exported, so we
@@ -213,6 +218,41 @@ assert.match(
   "combo photo fetch discovery must bound candidate scans so Step 4 does not appear stuck on weak markets",
 );
 assert.match(
+  routesSource,
+  /Photo discovery failed proof checks/,
+  "combo photo fetch items must fail instead of completing when either unit lacks independent photo proof",
+);
+assert.match(
+  routesSource,
+  /compareUnitPhotoProofs\(item\.unit1Proof, item\.unit2Proof\)/,
+  "combo photo fetch must compare Unit A and Unit B proof before accepting a combo gallery",
+);
+assert.match(
+  routesSource,
+  /resolverProof/,
+  "fetch-unit-photos must return resolver proof so diagnostics can self-fix based on exact evidence",
+);
+assert.match(
+  routesSource,
+  /unitPhotoResolverProof/,
+  "persisted draft and replacement photo folders must stamp the resolver proof in _source.json",
+);
+assert.match(
+  routesSource,
+  /result\.kept < MIN_INDEPENDENT_UNIT_PHOTOS/,
+  "replacement commits must reject photo folders with too few kept photos",
+);
+assert.match(
+  preflightJobsSource,
+  /nextProof\.status !== "rejected"/,
+  "preflight photo jobs must keep searching instead of persisting proof-rejected candidates",
+);
+assert.match(
+  preflightJobsSource,
+  /Only \$\{saved\} photo/,
+  "preflight photo jobs must fail when persistence saves fewer than the required independent photos",
+);
+assert.match(
   preflightPhotoDiscoverySource,
   /replacingExistingPhotos \? 10 : 6/,
   "preflight Find Photos must bound candidate scans so a no-match does not run for several minutes",
@@ -227,6 +267,40 @@ assert.doesNotMatch(
   /minBedrooms:/,
   "preflight Find Photos must not require minBedrooms on the relaxed attempt — Zillow often lacks matching BR at the resort",
 );
+const acceptedUnitProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/abc11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc22222-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc33333-test.jpg" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/123_zpid/",
+  requestedBedrooms: 3,
+  facts: { bedrooms: 3 },
+});
+assert.equal(acceptedUnitProof.status, "accepted", "three distinct photos with matching bedrooms should be accepted");
+const sparseUnitProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/abc11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc11111-other-size.jpg?width=960" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/123_zpid/",
+  requestedBedrooms: 3,
+  facts: { bedrooms: 3 },
+});
+assert.equal(sparseUnitProof.status, "rejected", "duplicate photo variants must not count as independent unit proof");
+assert.equal(sparseUnitProof.distinctPhotoCount, 1, "Zillow photo fingerprints should collapse size variants");
+const duplicateProof = compareUnitPhotoProofs(acceptedUnitProof, buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/abc11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc22222-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc33333-test.jpg" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/123_zpid/",
+  requestedBedrooms: 3,
+  facts: { bedrooms: 3 },
+}));
+assert.equal(duplicateProof.duplicate, true, "same-source/same-photo proof must be treated as duplicate combo evidence");
+assert.equal(MIN_INDEPENDENT_UNIT_PHOTOS, 3, "photo proof minimum should remain aligned with combo/preflight acceptance");
 assert.match(
   preflightSource,
   /replacingExistingPhotos[\s\S]*siblingSourceUrls/,
