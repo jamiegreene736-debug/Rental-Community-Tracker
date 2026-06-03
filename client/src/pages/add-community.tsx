@@ -41,6 +41,7 @@ import { estimateNewCommunityScore, gradeColor, gradeBg } from "@/data/quality-s
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { checkCommunityType } from "@shared/community-type";
+import { formatTypicalComboLabel, inferTypicalComboPair } from "@shared/community-combo";
 import { BUY_IN_RATES, suggestPricingArea } from "@shared/pricing-rates";
 import { inferCommunityStreetAddress, validateCommunityStreetAddress } from "@shared/community-addresses";
 import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
@@ -3044,7 +3045,7 @@ export default function AddCommunity() {
                           >
                             <BedDouble className="h-3 w-3 mr-1" />
                             Combinability {c.combinabilityScore}
-                            {c.combinedBedroomsTypical ? ` · 2×${Math.round(c.combinedBedroomsTypical / 2)}BR=${c.combinedBedroomsTypical}BR` : ""}
+                            {formatTypicalComboLabel(inferTypicalComboPair(c))}
                           </Badge>
                         )}
                         {c.fromWorldKnowledge && (

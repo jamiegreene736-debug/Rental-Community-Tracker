@@ -3,7 +3,15 @@
 // (/api/community/scan-top-markets) can reuse the same Google + Claude pipeline.
 
 import { checkCommunityType } from "@shared/community-type";
+import {
+  formatTypicalComboLabel,
+  inferTypicalComboPair,
+  normalizeCombinedBedroomsTypical,
+  type TypicalComboPair,
+} from "@shared/community-combo";
 import { geocode } from "./walking-distance";
+
+export { formatTypicalComboLabel, inferTypicalComboPair, normalizeCombinedBedroomsTypical, type TypicalComboPair };
 
 export type ResearchedCommunity = {
   name: string;
@@ -730,7 +738,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     addressHint: "130 Kai Malina Pkwy",
     unitTypes: "condos",
     bedroomMix: "1BR, 2BR, and 3BR condos",
-    combinedBedroomsTypical: 5,
+    combinedBedroomsTypical: 6,
     confidenceScore: 86,
     combinabilityScore: 72,
     sourceUrl: "https://www.hawaiigaga.com/honua-kai-rentals.aspx",
@@ -745,7 +753,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     addressHint: "50 Nohea Kai Dr",
     unitTypes: "condos",
     bedroomMix: "1BR, 2BR, and 3BR condos",
-    combinedBedroomsTypical: 5,
+    combinedBedroomsTypical: 6,
     confidenceScore: 82,
     combinabilityScore: 70,
     sourceUrl: "https://www.hawaiigaga.com/kaanapali-alii-rentals.aspx",
@@ -1884,7 +1892,11 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
               researchSummary: s.reason,
               sourceUrl: s.sourceUrl || "",
               bedroomMix: s.bedroomMix,
-              combinedBedroomsTypical: s.combinedBedroomsTypical,
+              combinedBedroomsTypical: normalizeCombinedBedroomsTypical({
+                availableBedrooms: normalized.availableBedrooms,
+                estimatedBedroomUnitCounts: normalizedBedroomUnitCounts,
+                combinedBedroomsTypical: s.combinedBedroomsTypical,
+              }),
               // Single mode doesn't ask for combinabilityScore — it
               // can come back undefined. The downstream sort uses 50
               // as the default when undefined, which is fine.
@@ -1974,7 +1986,12 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
     const key = `${normalizeCommunityName(result.name)}|${result.city.toLowerCase()}|${result.state.toLowerCase()}`;
     if (seenCommunities.has(key)) continue;
     seenCommunities.add(key);
-    deduped.push(result);
+    const combinedBedroomsTypical = normalizeCombinedBedroomsTypical(result);
+    deduped.push(
+      combinedBedroomsTypical === result.combinedBedroomsTypical
+        ? result
+        : { ...result, combinedBedroomsTypical },
+    );
   }
   return deduped;
 }
