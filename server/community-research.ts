@@ -333,14 +333,15 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
     state: /^(hi|hawaii)$/i,
     name: "Regency at Poipu Kai",
     unitTypes: "condos",
-    bedroomMix: "2BR and 3BR condos",
-    combinedBedroomsTypical: 5,
+    bedroomMix: "2BR, 3BR, and 4BR condos",
+    combinedBedroomsTypical: 7,
     confidenceScore: 82,
     combinabilityScore: 72,
     sourceUrl: "https://www.parrishkauai.com/36044/regency-at-poipu-kai-new-kauai-vacation-rentals-available/",
-    researchSummary: "Refined condo complex at Poipu Kai with individually owned 2BR/3BR units, air-conditioned, popular vacation rental inventory.",
+    researchSummary: "Refined condo complex at Poipu Kai with individually owned 2BR/3BR/4BR units (4BR often 3BR + loft), air-conditioned, popular vacation rental inventory; supports 3BR+4BR=7BR and 4BR+4BR=8BR combos.",
     availableBedrooms: [2, 3, 4],
     estimatedTotalUnits: 80,
+    estimatedBedroomUnitCounts: { "2": 25, "3": 45, "4": 10 },
   },
   {
     city: /^(poipu|koloa|poipu kai)$/i,
@@ -1016,7 +1017,8 @@ export function hasSixBedroomComboPotential(
 export function hasSevenEightBedroomComboPotential(
   community: Pick<ResearchedCommunity, "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">,
 ): boolean {
-  return hasBedroomPairComboPotential(community, [[3, 4], [2, 5], [4, 4], [3, 5]]);
+  // 7BR/8BR combos require a 4BR attached unit (3+4 or 4+4). Do not infer from 2+5 or 3+5.
+  return hasBedroomPairComboPotential(community, [[3, 4], [4, 4]]);
 }
 
 function getComboBedroomCounts(

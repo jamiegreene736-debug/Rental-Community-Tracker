@@ -260,7 +260,7 @@ function hasBedroomPairPotential(community: CommunityResult, pairs: Array<[numbe
 }
 
 function hasSevenEightBedroomComboPotential(community: CommunityResult): boolean {
-  return hasBedroomPairPotential(community, [[3, 4], [2, 5], [4, 4], [3, 5]]);
+  return hasBedroomPairPotential(community, [[3, 4], [4, 4]]);
 }
 
 type SeedComboBadge = {
@@ -2617,7 +2617,7 @@ export default function AddCommunity() {
                   const sevenEightBedroomCombo = comboBadgeState(
                     m.sevenEightBedroomPossible,
                     "border-sky-200 bg-sky-50 text-sky-700",
-                    "Has evidence for 7BR/8BR combo potential using 3BR+4BR, 2BR+5BR, 4BR+4BR, or 3BR+5BR attached inventory",
+                    "Has evidence for 7BR/8BR combo potential using 3BR+4BR or 4BR+4BR attached inventory (requires 4BR units)",
                     "Completed scan found no 7BR/8BR combo potential for this market",
                   );
                   return (

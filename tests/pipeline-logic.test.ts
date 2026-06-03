@@ -6,7 +6,11 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parseCommunityResearchJsonArray, researchCommunitiesForCity } from "../server/community-research";
+import {
+  hasSevenEightBedroomComboPotential,
+  parseCommunityResearchJsonArray,
+  researchCommunitiesForCity,
+} from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 import {
   discoveryCityForPhotoSearch,
@@ -1502,6 +1506,16 @@ try {
     assert.ok(!(community?.availableBedrooms ?? []).includes(4), `${name} should not advertise 4BR units`);
   }
   console.log("  ✓ selected Waikiki communities no longer advertise 4BR combos");
+
+  const poipuSeeds = await researchCommunitiesForCity("Poipu", "Hawaii");
+  const regency = poipuSeeds.find((c) => c.name === "Regency at Poipu Kai");
+  assert.ok(regency, "Poipu seeds should include Regency at Poipu Kai");
+  assert.ok((regency?.availableBedrooms ?? []).includes(4), "Regency seed should list 4BR units");
+  assert.match(regency?.bedroomMix ?? "", /4BR/i, "Regency bedroom mix text should mention 4BR units");
+  assert.ok(hasSevenEightBedroomComboPotential(regency!), "Regency 3BR+4BR should qualify for 7/8BR market badge");
+  const piliMai = poipuSeeds.find((c) => c.name === "Pili Mai");
+  assert.ok(piliMai && !hasSevenEightBedroomComboPotential(piliMai!), "Pili Mai (2/3BR only) should not claim 7/8BR");
+  console.log("  ✓ 7/8BR combo potential requires 4BR inventory");
 } finally {
   globalThis.fetch = originalFetch;
   if (originalSearchKey == null) delete process.env.SEARCHAPI_API_KEY;
@@ -1987,13 +2001,22 @@ assert.equal(
 console.log("  ✓ Honua Kai + Kaanapali Alii canonical addresses validate for bulk combo draft saves");
 
 const honuaKaiTypical = inferTypicalComboPair({ availableBedrooms: [1, 2, 3] });
-assert.deepEqual(honuaKaiTypical, { unitBeds: 3, totalBeds: 6 });
+assert.deepEqual(honuaKaiTypical, { unitBeds: 3, secondUnitBeds: 3, totalBeds: 6 });
 assert.equal(formatTypicalComboLabel(honuaKaiTypical), " · 2×3BR=6BR");
+const regencyTypical = inferTypicalComboPair({
+  availableBedrooms: [2, 3, 4],
+  estimatedBedroomUnitCounts: { "2": 25, "3": 45, "4": 10 },
+});
+assert.equal(regencyTypical?.totalBeds, 8, "4BR inventory should surface 8BR as the headline combo");
+assert.equal(formatTypicalComboLabel(regencyTypical), " · 2×4BR=8BR");
+const kahalaTypical = inferTypicalComboPair({ availableBedrooms: [2, 3] });
+assert.deepEqual(kahalaTypical, { unitBeds: 3, secondUnitBeds: 3, totalBeds: 6 });
+assert.equal(formatTypicalComboLabel({ unitBeds: 2, secondUnitBeds: 3, totalBeds: 5 }), " · 2BR+3BR=5BR");
 assert.equal(
-  normalizeCombinedBedroomsTypical({ availableBedrooms: [1, 2, 3], combinedBedroomsTypical: 5 }),
+  normalizeCombinedBedroomsTypical({ availableBedrooms: [1,  2, 3], combinedBedroomsTypical: 5 }),
   6,
 );
-console.log("  ✓ typical combo label uses 2×3BR=6BR math for 1/2/3BR resorts");
+console.log("  ✓ typical combo labels distinguish 2×same-BR vs mixed-BR pairs");
 
 assert.match(
   routeSource,

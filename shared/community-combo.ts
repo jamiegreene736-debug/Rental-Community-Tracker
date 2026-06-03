@@ -4,7 +4,7 @@ export type TypicalComboBedroomFields = {
   combinedBedroomsTypical?: number | null;
 };
 
-export type TypicalComboPair = { unitBeds: number; totalBeds: number };
+export type TypicalComboPair = { unitBeds: number; secondUnitBeds?: number; totalBeds: number };
 
 function getComboBedroomCounts(community: Pick<TypicalComboBedroomFields, "estimatedBedroomUnitCounts">): Map<number, number> {
   const counts = new Map<number, number>();
@@ -45,10 +45,11 @@ export function inferTypicalComboPair(community: TypicalComboBedroomFields): Typ
       if (total < 3 || total > 10) continue;
       const counts = getComboBedroomCounts(community);
       if (b1 === b2 && counts.size > 0 && (counts.get(b1) ?? 0) < 2) continue;
-      const matchScore = (b1 === b2 ? 2 : 0) + Math.min(total / 2, 3);
+      const fourBrBoost = availableTypes.includes(4) && (b1 === 4 || b2 === 4) ? 2 : 0;
+      const matchScore = (b1 === b2 ? 2 : 0) + Math.min(total / 2, 3) + fourBrBoost;
       if (matchScore > bestScore) {
         bestScore = matchScore;
-        best = { unitBeds: b1, totalBeds: total };
+        best = { unitBeds: b1, secondUnitBeds: b2, totalBeds: total };
       }
     }
   }
@@ -57,6 +58,10 @@ export function inferTypicalComboPair(community: TypicalComboBedroomFields): Typ
 
 export function formatTypicalComboLabel(pair: TypicalComboPair | null | undefined): string {
   if (!pair) return "";
+  const second = pair.secondUnitBeds ?? pair.unitBeds;
+  if (second !== pair.unitBeds) {
+    return ` · ${pair.unitBeds}BR+${second}BR=${pair.totalBeds}BR`;
+  }
   return ` · 2×${pair.unitBeds}BR=${pair.totalBeds}BR`;
 }
 

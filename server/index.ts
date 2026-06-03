@@ -10,6 +10,7 @@ import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 import { ensureRuntimeSchema } from "./schema-maintenance";
+import { ensureTopMarketScanCacheLogicVersion } from "./top-market-scan-cache";
 import { requireAuth, loginPageHandler, loginPostHandler, logoutHandler } from "./auth";
 
 const app = express();
@@ -92,6 +93,7 @@ app.get("/api/auth/session", (_req, res) => {
 
 (async () => {
   await ensureRuntimeSchema();
+  await ensureTopMarketScanCacheLogicVersion();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
