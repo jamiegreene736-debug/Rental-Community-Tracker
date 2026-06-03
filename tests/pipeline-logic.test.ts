@@ -2541,6 +2541,11 @@ import {
   nearbyBuyInMarketsForScout,
   oceanfrontComparableBuyInMarket,
 } from "../shared/buy-in-market";
+import {
+  inferResortCommunityLabel,
+  looksLikeIndividualListingTitle,
+  looksLikeHotelNotVacationRentalResort,
+} from "../shared/alternative-scout-resort";
 
 assert.equal(oceanfrontComparableBuyInMarket("Kapaa Beachfront"), true);
 assert.equal(oceanfrontComparableBuyInMarket("Poipu Kai"), false);
@@ -2564,6 +2569,33 @@ assert.ok(poipuNearbyOcean.includes("Makahuena"), "Makahuena should be within 20
 assert.ok(!poipuNearbyOcean.includes("Pili Mai"), "Pili Mai is not oceanfront-comparable");
 assert.ok(!poipuNearbyOcean.includes("Kapaa Beachfront"), "Kapaa should be excluded at 20 min for Poipu Kai oceanfront scout");
 console.log("[test] nearby buy-in markets by drive: PASS");
+
+assert.equal(
+  looksLikeIndividualListingTitle("2/2 BEACH FRONT RESORT-AC-Poipu Bch, Kiahuna-Garden View"),
+  true,
+  "individual Airbnb listing titles must not become scout community names",
+);
+assert.equal(looksLikeIndividualListingTitle("Kiahuna Plantation"), false);
+assert.equal(looksLikeIndividualListingTitle("Whalers Cove Resort"), false);
+assert.ok(looksLikeHotelNotVacationRentalResort("Marriott Kauai Beach Resort Hotel"));
+assert.ok(!looksLikeHotelNotVacationRentalResort("Kiahuna Plantation condominium resort vacation rentals"));
+assert.equal(
+  inferResortCommunityLabel(
+    [{ title: "2BR Garden View at Kiahuna Plantation - Poipu" }],
+    "2/2 BEACH FRONT RESORT w AC, Kiahuna Gardenview",
+  ),
+  "Kiahuna Plantation",
+);
+console.log("  ✓ alternative scout resort vs listing title guards");
+
+assert.ok(
+  routesSource.includes("fetchNearbyVacationRentalResortsFromLlm"),
+  "alternative scout should call LLM for nearby vacation rental resorts",
+);
+assert.ok(
+  routesSource.includes("looksLikeIndividualListingTitle"),
+  "alternative scout should reject individual listing titles from Maps discovery",
+);
 
 assert.equal(classifyFailureText("HTTP 502 while waiting for sidecar lane").failureClass, "transient");
 assert.equal(classifyFailureText("waiting-sidecar-lane held by bulk combo").failureClass, "sidecar");

@@ -196,7 +196,14 @@ import {
 import { MAX_COMBO_PHOTO_OTA_ATTEMPTS, runComboOtaPreflight } from "./combo-ota-preflight";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
-import { walkBetween } from "./walking-distance";
+import { geocode, walkBetween } from "./walking-distance";
+import { fetchNearbyVacationRentalResortsFromLlm } from "./alternative-scout-llm-resorts";
+import {
+  inferResortCommunityLabel,
+  looksLikeHotelNotVacationRentalResort,
+  looksLikeIndividualListingTitle,
+  mergeDiscoveredScoutRowsByResort,
+} from "@shared/alternative-scout-resort";
 import { fallbackWalkForResort, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
@@ -7270,12 +7277,15 @@ export async function registerRoutes(
             if (market.location?.searchName) knownNames.add(normalizeName(market.location.searchName));
           }
           const discoveryQueries = [
-            "vacation rental resort",
-            "condo resort vacation rentals",
-            "resort condominium vacation rentals",
+            `condominium resort complex ${baseLocation.city} ${baseLocation.state}`,
+            `vacation rental condo resort ${baseLocation.city}`,
+            "resort condominium community vacation rentals",
             "townhome resort vacation rentals",
-            `${baseLocation.city} ${baseLocation.state} vacation rental condos resort`,
           ];
+          const llmResortSuggestions = await fetchNearbyVacationRentalResortsFromLlm(baseCommunity, baseLocation, {
+            maxDriveMinutes: 20,
+            oceanfrontOnly: sourceRequiresOceanfront,
+          }).catch(() => []);
           const mapsResponses = await Promise.all(discoveryQueries.map(async (q) => {
             const params = new URLSearchParams({
               engine: "google_maps",
@@ -7298,6 +7308,7 @@ export async function registerRoutes(
               const lat = Number(row?.gps_coordinates?.latitude);
               const lng = Number(row?.gps_coordinates?.longitude);
               if (!title || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+              if (looksLikeIndividualListingTitle(title)) continue;
               const key = String(row?.place_id ?? row?.data_id ?? `${normalizeName(title)}|${normalizeName(row?.address ?? "")}`);
               if (seen.has(key)) continue;
               seen.add(key);
@@ -7305,8 +7316,9 @@ export async function registerRoutes(
               if (normalizedTitle === normalizeName(baseCommunity)) continue;
               if (knownNames.has(normalizedTitle) || similar.some((s) => normalizeName(s) === normalizedTitle)) continue;
               const hay = normalizeName(`${title} ${row?.type ?? ""} ${(row?.types ?? []).join(" ")} ${row?.description ?? ""} ${row?.address ?? ""}`);
-              if (!/\b(resort|condo|condominium|villas?|townhomes?|townhouses?|vacation rentals?)\b/.test(hay)) continue;
-              if (/\b(hotel|motel|hostel|timeshare|travel agency|real estate agency)\b/.test(hay) && !/\b(condo|condominium|vacation rental|resort)\b/.test(hay)) continue;
+              if (!/\b(resort|condo|condominium|villas?|townhomes?|townhouses?|vacation rentals?|plantation|complex)\b/.test(hay)) continue;
+              if (looksLikeHotelNotVacationRentalResort(hay)) continue;
+              if (/\b(timeshare office|travel agency|real estate agency|vacation home rental agency)\b/.test(hay) && !/\b(resort|condominium complex)\b/.test(hay)) continue;
               if (sourceRequiresOceanfront && !/\b(ocean|beach|waterfront|shore|brennecke|makahuena)\b/.test(hay)) continue;
               const estimatedMinutes = driveMinutesBetweenCoords(baseLocation.lat, baseLocation.lng, lat, lng);
               if (estimatedMinutes == null || estimatedMinutes > 30 || estimatedMinutes < 1) continue;
@@ -7319,6 +7331,28 @@ export async function registerRoutes(
                 estimatedMinutes,
               });
             }
+          }
+          for (const suggestion of llmResortSuggestions) {
+            if (looksLikeIndividualListingTitle(suggestion.community)) continue;
+            const norm = normalizeName(suggestion.community);
+            if (knownNames.has(norm) || similar.some((s) => normalizeName(s) === norm)) continue;
+            const coord = await geocode(`${suggestion.searchTerm}, ${baseLocation.city}, ${baseLocation.state}`);
+            if (!coord) continue;
+            const estimatedMinutes = driveMinutesBetweenCoords(baseLocation.lat, baseLocation.lng, coord.lat, coord.lng);
+            if (estimatedMinutes == null || estimatedMinutes > 30 || estimatedMinutes < 1) continue;
+            const llmKey = `llm|${norm}`;
+            if (seen.has(llmKey)) continue;
+            seen.add(llmKey);
+            rawPlaces.push({
+              community: suggestion.community,
+              address: `${baseLocation.city}, ${baseLocation.state}`,
+              website: null,
+              lat: coord.lat,
+              lng: coord.lng,
+              estimatedMinutes,
+              searchTerm: suggestion.searchTerm,
+              discoverySource: "llm",
+            });
           }
           rawPlaces.sort((a, b) => a.estimatedMinutes - b.estimatedMinutes || a.community.localeCompare(b.community));
           const withDirections = await mapLimited(rawPlaces.slice(0, 28), 4, async (place) => {
@@ -7356,9 +7390,11 @@ export async function registerRoutes(
             .slice(0, 16)
             .map((place: any) => ({
               ...place,
-              searchTerm: `${place.community}, ${baseLocation.city}, ${baseLocation.state}`,
+              searchTerm: place.searchTerm || `${place.community}, ${baseLocation.city}, ${baseLocation.state}`,
               isDiscovered: true,
-              reason: `Discovered by SearchAPI Google Maps within ${place.driveTime ?? `${place.driveMinutesFromBase} min`} drive — Airbnb scout must prove two qualifying units before sidecar.`,
+              reason: place.discoverySource === "llm"
+                ? `Named by AI resort scout (~${place.driveMinutesFromBase ?? place.estimatedMinutes} min drive) — Airbnb must prove combo inventory before sidecar.`
+                : `Discovered by SearchAPI Google Maps within ${place.driveTime ?? `${place.driveMinutesFromBase} min`} drive — Airbnb scout must prove two qualifying units before sidecar.`,
               count: 0,
               raw: 0,
               recommended: false,
@@ -7441,13 +7477,17 @@ export async function registerRoutes(
             if (passingPlans.length === 0) return null;
             const maxPlanCount = Math.max(0, ...Object.values(countsByBedroom));
             const samples = Object.values(samplesByBedroom).flat().slice(0, 6);
+            const communityLabel = inferResortCommunityLabel(samples, d.community);
+            const searchTerm = `${communityLabel}, ${baseLocation?.city ?? ""}, ${baseLocation?.state ?? ""}`.replace(/,\s*,/g, ",");
             return {
               ...d,
+              community: communityLabel,
+              searchTerm: d.searchTerm && !looksLikeIndividualListingTitle(d.community) ? d.searchTerm : searchTerm,
               status: "ok",
               count: maxPlanCount,
               raw: Object.values(countsByBedroom).reduce((sum, count) => sum + count, 0),
               recommended: true,
-              reason: `Airbnb scout passed ${passingPlans[0].join("+")}BR replacement at ${d.community} (${d.driveTime ?? `~${d.driveMinutesFromBase} min drive`} via SearchAPI Google Maps)`,
+              reason: `Airbnb scout passed ${passingPlans[0].join("+")}BR replacement at ${communityLabel} (${d.driveTime ?? `~${d.driveMinutesFromBase} min drive`}${d.discoverySource === "llm" ? ", AI resort list" : ", Maps + Airbnb"})`,
               countsByBedroom,
               airbnbCountsByBedroom: countsByBedroom,
               passingPlans,
@@ -7461,6 +7501,7 @@ export async function registerRoutes(
             return null;
           }
         }))).filter(Boolean);
+        qualifiedDiscovered = mergeDiscoveredScoutRowsByResort(qualifiedDiscovered);
       }
       const results = await Promise.all(similar.map(async (community) => {
         const loc = BUY_IN_MARKET_LOCATIONS[community];
