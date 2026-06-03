@@ -994,8 +994,9 @@ async function closeExtraTabs(reason, keepPage = page) {
   return closedCount;
 }
 
-async function dismissObstructions(targetPage = page, label = "page") {
+async function dismissObstructions(targetPage = page, label = "page", options = {}) {
   if (!targetPage || targetPage.isClosed?.()) return [];
+  const allowEscape = options?.allowEscape !== false;
   const actions = [];
   for (let pass = 0; pass < 4; pass++) {
     const action = await withSoftTimeout(
@@ -1160,7 +1161,7 @@ async function dismissObstructions(targetPage = page, label = "page") {
     1_000,
     false,
   );
-  if (stillBlocked) {
+  if (stillBlocked && allowEscape) {
     await targetPage.keyboard.press("Escape").catch(() => {});
     actions.push({ clicked: true, kind: "escape", label: "Escape" });
     await targetPage.waitForTimeout(400).catch(() => {});
@@ -4317,6 +4318,19 @@ async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "h
       : await fillVisibleSearchField(page, inputTerm, `${label}_home`, { targetSuggestion, requestId }).catch(() => null);
     const filled = vrboFilled?.filled ?? genericFilled?.filled ?? null;
     const suggestion = vrboFilled?.suggestion ?? genericFilled?.suggestion ?? null;
+    if (filled && !suggestion && targetSuggestion) {
+      const retrySuggestion = await chooseVisibleDestinationSuggestion(
+        page,
+        String(targetSuggestion),
+        `${label}_home_retry`,
+        targetSuggestion,
+        { requestId },
+      ).catch(() => null);
+      if (retrySuggestion) {
+        log(`${label}: confirmed destination suggestion on retry → "${retrySuggestion}"`);
+        return true;
+      }
+    }
     if (filled && !suggestion) {
       log(`${label}: destination suggestion was not confirmed for "${searchTerm}"; refusing to submit a provider default/geolocated search`);
       return false;
@@ -4344,6 +4358,28 @@ async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_se
   if (!targetPage || targetPage.isClosed?.() || !searchTerm) return null;
   const chooseSuggestion = options?.chooseSuggestion !== false;
   const targetSuggestion = options?.targetSuggestion || null;
+  const suggestionNeedle = String(targetSuggestion || searchTerm || "").trim();
+  const pickSuggestion = async () => {
+    if (!chooseSuggestion) return null;
+    await targetPage.waitForTimeout(2_400).catch(() => {});
+    let suggestion = await chooseVisibleDestinationSuggestion(
+      targetPage,
+      searchTerm,
+      label,
+      targetSuggestion,
+      { requestId: options.requestId },
+    ).catch(() => null);
+    if (!suggestion && suggestionNeedle && suggestionNeedle !== searchTerm) {
+      suggestion = await chooseVisibleDestinationSuggestion(
+        targetPage,
+        suggestionNeedle,
+        label,
+        targetSuggestion,
+        { requestId: options.requestId },
+      ).catch(() => null);
+    }
+    return suggestion;
+  };
   const selectors = [
     'input[name="destination"]',
     '#destination_form_field',
@@ -4361,10 +4397,12 @@ async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_se
       await locator.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
       await locator.press("Backspace").catch(() => {});
       await locator.type(searchTerm, { delay: 35, timeout: 6_000 });
-      await targetPage.waitForTimeout(1_000).catch(() => {});
-      const suggestion = chooseSuggestion
-        ? await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion, { requestId: options.requestId }).catch(() => null)
-        : null;
+      let suggestion = await pickSuggestion();
+      if (!suggestion && chooseSuggestion) {
+        await locator.click({ timeout: 1_500 }).catch(() => {});
+        await targetPage.waitForTimeout(600).catch(() => {});
+        suggestion = await pickSuggestion();
+      }
       log(`${label}: typed destination into VRBO field "${selector}"${suggestion ? ` and selected "${suggestion}"` : ""}`);
       return { filled: selector, suggestion };
     } catch (e) {
@@ -4381,13 +4419,73 @@ async function fillVrboDestinationField(targetPage, searchTerm, label = "vrbo_se
     await targetPage.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
     await targetPage.keyboard.press("Backspace").catch(() => {});
     await targetPage.keyboard.type(searchTerm, { delay: 35 }).catch(() => {});
-    await targetPage.waitForTimeout(1_000).catch(() => {});
-    const suggestion = chooseSuggestion
-      ? await chooseVisibleDestinationSuggestion(targetPage, searchTerm, label, targetSuggestion, { requestId: options.requestId }).catch(() => null)
-      : null;
+    const suggestion = chooseSuggestion ? await pickSuggestion() : null;
     return { filled: "vision destination input", suggestion };
   }
+  const genericFilled = await fillVisibleSearchField(targetPage, searchTerm, label, {
+    targetSuggestion,
+    requestId: options.requestId,
+    chooseSuggestion,
+  }).catch(() => null);
+  if (genericFilled?.filled) {
+    log(`${label}: filled VRBO destination via generic search-field helper "${genericFilled.filled}"${genericFilled.suggestion ? ` → "${genericFilled.suggestion}"` : ""}`);
+    return genericFilled;
+  }
   return null;
+}
+
+async function readVrboHomepageFormSnapshot(targetPage) {
+  if (!targetPage || targetPage.isClosed?.()) return null;
+  return withSoftTimeout(
+    targetPage.evaluate(() => {
+      function isVisible(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 6 && rect.height > 6 &&
+          style.display !== "none" && style.visibility !== "hidden" &&
+          Number(style.opacity || "1") > 0.05;
+      }
+      function textOf(el) {
+        return [
+          el.textContent,
+          el.getAttribute?.("aria-label"),
+          el.getAttribute?.("title"),
+          el.getAttribute?.("value"),
+          el.getAttribute?.("placeholder"),
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      }
+      const controls = Array.from(document.querySelectorAll("input, button, [role='button'], [role='textbox'], [aria-label], [data-stid]"))
+        .filter((el) => el instanceof HTMLElement && isVisible(el))
+        .map((el) => ({ text: textOf(el), cls: String(el.className || "") }));
+      const destination = controls
+        .filter(({ text, cls }) => /destination|where to|where\?/i.test(`${text} ${cls}`) || /destination/i.test(cls))
+        .map(({ text }) => text)
+        .find((text) => text.length >= 3 && text.length <= 180) || "";
+      const dates = controls
+        .filter(({ text }) => /\b(?:dates?|check[\s-]*in|check[\s-]*out|arrival|departure)\b/i.test(text))
+        .map(({ text }) => text)
+        .find((text) => text.length >= 3 && text.length <= 120) || "";
+      return { destination, dates };
+    }),
+    2_000,
+    null,
+  );
+}
+
+function vrboHomepageFormMatchesRequest(snapshot, checkIn, checkOut, ...expectedValues) {
+  if (!snapshot) return { destinationOk: false, datesOk: false };
+  const pseudoState = {
+    url: "",
+    title: snapshot.destination,
+    bodyExcerpt: `${snapshot.destination} ${snapshot.dates}`,
+  };
+  return {
+    destinationOk: stateMatchesExpectedDestination(pseudoState, ...expectedValues),
+    datesOk: stateTextHasExpectedDates(pseudoState, checkIn, checkOut),
+    destinationText: snapshot.destination,
+    datesText: snapshot.dates,
+  };
 }
 
 async function processAirbnbSearch(id, params) {
@@ -5243,6 +5341,43 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   log(`vrbo_search ${id}: entered dates via VRBO homepage controls (${checkIn}→${checkOut})`);
   const visibleSearchWasAuthoritative = Boolean(primedDestination && pmDateEntryComplete(dateEntry));
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
+  let formSnapshot = await readVrboHomepageFormSnapshot(page);
+  let formCheck = vrboHomepageFormMatchesRequest(formSnapshot, checkIn, checkOut, effectiveSearchTerm, destination);
+  if (!formCheck.destinationOk || !formCheck.datesOk) {
+    log(
+      `vrbo_search ${id}: homepage form drift before submit ` +
+      `(destinationOk=${formCheck.destinationOk} datesOk=${formCheck.datesOk}; ` +
+      `where="${String(formCheck.destinationText || "").slice(0, 80)}" dates="${String(formCheck.datesText || "").slice(0, 80)}")`,
+    );
+    if (!formCheck.destinationOk) {
+      await fillVrboDestinationField(page, typedQuery, "vrbo_search_preflight", {
+        targetSuggestion: variant?.suggestionText || null,
+        requestId: id,
+      }).catch(() => null);
+    }
+    if (!formCheck.datesOk) {
+      dateEntry = mergeDateEntries(
+        dateEntry,
+        await applyOtaSearchDateInputs(page, checkIn, checkOut, "vrbo_search", "vrbo").catch(() => null),
+      );
+    }
+    formSnapshot = await readVrboHomepageFormSnapshot(page);
+    formCheck = vrboHomepageFormMatchesRequest(formSnapshot, checkIn, checkOut, effectiveSearchTerm, destination);
+    if (!formCheck.destinationOk || !formCheck.datesOk) {
+      throw new ProviderBrowserUnavailableError(
+        `VRBO homepage form did not keep destination/dates before search (${checkIn}→${checkOut}).`,
+        {
+          label: "vrbo_search",
+          id,
+          provider: "vrbo",
+          url: page.url(),
+          destinationText: formCheck.destinationText,
+          datesText: formCheck.datesText,
+          dateEntry,
+        },
+      );
+    }
+  }
   await clickVisibleSearchSubmit(page, "vrbo_search", { requestId: id }).catch(() => null);
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopVrboProviderIfBlocked(page, "vrbo_search", id);
@@ -5296,12 +5431,12 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     const expectedText = normalizeDestinationGuardText(`${effectiveSearchTerm} ${destination}`);
     const clearlyWrongFloridaDefault =
       /\b(?:orlando|kissimmee|florida)\b/.test(haystack) && !/\bflorida\b/.test(expectedText);
-    if (visibleSearchWasAuthoritative && !clearlyWrongFloridaDefault) {
+    if (visibleSearchWasAuthoritative && !clearlyWrongFloridaDefault && !correctionReasons.includes("destination")) {
       log(
-        `vrbo_search ${id}: accepting visible dropdown/date search despite ` +
-        `${correctionReasons.join("+")} not being echoed in the post-submit page state`,
+        `vrbo_search ${id}: accepting visible date entry despite ` +
+        `post-submit URL/text not echoing ${checkIn}→${checkOut}`,
       );
-      correctionReasons = [];
+      correctionReasons = correctionReasons.filter((reason) => reason !== "dates");
     }
   }
   if (correctionReasons.length > 0) {
@@ -6217,7 +6352,7 @@ async function applyOtaSearchDateInputs(targetPage, checkIn, checkOut, label, pr
   if (!pmDateEntryComplete(dateEntry)) {
     const openedLabel = String(dateEntry?.openedLabel || "");
     if (/\b(?:earn\s+airbnb\s+credit|featured\s+hotels|sign[ -]?in|log[ -]?in|register|create\s+account)\b/i.test(openedLabel)) {
-      await dismissObstructions(targetPage, `${label}_date_entry_obstruction`).catch(() => []);
+      await dismissObstructions(targetPage, `${label}_date_entry_obstruction`, { allowEscape: false }).catch(() => []);
       const retryEntry = await applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label, provider).catch((e) => {
         log(`${label}: homepage deterministic date retry failed: ${e?.message ?? e}`);
         return null;
@@ -6233,7 +6368,7 @@ async function applyOtaSearchDateInputs(targetPage, checkIn, checkOut, label, pr
     dateEntry = mergeDateEntries(dateEntry, vrboCalendarEntry);
   }
   if (!pmDateEntryComplete(dateEntry)) {
-    await dismissObstructions(targetPage, `${label}_date_entry_visual_assist`);
+    await dismissObstructions(targetPage, `${label}_date_entry_visual_assist`, { allowEscape: false });
     const visualEntry = await applyVisualPmDateFallback(targetPage, checkIn, checkOut).catch((e) => {
       log(`${label}: visual date assist failed: ${e?.message ?? e}`);
       return null;

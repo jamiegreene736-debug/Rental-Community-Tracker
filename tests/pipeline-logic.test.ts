@@ -1343,6 +1343,24 @@ console.log("\nSidecar date signal suite");
 console.log("  ✓ generic sidecar prices require both requested dates");
 }
 
+const workerSource = readFileSync(new URL("../daemon/vrbo-sidecar/worker.mjs", import.meta.url), "utf8");
+assert.match(
+  workerSource,
+  /correctionReasons\.includes\("destination"\)/,
+  "VRBO post-submit forgiveness must not ignore destination drift to the wrong resort",
+);
+assert.match(
+  workerSource,
+  /allowEscape: false/,
+  "VRBO date entry must not dismiss the open calendar with Escape",
+);
+assert.match(
+  workerSource,
+  /readVrboHomepageFormSnapshot/,
+  "VRBO search must verify visible destination and dates before clicking Search",
+);
+console.log("  ✓ VRBO homepage search guards stay strict on destination drift");
+
 // ---------- Community research/type guards ----------
 console.log("\ncommunity research/type suite");
 
