@@ -25895,11 +25895,14 @@ Return ONLY compact JSON with this exact shape:
       return `${nums[0]}-${nums[1]}-${name}`;
     };
 
-    const candidateRootMatches = (url: string, allowedRoots: Set<string>, contextText = ""): boolean => {
+    const candidateRootMatches = (url: string, allowedRoots: Set<string>, _contextText = ""): boolean => {
       if (allowedRoots.size === 0) return false;
       const root = streetRootFromListingAddress(parseListingAddressFromUrl(url));
       if (root && allowedRoots.has(root)) return true;
-      const hay = `${url} ${contextText}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      // Match on the listing URL only. Snippet/title context often mentions
+      // the resort street for unrelated nearby inventory (e.g. Waikoloa Village
+      // homes whose Google blurb references Waikoloa Beach Villas).
+      const hay = url.toLowerCase().replace(/[^a-z0-9]+/g, " ");
       const hyphenHay = hay.replace(/\s+/g, "-");
       for (const allowed of allowedRoots) {
         const slugKey = hawaiiStreetSlugKey(allowed);
@@ -26269,9 +26272,9 @@ Return ONLY compact JSON with this exact shape:
       // Known resort street (e.g. 92-1070 Olani): do not filter Apify Zillow through
       // repeatedCandidateRoots — Ko Olina slugs embed unit numbers between the
       // Hawaii street pair and "Olani", which fetch-unit-photos already handles.
+      const zillowApifyRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;
       for (const link of zillowApifyUrls) {
-        if (suppliedStreetRoot) addCandidateUrl(link, "zillow");
-        else addCandidateUrl(link, "zillow", "", "", allowedRoots);
+        addCandidateUrl(link, "zillow", "", "", zillowApifyRoots);
       }
       console.error(
         `[find-unit] Apify supplement: cities=${apifyDiscoveryCities.join("|")}, state=${communityLoc.state}, ` +
@@ -26579,7 +26582,7 @@ Return ONLY compact JSON with this exact shape:
       source: CandidateSource;
       address: string;
       unit: string;
-      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-internal-duplicate" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
+      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-internal-duplicate" | "skipped-outside-resort" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
       reason: string;
       platformCheck?: PlatformCheck;
     };
@@ -26593,6 +26596,29 @@ Return ONLY compact JSON with this exact shape:
     const sourceLabel = (s: CandidateSource): string =>
       s === "zillow" ? "Zillow" : s === "realtor" ? "Realtor.com" : s === "redfin" ? "Redfin" : s === "homes" ? "Homes.com" : "VRBO";
 
+    const resortAllowedRoots = communityAddressRoots.size > 0
+      ? communityAddressRoots
+      : directRoot
+      ? new Set([directRoot])
+      : null;
+    const rejectOutsideResort = (url: string, source: CandidateSource, address: string, unit: string): boolean => {
+      if (!resortAllowedRoots?.size) return false;
+      if (candidateRootMatches(url, resortAllowedRoots)) return false;
+      console.error(
+        `[find-unit] [${source}] ${url} outside ${communityName} resort street ` +
+        `(${Array.from(resortAllowedRoots).join(", ")}) — skipping`,
+      );
+      attempts.push({
+        sourceUrl: url,
+        source,
+        address,
+        unit: unit || "?",
+        verdict: "skipped-outside-resort",
+        reason: `Listing address does not match ${communityName} resort street.`,
+      });
+      return true;
+    };
+
     let budgetStopped = false;
     const candidatesToCheck = candidates.slice(0, MAX_CANDIDATES_TO_CHECK);
     for (const candidate of candidatesToCheck) {
@@ -26603,6 +26629,7 @@ Return ONLY compact JSON with this exact shape:
       }
       try {
         let { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
+        if (rejectOutsideResort(sourceUrl, source, address, unitNumber)) continue;
         const blockedUnitClaim = findReplacementBlockedUnitClaim(unitNumber, address, sameCommunityExclusions);
         if (blockedUnitClaim) {
           console.error(`[find-unit] [${source}] ${sourceUrl} unit ${blockedUnitClaim} is already used by another ${communityName} listing — skipping`);
@@ -26734,6 +26761,7 @@ Return ONLY compact JSON with this exact shape:
               }
               scrapedPhotoUrls = alternate.photos;
               candidateFacts = alternate.facts;
+              if (rejectOutsideResort(sourceUrl, source, address, unitNumber)) continue;
               platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
             }
           }
@@ -26866,6 +26894,7 @@ Return ONLY compact JSON with this exact shape:
 	      "skipped-photo-found": 0,
 	      "skipped-unknown-strict": 0,
       "skipped-internal-duplicate": 0,
+      "skipped-outside-resort": 0,
       "skipped-bedroom-mismatch": 0,
       "skipped-too-few-photos": 0,
       "skipped-vision-rejected": 0,
@@ -26896,6 +26925,7 @@ Return ONLY compact JSON with this exact shape:
 	      if (breakdown["skipped-photo-found"] > 0) parts.push(`${breakdown["skipped-photo-found"]} had 2+ strong private-photo matches on the enforced channel`);
 	      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
       if (breakdown["skipped-internal-duplicate"] > 0) parts.push(`${breakdown["skipped-internal-duplicate"]} already used by another listing in this community`);
+      if (breakdown["skipped-outside-resort"] > 0) parts.push(`${breakdown["skipped-outside-resort"]} outside the resort street`);
       if (breakdown["skipped-bedroom-mismatch"] > 0) parts.push(`${breakdown["skipped-bedroom-mismatch"]} had too few bedrooms`);
       if (breakdown["skipped-too-few-photos"] > 0) parts.push(`${breakdown["skipped-too-few-photos"]} had too few photos`);
       if (breakdown["skipped-vision-rejected"] > 0) parts.push(`${breakdown["skipped-vision-rejected"]} failed the bedroom/bathroom vision check`);
