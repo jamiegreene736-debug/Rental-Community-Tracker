@@ -2603,3 +2603,21 @@ assert.ok(
   "add-community should expose Check logs for bulk combo and photo fetch failures",
 );
 console.log("  ✓ operation diagnostics + remediate helpers");
+
+const bookingsSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
+const liveSearchSectionStart = bookingsSource.indexOf("function LiveSearchSection");
+assert.ok(liveSearchSectionStart >= 0, "LiveSearchSection should exist in bookings page");
+const liveSearchSectionBody = bookingsSource.slice(liveSearchSectionStart);
+const autoScoutHookIdx = liveSearchSectionBody.indexOf("autoAlternativeScoutAfterSearchRef");
+const firstEarlyReturnIdx = liveSearchSectionBody.indexOf("if (isLoading && !data)");
+assert.ok(autoScoutHookIdx >= 0, "LiveSearchSection should declare auto alternative scout ref");
+assert.ok(firstEarlyReturnIdx >= 0, "LiveSearchSection should have loading early return");
+assert.ok(
+  autoScoutHookIdx < firstEarlyReturnIdx,
+  "auto alternative scout hook must run before loading early return (Rules of Hooks)",
+);
+assert.ok(
+  liveSearchSectionBody.indexOf("onScoutAlternatives(advice, { auto: true })") >= 0,
+  "LiveSearchSection should auto-trigger alternative scout after failed search",
+);
+console.log("  ✓ LiveSearchSection auto alternative scout hook placement");
