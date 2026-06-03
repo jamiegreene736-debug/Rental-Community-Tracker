@@ -2875,6 +2875,78 @@ function GroundFloorRequirementNotice({
   );
 }
 
+type ListingPairWalkResponse = {
+  status: "ready";
+  walk: {
+    minutes: number;
+    feet: number;
+    description: string;
+    source: "geocoded" | "fallback";
+  };
+  confidence: "exact-address" | "listing-title" | "resort-default";
+  withinLimit: boolean;
+  maxMinutes: number;
+};
+
+function ComboOptionWalkDistance({
+  picks,
+  community,
+}: {
+  picks: AutoFillComboOption["picks"];
+  community: string;
+}) {
+  const listings = picks.slice(0, 2).map((pick) => ({ url: pick.url, title: pick.title }));
+  const query = useQuery<ListingPairWalkResponse>({
+    queryKey: ["/api/tools/listing-pair-proximity", community, listings[0]?.url, listings[1]?.url],
+    queryFn: async () => {
+      const response = await apiRequest("POST", "/api/tools/listing-pair-proximity", {
+        listings,
+        community,
+      });
+      return response.json() as Promise<ListingPairWalkResponse>;
+    },
+    enabled: listings.length === 2 && !!listings[0]?.url && !!listings[1]?.url,
+    staleTime: 10 * 60 * 1000,
+  });
+
+  if (listings.length < 2) return null;
+
+  const confidenceLabel = query.data?.confidence === "exact-address"
+    ? "address verified"
+    : query.data?.confidence === "listing-title"
+      ? "estimated from listing titles"
+      : "resort footprint estimate";
+  const isTooFar = query.data?.withinLimit === false;
+
+  return (
+    <div className={`mt-2 border-t pt-1.5 text-[11px] ${isTooFar ? "text-red-900" : "text-muted-foreground"}`}>
+      <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        <Footprints className="h-3 w-3 shrink-0" />
+        {query.isLoading ? (
+          <>
+            <Loader2 className="h-3 w-3 animate-spin" />
+            <span>Estimating walking distance between units…</span>
+          </>
+        ) : query.isError || !query.data ? (
+          <span>Walking distance unavailable</span>
+        ) : (
+          <>
+            <Badge className={`${isTooFar ? "bg-red-700" : "bg-sky-700"} text-white text-[9px]`}>
+              {query.data.walk.minutes} min walk
+            </Badge>
+            <span className={isTooFar ? "text-red-800" : "text-foreground/80"}>
+              {isTooFar
+                ? `Too far for buy-in pairing (limit ${query.data.maxMinutes} min). ${query.data.walk.description}`
+                : query.data.walk.description}
+            </span>
+            <span className="text-[10px]">{confidenceLabel}</span>
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
 function groundFloorTargetBedrooms(req?: GroundFloorRequirement | null): number[] {
   const explicit = (req?.targetBedrooms ?? [])
     .map((n) => Number(n))
@@ -3273,6 +3345,9 @@ function ComboComparisonPanel({
                   ))}
                 </div>
               </details>
+            )}
+            {displayedTotal != null && displayedPicks.length >= 2 && (
+              <ComboOptionWalkDistance picks={displayedPicks} community={community} />
             )}
           </div>
         )})}

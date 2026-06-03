@@ -2621,3 +2621,18 @@ assert.ok(
   "LiveSearchSection should auto-trigger alternative scout after failed search",
 );
 console.log("  ✓ LiveSearchSection auto alternative scout hook placement");
+
+const bookingsComboSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
+assert.ok(
+  bookingsComboSource.includes("ComboOptionWalkDistance"),
+  "bookings combo panel should show walking distance between combo units",
+);
+assert.ok(
+  bookingsComboSource.includes("/api/tools/listing-pair-proximity"),
+  "bookings combo panel should call listing-pair-proximity API",
+);
+assert.ok(
+  routesSource.includes('app.post("/api/tools/listing-pair-proximity"'),
+  "listing-pair-proximity route should exist",
+);
+console.log("  ✓ combo option walking distance UI + API");
