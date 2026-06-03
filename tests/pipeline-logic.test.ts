@@ -591,6 +591,45 @@ assert.deepEqual(
 );
 console.log("  ✓ live config has no duplicates");
 
+// ---------- Combo draft bedroom reconciliation ----------
+import { resolveComboUnitBedrooms } from "../shared/draft-unit-bedrooms.ts";
+
+console.log("\ndraft-unit-bedrooms suite");
+
+assert.deepEqual(
+  resolveComboUnitBedrooms({
+    listingTitle: "Sunny 6BR for 12 at Waikoloa Villas!",
+    unit1Bedrooms: 2,
+    unit2Bedrooms: 2,
+    combinedBedrooms: 6,
+  }),
+  { unit1: 3, unit2: 3, combined: 6 },
+  "under-counted symmetric units should split combined total",
+);
+console.log("  ✓ 2+2 vs 6BR title reconciles to 3+3");
+
+assert.deepEqual(
+  resolveComboUnitBedrooms({
+    listingTitle: "Sunny 6BR for 12 at Waikoloa Villas!",
+    unit1Bedrooms: 2,
+    unit2Bedrooms: 2,
+  }),
+  { unit1: 3, unit2: 3, combined: 6 },
+  "combined total inferred from listing title when field missing",
+);
+console.log("  ✓ infers combined from listing title");
+
+assert.deepEqual(
+  resolveComboUnitBedrooms({
+    unit1Bedrooms: 3,
+    unit2Bedrooms: 3,
+    combinedBedrooms: 6,
+  }),
+  { unit1: 3, unit2: 3, combined: 6 },
+  "already-correct counts should stay unchanged",
+);
+console.log("  ✓ correct 3+3 unchanged");
+
 // ---------- Pricing tables (shared/pricing-rates) ----------
 console.log("\npricing tables suite");
 
