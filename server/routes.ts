@@ -25238,6 +25238,8 @@ Return ONLY compact JSON with this exact shape:
       propertyId: bodyPropertyId,
       targetUnitId,
       expandedSearch: requestedExpandedSearch = false,
+      skipDiscovery: requestedSkipDiscovery = false,
+      resumeCandidates: requestedResumeCandidates = [],
     } = req.body as {
       communityFolder: string;
       requiredBedrooms?: number;
@@ -25252,9 +25254,20 @@ Return ONLY compact JSON with this exact shape:
       propertyId?: number;
       targetUnitId?: string;
       expandedSearch?: boolean;
+      skipDiscovery?: boolean;
+      resumeCandidates?: Array<{
+        sourceUrl: string;
+        source: "zillow" | "realtor" | "redfin" | "homes";
+        address: string;
+        unitNumber: string;
+        thumbnail?: string;
+        contextText?: string;
+        bedroomHint?: number | null;
+      }>;
     };
     const strict = requestedStrict === true && !!cleanChannel;
     const expandedSearch = requestedExpandedSearch === true;
+    const skipDiscovery = requestedSkipDiscovery === true;
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
     const normalizedBodyName = typeof bodyCommunityName === "string" ? bodyCommunityName.trim() : "";
@@ -25346,10 +25359,14 @@ Return ONLY compact JSON with this exact shape:
     // Discovery (SearchAPI + Apify) must not consume the whole route budget before
     // candidate checks run — expanded searches were stopping at ~9/58 with
     // "avoid a stuck request" because platform/photo work had almost no time left.
-    const DISCOVERY_BUDGET_MS = expandedSearch ? 95_000 : 80_000;
+    const DISCOVERY_BUDGET_MS = expandedSearch ? 70_000 : 60_000;
     const APIFY_SUPPLEMENT_BUDGET_MS = expandedSearch ? 100_000 : 75_000;
-    const PLATFORM_SEARCH_TIMEOUT_MS = 12_000;
+    const DISCOVERY_CANDIDATE_TARGET = expandedSearch ? 28 : 20;
+    const APIFY_SKIP_WHEN_CANDIDATES_AT = expandedSearch ? 18 : 12;
+    const PLATFORM_SEARCH_TIMEOUT_MS = 8_000;
     const PHOTO_SCRAPE_TIMEOUT_MS = 45_000;
+    const PLATFORM_CHECK_RESERVE_MS = 12_000;
+    const PHOTO_PIPELINE_RESERVE_MS = PHOTO_SCRAPE_TIMEOUT_MS + 10_000;
     const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 80 : 45;
     const discoveryElapsedMs = () => Date.now() - routeStartedAt;
     const hasDiscoveryBudget = () => discoveryElapsedMs() < DISCOVERY_BUDGET_MS;
@@ -25816,7 +25833,35 @@ Return ONLY compact JSON with this exact shape:
       console.error(`[find-unit] Community address roots: ${Array.from(directAllowedRoots).join(", ")}`);
     }
 
+    if (skipDiscovery) {
+      for (const row of requestedResumeCandidates ?? []) {
+        const sourceUrl = String(row?.sourceUrl ?? "").trim();
+        const source = row?.source;
+        if (!sourceUrl || !source) continue;
+        const lower = unitSwapListingKey(sourceUrl);
+        if (!lower || candidateUrlSet.has(lower) || skipUrlSet.has(lower)) continue;
+        candidateUrlSet.add(lower);
+        candidates.push({
+          sourceUrl,
+          source,
+          address: String(row.address ?? "").trim() || communityName,
+          unitNumber: String(row.unitNumber ?? "").trim(),
+          thumbnail: String(row.thumbnail ?? "").trim(),
+          contextText: String(row.contextText ?? "").trim(),
+          bedroomHint: typeof row.bedroomHint === "number" ? row.bedroomHint : null,
+        });
+      }
+      console.error(`[find-unit] Resuming candidate checks on ${candidates.length} pre-discovered URL(s) (skipDiscovery)`);
+    }
+
     for (const siteQuery of searchQueries) {
+      if (skipDiscovery) break;
+      if (candidates.length >= DISCOVERY_CANDIDATE_TARGET) {
+        console.warn(
+          `[find-unit] stopping discovery early — ${candidates.length} candidates (target ${DISCOVERY_CANDIDATE_TARGET})`,
+        );
+        break;
+      }
       if (!hasDiscoveryBudget()) {
         console.warn(`[find-unit] discovery budget exhausted after ${discoveryElapsedMs()}ms — skipping remaining SearchAPI queries`);
         break;
@@ -25869,7 +25914,13 @@ Return ONLY compact JSON with this exact shape:
     const allowedRoots = repeatedCandidateRoots();
     if (directRoot) allowedRoots.add(directRoot);
     for (const root of communityAddressRoots) allowedRoots.add(root);
-    if (communityLoc && allowedRoots.size > 0 && hasDiscoveryBudget()) {
+    if (
+      !skipDiscovery
+      && candidates.length < APIFY_SKIP_WHEN_CANDIDATES_AT
+      && communityLoc
+      && allowedRoots.size > 0
+      && hasDiscoveryBudget()
+    ) {
       const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({
         city: bodyLocation?.city ?? communityLoc.city,
         communityName,
@@ -26223,7 +26274,7 @@ Return ONLY compact JSON with this exact shape:
     let budgetStopped = false;
     const candidatesToCheck = candidates.slice(0, MAX_CANDIDATES_TO_CHECK);
     for (const candidate of candidatesToCheck) {
-      if (!hasRouteBudget(PHOTO_SCRAPE_TIMEOUT_MS + 15_000)) {
+      if (!hasRouteBudget(PLATFORM_CHECK_RESERVE_MS)) {
         budgetStopped = true;
         console.warn(`[find-unit] route budget nearly exhausted after ${attempts.length}/${candidates.length} candidates`);
         break;
@@ -26294,6 +26345,14 @@ Return ONLY compact JSON with this exact shape:
         // through to the photo+vision gates and surface the full
         // verdict in the response (caller can see other-channel state
         // too).
+
+        if (!hasRouteBudget(PHOTO_PIPELINE_RESERVE_MS)) {
+          budgetStopped = true;
+          console.warn(
+            `[find-unit] route budget too low for photo pipeline after ${attempts.length}/${candidates.length} platform checks`,
+          );
+          break;
+        }
 
         {
           // Two-stage quality filter before suggesting this candidate:
@@ -26525,6 +26584,18 @@ Return ONLY compact JSON with this exact shape:
       diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")})${expandedSearch ? " in expanded mode" : ""} — ${parts.join(", ")}.`;
     }
 
+    const uncheckedCandidates = budgetStopped
+      ? candidatesToCheck.slice(attempts.length).map((c) => ({
+        sourceUrl: c.sourceUrl,
+        source: c.source,
+        address: c.address,
+        unitNumber: c.unitNumber,
+        thumbnail: c.thumbnail,
+        contextText: c.contextText,
+        bedroomHint: c.bedroomHint,
+      }))
+      : [];
+
     return res.json({
       error: `No eligible replacement units found. ${diagnostic}`,
       diagnostic: {
@@ -26534,11 +26605,14 @@ Return ONLY compact JSON with this exact shape:
         cleanChannel: cleanChannel ?? null,
         strict,
         expandedSearch,
+        skipDiscovery,
         totalCandidates,
         sourceBreakdown,
         breakdown,
         attempts,
         checkedCandidates: attempts.length,
+        uncheckedCandidates,
+        uncheckedCount: uncheckedCandidates.length,
         maxCandidatesChecked: MAX_CANDIDATES_TO_CHECK,
         budgetStopped,
       },
