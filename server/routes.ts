@@ -11035,6 +11035,41 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/operations/city-vrbo-inventory", async (req: Request, res: Response) => {
+    try {
+      const propertyId = parseInt(req.query.propertyId as string, 10);
+      const checkIn = req.query.checkIn as string;
+      const checkOut = req.query.checkOut as string;
+      if (!propertyId || Number.isNaN(propertyId)) {
+        return res.status(400).json({ error: "propertyId required" });
+      }
+      if (!checkIn || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+      }
+      const unitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
+      if (!unitConfig || unitConfig.units.length < 2) {
+        return res.status(400).json({ error: "Property needs at least two configured unit slots for city combo inventory" });
+      }
+      const { runCityVrboInventoryScan } = await import("./city-vrbo-inventory");
+      const payload = await runCityVrboInventoryScan({
+        community: unitConfig.community,
+        checkIn,
+        checkOut,
+        bedroomPlan: unitConfig.units.map((unit) => unit.bedrooms),
+      });
+      return res.json({
+        propertyId,
+        community: unitConfig.community,
+        unitLabels: unitConfig.units.map((unit) => unit.unitLabel),
+        bedroomPlan: unitConfig.units.map((unit) => unit.bedrooms),
+        ...payload,
+      });
+    } catch (e: any) {
+      console.error("[city-vrbo-inventory] error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });

@@ -1338,6 +1338,196 @@ function AlternativeMapInventoryPanel({
   );
 }
 
+type CityVrboInventoryResponse = {
+  propertyId: number;
+  community: string;
+  citySearchTerm: string;
+  nights: number;
+  listings: Array<{
+    url: string;
+    title: string;
+    bedrooms?: number | null;
+    nightlyPrice?: number;
+    totalPrice?: number;
+    lat?: number | null;
+    lng?: number | null;
+    sourceLabel?: string;
+  }>;
+  byBedroom: Record<number, Array<CityVrboInventoryResponse["listings"][number]>>;
+  suggestedPair: {
+    resortPhrase: string;
+    bedrooms: number[];
+    picks: CityVrboInventoryResponse["listings"];
+    totalCost: number;
+    walkMinutes: number | null;
+    walkSource: string;
+  } | null;
+  sidecar: {
+    workerOnline: boolean;
+    durationMs: number;
+    reason: string;
+    rawCount: number;
+    mapHarvest: Record<string, unknown> | null;
+  };
+};
+
+function downloadCityVrboInventoryExport(data: CityVrboInventoryResponse) {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    ...data,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `city-vrbo-${data.community.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "export"}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFillComboOption | null {
+  const pair = data.suggestedPair;
+  if (!pair?.picks?.length || pair.picks.length !== pair.bedrooms.length) return null;
+  return {
+    label: `${pair.bedrooms.map((b) => `${b}BR`).join(" + ")} · ${pair.resortPhrase}`,
+    bedrooms: pair.bedrooms,
+    totalCost: pair.totalCost,
+    selected: true,
+    note: `City VRBO inventory${pair.walkMinutes != null ? ` · ~${pair.walkMinutes} min walk` : ""}`,
+    picks: pair.picks.map((pick, index) => ({
+      bedrooms: pair.bedrooms[index] ?? Number(pick.bedrooms) || 0,
+      source: "vrbo",
+      sourceLabel: pick.sourceLabel ?? "Vrbo",
+      title: pick.title,
+      totalPrice: Number(pick.totalPrice) || 0,
+      nightlyPrice: pick.nightlyPrice,
+      url: pick.url,
+      verified: "yes",
+      verifiedReason: "Matched resort phrase in city VRBO map inventory",
+    })),
+  };
+}
+
+function CityVrboInventoryPanel({
+  propertyId,
+  reservation,
+  community,
+  bedroomPlan,
+  onAttachCombo,
+  attaching,
+}: {
+  propertyId: number;
+  reservation: GuestyReservation;
+  community: string;
+  bedroomPlan: number[];
+  onAttachCombo: (option: AutoFillComboOption) => void;
+  attaching?: boolean;
+}) {
+  const toDateOnly = (s: string | undefined): string => {
+    if (!s) return "";
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+  };
+  const checkIn = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
+  const checkOut = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+  const [scanNonce, setScanNonce] = useState(0);
+  const { data, isFetching, isError, error } = useQuery<CityVrboInventoryResponse>({
+    queryKey: ["/api/operations/city-vrbo-inventory", propertyId, checkIn, checkOut, scanNonce],
+    queryFn: ({ signal }) => {
+      const params = new URLSearchParams({
+        propertyId: String(propertyId),
+        checkIn,
+        checkOut,
+      });
+      return apiGetJson<CityVrboInventoryResponse>(`/api/operations/city-vrbo-inventory?${params.toString()}`, signal);
+    },
+    enabled: scanNonce > 0 && !!checkIn && !!checkOut,
+    staleTime: 0,
+  });
+  const comboOption = data ? cityComboOptionFromInventory(data) : null;
+  const bedroomGroups = data
+    ? Object.entries(data.byBedroom).sort(([a], [b]) => Number(b) - Number(a))
+    : [];
+  const harvest = data?.sidecar?.mapHarvest;
+  return (
+    <div className="rounded border border-violet-200 bg-violet-50/40 px-3 py-2 text-[11px]">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="font-semibold text-violet-950">City VRBO map inventory</p>
+          <p className="text-[10px] text-muted-foreground">
+            Search {community} as the VRBO location (not resort bounds), export all scraped listings, then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          className="h-7"
+          disabled={isFetching || !checkIn || !checkOut}
+          onClick={() => setScanNonce((n) => n + 1)}
+        >
+          {isFetching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
+          {isFetching ? "Scanning city map…" : scanNonce > 0 ? "Re-scan city map" : "Scan city VRBO map"}
+        </Button>
+      </div>
+      {isError && (
+        <p className="mt-1 text-red-700">{(error as Error)?.message ?? "City inventory scan failed"}</p>
+      )}
+      {data && (
+        <>
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            Term: {data.citySearchTerm} · exported {data.listings.length} listing{data.listings.length === 1 ? "" : "s"}
+            {data.sidecar.rawCount ? ` (raw ${data.sidecar.rawCount})` : ""}
+            {harvest && typeof harvest.mergedCount === "number" ? ` · merged ${harvest.mergedCount}` : ""}
+          </p>
+          <div className="mt-1 flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" className="h-7" onClick={() => downloadCityVrboInventoryExport(data)}>
+              <FileText className="mr-1 h-3.5 w-3.5" />
+              Export all ({data.listings.length})
+            </Button>
+            {comboOption && (
+              <Button
+                size="sm"
+                className="h-7"
+                disabled={attaching}
+                onClick={() => onAttachCombo(comboOption)}
+              >
+                {attaching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Zap className="mr-1 h-3.5 w-3.5" />}
+                Attach matched combo
+              </Button>
+            )}
+          </div>
+          {comboOption ? (
+            <p className="mt-1 font-medium text-emerald-900">
+              Suggested pair: {comboOption.label} · {fmtMoney(comboOption.totalCost)}
+            </p>
+          ) : (
+            <p className="mt-1 text-amber-900">No walkable {bedroomPlan.map((b) => `${b}BR`).join(" + ")} pair with a shared resort title yet.</p>
+          )}
+          {bedroomGroups.length > 0 && (
+            <div className="mt-1 max-h-32 space-y-1 overflow-y-auto">
+              {bedroomGroups.map(([bedrooms, rows]) => (
+                <div key={bedrooms}>
+                  <p className="text-[10px] font-semibold text-slate-700">{bedrooms}BR ({rows.length})</p>
+                  {rows.slice(0, 6).map((row) => (
+                    <a
+                      key={row.url}
+                      href={row.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block truncate text-sky-800 underline underline-offset-2"
+                      title={row.title}
+                    >
+                      {fmtMoney(row.totalPrice || row.nightlyPrice)} · {row.title}
+                    </a>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function candidateWalkMinutes(a: Pick<LiveCandidate, "lat" | "lng">, b: Pick<LiveCandidate, "lat" | "lng">): number | null {
   const aLat = Number(a.lat);
   const aLng = Number(a.lng);
@@ -8866,6 +9056,16 @@ export default function Bookings() {
                               : r.slots.find((slot) => slot.community)?.community ?? ""}
                             onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
                             attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
+                          />
+                        )}
+                        {selectedPropertyId && (PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.units.length ?? 0) >= 2 && (
+                          <CityVrboInventoryPanel
+                            propertyId={selectedPropertyId}
+                            reservation={r}
+                            community={PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""}
+                            bedroomPlan={PROPERTY_UNIT_CONFIGS[selectedPropertyId]!.units.map((unit) => unit.bedrooms)}
+                            onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
+                            attaching={attachComboMutation.isPending}
                           />
                         )}
                         {searchAudits.length > 0 && (() => {
