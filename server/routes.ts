@@ -27114,12 +27114,87 @@ Return ONLY compact JSON with this exact shape:
       );
     };
 
+    const runFindUnitStackedRentCastDiscovery = async (): Promise<void> => {
+      const communityLoc = communityLocForQueries;
+      if (!communityLoc || !isRentCastDiscoveryEnabled() || !searchApiKey) return;
+      const rentcastCities = [...new Set(discoverySearchCitiesForPhotoSearch({
+        city: bodyLocation?.city ?? communityLoc.city,
+        communityName,
+        streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
+      }))].slice(0, 3);
+      if (rentcastCities.length === 0) return;
+      const rentcastBudgetMs = Math.min(
+        15_000,
+        Math.max(6_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
+      );
+      const allowedRoots = repeatedCandidateRoots();
+      if (directRoot) allowedRoots.add(directRoot);
+      for (const root of communityAddressRoots) allowedRoots.add(root);
+      if (suppliedStreetRoot) allowedRoots.add(suppliedStreetRoot);
+      const filterRoots = suppliedStreetRoot
+        ? new Set([suppliedStreetRoot])
+        : allowedRoots.size > 0
+          ? allowedRoots
+          : directAllowedRoots;
+      const harvest = await withStepTimeout(
+        harvestRentCastSaleListings({
+          cities: rentcastCities,
+          state: communityLoc.state,
+          minBedrooms: requiredBedroomCount,
+          maxBedrooms: requiredBedroomCount,
+          limitPerCity: requiredBedroomCount ? 80 : 50,
+          timeoutMs: rentcastBudgetMs,
+          allowedStreetRoots: suppliedStreetRoot ? new Set([suppliedStreetRoot]) : undefined,
+        }),
+        rentcastBudgetMs,
+        { candidates: [], rawCount: 0, filteredCount: 0, citiesQueried: [], errors: [] },
+        "stacked RentCast discovery",
+      );
+      if (harvest.candidates.length === 0) {
+        console.error(
+          `[find-unit] stacked RentCast discovery: raw=${harvest.rawCount} kept=0 (no resolve)`,
+        );
+        return;
+      }
+      const resolved = await withStepTimeout(
+        resolveRentCastCandidatesToPortalUrls({
+          listings: harvest.candidates,
+          searchApiKey,
+          maxLookups: expandedSearch ? 45 : 30,
+          timeoutMs: 10_000,
+        }),
+        12_000,
+        { resolvedZillow: 0, resolvedRealtor: 0, lookupsRun: 0, urls: [] },
+        "RentCast portal resolve",
+      );
+      const beforeRentCast = candidates.length;
+      for (const row of resolved.urls) {
+        if (row.zillow) addCandidateUrl(row.zillow, "zillow", "", "", filterRoots);
+        if (row.realtor) addCandidateUrl(row.realtor, "realtor", "", "", filterRoots);
+      }
+      console.error(
+        `[find-unit] stacked RentCast discovery: cities=${rentcastCities.join("|")}, ` +
+        `raw=${harvest.rawCount} kept=${harvest.filteredCount} ` +
+        `resolvedZ=${resolved.resolvedZillow} resolvedR=${resolved.resolvedRealtor} ` +
+        `added=${candidates.length - beforeRentCast}`,
+      );
+    };
+
     let apifyDiscoveryPromise: Promise<void> | null = null;
+    let rentcastDiscoveryPromise: Promise<void> | null = null;
     if (!skipDiscovery && communityLocForQueries) {
       apifyDiscoveryPromise = runFindUnitStackedApifyDiscovery().catch((e: any) => {
         console.error(`[find-unit] stacked Apify discovery failed: ${e?.message ?? e}`);
       });
-      console.error("[find-unit] stacked Apify discovery started in parallel with SearchAPI/Google discovery");
+      if (isRentCastDiscoveryEnabled() && searchApiKey) {
+        rentcastDiscoveryPromise = runFindUnitStackedRentCastDiscovery().catch((e: any) => {
+          console.error(`[find-unit] stacked RentCast discovery failed: ${e?.message ?? e}`);
+        });
+      }
+      console.error(
+        "[find-unit] stacked Apify discovery started in parallel with SearchAPI/Google discovery" +
+        (rentcastDiscoveryPromise ? " (+ RentCast leg)" : ""),
+      );
     }
 
     if (!skipDiscovery) {
@@ -27222,6 +27297,11 @@ Return ONLY compact JSON with this exact shape:
         await apifyDiscoveryPromise;
       } else if (!skipDiscovery && communityLocForQueries && process.env.APIFY_API_TOKEN) {
         await runFindUnitStackedApifyDiscovery();
+      }
+      if (rentcastDiscoveryPromise) {
+        await rentcastDiscoveryPromise;
+      } else if (!skipDiscovery && communityLocForQueries && isRentCastDiscoveryEnabled() && searchApiKey) {
+        await runFindUnitStackedRentCastDiscovery();
       }
     }
 
@@ -32265,18 +32345,93 @@ Return ONLY compact JSON with this exact shape:
       );
     };
 
-    const runSearchApiDiscovery = async () => {
+    const runZillowSearchApiDiscovery = async () => {
+      await harvestQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow");
+    };
+
+    const runSupplementalSearchApiDiscovery = async () => {
       await Promise.all([
-        harvestQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
         harvestQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
         harvestQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
         harvestQueries(brokerageQueries, /^https?:\/\//i, "brokerage"),
       ]);
     };
 
-    // Stacked discovery: Apify native search + SearchAPI Google site:
-    // in parallel (not SearchAPI-first with Apify as a late supplement).
-    await Promise.all([runApifyDiscovery(), runSearchApiDiscovery()]);
+    const discoveryCitiesForRentCast = isCityWide
+      ? [city]
+      : [...new Set(discoverySearchCitiesForPhotoSearch({ city, communityName }))].slice(0, 3);
+    const rentcastLimitPerCity = isCityWide ? 150 : 100;
+    const rentcastMaxResolverLookups = isCityWide ? 50 : 35;
+
+    const runRentCastDiscovery = async (): Promise<{
+      raw: number;
+      kept: number;
+      resolvedZillow: number;
+      resolvedRealtor: number;
+    }> => {
+      if (!isRentCastDiscoveryEnabled() || discoveryCitiesForRentCast.length === 0) {
+        return { raw: 0, kept: 0, resolvedZillow: 0, resolvedRealtor: 0 };
+      }
+      const harvest = await harvestRentCastSaleListings({
+        cities: discoveryCitiesForRentCast,
+        state,
+        minBedrooms: !isAnyBedroom && numericBedrooms ? numericBedrooms : undefined,
+        maxBedrooms: !isAnyBedroom && numericBedrooms ? numericBedrooms : undefined,
+        limitPerCity: rentcastLimitPerCity,
+        timeoutMs: isCityWide ? 15_000 : 12_000,
+      });
+      if (harvest.candidates.length === 0) {
+        return {
+          raw: harvest.rawCount,
+          kept: harvest.filteredCount,
+          resolvedZillow: 0,
+          resolvedRealtor: 0,
+        };
+      }
+      const resolved = await resolveRentCastCandidatesToPortalUrls({
+        listings: harvest.candidates,
+        searchApiKey: apiKey,
+        maxLookups: rentcastMaxResolverLookups,
+        timeoutMs: 12_000,
+      });
+      const addressRootSet = repeatedHarvestRoots();
+      for (const row of resolved.urls) {
+        if (row.zillow) {
+          if (!isCityWide && addressRootSet.size > 0) {
+            addApifyCandidateUrls([row.zillow], "zillow", { addressRoots: addressRootSet });
+          } else {
+            addApifyCandidateUrls([row.zillow], "zillow");
+          }
+        }
+        if (row.realtor) {
+          if (!isCityWide && addressRootSet.size > 0) {
+            addApifyCandidateUrls([row.realtor], "realtor", { addressRoots: addressRootSet });
+          } else {
+            addApifyCandidateUrls([row.realtor], "realtor");
+          }
+        }
+      }
+      return {
+        raw: harvest.rawCount,
+        kept: harvest.filteredCount,
+        resolvedZillow: resolved.resolvedZillow,
+        resolvedRealtor: resolved.resolvedRealtor,
+      };
+    };
+
+    // Stacked discovery: Apify + Zillow SearchAPI + RentCast (+ Realtor/Redfin/brokerage) in parallel.
+    const rentcastCounts = await Promise.all([
+      runApifyDiscovery(),
+      runZillowSearchApiDiscovery(),
+      runRentCastDiscovery(),
+      runSupplementalSearchApiDiscovery(),
+    ]).then(([, , rentcast]) => rentcast);
+    console.log(
+      `[find-clean-unit] stacked discovery for "${communityName ?? city}": ` +
+      `rentcast(raw=${rentcastCounts.raw} kept=${rentcastCounts.kept} ` +
+      `resolvedZ=${rentcastCounts.resolvedZillow} resolvedR=${rentcastCounts.resolvedRealtor}) ` +
+      `total=${candidateUrls.length}`,
+    );
 
     const addressRootSet = repeatedHarvestRoots();
     if (!isCityWide && addressRootSet.size > 0) {
