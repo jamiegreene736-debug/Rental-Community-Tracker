@@ -3445,8 +3445,8 @@ assert.ok(
 );
 assert.ok(
   bookingsSource.includes("CityVrboInventoryPanel") &&
-    bookingsSource.includes("downloadCityVrboInventoryExport"),
-  "bookings UI should scan/export city VRBO inventory and attach matched combos",
+    !bookingsSource.includes("downloadCityVrboInventoryExport"),
+  "bookings UI should show city VRBO inventory results without JSON file export",
 );
 assert.ok(
   vrboWorkerSource.includes("deepHarvest") && vrboWorkerSource.includes("deepMapHarvest"),

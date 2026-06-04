@@ -1371,20 +1371,6 @@ type CityVrboInventoryResponse = {
   };
 };
 
-function downloadCityVrboInventoryExport(data: CityVrboInventoryResponse) {
-  const payload = {
-    exportedAt: new Date().toISOString(),
-    ...data,
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `city-vrbo-${data.community.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "export"}.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
 function liveCandidateFromCityComboPick(
   pick: AutoFillComboOption["picks"][number],
   slotBedrooms: number,
@@ -1489,7 +1475,7 @@ function CityVrboInventoryPanel({
         <div>
           <p className="font-semibold text-violet-950">City VRBO map inventory</p>
           <p className="text-[10px] text-muted-foreground">
-            Runs automatically after Auto-fill cheapest if resort search fails. One city-wide VRBO search ({community} + dates), export all listings, then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title (not separate community names).
+            Runs automatically after Auto-fill cheapest if resort search fails. One city-wide VRBO search ({community} + dates), then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title (not separate community names).
           </p>
         </div>
         <Button
@@ -1508,16 +1494,12 @@ function CityVrboInventoryPanel({
       {data && (
         <>
           <p className="mt-1 text-[10px] text-muted-foreground">
-            Term: {data.citySearchTerm} · exported {data.listings.length} listing{data.listings.length === 1 ? "" : "s"}
+            Term: {data.citySearchTerm} · {data.listings.length} listing{data.listings.length === 1 ? "" : "s"} scraped
             {data.sidecar.rawCount ? ` (raw ${data.sidecar.rawCount})` : ""}
             {harvest && typeof harvest.mergedCount === "number" ? ` · merged ${harvest.mergedCount}` : ""}
           </p>
-          <div className="mt-1 flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" className="h-7" onClick={() => downloadCityVrboInventoryExport(data)}>
-              <FileText className="mr-1 h-3.5 w-3.5" />
-              Export all ({data.listings.length})
-            </Button>
-            {comboOption && (
+          {comboOption && (
+            <div className="mt-1">
               <Button
                 size="sm"
                 className="h-7"
@@ -1527,8 +1509,8 @@ function CityVrboInventoryPanel({
                 {attaching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Zap className="mr-1 h-3.5 w-3.5" />}
                 Attach matched combo
               </Button>
-            )}
-          </div>
+            </div>
+          )}
           {comboOption ? (
             <p className="mt-1 font-medium text-emerald-900">
               Suggested pair: {comboOption.label} · {fmtMoney(comboOption.totalCost)}
