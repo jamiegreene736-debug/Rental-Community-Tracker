@@ -1825,6 +1825,22 @@ assert.ok(
   "replacement discovery must stop once enough candidates are queued for checking",
 );
 assert.ok(
+  routeSource.includes("const DISCOVERY_BEDROOM_EXPLICIT_TARGET = expandedSearch ? 8 : 5"),
+  "replacement discovery must track explicit bedroom matches for Apify supplement decisions",
+);
+assert.ok(
+  routeSource.includes("const discoveryTargetMet = (): boolean =>"),
+  "replacement discovery early-stop must count qualifying bedroom candidates, not wrong-size inventory",
+);
+assert.ok(
+  routeSource.includes("bedroomHint < requiredBedroomCount"),
+  "replacement discovery must skip harvesting Google hits that advertise too few bedrooms",
+);
+assert.ok(
+  routeSource.includes("needsApifyForBedroomSearch"),
+  "replacement discovery must run Apify when bedroom-scoped pool is still thin",
+);
+assert.ok(
   routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
   "replacement search must reserve a dedicated candidate-check budget after discovery",
 );
