@@ -6083,6 +6083,56 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
   return cards.map((card) => ({ ...card, searchVariant: variantLabel }));
 }
 
+async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
+  for (let pass = 0; pass < passes; pass++) {
+    const snapshot = await withSoftTimeout(
+      targetPage.evaluate(() => {
+        function visible(el) {
+          if (!el || !(el instanceof HTMLElement)) return false;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 80 && rect.height > 120
+            && rect.bottom >= 0 && rect.right >= 0
+            && rect.top <= window.innerHeight && rect.left <= window.innerWidth
+            && style.display !== "none" && style.visibility !== "hidden";
+        }
+        const scrollables = Array.from(document.querySelectorAll("main, section, aside, [role='main'], [data-stid], div"))
+          .filter((el) => el instanceof HTMLElement && visible(el) && el.scrollHeight > el.clientHeight + 180)
+          .map((el) => ({
+            el,
+            cardCount: el.querySelectorAll?.('[data-stid="lodging-card-responsive"], a[href^="/"][href*="?"]').length ?? 0,
+            overflow: el.scrollHeight - el.clientHeight,
+            rect: el.getBoundingClientRect(),
+          }))
+          .sort((a, b) => (b.cardCount - a.cardCount) || (b.overflow - a.overflow));
+        const targets = scrollables.slice(0, 3);
+        for (const target of targets) {
+          target.el.scrollBy?.({ top: Math.max(260, Math.round(target.el.clientHeight * 0.85)), left: 0, behavior: "instant" });
+        }
+        window.scrollBy({ top: Math.round(window.innerHeight * 0.65), left: 0, behavior: "instant" });
+        return {
+          pass: pass + 1,
+          scrollTargets: targets.length,
+          visibleCards: document.querySelectorAll('[data-stid="lodging-card-responsive"]').length,
+          propertyLinks: Array.from(document.querySelectorAll('a[href]')).filter((a) => /^\/\d+/.test(a.getAttribute("href") || "")).length,
+          topTargetCards: targets[0]?.cardCount ?? 0,
+          topTargetOverflow: targets[0]?.overflow ?? 0,
+        };
+      }),
+      2_500,
+      null,
+    );
+    if (snapshot) {
+      log(
+        `vrbo_search ${id}: map harvest pass ${snapshot.pass}/${passes} ` +
+        `targets=${snapshot.scrollTargets} visibleCards=${snapshot.visibleCards} propertyLinks=${snapshot.propertyLinks} ` +
+        `topCards=${snapshot.topTargetCards} overflow=${snapshot.topTargetOverflow}`,
+      );
+    }
+    await boundedPageDelay(targetPage, pass < 2 ? 1_200 : 900);
+  }
+}
+
 async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
@@ -6131,6 +6181,11 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
         excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
         retryLater: true,
       });
+    }
+    if (!bounds) {
+      await harvestVrboMapResultCards(page, id, 8);
+    } else {
+      await harvestVrboMapResultCards(page, id, 3);
     }
     const domCards = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm);
     const networkCards = networkCapture.candidates();
