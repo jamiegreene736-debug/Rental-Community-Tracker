@@ -2372,16 +2372,23 @@ assert.ok(
   findBuyInRouteSource.includes("const [airbnb, googleHotelsRows] = alternativeScoutOtaMapOnly") &&
     findBuyInRouteSource.includes("withTimeout(airbnbPromise, sidecarSourceBudgetMs") &&
     findBuyInRouteSource.includes("withTimeout(googleHotelsPromise, googleHotelsBudgetMs"),
-  "find-buy-in should run SearchAPI Airbnb + Google Hotels before sidecar VRBO map search",
+  "find-buy-in should run SearchAPI Airbnb + Google Hotels before sidecar VRBO resort dropdown search",
 );
 assert.ok(
   findBuyInRouteSource.indexOf("const [airbnb, googleHotelsRows] = alternativeScoutOtaMapOnly") <
     findBuyInRouteSource.indexOf("const [booking, vrbo] = await Promise.all"),
-  "find-buy-in should finish SearchAPI before VRBO map sidecar search",
+  "find-buy-in should finish SearchAPI before VRBO resort dropdown sidecar search",
 );
 assert.ok(
-  findBuyInRouteSource.includes('searchMode: "map_bounds"') && findBuyInRouteSource.includes("mapSearch: {"),
-  "find-buy-in should request sidecar map-bounds searches instead of destination dropdown variants",
+  findBuyInRouteSource.includes('searchMode: "destination_dropdown"')
+    && !findBuyInRouteSource.includes('searchMode: "map_bounds"'),
+  "find-buy-in should request sidecar resort-name dropdown searches instead of map-bounds harvest",
+);
+assert.ok(
+  findBuyInRouteSource.includes("sources: {")
+    && findBuyInRouteSource.includes("vrboAll:")
+    && findBuyInRouteSource.includes("vrboMatchesBedroomAndTitle"),
+  "find-buy-in should export all VRBO rows then filter by bedroom count and resort tokens in titles",
 );
 assert.ok(
   findBuyInRouteSource.includes("const bookingPromise: Promise<Candidate[]> = Promise.resolve([])") &&
@@ -2395,12 +2402,12 @@ assert.ok(
   "find-buy-in should centralize date-specific OTA search proof for unit-type confidence",
 );
 assert.ok(
-  routeSource.includes("sidecar searched .* with the resort(?: bounds)?, dates, and bedroom filter and scraped this priced result card"),
-  "Vrbo map sidecar search proof should contribute to unit-type confidence",
+  routeSource.includes("sidecar searched vrbo.com with the resort destination dropdown"),
+  "Vrbo resort dropdown sidecar search proof should contribute to unit-type confidence",
 );
 assert.ok(
   routeSource.includes("if (candidateHasDateSpecificOtaSearchProof(c)) score += 30"),
-  "Vrbo map sidecar rows should not stall under the 85 confidence threshold after passing target/BR proof",
+  "Vrbo resort dropdown sidecar rows should not stall under the 85 confidence threshold after passing bedroom/title proof",
 );
 console.log("  ✓ buy-in SearchAPI phases complete before local-Chrome sidecar phases");
 
@@ -3154,11 +3161,10 @@ assert.ok(
   "VRBO city map scans should turn off map auto-search and avoid binding city searches to the visible map viewport",
 );
 assert.ok(
-  vrboWorkerSource.includes("map inventory merged") &&
-    vrboWorkerSource.includes("networkCapture.dispose()") &&
-    vrboWorkerSource.includes("mapHarvest") &&
-    routesSource.includes("captured this result from VRBO's map inventory response"),
-  "VRBO network inventory should be merged with DOM cards, disposed after each run, and surfaced in buy-in proof text",
+  vrboWorkerSource.includes("starting resort list harvest") &&
+    vrboWorkerSource.includes("harvestVrboMapResultCards") &&
+    routesSource.includes("resort destination dropdown, dates, and bedroom export"),
+  "VRBO resort dropdown search should scroll-harvest all visible cards and surface dropdown export proof text",
 );
 assert.ok(
   vrboWorkerSource.includes("finalHarvestTotal") &&

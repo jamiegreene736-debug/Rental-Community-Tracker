@@ -10665,7 +10665,7 @@ export async function registerRoutes(
       ? `search:${requestedSearchTerm.toLowerCase()}`
       : "search:default";
     const scoutPhraseKey = requestedResortPhrase ? `phrase:${requestedResortPhrase.toLowerCase()}` : "phrase:none";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-no-lens-pm-gh-vrbo-map-v2|${scoutMapKey}|${scoutSearchKey}|${scoutPhraseKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-vrbo-resort-dropdown-export-v1|${scoutMapKey}|${scoutSearchKey}|${scoutPhraseKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     // Result HTTP cache is off by default (FIND_BUY_IN_TTL_MS=0), but in-flight
     // dedup must stay on unless the caller explicitly opts out with nocache=1.
     // Backgrounding the Operations tab closes the browser socket; without
@@ -11021,7 +11021,7 @@ export async function registerRoutes(
     const vrboWebsiteSearchTerm = buyInPlatformSearch.vrbo ?? websiteSearchTerm;
     const pmWebsiteSearchTerm = buyInPlatformSearch.pm ?? websiteSearchTerm;
     console.log(
-      `[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" booking=disabled map=${mapSearchScope}:${mapSearchBounds ? `${mapSearchCenter?.lat},${mapSearchCenter?.lng} r=${mapSearchRadiusKm?.toFixed(2)}km` : "none"} listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${requestedBedrooms}${otaSearchBedrooms !== requestedBedrooms ? ` otaSearchBedrooms=${otaSearchBedrooms}` : ""} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`,
+      `[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" booking=disabled vrboMode=resort-dropdown-export-all map=${mapSearchScope}:${mapSearchBounds ? `${mapSearchCenter?.lat},${mapSearchCenter?.lng} r=${mapSearchRadiusKm?.toFixed(2)}km` : "none"} listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${requestedBedrooms}${otaSearchBedrooms !== requestedBedrooms ? ` otaSearchBedrooms=${otaSearchBedrooms}` : ""} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`,
     );
 
     const scanStartedAt = Date.now();
@@ -11539,7 +11539,8 @@ export async function registerRoutes(
         return /SearchAPI Airbnb engine returned this date-specific priced result/i.test(reason);
       }
       if (c.source === "vrbo") {
-        return /sidecar searched .* with the resort(?: bounds)?, dates, and bedroom filter and scraped this priced result card/i.test(reason);
+        return /sidecar searched vrbo\.com with the resort destination dropdown/i.test(reason)
+          || /sidecar searched .* with the resort(?: bounds)?, dates, and bedroom filter and scraped this priced result card/i.test(reason);
       }
       return false;
     };
@@ -11601,6 +11602,35 @@ export async function registerRoutes(
     const candidateMatchesResortPhraseFilter = (c: Candidate): boolean => {
       if (!requestedResortPhrase) return true;
       return textMatchesResortPhrase(candidateHaystack(c), requestedResortPhrase);
+    };
+    const vrboTitleMatchesResort = (title: string): boolean => {
+      const hay = String(title || "");
+      if (requestedResortPhrase && !textMatchesResortPhrase(hay, requestedResortPhrase)) return false;
+      if (!resortName || resortTokens.length === 0) return true;
+      if (targetIsRegencyPoipuKai) {
+        return mentionsRegencyPoipuKai(hay) && !mentionsKnownNonRegencyPoipuKaiComplex(hay);
+      }
+      if (normalizedResortName === "poipu kai") return mentionsPoipuKai(hay);
+      return mentionsResort(hay) || significantResortTokens.some((t) => norm(hay).includes(t));
+    };
+    const vrboMatchesBedroomAndTitle = (c: Candidate): boolean => {
+      const inferred = candidateBedroomSignal(c);
+      if (inferred !== null && inferred < buyInBedroomFloor) return false;
+      if (inferred !== null && !satisfiesBuyInBedrooms(inferred)) return false;
+      if (inferred === null) return false;
+      return vrboTitleMatchesResort(c.title || "");
+    };
+    const vrboBedroomTitleRejectReason = (c: Candidate): string => {
+      const inferred = candidateBedroomSignal(c);
+      if (inferred !== null && inferred < buyInBedroomFloor) {
+        return `bedroom mismatch ${inferred}BR < ${buyInBedroomFloor}BR`;
+      }
+      if (inferred !== null && !satisfiesBuyInBedrooms(inferred)) {
+        return `bedroom mismatch ${inferred}BR != requested ${requestedBedrooms}BR`;
+      }
+      if (inferred === null) return "no bedroom count on listing card";
+      if (!vrboTitleMatchesResort(c.title || "")) return "resort name not found in listing title";
+      return "unknown vrbo bedroom/title rejection";
     };
     const candidateIsAlternativeScoutMapResult = (c: Candidate): boolean => {
       if (c.source !== "vrbo" && c.source !== "booking") return false;
@@ -11964,12 +11994,12 @@ export async function registerRoutes(
     const bookingProviderHealth: ProviderHealthSnapshot | null = null;
     const bookingPromise: Promise<Candidate[]> = Promise.resolve([]);
 
-    // ── Vrbo: map-bounds search through the local Chrome sidecar ─────
-    // Buy-in needs two units in the same resort/complex. Drive Vrbo to
-    // map view around the configured target bounds instead of walking
-    // provider autocomplete/dropdown destination variants.
+    // ── Vrbo: resort-name dropdown search through the local Chrome sidecar ─
+    // Type the resort into VRBO's destination field, export every priced card
+    // the sidecar harvests (including long lists), then filter server-side by
+    // bedroom count and resort-name tokens in listing titles.
     let vrboRawCount = 0;
-    let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
+    let vrboDropped = { wrongBedrooms: 0, titleMismatch: 0 };
     let vrboGoogleCount = 0;
     let vrboSidecarCount = 0;
     let vrboDetailPricedCount = 0;
@@ -11984,7 +12014,7 @@ export async function registerRoutes(
       const targetSearchTerm = vrboWebsiteSearchTerm;
       try {
         console.log(
-          `[find-buy-in] vrbo sidecar start search="${targetSearchTerm}" bedrooms=${otaSearchBedrooms} map=${mapSearchScope} bounds=${mapSearchBounds ? "yes" : "none"} alternativeScout=${alternativeScoutMapSearch}`,
+          `[find-buy-in] vrbo sidecar start search="${targetSearchTerm}" bedrooms=${otaSearchBedrooms} mode=resort-dropdown-export-all alternativeScout=${alternativeScoutMapSearch}`,
         );
         const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchVrboViaSidecar({
@@ -11993,14 +12023,7 @@ export async function registerRoutes(
           checkIn,
           checkOut,
           bedrooms: otaSearchBedrooms,
-          searchMode: "map_bounds",
-          mapSearch: {
-            enabled: true,
-            targetName: resortName || community,
-            bounds: mapSearchBounds,
-            center: mapSearchCenter,
-            radiusKm: mapSearchRadiusKm,
-          },
+          searchMode: "destination_dropdown",
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
           rerunOnlyUntried: rerunOnlyUntriedVariations,
@@ -12009,17 +12032,8 @@ export async function registerRoutes(
           queueContext: sidecarQueueContextFor("VRBO"),
         });
         if (!r) return [];
-        const acceptedVrbo = r.candidates.filter((c) => {
-          const inferred = rawCandidateBedroomSignal(c);
-          if (inferred !== null && inferred < buyInBedroomFloor) return false;
-          return true;
-        });
-        const droppedVrbo = r.candidates.length - acceptedVrbo.length;
-        if (droppedVrbo > 0) {
-          console.log(`[find-buy-in] vrbo sidecar: dropped ${droppedVrbo}/${r.candidates.length} candidates below ${buyInBedroomFloor}BR`);
-        }
         vrboGoogleCount = 0;
-        vrboSidecarCount = acceptedVrbo.length;
+        vrboSidecarCount = r.candidates.length;
         vrboSidecarOnline = r.workerOnline;
         vrboSidecarMs = r.durationMs;
         vrboSidecarReason = r.reason;
@@ -12029,15 +12043,13 @@ export async function registerRoutes(
         if (sidecarReasonIsProviderFailure(r.reason)) {
           noteSourceError("Vrbo sidecar search", r.reason);
         }
-        vrboDropped = { noResort: 0, wrongBedrooms: droppedVrbo };
         vrboRawCount = r.candidates.length;
         vrboDetailPricedCount = 0;
         console.log(
-          `[find-buy-in] vrbo sidecar finish search="${targetSearchTerm}" raw=${vrboRawCount} accepted=${vrboSidecarCount} reason="${vrboSidecarReason}"`,
+          `[find-buy-in] vrbo sidecar finish search="${targetSearchTerm}" exported=${vrboRawCount} reason="${vrboSidecarReason}"`,
         );
-        return acceptedVrbo.map((c): Candidate => {
+        return r.candidates.map((c): Candidate => {
           const inferred = rawCandidateBedroomSignal(c) ?? undefined;
-          const capturedFromMapInventory = c.captureSource === "vrbo_graphql_propertySearchListings";
           return {
             source: "vrbo" as const,
             sourceLabel: "Vrbo",
@@ -12054,9 +12066,8 @@ export async function registerRoutes(
             snippet: c.snippet,
             verified: "yes",
             verifiedNightlyPrice: c.nightlyPrice,
-            verifiedReason: capturedFromMapInventory
-              ? "Vrbo sidecar searched vrbo.com map view with the resort bounds, dates, and bedroom filter and captured this result from VRBO's map inventory response"
-              : "Vrbo sidecar searched vrbo.com map view with the resort bounds, dates, and bedroom filter and scraped this priced result card",
+            verifiedReason:
+              "Vrbo sidecar searched vrbo.com with the resort destination dropdown, dates, and bedroom export; scraped this priced result card",
           };
         });
       } catch (e: any) {
@@ -12858,7 +12869,7 @@ export async function registerRoutes(
       ]);
     const [booking, vrbo] = await Promise.all([
       bookingPromise,
-      withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo-map-bounds", vrboSidecarAbort.abort),
+      withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo-resort-dropdown", vrboSidecarAbort.abort),
     ]);
     const googleHotels: Candidate[] = googleHotelsRows.map((row) => ({ ...row }));
     let pmGoogle: Candidate[] = [];
@@ -13536,21 +13547,29 @@ export async function registerRoutes(
       const dropExamples: string[] = [];
       const keepExamples: string[] = [];
       const kept = items.filter((item) => {
-        const fits = alternativeScoutOtaMapOnly && key === "vrbo"
-          ? candidateIsAlternativeScoutMapResult(item)
+        const fits = key === "vrbo"
+          ? vrboMatchesBedroomAndTitle(item)
           : candidateFitsTarget(item);
         if (!fits) {
+          if (key === "vrbo") {
+            const inferred = candidateBedroomSignal(item);
+            if (inferred !== null && (inferred < buyInBedroomFloor || !satisfiesBuyInBedrooms(inferred))) {
+              vrboDropped.wrongBedrooms++;
+            } else if (!vrboTitleMatchesResort(item.title || "")) {
+              vrboDropped.titleMismatch++;
+            }
+          }
           if (pricePlausibilityReason(item)) targetFilterPriceDropped[key]++;
           if (dropExamples.length < 6 && (item.totalPrice > 0 || item.nightlyPrice > 0)) {
             const urlHost = (() => {
               try { return new URL(item.url).hostname.replace(/^www\./, ""); } catch { return item.sourceLabel || item.source; }
             })();
-            const reason = alternativeScoutOtaMapOnly && key === "vrbo"
-              ? alternativeScoutMapRejectReason(item)
+            const reason = key === "vrbo"
+              ? vrboBedroomTitleRejectReason(item)
               : candidateTargetRejectReason(item);
             dropExamples.push(`${reason} :: ${urlHost} :: ${(item.title || item.sourceLabel || item.url).replace(/\s+/g, " ").slice(0, 90)} :: $${Math.round(item.totalPrice || item.nightlyPrice * Math.max(1, nights))}`);
           }
-        } else if (alternativeScoutOtaMapOnly && key === "vrbo" && keepExamples.length < 8) {
+        } else if (key === "vrbo" && keepExamples.length < 8) {
           const br = candidateBedroomSignal(item);
           keepExamples.push(`${br ?? "?"}BR :: ${(item.title || item.sourceLabel || item.url).replace(/\s+/g, " ").slice(0, 90)} :: $${Math.round(item.totalPrice || item.nightlyPrice * Math.max(1, nights))}`);
         }
@@ -13559,12 +13578,12 @@ export async function registerRoutes(
       targetFilterDropped[key] += items.length - kept.length;
       if (keepExamples.length > 0) {
         console.log(
-          `[find-buy-in] alternative city-map kept ${key} examples (${kept.length}/${items.length}) search="${websiteSearchTerm}": ${keepExamples.join(" | ")}`,
+          `[find-buy-in] vrbo bedroom/title filter kept examples (${kept.length}/${items.length}) search="${websiteSearchTerm}": ${keepExamples.join(" | ")}`,
         );
       }
       if (dropExamples.length > 0) {
         console.log(
-          `[find-buy-in] target-filter dropped priced ${key} examples (${items.length - kept.length}/${items.length}): ${dropExamples.join(" | ")}`,
+          `[find-buy-in] ${key === "vrbo" ? "vrbo bedroom/title" : "target"} filter dropped priced ${key} examples (${items.length - kept.length}/${items.length}): ${dropExamples.join(" | ")}`,
         );
       }
       return kept;
@@ -13626,7 +13645,11 @@ export async function registerRoutes(
       return aPrice - bPrice;
     };
     const comparisonCandidateCap = alternativeScoutOtaMapOnly ? 150 : 40;
-    const dedupeComparisonCandidates = (items: Candidate[], opts: { allowAirbnb?: boolean } = {}): Candidate[] =>
+    const vrboComparisonCap = 500;
+    const dedupeComparisonCandidates = (
+      items: Candidate[],
+      opts: { allowAirbnb?: boolean; cap?: number } = {},
+    ): Candidate[] =>
       Array.from(
         new Map(
           items
@@ -13634,10 +13657,19 @@ export async function registerRoutes(
             .sort(comparisonSort)
             .map((item) => [item.url, item] as const),
         ).values(),
-      ).slice(0, comparisonCandidateCap);
+      ).slice(0, opts.cap ?? comparisonCandidateCap);
+    const dedupeVrboExportCandidates = (items: Candidate[]): Candidate[] =>
+      Array.from(
+        new Map(
+          items
+            .filter((item) => item.source === "vrbo" && (item.totalPrice > 0 || item.nightlyPrice > 0))
+            .sort(comparisonSort)
+            .map((item) => [item.url, item] as const),
+        ).values(),
+      );
     const comparisonSources = {
       airbnb: dedupeComparisonCandidates([...airbnbTarget, ...airbnbWithMatches], { allowAirbnb: true }),
-      vrbo: dedupeComparisonCandidates([...vrboTarget, ...vrbo]),
+      vrbo: dedupeVrboExportCandidates(vrbo).slice(0, vrboComparisonCap),
       booking: [] as Candidate[],
       pm: dedupeComparisonCandidates([...pmTarget, ...pmAugmented]),
     };
@@ -14095,10 +14127,10 @@ export async function registerRoutes(
         health: vrboProviderHealth,
         searchTerm: vrboWebsiteSearchTerm,
         searchVariationSummary: vrboVariationSummary,
-        accessPattern: "authorized website map-bounds search via sidecar; one shared all-bedroom VRBO map run per resort/date, then server-side bedroom curation",
+        accessPattern: "authorized website resort-name dropdown search via sidecar; export all harvested cards, then server-side bedroom + title filtering",
         bedroomFilterApplied: false,
-        bedroomFilterMode: "server-side bedroom curation after shared VRBO map-bounds search",
-        message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}; mapScope=${mapSearchScope}; mapBounds=${mapSearchBounds ? "yes" : "no"}; bedroom filter applied server-side after shared VRBO map-bounds search${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
+        bedroomFilterMode: "server-side bedroom + resort-title match after full VRBO export",
+        message: `sidecarOnline=${vrboSidecarOnline}; exported=${vrboSidecarCount}; keptAfterBedroomTitle=${vrboTarget.length}; bedroomDropped=${vrboDropped.wrongBedrooms}; titleDropped=${vrboDropped.titleMismatch}${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
       }),
       enrichProviderDiagnostic({
         source: "Google Hotels",
@@ -14207,7 +14239,7 @@ export async function registerRoutes(
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (searchApi=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
-      + `vrbo=${vrbo.length} (mapSidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, mapScope=${mapSearchScope}, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
+      + `vrbo exported=${vrbo.length} filtered=${vrboTarget.length} (sidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, bedroomDrop=${vrboDropped.wrongBedrooms}, titleDrop=${vrboDropped.titleMismatch}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
       + `booking=disabled `
       + `googleHotels=${googleHotels.length}/${googleHotelsRawCount} · `
       + `directLens=${photoMatchPmCandidates.length}/${totalPhotoMatches} (includePm=${includePm}; pmPool=${pm.length}; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
@@ -14227,6 +14259,7 @@ export async function registerRoutes(
       groundFloorOnly,
       sources: {
         airbnb: airbnbTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
+        vrboAll: vrbo.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         vrbo: vrboTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         booking: bookingTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
         pm: pmTarget.sort((a, b) => (a.nightlyPrice || 99999) - (b.nightlyPrice || 99999)),
@@ -14249,7 +14282,7 @@ export async function registerRoutes(
             { label: "Google Hotels (SearchAPI)", count: googleHotels.length },
           ],
       debug: {
-        rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromKvrSitemap: kvrDiscovered.length, pmFromPbhSitemap: pbhDiscovered.length, pmFromIrkSitemap: irkDiscovered.length, pmFromKpSitemap: kpDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
+        rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboExported: vrbo.length, vrboFiltered: vrboTarget.length, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromKvrSitemap: kvrDiscovered.length, pmFromPbhSitemap: pbhDiscovered.length, pmFromIrkSitemap: irkDiscovered.length, pmFromKpSitemap: kpDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },
         dropped: {
           airbnb: airbnbDropped,
           vrbo: vrboDropped,

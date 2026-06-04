@@ -1940,7 +1940,7 @@ function liveSearchSummaryFor(data: FindBuyInResponse, searchedBedrooms: number)
   };
   const sourceCounts = {
     airbnb: data.sources?.airbnb?.length ?? 0,
-    vrbo: data.sources?.vrbo?.length ?? 0,
+    vrbo: data.sources?.vrboAll?.length ?? data.sources?.vrbo?.length ?? 0,
     booking: 0,
     pm: data.sources?.pm?.length ?? 0,
   };
@@ -5070,7 +5070,7 @@ export default function Bookings() {
         };
         const sourceCounts = {
           airbnb: data.sources?.airbnb?.length ?? 0,
-          vrbo: data.sources?.vrbo?.length ?? 0,
+          vrbo: data.sources?.vrboAll?.length ?? data.sources?.vrbo?.length ?? 0,
           booking: 0,
           pm: data.sources?.pm?.length ?? 0,
         };
@@ -10991,7 +10991,7 @@ function LiveSearchSection({
   }
 
   const airbnb  = data?.sources?.airbnb  ?? [];
-  const vrbo    = data?.sources?.vrbo    ?? [];
+  const vrbo    = data?.sources?.vrboAll ?? data?.sources?.vrbo ?? [];
   const booking: LiveCandidate[] = [];
   const pm      = data?.sources?.pm      ?? [];
   const cheapest = data?.cheapest        ?? [];
@@ -11297,7 +11297,10 @@ function LiveSearchSection({
             <div>
               Dropped (wrong resort / bedrooms):
               {" "}airbnb {data.debug.dropped.airbnb?.noResort ?? 0}/{data.debug.dropped.airbnb?.wrongBedrooms ?? 0} ·
-              {" "}vrbo {data.debug.dropped.vrbo?.noResort ?? 0}/{data.debug.dropped.vrbo?.wrongBedrooms ?? 0}
+              {" "}vrbo bedroom {data.debug.dropped.vrbo?.wrongBedrooms ?? 0} / title {data.debug.dropped.vrbo?.titleMismatch ?? 0}
+              {typeof (data.debug.rawCounts as { vrboExported?: number }).vrboExported === "number" && (
+                <> · vrbo exported {(data.debug.rawCounts as { vrboExported?: number }).vrboExported} → kept {(data.debug.rawCounts as { vrboFiltered?: number }).vrboFiltered ?? data.sources?.vrbo?.length ?? 0}</>
+              )}
             </div>
           )}
         </div>
