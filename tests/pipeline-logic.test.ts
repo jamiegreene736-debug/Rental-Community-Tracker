@@ -369,23 +369,33 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /focusedScrapeableCandidates = candidateUrls\.filter\(\s*\(candidate\) => candidate\.source === "zillow" \|\| candidate\.source === "realtor"/,
-  "fetch-unit-photos must not skip Apify supplement when SearchAPI only surfaced Redfin/Homes URLs",
+  /runApifyDiscovery[\s\S]*harvestApifyPhotoDiscoveryBatch/,
+  "fetch-unit-photos must always run Apify discovery in the stacked pass even when SearchAPI only surfaced Redfin/Homes",
 );
 assert.match(
   routesSource,
-  /isBoundedDiscovery[\s\S]*orderedCandidates = scrapeable;/,
-  "bounded preflight photo discovery must only try Zillow/Realtor scrapers, not Redfin",
+  /harvestApifyPhotoDiscoveryBatch/,
+  "fetch-unit-photos must use stacked Apify discovery batch",
 );
 assert.match(
   routesSource,
-  /runApifySupplement = roots\.size > 0 &&/,
-  "fetch-unit-photos must still run Apify when a canonical resort street is known",
+  /runApifyDiscovery[\s\S]*runSearchApiDiscovery[\s\S]*Promise\.all/,
+  "fetch-unit-photos must run Apify and SearchAPI discovery in parallel",
 );
 assert.match(
   routesSource,
-  /apifyCities\.map\(\(apifyCity\) => harvestZillowUrlsViaApifySearch/,
-  "fetch-unit-photos must search multiple Zillow index cities for Mauna Lani-style resorts",
+  /isBoundedDiscovery[\s\S]*c\.source === "zillow" \|\| c\.source === "realtor" \|\| c\.source === "redfin" \|\| c\.source === "homes"/,
+  "bounded preflight must try all four portal scrapers in parallel stack",
+);
+assert.match(
+  routesSource,
+  /hasApifyDiscovery[\s\S]*runApifyDiscovery/,
+  "fetch-unit-photos must run stacked Apify discovery when APIFY_API_TOKEN is set",
+);
+assert.match(
+  routesSource,
+  /harvestApifyPhotoDiscoveryBatch[\s\S]*cities: apifyCities/,
+  "fetch-unit-photos must search multiple Zillow/Realtor index cities via stacked Apify batch",
 );
 assert.match(
   routesSource,
@@ -396,6 +406,26 @@ assert.match(
   routesSource,
   /Redfin slugs like "92-1070-1-Olani-St"/,
   "Hawaii Redfin unit slugs must normalize to the same street root as the resort address",
+);
+assert.match(
+  routesSource,
+  /scrapeListingPhotosDualSource[\s\S]*Promise\.all\(parallelTargets\.map/,
+  "listing photo scrape must run all portal URLs in parallel when discovery surfaced them",
+);
+assert.match(
+  routesSource,
+  /parallelStackUrlsFromCandidates[\s\S]*redfinUrl[\s\S]*homesUrl/,
+  "parallel photo stack must include Redfin and Homes URLs",
+);
+assert.match(
+  routesSource,
+  /find-clean-unit[\s\S]*harvestApifyPhotoDiscoveryBatch[\s\S]*runSearchApiDiscovery/,
+  "find-clean-unit must stack Apify and SearchAPI discovery in parallel",
+);
+assert.match(
+  routesSource,
+  /fetch-unit-photos[\s\S]*scrapeListingPhotosDualSource\(clusterUrls/,
+  "fetch-unit-photos must parallel-scrape Realtor+Zillow per address cluster",
 );
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
 assert.match(
@@ -1837,8 +1867,8 @@ assert.ok(
   "replacement discovery must skip harvesting Google hits that advertise too few bedrooms",
 );
 assert.ok(
-  routeSource.includes("needsApifyForBedroomSearch"),
-  "replacement discovery must run Apify when bedroom-scoped pool is still thin",
+  routeSource.includes("harvestApifyPhotoDiscoveryBatch"),
+  "replacement discovery must use stacked Apify batch for Zillow+Realtor native search",
 );
 assert.ok(
   routeSource.includes("Street-root expansion: roots="),
@@ -1865,16 +1895,21 @@ assert.ok(
   "replacement discovery must run unit-label Google queries for alphanumeric condo resorts",
 );
 assert.ok(
-  routeSource.includes("Apify supplement started in parallel with Google discovery"),
-  "replacement discovery must start Apify in parallel with Google so bedroom pools are not starved",
+  routeSource.includes("stacked Apify discovery started in parallel with SearchAPI/Google discovery"),
+  "replacement discovery must start Apify in parallel with SearchAPI so bedroom pools are not starved",
 );
 assert.ok(
   routeSource.includes("site:redfin.com/inurl:"),
   "replacement discovery must use Redfin inurl queries for Hawaii hyphenated street slugs",
 );
 assert.ok(
-  routeSource.includes("runFindUnitApifySupplement"),
-  "replacement discovery must centralize Apify supplement in one helper invoked parallel and late",
+  routeSource.includes("runFindUnitStackedApifyDiscovery"),
+  "replacement discovery must centralize stacked Apify discovery invoked parallel with SearchAPI",
+);
+assert.match(
+  routeSource,
+  /find-unit[\s\S]*scrapeListingPhotosDualSource\(clusterUrls/,
+  "replacement find-unit must parallel-scrape all portal URLs per address cluster",
 );
 assert.ok(
   routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
@@ -2034,8 +2069,8 @@ assert.ok(
   "fetch-unit-photos must not enqueue zillow_photo_scrape on the local sidecar",
 );
 assert.ok(
-  routeSource.includes("scrapeListingPhotos(sourceUrl, undefined, candidateFacts, SCRAPE_WITHOUT_SIDECAR)"),
-  "replacement find-unit must not open local Chrome during preflight",
+  routeSource.includes("scrapeListingPhotosDualSource(clusterUrls, candidateFacts, SCRAPE_WITHOUT_SIDECAR)"),
+  "replacement find-unit must not open local Chrome during photo scrape",
 );
 assert.ok(
   routeSource.includes("if (scrapedPhotoUrls.length < MIN_PHOTOS) {"),
@@ -2058,8 +2093,8 @@ assert.ok(
   "replacement discovery should run SearchAPI queries in parallel batches",
 );
 assert.ok(
-  routeSource.includes("const zillowApifyRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;"),
-  "replacement Apify Zillow supplement must filter through the canonical resort street without skipping roots entirely",
+  routeSource.includes("const filterRoots = suppliedStreetRoot"),
+  "replacement stacked Apify discovery must filter Zillow/Realtor through canonical resort street when known",
 );
 assert.ok(
   routeSource.includes("(?:[-\\\\s]+\\\\d{1,4})?[-\\\\s]+"),
