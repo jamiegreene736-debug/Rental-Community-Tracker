@@ -157,6 +157,14 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Southern Dunes",
     aliases: [/\b(?:southern\s+dunes|haines\s+city|davenport)\b/i],
     searchLocation: "Southern Dunes, Haines City, Florida",
+    platformSearch: {
+      airbnb: "Southern Dunes, Haines City, FL",
+      booking: "Southern Dunes, Haines City, FL",
+      vrbo: "Southern Dunes, Haines City, FL",
+      pm: "Southern Dunes",
+    },
+    location: { searchName: "Southern Dunes", city: "Haines City", state: "Florida", streetAddress: "2888 Southern Dunes Blvd", lat: 28.1277, lng: -81.6259 },
+    bounds: { sw_lat: 28.112, sw_lng: -81.641, ne_lat: 28.137, ne_lng: -81.612 },
   },
   "Florida Generic": {
     key: "Florida Generic",

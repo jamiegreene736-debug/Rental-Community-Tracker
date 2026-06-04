@@ -42,6 +42,12 @@ import {
 import { unitVerificationClaims } from "../shared/folder-unit-map";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
 import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
+import {
+  BUY_IN_MARKET_BOUNDS,
+  BUY_IN_MARKET_LOCATIONS,
+  BUY_IN_MARKETS,
+  SIMILAR_BUY_IN_MARKETS,
+} from "../shared/buy-in-market";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "../server/photo-match-guardrails";
 import {
   buildUnitPhotoResolverProof,
@@ -2836,6 +2842,28 @@ assert.equal(
 );
 console.log("  ✓ pickBestAvailableComboPairing prefers largest unused combo");
 
+const requiredMapMarkets = new Set<string>();
+for (const [market, related] of Object.entries(SIMILAR_BUY_IN_MARKETS)) {
+  requiredMapMarkets.add(market);
+  for (const relatedMarket of related) requiredMapMarkets.add(relatedMarket);
+}
+for (const market of Object.values(BUY_IN_MARKETS)) {
+  if (market.key !== "Florida Generic" && (market.location || requiredMapMarkets.has(market.key))) {
+    assert.ok(BUY_IN_MARKET_LOCATIONS[market.key], `${market.key} should have a map-search location`);
+    assert.ok(BUY_IN_MARKET_BOUNDS[market.key], `${market.key} should have a community boundary box`);
+  }
+}
+for (const [market, bounds] of Object.entries(BUY_IN_MARKET_BOUNDS)) {
+  const loc = BUY_IN_MARKET_LOCATIONS[market];
+  assert.ok(loc, `${market} boundary should have a matching location`);
+  assert.ok(bounds.sw_lat < bounds.ne_lat && bounds.sw_lng < bounds.ne_lng, `${market} boundary should be SW→NE ordered`);
+  assert.ok(
+    loc.lat >= bounds.sw_lat && loc.lat <= bounds.ne_lat && loc.lng >= bounds.sw_lng && loc.lng <= bounds.ne_lng,
+    `${market} location should be inside its community boundary box`,
+  );
+}
+console.log("  ✓ buy-in community map boundary boxes are complete and ordered");
+
 assert.ok(TOP_MARKET_SEEDS.length >= 86, "top markets sweep should not shrink below the original 86-market coverage");
 const topMarketAudit = auditTopMarketSevenEightFromCuratedSeeds();
 assert.equal(topMarketAudit.length, TOP_MARKET_SEEDS.length);
@@ -3012,8 +3040,8 @@ assert.ok(
   "find-buy-in should support city-scope VRBO map bounds for alternative scout scans",
 );
 assert.ok(
-  routesSource.includes("const bounds = resortBounds;") && routesSource.includes("const vrboMapBounds = cityMapBounds ?? resortBounds;"),
-  "alternative scout should widen only the VRBO map search while keeping Airbnb resort bounds strict",
+  routesSource.includes("const bounds = resortBounds;") && routesSource.includes("const providerMapBounds = cityMapBounds ?? resortBounds;"),
+  "alternative scout should widen OTA provider map searches while keeping Airbnb/SearchAPI resort bounds strict",
 );
 assert.ok(
   routesSource.includes("const requestedSearchTerm = typeof req.query.searchTerm") &&

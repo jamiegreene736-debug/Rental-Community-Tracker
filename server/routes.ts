@@ -11220,13 +11220,13 @@ export async function registerRoutes(
       ? cityWideMapBoundsForBuyInMarket(community, requestedMapCenter)
       : undefined;
     const bounds = resortBounds;
-    const vrboMapBounds = cityMapBounds ?? resortBounds;
-    const mapSearchBounds = vrboMapBounds
+    const providerMapBounds = cityMapBounds ?? resortBounds;
+    const mapSearchBounds = providerMapBounds
       ? {
-          sw_lat: vrboMapBounds.sw_lat,
-          sw_lng: vrboMapBounds.sw_lng,
-          ne_lat: vrboMapBounds.ne_lat,
-          ne_lng: vrboMapBounds.ne_lng,
+          sw_lat: providerMapBounds.sw_lat,
+          sw_lng: providerMapBounds.sw_lng,
+          ne_lat: providerMapBounds.ne_lat,
+          ne_lng: providerMapBounds.ne_lng,
         }
       : undefined;
     const mapSearchCenter = mapBoundsCenter(mapSearchBounds);
