@@ -2062,6 +2062,7 @@ const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
   "community-poipu-oceanfront": "Poipu Brenneckes Oceanfront",
   "community-pili-mai": "Pili Mai",
   "community-menehune-shores": "Menehune Shores",
+  "community-coconut-plantation-at-ko-olina": "Coconut Plantation at Ko Olina",
 };
 
 // Street address fragment for each community — used to find individual
@@ -2080,6 +2081,7 @@ const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
   "community-poipu-oceanfront": "2350 Ho'one Rd",           // Poipu Brenneckes Oceanfront
   "community-pili-mai": "2611 Kiahuna Plantation Dr",       // Pili Mai at Poipu
   "community-menehune-shores": "760 S Kihei Rd",            // Menehune Shores
+  "community-coconut-plantation-at-ko-olina": "92-1070 Olani St", // Coconut Plantation at Ko Olina
 };
 
 interface ScrapedPhoto {

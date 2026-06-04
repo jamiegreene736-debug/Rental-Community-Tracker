@@ -99,6 +99,14 @@ function parseAddress(addr: string) {
   return { full, city, state, zipcode, country: "US" };
 }
 
+function captionFromFilename(filename: string): string {
+  const stem = filename.replace(/\.[^.]+$/, "").replace(/^\d+[-_]/, "");
+  if (!stem) return "Photo";
+  return stem
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 // ─── Builder page ─────────────────────────────────────────────────────────────
 export default function Builder() {
   const { propertyId: pidStr } = useParams<{ propertyId: string }>();
@@ -341,7 +349,7 @@ export default function Builder() {
     const pushCommunity = (filename: string, bandLabel: string) => {
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
-        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
+        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? captionFromFilename(filename),
         source: bandLabel,
       });
     };
@@ -363,7 +371,7 @@ export default function Builder() {
         if (hidden(u.photoFolder, filename)) continue;
         photos.push({
           url: `${origin}/photos/${u.photoFolder}/${filename}`,
-          caption: getLabel(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? "Photo",
+          caption: getLabel(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? captionFromFilename(filename),
           source: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
         });
       }
@@ -378,7 +386,7 @@ export default function Builder() {
       if (hidden(property.communityPhotoFolder, filename)) continue;
       photos.push({
         url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
-        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? "Photo",
+        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? captionFromFilename(filename),
         source: `Community — ${property.complexName}`,
       });
     }
