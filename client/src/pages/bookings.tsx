@@ -1146,6 +1146,47 @@ function candidateMatchesBedroom(candidate: Pick<LiveCandidate, "bedrooms">, bed
   return typeof candidate.bedrooms !== "number" || Math.round(candidate.bedrooms) === bedrooms;
 }
 
+function mergeAlternativeFindBuyInResponses(
+  responses: FindBuyInResponse[],
+  bedroomsSearched: number[],
+): FindBuyInResponse {
+  const primary = responses[0];
+  if (!primary) throw new Error("No alternative city map search response returned.");
+  if (responses.length <= 1) return primary;
+
+  const flatCandidates = (key: keyof FindBuyInResponse["sources"]) => responses.flatMap((response) => response.sources?.[key] ?? []);
+  const cheapest = responses.flatMap((response) => response.cheapest ?? []);
+  return {
+    ...primary,
+    bedrooms: Math.min(...bedroomsSearched),
+    sources: {
+      airbnb: flatCandidates("airbnb"),
+      vrbo: flatCandidates("vrbo"),
+      booking: flatCandidates("booking"),
+      pm: flatCandidates("pm"),
+    },
+    comparisonSources: {
+      airbnb: responses.flatMap((response) => response.comparisonSources?.airbnb ?? []),
+      vrbo: responses.flatMap((response) => response.comparisonSources?.vrbo ?? []),
+      booking: responses.flatMap((response) => response.comparisonSources?.booking ?? []),
+      pm: responses.flatMap((response) => response.comparisonSources?.pm ?? []),
+    },
+    cheapest,
+    cheapestUnits: responses.flatMap((response) => response.cheapestUnits ?? []),
+    totalPricedResults: responses.reduce((sum, response) => sum + (response.totalPricedResults ?? response.cheapest?.length ?? 0), 0),
+    fromCache: responses.every((response) => response.fromCache),
+    scanComplete: responses.every((response) => response.scanComplete !== false),
+    autoFillSafe: responses.every((response) => response.autoFillSafe !== false),
+    diagnostics: {
+      ...primary.diagnostics,
+      summary: `City map searched ${bedroomsSearched.map((bedrooms) => `${bedrooms}BR`).join(" + ")} for the replacement plan. ${
+        cheapest.length
+      } verified candidate${cheapest.length === 1 ? "" : "s"} returned.`,
+      generatedAt: new Date().toISOString(),
+    },
+  };
+}
+
 function candidateWalkMinutes(a: Pick<LiveCandidate, "lat" | "lng">, b: Pick<LiveCandidate, "lat" | "lng">): number | null {
   const aLat = Number(a.lat);
   const aLng = Number(a.lng);
@@ -4609,9 +4650,9 @@ export default function Bookings() {
         .flat()
         .map((value) => Number(value))
         .filter((value) => Number.isFinite(value) && value > 0);
-      const bedrooms = replacementBedrooms.length > 0
-        ? Math.min(...replacementBedrooms)
-        : fallbackBedrooms;
+      const bedroomsToSearch = replacementBedrooms.length > 0
+        ? Array.from(new Set(replacementBedrooms)).sort((a, b) => a - b)
+        : [fallbackBedrooms];
       const scoutedRows = [
         ...(workflow?.scout?.scouted ?? []),
         ...(workflow?.scout?.results ?? []),
@@ -4620,26 +4661,29 @@ export default function Bookings() {
       ];
       const scoutRow = scoutedRows.find((row) => row.community === community);
       const communitySearchTerm = scoutRow?.searchTerm || community;
-      const params = new URLSearchParams({
-        propertyId: String(propertyId),
-        bedrooms: String(bedrooms),
-        checkIn,
-        checkOut,
-        community: scoutRow?.community || community,
-        alternativeScout: "1",
-      });
-      if (communitySearchTerm) {
-        params.set("searchTerm", communitySearchTerm);
-      }
       const lat = Number(scoutRow?.lat);
       const lng = Number(scoutRow?.lng);
-      if (Number.isFinite(lat) && Number.isFinite(lng)) {
-        params.set("mapCenterLat", String(lat));
-        params.set("mapCenterLng", String(lng));
-      }
-      if (opts?.forceRefresh) params.set("nocache", "1");
-      if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
-      const data = await fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
+      const searches = bedroomsToSearch.map((bedrooms) => {
+        const params = new URLSearchParams({
+          propertyId: String(propertyId),
+          bedrooms: String(bedrooms),
+          checkIn,
+          checkOut,
+          community: scoutRow?.community || community,
+          alternativeScout: "1",
+        });
+        if (communitySearchTerm) {
+          params.set("searchTerm", communitySearchTerm);
+        }
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          params.set("mapCenterLat", String(lat));
+          params.set("mapCenterLng", String(lng));
+        }
+        if (opts?.forceRefresh) params.set("nocache", "1");
+        if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
+        return fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
+      });
+      const data = mergeAlternativeFindBuyInResponses(await Promise.all(searches), bedroomsToSearch);
       updateAlternativeWorkflow(resId, {
         activeCommunity: null,
         sidecarResults: {
