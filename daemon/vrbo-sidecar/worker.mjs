@@ -5962,8 +5962,10 @@ async function disableVrboSearchAsMapMoves(targetPage, label, id) {
   return Boolean(result.found);
 }
 
-async function extractVisibleVrboCards(id, params, expectedNights, variantLabel) {
-  const mapMinBedrooms = vrboMapMinBedrooms(params?.bedrooms);
+async function extractVisibleVrboCards(id, params, expectedNights, variantLabel, options = {}) {
+  const mapMinBedrooms = Number.isFinite(options.minBedrooms)
+    ? Math.max(1, Math.floor(options.minBedrooms))
+    : vrboMapMinBedrooms(params?.bedrooms);
   const result = await page.evaluate((args) => {
     const { expectedNights, mapMinBedrooms } = args;
 
@@ -6577,156 +6579,24 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   // future callers can ask for different windows.
   const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
 
-  const result = await page.evaluate((args) => {
-    const { expectedNights } = args;
-
-    // Card selector with fallback chain. Vrbo's data-stid attribute
-    // has changed multiple times; relying on a single fixed selector
-    // breaks every time they redesign. Strategy:
-    //   1. Try the historical data-stid="lodging-card-responsive"
-    //      (still works on some page variants)
-    //   2. Fall back to anchors with Vrbo property URLs (/N pattern)
-    //      and walk up to their card-like ancestor. Vrbo property
-    //      listing URLs are consistently digit-based, much more
-    //      stable than data-stid attributes.
-    let cardEls = Array.from(document.querySelectorAll('[data-stid="lodging-card-responsive"]'));
-    let selectorSource = "data-stid";
-    if (cardEls.length === 0) {
-      const propertyAnchors = Array.from(document.querySelectorAll('a[href]'))
-        .filter((a) => /^\/\d+/.test(a.getAttribute("href") || ""));
-      const cardSet = new Set();
-      for (const a of propertyAnchors) {
-        // Walk up to a card-like container. The first ancestor with
-        // an h3 inside is likely the card boundary.
-        let el = a;
-        for (let depth = 0; depth < 6 && el && el.parentElement; depth++) {
-          el = el.parentElement;
-          if (el.querySelector("h3")) {
-            cardSet.add(el);
-            break;
-          }
-        }
-      }
-      cardEls = Array.from(cardSet);
-      selectorSource = "anchor-fallback";
-    }
-    const out = [];
-    const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0 };
-    let firstCardSample = null;
-    for (const card of cardEls) {
-      const titleEl = card.querySelector("h3");
-      const title = titleEl ? titleEl.textContent.trim().replace(/^Photo gallery for\s*/i, "") : "";
-      const fullText = (card.textContent || "").replace(/\s+/g, " ");
-      const bdMatch = fullText.match(/(\d+)\s*bedrooms?/i);
-      const link = card.querySelector("a[href]");
-      const propertyPath = ((link?.getAttribute("href") || "")).replace(/^https?:\/\/[^\/]+/, "").split("?")[0];
-      const bedroomsExtracted = bdMatch ? parseInt(bdMatch[1], 10) : null;
-
-      // Capture the first card's text + extracted values so the daemon
-      // can log it when zero cards survived the filter — gives us
-      // visibility into Vrbo UI changes without redeploying.
-      if (firstCardSample === null) {
-        firstCardSample = {
-          title: title.slice(0, 80),
-          textExcerpt: fullText.slice(0, 240),
-          propertyPath: propertyPath.slice(0, 80),
-          bedroomsExtracted,
-        };
-      }
-
-      if (!/^\/\d+/.test(propertyPath)) { drops.noUrl++; continue; }
-      if (bedroomsExtracted === null) { drops.noBedrooms++; continue; }
-
-      // Vrbo card pricing has TWO common formats today (2026-04-29):
-      //   New: "$820" big price + "$8,123 total includes taxes & fees"
-      //   Old: "$X for Y nights" (single string)
-      let totalPrice = 0;
-      let totalNights = 0;
-      let priceIncludesTaxes = false;
-      let priceIncludesFees = true;
-      let priceBasis = "pre_tax_total";
-
-      const totalMatch = fullText.match(/\$\s*([\d,]+)\s*total\s*(?:includes\s*taxes)?/i);
-      if (totalMatch) {
-        totalPrice = parseInt(totalMatch[1].replace(/,/g, ""), 10);
-        totalNights = expectedNights;
-        priceIncludesTaxes = /total\s*includes\s*taxes/i.test(fullText);
-        priceIncludesFees = true;
-        priceBasis = priceIncludesTaxes ? "all_in" : "pre_tax_total";
-      } else {
-        const m = fullText.match(/\$\s*([\d,]+)\s*for\s*(\d+)\s*nights/i);
-        if (m) {
-          totalPrice = parseInt(m[1].replace(/,/g, ""), 10);
-          totalNights = parseInt(m[2], 10);
-          priceIncludesTaxes = false;
-          priceIncludesFees = true;
-          priceBasis = "pre_tax_total";
-        }
-      }
-      if (!(totalPrice > 0) || !(totalNights > 0)) {
-        drops.noPrice++;
-        out.push({
-          url: "https://www.vrbo.com" + propertyPath,
-          title: title.slice(0, 80),
-          totalPrice: 0,
-          nightlyPrice: 0,
-          bedrooms: bedroomsExtracted,
-          priceIncludesTaxes: false,
-          priceIncludesFees: false,
-          priceBasis: "unknown",
-          availabilityOnly: true,
-        });
-        continue;
-      }
-
-      out.push({
-        url: "https://www.vrbo.com" + propertyPath,
-        title: title.slice(0, 80),
-        totalPrice,
-        nightlyPrice: Math.round(totalPrice / totalNights),
-        bedrooms: bedroomsExtracted,
-        priceIncludesTaxes,
-        priceIncludesFees,
-        priceBasis,
-      });
-    }
-    return { out, drops, totalSeen: cardEls.length, selectorSource, firstCardSample };
-  }, { expectedNights });
-
-  const cards = result.out;
-  const allInCount = cards.filter((c) => c.priceIncludesTaxes).length;
-  // Bedroom distribution across the extracted cards — surfaces UI
-  // changes where the regex matches the wrong number (e.g. matches
-  // "Sleeps 4 · 1 bedroom" → 4 instead of 1).
-  const brList = cards.map((c) => c.bedrooms ?? "?").join(",");
-  log(
-    `vrbo_search ${id}: ${cards.length} cards (${allInCount} all-in / ${cards.length - allInCount} pre-tax) ` +
-    `[selector=${result.totalSeen}/${result.selectorSource}, drops=noUrl:${result.drops.noUrl}/noPrice:${result.drops.noPrice}/noBR:${result.drops.noBedrooms}, BRs=[${brList}]]`,
+  // Scroll the results list so long resort searches (100+ cards) are
+  // harvested before extraction. Bedroom/resort filtering happens on
+  // the server after the full export returns.
+  await page.evaluate(() => {
+    window.__vrboHarvestCards = [];
+  }).catch(() => {});
+  const listHarvestPasses = Math.max(
+    8,
+    Math.min(20, Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_HARVEST_PASSES ?? "14"), 10) || 14),
   );
-  if (cards.length === 0 && result.firstCardSample) {
-    log(`vrbo_search ${id}: empty-result diagnostic — first card title="${result.firstCardSample.title}" path="${result.firstCardSample.propertyPath}" br=${result.firstCardSample.bedroomsExtracted} text="${result.firstCardSample.textExcerpt}"`);
-  }
-  // Per-card detail. Log min/max nightly per BR bucket so we can spot
-  // outliers without flooding logs with 19+ lines per scan.
-  if (cards.length > 0) {
-    const byBR = new Map();
-    for (const c of cards) {
-      const k = c.bedrooms ?? "?";
-      const bucket = byBR.get(k) ?? [];
-      bucket.push(c.nightlyPrice);
-      byBR.set(k, bucket);
-    }
-    const summary = Array.from(byBR.entries())
-      .sort((a, b) => (typeof a[0] === "number" ? a[0] : 99) - (typeof b[0] === "number" ? b[0] : 99))
-      .map(([br, prices]) => {
-        const min = Math.min(...prices);
-        const max = Math.max(...prices);
-        return `${br}BR n=${prices.length} $${min}-$${max}`;
-      })
-      .join(", ");
-    log(`vrbo_search ${id}: by-BR: ${summary}`);
-  }
-  return cards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
+  log(`vrbo_search ${id}: starting resort list harvest (${listHarvestPasses} passes) before card extraction`);
+  const listHarvestStats = await harvestVrboMapResultCards(page, id, listHarvestPasses);
+  log(
+    `vrbo_search ${id}: resort list harvest done passes=${listHarvestStats.passes} ` +
+    `total=${listHarvestStats.finalHarvestTotal} visible=${listHarvestStats.lastVisibleCards}`,
+  );
+  const domExtract = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm, { minBedrooms: 1 });
+  return (domExtract.cards ?? []).map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
 }
 
 // ─────────────────────── VRBO listing photo scrape ─────────────────
