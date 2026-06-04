@@ -26,8 +26,6 @@ const REALTOR_DETAIL_PATH = /realtor\.com\/realestateandhomes-detail\//i;
 
 const REJECTED_LISTING_STATUSES = new Set([
   "pending",
-  "sold",
-  "closed",
   "off market",
   "off-market",
   "withdrawn",
@@ -408,7 +406,7 @@ export function buildRealtyApiSearchParams(opts: {
   qs.set("location", opts.location.trim());
   qs.set("page", String(Math.max(1, Math.floor(opts.page))));
   qs.set("resultCount", String(Math.max(1, Math.min(200, Math.floor(opts.resultCount)))));
-  qs.set("searchType", "For_Sale");
+  qs.set("searchType", "Sold");
   qs.set("propertyType", "Condo,Townhome");
   qs.set("pending", "false");
   qs.set("hasPhotos", "true");

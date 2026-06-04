@@ -34,7 +34,7 @@ For each community (example: **Pili Mai**):
 3. ZIP `96756`
 4. Discovery cities: `Koloa, HI`, etc.
 
-Each query uses `propertyType=Condo,Townhome`, `searchType=For_Sale`,
+Each query uses `propertyType=Condo,Townhome`, `searchType=Sold`,
 `pending=false`, `hasPhotos=true`, optional `keywords` from community name,
 and bedroom filters when the wizard requests a specific BR count.
 

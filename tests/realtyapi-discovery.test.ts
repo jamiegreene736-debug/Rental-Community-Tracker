@@ -39,7 +39,7 @@ const qs = buildRealtyApiSearchParams({
 });
 assert.equal(qs.get("location"), "Pili Mai at Poipu");
 assert.equal(qs.get("propertyType"), "Condo,Townhome");
-assert.equal(qs.get("searchType"), "For_Sale");
+assert.equal(qs.get("searchType"), "Sold");
 assert.equal(qs.get("pending"), "false");
 assert.equal(qs.get("hasPhotos"), "true");
 assert.equal(qs.get("bedsRange"), "min:2,max:2");
@@ -59,7 +59,7 @@ const row = normalizeRealtyApiListing({
   beds: 2,
   baths: 2,
   sqft: 1100,
-  status: "for_sale",
+  status: "sold",
   list_price: 850000,
   property_id: "12345",
 }, "Pili Mai at Poipu");
