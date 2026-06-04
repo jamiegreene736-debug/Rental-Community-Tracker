@@ -5808,6 +5808,14 @@ function logProviderMapSearchPlan(label, id, providerName, params, effectiveSear
   );
 }
 
+function vrboMapMinBedrooms(bedrooms) {
+  const n = Number.parseInt(String(bedrooms ?? ""), 10);
+  // Buy-in map scans need at least 2BR in the VRBO filter so 1BR map pins
+  // do not dominate Princeville/Kauai results while the server still applies
+  // the per-slot bedroom floor afterward.
+  return Math.max(2, Number.isFinite(n) && n > 0 ? n : 1);
+}
+
 function buildVrboMapSearchUrl(params, searchTerm) {
   const { checkIn, checkOut, bedrooms } = params;
   const url = new URL("https://www.vrbo.com/search");
@@ -5815,7 +5823,7 @@ function buildVrboMapSearchUrl(params, searchTerm) {
   url.searchParams.set("startDate", checkIn);
   url.searchParams.set("endDate", checkOut);
   url.searchParams.set("adults", "2");
-  url.searchParams.set("minBedrooms", String(Math.max(1, Number(bedrooms) || 1)));
+  url.searchParams.set("minBedrooms", String(vrboMapMinBedrooms(bedrooms)));
   url.searchParams.set("sort", "PRICE_RELEVANT");
   const center = vrboMapCenter(params);
   if (center) {
@@ -5955,8 +5963,9 @@ async function disableVrboSearchAsMapMoves(targetPage, label, id) {
 }
 
 async function extractVisibleVrboCards(id, params, expectedNights, variantLabel) {
+  const mapMinBedrooms = vrboMapMinBedrooms(params?.bedrooms);
   const result = await page.evaluate((args) => {
-    const { expectedNights } = args;
+    const { expectedNights, mapMinBedrooms } = args;
 
     function cardRowFromElement(card) {
       const titleEl = card.querySelector?.("h3");
@@ -5991,7 +6000,7 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
     if (harvestedRows.length > 0) selectorSource = `${selectorSource}+harvest`;
 
     const out = [];
-    const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0 };
+    const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0, belowMinBedrooms: 0 };
     let firstCardSample = null;
     const seenRows = new Set();
     const rows = [
@@ -6026,6 +6035,7 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
 
       if (!/^\/\d+/.test(propertyPath)) { drops.noUrl++; continue; }
       if (bedroomsExtracted === null) { drops.noBedrooms++; continue; }
+      if (bedroomsExtracted < mapMinBedrooms) { drops.belowMinBedrooms++; continue; }
 
       let totalPrice = 0;
       let totalNights = 0;
@@ -6096,14 +6106,14 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
       selectorSource,
       firstCardSample,
     };
-  }, { expectedNights });
+  }, { expectedNights, mapMinBedrooms });
 
   const cards = result.out;
   const allInCount = cards.filter((c) => c.priceIncludesTaxes).length;
   const brList = cards.map((c) => c.bedrooms ?? "?").join(",");
   log(
     `vrbo_search ${id}: ${cards.length} cards (${allInCount} all-in / ${cards.length - allInCount} pre-tax) ` +
-    `[selector=${result.totalSeen}/${result.selectorSource}, dom=${result.domSeen ?? 0}, harvest=${result.harvestSeen ?? 0}, drops=noUrl:${result.drops.noUrl}/noPrice:${result.drops.noPrice}/noBR:${result.drops.noBedrooms}, BRs=[${brList}]]`,
+    `[selector=${result.totalSeen}/${result.selectorSource}, dom=${result.domSeen ?? 0}, harvest=${result.harvestSeen ?? 0}, drops=noUrl:${result.drops.noUrl}/noPrice:${result.drops.noPrice}/noBR:${result.drops.noBedrooms}/belowMinBR:${result.drops.belowMinBedrooms ?? 0}, BRs=[${brList}]]`,
   );
   if (cards.length === 0 && result.firstCardSample) {
     log(`vrbo_search ${id}: empty-result diagnostic — first card title="${result.firstCardSample.title}" path="${result.firstCardSample.propertyPath}" br=${result.firstCardSample.bedroomsExtracted} text="${result.firstCardSample.textExcerpt}"`);
@@ -6139,9 +6149,6 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
   let lastSnapshot = null;
   for (let pass = 0; pass < passes; pass++) {
     log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} starting`);
-    await targetPage.mouse?.click?.(420, 740).catch(() => {});
-    await targetPage.mouse?.wheel?.(0, 1400).catch(() => {});
-    await targetPage.keyboard?.press?.("PageDown").catch(() => {});
     let snapshot = null;
     try {
       snapshot = await withSoftTimeout(
@@ -6170,39 +6177,56 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
             seenHarvest.add(key);
             window.__vrboHarvestCards.push(row);
           }
-          const firstCard = cards[0] || document.querySelector('a[href^="/"][href*="?"]');
-          const candidates = [];
-          let el = firstCard;
-          for (let depth = 0; el && depth < 14; depth += 1, el = el.parentElement) {
+          function looksLikeMapPane(rect) {
+            if (!rect || rect.width < 1 || rect.height < 1) return false;
+            const vw = window.innerWidth || 1;
+            const vh = window.innerHeight || 1;
+            const wide = rect.width >= vw * 0.42;
+            const rightHeavy = rect.left >= vw * 0.28;
+            const tall = rect.height >= vh * 0.45;
+            return wide && rightHeavy && tall;
+          }
+          const scrollCandidates = [];
+          const seed = cards[0] || document.querySelector('[data-stid="lodging-card-responsive"]');
+          let el = seed;
+          for (let depth = 0; el && depth < 18; depth += 1, el = el.parentElement) {
             if (!el || el.nodeType !== 1) continue;
             const overflow = (el.scrollHeight || 0) - (el.clientHeight || 0);
-            if (overflow > 120) {
-              candidates.push({
-                el,
-                overflow,
-                cardCount: el.querySelectorAll?.('[data-stid="lodging-card-responsive"], a[href^="/"][href*="?"]').length ?? 0,
-                before: el.scrollTop || 0,
-              });
-            }
+            if (overflow < 80) continue;
+            const rect = el.getBoundingClientRect?.() ?? { width: 0, height: 0, left: 0 };
+            if (looksLikeMapPane(rect)) continue;
+            const cardCount = el.querySelectorAll?.('[data-stid="lodging-card-responsive"]')?.length ?? 0;
+            if (cardCount < 1) continue;
+            scrollCandidates.push({
+              el,
+              overflow,
+              cardCount,
+              before: el.scrollTop || 0,
+            });
           }
-          candidates.sort((a, b) => (b.cardCount - a.cardCount) || (b.overflow - a.overflow));
-          const target = candidates[0] || document.scrollingElement || document.documentElement;
-          const before = target.scrollTop || 0;
-          const step = Math.max(480, Math.round((target.clientHeight || window.innerHeight) * 0.85));
-          target.scrollTop = before + step;
-          target.dispatchEvent?.(new Event("scroll", { bubbles: true }));
-          window.scrollBy(0, Math.round(window.innerHeight * 0.6));
+          scrollCandidates.sort((a, b) => (b.cardCount - a.cardCount) || (b.overflow - a.overflow));
+          const target = scrollCandidates[0]?.el ?? null;
+          let before = 0;
+          let after = 0;
+          if (target) {
+            before = target.scrollTop || 0;
+            const step = Math.max(360, Math.round((target.clientHeight || 640) * 0.72));
+            target.scrollTop = before + step;
+            target.dispatchEvent?.(new Event("scroll", { bubbles: true }));
+            after = target.scrollTop || 0;
+          }
           return {
             pass: passNumber,
-            scrollTargets: candidates.length,
+            scrollTargets: scrollCandidates.length,
+            scrolledResultsList: Boolean(target),
             visibleCards: document.querySelectorAll('[data-stid="lodging-card-responsive"]').length,
             propertyLinks: Array.from(document.querySelectorAll('a[href]')).filter((a) => /^\/\d+/.test(a.getAttribute("href") || "")).length,
             harvestedCurrent: currentRows.length,
             harvestedTotal: window.__vrboHarvestCards.length,
-            topTargetCards: candidates[0]?.cardCount ?? 0,
-            topTargetOverflow: candidates[0]?.overflow ?? 0,
+            topTargetCards: scrollCandidates[0]?.cardCount ?? 0,
+            topTargetOverflow: scrollCandidates[0]?.overflow ?? 0,
             before,
-            after: target.scrollTop || 0,
+            after,
           };
         }, pass + 1),
         5_000,
@@ -6215,7 +6239,7 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
       lastSnapshot = snapshot;
       log(
         `vrbo_search ${id}: map harvest pass ${snapshot.pass}/${passes} ` +
-        `targets=${snapshot.scrollTargets} visibleCards=${snapshot.visibleCards} propertyLinks=${snapshot.propertyLinks} ` +
+        `targets=${snapshot.scrollTargets} scrolledList=${snapshot.scrolledResultsList} visibleCards=${snapshot.visibleCards} propertyLinks=${snapshot.propertyLinks} ` +
         `harvest=${snapshot.harvestedCurrent}/${snapshot.harvestedTotal} ` +
         `topCards=${snapshot.topTargetCards} overflow=${snapshot.topTargetOverflow} scroll=${snapshot.before}->${snapshot.after}`,
       );
@@ -6258,6 +6282,8 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
     await dismissObstructions(page, "vrbo_search_map");
     await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
     await disableVrboSearchAsMapMoves(page, "vrbo_search", id).catch(() => false);
+    const mapMinBedrooms = vrboMapMinBedrooms(bedrooms);
+    await fillBedroomFilter(page, mapMinBedrooms, `vrbo_search ${id} map-min-br`).catch(() => null);
     if (bounds) {
       log(`vrbo_search ${id}: provider bounds present; clicking search-this-area to apply viewport/bounds ${formatMapBoundsForLog(bounds)}`);
       await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);

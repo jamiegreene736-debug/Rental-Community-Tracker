@@ -1740,6 +1740,32 @@ console.log("  ✓ VRBO homepage search guards stay strict on destination drift"
 
 assert.match(
   workerSource,
+  /function vrboMapMinBedrooms/,
+  "VRBO map searches should enforce at least 2 bedrooms in URL/filter to reduce 1BR map noise",
+);
+assert.match(
+  workerSource,
+  /vrboMapMinBedrooms\(bedrooms\)/,
+  "VRBO map URL builder should use the shared 2BR floor helper",
+);
+assert.ok(
+  !workerSource.includes("mouse?.wheel?.(0, 1400)"),
+  "VRBO map harvest must not wheel-scroll the map pane (causes repeated zoom-out on Princeville)",
+);
+assert.match(
+  workerSource,
+  /looksLikeMapPane/,
+  "VRBO map harvest should scroll only the results list, not the map viewport",
+);
+assert.match(
+  workerSource,
+  /scrolledResultsList/,
+  "VRBO map harvest diagnostics should report list-only scrolling",
+);
+console.log("  ✓ VRBO map harvest avoids map zoom-out and enforces 2BR floor");
+
+assert.match(
+  workerSource,
   /function bookingRequiredTargetTokens/,
   "Booking card filtering should use server filter tokens plus resort/city context",
 );
