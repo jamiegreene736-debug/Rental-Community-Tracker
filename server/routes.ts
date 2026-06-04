@@ -12323,6 +12323,7 @@ export async function registerRoutes(
         vrboDetailPricedCount = 0;
         return acceptedVrbo.map((c): Candidate => {
           const inferred = rawCandidateBedroomSignal(c) ?? undefined;
+          const capturedFromMapInventory = c.captureSource === "vrbo_graphql_propertySearchListings";
           return {
             source: "vrbo" as const,
             sourceLabel: "Vrbo",
@@ -12333,10 +12334,13 @@ export async function registerRoutes(
             totalPrice: c.totalPrice,
             bedrooms: inferred,
             image: c.image,
+            images: Array.isArray(c.images) ? c.images.slice(0, 5) : undefined,
             snippet: c.snippet,
             verified: "yes",
             verifiedNightlyPrice: c.nightlyPrice,
-            verifiedReason: "Vrbo sidecar searched vrbo.com map view with the resort bounds, dates, and bedroom filter and scraped this priced result card",
+            verifiedReason: capturedFromMapInventory
+              ? "Vrbo sidecar searched vrbo.com map view with the resort bounds, dates, and bedroom filter and captured this result from VRBO's map inventory response"
+              : "Vrbo sidecar searched vrbo.com map view with the resort bounds, dates, and bedroom filter and scraped this priced result card",
           };
         });
       } catch (e: any) {

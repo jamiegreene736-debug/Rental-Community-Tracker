@@ -283,6 +283,8 @@ export type SidecarPropertyCandidate = {
   directBookingSource?: "airbnb_image_reverse_search";
   directBookingReason?: string;
   searchVariant?: string;
+  vrboId?: string;
+  captureSource?: "vrbo_graphql_propertySearchListings";
 };
 
 export type SidecarSearchVariationMode =

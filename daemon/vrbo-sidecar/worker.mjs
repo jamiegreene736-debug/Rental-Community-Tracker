@@ -4920,12 +4920,327 @@ function dedupeCandidatesByUrl(candidates) {
   const seen = new Set();
   const out = [];
   for (const candidate of candidates) {
-    const key = String(candidate?.url || "").replace(/[?#].*$/, "");
+    const rawId = String(candidate?.vrboId || candidate?.propertyId || "").trim();
+    const urlKey = String(candidate?.url || "").replace(/[?#].*$/, "");
+    const key = rawId ? `id:${rawId}` : urlKey;
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(candidate);
   }
   return out;
+}
+
+function cleanText(raw) {
+  if (raw == null) return "";
+  if (typeof raw === "object") return "";
+  return String(raw || "").replace(/\s+/g, " ").trim();
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const text = cleanText(value);
+    if (text) return text;
+  }
+  return "";
+}
+
+function parseVrboAmount(raw) {
+  const n = Number.parseFloat(String(raw || "").replace(/,/g, "").replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function findFirstStringDeep(root, predicates, maxDepth = 7) {
+  const stack = [{ value: root, path: "", depth: 0 }];
+  const seen = new Set();
+  while (stack.length) {
+    const { value, path, depth } = stack.pop();
+    if (value == null || depth > maxDepth) continue;
+    if (typeof value === "string") {
+      const text = cleanText(value);
+      if (text && predicates.some((predicate) => predicate(text, path))) return text;
+      continue;
+    }
+    if (typeof value !== "object") continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (let i = Math.min(value.length - 1, 40); i >= 0; i--) {
+        stack.push({ value: value[i], path: `${path}[${i}]`, depth: depth + 1 });
+      }
+    } else {
+      const entries = Object.entries(value);
+      for (let i = Math.min(entries.length - 1, 80); i >= 0; i--) {
+        const [key, child] = entries[i];
+        stack.push({ value: child, path: path ? `${path}.${key}` : key, depth: depth + 1 });
+      }
+    }
+  }
+  return "";
+}
+
+function collectStringsDeep(root, predicate, limit = 20, maxDepth = 7) {
+  const out = [];
+  const stack = [{ value: root, path: "", depth: 0 }];
+  const seen = new Set();
+  while (stack.length && out.length < limit) {
+    const { value, path, depth } = stack.pop();
+    if (value == null || depth > maxDepth) continue;
+    if (typeof value === "string") {
+      const text = cleanText(value);
+      if (text && predicate(text, path)) out.push(text);
+      continue;
+    }
+    if (typeof value !== "object") continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (let i = Math.min(value.length - 1, 80); i >= 0; i--) {
+        stack.push({ value: value[i], path: `${path}[${i}]`, depth: depth + 1 });
+      }
+    } else {
+      const entries = Object.entries(value);
+      for (let i = Math.min(entries.length - 1, 120); i >= 0; i--) {
+        const [key, child] = entries[i];
+        stack.push({ value: child, path: path ? `${path}.${key}` : key, depth: depth + 1 });
+      }
+    }
+  }
+  return out;
+}
+
+function firstNumberDeep(root, keyPattern, min = 0, max = Number.POSITIVE_INFINITY, maxDepth = 6) {
+  const stack = [{ value: root, path: "", depth: 0 }];
+  const seen = new Set();
+  while (stack.length) {
+    const { value, path, depth } = stack.pop();
+    if (value == null || depth > maxDepth) continue;
+    if (typeof value === "number" || typeof value === "string") {
+      if (keyPattern.test(path)) {
+        const n = typeof value === "number" ? value : Number.parseFloat(value.replace(/[^\d.]/g, ""));
+        if (Number.isFinite(n) && n >= min && n <= max) return n;
+      }
+      continue;
+    }
+    if (typeof value !== "object") continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    const entries = Array.isArray(value) ? value.map((child, i) => [String(i), child]) : Object.entries(value);
+    for (let i = Math.min(entries.length - 1, 80); i >= 0; i--) {
+      const [key, child] = entries[i];
+      stack.push({ value: child, path: path ? `${path}.${key}` : key, depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
+function extractVrboBedroomsFromText(raw) {
+  const text = cleanText(raw).toLowerCase();
+  const direct = text.match(/\b([1-9])\s*(?:br|bd|bdr|bedrooms?|bed\s*rooms?)\b/);
+  if (direct) return Number.parseInt(direct[1], 10);
+  const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };
+  for (const [word, count] of Object.entries(words)) {
+    if (new RegExp(`\\b${word}[\\s-]*(?:bedroom|bedrooms|bed\\s*rooms?)\\b`).test(text)) return count;
+  }
+  return null;
+}
+
+function parseVrboPriceText(raw, expectedNights) {
+  const text = cleanText(raw);
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const totalMatch =
+    text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:total|for\s+\d+\s+nights?)/i) ||
+    text.match(/total(?:\s+before\s+taxes)?\s*\$\s*([\d,]+(?:\.\d+)?)/i);
+  if (totalMatch) {
+    const totalPrice = parseVrboAmount(totalMatch[1]);
+    if (totalPrice > 0) {
+      const includesTaxes = /\bincludes?\s+tax(?:es)?\b|\btaxes?\s*(?:and|&)\s*fees?\s*included\b/.test(lower);
+      const beforeTaxes = /\bbefore\s+tax(?:es)?\b/.test(lower);
+      return {
+        totalPrice: Math.round(totalPrice),
+        nightlyPrice: Math.round(totalPrice / expectedNights),
+        priceIncludesTaxes: includesTaxes && !beforeTaxes,
+        priceIncludesFees: true,
+        priceBasis: includesTaxes && !beforeTaxes ? "all_in" : "pre_tax_total",
+      };
+    }
+  }
+  const nightlyMatch =
+    text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:night|\/night|per night)/i) ||
+    text.match(/(?:night|\/night|per night)\s*\$\s*([\d,]+(?:\.\d+)?)/i);
+  if (nightlyMatch) {
+    const nightlyPrice = parseVrboAmount(nightlyMatch[1]);
+    if (nightlyPrice > 0) {
+      return {
+        nightlyPrice: Math.round(nightlyPrice),
+        totalPrice: Math.round(nightlyPrice * expectedNights),
+        priceIncludesTaxes: false,
+        priceIncludesFees: false,
+        priceBasis: "nightly_base",
+      };
+    }
+  }
+  return null;
+}
+
+function normalizeVrboListingUrl(rawUrl, id) {
+  const raw = cleanText(rawUrl);
+  if (/^https?:\/\//i.test(raw)) return normalizeAbsoluteUrl(raw, "https://www.vrbo.com");
+  if (/^\/\d+/.test(raw)) return normalizeAbsoluteUrl(raw, "https://www.vrbo.com");
+  if (/^\d{5,}$/.test(String(id || ""))) return `https://www.vrbo.com/${id}`;
+  return "";
+}
+
+function normalizeVrboGraphqlListing(row, expectedNights, variantLabel) {
+  if (!row || typeof row !== "object") return null;
+  const id = firstNonEmpty(
+    row.id,
+    row.listingId,
+    row.propertyId,
+    row.propertyMetadata?.id,
+    row.cardLink?.resource?.value?.match?.(/\/(\d{5,})/)?.[1],
+    row.cardLink?.uri?.value?.match?.(/\/(\d{5,})/)?.[1],
+  );
+  const url = normalizeVrboListingUrl(
+    firstNonEmpty(
+      row.cardLink?.resource?.value,
+      row.cardLink?.uri?.value,
+      row.cardLink?.url,
+      row.url,
+      row.href,
+      findFirstStringDeep(row, [
+        (text, path) => /(?:cardLink|propertyUrl|detailsUrl|url|href|resource|uri)/i.test(path) && /(?:vrbo\.com|^\/\d+)/i.test(text),
+      ], 5),
+    ),
+    id,
+  );
+  if (!url) return null;
+
+  const title = firstNonEmpty(
+    row.headingSection?.heading,
+    row.headingSection?.title,
+    row.detailSection?.title,
+    row.name,
+    row.title,
+    findFirstStringDeep(row, [
+      (_text, path) => /(?:heading|title|name)$/i.test(path) && !/(badge|label|button|accessibility|price)/i.test(path),
+    ], 5),
+    id ? `Vrbo property ${id}` : "Vrbo property",
+  ).replace(/^Photo gallery for\s*/i, "").slice(0, 110);
+
+  const images = collectStringsDeep(
+    row,
+    (text, path) => /(?:image|photo|media|gallery|url|uri)/i.test(path) && /^https?:\/\//i.test(text) && !/logo|icon|sprite|avatar|profile|map|placeholder/i.test(text),
+    5,
+    7,
+  );
+  const textBlob = collectStringsDeep(row, (text) => text.length <= 260, 40, 6).join(" ");
+  const bedrooms =
+    firstNumberDeep(row, /bedrooms?|bedroomCount|bedCount|rooms\.bed/i, 1, 30, 6) ??
+    extractVrboBedroomsFromText(textBlob);
+  const priceText = firstNonEmpty(
+    row.priceSection?.priceSummary,
+    row.priceSection?.primary?.lineItems?.map?.((x) => x?.value || x?.text)?.join(" "),
+    row.priceSection?.primary?.text,
+    row.priceSection?.price?.text,
+    row.priceSection?.displayPrice,
+    findFirstStringDeep(row, [
+      (text, path) => /\$/.test(text) && /(?:price|total|rate|amount|summary|lineItems?)/i.test(path),
+      (text) => /\$\s*[\d,]+/.test(text) && /\b(?:total|night|nights?|tax|fee)\b/i.test(text),
+    ], 7),
+  );
+  const price = parseVrboPriceText(priceText || textBlob, expectedNights);
+  const snippet = cleanText([priceText, textBlob].filter(Boolean).join(" ")).slice(0, 260);
+  return {
+    url,
+    title,
+    totalPrice: price?.totalPrice ?? 0,
+    nightlyPrice: price?.nightlyPrice ?? 0,
+    bedrooms: Number.isFinite(bedrooms) ? Math.round(bedrooms) : undefined,
+    bedroomSource: Number.isFinite(bedrooms) ? "search-card" : "unknown",
+    image: images[0],
+    images,
+    snippet,
+    priceIncludesTaxes: price?.priceIncludesTaxes ?? false,
+    priceIncludesFees: price?.priceIncludesFees ?? false,
+    priceBasis: price?.priceBasis ?? "unknown",
+    availabilityOnly: !price,
+    vrboId: id || undefined,
+    captureSource: "vrbo_graphql_propertySearchListings",
+    searchVariant: variantLabel,
+  };
+}
+
+function collectVrboPropertySearchListings(root, out = [], maxDepth = 10) {
+  const stack = [{ value: root, path: "", depth: 0 }];
+  const seen = new Set();
+  while (stack.length && out.length < 600) {
+    const { value, path, depth } = stack.pop();
+    if (value == null || depth > maxDepth) continue;
+    if (typeof value !== "object") continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      if (/propertySearchListings$|searchListings$|listings$|lodgings$/i.test(path)) {
+        for (const item of value) {
+          if (item && typeof item === "object") out.push(item);
+          if (out.length >= 600) break;
+        }
+      }
+      for (let i = Math.min(value.length - 1, 120); i >= 0; i--) {
+        stack.push({ value: value[i], path: `${path}[${i}]`, depth: depth + 1 });
+      }
+    } else {
+      for (const [key, child] of Object.entries(value).reverse()) {
+        const childPath = path ? `${path}.${key}` : key;
+        if (key === "propertySearchListings" && Array.isArray(child)) {
+          for (const item of child) {
+            if (item && typeof item === "object") out.push(item);
+            if (out.length >= 600) break;
+          }
+        }
+        stack.push({ value: child, path: childPath, depth: depth + 1 });
+      }
+    }
+  }
+  return out;
+}
+
+function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel) {
+  const rows = [];
+  let responsesSeen = 0;
+  let matchedResponses = 0;
+  const handler = async (response) => {
+    try {
+      const request = response.request?.();
+      const url = response.url?.() || "";
+      const contentType = String(response.headers?.()?.["content-type"] || "");
+      const method = request?.method?.() || "";
+      if (!/vrbo\.com|expediagroup|egds|graphql/i.test(url)) return;
+      if (!/json|graphql/i.test(contentType) && !/graphql/i.test(url)) return;
+      if (response.status?.() >= 400) return;
+      responsesSeen++;
+      const payload = await response.json().catch(() => null);
+      if (!payload || typeof payload !== "object") return;
+      const listings = collectVrboPropertySearchListings(payload);
+      if (listings.length === 0) return;
+      matchedResponses++;
+      for (const listing of listings) {
+        const normalized = normalizeVrboGraphqlListing(listing, expectedNights, variantLabel);
+        if (normalized) rows.push(normalized);
+        if (rows.length >= 300) break;
+      }
+      log(`vrbo_search ${id}: captured ${listings.length} listing rows from ${method} ${url.slice(0, 120)}`);
+    } catch (e) {
+      log(`vrbo_search ${id}: VRBO network capture skipped response: ${e?.message ?? e}`);
+    }
+  };
+  targetPage.on("response", handler);
+  return {
+    candidates: () => dedupeCandidatesByUrl(rows),
+    stats: () => ({ responsesSeen, matchedResponses, normalized: rows.length }),
+    dispose: () => targetPage.off?.("response", handler),
+  };
 }
 
 async function fillVisibleSearchField(targetPage, searchTerm, label = "site_search", options = {}) {
@@ -5387,15 +5702,16 @@ async function processVrboSearch(id, params) {
       source: "map-bounds",
     };
     const cards = await runVrboMapBoundsSearchVariant(id, params, mapVariant);
+    const uniqueCards = dedupeCandidatesByUrl(cards);
     await postResult(id, {
-      candidates: dedupeCandidatesByUrl(cards),
+      candidates: uniqueCards,
       variationsTried: [{
         term: effectiveSearchTerm,
         typedQuery: effectiveSearchTerm,
         suggestionText: mapVariant.suggestionText,
         source: "map-bounds",
         success: true,
-        candidateCount: cards.length,
+        candidateCount: uniqueCards.length,
       }],
     });
     return;
@@ -5663,32 +5979,48 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
   await ensureBrowser();
   await surfaceVisibleOtaSearchWindow(page, "vrbo_search", id);
   await clearOtaClientSearchState("https://www.vrbo.com", `vrbo_search ${id} map-bounds preflight`);
-  const url = buildVrboMapSearchUrl(params, effectiveSearchTerm);
-  assertSafeVrboNavigation(url, "vrbo_search_map", id, { allowMapBoundsSearch: true });
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
-  await boundedPageDelay(page, PAGE_SETTLE_MS);
-  await stopVrboProviderIfBlocked(page, "vrbo_search", id);
-  await dismissObstructions(page, "vrbo_search_map");
-  await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
-  await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
-  let state = await dumpPageState("vrbo-map", { id, ...params });
-  throwIfBrightDataKycBlock(state, "vrbo_search", id);
-  if (await stopVrboProviderIfBlocked(page, "vrbo_search", id, state)) {
-    state = await dumpPageState("vrbo-map-after-manual-solve", { id, ...params });
-  }
-  throwIfVrboHardBlock(state, "vrbo_search", id);
-  if (stateLooksLikeVrboHumanChallenge(state)) {
-    throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
-      label: "vrbo_search",
-      id,
-      url: state?.url,
-      title: state?.title,
-      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
-      retryLater: true,
-    });
-  }
   const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
-  return extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm);
+  const networkCapture = createVrboGraphqlCollector(page, id, expectedNights, effectiveSearchTerm);
+  const url = buildVrboMapSearchUrl(params, effectiveSearchTerm);
+  try {
+    assertSafeVrboNavigation(url, "vrbo_search_map", id, { allowMapBoundsSearch: true });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+    await boundedPageDelay(page, PAGE_SETTLE_MS);
+    await stopVrboProviderIfBlocked(page, "vrbo_search", id);
+    await dismissObstructions(page, "vrbo_search_map");
+    await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
+    await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
+    await boundedPageDelay(page, 2_500);
+    let state = await dumpPageState("vrbo-map", { id, ...params });
+    throwIfBrightDataKycBlock(state, "vrbo_search", id);
+    if (await stopVrboProviderIfBlocked(page, "vrbo_search", id, state)) {
+      state = await dumpPageState("vrbo-map-after-manual-solve", { id, ...params });
+    }
+    throwIfVrboHardBlock(state, "vrbo_search", id);
+    if (stateLooksLikeVrboHumanChallenge(state)) {
+      throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
+        label: "vrbo_search",
+        id,
+        url: state?.url,
+        title: state?.title,
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+        retryLater: true,
+      });
+    }
+    const domCards = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm);
+    const networkCards = networkCapture.candidates();
+    const mergedCards = dedupeCandidatesByUrl([...networkCards, ...domCards]);
+    const pricedNetworkCards = networkCards.filter((c) => !c.availabilityOnly && c.totalPrice > 0).length;
+    const stats = networkCapture.stats();
+    log(
+      `vrbo_search ${id}: map inventory merged ${mergedCards.length} candidates ` +
+      `(network=${networkCards.length}, networkPriced=${pricedNetworkCards}, dom=${domCards.length}, ` +
+      `jsonResponses=${stats.matchedResponses}/${stats.responsesSeen})`,
+    );
+    return mergedCards;
+  } finally {
+    networkCapture.dispose();
+  }
 }
 
 async function runVrboSearchVariant(id, params, variant = null, visibleAttempt = 0) {

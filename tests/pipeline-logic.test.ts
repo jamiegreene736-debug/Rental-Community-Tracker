@@ -2939,6 +2939,18 @@ assert.ok(
   routesSource.includes("const bounds = resortBounds;") && routesSource.includes("const vrboMapBounds = cityMapBounds ?? resortBounds;"),
   "alternative scout should widen only the VRBO map search while keeping Airbnb resort bounds strict",
 );
+assert.ok(
+  vrboWorkerSource.includes("createVrboGraphqlCollector") &&
+    vrboWorkerSource.includes("propertySearchListings") &&
+    vrboWorkerSource.includes("captureSource: \"vrbo_graphql_propertySearchListings\""),
+  "VRBO map-bounds search should passively capture propertySearchListings inventory from the visible map search",
+);
+assert.ok(
+  vrboWorkerSource.includes("map inventory merged") &&
+    vrboWorkerSource.includes("networkCapture.dispose()") &&
+    routesSource.includes("captured this result from VRBO's map inventory response"),
+  "VRBO network inventory should be merged with DOM cards, disposed after each run, and surfaced in buy-in proof text",
+);
 
 assert.equal(classifyFailureText("HTTP 502 while waiting for sidecar lane").failureClass, "transient");
 assert.equal(classifyFailureText("waiting-sidecar-lane held by bulk combo").failureClass, "sidecar");
