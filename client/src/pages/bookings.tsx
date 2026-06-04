@@ -1395,7 +1395,7 @@ function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFill
     selected: true,
     note: `City VRBO inventory${pair.walkMinutes != null ? ` · ~${pair.walkMinutes} min walk` : ""}`,
     picks: pair.picks.map((pick, index) => ({
-      bedrooms: pair.bedrooms[index] ?? Number(pick.bedrooms) || 0,
+      bedrooms: pair.bedrooms[index] ?? (Number(pick.bedrooms) || 0),
       source: "vrbo",
       sourceLabel: pick.sourceLabel ?? "Vrbo",
       title: pick.title,
