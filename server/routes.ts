@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { storage } from "./storage";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
@@ -25278,15 +25278,6 @@ Return ONLY compact JSON with this exact shape:
       communityName?: string;
       location?: string;
     };
-    void communityName;
-    void location;
-    return res.status(410).json({
-      filename: filename || null,
-      platforms: [],
-      checkedUrl: imageUrl || null,
-      skipped: true,
-      reason: "Google Lens reverse-image platform checks are disabled to preserve SearchAPI quota.",
-    });
 
     const searchApiKey = process.env.SEARCHAPI_API_KEY;
     const imgbbKey = process.env.IMGBB_API_KEY;
@@ -28432,6 +28423,22 @@ Return ONLY compact JSON with this exact shape:
           error: `Replacement photo pipeline kept only ${result.kept} photo${result.kept === 1 ? "" : "s"}; at least ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos are required.`,
         };
       }
+      const persistedProof = buildUnitPhotoResolverProof({
+        photos: result.keptSourceUrls.map((photoUrl) => ({ url: photoUrl })),
+        sourceUrl: url,
+        foundVia: "replacement-commit",
+        requestedBedrooms: swap.newBedrooms ?? swap.oldBedrooms ?? null,
+        facts: listingFacts,
+        contentFingerprints: result.keptContentFingerprints,
+      });
+      if (persistedProof.status === "rejected") {
+        return {
+          ok: false,
+          folder,
+          savedCount: result.kept,
+          error: summarizeUnitPhotoProof("Replacement saved photos", persistedProof),
+        };
+      }
 
       const sourcePath = path.join(folderPath, "_source.json");
       let sourceDoc: any = {};
@@ -28442,8 +28449,13 @@ Return ONLY compact JSON with this exact shape:
         scrapedDate: new Date().toISOString().slice(0, 10),
       };
       sourceDoc.unitPhotoResolverProof = {
-        ...resolverProof,
+        ...persistedProof,
         savedPhotoCount: result.kept,
+        savedPhotos: result.keptFilenames.map((filename, index) => ({
+          filename,
+          sourceUrl: result.keptSourceUrls[index] ?? null,
+          contentFingerprint: result.keptContentFingerprints[index] ?? null,
+        })),
       };
       sourceDoc.verificationStatus = "needs-review";
       sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
@@ -31000,7 +31012,8 @@ Return ONLY compact JSON with this exact shape:
       const requestedStateAbbr = String(state ?? "").trim().toLowerCase().match(/^(hi|hawaii)$/) ? "hi" : null;
       const urlStatePattern = /(?:^|[-_/])([A-Z]{2})(?:[-_/]|$)/i;
       type DiscoverySource = "zillow" | "realtor" | "redfin" | "homes";
-      const candidateUrls: Array<{ url: string; source: DiscoverySource }> = [];
+      type DiscoveryCandidate = { url: string; source: DiscoverySource; score: number; reasons: string[] };
+      const candidateUrls: DiscoveryCandidate[] = [];
       const seen = new Set<string>();
       const harvestRootCounts = new Map<string, number>();
       const suppliedStreetRoot = streetRootFromListingAddress(streetAddress ?? null);
@@ -31020,6 +31033,33 @@ Return ONLY compact JSON with this exact shape:
           .map(([root]) => root);
         return new Set(repeated.length > 0 ? repeated : Array.from(harvestRootCounts.keys()));
       };
+      const scoreCandidate = (link: string, source: DiscoverySource, title = "", snippet = ""): { score: number; reasons: string[] } => {
+        const reasons: string[] = [];
+        let score = 0;
+        const text = `${link} ${title} ${snippet}`.toLowerCase();
+        const root = streetRootFromListingAddress(
+          parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${title} ${snippet}`),
+        );
+        if (root && suppliedStreetRoot && root === suppliedStreetRoot) {
+          score += 60;
+          reasons.push("exact-street-root");
+        }
+        if (requestedBedrooms && new RegExp(`\\b${requestedBedrooms}\\s*(?:br|bed|bedroom)\\b`, "i").test(text)) {
+          score += 20;
+          reasons.push("bedroom-evidence");
+        }
+        if (communityNames.some((name) => name && text.includes(name.toLowerCase()))) {
+          score += 12;
+          reasons.push("community-name");
+        }
+        if (discoveryCities.some((searchCity) => searchCity && text.includes(searchCity.toLowerCase()))) {
+          score += 8;
+          reasons.push("city-alias");
+        }
+        score += source === "zillow" ? 8 : source === "realtor" ? 7 : source === "redfin" ? 5 : 4;
+        reasons.push(`source:${source}`);
+        return { score, reasons };
+      };
       const addCandidate = (link: string, source: DiscoverySource, title = "", snippet = "", allowedRoots?: Set<string>): boolean => {
         const key = listingKey(link);
         if (seen.has(key) || skipSet.has(key)) return false;
@@ -31034,7 +31074,7 @@ Return ONLY compact JSON with this exact shape:
           if (!root || !allowedRoots.has(root)) return false;
         }
         seen.add(key);
-        candidateUrls.push({ url: link, source });
+        candidateUrls.push({ url: link, source, ...scoreCandidate(link, source, title, snippet) });
         rememberRoot(link, title, snippet);
         return true;
       };
@@ -31293,7 +31333,8 @@ Return ONLY compact JSON with this exact shape:
       candidateUrls.sort((a, b) => {
         const aOnStreet = canonicalStreetRoot && listingStreetRoot(a.url) === canonicalStreetRoot ? 0 : 1;
         const bOnStreet = canonicalStreetRoot && listingStreetRoot(b.url) === canonicalStreetRoot ? 0 : 1;
-        return aOnStreet - bOnStreet;
+        if (aOnStreet !== bOnStreet) return aOnStreet - bOnStreet;
+        return b.score - a.score;
       });
 
       let orderedCandidates = candidateUrls;
@@ -31312,10 +31353,18 @@ Return ONLY compact JSON with this exact shape:
       if (knownPhotoSourceUrl && !skipSet.has(listingKey(knownPhotoSourceUrl))) {
         const knownKey = listingKey(knownPhotoSourceUrl);
         orderedCandidates = [
-          { url: knownPhotoSourceUrl, source: "zillow" as DiscoverySource },
+          { url: knownPhotoSourceUrl, source: "zillow" as DiscoverySource, score: 100, reasons: ["configured-source", "source:zillow"] },
           ...orderedCandidates.filter((candidate) => listingKey(candidate.url) !== knownKey),
         ];
       }
+      const candidateDiagnostics = (candidates: DiscoveryCandidate[]) =>
+        candidates.slice(0, 25).map((candidate) => ({
+          url: candidate.url,
+          source: candidate.source,
+          score: candidate.score,
+          reasons: candidate.reasons,
+          streetRoot: listingStreetRoot(candidate.url),
+        }));
 
       const offset = Math.max(0, Math.min(10, Number(skipFirst ?? 0) || 0));
       const candidatesToTry = candidateLimit
@@ -31339,7 +31388,7 @@ Return ONLY compact JSON with this exact shape:
       const configuredPhotoSourceUrl = COMMUNITY_SOURCE_URLS[communityName]?.primary;
       const configuredPhotoSourceKey = configuredPhotoSourceUrl ? listingKey(configuredPhotoSourceUrl) : null;
       let bestRepresentativeFallback: {
-        candidate: { url: string; source: DiscoverySource };
+        candidate: DiscoveryCandidate;
         photos: ScrapedPhoto[];
         facts: ListingFacts;
         scrapedBedrooms: number;
@@ -31414,7 +31463,11 @@ Return ONLY compact JSON with this exact shape:
           }
           const scrapedBR = facts.bedrooms ?? null;
           if (requestedBedrooms && scrapedBR !== null && scrapedBR !== requestedBedrooms) {
-            considerRepresentativeFallback({ url: sourceUrl, source: sourceLabel as DiscoverySource }, photos, facts);
+            considerRepresentativeFallback({
+              url: sourceUrl,
+              source: sourceLabel as DiscoverySource,
+              ...scoreCandidate(sourceUrl, sourceLabel as DiscoverySource),
+            }, photos, facts);
             console.warn(`[fetch-unit-photos] skipping ${sourceUrl}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
             continue;
           }
@@ -31449,6 +31502,7 @@ Return ONLY compact JSON with this exact shape:
               resolverProof,
               dualSourceCluster: clusterUrls,
               winningPlatform: dual.platform,
+              candidateScores: candidateDiagnostics(candidatesToTry),
             },
           });
           return;
@@ -31458,7 +31512,7 @@ Return ONLY compact JSON with this exact shape:
       }
 
       const representativeFallback = bestRepresentativeFallback as {
-        candidate: { url: string; source: DiscoverySource };
+        candidate: DiscoveryCandidate;
         photos: ScrapedPhoto[];
         facts: ListingFacts;
         scrapedBedrooms: number;
@@ -31493,6 +31547,7 @@ Return ONLY compact JSON with this exact shape:
             code: "representative-photo-proof",
             triedCandidateUrls,
             resolverProof,
+            candidateScores: candidateDiagnostics(candidatesToTry),
           },
           note: isConfiguredPhotoSource
             ? `No exact ${requestedBedrooms}BR listing was found for "${communityName}", so this saved the configured property photo gallery for representative photos.`
@@ -31541,6 +31596,7 @@ Return ONLY compact JSON with this exact shape:
                 code: "configured-representative-photo-proof",
                 triedCandidateUrls,
                 resolverProof,
+                candidateScores: candidateDiagnostics(candidatesToTry),
               },
               note: `No distinct exact ${requestedBedrooms}BR listing was found for "${communityName}", so this reused the configured property photo gallery for representative photos.`,
             });
@@ -31577,6 +31633,7 @@ Return ONLY compact JSON with this exact shape:
             triedCandidateUrls,
             uncheckedCandidateUrls: candidatesToTry.slice(triedCandidateUrls.length).map((candidate) => candidate.url),
             resolverProof,
+            candidateScores: candidateDiagnostics(candidatesToTry),
             selfFix: resolverProof.selfFix,
           },
           note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${triedCandidateUrls.length} candidate${triedCandidateUrls.length === 1 ? "" : "s"}.`,
@@ -35762,11 +35819,16 @@ Return ONLY compact JSON with this exact shape:
 
     const MAX_PER_UNIT = 25;
 
-    const downloadOne = async (url: string, folderPath: string, idx: number): Promise<boolean> => {
+    const downloadOne = async (
+      url: string,
+      folderPath: string,
+      idx: number,
+    ): Promise<{ url: string; filename: string; contentFingerprint: string } | null> => {
       try {
         const resp = await fetch(url, { headers: { "User-Agent": "NexStay/1.0" } });
-        if (!resp.ok) return false;
+        if (!resp.ok) return null;
         const buf = Buffer.from(await resp.arrayBuffer());
+        if (buf.length === 0) return null;
         // Photos.zillowstatic.com URLs end in .jpg/.jpeg/.png/.webp;
         // honor the original extension for content-type accuracy
         // when Express serves the file. Defaults to .jpg when the
@@ -35774,10 +35836,14 @@ Return ONLY compact JSON with this exact shape:
         const ext = (url.match(/\.(jpe?g|png|webp)\b/i)?.[1] ?? "jpg").toLowerCase().replace("jpeg", "jpg");
         const filename = `${String(idx).padStart(2, "0")}.${ext}`;
         await fs.promises.writeFile(path.join(folderPath, filename), buf);
-        return true;
+        return {
+          url,
+          filename,
+          contentFingerprint: `sha256:${createHash("sha256").update(buf).digest("hex")}`,
+        };
       } catch (e: any) {
         console.warn(`[draft-photos] download failed for ${url}: ${e.message}`);
-        return false;
+        return null;
       }
     };
 
@@ -35795,7 +35861,7 @@ Return ONLY compact JSON with this exact shape:
       sourceUrl: string | null,
       unitLabel: string,
       resolverProof: UnitPhotoResolverProof,
-    ): Promise<{ folder: string; saved: number } | null> => {
+    ): Promise<{ folder: string; saved: number; proof: UnitPhotoResolverProof } | null> => {
       if (urls.length === 0) return null;
       const folderPath = path.join(PHOTOS_BASE, folder);
       // Wipe any prior contents so re-saving doesn't accumulate.
@@ -35804,7 +35870,20 @@ Return ONLY compact JSON with this exact shape:
       await fs.promises.mkdir(folderPath, { recursive: true });
       const capped = urls.slice(0, MAX_PER_UNIT);
       const results = await Promise.all(capped.map((u, i) => downloadOne(u, folderPath, i)));
-      const saved = results.filter(Boolean).length;
+      const savedRows = results.filter((row): row is { url: string; filename: string; contentFingerprint: string } => !!row);
+      const saved = savedRows.length;
+      const persistedProof = buildUnitPhotoResolverProof({
+        photos: savedRows.map((row) => ({ url: row.url })),
+        sourceUrl,
+        foundVia: resolverProof.foundVia ?? "persist-photos",
+        requestedBedrooms: resolverProof.requestedBedrooms,
+        minimumBedrooms: resolverProof.minimumBedrooms,
+        facts: { bedrooms: resolverProof.scrapedBedrooms },
+        representativeFallback: resolverProof.representativeFallback,
+        reusedConfiguredSource: resolverProof.reusedConfiguredSource,
+        relaxedSearch: resolverProof.relaxedSearch,
+        contentFingerprints: savedRows.map((row) => row.contentFingerprint),
+      });
       if (sourceUrl) {
         await fs.promises.writeFile(path.join(folderPath, "_source.json"), JSON.stringify({
           sourceListing: {
@@ -35815,12 +35894,17 @@ Return ONLY compact JSON with this exact shape:
           },
           unitLabel,
           unitPhotoResolverProof: {
-            ...resolverProof,
+            ...persistedProof,
             savedPhotoCount: saved,
+            savedPhotos: savedRows.map((row) => ({
+              filename: row.filename,
+              sourceUrl: row.url,
+              contentFingerprint: row.contentFingerprint,
+            })),
           },
         }, null, 2));
       }
-      return { folder, saved };
+      return { folder, saved, proof: persistedProof };
     };
 
     try {
@@ -35828,6 +35912,47 @@ Return ONLY compact JSON with this exact shape:
         persistUnit(unit1Urls, `draft-${draftId}-unit-a`, unit1SourceUrl, "Unit A", unit1Proof),
         persistUnit(unit2Urls, `draft-${draftId}-unit-b`, unit2SourceUrl, "Unit B", unit2Proof),
       ]);
+      const failedProofs: string[] = [];
+      if (u1 && (u1.saved < MIN_INDEPENDENT_UNIT_PHOTOS || u1.proof.status === "rejected")) {
+        failedProofs.push(summarizeUnitPhotoProof("Unit A", u1.proof));
+      }
+      if (u2 && (u2.saved < MIN_INDEPENDENT_UNIT_PHOTOS || u2.proof.status === "rejected")) {
+        failedProofs.push(summarizeUnitPhotoProof("Unit B", u2.proof));
+      }
+      if (failedProofs.length > 0) {
+        return res.status(409).json({
+          error: `One or both unit galleries saved fewer than ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos.`,
+          diagnostic: {
+            unit1Proof: u1?.proof ?? null,
+            unit2Proof: u2?.proof ?? null,
+            selfFix: failedProofs,
+          },
+        });
+      }
+      if (u1 && u2) {
+        const comparison = compareUnitPhotoProofs(u1.proof, u2.proof);
+        if (comparison.duplicate) {
+          return res.status(409).json({
+            error: "Unit A and Unit B saved photo sets are duplicates. Pick a different photo source before saving.",
+            diagnostic: {
+              comparison,
+              unit1Proof: u1.proof,
+              unit2Proof: u2.proof,
+              selfFix: ["retry Unit B with Unit A's source URL blocked and continue candidate search until the content overlap is below the duplicate threshold"],
+            },
+          });
+        }
+      }
+      if (u1 && !u2) {
+        const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
+        const siblingProof = await readPersistedUnitProof(draft?.unit2PhotoFolder);
+        if (siblingProof && duplicatePersistResponse("Unit A", u1.proof, "Unit B", siblingProof)) return;
+      }
+      if (u2 && !u1) {
+        const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
+        const siblingProof = await readPersistedUnitProof(draft?.unit1PhotoFolder);
+        if (siblingProof && duplicatePersistResponse("Unit B", u2.proof, "Unit A", siblingProof)) return;
+      }
       const update: Record<string, string | null> = {};
       if (u1) {
         update.unit1PhotoFolder = u1.folder;

@@ -59,11 +59,9 @@ export async function runComboPhotoReverseSearch(
   matches: { airbnb: string[]; vrbo: string[]; booking: string[] };
   checked: number;
 }> {
-  void apiKey;
   if (photoUrls.length === 0) {
     return { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 };
   }
-  return { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 };
   const matches = {
     airbnb: new Set<string>(),
     vrbo: new Set<string>(),

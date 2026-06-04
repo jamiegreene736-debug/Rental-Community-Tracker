@@ -11,6 +11,7 @@ export type UnitPhotoResolverProof = {
   photoCount: number;
   distinctPhotoCount: number;
   photoFingerprints: string[];
+  photoContentFingerprints: string[];
   requestedBedrooms: number | null;
   minimumBedrooms: number | null;
   scrapedBedrooms: number | null;
@@ -32,6 +33,7 @@ export type UnitPhotoProofInput = {
   representativeFallback?: boolean;
   reusedConfiguredSource?: boolean;
   relaxedSearch?: boolean;
+  contentFingerprints?: string[];
 };
 
 export type UnitPhotoProofComparison = {
@@ -79,11 +81,17 @@ export function photoUrlFingerprint(raw: string | null | undefined): string | nu
 
 export function buildUnitPhotoResolverProof(input: UnitPhotoProofInput): UnitPhotoResolverProof {
   const photos = Array.isArray(input.photos) ? input.photos : [];
-  const fingerprints = Array.from(new Set(
+  const urlFingerprints = Array.from(new Set(
     photos
       .map((photo) => photoUrlFingerprint(photo?.url))
       .filter((fingerprint): fingerprint is string => !!fingerprint),
   ));
+  const contentFingerprints = Array.from(new Set(
+    (Array.isArray(input.contentFingerprints) ? input.contentFingerprints : [])
+      .map((fingerprint) => String(fingerprint ?? "").trim().toLowerCase())
+      .filter(Boolean),
+  ));
+  const distinctFingerprints = contentFingerprints.length > 0 ? contentFingerprints : urlFingerprints;
   const sourceUrl = typeof input.sourceUrl === "string" && input.sourceUrl.trim() ? input.sourceUrl.trim() : null;
   const sourceKey = canonicalListingKey(sourceUrl);
   const requestedBedrooms = positiveIntegerOrNull(input.requestedBedrooms);
@@ -108,8 +116,8 @@ export function buildUnitPhotoResolverProof(input: UnitPhotoProofInput): UnitPho
     issues.push("no-photos");
     selfFix.push("continue candidate search; do not persist an empty gallery");
   }
-  if (fingerprints.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
-    issues.push(`too-few-distinct-photos:${fingerprints.length}`);
+  if (distinctFingerprints.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
+    issues.push(`too-few-distinct-photos:${distinctFingerprints.length}`);
     selfFix.push(`continue search until at least ${MIN_INDEPENDENT_UNIT_PHOTOS} distinct unit photos are available`);
   }
   if (bedroomMatch === false && !representativeFallback && !relaxedSearch) {
@@ -139,8 +147,9 @@ export function buildUnitPhotoResolverProof(input: UnitPhotoProofInput): UnitPho
     sourceKey,
     foundVia: input.foundVia ?? null,
     photoCount: photos.length,
-    distinctPhotoCount: fingerprints.length,
-    photoFingerprints: fingerprints,
+    distinctPhotoCount: distinctFingerprints.length,
+    photoFingerprints: urlFingerprints,
+    photoContentFingerprints: contentFingerprints,
     requestedBedrooms,
     minimumBedrooms,
     scrapedBedrooms,
@@ -158,9 +167,11 @@ export function compareUnitPhotoProofs(
   second: UnitPhotoResolverProof,
 ): UnitPhotoProofComparison {
   const sameSource = !!first.sourceKey && !!second.sourceKey && first.sourceKey === second.sourceKey;
-  const firstSet = new Set(first.photoFingerprints);
-  const overlapCount = second.photoFingerprints.filter((fingerprint) => firstSet.has(fingerprint)).length;
-  const denominator = Math.min(first.distinctPhotoCount, second.distinctPhotoCount);
+  const firstComparable = first.photoContentFingerprints?.length > 0 ? first.photoContentFingerprints : first.photoFingerprints;
+  const secondComparable = second.photoContentFingerprints?.length > 0 ? second.photoContentFingerprints : second.photoFingerprints;
+  const firstSet = new Set(firstComparable);
+  const overlapCount = secondComparable.filter((fingerprint) => firstSet.has(fingerprint)).length;
+  const denominator = Math.min(firstComparable.length, secondComparable.length);
   const overlapRatio = denominator > 0 ? overlapCount / denominator : 0;
   const duplicate = sameSource || (
     denominator >= MIN_INDEPENDENT_UNIT_PHOTOS &&

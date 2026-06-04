@@ -62,6 +62,7 @@ type DownloadResult = {
   tempName: string;
   url: string;
   originalIndex: number;
+  contentFingerprint: string;
 };
 
 type LabeledResult = DownloadResult & {
@@ -573,6 +574,8 @@ export type DownloadAndPrioritizeResult = {
   };
   categorySummary: Record<string, number>;
   keptFilenames: string[];
+  keptSourceUrls: string[];
+  keptContentFingerprints: string[];
 };
 
 // Main pipeline. Scrapes a Zillow URL, downloads every photo, labels every
@@ -628,7 +631,7 @@ export async function downloadAndPrioritize(opts: {
       continue;
     }
     seenHashes.add(hash);
-    downloaded.push({ tempName, url: scrapedUrls[i], originalIndex: i });
+    downloaded.push({ tempName, url: scrapedUrls[i], originalIndex: i, contentFingerprint: `md5:${hash}` });
   }
   if (duplicateCount > 0) {
     console.log(`[downloadAndPrioritize] ${folder}: dropped ${duplicateCount} byte-identical duplicates`);
@@ -645,7 +648,7 @@ export async function downloadAndPrioritize(opts: {
         bathroomsExpected: requiredBathrooms ?? null, bathroomsFound: 0,
         bathroomsShortfall: requiredBathrooms ?? 0,
       },
-      categorySummary: {}, keptFilenames: [],
+      categorySummary: {}, keptFilenames: [], keptSourceUrls: [], keptContentFingerprints: [],
     };
   }
 
@@ -850,5 +853,7 @@ export async function downloadAndPrioritize(opts: {
     },
     categorySummary,
     keptFilenames,
+    keptSourceUrls: kept.map((photo) => photo.url),
+    keptContentFingerprints: kept.map((photo) => photo.contentFingerprint),
   };
 }

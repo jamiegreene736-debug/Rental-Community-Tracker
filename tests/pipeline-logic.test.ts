@@ -304,6 +304,17 @@ const sparseUnitProof = buildUnitPhotoResolverProof({
 });
 assert.equal(sparseUnitProof.status, "rejected", "duplicate photo variants must not count as independent unit proof");
 assert.equal(sparseUnitProof.distinctPhotoCount, 1, "Zillow photo fingerprints should collapse size variants");
+const contentProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://cdn-a.example.com/photo-1.jpg" },
+    { url: "https://cdn-b.example.com/photo-2.jpg" },
+    { url: "https://cdn-c.example.com/photo-3.jpg" },
+  ],
+  sourceUrl: "https://www.realtor.com/realestateandhomes-detail/example",
+  contentFingerprints: ["sha256:one", "sha256:one", "sha256:two"],
+});
+assert.equal(contentProof.status, "rejected", "post-download content hashes must be allowed to reject duplicate image bytes across different URLs");
+assert.equal(contentProof.distinctPhotoCount, 2, "content hashes should drive distinct photo counts when available");
 const duplicateProof = compareUnitPhotoProofs(acceptedUnitProof, buildUnitPhotoResolverProof({
   photos: [
     { url: "https://photos.zillowstatic.com/fp/abc11111-test.jpg" },
@@ -315,6 +326,27 @@ const duplicateProof = compareUnitPhotoProofs(acceptedUnitProof, buildUnitPhotoR
   facts: { bedrooms: 3 },
 }));
 assert.equal(duplicateProof.duplicate, true, "same-source/same-photo proof must be treated as duplicate combo evidence");
+const contentDuplicateProof = compareUnitPhotoProofs(
+  buildUnitPhotoResolverProof({
+    photos: [
+      { url: "https://zillow.example/a.jpg" },
+      { url: "https://zillow.example/b.jpg" },
+      { url: "https://zillow.example/c.jpg" },
+    ],
+    sourceUrl: "https://www.zillow.com/homedetails/example-a/1_zpid/",
+    contentFingerprints: ["sha256:a", "sha256:b", "sha256:c"],
+  }),
+  buildUnitPhotoResolverProof({
+    photos: [
+      { url: "https://realtor.example/renamed-a.jpg" },
+      { url: "https://realtor.example/renamed-b.jpg" },
+      { url: "https://realtor.example/renamed-c.jpg" },
+    ],
+    sourceUrl: "https://www.realtor.com/realestateandhomes-detail/example-b",
+    contentFingerprints: ["sha256:a", "sha256:b", "sha256:c"],
+  }),
+);
+assert.equal(contentDuplicateProof.duplicate, true, "same image bytes from different platforms must count as duplicate unit proof");
 const relaxedUnitProof = buildUnitPhotoResolverProof({
   photos: [
     { url: "https://photos.zillowstatic.com/fp/relaxed11111-test.jpg" },
@@ -456,6 +488,27 @@ assert.match(
   routesSource,
   /fetch-unit-photos[\s\S]*scrapeListingPhotosDualSource\(clusterUrls/,
   "fetch-unit-photos must parallel-scrape Realtor+Zillow per address cluster",
+);
+const comboOtaPreflightSource = readFileSync("server/combo-ota-preflight.ts", "utf8");
+assert.doesNotMatch(
+  comboOtaPreflightSource,
+  /void apiKey;[\s\S]*return \{ matches: \{ airbnb: \[\], vrbo: \[\], booking: \[\] \}, checked: 0 \};/,
+  "combo photo finding must keep Google Lens reverse-image checks enabled for OTA contamination detection",
+);
+assert.match(
+  routesSource,
+  /api\/operations\/reverse-image-listings[\s\S]*Google Lens reverse-image search is disabled/,
+  "buy-in on-demand reverse image endpoint must stay disabled for SearchAPI quota preservation",
+);
+assert.match(
+  routesSource,
+  /contentFingerprint: `sha256:/,
+  "persist-photos must stamp post-download content hashes into resolver proof",
+);
+assert.match(
+  routesSource,
+  /candidateScores/,
+  "fetch-unit-photos diagnostics should explain candidate scores and reasons",
 );
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
 assert.match(
@@ -2783,9 +2836,9 @@ assert.equal(
 );
 console.log("  ✓ pickBestAvailableComboPairing prefers largest unused combo");
 
-assert.equal(TOP_MARKET_SEEDS.length, 86, "top markets sweep should cover 86 markets");
+assert.ok(TOP_MARKET_SEEDS.length >= 86, "top markets sweep should not shrink below the original 86-market coverage");
 const topMarketAudit = auditTopMarketSevenEightFromCuratedSeeds();
-assert.equal(topMarketAudit.length, 86);
+assert.equal(topMarketAudit.length, TOP_MARKET_SEEDS.length);
 const sevenEightMarkets = topMarketAudit.filter((row) => row.sevenEight);
 const marketHasSevenEight = (city: string, state: string) =>
   sevenEightMarkets.some((row) => row.city === city && row.state === state);
@@ -2802,7 +2855,7 @@ assert.ok(
 const seededFourBedroom = topMarketAudit.filter((row) => row.fourBedroomCommunities.length > 0);
 assert.ok(seededFourBedroom.length >= 8, "multiple top markets should surface curated 4BR communities");
 console.log(
-  `  ✓ top-market 4BR audit: ${sevenEightMarkets.length}/86 markets with curated 7/8BR potential`,
+  `  ✓ top-market 4BR audit: ${sevenEightMarkets.length}/${TOP_MARKET_SEEDS.length} markets with curated 7/8BR potential`,
 );
 
 assert.match(
@@ -2931,6 +2984,7 @@ assert.equal(
 console.log("  ✓ alternative scout resort vs listing title guards");
 
 const bookingsSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
+const vrboWorkerSource = readFileSync("daemon/vrbo-sidecar/worker.mjs", "utf8");
 
 assert.ok(
   routesSource.includes("fetchNearbyVacationRentalResortsFromLlm"),
