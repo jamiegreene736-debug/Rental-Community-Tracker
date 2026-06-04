@@ -150,6 +150,7 @@ import {
   discoveryCityForPhotoSearch,
   discoverySearchCitiesForPhotoSearch,
   discoveryCommunityNameAliases,
+  discoveryUnitLabelSearchQueries,
   hawaiiHyphenStreetSlugTokens,
   inferCommunityStreetAddress,
   normalizeCommunityAddressToken,
@@ -26246,9 +26247,8 @@ Return ONLY compact JSON with this exact shape:
     // Discovery (SearchAPI + Apify) must not consume the whole route budget before
     // candidate checks run — expanded searches were stopping at ~9/58 with
     // "avoid a stuck request" because platform/photo work had almost no time left.
-    const DISCOVERY_BUDGET_MS = expandedSearch ? 70_000 : 60_000;
+    const DISCOVERY_BUDGET_MS = expandedSearch ? 75_000 : 65_000;
     const APIFY_SUPPLEMENT_BUDGET_MS = expandedSearch ? 100_000 : 75_000;
-    const DISCOVERY_CANDIDATE_TARGET = expandedSearch ? 28 : 20;
     const APIFY_SKIP_WHEN_CANDIDATES_AT = expandedSearch ? 18 : 12;
     // When a replacement slot needs a specific size (e.g. 3BR), discovery should
     // not treat Google hits for smaller units as "enough" inventory — condo
@@ -26335,6 +26335,13 @@ Return ONLY compact JSON with this exact shape:
     const requiredBedroomCount = Number.isFinite(parsedRequiredBedrooms) && parsedRequiredBedrooms > 0
       ? Math.round(parsedRequiredBedrooms)
       : null;
+    const DISCOVERY_CANDIDATE_TARGET = (expandedSearch && requiredBedroomCount)
+      ? 42
+      : expandedSearch
+      ? 28
+      : requiredBedroomCount
+      ? 24
+      : 20;
     const hawaiiStreetSlugTokens = (() => {
       const merged = new Set<string>();
       for (const source of [communityAddress, normalizedStreetAddress, folderCommunityAddress]) {
@@ -26738,6 +26745,26 @@ Return ONLY compact JSON with this exact shape:
         `site:realtor.com "${directRoot}" ${communityLocForQueries ? `"${communityLocForQueries.city}"` : ""}`.trim(),
         `site:redfin.com "${directRoot}" ${communityLocForQueries ? `"${communityLocForQueries.city}"` : ""}`.trim(),
       );
+      const slugKey = hawaiiStreetSlugKey(directRoot);
+      const redfinStreetSlug = directRoot
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      if (slugKey) {
+        searchQueries.unshift(
+          `site:redfin.com/inurl:${slugKey}/unit-`,
+          `site:redfin.com/inurl:${redfinStreetSlug}/unit-`,
+        );
+      }
+    }
+    const unitLabelQueries = discoveryUnitLabelSearchQueries({
+      communityName,
+      street: communityAddress || canonicalStreet,
+      city: communityLocForQueries?.city,
+      requiredBedrooms: requiredBedroomCount,
+    });
+    if (unitLabelQueries.length > 0) {
+      searchQueries.unshift(...unitLabelQueries);
     }
     if (expandedSearch) {
       const quotedStreet = communityAddress && communityAddress !== communityName ? `"${communityAddress}"` : "";
@@ -26837,6 +26864,112 @@ Return ONLY compact JSON with this exact shape:
       }
     };
 
+    const runFindUnitApifySupplement = async (trigger: "parallel" | "late"): Promise<void> => {
+      const communityLoc = communityLocForQueries;
+      const allowedRoots = repeatedCandidateRoots();
+      if (directRoot) allowedRoots.add(directRoot);
+      for (const root of communityAddressRoots) allowedRoots.add(root);
+      const needsApifyForBedroomSearch = !!requiredBedroomCount && (
+        countQualifyingDiscoveryCandidates() < DISCOVERY_CANDIDATE_TARGET
+        || countExplicitBedroomCandidates() < DISCOVERY_BEDROOM_EXPLICIT_TARGET
+      );
+      const forceApifyDiscovery = candidates.length === 0;
+      const shouldRunApifySupplement = forceApifyDiscovery
+        || candidates.length < APIFY_SKIP_WHEN_CANDIDATES_AT
+        || needsApifyForBedroomSearch
+        || !!requiredBedroomCount
+        || expandedSearch;
+      if (
+        !communityLoc
+        || !(suppliedStreetRoot || allowedRoots.size > 0)
+        || !shouldRunApifySupplement
+        || (trigger === "late" && !hasDiscoveryBudget())
+      ) {
+        console.error(
+          `[find-unit] Apify supplement skipped (${trigger}): ` +
+          `location=${communityLoc ? `${communityLoc.city}, ${communityLoc.state}` : "unknown"} ` +
+          `roots=${Array.from(allowedRoots).join(", ") || "none"} ` +
+          `candidates=${candidates.length} qualifying=${countQualifyingDiscoveryCandidates()} ` +
+          `explicit${requiredBedroomCount ?? "?"}BR=${countExplicitBedroomCandidates()} ` +
+          `needsBedroomSupplement=${needsApifyForBedroomSearch}`,
+        );
+        return;
+      }
+      const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({
+        city: bodyLocation?.city ?? communityLoc.city,
+        communityName,
+        streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
+      }))].slice(0, 3);
+      const perCityMax = requiredBedroomCount
+        ? Math.max(40, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)))
+        : Math.max(20, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)));
+      const apifyBudgetMs = trigger === "parallel"
+        ? APIFY_SUPPLEMENT_BUDGET_MS
+        : Math.min(
+          APIFY_SUPPLEMENT_BUDGET_MS,
+          Math.max(5_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
+        );
+      const apifyHarvestOptions: ApifySearchHarvestOptions = {
+        minBedrooms: requiredBedroomCount,
+        streetAddress: canonicalStreet || communityAddress || normalizedStreetAddress || addressStreet,
+      };
+      const [zillowApifyUrls, realtorApifyUrls] = await withStepTimeout(
+        Promise.all([
+          Promise.all(
+            apifyDiscoveryCities.map((searchCity) =>
+              harvestZillowUrlsViaApifySearch(
+                searchCity,
+                communityLoc.state,
+                perCityMax,
+                apifyBudgetMs,
+                apifyHarvestOptions,
+              ),
+            ),
+          ).then((rows) => [...new Set(rows.flat())]),
+          Promise.all(
+            apifyDiscoveryCities.map((searchCity) =>
+              harvestRealtorUrlsViaApifySearch(
+                searchCity,
+                communityLoc.state,
+                perCityMax,
+                apifyBudgetMs,
+                apifyHarvestOptions,
+              ),
+            ),
+          ).then((rows) => [...new Set(rows.flat())]),
+        ]),
+        apifyBudgetMs,
+        [[], []] as [string[], string[]],
+        "Apify replacement supplement",
+      );
+      const beforeApify = candidates.length;
+      const apifyRealtorRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;
+      for (const link of realtorApifyUrls) addCandidateUrl(link, "realtor", "", "", apifyRealtorRoots);
+      const zillowApifyRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;
+      for (const link of zillowApifyUrls) {
+        addCandidateUrl(link, "zillow", "", "", zillowApifyRoots);
+      }
+      console.error(
+        `[find-unit] Apify supplement (${trigger}): cities=${apifyDiscoveryCities.join("|")}, state=${communityLoc.state}, ` +
+        `street=${apifyHarvestOptions.streetAddress ?? "city-wide"}, ` +
+        `minBedrooms=${apifyHarvestOptions.minBedrooms ?? "any"}, ` +
+        `roots=${Array.from(allowedRoots).join(", ")}, zillow=${zillowApifyUrls.length}, ` +
+        `realtor=${realtorApifyUrls.length}, added=${candidates.length - beforeApify}`,
+      );
+    };
+
+    let apifyParallelPromise: Promise<void> | null = null;
+    if (
+      !skipDiscovery
+      && communityLocForQueries
+      && (suppliedStreetRoot || communityAddressRoots.size > 0)
+    ) {
+      apifyParallelPromise = runFindUnitApifySupplement("parallel").catch((e: any) => {
+        console.error(`[find-unit] Apify parallel supplement failed: ${e?.message ?? e}`);
+      });
+      console.error("[find-unit] Apify supplement started in parallel with Google discovery");
+    }
+
     if (!skipDiscovery) {
       for (let i = 0; i < searchQueries.length; i += DISCOVERY_QUERY_CONCURRENCY) {
         if (discoveryTargetMet()) {
@@ -26932,107 +27065,12 @@ Return ONLY compact JSON with this exact shape:
           `added=${candidates.length - beforeBuilding}`,
         );
       }
-    }
 
-    // Apify search supplement for Preflight replacement/remediation.
-    // SearchAPI's Google index is often shallow for large condo
-    // buildings; Apify's native Zillow/Realtor search actors can
-    // surface detail URLs Google misses. We only add Apify results
-    // when they match the selected resort's known/discovered street
-    // roots so broad city inventory cannot leak into this community.
-    const communityLoc = communityLocForQueries;
-    const allowedRoots = repeatedCandidateRoots();
-    if (directRoot) allowedRoots.add(directRoot);
-    for (const root of communityAddressRoots) allowedRoots.add(root);
-    const forceApifyDiscovery = !skipDiscovery
-      && candidates.length === 0
-      && !!communityLoc
-      && (!!suppliedStreetRoot || allowedRoots.size > 0);
-    const needsApifyForBedroomSearch = !!requiredBedroomCount && (
-      countQualifyingDiscoveryCandidates() < DISCOVERY_CANDIDATE_TARGET
-      || countExplicitBedroomCandidates() < DISCOVERY_BEDROOM_EXPLICIT_TARGET
-    );
-    const shouldRunApifySupplement = forceApifyDiscovery
-      || candidates.length < APIFY_SKIP_WHEN_CANDIDATES_AT
-      || needsApifyForBedroomSearch;
-    if (
-      !skipDiscovery
-      && shouldRunApifySupplement
-      && communityLoc
-      && (!!suppliedStreetRoot || allowedRoots.size > 0)
-      && hasDiscoveryBudget()
-    ) {
-      const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({
-        city: bodyLocation?.city ?? communityLoc.city,
-        communityName,
-        streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
-      }))].slice(0, 3);
-      const perCityMax = requiredBedroomCount
-        ? Math.max(40, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)))
-        : Math.max(20, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)));
-      const apifyBudgetMs = Math.min(
-        APIFY_SUPPLEMENT_BUDGET_MS,
-        Math.max(5_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
-      );
-      const apifyHarvestOptions: ApifySearchHarvestOptions = {
-        minBedrooms: requiredBedroomCount,
-        streetAddress: canonicalStreet || communityAddress || normalizedStreetAddress || addressStreet,
-      };
-      const [zillowApifyUrls, realtorApifyUrls] = await withStepTimeout(
-        Promise.all([
-          Promise.all(
-            apifyDiscoveryCities.map((searchCity) =>
-              harvestZillowUrlsViaApifySearch(
-                searchCity,
-                communityLoc!.state,
-                perCityMax,
-                apifyBudgetMs,
-                apifyHarvestOptions,
-              ),
-            ),
-          ).then((rows) => [...new Set(rows.flat())]),
-          Promise.all(
-            apifyDiscoveryCities.map((searchCity) =>
-              harvestRealtorUrlsViaApifySearch(
-                searchCity,
-                communityLoc!.state,
-                perCityMax,
-                apifyBudgetMs,
-                apifyHarvestOptions,
-              ),
-            ),
-          ).then((rows) => [...new Set(rows.flat())]),
-        ]),
-        apifyBudgetMs,
-        [[], []] as [string[], string[]],
-        "Apify replacement supplement",
-      );
-      const beforeApify = candidates.length;
-      const apifyRealtorRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;
-      for (const link of realtorApifyUrls) addCandidateUrl(link, "realtor", "", "", apifyRealtorRoots);
-      // Known resort street (e.g. 92-1070 Olani): do not filter Apify Zillow through
-      // repeatedCandidateRoots — Ko Olina slugs embed unit numbers between the
-      // Hawaii street pair and "Olani", which fetch-unit-photos already handles.
-      const zillowApifyRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;
-      for (const link of zillowApifyUrls) {
-        addCandidateUrl(link, "zillow", "", "", zillowApifyRoots);
+      if (apifyParallelPromise) {
+        await apifyParallelPromise;
+      } else {
+        await runFindUnitApifySupplement("late");
       }
-      console.error(
-        `[find-unit] Apify supplement: cities=${apifyDiscoveryCities.join("|")}, state=${communityLoc.state}, ` +
-        `street=${apifyHarvestOptions.streetAddress ?? "city-wide"}, ` +
-        `minBedrooms=${apifyHarvestOptions.minBedrooms ?? "any"}, ` +
-        `roots=${Array.from(allowedRoots).join(", ")}, zillow=${zillowApifyUrls.length}, ` +
-        `realtor=${realtorApifyUrls.length}, added=${candidates.length - beforeApify}`,
-      );
-    } else {
-      console.error(
-        `[find-unit] Apify supplement skipped: ` +
-        `location=${communityLoc ? `${communityLoc.city}, ${communityLoc.state}` : "unknown"} ` +
-        `roots=${Array.from(allowedRoots).join(", ") || "none"} ` +
-        `candidates=${candidates.length} qualifying=${countQualifyingDiscoveryCandidates()} ` +
-        `explicit${requiredBedroomCount ?? "?"}BR=${countExplicitBedroomCandidates()} ` +
-        `needsBedroomSupplement=${needsApifyForBedroomSearch}`,
-      );
     }
 
     // PR #329 / #338: sort candidates by source priority before
