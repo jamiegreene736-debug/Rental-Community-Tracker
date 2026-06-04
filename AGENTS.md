@@ -53,8 +53,8 @@ alternative unit scouting, or live pricing flows.**
   after manual solve.
 - The sidecar worker (`daemon/vrbo-sidecar/worker.mjs`) contains a hard
   runtime guard `assertSafeVrboNavigation` that will throw on any
-  violation. All buy-in paths (find-buy-in, alternative-buy-in-scout
-  fallbacks, replacement flows, etc.) must route VRBO exclusively
+  violation. All buy-in paths (find-buy-in, city-vrbo-inventory,
+  replacement flows, etc.) must route VRBO exclusively
   through the sidecar visible-interaction path.
 - Airbnb and Booking.com may use post-dropdown confirmed results URLs
   with date params (per historical policy), but VRBO is special-cased

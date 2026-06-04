@@ -616,7 +616,7 @@ function BuyInMarketsTab({ propertyId }: { propertyId: number }) {
           <div>
             <p className="text-xs text-muted-foreground mb-0.5">Unit-type confidence threshold for attach</p>
             <p className="text-[11px] text-muted-foreground max-w-[42ch]">
-              85+ (default) requires strong proof the candidate matches the exact bedroom count + sub-community for combo slots (Poipu Kai examples: Regency vs Pili Mai). Lower = more manual review allowed. Applies to both cheapest buy-in and Alternative scout.
+              85+ (default) requires strong proof the candidate matches the exact bedroom count + sub-community for combo slots (Poipu Kai examples: Regency vs Pili Mai). Lower = more manual review allowed. Applies to cheapest buy-in and city-wide VRBO combo matching.
             </p>
           </div>
           <input
