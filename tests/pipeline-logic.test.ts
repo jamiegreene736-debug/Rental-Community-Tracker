@@ -3122,7 +3122,9 @@ assert.ok(
     routesSource.includes("const pricedSources = alternativeScoutOtaMapOnly") &&
     routesSource.includes("candidateIsAlternativeScoutMapResult") &&
     routesSource.includes("alternative city-map kept") &&
-    bookingsSource.includes('candidate.source === "vrbo" || candidate.source === "booking"'),
+    bookingsSource.includes("alternativeMapCandidatePool") &&
+    bookingsSource.includes("data.comparisonSources?.vrbo") &&
+    bookingsSource.includes('candidate.source !== "vrbo" && candidate.source !== "booking"'),
   "alternative city-map scout should use only VRBO/Booking.com map results, not Airbnb/SearchAPI or Google Hotels",
 );
 assert.ok(

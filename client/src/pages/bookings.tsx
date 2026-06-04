@@ -1252,13 +1252,36 @@ function candidateIsWalkableWithExistingPicks(
   return true;
 }
 
+function alternativeMapCandidatePool(data: FindBuyInResponse): LiveCandidate[] {
+  const rows = [
+    ...(data.cheapest ?? []),
+    ...(data.sources?.vrbo ?? []),
+    ...(data.sources?.booking ?? []),
+    ...(data.comparisonSources?.vrbo ?? []),
+    ...(data.comparisonSources?.booking ?? []),
+  ];
+  const deduped = new Map<string, LiveCandidate>();
+  for (const candidate of rows) {
+    if (candidate.source !== "vrbo" && candidate.source !== "booking") continue;
+    if (candidate.verified && candidate.verified !== "yes") continue;
+    if (!(candidate.totalPrice > 0 || candidate.nightlyPrice > 0)) continue;
+    const key = listingIdentityKeys(candidate)[0]
+      ?? `${candidate.source}:${normalizedIdentityText(candidate.title)}:${candidate.bedrooms ?? "unknown"}:${Math.round(candidate.totalPrice || candidate.nightlyPrice || 0)}`;
+    const previous = deduped.get(key);
+    const candidateTotal = candidate.totalPrice > 0 ? candidate.totalPrice : candidate.nightlyPrice;
+    const previousTotal = previous ? (previous.totalPrice > 0 ? previous.totalPrice : previous.nightlyPrice) : Infinity;
+    if (!previous || candidateTotal < previousTotal) deduped.set(key, candidate);
+  }
+  return Array.from(deduped.values());
+}
+
 function bestWalkableAlternativePicks(
   data: FindBuyInResponse,
   plan: number[],
   community: string,
 ): Array<LiveCandidate & { community: string }> | null {
-  const pools = plan.map((bedrooms) => (data.cheapest ?? [])
-    .filter((candidate) => candidate.source === "vrbo" || candidate.source === "booking")
+  const candidatePool = alternativeMapCandidatePool(data);
+  const pools = plan.map((bedrooms) => candidatePool
     .filter((candidate) => candidate.totalPrice > 0 && candidateMatchesBedroom(candidate, bedrooms))
     .sort((a, b) => a.totalPrice - b.totalPrice)
     .slice(0, 40));
