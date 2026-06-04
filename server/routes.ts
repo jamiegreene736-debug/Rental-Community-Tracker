@@ -35861,15 +35861,23 @@ Return ONLY compact JSON with this exact shape:
       sourceUrl: string | null,
       unitLabel: string,
       resolverProof: UnitPhotoResolverProof,
-    ): Promise<{ folder: string; saved: number; proof: UnitPhotoResolverProof } | null> => {
+    ): Promise<{
+      folder: string;
+      saved: number;
+      proof: UnitPhotoResolverProof;
+      stagingPath: string;
+      finalPath: string;
+    } | null> => {
       if (urls.length === 0) return null;
       const folderPath = path.join(PHOTOS_BASE, folder);
-      // Wipe any prior contents so re-saving doesn't accumulate.
-      // mkdir -p semantics handle the missing-folder case.
-      await fs.promises.rm(folderPath, { recursive: true, force: true });
-      await fs.promises.mkdir(folderPath, { recursive: true });
+      const stagingPath = path.join(
+        PHOTOS_BASE,
+        `.${folder}.staging-${Date.now()}-${randomBytes(4).toString("hex")}`,
+      );
+      await fs.promises.rm(stagingPath, { recursive: true, force: true });
+      await fs.promises.mkdir(stagingPath, { recursive: true });
       const capped = urls.slice(0, MAX_PER_UNIT);
-      const results = await Promise.all(capped.map((u, i) => downloadOne(u, folderPath, i)));
+      const results = await Promise.all(capped.map((u, i) => downloadOne(u, stagingPath, i)));
       const savedRows = results.filter((row): row is { url: string; filename: string; contentFingerprint: string } => !!row);
       const saved = savedRows.length;
       const persistedProof = buildUnitPhotoResolverProof({
@@ -35885,7 +35893,7 @@ Return ONLY compact JSON with this exact shape:
         contentFingerprints: savedRows.map((row) => row.contentFingerprint),
       });
       if (sourceUrl) {
-        await fs.promises.writeFile(path.join(folderPath, "_source.json"), JSON.stringify({
+        await fs.promises.writeFile(path.join(stagingPath, "_source.json"), JSON.stringify({
           sourceListing: {
             url: sourceUrl,
             platform: platformForSource(sourceUrl),
@@ -35904,7 +35912,7 @@ Return ONLY compact JSON with this exact shape:
           },
         }, null, 2));
       }
-      return { folder, saved, proof: persistedProof };
+      return { folder, saved, proof: persistedProof, stagingPath, finalPath: folderPath };
     };
 
     try {
@@ -35912,6 +35920,12 @@ Return ONLY compact JSON with this exact shape:
         persistUnit(unit1Urls, `draft-${draftId}-unit-a`, unit1SourceUrl, "Unit A", unit1Proof),
         persistUnit(unit2Urls, `draft-${draftId}-unit-b`, unit2SourceUrl, "Unit B", unit2Proof),
       ]);
+      const cleanupStaging = async () => {
+        await Promise.all([
+          u1 ? fs.promises.rm(u1.stagingPath, { recursive: true, force: true }).catch(() => {}) : Promise.resolve(),
+          u2 ? fs.promises.rm(u2.stagingPath, { recursive: true, force: true }).catch(() => {}) : Promise.resolve(),
+        ]);
+      };
       const failedProofs: string[] = [];
       if (u1 && (u1.saved < MIN_INDEPENDENT_UNIT_PHOTOS || u1.proof.status === "rejected")) {
         failedProofs.push(summarizeUnitPhotoProof("Unit A", u1.proof));
@@ -35920,6 +35934,7 @@ Return ONLY compact JSON with this exact shape:
         failedProofs.push(summarizeUnitPhotoProof("Unit B", u2.proof));
       }
       if (failedProofs.length > 0) {
+        await cleanupStaging();
         return res.status(409).json({
           error: `One or both unit galleries saved fewer than ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos.`,
           diagnostic: {
@@ -35932,6 +35947,7 @@ Return ONLY compact JSON with this exact shape:
       if (u1 && u2) {
         const comparison = compareUnitPhotoProofs(u1.proof, u2.proof);
         if (comparison.duplicate) {
+          await cleanupStaging();
           return res.status(409).json({
             error: "Unit A and Unit B saved photo sets are duplicates. Pick a different photo source before saving.",
             diagnostic: {
@@ -35946,13 +35962,23 @@ Return ONLY compact JSON with this exact shape:
       if (u1 && !u2) {
         const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
         const siblingProof = await readPersistedUnitProof(draft?.unit2PhotoFolder);
-        if (siblingProof && duplicatePersistResponse("Unit A", u1.proof, "Unit B", siblingProof)) return;
+        if (siblingProof && duplicatePersistResponse("Unit A", u1.proof, "Unit B", siblingProof)) {
+          await cleanupStaging();
+          return;
+        }
       }
       if (u2 && !u1) {
         const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
         const siblingProof = await readPersistedUnitProof(draft?.unit1PhotoFolder);
-        if (siblingProof && duplicatePersistResponse("Unit B", u2.proof, "Unit A", siblingProof)) return;
+        if (siblingProof && duplicatePersistResponse("Unit B", u2.proof, "Unit A", siblingProof)) {
+          await cleanupStaging();
+          return;
+        }
       }
+      await Promise.all([u1, u2].filter((unit): unit is NonNullable<typeof unit> => !!unit).map(async (unit) => {
+        await fs.promises.rm(unit.finalPath, { recursive: true, force: true });
+        await fs.promises.rename(unit.stagingPath, unit.finalPath);
+      }));
       const update: Record<string, string | null> = {};
       if (u1) {
         update.unit1PhotoFolder = u1.folder;

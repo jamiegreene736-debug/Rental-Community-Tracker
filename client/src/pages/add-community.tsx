@@ -2101,9 +2101,9 @@ export default function AddCommunity() {
         status: "draft_ready",
       });
       // Persist Step 4 photos so the builder has them when the
-      // operator promotes the draft. Best-effort — a failure here
-      // doesn't roll back the draft save (the operator can re-run
-      // photo persistence later by editing + re-saving).
+      // operator promotes the draft. Unit photos are load-bearing for
+      // the new combo listing, so do not navigate away on a proof or
+      // download failure; keep the operator here with the exact error.
       const saved = await saveResp.json().catch(() => null) as { id?: number } | null;
       const draftId = saved?.id;
       if (draftId && (unit1Photos.length > 0 || unit2Photos.length > 0)) {
@@ -2116,11 +2116,7 @@ export default function AddCommunity() {
           });
         } catch (e: any) {
           console.warn(`[add-community] photo persist failed: ${e?.message}`);
-          // Surface a soft warning but don't block — the draft saved successfully.
-          toast({
-            title: "Saved (photos pending)",
-            description: "Community saved, but the photos didn't persist. Edit + re-save to retry.",
-          });
+          throw new Error(`Community draft saved, but photos did not persist: ${e?.message ?? "unknown error"}`);
         }
       }
       // Auto-fetch resort/community-level photos for the Photos tab.

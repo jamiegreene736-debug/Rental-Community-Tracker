@@ -513,6 +513,11 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /stagingPath[\s\S]*fs\.promises\.rename\(unit\.stagingPath, unit\.finalPath\)/,
+  "persist-photos must stage downloads and swap into final folders only after proof checks pass",
+);
+assert.match(
+  routesSource,
   /candidateScores/,
   "fetch-unit-photos diagnostics should explain candidate scores and reasons",
 );
@@ -567,6 +572,16 @@ assert.match(
   addCommunitySource,
   /Unit 1: \{unit1Photos\.length\} photo/,
   "combo Step 4 photo summary must show Unit 1 and Unit 2 counts independently",
+);
+assert.doesNotMatch(
+  addCommunitySource,
+  /Saved \(photos pending\)/,
+  "Add Community save must not hide unit-photo persistence failures behind a soft success toast",
+);
+assert.match(
+  addCommunitySource,
+  /photos did not persist/,
+  "Add Community save must keep the operator on the page when unit-photo persistence fails",
 );
 assert.match(
   addCommunitySource,
