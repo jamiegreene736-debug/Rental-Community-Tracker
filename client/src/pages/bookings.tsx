@@ -6058,7 +6058,14 @@ export default function Bookings() {
               }
               picks.push(pick);
             }
-            const totalCost = !planned.reason && picks.length === combo.bedrooms.length
+            const tooFarForBuyInPair = !planned.reason
+              && picks.length === combo.bedrooms.length
+              && !alternativePicksAreWalkable(picks);
+            if (tooFarForBuyInPair) {
+              unavailableReason = `Matched units are too far apart for a buy-in pair; units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking.`;
+              unavailableDetails.push(unavailableReason);
+            }
+            const totalCost = !planned.reason && !tooFarForBuyInPair && picks.length === combo.bedrooms.length
               ? picks.reduce((sum, p) => sum + p.totalPrice, 0)
               : null;
             const evaluated: EvaluatedCombo = {

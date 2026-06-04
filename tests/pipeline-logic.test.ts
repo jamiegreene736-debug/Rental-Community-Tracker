@@ -3112,6 +3112,12 @@ assert.ok(
   "alternative replacement sets should require coordinate-proven walking proximity",
 );
 assert.ok(
+  bookingsSource.includes("tooFarForBuyInPair") &&
+    bookingsSource.includes("Matched units are too far apart for a buy-in pair") &&
+    bookingsSource.includes("!tooFarForBuyInPair"),
+  "auto-fill combo selection should reject non-walkable pairs before creating partial buy-in attachments",
+);
+assert.ok(
   vrboWorkerSource.includes("createVrboGraphqlCollector") &&
     vrboWorkerSource.includes("propertySearchListings") &&
     vrboWorkerSource.includes("extractLatLngDeep") &&
