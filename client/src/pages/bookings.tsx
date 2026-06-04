@@ -4596,9 +4596,12 @@ export default function Bookings() {
         bedrooms: String(bedrooms),
         checkIn,
         checkOut,
-        community: communitySearchTerm,
+        community: scoutRow?.community || community,
         alternativeScout: "1",
       });
+      if (communitySearchTerm && communitySearchTerm !== (scoutRow?.community || community)) {
+        params.set("searchTerm", communitySearchTerm);
+      }
       const lat = Number(scoutRow?.lat);
       const lng = Number(scoutRow?.lng);
       if (Number.isFinite(lat) && Number.isFinite(lng)) {

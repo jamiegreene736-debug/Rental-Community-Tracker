@@ -10964,6 +10964,7 @@ export async function registerRoutes(
     const checkOut = req.query.checkOut as string;
     const requestedListingId = typeof req.query.listingId === "string" ? req.query.listingId.trim() : "";
     const requestedCommunity = typeof req.query.community === "string" ? req.query.community.trim() : "";
+    const requestedSearchTerm = typeof req.query.searchTerm === "string" ? req.query.searchTerm.trim() : "";
     const alternativeScoutMapSearch = /^(1|true|yes)$/i.test(String(req.query.alternativeScout ?? ""));
     const requestedMapCenterLat = Number(req.query.mapCenterLat);
     const requestedMapCenterLng = Number(req.query.mapCenterLng);
@@ -11051,7 +11052,10 @@ export async function registerRoutes(
     const scoutMapKey = alternativeScoutMapSearch
       ? `alt-city-map:${requestedMapCenter ? `${requestedMapCenter.lat.toFixed(5)},${requestedMapCenter.lng.toFixed(5)}` : "configured"}`
       : "resort-map";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-no-lens-pm-gh-vrbo-map-v2|${scoutMapKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
+    const scoutSearchKey = alternativeScoutMapSearch && requestedSearchTerm
+      ? `search:${requestedSearchTerm.toLowerCase()}`
+      : "search:default";
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-no-lens-pm-gh-vrbo-map-v2|${scoutMapKey}|${scoutSearchKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     // Result HTTP cache is off by default (FIND_BUY_IN_TTL_MS=0), but in-flight
     // dedup must stay on unless the caller explicitly opts out with nocache=1.
     // Backgrounding the Operations tab closes the browser socket; without
@@ -11224,6 +11228,13 @@ export async function registerRoutes(
         : [];
     const communitySearchName = COMMUNITY_LOCATION_BY_KEY[community]?.searchName ?? (requestedCommunity ? requestedCommunity.split(",")[0].trim() : undefined);
     const listingResolvedResortName = resortName;
+    if (alternativeScoutMapSearch && communitySearchName) {
+      // Alternative scans are intentionally looking outside the original
+      // Guesty listing's resort. Use the requested nearby community as the
+      // identity target so the original listing title cannot filter out every
+      // VRBO/Airbnb result in the alternative map area.
+      resortName = communitySearchName;
+    }
     const configuredTargetTokens = meaningfulResortTokens(communitySearchName);
     const listingLeadTokens = meaningfulResortTokens(resortName);
     const listingLeadMentionsConfiguredTarget =
@@ -11374,9 +11385,12 @@ export async function registerRoutes(
       }
       return mentionsResortLoose(haystack);
     };
-    const websiteSearchTerm = community === "Kapaa Beachfront"
+    const defaultWebsiteSearchTerm = community === "Kapaa Beachfront"
       ? communitySearchName || resortName || community
       : resortName || communitySearchName || community;
+    const websiteSearchTerm = alternativeScoutMapSearch && requestedSearchTerm
+      ? requestedSearchTerm
+      : defaultWebsiteSearchTerm;
     const airbnbWebsiteSearchTerm = buyInPlatformSearch.airbnb ?? websiteSearchTerm;
     const vrboWebsiteSearchTerm = buyInPlatformSearch.vrbo ?? websiteSearchTerm;
     const pmWebsiteSearchTerm = buyInPlatformSearch.pm ?? websiteSearchTerm;

@@ -2928,6 +2928,11 @@ assert.ok(
   "alternative sidecar find-buy-in calls should mark the scan as an alternative scout",
 );
 assert.ok(
+  bookingsSource.includes("community: scoutRow?.community || community") &&
+    bookingsSource.includes('params.set("searchTerm", communitySearchTerm)'),
+  "alternative sidecar find-buy-in calls should keep canonical community separate from OTA search text",
+);
+assert.ok(
   bookingsSource.includes('params.set("mapCenterLat"') && bookingsSource.includes('params.set("mapCenterLng"'),
   "alternative sidecar find-buy-in calls should pass discovered resort coordinates when available",
 );
@@ -2938,6 +2943,17 @@ assert.ok(
 assert.ok(
   routesSource.includes("const bounds = resortBounds;") && routesSource.includes("const vrboMapBounds = cityMapBounds ?? resortBounds;"),
   "alternative scout should widen only the VRBO map search while keeping Airbnb resort bounds strict",
+);
+assert.ok(
+  routesSource.includes("const requestedSearchTerm = typeof req.query.searchTerm") &&
+    routesSource.includes("alternativeScoutMapSearch && requestedSearchTerm") &&
+    routesSource.includes("scoutSearchKey"),
+  "find-buy-in should use the alternative scout OTA search term with city/map bounds without reusing stale cache entries",
+);
+assert.ok(
+  routesSource.includes("alternativeScoutMapSearch && communitySearchName") &&
+    routesSource.includes("resortName = communitySearchName"),
+  "alternative find-buy-in scans should target the nearby community instead of the original Guesty listing title",
 );
 assert.ok(
   vrboWorkerSource.includes("createVrboGraphqlCollector") &&
