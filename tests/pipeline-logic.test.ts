@@ -3432,6 +3432,17 @@ assert.ok(
     routesSource.includes("runCityVrboInventoryScan"),
   "routes should expose city VRBO inventory scan for full map export + combo pairing",
 );
+const cityInventorySource = readFileSync("server/city-vrbo-inventory.ts", "utf8");
+assert.ok(
+  cityInventorySource.includes("cityWideInventory: true"),
+  "city VRBO inventory should use a single city search term without resort name variations",
+);
+assert.ok(
+  bookingsSource.includes("city-vrbo-inventory") &&
+    bookingsSource.includes('attachSource === "city-vrbo"') &&
+    bookingsSource.includes("multiUnitConfigured"),
+  "auto-fill should run resort search first then city-wide VRBO fallback without per-community scout",
+);
 assert.ok(
   bookingsSource.includes("CityVrboInventoryPanel") &&
     bookingsSource.includes("downloadCityVrboInventoryExport"),
