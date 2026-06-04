@@ -43,6 +43,12 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-04 (RentCast photo discovery, PRs #503–#506): `server/rentcast-discovery.ts`
+  harvests active sale listings; SearchAPI resolves addresses to Zillow/Realtor URLs;
+  wired on `fetch-unit-photos`, find-unit, and find-clean-unit in parallel with Apify +
+  Zillow SearchAPI. **RentCast never supplies photos** — see AGENTS.md Load-Bearing #43
+  and `docs/rentcast-photo-discovery.md` for Railway log patterns and tuning env vars.
+
 - 2026-05-04 (single-password portal gate, OFF by default): added
   `server/auth.ts` middleware that gates the entire portal behind one
   shared password. Activated by setting the `ADMIN_SECRET` env var on

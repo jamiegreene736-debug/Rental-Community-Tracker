@@ -85,6 +85,41 @@ export function isRentCastDiscoveryEnabled(): boolean {
   return flag !== "0" && flag !== "false" && flag !== "no";
 }
 
+export type RentCastDiscoveryProfile = "bounded" | "standard" | "cityWide" | "findUnit";
+
+export type RentCastDiscoveryTuning = {
+  limitPerCity: number;
+  maxResolverLookups: number;
+  requestTimeoutMs: number;
+  resolverConcurrency: number;
+};
+
+function rentCastEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = Number(process.env[name]);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(raw)));
+}
+
+/**
+ * Operator-tunable defaults (Railway env). Profile picks route-appropriate
+ * baselines; env vars override when set.
+ */
+export function rentCastDiscoveryTuning(profile: RentCastDiscoveryProfile): RentCastDiscoveryTuning {
+  const profileDefaults: Record<RentCastDiscoveryProfile, RentCastDiscoveryTuning> = {
+    bounded: { limitPerCity: 50, maxResolverLookups: 25, requestTimeoutMs: 12_000, resolverConcurrency: 6 },
+    standard: { limitPerCity: 100, maxResolverLookups: 40, requestTimeoutMs: 12_000, resolverConcurrency: 6 },
+    cityWide: { limitPerCity: 150, maxResolverLookups: 50, requestTimeoutMs: 15_000, resolverConcurrency: 6 },
+    findUnit: { limitPerCity: 80, maxResolverLookups: 30, requestTimeoutMs: 12_000, resolverConcurrency: 6 },
+  };
+  const base = profileDefaults[profile];
+  return {
+    limitPerCity: rentCastEnvInt("RENTCAST_LIMIT_PER_CITY", base.limitPerCity, 10, 500),
+    maxResolverLookups: rentCastEnvInt("RENTCAST_RESOLVER_MAX_LOOKUPS", base.maxResolverLookups, 5, 80),
+    requestTimeoutMs: rentCastEnvInt("RENTCAST_REQUEST_TIMEOUT_MS", base.requestTimeoutMs, 3_000, 30_000),
+    resolverConcurrency: rentCastEnvInt("RENTCAST_RESOLVER_CONCURRENCY", base.resolverConcurrency, 1, 12),
+  };
+}
+
 /**
  * Canonical street root for dedupe / community anchoring (aligned with routes.ts).
  */
@@ -267,8 +302,9 @@ export async function harvestRentCastSaleListings(
     return { candidates: [], rawCount: 0, filteredCount: 0, citiesQueried: [], errors: ["missing city or state"] };
   }
 
-  const limitPerCity = Math.max(1, Math.min(500, options.limitPerCity ?? 100));
-  const timeoutMs = Math.max(3_000, Math.min(30_000, options.timeoutMs ?? 12_000));
+  const tuning = rentCastDiscoveryTuning("standard");
+  const limitPerCity = Math.max(1, Math.min(500, options.limitPerCity ?? tuning.limitPerCity));
+  const timeoutMs = Math.max(3_000, Math.min(30_000, options.timeoutMs ?? tuning.requestTimeoutMs));
   const propertyTypes = options.propertyTypes ?? ["Condo", "Townhouse"];
   const errors: string[] = [];
   const seenIds = new Set<string>();
@@ -394,8 +430,9 @@ export async function resolveRentCastCandidatesToPortalUrls(opts: {
   maxLookups?: number;
   timeoutMs?: number;
 }): Promise<RentCastPortalResolutionResult> {
-  const maxLookups = Math.max(1, Math.min(80, opts.maxLookups ?? 40));
-  const timeoutMs = Math.max(3_000, Math.min(15_000, opts.timeoutMs ?? 10_000));
+  const tuning = rentCastDiscoveryTuning("standard");
+  const maxLookups = Math.max(1, Math.min(80, opts.maxLookups ?? tuning.maxResolverLookups));
+  const timeoutMs = Math.max(3_000, Math.min(30_000, opts.timeoutMs ?? tuning.requestTimeoutMs));
   const byRoot = new Map<string, RentCastListingCandidate>();
   for (const listing of opts.listings) {
     const root = listing.streetRoot;
@@ -407,7 +444,7 @@ export async function resolveRentCastCandidatesToPortalUrls(opts: {
   let resolvedZillow = 0;
   let resolvedRealtor = 0;
 
-  const lookupConcurrency = 6;
+  const lookupConcurrency = tuning.resolverConcurrency;
   for (let i = 0; i < toResolve.length; i += lookupConcurrency) {
     const batch = toResolve.slice(i, i + lookupConcurrency);
     const batchResults = await Promise.all(batch.map(async (listing) => {

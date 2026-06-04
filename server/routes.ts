@@ -164,6 +164,7 @@ import { downloadAndPrioritize } from "./photo-pipeline";
 import {
   harvestRentCastSaleListings,
   isRentCastDiscoveryEnabled,
+  rentCastDiscoveryTuning,
   resolveRentCastCandidatesToPortalUrls,
 } from "./rentcast-discovery";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
@@ -27136,14 +27137,15 @@ Return ONLY compact JSON with this exact shape:
         : allowedRoots.size > 0
           ? allowedRoots
           : directAllowedRoots;
+      const findUnitRentcastTune = rentCastDiscoveryTuning(expandedSearch ? "standard" : "findUnit");
       const harvest = await withStepTimeout(
         harvestRentCastSaleListings({
           cities: rentcastCities,
           state: communityLoc.state,
           minBedrooms: requiredBedroomCount,
           maxBedrooms: requiredBedroomCount,
-          limitPerCity: requiredBedroomCount ? 80 : 50,
-          timeoutMs: rentcastBudgetMs,
+          limitPerCity: findUnitRentcastTune.limitPerCity,
+          timeoutMs: Math.min(rentcastBudgetMs, findUnitRentcastTune.requestTimeoutMs),
           allowedStreetRoots: suppliedStreetRoot ? new Set([suppliedStreetRoot]) : undefined,
         }),
         rentcastBudgetMs,
@@ -27160,8 +27162,10 @@ Return ONLY compact JSON with this exact shape:
         resolveRentCastCandidatesToPortalUrls({
           listings: harvest.candidates,
           searchApiKey,
-          maxLookups: expandedSearch ? 45 : 30,
-          timeoutMs: 10_000,
+          maxLookups: expandedSearch
+            ? Math.max(findUnitRentcastTune.maxResolverLookups, 45)
+            : findUnitRentcastTune.maxResolverLookups,
+          timeoutMs: findUnitRentcastTune.requestTimeoutMs,
         }),
         12_000,
         { resolvedZillow: 0, resolvedRealtor: 0, lookupsRun: 0, urls: [] },
@@ -30841,11 +30845,12 @@ Return ONLY compact JSON with this exact shape:
         ]);
       };
 
+      const rentcastTune = rentCastDiscoveryTuning(isBoundedDiscovery ? "bounded" : "standard");
       const rentcastLimitPerCity = isBoundedDiscovery
-        ? Math.max(30, Math.min(80, (candidateLimit ?? 8) * 6))
-        : 100;
-      const rentcastMaxResolverLookups = isBoundedDiscovery ? 25 : 45;
-      const rentcastTimeoutMs = isBoundedDiscovery ? 12_000 : 15_000;
+        ? Math.max(rentcastTune.limitPerCity, Math.min(80, (candidateLimit ?? 8) * 6))
+        : rentcastTune.limitPerCity;
+      const rentcastMaxResolverLookups = rentcastTune.maxResolverLookups;
+      const rentcastTimeoutMs = rentcastTune.requestTimeoutMs;
 
       const runRentCastDiscovery = async (): Promise<{
         raw: number;
@@ -32360,8 +32365,9 @@ Return ONLY compact JSON with this exact shape:
     const discoveryCitiesForRentCast = isCityWide
       ? [city]
       : [...new Set(discoverySearchCitiesForPhotoSearch({ city, communityName }))].slice(0, 3);
-    const rentcastLimitPerCity = isCityWide ? 150 : 100;
-    const rentcastMaxResolverLookups = isCityWide ? 50 : 35;
+    const rentcastTune = rentCastDiscoveryTuning(isCityWide ? "cityWide" : "standard");
+    const rentcastLimitPerCity = rentcastTune.limitPerCity;
+    const rentcastMaxResolverLookups = rentcastTune.maxResolverLookups;
 
     const runRentCastDiscovery = async (): Promise<{
       raw: number;
@@ -32378,7 +32384,7 @@ Return ONLY compact JSON with this exact shape:
         minBedrooms: !isAnyBedroom && numericBedrooms ? numericBedrooms : undefined,
         maxBedrooms: !isAnyBedroom && numericBedrooms ? numericBedrooms : undefined,
         limitPerCity: rentcastLimitPerCity,
-        timeoutMs: isCityWide ? 15_000 : 12_000,
+        timeoutMs: rentcastTune.requestTimeoutMs,
       });
       if (harvest.candidates.length === 0) {
         return {
@@ -32392,7 +32398,7 @@ Return ONLY compact JSON with this exact shape:
         listings: harvest.candidates,
         searchApiKey: apiKey,
         maxLookups: rentcastMaxResolverLookups,
-        timeoutMs: 12_000,
+        timeoutMs: rentcastTune.requestTimeoutMs,
       });
       const addressRootSet = repeatedHarvestRoots();
       for (const row of resolved.urls) {
