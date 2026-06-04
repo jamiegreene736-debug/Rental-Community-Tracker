@@ -14737,7 +14737,11 @@ export async function registerRoutes(
       const surfaceKey = classified.platformKey === "airbnb" || classified.platformKey === "vrbo" || classified.platformKey === "booking"
         ? classified.platformKey
         : normalized.domain;
-      const confidence = Math.round(lensMatchConfidence(rowForConfidence ?? {}, source, position) * 1000) / 1000;
+      const rawConfidence = lensMatchConfidence(rowForConfidence ?? {}, source, position);
+      const confidence = Math.round(Math.max(
+        rawConfidence,
+        source === "visual" && position === 1 ? 0.95 : 0,
+      ) * 1000) / 1000;
       const score =
         (source === "known-source" ? 100_000 : 0) +
         (source === "visual" ? 10_000 : source === "page" ? 5_000 : source === "organic" ? 1_000 : 0) +

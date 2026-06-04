@@ -3043,6 +3043,10 @@ assert.ok(
   "direct-booking-sites cache key should include the Lens photo threshold",
 );
 assert.ok(
+  routesSource.includes('source === "visual" && position === 1 ? 0.95 : 0'),
+  "reverse-image-listings should score first visual Lens hits at the 95% direct-link threshold when SearchAPI omits explicit similarity",
+);
+assert.ok(
   routesSource.includes("type DirectBookingProof"),
   "direct booking discovery should expose a structured proof ledger",
 );
