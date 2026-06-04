@@ -5232,7 +5232,7 @@ function collectVrboPropertySearchListings(root, out = [], maxDepth = 10) {
   return out;
 }
 
-function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel) {
+function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel, maxRows = 300) {
   const rows = [];
   let responsesSeen = 0;
   let matchedResponses = 0;
@@ -5254,7 +5254,7 @@ function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel
       for (const listing of listings) {
         const normalized = normalizeVrboGraphqlListing(listing, expectedNights, variantLabel);
         if (normalized) rows.push(normalized);
-        if (rows.length >= 300) break;
+        if (rows.length >= maxRows) break;
       }
       log(`vrbo_search ${id}: captured ${listings.length} listing rows from ${method} ${url.slice(0, 120)}`);
     } catch (e) {
@@ -6147,6 +6147,8 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
 
 async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
   let lastSnapshot = null;
+  let lastHarvestTotal = 0;
+  let plateauPasses = 0;
   for (let pass = 0; pass < passes; pass++) {
     log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} starting`);
     let snapshot = null;
@@ -6246,6 +6248,14 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
     } else {
       log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} did not return a DOM snapshot`);
     }
+    const harvestedTotal = lastSnapshot?.harvestedTotal ?? 0;
+    if (harvestedTotal <= lastHarvestTotal) plateauPasses += 1;
+    else plateauPasses = 0;
+    lastHarvestTotal = harvestedTotal;
+    if (pass >= 4 && plateauPasses >= 3) {
+      log(`vrbo_search ${id}: map harvest plateau at ${harvestedTotal} cards; stopping early after pass ${pass + 1}/${passes}`);
+      break;
+    }
     await boundedPageDelay(targetPage, pass < 2 ? 1_200 : 900);
   }
   return {
@@ -6271,7 +6281,9 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
   await surfaceVisibleOtaSearchWindow(page, "vrbo_search", id);
   await clearOtaClientSearchState("https://www.vrbo.com", `vrbo_search ${id} map-bounds preflight`);
   const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
-  const networkCapture = createVrboGraphqlCollector(page, id, expectedNights, effectiveSearchTerm);
+  const deepMapHarvest = params?.mapSearch?.deepHarvest === true;
+  const maxGraphqlRows = deepMapHarvest ? 500 : 300;
+  const networkCapture = createVrboGraphqlCollector(page, id, expectedNights, effectiveSearchTerm, maxGraphqlRows);
   const url = buildVrboMapSearchUrl(params, effectiveSearchTerm);
   logProviderMapSearchPlan("vrbo_search", id, "vrbo", params, effectiveSearchTerm, url);
   try {
@@ -6307,8 +6319,11 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
         retryLater: true,
       });
     }
-    const harvestPasses = bounds ? 3 : 8;
-    log(`vrbo_search ${id}: starting map harvest passes (${bounds ? "bounded" : "city-unbounded"}) before card extraction`);
+    const harvestPasses = deepMapHarvest ? 18 : (bounds ? 3 : 8);
+    log(
+      `vrbo_search ${id}: starting map harvest passes (${deepMapHarvest ? "deep-city" : bounds ? "bounded" : "city-unbounded"}) ` +
+      `count=${harvestPasses} before card extraction`,
+    );
     const harvestStats = await harvestVrboMapResultCards(page, id, harvestPasses);
     const domExtract = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm);
     const domCards = domExtract.cards ?? [];

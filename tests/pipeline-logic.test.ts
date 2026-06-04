@@ -43,6 +43,11 @@ import { unitVerificationClaims } from "../shared/folder-unit-map";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
 import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
 import {
+  sharedResortPhraseKeys,
+  suggestCityVrboComboPair,
+  type CityVrboListing,
+} from "../shared/city-vrbo-combo";
+import {
   BUY_IN_MARKET_BOUNDS,
   BUY_IN_MARKET_LOCATIONS,
   BUY_IN_MARKETS,
@@ -3398,3 +3403,42 @@ assert.ok(
   "bookings UI should display direct proof level for Lens/direct matches",
 );
 console.log("  ✓ alternative scout direct booking probe UI + API");
+
+const kamalii3: CityVrboListing = {
+  url: "https://www.vrbo.com/111",
+  title: "Villas of Kamalii 30 · Princeville",
+  bedrooms: 3,
+  totalPrice: 4200,
+  lat: 22.217,
+  lng: -159.478,
+};
+const kamalii2: CityVrboListing = {
+  url: "https://www.vrbo.com/222",
+  title: "Villas of Kamalii 12 · Princeville",
+  bedrooms: 2,
+  totalPrice: 3100,
+  lat: 22.2171,
+  lng: -159.4781,
+};
+assert.ok(
+  sharedResortPhraseKeys(kamalii3).some((key) => key.includes("villas of kamalii")),
+  "city VRBO combo matcher should extract Villas of Kamalii phrase keys",
+);
+const kamaliiPair = suggestCityVrboComboPair([kamalii3, kamalii2], [3, 2], 6);
+assert.ok(kamaliiPair && kamaliiPair.picks.length === 2, "city VRBO combo matcher should pair 3BR+2BR with shared title");
+assert.equal(kamaliiPair?.resortPhrase.includes("kamalii"), true);
+assert.ok(
+  routesSource.includes("/api/operations/city-vrbo-inventory") &&
+    routesSource.includes("runCityVrboInventoryScan"),
+  "routes should expose city VRBO inventory scan for full map export + combo pairing",
+);
+assert.ok(
+  bookingsSource.includes("CityVrboInventoryPanel") &&
+    bookingsSource.includes("downloadCityVrboInventoryExport"),
+  "bookings UI should scan/export city VRBO inventory and attach matched combos",
+);
+assert.ok(
+  vrboWorkerSource.includes("deepHarvest") && vrboWorkerSource.includes("deepMapHarvest"),
+  "VRBO sidecar worker should support deep city map harvest passes",
+);
+console.log("  ✓ city VRBO inventory export + combo pairing");

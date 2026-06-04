@@ -87,6 +87,8 @@ export type SidecarVrboParams = {
     bounds?: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
     center?: { lat: number; lng: number };
     radiusKm?: number;
+    /** Scroll/harvest the full city map inventory (~100+ cards) instead of a quick resort pass. */
+    deepHarvest?: boolean;
   };
   searchVariations?: string[];
   variationMode?: SidecarSearchVariationMode;
