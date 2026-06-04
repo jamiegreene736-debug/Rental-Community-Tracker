@@ -1931,6 +1931,16 @@ assert.ok(
   routeSource.includes("runFindUnitStackedApifyDiscovery"),
   "replacement discovery must centralize stacked Apify discovery invoked parallel with SearchAPI",
 );
+{
+  const replacementRouteStart = routeSource.indexOf('app.post("/api/replacement/find-unit"');
+  const replacementRouteEnd = routeSource.indexOf("// ============================================================\n  // Unit Swaps", replacementRouteStart);
+  const replacementRouteSource = routeSource.slice(replacementRouteStart, replacementRouteEnd);
+  assert.equal(
+    /RealtyAPI|realtyApi|isRealtyApiDiscoveryEnabled|harvestRealtyApi/.test(replacementRouteSource),
+    false,
+    "replacement find-unit must not spend discovery budget on RealtyAPI when SearchAPI/Apify/RentCast already provide candidates",
+  );
+}
 assert.match(
   routeSource,
   /find-unit[\s\S]*scrapeListingPhotosDualSource\(clusterUrls/,

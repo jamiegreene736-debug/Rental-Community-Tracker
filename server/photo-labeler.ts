@@ -280,16 +280,32 @@ export async function probeInteriorCoverage(
   if (!apiKey) return { verdict: "unknown", categories: [] };
   if (photoUrls.length === 0) return { verdict: "reject", categories: [] };
 
-  // Sparse listing → label all of them. Rich listing → 8 stratified samples.
-  const indices = photoUrls.length <= 15
+  // Sparse listing -> label all of them. Rich listing -> sample more than the
+  // old 8-shot stride, with extra coverage at the beginning, middle, and end of
+  // real-estate galleries where bedrooms often live.
+  const indices = photoUrls.length <= 18
     ? photoUrls.map((_, i) => i)
-    : Array.from({ length: 8 }, (_, i) => Math.floor((photoUrls.length * i) / 8));
+    : [
+        ...Array.from({ length: 6 }, (_, i) => i),
+        ...Array.from({ length: 8 }, (_, i) => Math.floor((photoUrls.length * (i + 1)) / 9)),
+        ...Array.from({ length: 4 }, (_, i) => photoUrls.length - 1 - i),
+      ];
 
   const sampleUrls = Array.from(new Set(indices.map((i) => photoUrls[i])));
-  const results = await Promise.all(sampleUrls.map((u) => labelPhotoFromUrl(u, "unit", apiKey)));
-  const categories = results.map((r) => r?.category ?? "").filter((c) => c);
-  const hasInterior = categories.some((c) => c === "Bedrooms" || c === "Bathrooms");
-  return { verdict: hasInterior ? "pass" : "reject", categories };
+  const categories: string[] = [];
+  const batchSize = 6;
+  for (let i = 0; i < sampleUrls.length; i += batchSize) {
+    const batch = sampleUrls.slice(i, i + batchSize);
+    const results = await Promise.all(batch.map((u) => labelPhotoFromUrl(u, "unit", apiKey)));
+    categories.push(...results.map((r) => r?.category ?? "").filter((c) => c));
+    if (categories.some((c) => c === "Bedrooms" || c === "Bathrooms")) {
+      return { verdict: "pass", categories };
+    }
+  }
+  if (categories.length < Math.min(6, sampleUrls.length)) {
+    return { verdict: "unknown", categories };
+  }
+  return { verdict: "reject", categories };
 }
 
 // Helper: enumerate image files in a folder, sorted by filename (which

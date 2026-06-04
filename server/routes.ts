@@ -26504,9 +26504,10 @@ Return ONLY compact JSON with this exact shape:
     const DISCOVERY_SEARCH_TIMEOUT_MS = 15_000;
     const PLATFORM_SEARCH_TIMEOUT_MS = 8_000;
     const DISCOVERY_QUERY_CONCURRENCY = 6;
-    const PHOTO_SCRAPE_TIMEOUT_MS = 45_000;
+    const PHOTO_SCRAPE_TIMEOUT_MS = expandedSearch ? 28_000 : 35_000;
     const PLATFORM_CHECK_RESERVE_MS = 12_000;
-    const PHOTO_PIPELINE_RESERVE_MS = PHOTO_SCRAPE_TIMEOUT_MS + 10_000;
+    const PHOTO_REVERSE_SEARCH_TIMEOUT_MS = expandedSearch ? 14_000 : 20_000;
+    const PHOTO_PIPELINE_RESERVE_MS = PHOTO_SCRAPE_TIMEOUT_MS + 25_000;
     const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 80 : 45;
     const discoveryElapsedMs = () => Date.now() - routeStartedAt;
     const hasDiscoveryBudget = () => discoveryElapsedMs() < DISCOVERY_BUDGET_MS;
@@ -27247,52 +27248,8 @@ Return ONLY compact JSON with this exact shape:
       );
     };
 
-    const runFindUnitStackedRealtyApiDiscovery = async (): Promise<void> => {
-      const communityLoc = communityLocForQueries;
-      if (!communityLoc || !isRealtyApiDiscoveryEnabled()) return;
-      const allowedRoots = repeatedCandidateRoots();
-      if (directRoot) allowedRoots.add(directRoot);
-      for (const root of communityAddressRoots) allowedRoots.add(root);
-      if (suppliedStreetRoot) allowedRoots.add(suppliedStreetRoot);
-      const filterRoots = suppliedStreetRoot
-        ? new Set([suppliedStreetRoot])
-        : allowedRoots.size > 0
-          ? allowedRoots
-          : directAllowedRoots;
-      const realtyBudgetMs = Math.min(
-        20_000,
-        Math.max(8_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
-      );
-      const beforeRealty = candidates.length;
-      const harvest = await withStepTimeout(
-        harvestRealtyApiCommunityListings({
-          communityName,
-          streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
-          city: bodyLocation?.city ?? communityLoc.city,
-          state: communityLoc.state,
-          minBedrooms: requiredBedroomCount,
-          maxBedrooms: requiredBedroomCount,
-          profile: expandedSearch ? "standard" : "findUnit",
-          allowedStreetRoots: suppliedStreetRoot ? new Set([suppliedStreetRoot]) : undefined,
-          strictCommunityAnchor: true,
-        }),
-        realtyBudgetMs,
-        { candidates: [], rawCount: 0, filteredCount: 0, pagesFetched: 0, locationsTried: [], errors: [] },
-        "stacked RealtyAPI discovery",
-      );
-      for (const row of harvest.candidates) {
-        addCandidateUrl(row.listingUrl, "realtor", row.formattedAddress, "", filterRoots);
-      }
-      console.error(
-        `[find-unit] stacked RealtyAPI discovery: locations=${harvest.locationsTried.length} ` +
-        `pages=${harvest.pagesFetched} raw=${harvest.rawCount} kept=${harvest.filteredCount} ` +
-        `added=${candidates.length - beforeRealty}`,
-      );
-    };
-
     let apifyDiscoveryPromise: Promise<void> | null = null;
     let rentcastDiscoveryPromise: Promise<void> | null = null;
-    let realtyApiDiscoveryPromise: Promise<void> | null = null;
     if (!skipDiscovery && communityLocForQueries) {
       apifyDiscoveryPromise = runFindUnitStackedApifyDiscovery().catch((e: any) => {
         console.error(`[find-unit] stacked Apify discovery failed: ${e?.message ?? e}`);
@@ -27302,15 +27259,9 @@ Return ONLY compact JSON with this exact shape:
           console.error(`[find-unit] stacked RentCast discovery failed: ${e?.message ?? e}`);
         });
       }
-      if (isRealtyApiDiscoveryEnabled()) {
-        realtyApiDiscoveryPromise = runFindUnitStackedRealtyApiDiscovery().catch((e: any) => {
-          console.error(`[find-unit] stacked RealtyAPI discovery failed: ${e?.message ?? e}`);
-        });
-      }
       console.error(
         "[find-unit] stacked Apify discovery started in parallel with SearchAPI/Google discovery" +
-        (rentcastDiscoveryPromise ? " (+ RentCast leg)" : "") +
-        (realtyApiDiscoveryPromise ? " (+ RealtyAPI leg)" : ""),
+        (rentcastDiscoveryPromise ? " (+ RentCast leg)" : ""),
       );
     }
 
@@ -27419,11 +27370,6 @@ Return ONLY compact JSON with this exact shape:
         await rentcastDiscoveryPromise;
       } else if (!skipDiscovery && communityLocForQueries && isRentCastDiscoveryEnabled() && searchApiKey) {
         await runFindUnitStackedRentCastDiscovery();
-      }
-      if (realtyApiDiscoveryPromise) {
-        await realtyApiDiscoveryPromise;
-      } else if (!skipDiscovery && communityLocForQueries && isRealtyApiDiscoveryEnabled()) {
-        await runFindUnitStackedRealtyApiDiscovery();
       }
     }
 
@@ -27972,30 +27918,6 @@ Return ONLY compact JSON with this exact shape:
             continue;
           }
 
-          const photoOtaSearch = await withStepTimeout(
-            runPhotoReverseSearch(searchApiKey, scrapedPhotoUrls),
-            35_000,
-            { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 },
-            `photo OTA duplicate check ${sourceUrl}`,
-          );
-          const photoFoundOn = platformHosts.find((p) => {
-            if (!enforcedKeys.includes(p.key)) return false;
-            const matchKey = p.key === "bookingCom" ? "booking" : p.key;
-            return photoOtaSearch.matches[matchKey as "airbnb" | "vrbo" | "booking"].length > 0;
-          });
-          if (photoFoundOn) {
-            console.error(
-              `[find-unit] [${source}] Unit ${unitNumber} had ${MIN_DISTINCT_STRONG_PHOTO_MATCHES}+ strong photo matches on ${photoFoundOn.host} — skipping`,
-            );
-            attempts.push({
-              sourceUrl, source, address, unit: unitNumber || "?",
-              verdict: "skipped-photo-found",
-              reason: `Two or more private/unit photos matched ${photoFoundOn.host}.`,
-              platformCheck,
-            });
-            continue;
-          }
-
           const anthropicKey = process.env.ANTHROPIC_API_KEY;
           let sampledCategories: string[] = [];
           if (anthropicKey) {
@@ -28023,6 +27945,42 @@ Return ONLY compact JSON with this exact shape:
               continue;
             }
             // "unknown" (no key) or "pass" → fall through to confirm.
+          }
+
+          if (!hasRouteBudget(PHOTO_REVERSE_SEARCH_TIMEOUT_MS + 5_000)) {
+            budgetStopped = true;
+            console.warn(
+              `[find-unit] route budget too low for photo reverse-search after ${attempts.length}/${candidates.length} platform checks`,
+            );
+            break;
+          }
+
+          const photoOtaSearch = await withStepTimeout(
+            runPhotoReverseSearch(searchApiKey, scrapedPhotoUrls, {
+              maxPhotos: expandedSearch ? 2 : 3,
+              requestTimeoutMs: expandedSearch ? 8_000 : 12_000,
+              delayMs: 0,
+            }),
+            PHOTO_REVERSE_SEARCH_TIMEOUT_MS,
+            { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 },
+            `photo OTA duplicate check ${sourceUrl}`,
+          );
+          const photoFoundOn = platformHosts.find((p) => {
+            if (!enforcedKeys.includes(p.key)) return false;
+            const matchKey = p.key === "bookingCom" ? "booking" : p.key;
+            return photoOtaSearch.matches[matchKey as "airbnb" | "vrbo" | "booking"].length > 0;
+          });
+          if (photoFoundOn) {
+            console.error(
+              `[find-unit] [${source}] Unit ${unitNumber} had ${MIN_DISTINCT_STRONG_PHOTO_MATCHES}+ strong photo matches on ${photoFoundOn.host} — skipping`,
+            );
+            attempts.push({
+              sourceUrl, source, address, unit: unitNumber || "?",
+              verdict: "skipped-photo-found",
+              reason: `Two or more private/unit photos matched ${photoFoundOn.host}.`,
+              platformCheck,
+            });
+            continue;
           }
 
           console.error(`[find-unit] [${source}] Clean unit found: ${sourceUrl}`);
@@ -31773,6 +31731,11 @@ Return ONLY compact JSON with this exact shape:
   async function runPhotoReverseSearch(
     apiKey: string,
     photoUrls: string[],
+    options: {
+      maxPhotos?: number;
+      requestTimeoutMs?: number;
+      delayMs?: number;
+    } = {},
   ): Promise<{
     matches: { airbnb: string[]; vrbo: string[]; booking: string[] };
     checked: number;
@@ -31792,7 +31755,9 @@ Return ONLY compact JSON with this exact shape:
     };
     const sample = photoUrls
       .filter((url) => !isCommunityOrSharedPhotoCandidate({ url }))
-      .slice(0, 3);
+      .slice(0, options.maxPhotos ?? 3);
+    const requestTimeoutMs = options.requestTimeoutMs ?? 25_000;
+    const delayMs = options.delayMs ?? 500;
     let checked = 0;
     const photoHits = {
       airbnb: new Set<string>(),
@@ -31802,7 +31767,7 @@ Return ONLY compact JSON with this exact shape:
     for (const photoUrl of sample) {
       try {
         const url = `https://www.searchapi.io/api/v1/search?engine=google_lens&url=${encodeURIComponent(photoUrl)}&api_key=${apiKey}`;
-        const resp = await fetch(url, { signal: AbortSignal.timeout(25_000) });
+        const resp = await fetch(url, { signal: AbortSignal.timeout(requestTimeoutMs) });
         if (!resp.ok) continue;
         const data: any = await resp.json();
         checked++;
@@ -31827,8 +31792,8 @@ Return ONLY compact JSON with this exact shape:
       } catch {
         // best effort — keep going
       }
-      // 500ms breather between Lens calls so we don't trip rate limits
-      await new Promise((r) => setTimeout(r, 500));
+      // Small optional breather between Lens calls so we don't trip rate limits.
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
     }
     return {
       matches: {
