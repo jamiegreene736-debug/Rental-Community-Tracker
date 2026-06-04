@@ -5775,6 +5775,37 @@ function vrboMapCenter(params) {
   };
 }
 
+function formatMapBoundsForLog(bounds, precision = 5) {
+  if (!bounds) return "none";
+  return [
+    bounds.sw_lat,
+    bounds.sw_lng,
+    bounds.ne_lat,
+    bounds.ne_lng,
+  ].map((n) => Number(n).toFixed(precision)).join(",");
+}
+
+function formatMapCenterForLog(center) {
+  if (!center) return "none";
+  return `${Number(center.lat).toFixed(6)},${Number(center.lng).toFixed(6)}`;
+}
+
+function logProviderMapSearchPlan(label, id, providerName, params, effectiveSearchTerm, url) {
+  const bounds = numericMapBounds(params);
+  const center = vrboMapCenter(params);
+  const urlHasMapBounds = /[?&]mapBounds=/i.test(String(url || ""));
+  const urlHasLatLong = /[?&]latLong=/i.test(String(url || ""));
+  const urlHasMapMode = /[?&]map=1(?:&|$)/i.test(String(url || ""));
+  log(
+    `${label} ${id}: map-search-plan provider=${providerName} ` +
+    `mode=${params?.searchMode || "default"} enabled=${Boolean(params?.mapSearch?.enabled)} ` +
+    `term="${effectiveSearchTerm}" destination="${params?.destination || ""}" ` +
+    `target="${params?.mapSearch?.targetName || ""}" ` +
+    `center=${formatMapCenterForLog(center)} radiusKm=${Number.isFinite(Number(params?.mapSearch?.radiusKm)) ? Number(params.mapSearch.radiusKm).toFixed(2) : "none"} ` +
+    `bounds=${formatMapBoundsForLog(bounds)} urlHasMapBounds=${urlHasMapBounds} urlHasLatLong=${urlHasLatLong} urlHasMapMode=${urlHasMapMode}`,
+  );
+}
+
 function buildVrboMapSearchUrl(params, searchTerm) {
   const { checkIn, checkOut, bedrooms } = params;
   const url = new URL("https://www.vrbo.com/search");
@@ -6069,6 +6100,7 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
   const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
   const networkCapture = createVrboGraphqlCollector(page, id, expectedNights, effectiveSearchTerm);
   const url = buildVrboMapSearchUrl(params, effectiveSearchTerm);
+  logProviderMapSearchPlan("vrbo_search", id, "vrbo", params, effectiveSearchTerm, url);
   try {
     assertSafeVrboNavigation(url, "vrbo_search_map", id, { allowMapBoundsSearch: true });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
@@ -6078,6 +6110,7 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
     await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
     await disableVrboSearchAsMapMoves(page, "vrbo_search", id).catch(() => false);
     if (bounds) {
+      log(`vrbo_search ${id}: provider bounds present; clicking search-this-area to apply viewport/bounds ${formatMapBoundsForLog(bounds)}`);
       await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
     } else {
       log(`vrbo_search ${id}: city map search has no provider mapBounds; leaving city results unbound by map viewport`);
@@ -6989,6 +7022,7 @@ async function runBookingMapBoundsSearchVariant(id, params, variant = null) {
   await surfaceVisibleOtaSearchWindow(page, "booking_search", id);
   await clearOtaClientSearchState("https://www.booking.com", `booking_search ${id} map-bounds preflight`);
   const url = buildBookingMapSearchUrl(params, effectiveSearchTerm);
+  logProviderMapSearchPlan("booking_search", id, "booking", params, effectiveSearchTerm, url);
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await stopOtaProviderIfBlocked(page, "booking_search", id);

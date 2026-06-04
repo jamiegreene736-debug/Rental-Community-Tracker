@@ -9670,6 +9670,12 @@ export async function registerRoutes(
       ),
     );
   };
+  const mapBoundsLogValue = (bounds: BuyInMapBounds | undefined): string =>
+    bounds
+      ? [bounds.sw_lat, bounds.sw_lng, bounds.ne_lat, bounds.ne_lng].map((n) => n.toFixed(6)).join(",")
+      : "none";
+  const mapCenterLogValue = (center: { lat: number; lng: number } | undefined): string =>
+    center ? `${center.lat.toFixed(6)},${center.lng.toFixed(6)}` : "none";
   const cityWideMapBoundsForBuyInMarket = (
     community: string,
     fallbackCenter?: { lat: number; lng: number } | null,
@@ -11233,6 +11239,14 @@ export async function registerRoutes(
     const mapSearchCenter = requestedMapCenter ?? mapBoundsCenter(mapReferenceBounds);
     const mapSearchRadiusKm = mapBoundsRadiusKm(mapReferenceBounds);
     const mapSearchScope = alternativeScoutMapSearch && cityMapBounds ? "city" : "resort";
+    console.log(
+      `[find-buy-in] map-boundary-plan community="${community}" scope=${mapSearchScope} alternativeScout=${alternativeScoutMapSearch} ` +
+      `requestedSearchTerm="${requestedSearchTerm}" requestedMapCenter=${mapCenterLogValue(requestedMapCenter)} ` +
+      `resortBounds=${mapBoundsLogValue(resortBounds)} cityReferenceBounds=${mapBoundsLogValue(cityMapBounds)} ` +
+      `providerBounds=${mapBoundsLogValue(mapSearchBounds)} providerCenter=${mapCenterLogValue(mapSearchCenter)} ` +
+      `providerRadiusKm=${mapSearchRadiusKm !== undefined ? mapSearchRadiusKm.toFixed(2) : "none"} ` +
+      `providerBoundsPolicy=${alternativeScoutMapSearch ? "omit-provider-bounds-for-city-scan" : "send-resort-bounds"}`,
+    );
 
     // ── Resort-name resolution ───────────────────────────────────────────
     // The whole business model is combining two units IN THE SAME RESORT.

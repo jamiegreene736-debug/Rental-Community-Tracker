@@ -3067,7 +3067,9 @@ assert.ok(
 assert.ok(
   routesSource.includes("const bounds = resortBounds;") &&
     routesSource.includes("const providerMapBounds = alternativeScoutMapSearch ? undefined : resortBounds;") &&
-    routesSource.includes("const mapReferenceBounds = providerMapBounds ?? cityMapBounds;"),
+    routesSource.includes("const mapReferenceBounds = providerMapBounds ?? cityMapBounds;") &&
+    routesSource.includes("map-boundary-plan") &&
+    routesSource.includes("providerBoundsPolicy="),
   "alternative scout should use city map center hints without sending provider boundary boxes",
 );
 assert.ok(
@@ -3104,7 +3106,10 @@ assert.ok(
   vrboWorkerSource.includes("disableVrboSearchAsMapMoves") &&
     vrboWorkerSource.includes("city map search has no provider mapBounds") &&
     vrboWorkerSource.includes("if (bounds)") &&
-    vrboWorkerSource.includes("clickVrboSearchThisArea"),
+    vrboWorkerSource.includes("clickVrboSearchThisArea") &&
+    vrboWorkerSource.includes("logProviderMapSearchPlan") &&
+    vrboWorkerSource.includes("map-search-plan") &&
+    vrboWorkerSource.includes("urlHasMapBounds"),
   "VRBO city map scans should turn off map auto-search and avoid binding city searches to the visible map viewport",
 );
 assert.ok(
