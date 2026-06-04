@@ -1199,7 +1199,7 @@ function mergeAlternativeFindBuyInResponses(
     comparisonSources: {
       airbnb: responses.flatMap((response) => response.comparisonSources?.airbnb ?? []),
       vrbo: responses.flatMap((response) => response.comparisonSources?.vrbo ?? []),
-      booking: responses.flatMap((response) => response.comparisonSources?.booking ?? []),
+      booking: [],
       pm: responses.flatMap((response) => response.comparisonSources?.pm ?? []),
     },
     cheapest,
@@ -1306,7 +1306,7 @@ function AlternativeMapInventoryPanel({
         </p>
       )}
       <p className="mt-1 font-medium text-slate-900">
-        Map inventory ({pool.length} verified VRBO/Booking row{pool.length === 1 ? "" : "s"})
+        Map inventory ({pool.length} verified VRBO row{pool.length === 1 ? "" : "s"})
       </p>
       {bedroomGroups.length === 0 ? (
         <p className="text-muted-foreground">No verified map rows match the current filter.</p>
@@ -1379,13 +1379,11 @@ function alternativeMapCandidatePool(data: FindBuyInResponse, resortPhrase?: str
   const rows = [
     ...(data.cheapest ?? []),
     ...(data.sources?.vrbo ?? []),
-    ...(data.sources?.booking ?? []),
     ...(data.comparisonSources?.vrbo ?? []),
-    ...(data.comparisonSources?.booking ?? []),
   ];
   const deduped = new Map<string, LiveCandidate>();
   for (const candidate of rows) {
-    if (candidate.source !== "vrbo" && candidate.source !== "booking") continue;
+    if (candidate.source !== "vrbo") continue;
     if (phrase && !textMatchesResortPhrase(`${candidate.title} ${candidate.sourceLabel ?? ""}`, phrase)) continue;
     if (candidate.verified && candidate.verified !== "yes") continue;
     if (!(candidate.totalPrice > 0 || candidate.nightlyPrice > 0)) continue;
@@ -2187,19 +2185,18 @@ function liveSearchSummaryFor(data: FindBuyInResponse, searchedBedrooms: number)
   const rawSourceCounts = {
     airbnb: Number(rawCounts.airbnbWebsiteSidecar ?? rawCounts.airbnb ?? 0) || 0,
     vrbo: Number(rawCounts.vrbo ?? 0) || 0,
-    booking: Number(rawCounts.bookingWebsiteSidecar ?? rawCounts.booking ?? 0) || 0,
+    booking: 0,
     pm: Number(rawCounts.pmFromWebsiteSidecar ?? rawCounts.pmWebsiteSidecarRaw ?? rawCounts.pm ?? 0) || 0,
   };
   const sourceCounts = {
     airbnb: data.sources?.airbnb?.length ?? 0,
     vrbo: data.sources?.vrbo?.length ?? 0,
-    booking: data.sources?.booking?.length ?? 0,
+    booking: 0,
     pm: data.sources?.pm?.length ?? 0,
   };
   const allSourceCandidates = [
     ...(data.sources?.airbnb ?? []),
     ...(data.sources?.vrbo ?? []),
-    ...(data.sources?.booking ?? []),
     ...(data.sources?.pm ?? []),
   ];
   const targetFilter = data.debug?.dropped?.targetFilter ?? {};
@@ -2207,7 +2204,7 @@ function liveSearchSummaryFor(data: FindBuyInResponse, searchedBedrooms: number)
   const scannedSourceCounts = {
     airbnb: Math.max(sourceCounts.airbnb, rawSourceCounts.airbnb),
     vrbo: Math.max(sourceCounts.vrbo, rawSourceCounts.vrbo),
-    booking: Math.max(sourceCounts.booking, rawSourceCounts.booking),
+    booking: 0,
     pm: Math.max(sourceCounts.pm, rawSourceCounts.pm),
   };
   const scanned = Object.values(scannedSourceCounts).reduce((sum, value) => sum + value, 0);
@@ -2580,7 +2577,7 @@ function AlternativeBuyInWorkflowPanel({
         <div>
           <p className="font-semibold">Alternative buy-in workflow</p>
           <p className="text-[11px] opacity-80">
-            After the primary buy-in search finishes, the sidecar runs one city-level VRBO/Booking.com map scan for the surrounding town. The final pair must prove matching bedroom slots and a 5-10 minute walk (~20 min drive context from {workflow?.scout?.baseCommunity ?? "this resort"}
+            After the primary buy-in search finishes, the sidecar runs one city-level VRBO map scan for the surrounding town. The final pair must prove matching bedroom slots and a 5-10 minute walk (~20 min drive context from {workflow?.scout?.baseCommunity ?? "this resort"}
             {workflow?.scout?.requiresOceanfrontComparable ? ", waterfront comparable only" : ""}).
           </p>
           {(workflow?.scout?.nearbyWithinDriveMinutes?.length ?? 0) > 0 && (
@@ -5686,19 +5683,18 @@ export default function Bookings() {
         const rawSourceCounts = {
           airbnb: Number(rawCounts.airbnbWebsiteSidecar ?? rawCounts.airbnb ?? 0) || 0,
           vrbo: Number(rawCounts.vrbo ?? 0) || 0,
-          booking: Number(rawCounts.bookingWebsiteSidecar ?? rawCounts.booking ?? 0) || 0,
+          booking: 0,
           pm: Number(rawCounts.pmFromWebsiteSidecar ?? rawCounts.pmWebsiteSidecarRaw ?? rawCounts.pm ?? 0) || 0,
         };
         const sourceCounts = {
           airbnb: data.sources?.airbnb?.length ?? 0,
           vrbo: data.sources?.vrbo?.length ?? 0,
-          booking: data.sources?.booking?.length ?? 0,
+          booking: 0,
           pm: data.sources?.pm?.length ?? 0,
         };
         const allSourceCandidates = [
           ...(data.sources?.airbnb ?? []),
           ...(data.sources?.vrbo ?? []),
-          ...(data.sources?.booking ?? []),
           ...(data.sources?.pm ?? []),
         ];
         const targetFilter = data.debug?.dropped?.targetFilter ?? {};
@@ -5706,7 +5702,7 @@ export default function Bookings() {
         const scannedSourceCounts = {
           airbnb: Math.max(sourceCounts.airbnb, rawSourceCounts.airbnb),
           vrbo: Math.max(sourceCounts.vrbo, rawSourceCounts.vrbo),
-          booking: Math.max(sourceCounts.booking, rawSourceCounts.booking),
+          booking: 0,
           pm: Math.max(sourceCounts.pm, rawSourceCounts.pm),
         };
         const scanned = Object.values(scannedSourceCounts).reduce((sum, value) => sum + value, 0);
@@ -5740,7 +5736,6 @@ export default function Bookings() {
         const flatCandidates = [
           ...(data.sources?.airbnb ?? []),
           ...(data.sources?.vrbo ?? []),
-          ...(data.sources?.booking ?? []),
           ...(data.sources?.pm ?? []),
         ];
         const groupedCandidates = (data.cheapestUnits ?? []).flatMap((unit) =>
@@ -6010,7 +6005,6 @@ export default function Bookings() {
         });
         const comparisonSources = [
           ...(data.comparisonSources?.pm ?? []),
-          ...(data.comparisonSources?.booking ?? []),
           ...(data.comparisonSources?.vrbo ?? []),
           ...(data.comparisonSources?.airbnb ?? []),
         ];
@@ -6018,7 +6012,6 @@ export default function Bookings() {
           ? comparisonSources
           : [
               ...(data.sources?.pm ?? []),
-              ...(data.sources?.booking ?? []),
               ...(data.sources?.vrbo ?? []),
               ...(data.sources?.airbnb ?? []),
             ];
@@ -6851,7 +6844,7 @@ export default function Bookings() {
         toast({
           title: response.recommended.length ? "City map alternative queued" : "No city map alternative yet",
           description: response.recommended.length
-            ? `${response.recommended[0]?.searchTerm ?? "City"} queued for VRBO/Booking.com map search.${sidecarQueue.length > 0 ? " Sidecar city scan started." : ""}`
+            ? `${response.recommended[0]?.searchTerm ?? "City"} queued for VRBO map search.${sidecarQueue.length > 0 ? " Sidecar city scan started." : ""}`
             : sidecarQueue.length > 0
               ? "Sidecar city scan started."
               : "No city map scan target was available.",
@@ -6859,7 +6852,7 @@ export default function Bookings() {
       } else if (sidecarQueue.length > 0) {
         toast({
           title: "Scanning city map alternative",
-          description: `Running one VRBO/Booking.com map scan for ${sidecarQueue[0]?.searchTerm ?? "the city"}.`,
+          description: `Running one VRBO map scan for ${sidecarQueue[0]?.searchTerm ?? "the city"}.`,
         });
       }
     } catch (error: any) {
@@ -11622,7 +11615,6 @@ function LiveSearchSection({
       : (data.cheapest?.length ? data.cheapest : [
           ...(data.sources?.airbnb ?? []),
           ...(data.sources?.vrbo ?? []),
-          ...(data.sources?.booking ?? []),
           ...(data.sources?.pm ?? []),
         ]).map((candidate): AutoFillAuditCandidate => ({
           source: candidate.source,
@@ -11891,7 +11883,7 @@ function LiveSearchSection({
 
   const airbnb  = data?.sources?.airbnb  ?? [];
   const vrbo    = data?.sources?.vrbo    ?? [];
-  const booking = data?.sources?.booking ?? [];
+  const booking: LiveCandidate[] = [];
   const pm      = data?.sources?.pm      ?? [];
   const cheapest = data?.cheapest        ?? [];
   const cheapestUnits = data?.cheapestUnits ?? [];
@@ -11907,7 +11899,7 @@ function LiveSearchSection({
   const directScanCandidates = availableAirbnb
     .filter((c) => c.totalPrice > 0 && (c.verified === "yes" || !c.verified))
     .sort((a, b) => a.totalPrice - b.totalPrice);
-  const nonAirbnbBaseline = [...availableVrbo, ...availableBooking, ...availablePm]
+  const nonAirbnbBaseline = [...availableVrbo, ...availablePm]
     .filter((c) => c.totalPrice > 0 && (c.verified === "yes" || !c.verified))
     .reduce<number | null>((best, c) => best === null ? c.totalPrice : Math.min(best, c.totalPrice), null);
   const focusedCheapestUnits = availableCheapestUnits.slice(0, 1);
@@ -12184,7 +12176,7 @@ function LiveSearchSection({
       {data?.debug?.rawCounts && (
         <div className="text-[11px] text-muted-foreground -mt-1 space-y-0.5">
           <div>
-            Raw: airbnb site {data.debug.rawCounts.airbnb ?? 0} · airbnb priced {data.debug.rawCounts.airbnbEngine ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · booking {data.debug.rawCounts.booking ?? 0} · direct links {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
+            Raw: airbnb site {data.debug.rawCounts.airbnb ?? 0} · airbnb priced {data.debug.rawCounts.airbnbEngine ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · direct links {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
             {pmSourceBreakdown.length > 0 && (
               <> ({pmSourceBreakdown.filter((s) => s.count > 0).length}/{pmSourceBreakdown.length} direct-link sources had results)</>
             )}
@@ -12196,8 +12188,7 @@ function LiveSearchSection({
             <div>
               Dropped (wrong resort / bedrooms):
               {" "}airbnb {data.debug.dropped.airbnb?.noResort ?? 0}/{data.debug.dropped.airbnb?.wrongBedrooms ?? 0} ·
-              {" "}vrbo {data.debug.dropped.vrbo?.noResort ?? 0}/{data.debug.dropped.vrbo?.wrongBedrooms ?? 0} ·
-              {" "}booking {data.debug.dropped.booking?.noResort ?? 0}/{data.debug.dropped.booking?.wrongBedrooms ?? 0}
+              {" "}vrbo {data.debug.dropped.vrbo?.noResort ?? 0}/{data.debug.dropped.vrbo?.wrongBedrooms ?? 0}
             </div>
           )}
         </div>
@@ -12327,7 +12318,7 @@ function LiveSearchSection({
               ? "No source returned a live priced, verified option during this scan. All scanned options are listed below with their automatic verification state."
               : data?.debug?.verification?.attempted
                 ? `Tried to verify ${data.debug.verification.attempted} top-priced candidates: ${data.debug.verification.yes} bookable, ${data.debug.verification.no} unavailable, ${data.debug.verification.unclear} unclear. Browse all scanned options below.`
-                : "No priced PM/Booking candidates surfaced for these dates and bedrooms. Browse all scanned options below or click 'Refresh'."}
+                : "No priced VRBO/direct candidates surfaced for these dates and bedrooms. Browse all scanned options below or click 'Refresh'."}
           </p>
         </div>
       )}
@@ -12342,7 +12333,7 @@ function LiveSearchSection({
             All scanned options
           </Badge>
           <span>
-            {availableAirbnb.length + availableVrbo.length + availableBooking.length + availablePm.length} rows
+            {availableAirbnb.length + availableVrbo.length + availablePm.length} rows
             {hasCurrentFocusedRecommendation ? " hidden below the best pick" : ""}
           </span>
         </summary>
@@ -12350,7 +12341,7 @@ function LiveSearchSection({
           <ScannedOptionsTable
             airbnb={availableAirbnb}
             vrbo={availableVrbo}
-            booking={availableBooking}
+            booking={[]}
             pm={availablePm}
             autoPickUrl={availableCheapestUnits[0]?.primaryUrl ?? availableCheapest[0]?.url}
             checkIn={checkInYmd}

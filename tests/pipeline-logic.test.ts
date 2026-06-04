@@ -1882,6 +1882,10 @@ try {
 }
 
 const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+const findBuyInRouteSource = routeSource.slice(
+  routeSource.indexOf('app.get("/api/operations/find-buy-in"'),
+  routeSource.indexOf('// POST /api/operations/direct-booking-sites'),
+);
 const autoReplySource = readFileSync(new URL("../server/auto-reply.ts", import.meta.url), "utf8");
 const homeSource = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
 const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
@@ -2333,28 +2337,29 @@ assert.ok(
   "multichannel buy-in should finish SearchAPI before browser sidecar enqueue",
 );
 assert.ok(
-  routeSource.includes("const [airbnb, googleHotelsRows] = alternativeScoutOtaMapOnly") &&
-    routeSource.includes("withTimeout(airbnbPromise, sidecarSourceBudgetMs") &&
-    routeSource.includes("withTimeout(googleHotelsPromise, googleHotelsBudgetMs"),
+  findBuyInRouteSource.includes("const [airbnb, googleHotelsRows] = alternativeScoutOtaMapOnly") &&
+    findBuyInRouteSource.includes("withTimeout(airbnbPromise, sidecarSourceBudgetMs") &&
+    findBuyInRouteSource.includes("withTimeout(googleHotelsPromise, googleHotelsBudgetMs"),
   "find-buy-in should run SearchAPI Airbnb + Google Hotels before sidecar VRBO map search",
 );
 assert.ok(
-  routeSource.indexOf("const [airbnb, googleHotelsRows] = alternativeScoutOtaMapOnly") <
-    routeSource.indexOf("const [booking, vrbo] = await Promise.all"),
+  findBuyInRouteSource.indexOf("const [airbnb, googleHotelsRows] = alternativeScoutOtaMapOnly") <
+    findBuyInRouteSource.indexOf("const [booking, vrbo] = await Promise.all"),
   "find-buy-in should finish SearchAPI before VRBO map sidecar search",
 );
 assert.ok(
-  routeSource.includes('searchMode: "map_bounds"') && routeSource.includes("mapSearch: {"),
+  findBuyInRouteSource.includes('searchMode: "map_bounds"') && findBuyInRouteSource.includes("mapSearch: {"),
   "find-buy-in should request sidecar map-bounds searches instead of destination dropdown variants",
 );
 assert.ok(
-  routeSource.includes("searchBookingViaSidecar") &&
-    routeSource.includes('sourceLabel: "Booking.com"') &&
-    routeSource.includes("bookingWebsiteSearchTerm"),
-  "find-buy-in should launch Booking.com through the sidecar with the same map-search term plumbing as VRBO",
+  findBuyInRouteSource.includes("const bookingPromise: Promise<Candidate[]> = Promise.resolve([])") &&
+    findBuyInRouteSource.includes("Booking.com buy-in searches are disabled") &&
+    !findBuyInRouteSource.includes("const { searchBookingViaSidecar }") &&
+    !findBuyInRouteSource.includes("sourceLabel: \"Booking.com\""),
+  "find-buy-in should not launch Booking.com sidecar searches",
 );
 assert.ok(
-  routeSource.includes("const candidateHasDateSpecificOtaSearchProof = (c: Candidate): boolean =>"),
+  findBuyInRouteSource.includes("const candidateHasDateSpecificOtaSearchProof = (c: Candidate): boolean =>"),
   "find-buy-in should centralize date-specific OTA search proof for unit-type confidence",
 );
 assert.ok(
@@ -3129,10 +3134,10 @@ assert.ok(
   "alternative find-buy-in scans should target the nearby community instead of the original Guesty listing title",
 );
 assert.ok(
-  routesSource.includes("Queued for one VRBO/Booking.com city map scan") &&
+  routesSource.includes("Queued for one VRBO city map scan") &&
     routesSource.includes("threshold: 0") &&
     bookingsSource.includes("City map scan required"),
-  "alternative scout should queue a VRBO/Booking.com city map scan directly without Airbnb inventory qualification",
+  "alternative scout should queue a VRBO city map scan directly without Airbnb inventory qualification",
 );
 assert.ok(
   routesSource.includes("const cityMapResult = {") &&
@@ -3144,14 +3149,14 @@ assert.ok(
 );
 assert.ok(
   routesSource.includes("const alternativeScoutOtaMapOnly = alternativeScoutMapSearch") &&
-    routesSource.includes("Skipped for alternative city map scout; VRBO/Booking.com map results are authoritative.") &&
+    routesSource.includes("Skipped for alternative city map scout; VRBO map results are authoritative.") &&
     routesSource.includes("const pricedSources = alternativeScoutOtaMapOnly") &&
     routesSource.includes("candidateIsAlternativeScoutMapResult") &&
     routesSource.includes("alternative city-map kept") &&
     bookingsSource.includes("alternativeMapCandidatePool") &&
     bookingsSource.includes("data.comparisonSources?.vrbo") &&
-    bookingsSource.includes('candidate.source !== "vrbo" && candidate.source !== "booking"'),
-  "alternative city-map scout should use only VRBO/Booking.com map results, not Airbnb/SearchAPI or Google Hotels",
+    bookingsSource.includes('candidate.source !== "vrbo"'),
+  "alternative city-map scout should use only VRBO map results, not Airbnb/SearchAPI, Booking.com, or Google Hotels",
 );
 assert.ok(
   !routesSource.includes("candidate.verified !== \"yes\"") &&
