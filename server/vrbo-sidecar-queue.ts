@@ -323,6 +323,8 @@ export type SidecarQueueContext = {
   concurrencyMode?: "availability_bulk";
   /** When true, never reuse a prior successful sidecar search result for this op. */
   skipResultCache?: boolean;
+  /** When true, bypass request-key dedupe and enqueue a new browser run. */
+  forceFresh?: boolean;
 };
 
 export type SidecarSearchVariationAttempt = {
@@ -1635,23 +1637,26 @@ export function enqueueOp(
     throw new Error(`Sidecar queue is stopped${reason}`);
   }
   const requestKey = makeRequestKey(req.opType, req.params);
-  const existingId = requestKeyIndex.get(requestKey);
-  if (existingId) {
-    const existing = queue.get(existingId);
-    if (existing) {
-      const isFresh =
-        existing.status === "pending" ||
-        existing.status === "paused" ||
-        existing.status === "in_progress" ||
-        (existing.status === "completed" && existing.completedAt && nowMs() - existing.completedAt < 60 * 1000);
-      if (isFresh) {
-        console.log(
-          `[vrbo-sidecar-queue] deduped ${req.opType} request onto ${existingId} (${existing.status}, age=${Math.round((nowMs() - existing.createdAt) / 1000)}s)`,
-        );
-        return { id: existingId, deduped: true };
+  const queueContext = (req.params as { queueContext?: SidecarQueueContext } | undefined)?.queueContext;
+  if (!queueContext?.forceFresh) {
+    const existingId = requestKeyIndex.get(requestKey);
+    if (existingId) {
+      const existing = queue.get(existingId);
+      if (existing) {
+        const isFresh =
+          existing.status === "pending" ||
+          existing.status === "paused" ||
+          existing.status === "in_progress" ||
+          (existing.status === "completed" && existing.completedAt && nowMs() - existing.completedAt < 60 * 1000);
+        if (isFresh) {
+          console.log(
+            `[vrbo-sidecar-queue] deduped ${req.opType} request onto ${existingId} (${existing.status}, age=${Math.round((nowMs() - existing.createdAt) / 1000)}s)`,
+          );
+          return { id: existingId, deduped: true };
+        }
+      } else {
+        requestKeyIndex.delete(requestKey);
       }
-    } else {
-      requestKeyIndex.delete(requestKey);
     }
   }
   const id = makeId();

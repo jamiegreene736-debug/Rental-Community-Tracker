@@ -9997,6 +9997,7 @@ export async function registerRoutes(
   // the route writes harmless JSON whitespace while waiting so the edge
   // sees the app is still alive, then ends with the real JSON body.
   const FIND_BUY_IN_ROUTE_BUDGET_MS = 270_000;
+  const FIND_BUY_IN_IN_FLIGHT_MAX_AGE_MS = FIND_BUY_IN_ROUTE_BUDGET_MS + 30_000;
   const FIND_BUY_IN_RESPONSE_KEEPALIVE_MS = 15_000;
   const FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS = 250_000;
   const FIND_BUY_IN_MIN_SIDECAR_BATCH_MS = 5_000;
@@ -11201,15 +11202,21 @@ export async function registerRoutes(
     if (allowInFlightJoin) {
       const inFlight = findBuyInInFlight.get(cacheKey);
       if (inFlight) {
-        console.log(`[find-buy-in] in-flight join ${cacheKey}`);
-        startResponseKeepAlive();
-        try {
-          const value = await inFlight.promise;
-          const ageSec = Math.max(0, Math.round((Date.now() - inFlight.startedAt) / 1000));
-          return sendFindBuyInJson({ ...value, fromCache: true, fromInFlight: true, cacheAgeSec: ageSec });
-        } catch (e: any) {
-          console.warn(`[find-buy-in] in-flight join failed ${cacheKey}:`, e?.message ?? e);
+        const inFlightAgeMs = Date.now() - inFlight.startedAt;
+        if (inFlightAgeMs > FIND_BUY_IN_IN_FLIGHT_MAX_AGE_MS) {
+          console.warn(`[find-buy-in] stale in-flight evicted ${cacheKey} (age ${Math.round(inFlightAgeMs / 1000)}s)`);
           findBuyInInFlight.delete(cacheKey);
+        } else {
+          console.log(`[find-buy-in] in-flight join ${cacheKey}`);
+          startResponseKeepAlive();
+          try {
+            const value = await inFlight.promise;
+            const ageSec = Math.max(0, Math.round((Date.now() - inFlight.startedAt) / 1000));
+            return sendFindBuyInJson({ ...value, fromCache: true, fromInFlight: true, cacheAgeSec: ageSec });
+          } catch (e: any) {
+            console.warn(`[find-buy-in] in-flight join failed ${cacheKey}:`, e?.message ?? e);
+            findBuyInInFlight.delete(cacheKey);
+          }
         }
       }
     }
@@ -12273,6 +12280,7 @@ export async function registerRoutes(
       propertyId,
       detail: `${providerLabel}: scanning ${bedrooms}BR unit · ${sidecarQueueDateLabel} · ${(resortName || community).trim()}`,
       skipResultCache: true,
+      forceFresh: alternativeScoutMapSearch,
     });
     const alternativeScoutOtaMapOnly = alternativeScoutMapSearch;
     const airbnbSidecarAbort = makeSidecarAbort("airbnb-searchapi");
@@ -12417,6 +12425,9 @@ export async function registerRoutes(
     const bookingPromise: Promise<Candidate[]> = (async () => {
       const targetSearchTerm = bookingWebsiteSearchTerm;
       try {
+        console.log(
+          `[find-buy-in] booking sidecar start search="${targetSearchTerm}" bedrooms=${otaSearchBedrooms} map=${mapSearchScope} bounds=${mapSearchBounds ? "yes" : "none"} alternativeScout=${alternativeScoutMapSearch}`,
+        );
         const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchBookingViaSidecar({
           destination: targetSearchTerm,
@@ -12461,6 +12472,9 @@ export async function registerRoutes(
         bookingDropped = { noResort: 0, wrongBedrooms: droppedBooking };
         bookingRawCount = r.candidates.length;
         bookingPricedCount = acceptedBooking.filter((c) => !c.availabilityOnly && c.totalPrice > 0).length;
+        console.log(
+          `[find-buy-in] booking sidecar finish search="${targetSearchTerm}" raw=${bookingRawCount} accepted=${bookingSidecarCount} priced=${bookingPricedCount} reason="${bookingSidecarReason}"`,
+        );
         return acceptedBooking.map((c): Candidate => {
           const inferred = rawCandidateBedroomSignal(c) ?? undefined;
           const total = Math.round(Number(c.totalPrice) || 0);
@@ -12516,6 +12530,9 @@ export async function registerRoutes(
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const targetSearchTerm = vrboWebsiteSearchTerm;
       try {
+        console.log(
+          `[find-buy-in] vrbo sidecar start search="${targetSearchTerm}" bedrooms=${otaSearchBedrooms} map=${mapSearchScope} bounds=${mapSearchBounds ? "yes" : "none"} alternativeScout=${alternativeScoutMapSearch}`,
+        );
         const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
         const r = await searchVrboViaSidecar({
           destination: targetSearchTerm,
@@ -12561,6 +12578,9 @@ export async function registerRoutes(
         vrboDropped = { noResort: 0, wrongBedrooms: droppedVrbo };
         vrboRawCount = r.candidates.length;
         vrboDetailPricedCount = 0;
+        console.log(
+          `[find-buy-in] vrbo sidecar finish search="${targetSearchTerm}" raw=${vrboRawCount} accepted=${vrboSidecarCount} reason="${vrboSidecarReason}"`,
+        );
         return acceptedVrbo.map((c): Candidate => {
           const inferred = rawCandidateBedroomSignal(c) ?? undefined;
           const capturedFromMapInventory = c.captureSource === "vrbo_graphql_propertySearchListings";
