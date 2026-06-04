@@ -1385,6 +1385,41 @@ function downloadCityVrboInventoryExport(data: CityVrboInventoryResponse) {
   URL.revokeObjectURL(url);
 }
 
+function liveCandidateFromCityComboPick(
+  pick: AutoFillComboOption["picks"][number],
+  slotBedrooms: number,
+  nights: number,
+): LiveCandidate {
+  return {
+    source: "vrbo",
+    sourceLabel: pick.sourceLabel,
+    title: pick.title,
+    url: pick.url,
+    nightlyPrice: pick.nightlyPrice ?? Math.round(pick.totalPrice / Math.max(1, nights)),
+    totalPrice: pick.totalPrice,
+    bedrooms: slotBedrooms,
+    verified: pick.verified ?? "yes",
+    verifiedReason: pick.verifiedReason ?? "City VRBO map inventory title match",
+    identityKeys: listingIdentityKeys({ url: pick.url, title: pick.title, sourceLabel: pick.sourceLabel }),
+  };
+}
+
+function cityInventorySearchSummary(
+  data: CityVrboInventoryResponse,
+  slotBedrooms: number,
+): AutoFillSearchSummary {
+  const kept = data.byBedroom[slotBedrooms]?.length ?? 0;
+  return {
+    bedrooms: slotBedrooms,
+    scanned: data.listings.length,
+    priced: data.listings.length,
+    sourceCounts: { airbnb: 0, vrbo: data.listings.length, booking: 0, pm: 0 },
+    kept,
+    targetFiltered: 0,
+    groundFloorOnly: false,
+  };
+}
+
 function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFillComboOption | null {
   const pair = data.suggestedPair;
   if (!pair?.picks?.length || pair.picks.length !== pair.bedrooms.length) return null;
@@ -1454,7 +1489,7 @@ function CityVrboInventoryPanel({
         <div>
           <p className="font-semibold text-violet-950">City VRBO map inventory</p>
           <p className="text-[10px] text-muted-foreground">
-            Search {community} as the VRBO location (not resort bounds), export all scraped listings, then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title.
+            Runs automatically after Auto-fill cheapest if resort search fails. One city-wide VRBO search ({community} + dates), export all listings, then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title (not separate community names).
           </p>
         </div>
         <Button
@@ -6236,6 +6271,7 @@ export default function Bookings() {
         searchedBedrooms: number,
         searchSummary: AutoFillSearchSummary,
         comboLabel?: string,
+        attachSource?: "resort" | "city-vrbo",
       ): Promise<AutoFillResult> => {
         const skippedReasons: string[] = [];
         const finalCost = pick.totalPrice;
@@ -6255,7 +6291,9 @@ export default function Bookings() {
         }
         const community = selectedSearchCommunity;
         const targetResortName = directBookingTargetResortName(community);
-        const targetRejectReason = targetLocationRejectReason(targetResortName, community, pick);
+        const targetRejectReason = attachSource === "city-vrbo"
+          ? null
+          : targetLocationRejectReason(targetResortName, community, pick);
         if (targetRejectReason) {
           skippedReasons.push(`${slot.unitLabel}: skipped ${targetRejectReason}`);
           return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
@@ -6270,7 +6308,9 @@ export default function Bookings() {
         }
         addUsedListingIdentity(pickedIdentities, pick);
         const verifySuffix = pick.verified === "yes"
-          ? ` · Verified by find-buy-in for ${actualBedrooms}BR ${ci}→${co}`
+          ? attachSource === "city-vrbo"
+            ? ` · Matched from city-wide VRBO map for ${actualBedrooms}BR ${ci}→${co}`
+            : ` · Verified by find-buy-in for ${actualBedrooms}BR ${ci}→${co}`
           : "";
         const comboSuffix = comboLabel
           ? ` · ${comboLabel}; selected ${actualBedrooms}BR for this slot`
@@ -6734,6 +6774,92 @@ export default function Bookings() {
         };
       }
 
+      if (emptySlots.length >= 2 && staticUnitConfig && staticUnitConfig.units.length >= 2) {
+        try {
+          const cityParams = new URLSearchParams({
+            propertyId: String(buyInPropertyId),
+            checkIn: ci,
+            checkOut: co,
+          });
+          const cityData = await apiGetJson<CityVrboInventoryResponse>(
+            `/api/operations/city-vrbo-inventory?${cityParams.toString()}`,
+          );
+          const cityCombo = cityComboOptionFromInventory(cityData);
+          if (cityCombo?.totalCost && cityCombo.picks.length >= emptySlots.length) {
+            const pickByBedroom = new Map<number, AutoFillComboOption["picks"][number]>();
+            cityCombo.bedrooms.forEach((bedrooms, index) => {
+              if (!pickByBedroom.has(bedrooms)) pickByBedroom.set(bedrooms, cityCombo.picks[index]);
+            });
+            const cityResults: AutoFillResult[] = [];
+            const comboLabel = `City VRBO ${cityCombo.label}`;
+            let cityAttached = true;
+            for (const slot of emptySlots) {
+              const rawPick = pickByBedroom.get(slot.bedrooms);
+              if (!rawPick) {
+                cityAttached = false;
+                cityResults.push({
+                  slot,
+                  picked: null,
+                  created: null,
+                  skippedReasons: [`${slot.unitLabel}: no ${slot.bedrooms}BR row in city suggested pair`],
+                  airbnbPick: false,
+                  searchSummary: cityInventorySearchSummary(cityData, slot.bedrooms),
+                });
+                continue;
+              }
+              const livePick = liveCandidateFromCityComboPick(rawPick, slot.bedrooms, reservationNights);
+              cityResults.push(await createAndAttachPick(
+                slot,
+                livePick,
+                slot.bedrooms,
+                cityInventorySearchSummary(cityData, slot.bedrooms),
+                comboLabel,
+                "city-vrbo",
+              ));
+            }
+            for (const bedrooms of cityCombo.bedrooms) {
+              const rows = cityData.byBedroom[bedrooms] ?? [];
+              searchAudits.set(bedrooms, {
+                bedrooms,
+                generatedAt: new Date().toISOString(),
+                counts: cityInventorySearchSummary(cityData, bedrooms),
+                candidates: rows.slice(0, 20).map((row) => ({
+                  source: "vrbo" as const,
+                  sourceLabel: row.sourceLabel ?? "Vrbo",
+                  title: row.title,
+                  url: row.url,
+                  totalPrice: row.totalPrice ?? 0,
+                  nightlyPrice: row.nightlyPrice ?? 0,
+                  bedrooms: row.bedrooms ?? bedrooms,
+                  verified: "yes" as const,
+                })),
+                diagnostics: {
+                  severity: "ok",
+                  title: "City-wide VRBO map inventory",
+                  summary: `${cityData.listings.length} exported · pair=${cityCombo.resortPhrase}`,
+                  generatedAt: new Date().toISOString(),
+                  request: { propertyId: buyInPropertyId, bedrooms, checkIn: ci, checkOut: co },
+                  sources: [],
+                  issues: [],
+                  report: `City search: ${cityData.citySearchTerm}`,
+                },
+              });
+            }
+            if (cityAttached && cityResults.every((row) => row.picked)) {
+              return {
+                reservation,
+                results: cityResults,
+                comboOptions: [cityCombo, ...comboEvaluation.options],
+                searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
+                cityInventory: cityData,
+              };
+            }
+          }
+        } catch (cityError: any) {
+          console.warn("[auto-fill] city VRBO inventory fallback failed:", cityError?.message ?? cityError);
+        }
+      }
+
       const plannedPicks: Array<{
         slot: typeof emptySlots[number];
         pick: LiveCandidate | null;
@@ -6873,7 +6999,11 @@ export default function Bookings() {
           noCompleteCombo: noCompleteComboForScout,
           attachableVerifiedCount: countAttachableBuyInCandidates(searchAudits),
         });
-        if (shouldShowAlternativeBuyInWorkflow(postFillAdvice, { noCompleteCombo: noCompleteComboForScout })) {
+        const multiUnitConfigured = (PROPERTY_UNIT_CONFIGS[selectedBuyInPropertyId ?? 0]?.units.length ?? 0) >= 2;
+        if (
+          !multiUnitConfigured
+          && shouldShowAlternativeBuyInWorkflow(postFillAdvice, { noCompleteCombo: noCompleteComboForScout })
+        ) {
           void scoutAlternativeCommunities(reservation, postFillAdvice, { auto: true });
         }
       }

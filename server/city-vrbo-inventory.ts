@@ -91,9 +91,9 @@ export async function runCityVrboInventoryScan(args: {
     checkOut: args.checkOut,
     bedrooms: inventoryBedrooms,
     searchMode: "map_bounds",
+    cityWideInventory: true,
     mapSearch: {
       enabled: true,
-      targetName: args.community,
       bounds: undefined,
       center: mapSearchCenter,
       radiusKm: mapSearchRadiusKm,

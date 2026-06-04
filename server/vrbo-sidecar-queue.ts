@@ -2328,6 +2328,8 @@ export async function searchVrboViaSidecar(opts: {
   queueContext?: SidecarQueueContext;
   rerunOnlyUntried?: boolean;
   searchVariations?: string[];
+  /** One VRBO map run using only the city/market search term (no resort sub-name variations). */
+  cityWideInventory?: boolean;
   pollIntervalMs?: number;
   walletBudgetMs?: number;
   queueBudgetMs?: number;
@@ -2353,17 +2355,28 @@ export async function searchVrboViaSidecar(opts: {
     numberFromEnv("SIDECAR_VRBO_SEARCH_QUEUE_BUDGET_MS", vrboWalletMs + 60_000),
   );
   const location = parseSearchLocation(opts);
-  const policy = await buildSearchVariationPolicy({
-    provider: "vrbo",
-    community: location.communityName,
-    city: location.city,
-    state: location.state,
-    checkIn: opts.checkIn,
-    checkOut: opts.checkOut,
-    bedrooms: opts.bedrooms,
-    rerunOnlyUntried: opts.rerunOnlyUntried,
-    explicitTerms: opts.searchVariations,
-  });
+  const singleCityTerm = cleanText(opts.searchTerm || opts.destination);
+  const policy = opts.cityWideInventory
+    ? {
+        communityKey: `city-wide|${singleCityTerm.toLowerCase()}`,
+        generatedTerms: [singleCityTerm],
+        preferredTerms: [] as string[],
+        terms: singleCityTerm ? [singleCityTerm] : [],
+        filterTokens: [] as string[],
+        maxVariations: 1,
+        allowDiscovery: false,
+      }
+    : await buildSearchVariationPolicy({
+        provider: "vrbo",
+        community: location.communityName,
+        city: location.city,
+        state: location.state,
+        checkIn: opts.checkIn,
+        checkOut: opts.checkOut,
+        bedrooms: opts.bedrooms,
+        rerunOnlyUntried: opts.rerunOnlyUntried,
+        explicitTerms: opts.searchVariations,
+      });
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "vrbo_search",
