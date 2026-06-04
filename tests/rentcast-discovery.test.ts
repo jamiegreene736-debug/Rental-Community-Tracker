@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 
 const {
+  buildRentCastPortalLookupQueries,
   buildRentCastSaleListingsQuery,
   harvestRentCastSaleListings,
   isRentCastDiscoveryEnabled,
@@ -32,6 +33,27 @@ assert.equal(qs.get("bedrooms"), "2");
 assert.equal(qs.get("propertyType"), "Condo,Townhouse");
 assert.equal(qs.get("limit"), "80");
 console.log("  ✓ sale listings query builder");
+
+const lookupQueries = buildRentCastPortalLookupQueries({
+  id: "x",
+  formattedAddress: "123 Main St, Fort Myers Beach, FL 33931",
+  addressLine1: "123 Main St",
+  city: "Fort Myers Beach",
+  state: "FL",
+  zipCode: "33931",
+  bedrooms: 2,
+  bathrooms: 2,
+  status: "Active",
+  price: 1,
+  latitude: null,
+  longitude: null,
+  propertyType: "Condo",
+  lastSeenDate: null,
+  streetRoot: "123 main st",
+});
+assert.match(lookupQueries.zillow, /site:zillow\.com\/homedetails/);
+assert.match(lookupQueries.realtor, /site:realtor\.com\/realestateandhomes-detail/);
+console.log("  ✓ portal lookup query builder");
 
 assert.equal(
   streetRootFromRentCastAddress("78-6833 Alii Dr, Kapaa, HI 96746"),

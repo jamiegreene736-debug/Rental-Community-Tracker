@@ -379,8 +379,18 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /runApifyDiscovery[\s\S]*runSearchApiDiscovery[\s\S]*Promise\.all/,
-  "fetch-unit-photos must run Apify and SearchAPI discovery in parallel",
+  /runApifyDiscovery[\s\S]*runZillowSearchApiDiscovery[\s\S]*runRentCastDiscovery[\s\S]*Promise\.all/,
+  "fetch-unit-photos must run Apify, Zillow SearchAPI, and RentCast discovery in parallel",
+);
+assert.match(
+  routesSource,
+  /harvestRentCastSaleListings[\s\S]*resolveRentCastCandidatesToPortalUrls/,
+  "fetch-unit-photos must resolve RentCast addresses to portal URLs before scrape",
+);
+assert.match(
+  routesSource,
+  /isRentCastDiscoveryEnabled/,
+  "fetch-unit-photos must honor RentCast discovery enablement",
 );
 assert.match(
   routesSource,
