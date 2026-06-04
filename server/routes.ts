@@ -26056,6 +26056,10 @@ Return ONLY compact JSON with this exact shape:
     const APIFY_SUPPLEMENT_BUDGET_MS = expandedSearch ? 100_000 : 75_000;
     const DISCOVERY_CANDIDATE_TARGET = expandedSearch ? 28 : 20;
     const APIFY_SKIP_WHEN_CANDIDATES_AT = expandedSearch ? 18 : 12;
+    // When a replacement slot needs a specific size (e.g. 3BR), discovery should
+    // not treat Google hits for smaller units as "enough" inventory — condo
+    // buildings often surface mostly 2BR for-sale pages in broad queries.
+    const DISCOVERY_BEDROOM_EXPLICIT_TARGET = expandedSearch ? 8 : 5;
     const DISCOVERY_SEARCH_TIMEOUT_MS = 15_000;
     const PLATFORM_SEARCH_TIMEOUT_MS = 8_000;
     const DISCOVERY_QUERY_CONCURRENCY = 6;
@@ -26361,6 +26365,24 @@ Return ONLY compact JSON with this exact shape:
       return roots;
     };
 
+    const qualifyingDiscoveryBedroomHint = (bedroomHint: number | null): boolean =>
+      !requiredBedroomCount
+      || bedroomHint === null
+      || bedroomHint >= requiredBedroomCount;
+
+    const countQualifyingDiscoveryCandidates = (): number =>
+      candidates.filter((c) => qualifyingDiscoveryBedroomHint(c.bedroomHint)).length;
+
+    const countExplicitBedroomCandidates = (): number =>
+      requiredBedroomCount
+        ? candidates.filter((c) => typeof c.bedroomHint === "number" && c.bedroomHint >= requiredBedroomCount).length
+        : 0;
+
+    const discoveryTargetMet = (): boolean => {
+      if (!requiredBedroomCount) return candidates.length >= DISCOVERY_CANDIDATE_TARGET;
+      return countQualifyingDiscoveryCandidates() >= DISCOVERY_CANDIDATE_TARGET;
+    };
+
     const addCandidateUrl = (link: string, source: CandidateSource, contextText = "", thumbnail = "", allowedRoots?: Set<string>) => {
       if (!link) return;
       const lower = unitSwapListingKey(link);
@@ -26385,6 +26407,14 @@ Return ONLY compact JSON with this exact shape:
       const addrDisplay = displayAddressFromUrl(link, source);
       const candidateContextText = `${contextText || ""} ${link}`.trim();
       const bedroomHint = extractBedroomHintFromText(candidateContextText);
+      if (
+        requiredBedroomCount
+        && typeof bedroomHint === "number"
+        && bedroomHint < requiredBedroomCount
+      ) {
+        discoveryFilteredHits += 1;
+        return;
+      }
       candidateUrlSet.add(lower);
       candidates.push({
         sourceUrl: link,
@@ -26615,9 +26645,12 @@ Return ONLY compact JSON with this exact shape:
 
     if (!skipDiscovery) {
       for (let i = 0; i < searchQueries.length; i += DISCOVERY_QUERY_CONCURRENCY) {
-        if (candidates.length >= DISCOVERY_CANDIDATE_TARGET) {
+        if (discoveryTargetMet()) {
           console.warn(
-            `[find-unit] stopping discovery early — ${candidates.length} candidates (target ${DISCOVERY_CANDIDATE_TARGET})`,
+            requiredBedroomCount
+              ? `[find-unit] stopping discovery early — ${countQualifyingDiscoveryCandidates()} qualifying candidates ` +
+                `(≥${requiredBedroomCount}BR or unknown, target ${DISCOVERY_CANDIDATE_TARGET}; ${candidates.length} total)`
+              : `[find-unit] stopping discovery early — ${candidates.length} candidates (target ${DISCOVERY_CANDIDATE_TARGET})`,
           );
           break;
         }
@@ -26650,9 +26683,16 @@ Return ONLY compact JSON with this exact shape:
       && candidates.length === 0
       && !!communityLoc
       && (!!suppliedStreetRoot || allowedRoots.size > 0);
+    const needsApifyForBedroomSearch = !!requiredBedroomCount && (
+      countQualifyingDiscoveryCandidates() < DISCOVERY_CANDIDATE_TARGET
+      || countExplicitBedroomCandidates() < DISCOVERY_BEDROOM_EXPLICIT_TARGET
+    );
+    const shouldRunApifySupplement = forceApifyDiscovery
+      || candidates.length < APIFY_SKIP_WHEN_CANDIDATES_AT
+      || needsApifyForBedroomSearch;
     if (
       !skipDiscovery
-      && (forceApifyDiscovery || candidates.length < APIFY_SKIP_WHEN_CANDIDATES_AT)
+      && shouldRunApifySupplement
       && communityLoc
       && (!!suppliedStreetRoot || allowedRoots.size > 0)
       && hasDiscoveryBudget()
@@ -26703,7 +26743,10 @@ Return ONLY compact JSON with this exact shape:
       console.error(
         `[find-unit] Apify supplement skipped: ` +
         `location=${communityLoc ? `${communityLoc.city}, ${communityLoc.state}` : "unknown"} ` +
-        `roots=${Array.from(allowedRoots).join(", ") || "none"}`,
+        `roots=${Array.from(allowedRoots).join(", ") || "none"} ` +
+        `candidates=${candidates.length} qualifying=${countQualifyingDiscoveryCandidates()} ` +
+        `explicit${requiredBedroomCount ?? "?"}BR=${countExplicitBedroomCandidates()} ` +
+        `needsBedroomSupplement=${needsApifyForBedroomSearch}`,
       );
     }
 
@@ -26724,7 +26767,14 @@ Return ONLY compact JSON with this exact shape:
       || sourcePriority[a.source] - sourcePriority[b.source],
     );
 
-    console.error(`[find-unit] Found ${candidates.length} candidate URLs (sorted by bedroom/source priority)`);
+    console.error(
+      `[find-unit] Found ${candidates.length} candidate URLs` +
+      (requiredBedroomCount
+        ? ` (${countQualifyingDiscoveryCandidates()} qualifying for ≥${requiredBedroomCount}BR, ` +
+          `${countExplicitBedroomCandidates()} explicit)`
+        : "") +
+      " (sorted by bedroom/source priority)",
+    );
 
     const candidatePhaseStartedAt = Date.now();
     const candidateBudgetMs = Math.max(
