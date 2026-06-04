@@ -2232,6 +2232,18 @@ assert.ok(
     routeSource.indexOf("const [booking, vrbo] = await Promise.all"),
   "find-buy-in should finish SearchAPI before VRBO/Booking sidecar searches",
 );
+assert.ok(
+  routeSource.includes("const candidateHasDateSpecificOtaSearchProof = (c: Candidate): boolean =>"),
+  "find-buy-in should centralize date-specific OTA search proof for unit-type confidence",
+);
+assert.ok(
+  routeSource.includes("sidecar searched .* with the resort, dates, and bedroom filter and scraped this priced result card"),
+  "Booking/Vrbo sidecar search proof should contribute to unit-type confidence",
+);
+assert.ok(
+  routeSource.includes("if (candidateHasDateSpecificOtaSearchProof(c)) score += 30"),
+  "Booking/Vrbo sidecar rows should not stall under the 85 confidence threshold after passing target/BR proof",
+);
 console.log("  ✓ buy-in SearchAPI phases complete before local-Chrome sidecar phases");
 
 assert.ok(

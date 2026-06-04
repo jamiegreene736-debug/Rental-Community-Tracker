@@ -11789,6 +11789,17 @@ export async function registerRoutes(
       }
       return mentionsResort(hay) || candidateHasResortPhotoProof(c);
     };
+    const candidateHasDateSpecificOtaSearchProof = (c: Candidate): boolean => {
+      if (c.verified !== "yes") return false;
+      const reason = c.verifiedReason ?? "";
+      if (c.source === "airbnb") {
+        return /SearchAPI Airbnb engine returned this date-specific priced result/i.test(reason);
+      }
+      if (c.source === "booking" || c.source === "vrbo") {
+        return /sidecar searched .* with the resort, dates, and bedroom filter and scraped this priced result card/i.test(reason);
+      }
+      return false;
+    };
 
     /**
      * Surgical addition: Layered unit type correctness confidence (0-100).
@@ -11811,10 +11822,12 @@ export async function registerRoutes(
         score += 25;
       }
 
-      // SearchAPI Airbnb engine rows are date-verified at search time (same trust
-      // model as VRBO sidecar cards) — without this, verified Airbnb listings stall
-      // below the default 85 attach/auto-pick threshold despite passing resort/BR proof.
-      if (c.source === "airbnb" && c.verified === "yes") score += 30;
+      // OTA search rows are date-verified at search time: Airbnb through
+      // SearchAPI, Booking/Vrbo through the sidecar driving their own search
+      // pages with resort + dates + bedroom filter. Without this layer,
+      // verified Booking/Vrbo cards can pass target/BR proof but stall below
+      // the default 85 safe-attach threshold in alternative buy-in scans.
+      if (candidateHasDateSpecificOtaSearchProof(c)) score += 30;
 
       // Layer 3: Strong photo proof anchored to correct type
       if (candidateHasResortPhotoProof(c)) score += 20;
