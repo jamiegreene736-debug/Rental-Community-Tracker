@@ -5860,6 +5860,67 @@ async function clickVrboSearchThisArea(targetPage, label, id) {
   return result.clicked;
 }
 
+async function disableVrboSearchAsMapMoves(targetPage, label, id) {
+  const result = await targetPage.evaluate(() => {
+    function visible(el) {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 1 && rect.height > 1 && style.visibility !== "hidden" && style.display !== "none";
+    }
+    function textOf(el) {
+      return [
+        el?.textContent || "",
+        el?.getAttribute?.("aria-label") || "",
+        el?.getAttribute?.("title") || "",
+      ].join(" ").replace(/\s+/g, " ").trim();
+    }
+    function isMoveMapControlText(text) {
+      return /\bsearch\s+(?:as|when|while)\s+i\s+move\s+(?:the\s+)?map\b|\bsearch\s+(?:this\s+)?area\s+when\s+(?:the\s+)?map\s+moves\b|\bupdate\s+results\s+when\s+map\s+moves\b/i.test(text);
+    }
+    const candidates = [];
+    for (const labelEl of Array.from(document.querySelectorAll("label"))) {
+      if (!visible(labelEl) || !isMoveMapControlText(textOf(labelEl))) continue;
+      const forId = labelEl.getAttribute("for");
+      const linked = forId ? document.getElementById(forId) : null;
+      const nested = labelEl.querySelector("input[type='checkbox'], [role='switch'], [role='checkbox']");
+      const control = linked || nested;
+      if (control) candidates.push({ control, label: textOf(labelEl) });
+    }
+    for (const control of Array.from(document.querySelectorAll("input[type='checkbox'], [role='switch'], [role='checkbox'], button"))) {
+      if (!visible(control)) continue;
+      const wrapper = control.closest("label, [role='group'], div, section, aside") || control;
+      const text = `${textOf(control)} ${textOf(wrapper)}`;
+      if (isMoveMapControlText(text)) candidates.push({ control, label: text.slice(0, 100) });
+    }
+    const seen = new Set();
+    for (const item of candidates) {
+      const control = item.control;
+      if (!control || seen.has(control)) continue;
+      seen.add(control);
+      const ariaChecked = control.getAttribute?.("aria-checked");
+      const pressed = control.getAttribute?.("aria-pressed");
+      const checked = control instanceof HTMLInputElement
+        ? control.checked
+        : ariaChecked === "true" || pressed === "true" || control.className?.toString?.().match?.(/\bchecked|selected|active\b/i);
+      if (!checked) return { found: true, changed: false, label: item.label };
+      control.scrollIntoView({ block: "center", inline: "center" });
+      control.click();
+      return { found: true, changed: true, label: item.label };
+    }
+    return { found: false, changed: false };
+  }).catch((e) => ({ found: false, changed: false, error: e?.message ?? String(e) }));
+  if (result.changed) {
+    log(`${label} ${id}: turned off VRBO map auto-search "${result.label || "search as map moves"}"`);
+    await boundedPageDelay(targetPage, 900);
+  } else if (result.found) {
+    log(`${label} ${id}: VRBO map auto-search already off "${result.label || "search as map moves"}"`);
+  } else {
+    log(`${label} ${id}: VRBO map auto-search toggle not found; continuing without viewport search`);
+  }
+  return Boolean(result.found);
+}
+
 async function extractVisibleVrboCards(id, params, expectedNights, variantLabel) {
   const result = await page.evaluate((args) => {
     const { expectedNights } = args;
@@ -6015,7 +6076,12 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
     await stopVrboProviderIfBlocked(page, "vrbo_search", id);
     await dismissObstructions(page, "vrbo_search_map");
     await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
-    await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
+    await disableVrboSearchAsMapMoves(page, "vrbo_search", id).catch(() => false);
+    if (bounds) {
+      await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
+    } else {
+      log(`vrbo_search ${id}: city map search has no provider mapBounds; leaving city results unbound by map viewport`);
+    }
     await boundedPageDelay(page, 2_500);
     let state = await dumpPageState("vrbo-map", { id, ...params });
     throwIfBrightDataKycBlock(state, "vrbo_search", id);

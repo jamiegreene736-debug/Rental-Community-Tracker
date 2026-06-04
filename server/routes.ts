@@ -11220,7 +11220,8 @@ export async function registerRoutes(
       ? cityWideMapBoundsForBuyInMarket(community, requestedMapCenter)
       : undefined;
     const bounds = resortBounds;
-    const providerMapBounds = cityMapBounds ?? resortBounds;
+    const providerMapBounds = alternativeScoutMapSearch ? undefined : resortBounds;
+    const mapReferenceBounds = providerMapBounds ?? cityMapBounds;
     const mapSearchBounds = providerMapBounds
       ? {
           sw_lat: providerMapBounds.sw_lat,
@@ -11229,8 +11230,8 @@ export async function registerRoutes(
           ne_lng: providerMapBounds.ne_lng,
         }
       : undefined;
-    const mapSearchCenter = mapBoundsCenter(mapSearchBounds);
-    const mapSearchRadiusKm = mapBoundsRadiusKm(mapSearchBounds);
+    const mapSearchCenter = requestedMapCenter ?? mapBoundsCenter(mapReferenceBounds);
+    const mapSearchRadiusKm = mapBoundsRadiusKm(mapReferenceBounds);
     const mapSearchScope = alternativeScoutMapSearch && cityMapBounds ? "city" : "resort";
 
     // ── Resort-name resolution ───────────────────────────────────────────

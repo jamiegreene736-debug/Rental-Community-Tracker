@@ -3055,8 +3055,10 @@ assert.ok(
   "find-buy-in should support city-scope VRBO map bounds for alternative scout scans",
 );
 assert.ok(
-  routesSource.includes("const bounds = resortBounds;") && routesSource.includes("const providerMapBounds = cityMapBounds ?? resortBounds;"),
-  "alternative scout should widen OTA provider map searches while keeping Airbnb/SearchAPI resort bounds strict",
+  routesSource.includes("const bounds = resortBounds;") &&
+    routesSource.includes("const providerMapBounds = alternativeScoutMapSearch ? undefined : resortBounds;") &&
+    routesSource.includes("const mapReferenceBounds = providerMapBounds ?? cityMapBounds;"),
+  "alternative scout should use city map center hints without sending provider boundary boxes",
 );
 assert.ok(
   routesSource.includes("const requestedSearchTerm = typeof req.query.searchTerm") &&
@@ -3087,6 +3089,13 @@ assert.ok(
     vrboWorkerSource.includes("extractLatLngDeep") &&
     vrboWorkerSource.includes("captureSource: \"vrbo_graphql_propertySearchListings\""),
   "VRBO map-bounds search should passively capture propertySearchListings inventory and coordinates from the visible map search",
+);
+assert.ok(
+  vrboWorkerSource.includes("disableVrboSearchAsMapMoves") &&
+    vrboWorkerSource.includes("city map search has no provider mapBounds") &&
+    vrboWorkerSource.includes("if (bounds)") &&
+    vrboWorkerSource.includes("clickVrboSearchThisArea"),
+  "VRBO city map scans should turn off map auto-search and avoid binding city searches to the visible map viewport",
 );
 assert.ok(
   vrboWorkerSource.includes("map inventory merged") &&
