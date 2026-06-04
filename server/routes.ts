@@ -3058,6 +3058,178 @@ function extractUrlsFromApifyDataset(items: any[], pattern: RegExp): string[] {
   return Array.from(found);
 }
 
+type ApifySearchHarvestOptions = {
+  minBedrooms?: number | null;
+  streetAddress?: string | null;
+};
+
+function zillowStreetSearchUrl(streetAddress: string, city: string, state: string): string {
+  const st = stateToAbbrev(state).toLowerCase();
+  const citySlug = city.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const streetSlug = streetAddress
+    .split(",")[0]
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `https://www.zillow.com/homes/${streetSlug}-${citySlug}-${st}_rb/`;
+}
+
+function realtorStreetSearchUrl(streetAddress: string, city: string, state: string): string {
+  const streetSlug = streetAddress
+    .split(",")[0]
+    .trim()
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join("-");
+  const citySlug = city
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join("-");
+  return `https://www.realtor.com/realestateandhomes-search/${streetSlug}_${citySlug}_${stateToAbbrev(state).toUpperCase()}`;
+}
+
+function bedroomCountFromApifyItem(item: unknown): number | null {
+  if (item == null || typeof item !== "object") return null;
+  const visit = (val: unknown, depth: number): number | null => {
+    if (depth > 6 || val == null) return null;
+    if (typeof val === "number" && Number.isFinite(val) && val > 0 && val <= 10) {
+      return Math.round(val);
+    }
+    if (typeof val === "string") {
+      const match = val.match(/\b(\d{1,2})\s*(?:br|bd|beds?|bedrooms?)\b/i);
+      if (match) {
+        const n = Number(match[1]);
+        if (Number.isFinite(n) && n > 0 && n <= 10) return Math.round(n);
+      }
+      return null;
+    }
+    if (Array.isArray(val)) {
+      for (const entry of val) {
+        const found = visit(entry, depth + 1);
+        if (found != null) return found;
+      }
+      return null;
+    }
+    if (typeof val === "object") {
+      const obj = val as Record<string, unknown>;
+      for (const key of ["beds", "bedrooms", "bedroomCount", "bed", "bedsCount", "bedroom"]) {
+        const n = Number(obj[key]);
+        if (Number.isFinite(n) && n > 0 && n <= 10) return Math.round(n);
+      }
+      for (const entry of Object.values(obj)) {
+        const found = visit(entry, depth + 1);
+        if (found != null) return found;
+      }
+    }
+    return null;
+  };
+  return visit(item, 0);
+}
+
+function findDetailUrlInApifyItem(item: unknown, pattern: RegExp, depth = 0): string | null {
+  if (depth > 6 || item == null) return null;
+  if (typeof item === "string") {
+    const normalized = item.split("?")[0].trim();
+    return pattern.test(normalized) ? normalized : null;
+  }
+  if (Array.isArray(item)) {
+    for (const entry of item) {
+      const found = findDetailUrlInApifyItem(entry, pattern, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof item === "object") {
+    for (const key of ["url", "detailUrl", "detail_url", "hdpUrl", "propertyUrl", "link"]) {
+      const raw = (item as Record<string, unknown>)[key];
+      if (typeof raw === "string") {
+        const normalized = raw.split("?")[0].trim();
+        if (pattern.test(normalized)) return normalized;
+      }
+    }
+    for (const entry of Object.values(item as Record<string, unknown>)) {
+      const found = findDetailUrlInApifyItem(entry, pattern, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function extractListingUrlsFromApifyItems(
+  items: any[],
+  pattern: RegExp,
+  options?: ApifySearchHarvestOptions,
+): string[] {
+  const minBedrooms = options?.minBedrooms ?? null;
+  const found = new Set<string>();
+  for (const item of items) {
+    const url = findDetailUrlInApifyItem(item, pattern);
+    if (!url) continue;
+    if (minBedrooms != null) {
+      const beds = bedroomCountFromApifyItem(item);
+      if (beds != null && beds < minBedrooms) continue;
+    }
+    found.add(url);
+  }
+  return Array.from(found);
+}
+
+async function discoverZillowBuildingPageUrl(
+  communityName: string,
+  city: string,
+  apiKey: string,
+): Promise<string | null> {
+  const queries = [
+    `site:zillow.com/b/ "${communityName}"`,
+    `site:zillow.com/b/ "${communityName}" "${city}"`,
+  ];
+  for (const q of queries) {
+    try {
+      const resp = await fetch(
+        `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=5&api_key=${apiKey}`,
+        { signal: AbortSignal.timeout(12_000) },
+      );
+      if (!resp.ok) continue;
+      const data = await resp.json() as { organic_results?: Array<{ link?: string }> };
+      for (const row of data.organic_results ?? []) {
+        const link = String(row.link ?? "").split("?")[0].trim();
+        if (/^https?:\/\/(www\.)?zillow\.com\/b\//i.test(link)) return link;
+      }
+    } catch { /* try next query */ }
+  }
+  return null;
+}
+
+async function harvestZillowBuildingPageUrls(buildingUrl: string, timeoutMs = 15_000): Promise<string[]> {
+  try {
+    const resp = await fetch(buildingUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    const found = new Set<string>();
+    for (const match of html.matchAll(/https?:\\\/\\\/(?:www\.)?zillow\.com\\\/homedetails\\\/[^"'\\]+/gi)) {
+      const url = match[0].replace(/\\\//g, "/").split("?")[0];
+      if (/zillow\.com\/homedetails\//i.test(url)) found.add(url);
+    }
+    for (const match of html.matchAll(/https?:\/\/(?:www\.)?zillow\.com\/homedetails\/[^"'\\s<>]+/gi)) {
+      found.add(match[0].split("?")[0]);
+    }
+    for (const match of html.matchAll(/"(\/homedetails\/[^"?]+)"/gi)) {
+      found.add(`https://www.zillow.com${match[1].split("?")[0]}`);
+    }
+    return Array.from(found);
+  } catch (e: any) {
+    console.warn(`[harvestZillow:building] ${buildingUrl}: ${e?.message ?? e}`);
+    return [];
+  }
+}
+
 function buildZillowSearchActorInput(actor: string, city: string, state: string, searchUrl: string, maxItems: number): Record<string, unknown> {
   const a = actor.toLowerCase();
   if (a.includes("igolaizola")) {
@@ -3092,6 +3264,7 @@ async function harvestZillowUrlsViaApifySearch(
   state: string,
   maxItems: number = 500,
   timeoutMs = 180_000,
+  options?: ApifySearchHarvestOptions,
 ): Promise<string[]> {
   const token = process.env.APIFY_API_TOKEN;
   if (!token) {
@@ -3100,8 +3273,12 @@ async function harvestZillowUrlsViaApifySearch(
   }
   const actor = (process.env.APIFY_ZILLOW_SEARCH_ACTOR || "igolaizola~zillow-scraper-ppe").replace("/", "~");
   const slug = citySlugForZillow(city, state);
-  const searchUrl = `https://www.zillow.com/${slug}/condos/`;
+  const street = String(options?.streetAddress ?? "").trim();
+  const searchUrl = street
+    ? zillowStreetSearchUrl(street, city, state)
+    : `https://www.zillow.com/${slug}/condos/`;
   const input = buildZillowSearchActorInput(actor, city, state, searchUrl, maxItems);
+  const zillowDetailPattern = /^https?:\/\/(www\.)?zillow\.com\/homedetails\//i;
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
     const r = await fetch(api, {
@@ -3117,8 +3294,14 @@ async function harvestZillowUrlsViaApifySearch(
     }
     const items: any[] = await r.json().catch(() => []);
     if (!Array.isArray(items)) return [];
-    const urls = extractUrlsFromApifyDataset(items, /^https?:\/\/(www\.)?zillow\.com\/homedetails\//i);
-    console.log(`[harvestZillow:Apify] ${actor} ${searchUrl} → ${items.length} dataset items, ${urls.length} unique homedetails URLs`);
+    const urls = options?.minBedrooms
+      ? extractListingUrlsFromApifyItems(items, zillowDetailPattern, options)
+      : extractUrlsFromApifyDataset(items, zillowDetailPattern);
+    console.log(
+      `[harvestZillow:Apify] ${actor} ${searchUrl} → ${items.length} dataset items, ` +
+      `${urls.length} unique homedetails URLs` +
+      (options?.minBedrooms ? ` (≥${options.minBedrooms}BR filter)` : ""),
+    );
     return urls;
   } catch (e: any) {
     console.warn(`[harvestZillow:Apify] error: ${e?.message ?? e}`);
@@ -3131,13 +3314,18 @@ async function harvestRealtorUrlsViaApifySearch(
   state: string,
   maxItems: number = 500,
   timeoutMs = 180_000,
+  options?: ApifySearchHarvestOptions,
 ): Promise<string[]> {
   const token = process.env.APIFY_API_TOKEN;
   if (!token) return [];
   const actor = (process.env.APIFY_REALTOR_SEARCH_ACTOR || "dz_omar~realtor-scraper").replace("/", "~");
   const slug = citySlugForRealtor(city, state);
-  const searchUrl = `https://www.realtor.com/realestateandhomes-search/${slug}/type-condo-townhome-row-home-co-op`;
+  const street = String(options?.streetAddress ?? "").trim();
+  const searchUrl = street
+    ? realtorStreetSearchUrl(street, city, state)
+    : `https://www.realtor.com/realestateandhomes-search/${slug}/type-condo-townhome-row-home-co-op`;
   const input = buildRealtorSearchActorInput(searchUrl, maxItems);
+  const realtorDetailPattern = /^https?:\/\/(www\.)?realtor\.com\/realestateandhomes-detail\//i;
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
     const r = await fetch(api, {
@@ -3153,8 +3341,14 @@ async function harvestRealtorUrlsViaApifySearch(
     }
     const items: any[] = await r.json().catch(() => []);
     if (!Array.isArray(items)) return [];
-    const urls = extractUrlsFromApifyDataset(items, /^https?:\/\/(www\.)?realtor\.com\/realestateandhomes-detail\//i);
-    console.log(`[harvestRealtor:Apify] ${actor} ${searchUrl} → ${items.length} dataset items, ${urls.length} unique detail URLs`);
+    const urls = options?.minBedrooms
+      ? extractListingUrlsFromApifyItems(items, realtorDetailPattern, options)
+      : extractUrlsFromApifyDataset(items, realtorDetailPattern);
+    console.log(
+      `[harvestRealtor:Apify] ${actor} ${searchUrl} → ${items.length} dataset items, ` +
+      `${urls.length} unique detail URLs` +
+      (options?.minBedrooms ? ` (≥${options.minBedrooms}BR filter)` : ""),
+    );
     return urls;
   } catch (e: any) {
     console.warn(`[harvestRealtor:Apify] error: ${e?.message ?? e}`);
@@ -26667,6 +26861,77 @@ Return ONLY compact JSON with this exact shape:
           }
         }));
       }
+
+      // Second-wave Google queries scoped to known/discovered resort street
+      // roots — surfaces unit-level pages Google misses in the first broad pass.
+      const expansionRoots = repeatedCandidateRoots();
+      if (directRoot) expansionRoots.add(directRoot);
+      for (const root of communityAddressRoots) expansionRoots.add(root);
+      if (communityLocForQueries && expansionRoots.size > 0 && hasDiscoveryBudget()) {
+        const expansionCity = communityLocForQueries.city;
+        const expansionState = communityLocForQueries.state;
+        const rootQueries: string[] = [];
+        for (const root of expansionRoots) {
+          const quoted = `"${root}"`;
+          rootQueries.push(
+            `site:realtor.com/realestateandhomes-detail ${quoted} "${expansionCity}"`,
+            `site:realtor.com ${quoted} "${expansionCity}" "${stateToAbbrev(expansionState)}"`,
+            `site:redfin.com ${quoted} "${expansionCity}"`,
+            `site:zillow.com/homedetails ${quoted} "${expansionCity}"`,
+            `site:homes.com ${quoted} "${expansionCity}"`,
+          );
+          if (requiredBedroomCount) {
+            rootQueries.push(
+              `site:zillow.com/homedetails ${quoted} "${requiredBedroomCount} bedroom"`,
+              `site:redfin.com ${quoted} "${requiredBedroomCount} bedroom"`,
+              `site:realtor.com/realestateandhomes-detail ${quoted} "${requiredBedroomCount} bedroom"`,
+              `site:homes.com ${quoted} "${requiredBedroomCount} bedroom"`,
+            );
+          }
+        }
+        const beforeRootExpansion = candidates.length;
+        for (let i = 0; i < rootQueries.length; i += DISCOVERY_QUERY_CONCURRENCY) {
+          if (!hasDiscoveryBudget()) break;
+          const batch = rootQueries.slice(i, i + DISCOVERY_QUERY_CONCURRENCY);
+          await Promise.all(batch.map(async (siteQuery) => {
+            try {
+              await runDiscoveryQuery(siteQuery);
+            } catch (e: any) {
+              console.error(`[find-unit] Street-root search error for "${siteQuery}": ${e?.message}`);
+            }
+          }));
+        }
+        console.error(
+          `[find-unit] Street-root expansion: roots=${Array.from(expansionRoots).join(", ")}, ` +
+          `added=${candidates.length - beforeRootExpansion}, total=${candidates.length}`,
+        );
+      }
+
+      // Zillow building (/b/...) pages list many units in one condo resort.
+      const addressRule = communityAddressRuleForName(communityName);
+      let zillowBuildingUrl = addressRule?.zillowBuildingUrl ?? null;
+      if (!zillowBuildingUrl) {
+        const hardcoded = COMMUNITY_SOURCE_URLS[communityName]?.primary;
+        if (hardcoded && /zillow\.com\/b\//i.test(hardcoded)) zillowBuildingUrl = hardcoded;
+      }
+      if (!zillowBuildingUrl && communityLocForQueries) {
+        zillowBuildingUrl = await discoverZillowBuildingPageUrl(
+          communityName,
+          communityLocForQueries.city,
+          searchApiKey,
+        );
+      }
+      if (zillowBuildingUrl && hasDiscoveryBudget()) {
+        const buildingUrls = await harvestZillowBuildingPageUrls(zillowBuildingUrl);
+        const beforeBuilding = candidates.length;
+        for (const link of buildingUrls) {
+          addCandidateUrl(link, "zillow", `Zillow building page ${communityName}`, "", directAllowedRoots);
+        }
+        console.error(
+          `[find-unit] Zillow building page ${zillowBuildingUrl} → ${buildingUrls.length} homedetails URLs, ` +
+          `added=${candidates.length - beforeBuilding}`,
+        );
+      }
     }
 
     // Apify search supplement for Preflight replacement/remediation.
@@ -26702,21 +26967,39 @@ Return ONLY compact JSON with this exact shape:
         communityName,
         streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
       }))].slice(0, 3);
-      const perCityMax = Math.max(20, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)));
+      const perCityMax = requiredBedroomCount
+        ? Math.max(40, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)))
+        : Math.max(20, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)));
       const apifyBudgetMs = Math.min(
         APIFY_SUPPLEMENT_BUDGET_MS,
         Math.max(5_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
       );
+      const apifyHarvestOptions: ApifySearchHarvestOptions = {
+        minBedrooms: requiredBedroomCount,
+        streetAddress: canonicalStreet || communityAddress || normalizedStreetAddress || addressStreet,
+      };
       const [zillowApifyUrls, realtorApifyUrls] = await withStepTimeout(
         Promise.all([
           Promise.all(
             apifyDiscoveryCities.map((searchCity) =>
-              harvestZillowUrlsViaApifySearch(searchCity, communityLoc!.state, perCityMax),
+              harvestZillowUrlsViaApifySearch(
+                searchCity,
+                communityLoc!.state,
+                perCityMax,
+                apifyBudgetMs,
+                apifyHarvestOptions,
+              ),
             ),
           ).then((rows) => [...new Set(rows.flat())]),
           Promise.all(
             apifyDiscoveryCities.map((searchCity) =>
-              harvestRealtorUrlsViaApifySearch(searchCity, communityLoc!.state, perCityMax),
+              harvestRealtorUrlsViaApifySearch(
+                searchCity,
+                communityLoc!.state,
+                perCityMax,
+                apifyBudgetMs,
+                apifyHarvestOptions,
+              ),
             ),
           ).then((rows) => [...new Set(rows.flat())]),
         ]),
@@ -26736,6 +27019,8 @@ Return ONLY compact JSON with this exact shape:
       }
       console.error(
         `[find-unit] Apify supplement: cities=${apifyDiscoveryCities.join("|")}, state=${communityLoc.state}, ` +
+        `street=${apifyHarvestOptions.streetAddress ?? "city-wide"}, ` +
+        `minBedrooms=${apifyHarvestOptions.minBedrooms ?? "any"}, ` +
         `roots=${Array.from(allowedRoots).join(", ")}, zillow=${zillowApifyUrls.length}, ` +
         `realtor=${realtorApifyUrls.length}, added=${candidates.length - beforeApify}`,
       );
