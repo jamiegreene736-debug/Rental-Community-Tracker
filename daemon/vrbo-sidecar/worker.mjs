@@ -6085,6 +6085,9 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
 
 async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
   for (let pass = 0; pass < passes; pass++) {
+    log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} starting`);
+    await targetPage.mouse?.wheel?.(0, 900).catch(() => {});
+    await targetPage.keyboard?.press?.("PageDown").catch(() => {});
     const snapshot = await withSoftTimeout(
       targetPage.evaluate(() => {
         function visible(el) {
@@ -6119,7 +6122,7 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
           topTargetOverflow: targets[0]?.overflow ?? 0,
         };
       }),
-      2_500,
+      5_000,
       null,
     );
     if (snapshot) {
@@ -6128,6 +6131,8 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
         `targets=${snapshot.scrollTargets} visibleCards=${snapshot.visibleCards} propertyLinks=${snapshot.propertyLinks} ` +
         `topCards=${snapshot.topTargetCards} overflow=${snapshot.topTargetOverflow}`,
       );
+    } else {
+      log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} did not return a DOM snapshot`);
     }
     await boundedPageDelay(targetPage, pass < 2 ? 1_200 : 900);
   }
