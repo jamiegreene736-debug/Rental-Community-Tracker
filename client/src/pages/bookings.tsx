@@ -4621,7 +4621,7 @@ export default function Bookings() {
         community: scoutRow?.community || community,
         alternativeScout: "1",
       });
-      if (communitySearchTerm && communitySearchTerm !== (scoutRow?.community || community)) {
+      if (communitySearchTerm) {
         params.set("searchTerm", communitySearchTerm);
       }
       const lat = Number(scoutRow?.lat);

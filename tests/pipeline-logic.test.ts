@@ -3053,8 +3053,10 @@ assert.ok(
 );
 assert.ok(
   bookingsSource.includes("community: scoutRow?.community || community") &&
-    bookingsSource.includes('params.set("searchTerm", communitySearchTerm)'),
-  "alternative sidecar find-buy-in calls should keep canonical community separate from OTA search text",
+    bookingsSource.includes("if (communitySearchTerm)") &&
+    bookingsSource.includes('params.set("searchTerm", communitySearchTerm)') &&
+    !bookingsSource.includes("communitySearchTerm !=="),
+  "alternative sidecar find-buy-in calls should always send the OTA map search text separately from canonical community",
 );
 assert.ok(
   bookingsSource.includes('params.set("mapCenterLat"') && bookingsSource.includes('params.set("mapCenterLng"'),
