@@ -2956,10 +2956,23 @@ assert.ok(
   "alternative find-buy-in scans should target the nearby community instead of the original Guesty listing title",
 );
 assert.ok(
+  routesSource.includes("Queued for VRBO city map scan") &&
+    routesSource.includes("threshold: 0") &&
+    bookingsSource.includes("VRBO city map scan required"),
+  "alternative scout should queue VRBO city map scans directly without Airbnb inventory qualification",
+);
+assert.ok(
+  bookingsSource.includes("alternativePicksAreWalkable") &&
+    bookingsSource.includes("MAX_BUY_IN_WALK_MINUTES") &&
+    bookingsSource.includes("candidateWalkMinutes"),
+  "alternative replacement sets should require coordinate-proven walking proximity",
+);
+assert.ok(
   vrboWorkerSource.includes("createVrboGraphqlCollector") &&
     vrboWorkerSource.includes("propertySearchListings") &&
+    vrboWorkerSource.includes("extractLatLngDeep") &&
     vrboWorkerSource.includes("captureSource: \"vrbo_graphql_propertySearchListings\""),
-  "VRBO map-bounds search should passively capture propertySearchListings inventory from the visible map search",
+  "VRBO map-bounds search should passively capture propertySearchListings inventory and coordinates from the visible map search",
 );
 assert.ok(
   vrboWorkerSource.includes("map inventory merged") &&
@@ -3065,8 +3078,10 @@ assert.ok(
   "alternative buy-in workflow should skip Google Lens direct-site probes before sidecar",
 );
 assert.ok(
-  bookingsComboSource.includes("Google Lens direct-booking probes are disabled to preserve SearchAPI quota"),
-  "alternative buy-in community cards should explain that Lens direct booking probes are disabled",
+  routesSource.includes("const includePm = false") &&
+    bookingsComboSource.includes("const autoDirectBookingCandidatesFor") &&
+    bookingsComboSource.includes("return [];"),
+  "find-buy-in and auto-fill should not run PM/direct source discovery",
 );
 assert.ok(
   bookingsComboSource.includes("groupAlternativeScoutSamplesByPlan"),

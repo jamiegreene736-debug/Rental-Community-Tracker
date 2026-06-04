@@ -7843,6 +7843,67 @@ export async function registerRoutes(
         }
       }
       const replacementPlans = twoUnitReplacementPlans(propertyConfig?.units?.map((unit) => unit.bedrooms) ?? [bedrooms]);
+      const citySearchForCommunity = (community: string): string => {
+        const loc = BUY_IN_MARKET_LOCATIONS[community];
+        if (loc?.city && loc?.state) return `${loc.city}, ${loc.state}`;
+        return searchLocationForBuyInMarket(community) ?? community;
+      };
+      const configuredResults = similar.map((community) => {
+        const driveMinutesFromBase = driveMinutesBetweenBuyInMarkets(baseCommunity, community);
+        return {
+          community,
+          searchTerm: citySearchForCommunity(community),
+          status: "queued-vrbo-map",
+          count: 0,
+          raw: 0,
+          recommended: true,
+          reason: `Queued for VRBO city map scan${driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : ""}. Two matching units must be proven by VRBO and within a 5-10 minute walk of each other.`,
+          countsByBedroom: {},
+          airbnbCountsByBedroom: {},
+          passingPlans: replacementPlans,
+          replacementPlans,
+          oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
+          driveMinutesFromBase,
+          errors: [],
+          durationMs: 0,
+          samples: [],
+          directPmUsed: false,
+        };
+      });
+      const discoveredQueued = discoveredResorts.map((d: any) => ({
+        ...d,
+        searchTerm: baseLocation?.city && baseLocation?.state ? `${baseLocation.city}, ${baseLocation.state}` : (d.searchTerm || d.community),
+        status: "queued-vrbo-map",
+        count: 0,
+        raw: 0,
+        recommended: true,
+        reason: `${d.reason || "Nearby resort discovered within drive radius"} — queued for VRBO city map scan; two matching units must be within a 5-10 minute walk.`,
+        countsByBedroom: {},
+        airbnbCountsByBedroom: {},
+        passingPlans: replacementPlans,
+        replacementPlans,
+        samples: [],
+        directPmUsed: false,
+      }));
+      const vrboQueuedRecommended = [...configuredResults, ...discoveredQueued]
+        .sort((a: any, b: any) => (a.driveMinutesFromBase ?? 99) - (b.driveMinutesFromBase ?? 99) || a.community.localeCompare(b.community));
+      return res.json({
+        propertyId,
+        baseCommunity,
+        bedrooms,
+        checkIn,
+        checkOut,
+        threshold: 0,
+        requiresOceanfrontComparable: sourceRequiresOceanfront,
+        replacementPlans,
+        nearbyWithinDriveMinutes: driveNearbyDetailed,
+        results: vrboQueuedRecommended,
+        recommended: vrboQueuedRecommended,
+        rejected: [],
+        scouted: vrboQueuedRecommended,
+        discoveredResorts: discoveredQueued,
+        generatedAt: new Date().toISOString(),
+      });
       const minAirbnbResults = Math.max(1, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "1"), 10) || 1));
       // Qualify discovered resorts via Airbnb SearchAPI for the exact dates + combo.
       // Only those with qualifying unit counts (e.g. 2x3BR) are returned for sidecar queuing.
@@ -11026,12 +11087,9 @@ export async function registerRoutes(
 	    // Result-cache fast path. Honors a `?nocache=1` query for the
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
-    // OTA: Airbnb (SearchAPI) + VRBO map-bounds sidecar. PM scrapers and
-    // Google Hotels supplement are on unless FIND_BUY_IN_PM_ENABLED=0 or
-    // ?includePm=0. Google Lens reverse-image discovery is disabled because
-    // it burned SearchAPI quota without producing reliable direct-booking proof.
-    const includePmDefault = process.env.FIND_BUY_IN_PM_ENABLED !== "0";
-    const includePm = includePmDefault && req.query.includePm !== "0";
+    // OTA-only by operator request: Airbnb/SearchAPI, VRBO map-bounds sidecar,
+    // and Google Hotels supplement. Direct PM/Lens discovery is disabled.
+    const includePm = false;
     const airbnbDirectLensEnabled = false;
     const propertyUnitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
     const googleDiscoveryEnabled = airbnbDirectLensEnabled;
@@ -11474,6 +11532,8 @@ export async function registerRoutes(
       image?: string;
       images?: string[];
       snippet?: string;
+      lat?: number;
+      lng?: number;
       inTargetBounds?: boolean;
       // Reverse-image-search matches on this candidate's photo. Used
       // to surface "this exact unit also listed at <PM company>" links
@@ -12349,6 +12409,8 @@ export async function registerRoutes(
             bedrooms: inferred,
             image: c.image,
             images: Array.isArray(c.images) ? c.images.slice(0, 5) : undefined,
+            lat: typeof c.lat === "number" && Number.isFinite(c.lat) ? c.lat : undefined,
+            lng: typeof c.lng === "number" && Number.isFinite(c.lng) ? c.lng : undefined,
             snippet: c.snippet,
             verified: "yes",
             verifiedNightlyPrice: c.nightlyPrice,
@@ -14043,11 +14105,15 @@ export async function registerRoutes(
       directBookingReason?: string;
       groundFloorStatus?: "confirmed" | "not_confirmed" | "conflict" | "unknown";
       groundFloorEvidence?: string | null;
+      lat?: number;
+      lng?: number;
     };
     type CheapestUnit = {
       unitTitle: string;
       bedrooms?: number;
       image?: string;
+      lat?: number;
+      lng?: number;
       groundFloorStatus?: "confirmed" | "not_confirmed" | "conflict" | "unknown";
       groundFloorEvidence?: string | null;
       minNightlyPrice: number;
@@ -14075,6 +14141,8 @@ export async function registerRoutes(
       directBookingReason: c.directBookingReason,
       groundFloorStatus: c.groundFloorStatus ?? "unknown",
       groundFloorEvidence: c.groundFloorEvidence ?? null,
+      lat: c.lat,
+      lng: c.lng,
     });
     // anchorKey → cluster builder. The anchor key is the Airbnb anchor
     // URL when the candidate is part of a photo-match cluster, else the
@@ -14145,6 +14213,8 @@ export async function registerRoutes(
         unitTitle: anchor.title,
         bedrooms: anchor.bedrooms,
         image: anchor.image,
+        lat: anchor.lat,
+        lng: anchor.lng,
         groundFloorStatus: floorEvidenceListing?.groundFloorStatus ?? anchor.groundFloorStatus ?? "unknown",
         groundFloorEvidence: floorEvidenceListing?.groundFloorEvidence ?? anchor.groundFloorEvidence ?? null,
         minNightlyPrice: cheapestVerified.nightlyPrice,
@@ -14170,7 +14240,6 @@ export async function registerRoutes(
 	    const providerAvailabilitySummary = [
 	      `Airbnb raw=${airbnbRawCount}, kept=${airbnbTarget.length}, priced=${pricedCount(airbnbTarget)}, verified=${verifiedYesCount(airbnbTarget)}${airbnbSidecarReason ? ` (${compactReason(airbnbSidecarReason)})` : ""}`,
 	      `VRBO raw=${vrboRawCount}, kept=${vrboTarget.length}, priced=${pricedCount(vrboTarget)}, verified=${verifiedYesCount(vrboTarget)}${vrboSidecarReason ? ` (${compactReason(vrboSidecarReason)})` : ""}`,
-	      `Direct/Lens raw=${totalPhotoMatches}, kept=${pmTarget.length}, priced=${pricedCount(pmTarget)}, verified=${verifiedYesCount(pmTarget)}`,
 	    ].join("; ");
     const issueList: Array<{ severity: "warning" | "error"; source: string; summary: string; detail?: string }> = [];
     for (const t of sourceTimeouts) {
@@ -14398,16 +14467,6 @@ export async function registerRoutes(
         message: bookingSidecarReason,
       }),
       enrichProviderDiagnostic({
-        source: "Airbnb Lens direct links",
-        status: sourceStatus([], ["Google Lens"], totalPhotoMatches, pmTarget.length, pricedCount(pmTarget), verifiedYesCount(pmTarget), ""),
-        raw: totalPhotoMatches,
-        kept: pmTarget.length,
-        priced: pricedCount(pmTarget),
-        verified: verifiedYesCount(pmTarget),
-        accessPattern: "authorized SearchAPI Google Lens lookup; PM/direct pages are preserved as links only",
-        message: `${photoMatchPmCandidates.length} direct link candidate(s) came only from Airbnb photo Lens matches. Direct sites were not scraped; rates remain Airbnb proof.`,
-      }),
-      enrichProviderDiagnostic({
         source: "Sidecar rate verifier",
         status: sidecarVerifyTargets.length === 0 ? "skipped" : sidecarBatchVerifiedUrls.size > 0 ? "ok" : "warning",
         raw: sidecarVerifyTargets.length,
@@ -14543,7 +14602,6 @@ export async function registerRoutes(
           ]
         : [
             { label: "Google Hotels (SearchAPI)", count: googleHotels.length },
-            { label: "Airbnb Google Lens direct links", count: photoMatchPmCandidates.length },
           ],
       debug: {
         rawCounts: { airbnb: airbnbRawCount, airbnbWebsiteSidecar: airbnbPricedCount, vrbo: vrboRawCount, vrboDetailPriced: vrboDetailPricedCount, booking: bookingRawCount, bookingWebsiteSidecar: bookingPricedCount, pm: pmRawCount, pmFromWebsiteSidecar: pmWebsiteSidecarDiscovered.length, pmWebsiteSidecarRaw: pmWebsiteSidecarCount, pmFromPhotoMatches: photoMatchPmCandidates.length, pmFromSpSitemap: spDiscovered.length, pmFromPkSitemap: pkDiscovered.length, pmFromCbSitemap: cbDiscovered.length, pmFromPikoSitemap: pikoDiscovered.length, pmFromEvrhiSitemap: evrhiDiscovered.length, pmFromKvrSitemap: kvrDiscovered.length, pmFromPbhSitemap: pbhDiscovered.length, pmFromIrkSitemap: irkDiscovered.length, pmFromKpSitemap: kpDiscovered.length, pmFromGvSitemap: gvDiscovered.length, pmFromSlAlekona: slAlekonaDiscovered.length, pmFromSlPrinceville: slPrincevilleDiscovered.length, pmFromSearchApiFinder: pmSearchApiFinderCandidates.length, pmFromSidecarFinder: 0, pmFromFinder: pmFinderCandidates.length, photoMatches: totalPhotoMatches },

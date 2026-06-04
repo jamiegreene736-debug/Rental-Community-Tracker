@@ -42,6 +42,7 @@ import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
 import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
+import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1145,6 +1146,26 @@ function candidateMatchesBedroom(candidate: Pick<LiveCandidate, "bedrooms">, bed
   return typeof candidate.bedrooms !== "number" || Math.round(candidate.bedrooms) === bedrooms;
 }
 
+function candidateWalkMinutes(a: Pick<LiveCandidate, "lat" | "lng">, b: Pick<LiveCandidate, "lat" | "lng">): number | null {
+  const aLat = Number(a.lat);
+  const aLng = Number(a.lng);
+  const bLat = Number(b.lat);
+  const bLng = Number(b.lng);
+  if (![aLat, aLng, bLat, bLng].every(Number.isFinite)) return null;
+  return walkMinutesFromFeet(haversineFeet(aLat, aLng, bLat, bLng));
+}
+
+function alternativePicksAreWalkable(picks: Array<Pick<LiveCandidate, "lat" | "lng">>): boolean {
+  if (picks.length < 2) return true;
+  for (let i = 0; i < picks.length; i++) {
+    for (let j = i + 1; j < picks.length; j++) {
+      const minutes = candidateWalkMinutes(picks[i], picks[j]);
+      if (minutes === null || minutes > MAX_BUY_IN_WALK_MINUTES) return false;
+    }
+  }
+  return true;
+}
+
 function UnitTypeConfidenceBadge({ confidence }: { confidence?: number | null }) {
   if (typeof confidence !== "number") return null;
   const color = confidence >= 85 ? "emerald" : confidence >= 70 ? "amber" : "rose";
@@ -1251,6 +1272,7 @@ function bestAlternativeReplacementSet(workflow: AlternativeWorkflowState | unde
       }
 
       if (picks.length === plan.length) {
+        if (!alternativePicksAreWalkable(picks)) continue;
         sets.push({
           community: scoutResult.community,
           plan,
@@ -1307,7 +1329,7 @@ function alternativeScoutSourceSummary(scout: AlternativeScoutResponse | undefin
   return { configured: unique.length - discovered, discovered, total: unique.length };
 }
 
-/** Communities that passed SearchAPI Airbnb inventory proof — eligible for sidecar find-buy-in. */
+/** Nearby communities queued for city-level VRBO map sidecar find-buy-in. */
 function alternativeCommunitiesForSidecar(scout: AlternativeScoutResponse): AlternativeScoutResult[] {
   const byCommunity = new Map<string, AlternativeScoutResult>();
   for (const row of [...(scout.recommended ?? []), ...(scout.results ?? [])]) {
@@ -2307,7 +2329,7 @@ function AlternativeBuyInWorkflowPanel({
           )}
           {replacementPlanText && (
             <p className="mt-0.5 text-[11px] opacity-80">
-              Airbnb proof required: {replacementPlanText}{workflow?.scout?.requiresOceanfrontComparable ? " · oceanfront comparable only" : ""}
+              VRBO city map scan required: {replacementPlanText}{workflow?.scout?.requiresOceanfrontComparable ? " · oceanfront comparable only" : ""} · units must be within a 10-minute walk
             </p>
           )}
         </div>
@@ -2356,12 +2378,12 @@ function AlternativeBuyInWorkflowPanel({
                       <AlternativeScoutSourceBadge result={result} />
                     </p>
                     <p className="text-[11px] text-muted-foreground">
-                      Airbnb scout: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} passed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
+                      VRBO map queue: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} needed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
                       <UnitTypeConfidenceBadge confidence={sidecar?.cheapest?.[0]?.unitTypeConfidence} />
                     </p>
                     {inventoryText && (
                       <p className="mt-0.5 text-[11px] font-medium text-sky-900">
-                        Airbnb inventory: {inventoryText}
+                        VRBO inventory need: {inventoryText}
                       </p>
                     )}
                     <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.reason}</p>
@@ -5590,38 +5612,15 @@ export default function Bookings() {
         return promise;
       };
       const autoDirectBookingCandidatesFor = async (
-        items: LiveCandidate[],
-        searchedBedrooms: number,
+        _items: LiveCandidate[],
+        _searchedBedrooms: number,
       ): Promise<LiveCandidate[]> => {
-        const candidates = items
-          .filter((candidate) => candidate.source === "airbnb" && candidate.totalPrice > 0)
-          .filter((candidate) => candidateBedrooms(candidate, searchedBedrooms) === searchedBedrooms)
-          .sort((a, b) => a.totalPrice - b.totalPrice);
-        const scans: Promise<LiveCandidate[]>[] = [];
-        const seen = new Set<string>();
-        for (const candidate of candidates) {
-          if (autoDirectBookingScansStarted >= autoDirectBookingScanLimit) break;
-          const key = listingUrlKey(candidate.url);
-          if (!key || seen.has(key)) continue;
-          seen.add(key);
-          autoDirectBookingScansStarted++;
-          scans.push(scanDirectBookingSitesForAirbnb(candidate));
-        }
-        if (scans.length === 0) return [];
-        const directCandidates = (await Promise.all(scans)).flat();
-        return Array.from(
-          new Map(
-            directCandidates
-              .map(hydrateCandidateIdentity)
-              .sort((a, b) => a.totalPrice - b.totalPrice)
-              .map((candidate) => [listingUrlKey(candidate.url), candidate] as const),
-          ).values(),
-        );
+        return [];
       };
       const getCandidatePool = async (
         searchedBedrooms: number,
         exactBedroomForCombo: boolean,
-        includePm = true,
+        includePm = false,
       ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
         const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm });
         const searchSummary = searchSummaryFor(data, searchedBedrooms);
@@ -5662,6 +5661,8 @@ export default function Bookings() {
               totalPrice: listing.totalPrice,
               bedrooms: listing.bedrooms ?? unit.bedrooms,
               image: unit.image,
+              lat: listing.lat ?? unit.lat,
+              lng: listing.lng ?? unit.lng,
               alternateUrls,
               identityKeys,
               verified: listing.verified,
@@ -5709,7 +5710,7 @@ export default function Bookings() {
       const getComparisonCandidatePool = async (
         searchedBedrooms: number,
       ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
-        const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm: true });
+        const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm: false });
         const searchSummary = searchSummaryFor(data, searchedBedrooms);
         searchAudits.set(searchedBedrooms, {
           bedrooms: searchedBedrooms,
@@ -6534,7 +6535,6 @@ export default function Bookings() {
         checkIn,
         checkOut,
         community: PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? reservation.slots.find((slot) => slot.community)?.community ?? undefined,
-        minAirbnbResults: 1,
       }).then((r) => r.json()) as AlternativeScoutResponse;
       updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
 
@@ -6551,15 +6551,15 @@ export default function Bookings() {
         toast({
           title: response.recommended.length ? "Alternative communities found" : "No strong alternative community yet",
           description: response.recommended.length
-            ? `${response.recommended.length} community option${response.recommended.length === 1 ? "" : "s"} passed the Airbnb scout threshold.${sidecarQueue.length > 0 ? " Sidecar queue started for those communities." : ""}`
+            ? `${response.recommended.length} nearby community option${response.recommended.length === 1 ? "" : "s"} queued for VRBO city map search.${sidecarQueue.length > 0 ? " Sidecar queue started for those communities." : ""}`
             : sidecarQueue.length > 0
-              ? "SearchAPI scout finished; sidecar queue started for Airbnb-qualified nearby communities."
-              : "SearchAPI did not find enough Airbnb inventory in the curated nearby communities.",
+              ? "Sidecar queue started for nearby communities."
+              : "No nearby communities were available for VRBO city map scanning.",
         });
       } else if (sidecarQueue.length > 0) {
         toast({
           title: "Scanning nearby alternatives",
-          description: `Airbnb scout confirmed inventory at ${sidecarQueue.length} nearby communit${sidecarQueue.length === 1 ? "y" : "ies"} — running sidecar verification.`,
+          description: `Running VRBO city map scans for ${sidecarQueue.length} nearby communit${sidecarQueue.length === 1 ? "y" : "ies"}.`,
         });
       }
     } catch (error: any) {
@@ -6581,7 +6581,7 @@ export default function Bookings() {
     }
     const communities = alternativeCommunitiesForSidecar(scout);
     if (communities.length === 0) {
-      toast({ title: "No alternatives", description: "No nearby community passed Airbnb inventory proof yet — run Scout similar areas first." });
+      toast({ title: "No alternatives", description: "No nearby community is queued yet — run Scout similar areas first." });
       return;
     }
     setAutoAltScans((prev) => {
@@ -6590,7 +6590,7 @@ export default function Bookings() {
       return { ...prev, [resId]: { isRunning: true, scanned: [], foundComboIn: null, stopped: false } };
     });
     // Sequencing is driven by the reactive useEffect below (watches sidecarResults + activeCommunity).
-    toast({ title: "Auto sidecar scan started", description: `Will run sidecar on up to ${communities.length} Airbnb-qualified nearby communit${communities.length === 1 ? "y" : "ies"} until a combo is found.` });
+    toast({ title: "Auto sidecar scan started", description: `Will run VRBO city map scans on up to ${communities.length} nearby communit${communities.length === 1 ? "y" : "ies"} until a walkable combo is found.` });
   };
 
   const stopAutoAlternativeSidecarScan = (reservationId: string) => {
@@ -6646,6 +6646,12 @@ export default function Bookings() {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
       throw new Error("Alternative attach needs valid check-in/check-out dates.");
     }
+    const proximityMinutes = replacement.picks.length >= 2
+      ? candidateWalkMinutes(replacement.picks[0], replacement.picks[1])
+      : null;
+    const proximityNote = proximityMinutes !== null
+      ? ` · Proximity: selected units are ~${proximityMinutes} min walk apart by VRBO map coordinates.`
+      : "";
 
     const usedSlots = new Set<number>();
     const assignments = replacement.picks.map((pick) => {
@@ -6675,7 +6681,7 @@ export default function Bookings() {
         airbnbListingUrl: pick.url,
         groundFloorStatus: pick.groundFloorStatus ?? "unknown",
         groundFloorEvidence: pick.groundFloorEvidence ?? null,
-        notes: `Attached from alternative community ${replacement.community} — ${pick.bedrooms ?? slot.bedrooms}BR ${pick.sourceLabel} — ${pick.title}. Guest-facing draft/page intentionally omitted buy-in pricing.`,
+        notes: `Attached from alternative community ${replacement.community} — ${pick.bedrooms ?? slot.bedrooms}BR ${pick.sourceLabel} — ${pick.title}.${proximityNote} Guest-facing draft/page intentionally omitted buy-in pricing.`,
         status: "active",
       }).then((r) => r.json());
       if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -10098,6 +10104,8 @@ type LiveCandidate = {
   totalPrice: number;
   bedrooms?: number;
   image?: string;
+  lat?: number;
+  lng?: number;
   snippet?: string;
   // Reverse-image-search hits where the same photo appears on a non-OTA
   // site (typically a property-management company that has the same
@@ -10142,6 +10150,8 @@ type LiveCandidate = {
   verifiedReason?: string;
   groundFloorStatus?: GroundFloorStatus;
   groundFloorEvidence?: string | null;
+  lat?: number;
+  lng?: number;
 };
 
 // Single channel inside a clustered unit (one row inside a UnitRow).
@@ -10154,6 +10164,8 @@ type LiveUnitListing = {
   nightlyPrice: number;
   totalPrice: number;
   bedrooms?: number;
+  lat?: number;
+  lng?: number;
   verified?: "yes" | "no" | "unclear" | "skipped";
   verifiedReason?: string;
   airbnbAnchorUrl?: string;
@@ -10171,6 +10183,8 @@ type LiveUnit = {
   unitTitle: string;
   bedrooms?: number;
   image?: string;
+  lat?: number;
+  lng?: number;
   groundFloorStatus?: GroundFloorStatus;
   groundFloorEvidence?: string | null;
   minNightlyPrice: number;

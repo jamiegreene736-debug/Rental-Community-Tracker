@@ -5033,6 +5033,29 @@ function firstNumberDeep(root, keyPattern, min = 0, max = Number.POSITIVE_INFINI
   return null;
 }
 
+function extractLatLngDeep(root, maxDepth = 7) {
+  const stack = [{ value: root, depth: 0 }];
+  const seen = new Set();
+  while (stack.length) {
+    const { value, depth } = stack.pop();
+    if (!value || typeof value !== "object" || depth > maxDepth) continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    if (!Array.isArray(value)) {
+      const lat = Number(value.lat ?? value.latitude ?? value.geo?.lat ?? value.geo?.latitude);
+      const lng = Number(value.lng ?? value.lon ?? value.longitude ?? value.geo?.lng ?? value.geo?.lon ?? value.geo?.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+        return { lat, lng };
+      }
+    }
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (let i = Math.min(children.length - 1, 120); i >= 0; i--) {
+      stack.push({ value: children[i], depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
 function extractVrboBedroomsFromText(raw) {
   const text = cleanText(raw).toLowerCase();
   const direct = text.match(/\b([1-9])\s*(?:br|bd|bdr|bedrooms?|bed\s*rooms?)\b/);
@@ -5151,6 +5174,7 @@ function normalizeVrboGraphqlListing(row, expectedNights, variantLabel) {
   );
   const price = parseVrboPriceText(priceText || textBlob, expectedNights);
   const snippet = cleanText([priceText, textBlob].filter(Boolean).join(" ")).slice(0, 260);
+  const coords = extractLatLngDeep(row);
   return {
     url,
     title,
@@ -5160,6 +5184,8 @@ function normalizeVrboGraphqlListing(row, expectedNights, variantLabel) {
     bedroomSource: Number.isFinite(bedrooms) ? "search-card" : "unknown",
     image: images[0],
     images,
+    lat: coords?.lat,
+    lng: coords?.lng,
     snippet,
     priceIncludesTaxes: price?.priceIncludesTaxes ?? false,
     priceIncludesFees: price?.priceIncludesFees ?? false,

@@ -261,6 +261,8 @@ export type SidecarPropertyCandidate = {
   image?: string;
   images?: string[];
   snippet?: string;
+  lat?: number;
+  lng?: number;
   // PR #299: when daemon extracted from Vrbo's new "$X total includes
   // taxes & fees" format, the price is already all-in and downstream
   // should skip the per-region tax-normalization multiplier. Old
