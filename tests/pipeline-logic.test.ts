@@ -2913,6 +2913,8 @@ assert.equal(
 );
 console.log("  ✓ alternative scout resort vs listing title guards");
 
+const bookingsSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
+
 assert.ok(
   routesSource.includes("fetchNearbyVacationRentalResortsFromLlm"),
   "alternative scout should call LLM for nearby vacation rental resorts",
@@ -2920,6 +2922,22 @@ assert.ok(
 assert.ok(
   routesSource.includes("looksLikeIndividualListingTitle"),
   "alternative scout should reject individual listing titles from Maps discovery",
+);
+assert.ok(
+  bookingsSource.includes('alternativeScout: "1"'),
+  "alternative sidecar find-buy-in calls should mark the scan as an alternative scout",
+);
+assert.ok(
+  bookingsSource.includes('params.set("mapCenterLat"') && bookingsSource.includes('params.set("mapCenterLng"'),
+  "alternative sidecar find-buy-in calls should pass discovered resort coordinates when available",
+);
+assert.ok(
+  routesSource.includes("cityWideMapBoundsForBuyInMarket") && routesSource.includes("mapSearchScope"),
+  "find-buy-in should support city-scope VRBO map bounds for alternative scout scans",
+);
+assert.ok(
+  routesSource.includes("const bounds = resortBounds;") && routesSource.includes("const vrboMapBounds = cityMapBounds ?? resortBounds;"),
+  "alternative scout should widen only the VRBO map search while keeping Airbnb resort bounds strict",
 );
 
 assert.equal(classifyFailureText("HTTP 502 while waiting for sidecar lane").failureClass, "transient");
@@ -2961,7 +2979,6 @@ assert.ok(
 );
 console.log("  ✓ operation diagnostics + remediate helpers");
 
-const bookingsSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
 const liveSearchSectionStart = bookingsSource.indexOf("function LiveSearchSection");
 assert.ok(liveSearchSectionStart >= 0, "LiveSearchSection should exist in bookings page");
 const liveSearchSectionBody = bookingsSource.slice(liveSearchSectionStart);

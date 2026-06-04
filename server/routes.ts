@@ -9537,7 +9537,7 @@ export async function registerRoutes(
 
   // ========== OPERATIONS: FIND BUY-IN ACROSS ALL SOURCES ==========
   //
-  // Fan-out search across Airbnb, Vrbo/Booking.com, and Google-discovered
+  // Fan-out search across Airbnb, VRBO map search, and Google-discovered
   // property-management companies for a given community + date range + bedroom
   // count. Returns unified, price-sorted candidates so the host can pick the
   // cheapest option to buy in at.
@@ -9556,6 +9556,83 @@ export async function registerRoutes(
   type FindBuyInInFlightEntry = { promise: Promise<any>; startedAt: number };
   const findBuyInCache = new Map<string, FindBuyInCacheEntry>();
   const findBuyInInFlight = new Map<string, FindBuyInInFlightEntry>();
+  type BuyInMapBounds = { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
+  const normalizeLocationToken = (value: unknown): string =>
+    String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const boundsAroundCoords = (lat: number, lng: number, radiusMiles: number): BuyInMapBounds | undefined => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || radiusMiles <= 0) return undefined;
+    const latDelta = radiusMiles / 69;
+    const lngDelta = radiusMiles / (69 * Math.max(0.2, Math.cos((lat * Math.PI) / 180)));
+    return {
+      sw_lat: Number((lat - latDelta).toFixed(6)),
+      sw_lng: Number((lng - lngDelta).toFixed(6)),
+      ne_lat: Number((lat + latDelta).toFixed(6)),
+      ne_lng: Number((lng + lngDelta).toFixed(6)),
+    };
+  };
+  const paddedMapBounds = (bounds: BuyInMapBounds, padMiles: number): BuyInMapBounds => {
+    const centerLat = (bounds.sw_lat + bounds.ne_lat) / 2;
+    const latPad = padMiles / 69;
+    const lngPad = padMiles / (69 * Math.max(0.2, Math.cos((centerLat * Math.PI) / 180)));
+    return {
+      sw_lat: Number((bounds.sw_lat - latPad).toFixed(6)),
+      sw_lng: Number((bounds.sw_lng - lngPad).toFixed(6)),
+      ne_lat: Number((bounds.ne_lat + latPad).toFixed(6)),
+      ne_lng: Number((bounds.ne_lng + lngPad).toFixed(6)),
+    };
+  };
+  const mergeMapBounds = (items: Array<BuyInMapBounds | undefined>): BuyInMapBounds | undefined => {
+    const bounds = items.filter((item): item is BuyInMapBounds => !!item);
+    if (bounds.length === 0) return undefined;
+    return {
+      sw_lat: Math.min(...bounds.map((item) => item.sw_lat)),
+      sw_lng: Math.min(...bounds.map((item) => item.sw_lng)),
+      ne_lat: Math.max(...bounds.map((item) => item.ne_lat)),
+      ne_lng: Math.max(...bounds.map((item) => item.ne_lng)),
+    };
+  };
+  const mapBoundsCenter = (bounds: BuyInMapBounds | undefined): { lat: number; lng: number } | undefined => {
+    if (!bounds) return undefined;
+    return {
+      lat: Number(((bounds.sw_lat + bounds.ne_lat) / 2).toFixed(6)),
+      lng: Number(((bounds.sw_lng + bounds.ne_lng) / 2).toFixed(6)),
+    };
+  };
+  const mapBoundsRadiusKm = (bounds: BuyInMapBounds | undefined): number | undefined => {
+    if (!bounds) return undefined;
+    const centerLat = (bounds.sw_lat + bounds.ne_lat) / 2;
+    return Math.max(
+      0.4,
+      Math.min(
+        16,
+        Math.hypot(
+          (bounds.ne_lat - bounds.sw_lat) * 111,
+          (bounds.ne_lng - bounds.sw_lng) * 111 * Math.cos((centerLat * Math.PI) / 180),
+        ) / 2,
+      ),
+    );
+  };
+  const cityWideMapBoundsForBuyInMarket = (
+    community: string,
+    fallbackCenter?: { lat: number; lng: number } | null,
+  ): BuyInMapBounds | undefined => {
+    const loc = BUY_IN_MARKET_LOCATIONS[community];
+    if (!loc && fallbackCenter) return boundsAroundCoords(fallbackCenter.lat, fallbackCenter.lng, 5);
+    if (!loc) return undefined;
+    const city = normalizeLocationToken(loc.city);
+    const state = normalizeLocationToken(loc.state);
+    const relatedBounds = Object.entries(BUY_IN_MARKET_LOCATIONS)
+      .filter(([, candidate]) => normalizeLocationToken(candidate.city) === city && normalizeLocationToken(candidate.state) === state)
+      .map(([key, candidate]) => COMMUNITY_BOUNDS[key] ?? boundsAroundCoords(candidate.lat, candidate.lng, 1.5));
+    return paddedMapBounds(
+      mergeMapBounds([
+        ...relatedBounds,
+        COMMUNITY_BOUNDS[community],
+        boundsAroundCoords(loc.lat, loc.lng, 1.5),
+      ]) ?? boundsAroundCoords(loc.lat, loc.lng, 5)!,
+      2.5,
+    );
+  };
   type DirectBookingProof = {
     verdict: "same_unit_direct_page" | "direct_price_available" | "direct_unavailable" | "needs_review";
     summary: string;
@@ -10890,6 +10967,12 @@ export async function registerRoutes(
     const checkOut = req.query.checkOut as string;
     const requestedListingId = typeof req.query.listingId === "string" ? req.query.listingId.trim() : "";
     const requestedCommunity = typeof req.query.community === "string" ? req.query.community.trim() : "";
+    const alternativeScoutMapSearch = /^(1|true|yes)$/i.test(String(req.query.alternativeScout ?? ""));
+    const requestedMapCenterLat = Number(req.query.mapCenterLat);
+    const requestedMapCenterLng = Number(req.query.mapCenterLng);
+    const requestedMapCenter = Number.isFinite(requestedMapCenterLat) && Number.isFinite(requestedMapCenterLng)
+      ? { lat: requestedMapCenterLat, lng: requestedMapCenterLng }
+      : undefined;
 
     if (!propertyId || isNaN(propertyId)) return res.status(400).json({ error: "propertyId required" });
     if (!bedrooms || isNaN(bedrooms)) return res.status(400).json({ error: "bedrooms required" });
@@ -10967,7 +11050,10 @@ export async function registerRoutes(
     const otaSearchBedrooms = buyInBedroomFloor;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-pm-gh-vrbo-map-v1|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
+    const scoutMapKey = alternativeScoutMapSearch
+      ? `alt-city-map:${requestedMapCenter ? `${requestedMapCenter.lat.toFixed(5)},${requestedMapCenter.lng.toFixed(5)}` : "configured"}`
+      : "resort-map";
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-pm-gh-vrbo-map-v2|${scoutMapKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     // Result HTTP cache is off by default (FIND_BUY_IN_TTL_MS=0), but in-flight
     // dedup must stay on unless the caller explicitly opts out with nocache=1.
     // Backgrounding the Operations tab closes the browser socket; without
@@ -11069,33 +11155,23 @@ export async function registerRoutes(
     const searchLocation = searchLocationForBuyInMarket(community) || (requestedCommunity ? requestedCommunity : `${community}, Hawaii`);
     const buyInPlatformSearch = COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS[community] ?? {};
     const vrboDestination = buyInPlatformSearch.vrbo ?? searchLocation;
-    const bounds = COMMUNITY_BOUNDS[community];
-    const mapSearchBounds = bounds
+    const resortBounds = COMMUNITY_BOUNDS[community];
+    const cityMapBounds = alternativeScoutMapSearch
+      ? cityWideMapBoundsForBuyInMarket(community, requestedMapCenter)
+      : undefined;
+    const bounds = resortBounds;
+    const vrboMapBounds = cityMapBounds ?? resortBounds;
+    const mapSearchBounds = vrboMapBounds
       ? {
-          sw_lat: bounds.sw_lat,
-          sw_lng: bounds.sw_lng,
-          ne_lat: bounds.ne_lat,
-          ne_lng: bounds.ne_lng,
+          sw_lat: vrboMapBounds.sw_lat,
+          sw_lng: vrboMapBounds.sw_lng,
+          ne_lat: vrboMapBounds.ne_lat,
+          ne_lng: vrboMapBounds.ne_lng,
         }
       : undefined;
-    const mapSearchCenter = bounds
-      ? {
-          lat: Number(((bounds.sw_lat + bounds.ne_lat) / 2).toFixed(6)),
-          lng: Number(((bounds.sw_lng + bounds.ne_lng) / 2).toFixed(6)),
-        }
-      : undefined;
-    const mapSearchRadiusKm = bounds
-      ? Math.max(
-          0.4,
-          Math.min(
-            8,
-            Math.hypot(
-              (bounds.ne_lat - bounds.sw_lat) * 111,
-              (bounds.ne_lng - bounds.sw_lng) * 111 * Math.cos((((bounds.sw_lat + bounds.ne_lat) / 2) * Math.PI) / 180),
-            ) / 2,
-          ),
-        )
-      : undefined;
+    const mapSearchCenter = mapBoundsCenter(mapSearchBounds);
+    const mapSearchRadiusKm = mapBoundsRadiusKm(mapSearchBounds);
+    const mapSearchScope = alternativeScoutMapSearch && cityMapBounds ? "city" : "resort";
 
     // ── Resort-name resolution ───────────────────────────────────────────
     // The whole business model is combining two units IN THE SAME RESORT.
@@ -11307,7 +11383,7 @@ export async function registerRoutes(
     const vrboWebsiteSearchTerm = buyInPlatformSearch.vrbo ?? websiteSearchTerm;
     const pmWebsiteSearchTerm = buyInPlatformSearch.pm ?? websiteSearchTerm;
     console.log(
-      `[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" vrboMap=${mapSearchBounds ? `${mapSearchCenter?.lat},${mapSearchCenter?.lng} r=${mapSearchRadiusKm?.toFixed(2)}km` : "none"} listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${requestedBedrooms}${otaSearchBedrooms !== requestedBedrooms ? ` otaSearchBedrooms=${otaSearchBedrooms}` : ""} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`,
+      `[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" vrboMap=${mapSearchScope}:${mapSearchBounds ? `${mapSearchCenter?.lat},${mapSearchCenter?.lng} r=${mapSearchRadiusKm?.toFixed(2)}km` : "none"} listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${requestedBedrooms}${otaSearchBedrooms !== requestedBedrooms ? ` otaSearchBedrooms=${otaSearchBedrooms}` : ""} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`,
     );
 
     const scanStartedAt = Date.now();
@@ -14270,15 +14346,15 @@ export async function registerRoutes(
         kept: vrboTarget.length,
         priced: pricedCount(vrboTarget),
         verified: verifiedYesCount(vrboTarget),
-	        durationMs: vrboSidecarMs,
-	        reason: vrboSidecarReason,
-	        health: vrboProviderHealth,
-	        searchTerm: vrboWebsiteSearchTerm,
-	        searchVariationSummary: vrboVariationSummary,
-	        accessPattern: "authorized website map-bounds search via sidecar; one shared all-bedroom VRBO map run per resort/date, then server-side bedroom curation",
-	        bedroomFilterApplied: false,
-	        bedroomFilterMode: "server-side bedroom curation after shared VRBO map-bounds search",
-	        message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}; mapBounds=${mapSearchBounds ? "yes" : "no"}; bedroom filter applied server-side after shared VRBO map-bounds search${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
+        durationMs: vrboSidecarMs,
+        reason: vrboSidecarReason,
+        health: vrboProviderHealth,
+        searchTerm: vrboWebsiteSearchTerm,
+        searchVariationSummary: vrboVariationSummary,
+        accessPattern: "authorized website map-bounds search via sidecar; one shared all-bedroom VRBO map run per resort/date, then server-side bedroom curation",
+        bedroomFilterApplied: false,
+        bedroomFilterMode: "server-side bedroom curation after shared VRBO map-bounds search",
+        message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}; mapScope=${mapSearchScope}; mapBounds=${mapSearchBounds ? "yes" : "no"}; bedroom filter applied server-side after shared VRBO map-bounds search${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
       }),
       enrichProviderDiagnostic({
         source: "Google Hotels",
@@ -14396,9 +14472,9 @@ export async function registerRoutes(
         source: livePlausibilityRate > 0 ? "property-market-rates" : staticPlausibilityRate > 0 ? "static-buy-in-rates" : "regional-fallback",
       },
       sources: diagnosticSources,
-	      providerStatuses: diagnosticSources.filter((source) =>
-	        /^Airbnb$|^Vrbo$/i.test(source.source),
-	      ),
+      providerStatuses: diagnosticSources.filter((source) =>
+        /^Airbnb$|^Vrbo$/i.test(source.source),
+      ),
       issues: issueList,
       report: diagnosticsReport,
     };
@@ -14412,8 +14488,8 @@ export async function registerRoutes(
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (searchApi=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
-	      + `vrbo=${vrbo.length} (mapSidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
-	      + `booking=0 (sidecar disabled) `
+      + `vrbo=${vrbo.length} (mapSidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, mapScope=${mapSearchScope}, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
+      + `booking=0 (sidecar disabled) `
       + `googleHotels=${googleHotels.length}/${googleHotelsRawCount} · `
       + `directLens=${photoMatchPmCandidates.length}/${totalPhotoMatches} (includePm=${includePm}; pmPool=${pm.length}; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} priceFloor=${JSON.stringify(targetFilterPriceDropped)} · `
@@ -14483,16 +14559,18 @@ export async function registerRoutes(
           vrbo: vrboProviderHealth,
           booking: bookingProviderHealth,
         },
-	        searchLocation,
-	        vrboDestination,
-	        airbnbWebsiteSearchTerm,
-	        vrboWebsiteSearchTerm,
-	        vrboMapSearch: {
-	          bounds: mapSearchBounds ?? null,
-	          center: mapSearchCenter ?? null,
-	          radiusKm: mapSearchRadiusKm ?? null,
-	        },
-	        resortName,
+        searchLocation,
+        vrboDestination,
+        airbnbWebsiteSearchTerm,
+        vrboWebsiteSearchTerm,
+        vrboMapSearch: {
+          scope: mapSearchScope,
+          alternativeScout: alternativeScoutMapSearch,
+          bounds: mapSearchBounds ?? null,
+          center: mapSearchCenter ?? null,
+          radiusKm: mapSearchRadiusKm ?? null,
+        },
+        resortName,
       },
       diagnostics,
       scanComplete,

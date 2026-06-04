@@ -365,6 +365,8 @@ type AlternativeScoutDirectProbe = {
 type AlternativeScoutResult = {
   community: string;
   searchTerm: string;
+  lat?: number | null;
+  lng?: number | null;
   status: "ok" | "error" | string;
   count: number;
   raw: number;
@@ -4595,7 +4597,14 @@ export default function Bookings() {
         checkIn,
         checkOut,
         community: communitySearchTerm,
+        alternativeScout: "1",
       });
+      const lat = Number(scoutRow?.lat);
+      const lng = Number(scoutRow?.lng);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        params.set("mapCenterLat", String(lat));
+        params.set("mapCenterLng", String(lng));
+      }
       if (opts?.forceRefresh) params.set("nocache", "1");
       if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
       const data = await fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
