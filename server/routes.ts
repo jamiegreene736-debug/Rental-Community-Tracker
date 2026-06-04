@@ -180,6 +180,7 @@ import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
   demandFactorForPolicyBand,
+  pushLeadTimePolicyPricesToGuesty,
   runFullScanForProperty,
   runFullScanNow,
   runLeadTimePolicySyncForProperty,
@@ -888,7 +889,7 @@ function marketRateBasisForMonth(args: {
 async function buildBulkGuestySeasonalPlan(
   propertyId: number,
   targetMargin: number,
-): Promise<{ listingId: string; monthlyRates: Array<{ yearMonth: string; price: number; buyIn: number }>; units: Array<{ bedrooms: number }>; targetMargin: number } | null> {
+): Promise<{ listingId: string; community: string; monthlyRates: Array<{ yearMonth: string; price: number; buyIn: number }>; units: Array<{ bedrooms: number }>; targetMargin: number } | null> {
   const listingId = await storage.getGuestyListingId(propertyId);
   if (!listingId) return null;
 
@@ -946,7 +947,7 @@ async function buildBulkGuestySeasonalPlan(
     );
   }
 
-  return { listingId, monthlyRates, units, targetMargin };
+  return { listingId, community, monthlyRates, units, targetMargin };
 }
 
 async function pushBulkGuestyPricingAfterRefresh(
@@ -957,6 +958,7 @@ async function pushBulkGuestyPricingAfterRefresh(
   listingId?: string;
   targetMargin?: number;
   seasonal?: any;
+  leadTime?: Awaited<ReturnType<typeof pushLeadTimePolicyPricesToGuesty>>;
 }> {
   const schedule = await storage.getScannerSchedule(propertyId).catch(() => null);
   const configuredMargin = parseTargetMargin(schedule?.targetMargin);
@@ -994,11 +996,33 @@ async function pushBulkGuestyPricingAfterRefresh(
     );
   }
 
+  const leadTime = await pushLeadTimePolicyPricesToGuesty({
+    propertyId,
+    guestyListingId: plan.listingId,
+    community: plan.community,
+    units: plan.units,
+    targetMargin,
+    monthlyBuyInByMonth: new Map(plan.monthlyRates.map((row) => [row.yearMonth, row.buyIn])),
+  });
+  if (leadTime.failed.length > 0) {
+    const first = leadTime.failed[0];
+    const message = `Guesty lead-time pricing push failed after base rates: ${leadTime.pushed}/${leadTime.total} windows pushed; first failed window ${first.startDate}-${first.endDate}: ${first.error}`;
+    await storage.markScannerGuestyRatePush(propertyId, "error", message.slice(0, 240), targetMargin).catch((err: any) => {
+      console.warn(`[bulk-pricing] could not record failed Guesty lead-time push for property ${propertyId}: ${err?.message ?? err}`);
+    });
+    throw new Error(message);
+  }
+  const combinedSummary = `${seasonal?.lastGuestyRatePushSummary ?? "Base seasonal rates pushed"} · ${leadTime.summary}`;
+  await storage.markScannerGuestyRatePush(propertyId, "ok", combinedSummary.slice(0, 240), targetMargin).catch((err: any) => {
+    console.warn(`[bulk-pricing] could not record combined Guesty lead-time push for property ${propertyId}: ${err?.message ?? err}`);
+  });
+
   return {
     skipped: false,
     listingId: plan.listingId,
     targetMargin,
     seasonal,
+    leadTime,
   };
 }
 
@@ -1167,7 +1191,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   item.progress = {
     phase: "searchapi-airbnb",
     percent: 80,
-    label: `SearchAPI Airbnb monthly pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing marked-up Guesty base rates`,
+    label: `SearchAPI Airbnb monthly pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing Guesty base rates plus lead-time scarcity pricing`,
     rows: pricingResult.rows.length,
     confidence: confidenceSummary,
     pricingRecipe,
@@ -1185,7 +1209,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
   }
 
-  await topQueueEvent("bulk-pricing", job.id, "item-pushing-guesty", `Pushing marked-up Guesty base rates for ${item.label}`, {
+  await topQueueEvent("bulk-pricing", job.id, "item-pushing-guesty", `Pushing Guesty base rates plus lead-time scarcity pricing for ${item.label}`, {
     itemKey: item.id,
     meta: { propertyId: item.propertyId },
   });
@@ -1228,12 +1252,12 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     item.progress = {
       phase: "done",
       percent: 100,
-      label: `Market rates saved and marked-up Guesty base rates pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
+      label: `Market rates saved; Guesty base rates and ${guestyPush.leadTime?.pushed ?? 0}/${guestyPush.leadTime?.total ?? 0} lead-time windows pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
       guestyPush,
       confidence: confidenceSummary,
       pricingRecipe,
     };
-    await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed marked-up Guesty base rates for ${item.label}`, {
+    await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed Guesty base rates plus lead-time scarcity pricing for ${item.label}`, {
       itemKey: item.id,
       meta: {
         propertyId: item.propertyId,
@@ -1241,6 +1265,8 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
         targetMargin: guestyPush.targetMargin,
         pushedDays: guestyPush.seasonal?.pushedDays,
         pushedRanges: guestyPush.seasonal?.pushedRanges,
+        leadTimePushed: guestyPush.leadTime?.pushed,
+        leadTimeTotal: guestyPush.leadTime?.total,
         confidence: confidenceSummary,
         pricingRecipe,
       },
@@ -34351,7 +34377,7 @@ Return ONLY compact JSON with this exact shape:
         percent: 100,
         label: guestyPush.skipped
           ? `SearchAPI Airbnb seasonal pricing saved; Guesty push skipped: ${guestyPush.reason ?? "not mapped"}`
-          : "SearchAPI Airbnb seasonal pricing saved and marked-up Guesty base rates pushed",
+          : `SearchAPI Airbnb seasonal pricing saved; Guesty base rates and ${guestyPush.leadTime?.pushed ?? 0}/${guestyPush.leadTime?.total ?? 0} lead-time windows pushed`,
       });
       setTimeout(() => clearQuickRefreshProgress(propertyId), 5 * 60 * 1000);
       releasePricingRefreshLock(quickRefreshLock);
@@ -35354,8 +35380,9 @@ Return ONLY compact JSON with this exact shape:
   //
   // Operator-facing queue for refreshing selected dashboard rows. The queue is
   // intentionally sequential: each item runs the SearchAPI Airbnb hybrid
-  // pricing engine, then pushes the marked-up Guesty base prices before the next
-  // row starts. Pricing does not acquire the Chrome sidecar lane.
+  // pricing engine, then pushes the marked-up Guesty base prices plus fixed
+  // lead-time scarcity overlays before the next row starts. Pricing does not
+  // acquire the Chrome sidecar lane.
   app.post("/api/pricing/bulk-refresh", async (req, res) => {
     cleanupBulkPricingJobs();
     const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];

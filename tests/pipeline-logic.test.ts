@@ -1972,6 +1972,16 @@ assert.ok(
 console.log("  ✓ market-pricing routes are not shadowed by legacy handlers");
 
 assert.ok(
+  routeSource.includes("pushLeadTimePolicyPricesToGuesty"),
+  "bulk/Pricing-tab market-rate pushes must layer fixed lead-time scarcity prices after monthly base rates",
+);
+assert.ok(
+  routeSource.includes("leadTimePushed"),
+  "bulk-pricing queue events must expose lead-time scarcity push counts",
+);
+console.log("  ✓ market-pricing pushes include lead-time scarcity overlays");
+
+assert.ok(
   routeSource.includes("const ROUTE_BUDGET_MS = expandedSearch ? 285_000 : 260_000"),
   "replacement search should use most of Railway's request window before giving up",
 );

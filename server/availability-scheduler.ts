@@ -12,6 +12,7 @@ import { storage } from "./storage";
 import { guestyRequest } from "./guesty-sync";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import {
+  getCommunityRegion,
   totalNightlyBuyInForMonth,
 } from "@shared/pricing-rates";
 import {
@@ -65,7 +66,8 @@ export function getScannerSchedulerStatus() {
 function computePureLeadTimePolicyBlocks(
   today: Date,
   weeks = 52,
-  leadDays?: { standard?: number; high?: number; holiday?: number; ultra?: number }
+  leadDays?: { standard?: number; high?: number; holiday?: number; ultra?: number },
+  region: "hawaii" | "florida" = "hawaii",
 ): Array<{ startDate: string; endDate: string; verdict: "blocked"; policyBand: LeadTimePricingBand; reason: string }> {
   const blocks: Array<{ startDate: string; endDate: string; verdict: "blocked"; policyBand: LeadTimePricingBand; reason: string }> = [];
   const std = leadDays?.standard ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS;
@@ -83,7 +85,7 @@ function computePureLeadTimePolicyBlocks(
     const ed = end.toISOString().slice(0, 10);
 
     const policy = availabilityPolicyForWindow({
-      region: "hawaii",
+      region,
       checkIn: sd,
       checkOut: ed,
       nights: 7,
@@ -109,6 +111,79 @@ function computePureLeadTimePolicyBlocks(
   }
 
   return blocks;
+}
+
+export type LeadTimePolicyPricePushResult = {
+  pushed: number;
+  total: number;
+  windows: Array<{ startDate: string; endDate: string; price: number; policyBand: LeadTimePricingBand; demandFactor: number }>;
+  failed: Array<{ startDate: string; endDate: string; error: string }>;
+  summary: string;
+};
+
+export async function pushLeadTimePolicyPricesToGuesty(args: {
+  propertyId: number;
+  guestyListingId: string;
+  community: string;
+  units: Array<{ bedrooms: number }>;
+  targetMargin: number;
+  weeks?: number;
+  now?: Date;
+  leadDays?: { standard?: number; high?: number; holiday?: number; ultra?: number };
+  monthlyBuyInByMonth?: Map<string, number>;
+}): Promise<LeadTimePolicyPricePushResult> {
+  const scheduleRow = await storage.getScannerSchedule(args.propertyId).catch(() => null);
+  const leadDays = args.leadDays ?? {
+    standard: scheduleRow?.standardLeadDays ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS,
+    high: scheduleRow?.highSeasonLeadDays ?? AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS,
+    holiday: scheduleRow?.majorHolidayLeadDays ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS,
+    ultra: scheduleRow?.ultraPeakLeadDays ?? AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS,
+  };
+  const todayNoon = args.now ? new Date(args.now) : new Date();
+  todayNoon.setHours(12, 0, 0, 0);
+  const region = getCommunityRegion(args.community);
+  const scarcityWindows = computePureLeadTimePolicyBlocks(todayNoon, args.weeks ?? 52, leadDays, region);
+  const calPath = `/availability-pricing/api/calendar/listings/${args.guestyListingId}`;
+  const pushedWindows: LeadTimePolicyPricePushResult["windows"] = [];
+  const failed: LeadTimePolicyPricePushResult["failed"] = [];
+
+  for (const window of scarcityWindows) {
+    const monthKey = window.startDate.slice(0, 7);
+    const setCost = args.monthlyBuyInByMonth?.get(monthKey)
+      ?? totalNightlyBuyInForMonth(args.community, args.units, monthKey, args.propertyId);
+    if (!(setCost > 0)) continue;
+    const demandFactor = demandFactorForPolicyBand(window.policyBand);
+    const targetRate = Math.round(setCost * demandFactor * (1 + args.targetMargin));
+    try {
+      await guestyRequest("PUT", calPath, {
+        startDate: window.startDate,
+        endDate: window.endDate,
+        price: targetRate,
+      });
+      pushedWindows.push({
+        startDate: window.startDate,
+        endDate: window.endDate,
+        price: targetRate,
+        policyBand: window.policyBand,
+        demandFactor,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    } catch (e: any) {
+      failed.push({
+        startDate: window.startDate,
+        endDate: window.endDate,
+        error: e?.message ?? String(e),
+      });
+    }
+  }
+
+  return {
+    pushed: pushedWindows.length,
+    total: scarcityWindows.length,
+    windows: pushedWindows,
+    failed,
+    summary: `lead-time-prices ${pushedWindows.length}/${scarcityWindows.length} windows (+15/+25/+40/+50%)`,
+  };
 }
 
 // Pick a *random* 7-night inside the next season occurrence (capped 10mo).
@@ -287,7 +362,7 @@ export async function runFullScanForProperty(
       const mm = d.getMonth() + 1;
       const yearMonth = `${y}-${String(mm).padStart(2, "0")}`;
       // Cost basis = sum of buy-in cost per slot for this month/season
-      const setCost = totalNightlyBuyInForMonth(community, config.units, yearMonth);
+      const setCost = totalNightlyBuyInForMonth(community, config.units, yearMonth, propertyId);
       if (setCost <= 0) continue;
       const targetRate = Math.round((1 + opts.targetMargin) * setCost);
       const startDate = new Date(y, mm - 1, 1).toISOString().slice(0, 10);
@@ -305,30 +380,15 @@ export async function runFullScanForProperty(
     }
     summaries.push(`rates ${pushedRanges}/${ranges.length} months`);
 
-    const todayNoon = new Date();
-    todayNoon.setHours(12, 0, 0, 0);
-    const scarcityWindows = computePureLeadTimePolicyBlocks(todayNoon, 52, leadDays);
-    const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
-    let pushedScarcity = 0;
-    for (const w of scarcityWindows) {
-      try {
-        const monthKey = w.startDate.slice(0, 7);
-        const setCost = totalNightlyBuyInForMonth(community, config.units, monthKey);
-        if (setCost <= 0) continue;
-        const factor = demandFactorForPolicyBand(w.policyBand);
-        const targetRate = Math.round(setCost * factor * (1 + opts.targetMargin));
-        await guestyRequest("PUT", calPath, {
-          startDate: w.startDate,
-          endDate: w.endDate,
-          price: targetRate,
-        });
-        pushedScarcity++;
-        await new Promise((resolve) => setTimeout(resolve, 120));
-      } catch { /* continue */ }
-    }
-    if (scarcityWindows.length > 0) {
-      summaries.push(`lead-time-prices ${pushedScarcity}/${scarcityWindows.length} windows (+15/+25/+40/+50%)`);
-    }
+    const leadTimePush = await pushLeadTimePolicyPricesToGuesty({
+      propertyId,
+      guestyListingId,
+      community,
+      units: config.units,
+      targetMargin: opts.targetMargin,
+      leadDays,
+    });
+    if (leadTimePush.total > 0) summaries.push(leadTimePush.summary);
   }
 
   return summaries.join(" · ");
