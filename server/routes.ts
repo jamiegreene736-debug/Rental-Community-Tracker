@@ -12226,9 +12226,14 @@ export async function registerRoutes(
       detail: `${providerLabel}: scanning ${bedrooms}BR unit · ${sidecarQueueDateLabel} · ${(resortName || community).trim()}`,
       skipResultCache: true,
     });
+    const alternativeScoutOtaMapOnly = alternativeScoutMapSearch;
     const airbnbSidecarAbort = makeSidecarAbort("airbnb-searchapi");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       try {
+        if (alternativeScoutOtaMapOnly) {
+          airbnbSidecarReason = "Skipped for alternative city map scout; VRBO/Booking.com map results are authoritative.";
+          return [];
+        }
         const sp: Record<string, string> = {
           engine: "airbnb",
           q: airbnbWebsiteSearchTerm,
@@ -12317,6 +12322,10 @@ export async function registerRoutes(
     const googleHotelsAbort = makeSidecarAbort("google-hotels-searchapi");
     const googleHotelsPromise: Promise<GoogleHotelsBuyInCandidate[]> = (async () => {
       try {
+        if (alternativeScoutOtaMapOnly) {
+          googleHotelsReason = "Skipped for alternative city map scout; VRBO/Booking.com map results are authoritative.";
+          return [];
+        }
         if (!apiKey) {
           googleHotelsReason = "SEARCHAPI_API_KEY not configured";
           return [];
@@ -13319,10 +13328,12 @@ export async function registerRoutes(
       Math.max(25_000, routeRemainingMs() - 10_000),
     );
     const googleHotelsBudgetMs = Math.min(45_000, Math.max(12_000, routeRemainingMs() - 12_000));
-    const [airbnb, googleHotelsRows] = await Promise.all([
-      withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-searchapi", airbnbSidecarAbort.abort),
-      withTimeout(googleHotelsPromise, googleHotelsBudgetMs, [] as GoogleHotelsBuyInCandidate[], "google-hotels-searchapi", googleHotelsAbort.abort),
-    ]);
+    const [airbnb, googleHotelsRows] = alternativeScoutOtaMapOnly
+      ? await Promise.all([airbnbPromise, googleHotelsPromise])
+      : await Promise.all([
+        withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-searchapi", airbnbSidecarAbort.abort),
+        withTimeout(googleHotelsPromise, googleHotelsBudgetMs, [] as GoogleHotelsBuyInCandidate[], "google-hotels-searchapi", googleHotelsAbort.abort),
+      ]);
     const [booking, vrbo] = await Promise.all([
       withTimeout(bookingPromise, sidecarSourceBudgetMs, [] as Candidate[], "booking-map-bounds", bookingSidecarAbort.abort),
       withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo-map-bounds", vrboSidecarAbort.abort),
@@ -14113,7 +14124,10 @@ export async function registerRoutes(
 	    // Vrbo is sidecar-priced from its own map-bounds search page.
     // Direct-link rows are Lens matches under an Airbnb anchor, then
     // checked against the PM page before they can be priced/verified.
-    const priced: Candidate[] = [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget]
+    const pricedSources = alternativeScoutOtaMapOnly
+      ? [...bookingTarget, ...vrboTarget]
+      : [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget];
+    const priced: Candidate[] = pricedSources
       .filter((c) => c.nightlyPrice > 0)
       .filter((c) => c.source === "airbnb" || c.verified === "yes")
       .filter((c) => !groundFloorOnly || c.groundFloorStatus === "confirmed")

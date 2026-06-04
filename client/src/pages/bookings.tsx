@@ -1258,6 +1258,7 @@ function bestWalkableAlternativePicks(
   community: string,
 ): Array<LiveCandidate & { community: string }> | null {
   const pools = plan.map((bedrooms) => (data.cheapest ?? [])
+    .filter((candidate) => candidate.source === "vrbo" || candidate.source === "booking")
     .filter((candidate) => candidate.totalPrice > 0 && candidateMatchesBedroom(candidate, bedrooms))
     .sort((a, b) => a.totalPrice - b.totalPrice)
     .slice(0, 40));
