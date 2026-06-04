@@ -6182,6 +6182,7 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
         retryLater: true,
       });
     }
+    log(`vrbo_search ${id}: starting map harvest passes (${bounds ? "bounded" : "city-unbounded"}) before card extraction`);
     if (!bounds) {
       await harvestVrboMapResultCards(page, id, 8);
     } else {
