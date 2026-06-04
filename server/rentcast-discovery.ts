@@ -319,3 +319,125 @@ export async function harvestRentCastSaleListings(
     errors,
   };
 }
+
+export type ResolvedPortalUrls = {
+  zillowUrl: string | null;
+  realtorUrl: string | null;
+};
+
+export function buildRentCastPortalLookupQueries(listing: RentCastListingCandidate): {
+  zillow: string;
+  realtor: string;
+} {
+  const street = listing.addressLine1 || listing.formattedAddress.split(",")[0]?.trim() || "";
+  const city = listing.city.trim();
+  const stateAbbr = listing.state.length === 2
+    ? listing.state.toUpperCase()
+    : stateToAbbrevForRentCast(listing.state);
+  const quotedStreet = `"${street}"`;
+  return {
+    zillow: `site:zillow.com/homedetails ${quotedStreet} "${city}" "${stateAbbr}"`.replace(/\s+/g, " ").trim(),
+    realtor: `site:realtor.com/realestateandhomes-detail ${quotedStreet} "${city}" "${stateAbbr}"`.replace(/\s+/g, " ").trim(),
+  };
+}
+
+async function searchApiPortalUrl(
+  query: string,
+  pattern: RegExp,
+  apiKey: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  try {
+    const resp = await fetch(
+      `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(query)}&num=5&api_key=${apiKey}`,
+      { signal: AbortSignal.timeout(timeoutMs) },
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json() as { organic_results?: Array<{ link?: string }> };
+    for (const row of data.organic_results ?? []) {
+      const link = String(row.link ?? "").split("?")[0].trim();
+      if (pattern.test(link)) return link;
+    }
+  } catch {
+    /* try next */
+  }
+  return null;
+}
+
+export async function resolveRentCastListingToPortalUrls(opts: {
+  listing: RentCastListingCandidate;
+  searchApiKey: string;
+  timeoutMs?: number;
+}): Promise<ResolvedPortalUrls> {
+  const timeoutMs = Math.max(3_000, Math.min(15_000, opts.timeoutMs ?? 10_000));
+  const queries = buildRentCastPortalLookupQueries(opts.listing);
+  const [zillowUrl, realtorUrl] = await Promise.all([
+    searchApiPortalUrl(queries.zillow, /zillow\.com\/homedetails\//i, opts.searchApiKey, timeoutMs),
+    searchApiPortalUrl(queries.realtor, /realtor\.com\/realestateandhomes-detail\//i, opts.searchApiKey, timeoutMs),
+  ]);
+  return { zillowUrl, realtorUrl };
+}
+
+export type RentCastPortalResolutionResult = {
+  resolvedZillow: number;
+  resolvedRealtor: number;
+  lookupsRun: number;
+  urls: Array<{ zillow: string | null; realtor: string | null; streetRoot: string | null }>;
+};
+
+/**
+ * Resolve unique RentCast street roots to Zillow/Realtor detail URLs via SearchAPI.
+ */
+export async function resolveRentCastCandidatesToPortalUrls(opts: {
+  listings: RentCastListingCandidate[];
+  searchApiKey: string;
+  maxLookups?: number;
+  timeoutMs?: number;
+}): Promise<RentCastPortalResolutionResult> {
+  const maxLookups = Math.max(1, Math.min(80, opts.maxLookups ?? 40));
+  const timeoutMs = Math.max(3_000, Math.min(15_000, opts.timeoutMs ?? 10_000));
+  const byRoot = new Map<string, RentCastListingCandidate>();
+  for (const listing of opts.listings) {
+    const root = listing.streetRoot;
+    if (!root || byRoot.has(root)) continue;
+    byRoot.set(root, listing);
+  }
+  const toResolve = Array.from(byRoot.values()).slice(0, maxLookups);
+  const urls: Array<{ zillow: string | null; realtor: string | null; streetRoot: string | null }> = [];
+  let resolvedZillow = 0;
+  let resolvedRealtor = 0;
+
+  const lookupConcurrency = 6;
+  for (let i = 0; i < toResolve.length; i += lookupConcurrency) {
+    const batch = toResolve.slice(i, i + lookupConcurrency);
+    const batchResults = await Promise.all(batch.map(async (listing) => {
+      const resolved = await resolveRentCastListingToPortalUrls({
+        listing,
+        searchApiKey: opts.searchApiKey,
+        timeoutMs,
+      });
+      return {
+        zillow: resolved.zillowUrl,
+        realtor: resolved.realtorUrl,
+        streetRoot: listing.streetRoot,
+      };
+    }));
+    for (const row of batchResults) {
+      urls.push(row);
+      if (row.zillow) resolvedZillow += 1;
+      if (row.realtor) resolvedRealtor += 1;
+    }
+  }
+
+  console.log(
+    `[rentcast-discovery] portal resolve lookups=${toResolve.length} ` +
+    `zillow=${resolvedZillow} realtor=${resolvedRealtor}`,
+  );
+
+  return {
+    resolvedZillow,
+    resolvedRealtor,
+    lookupsRun: toResolve.length,
+    urls,
+  };
+}
