@@ -3299,6 +3299,13 @@ assert.ok(
   bookingsComboSource.includes("directProofShortLabel"),
   "bookings UI should display direct proof level for Lens/direct matches",
 );
+assert.ok(
+  !bookingsComboSource.includes("Optimize direct booking sites") &&
+    !bookingsComboSource.includes('apiRequest("POST", "/api/operations/direct-booking-sites"') &&
+    !bookingsComboSource.includes("Direct-booking Airbnb picks") &&
+    !bookingsComboSource.includes("button-direct-booking-airbnb-scan"),
+  "bookings UI should not expose manual direct-booking site optimize/scan actions",
+);
 console.log("  ✓ direct booking probe compatibility API");
 
 const kamalii3: CityVrboListing = {

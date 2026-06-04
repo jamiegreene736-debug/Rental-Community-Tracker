@@ -3082,14 +3082,6 @@ function ComboComparisonPanel({
   onAttachCombo?: (option: AutoFillComboOption) => void;
   attachingComboLabel?: string | null;
 }) {
-  const [directRows, setDirectRows] = useState<Array<{
-    candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number];
-    status: "loading" | "done" | "error";
-    matches: ReverseImageListingMatch[];
-    message?: string;
-  }>>([]);
-  const [directRunning, setDirectRunning] = useState(false);
-  const [directDone, setDirectDone] = useState(0);
   if (options.length === 0) return null;
   const candidateVisibleForTarget = (candidate: {
     source?: "airbnb" | "vrbo" | "booking" | "pm";
@@ -3127,98 +3119,6 @@ function ComboComparisonPanel({
   const secondaryOption = pricedVisibleOptions.find((option) => option.label !== primaryOption?.label)
     ?? visibleOptions.find((option) => option.label !== primaryOption?.label);
   const summaryOptions = [primaryOption, secondaryOption].filter((option): option is typeof visibleOptions[number] => !!option);
-  const directCandidates = Array.from(new Map(
-    visibleOptions
-      .flatMap((option) => option.pools ?? [])
-      .flatMap((pool) => pool.candidates)
-      .filter((candidate) => candidate.source === "airbnb" && candidate.totalPrice > 0 && candidateVisibleForTarget(candidate))
-      .sort((a, b) => a.totalPrice - b.totalPrice)
-      .map((candidate) => [listingUrlKey(candidate.url), candidate] as const),
-  ).values());
-  const runDirectScan = async () => {
-    if (directRunning || directCandidates.length === 0) return;
-    setDirectRunning(true);
-    setDirectDone(0);
-    setDirectRows(directCandidates.map((candidate) => ({ candidate, status: "loading", matches: [] })));
-    try {
-      for (const candidate of directCandidates) {
-        try {
-          const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
-            sourceUrl: candidate.url,
-            title: candidate.title,
-            resortName: targetResortName,
-            community,
-          });
-          const body = await response.json();
-          const matches = Array.isArray(body?.matches)
-            ? (body.matches as ReverseImageListingMatch[])
-                .filter((match) => match.platformKey === "pm")
-                .filter((match) => directCandidateFitsTarget(targetResortName, community, match))
-            : [];
-          setDirectRows((prev) => prev.map((row) => listingUrlKey(row.candidate.url) === listingUrlKey(candidate.url)
-            ? { candidate, status: "done", matches, message: body?.message }
-            : row));
-        } catch (e: any) {
-          setDirectRows((prev) => prev.map((row) => listingUrlKey(row.candidate.url) === listingUrlKey(candidate.url)
-            ? { candidate, status: "error", matches: [], message: e?.message ?? "Direct booking scan failed" }
-            : row));
-        } finally {
-          setDirectDone((n) => n + 1);
-        }
-      }
-    } finally {
-      setDirectRunning(false);
-    }
-  };
-  const directMatches = directRows
-    .filter((row) => row.status === "done" && row.matches.length > 0)
-    .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
-  const directMatchByUrl = new Map(directMatches.map((row) => [listingUrlKey(row.candidate.url), row] as const));
-  const bestDirectCandidate = directMatches[0] ?? null;
-  const minimumDirectNightly = (bedrooms?: number) => Math.max(70, (bedrooms ?? 1) * 55);
-  const plausibleForDirectCombo = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) => {
-    const nightly = candidate.nightlyPrice > 0
-      ? candidate.nightlyPrice
-      : candidate.totalPrice;
-    return nightly >= minimumDirectNightly(candidate.bedrooms);
-  };
-  const candidateQualifies = (candidate: NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]) => {
-    const verifiedDirectOrPm =
-      candidate.source === "pm"
-      && candidate.verified === "yes"
-      && candidateVisibleForTarget(candidate);
-    return candidate.verified === "yes"
-      && (verifiedDirectOrPm || plausibleForDirectCombo(candidate))
-      && (candidate.source !== "airbnb" || directMatchByUrl.has(listingUrlKey(candidate.url)));
-  };
-  const distinctCheapestDirectPicks = (option: AutoFillComboOption) => {
-    const used = new Set<string>();
-    const picks: Array<NonNullable<AutoFillComboOption["pools"]>[number]["candidates"][number]> = [];
-    for (const pool of option.pools ?? []) {
-      const pick = pool.candidates
-        .filter((candidate) => candidate.totalPrice > 0 && candidateQualifies(candidate))
-        .sort((a, b) => a.totalPrice - b.totalPrice)
-        .find((candidate) => !hasUsedListingIdentity(used, candidate));
-      if (!pick) return null;
-      addUsedListingIdentity(used, pick);
-      picks.push(pick);
-    }
-    return picks.length > 0 ? picks : null;
-  };
-  const optimizedCombos = visibleOptions
-    .map((option) => {
-      const picks = distinctCheapestDirectPicks(option);
-      if (!picks) return null;
-      const totalCost = picks.reduce((sum, pick) => sum + pick.totalPrice, 0);
-      return { option, picks, totalCost };
-    })
-    .filter((combo): combo is NonNullable<typeof combo> => combo !== null);
-  const optimizedComboByLabel = new Map(optimizedCombos.map((combo) => [combo.option.label, combo] as const));
-  const bestOptimizedCombo = [...optimizedCombos].sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
-  const optimizedOptionLabel = bestOptimizedCombo?.option.label ?? null;
-  const directProgress = directCandidates.length > 0
-    ? Math.min(100, Math.round((directDone / directCandidates.length) * 100))
-    : 0;
   return (
     <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs">
       {completeVisibleOptions.length === 0 && (
@@ -3233,73 +3133,30 @@ function ComboComparisonPanel({
         <p className="font-medium text-emerald-900">
           {completeVisibleOptions.length === 0
             ? "Two-unit combination search"
-            : bestOptimizedCombo
-            ? `Direct-optimized combination: ${bestOptimizedCombo.option.label} · ${fmtMoney(bestOptimizedCombo.totalCost)}`
             : `Cheapest two-unit combination${selected ? `: ${selected.label} · ${fmtMoney(selected.totalCost)}` : ""}`}
         </p>
-        <div className="flex flex-wrap items-center gap-2">
-          {directCandidates.length > 0 && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-7 border-emerald-300 bg-white/80 px-2 text-[11px]"
-              onClick={runDirectScan}
-              disabled={directRunning}
-            >
-              {directRunning ? <RefreshCw className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Globe className="mr-1 h-3.5 w-3.5" />}
-              Optimize direct booking sites
-            </Button>
-          )}
-          {bestOptimizedCombo ? (
-            <Badge className="bg-sky-700 text-white text-[10px]">Direct optimized</Badge>
-          ) : selected && (
-            <Badge className="bg-emerald-600 text-white text-[10px]">Cheapest combo</Badge>
-          )}
-        </div>
+        {selected && (
+          <Badge className="bg-emerald-600 text-white text-[10px]">Cheapest combo</Badge>
+        )}
       </div>
       <div className="mt-2 space-y-2">
         {summaryOptions.map((option) => {
-          const optimizedCombo = optimizedComboByLabel.get(option.label) ?? null;
-          const isOptimizedWinner = optimizedOptionLabel === option.label;
-          const isOptimizedOption = !!optimizedCombo;
-          const displayedPicks = optimizedCombo
-            ? optimizedCombo.picks.map((pick, index) => ({
-              ...pick,
-              bedrooms: optimizedCombo.option.bedrooms[index] ?? 0,
-            }))
-            : option.picks;
-          const displayedTotal = optimizedCombo ? optimizedCombo.totalCost : option.totalCost;
-          const attachableOption: AutoFillComboOption = optimizedCombo
-            ? {
-                ...option,
-                totalCost: optimizedCombo.totalCost,
-                picks: optimizedCombo.picks.map((pick, index) => ({
-                  ...pick,
-                  bedrooms: optimizedCombo.option.bedrooms[index] ?? pick.bedrooms ?? 0,
-                })),
-              }
-            : option;
+          const displayedPicks = option.picks;
+          const displayedTotal = option.totalCost;
           const canAttachCombo = !!onAttachCombo && displayedTotal != null && displayedPicks.length === option.bedrooms.length;
           const attachingThisCombo = attachingComboLabel === option.label;
           return (
           <div
             key={option.label}
             className={`rounded border px-2 py-1.5 ${
-              isOptimizedWinner
-                ? "border-sky-400 bg-sky-50"
-                : isOptimizedOption
-                ? "border-sky-200 bg-sky-50/50"
-                : option.selected ? "border-emerald-300 bg-white/80" : "border-emerald-100 bg-white/50"
+              option.selected ? "border-emerald-300 bg-white/80" : "border-emerald-100 bg-white/50"
             }`}
           >
             <div className="grid grid-cols-[1fr_auto] gap-3">
               <div className="min-w-0">
                 <p className="font-medium text-foreground">
                   {option.label}
-                  {isOptimizedWinner && <span className="ml-1 text-sky-700">best direct optimized</span>}
-                  {!isOptimizedWinner && isOptimizedOption && <span className="ml-1 text-sky-700">direct optimized</span>}
-                  {!isOptimizedOption && option.selected && <span className="ml-1 text-emerald-700">cheapest combo</span>}
+                  {option.selected && <span className="ml-1 text-emerald-700">cheapest combo</span>}
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">
                   {displayedTotal == null
@@ -3332,12 +3189,12 @@ function ComboComparisonPanel({
                     <Button
                       type="button"
                       size="sm"
-                      variant={option.selected || isOptimizedWinner ? "default" : "outline"}
+                      variant={option.selected ? "default" : "outline"}
                       className="h-7 px-2 text-[11px]"
                       onClick={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
-                        onAttachCombo?.(attachableOption);
+                        onAttachCombo?.(option);
                       }}
                       disabled={!!attachingComboLabel}
                     >
@@ -3412,32 +3269,21 @@ function ComboComparisonPanel({
                               </ul>
                             )}
                           </div>
-                        ) : pool.candidates.filter(candidateVisibleForTarget).map((candidate, index) => {
-                          const directRow = directMatchByUrl.get(listingUrlKey(candidate.url));
-                          const isDirectPick = !!directRow;
-                          const candidateKeys = new Set(listingIdentityKeys(candidate));
-                          const isOptimizedPick = !!optimizedCombo?.picks.some((pick) => hasUsedListingIdentity(candidateKeys, pick));
-                          return (
+                        ) : pool.candidates.filter(candidateVisibleForTarget).map((candidate, index) => (
                           <a
                             key={`${candidate.url}-${index}`}
                             href={candidate.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className={`grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-2 py-1.5 last:border-b-0 ${
-                              isOptimizedPick
-                                ? "bg-sky-100 hover:bg-sky-100"
-                                : isDirectPick ? "bg-emerald-50 hover:bg-emerald-100" : "hover:bg-emerald-50/70"
-                            }`}
+                            className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-2 py-1.5 last:border-b-0 hover:bg-emerald-50/70"
                           >
                             <Badge className={`text-[9px] ${sourceBadgeClass(candidate.source)}`}>{candidate.sourceLabel}</Badge>
                             <span className="min-w-0 truncate text-[11px]" title={candidate.title}>
                               {candidate.title}
-                              {isOptimizedPick && <Badge className="ml-1 bg-sky-700 text-white text-[9px]">optimized pick</Badge>}
-                              {!isOptimizedPick && isDirectPick && <Badge className="ml-1 bg-emerald-600 text-white text-[9px]">direct site</Badge>}
                             </span>
                             <span className="text-right text-[11px] font-semibold tabular-nums">{fmtMoney(candidate.totalPrice)}</span>
                           </a>
-                        )})}
+                        ))}
                       </div>
                     </div>
                   ))}
@@ -3456,99 +3302,6 @@ function ComboComparisonPanel({
           </div>
         )})}
       </div>
-      {directRows.length > 0 && (
-        <div className="mt-2 rounded-md border border-sky-200 bg-sky-50/80 p-2">
-          <div className="mb-1 flex items-center justify-between gap-2">
-            <p className="text-[11px] font-semibold text-sky-900">Direct-booking site scan</p>
-            <Badge className="bg-sky-700 text-white text-[9px]">
-              {directRunning ? `${directRows.filter((row) => row.status !== "loading").length}/${directRows.length}` : `${directMatches.length} qualified`}
-            </Badge>
-          </div>
-          {directRunning && (
-            <div className="mb-2 space-y-1">
-              <p className="text-[11px] text-sky-900/75">Checking Airbnb candidates for direct booking links...</p>
-              <Progress value={directProgress} className="h-1.5" />
-            </div>
-          )}
-          {!directRunning && directMatches.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground">No full combination could be built using VRBO map rows plus Airbnb rows with a direct booking link.</p>
-          ) : (
-            <div className="space-y-1">
-              {bestOptimizedCombo && (
-                <div className="rounded border border-emerald-400 bg-emerald-50 px-2 py-1.5">
-                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-medium text-emerald-950">
-                      <Badge className="mr-1 bg-emerald-600 text-white text-[9px]">Auto-selected</Badge>
-                      {bestOptimizedCombo.option.label}
-                    </span>
-                    <span className="font-semibold">{fmtMoney(bestOptimizedCombo.totalCost)}</span>
-                  </div>
-                  <div className="space-y-1">
-                    {bestOptimizedCombo.picks.map((candidate, index) => (
-                      <div key={`${candidate.url}-${index}`} className="rounded border bg-white/80 px-2 py-1">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <span className="min-w-0 truncate">
-                            <Badge className={`mr-1 text-[9px] ${sourceBadgeClass(candidate.source)}`}>{candidate.sourceLabel}</Badge>
-                            {candidate.title}
-                          </span>
-                          <span className="font-semibold">{fmtMoney(candidate.totalPrice)}</span>
-                        </div>
-                        {candidate.source === "airbnb" && directMatchByUrl.has(listingUrlKey(candidate.url)) && (
-                          <div className="mt-1 flex flex-wrap gap-1">
-                            {directMatchByUrl.get(listingUrlKey(candidate.url))!.matches.slice(0, 3).map((match) => (
-                              <a
-                                key={`${candidate.url}-${match.url}`}
-                                href={match.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted"
-                              >
-                                {match.domain}
-                                <ExternalLink className="h-2.5 w-2.5" />
-                              </a>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {!bestOptimizedCombo && bestDirectCandidate && !directRunning && (
-                <div className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5">
-                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-medium text-amber-950">
-                      <Badge className="mr-1 bg-amber-600 text-white text-[9px]">Best direct unit found</Badge>
-                      {bestDirectCandidate.candidate.title}
-                    </span>
-                    <span className="font-semibold">{fmtMoney(bestDirectCandidate.candidate.totalPrice)}</span>
-                  </div>
-                  <p className="text-[11px] text-amber-900/80">
-                    This Airbnb has a direct-booking site match, but the scan did not find enough qualifying rows to build a complete optimized unit combination.
-                  </p>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {bestDirectCandidate.matches.slice(0, 3).map((match) => (
-                      <a
-                        key={`${bestDirectCandidate.candidate.url}-${match.url}`}
-                        href={match.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 rounded border bg-white px-1.5 py-0.5 text-[10px] hover:bg-muted"
-                      >
-                        {match.domain}
-                        <ExternalLink className="h-2.5 w-2.5" />
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {!bestOptimizedCombo && !directRunning && (
-                <p className="text-[11px] text-muted-foreground">Direct sites were found, but not enough qualifying rows existed to build a full unit combination.</p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -5191,92 +4944,6 @@ export default function Bookings() {
         ...candidate,
         identityKeys: candidate.identityKeys ?? listingIdentityKeys(candidate),
       });
-      const selectedSearchCommunity = staticUnitConfig?.community
-        ?? emptySlots.find((slot) => slot.community)?.community
-        ?? "";
-      const directBookingScanCache = new Map<string, Promise<LiveCandidate[]>>();
-      let autoDirectBookingScansStarted = 0;
-      const autoDirectBookingScanLimit = staticUnitConfig?.enableGoogleLensDiscovery ? 12 : 6;
-      const directMatchToAutoFillCandidate = (
-        airbnbCandidate: LiveCandidate,
-        match: ReverseImageListingMatch,
-      ): LiveCandidate => {
-        const photoRole = match.matchedPhotoRole ? ` (${photoRoleLabel(match.matchedPhotoRole)} photo)` : "";
-        const photoLabel = match.matchedPhotoLabel ? `: ${match.matchedPhotoLabel}` : "";
-        const proofPrice = directProofPrice(match.proof);
-        const verified = directProofVerifiedStatus(match.proof);
-        const totalPrice = proofPrice?.totalPrice ?? 0;
-        const nightlyPrice = proofPrice?.nightlyPrice ?? (totalPrice && airbnbCandidate.totalPrice > 0 && airbnbCandidate.nightlyPrice > 0
-          ? Math.round(totalPrice / Math.max(1, Math.round(airbnbCandidate.totalPrice / airbnbCandidate.nightlyPrice)))
-          : 0);
-        return {
-          source: "pm",
-          sourceLabel: `Direct link (${match.domain})`,
-          title: match.title || airbnbCandidate.title,
-          url: match.url,
-          nightlyPrice,
-          totalPrice,
-          bedrooms: candidateBedrooms(airbnbCandidate, 0) || airbnbCandidate.bedrooms,
-          image: airbnbCandidate.image,
-          snippet: match.proof?.summary
-            ? `${match.proof.summary}${photoRole}${photoLabel ? `: ${photoLabel.replace(/^:\s*/, "")}` : ""}`
-            : `Direct booking site found automatically from this Airbnb listing's photos${photoRole}${photoLabel}. Direct PM price/availability was not proven.`,
-          alternateUrls: Array.from(new Set([airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])].filter(Boolean) as string[])),
-          photoMatches: [{ url: match.url, title: match.title, domain: match.domain, matchedPhotoCount: match.matchedPhotoCount, minConfidence: match.minConfidence, maxConfidence: match.maxConfidence, proof: match.proof }],
-          identityKeys: listingIdentityKeys({
-            ...airbnbCandidate,
-            alternateUrls: [airbnbCandidate.url, match.url, ...(airbnbCandidate.alternateUrls ?? [])],
-            photoMatches: [{ url: match.url }],
-          }),
-          airbnbAnchorUrl: airbnbCandidate.url,
-          airbnbAnchorPrice: airbnbCandidate.totalPrice,
-          directBookingUrl: match.url,
-          directBookingHost: match.domain,
-          directBookingConfidence: match.proof?.sameUnit.status === "passed" ? "high" : "medium",
-          directBookingSource: "airbnb_image_reverse_search",
-          directBookingReason: match.proof?.sameUnit.reason ?? `Google Lens found this direct booking site from the Airbnb listing photos${photoRole}${photoLabel}.`,
-          directProof: match.proof,
-          verified,
-          verifiedNightlyPrice: verified === "yes" ? nightlyPrice : undefined,
-          verifiedReason: match.proof?.price.reason ?? match.proof?.availability.reason ?? match.proof?.summary,
-          groundFloorStatus: airbnbCandidate.groundFloorStatus,
-          groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
-        };
-      };
-      const scanDirectBookingSitesForAirbnb = (candidate: LiveCandidate): Promise<LiveCandidate[]> => {
-        const key = listingUrlKey(candidate.url);
-        if (!key) return Promise.resolve([]);
-        const existing = directBookingScanCache.get(key);
-        if (existing) return existing;
-        const promise = (async () => {
-          try {
-            const community = selectedSearchCommunity;
-            const resortName = directBookingTargetResortName(community);
-            const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
-              sourceUrl: candidate.url,
-              title: candidate.title,
-              resortName,
-              community,
-              checkIn: ci,
-              checkOut: co,
-              anchorTotalPrice: candidate.totalPrice,
-              anchorNightlyPrice: candidate.nightlyPrice,
-              verifyAvailability: false,
-            });
-            const body = await response.json();
-            const matches = Array.isArray(body?.matches)
-              ? (body.matches as ReverseImageListingMatch[])
-                  .filter((match) => match.platformKey === "pm")
-                  .filter((match) => directCandidateFitsTarget(resortName, community, match))
-              : [];
-            return matches.map((match) => directMatchToAutoFillCandidate(candidate, match));
-          } catch (e) {
-            return [];
-          }
-        })();
-        directBookingScanCache.set(key, promise);
-        return promise;
-      };
       const autoDirectBookingCandidatesFor = async (
         _items: LiveCandidate[],
         _searchedBedrooms: number,
@@ -9723,14 +9390,6 @@ type BuyInListingSitesResponse = {
   fromCache?: boolean;
 };
 
-type DirectBookingScanRow = {
-  candidate: LiveCandidate;
-  status: "loading" | "done" | "error";
-  matches: ReverseImageListingMatch[];
-  message?: string;
-  fromCache?: boolean;
-};
-
 type FindBuyInResponse = {
   community: string;
   resortName?: string | null;
@@ -10598,8 +10257,6 @@ function LiveSearchSection({
   const [searchStartedAtMs, setSearchStartedAtMs] = useState(() => Date.now());
   const [searchEnabled, setSearchEnabled] = useState(() => !slot.buyIn);
   const [rerunUntriedOnly, setRerunUntriedOnly] = useState(false);
-  const [directScanRows, setDirectScanRows] = useState<DirectBookingScanRow[]>([]);
-  const [directScanRunning, setDirectScanRunning] = useState(false);
 
   // Server validates dates as YYYY-MM-DD; Guesty returns `checkIn` as a full
   // ISO timestamp (2026-06-13T01:00:00.000Z). Prefer the localized date-only
@@ -11005,12 +10662,6 @@ function LiveSearchSection({
     if (isAttachedElsewhere(u.primaryUrl)) return false;
     return !u.listings.some((l) => isAttachedElsewhere(l.url));
   });
-  const directScanCandidates = availableAirbnb
-    .filter((c) => c.totalPrice > 0 && (c.verified === "yes" || !c.verified))
-    .sort((a, b) => a.totalPrice - b.totalPrice);
-  const nonAirbnbBaseline = [...availableVrbo, ...availablePm]
-    .filter((c) => c.totalPrice > 0 && (c.verified === "yes" || !c.verified))
-    .reduce<number | null>((best, c) => best === null ? c.totalPrice : Math.min(best, c.totalPrice), null);
   const focusedCheapestUnits = availableCheapestUnits.slice(0, 1);
   const additionalCheapestUnits = availableCheapestUnits.slice(1);
   const focusedCheapest = availableCheapest.slice(0, 1);
@@ -11087,95 +10738,6 @@ function LiveSearchSection({
     };
   };
 
-  const directMatchToCandidate = (airbnbCandidate: LiveCandidate, match: ReverseImageListingMatch): LiveCandidate => {
-    const proofPrice = directProofPrice(match.proof);
-    const verified = directProofVerifiedStatus(match.proof);
-    const totalPrice = proofPrice?.totalPrice ?? 0;
-    const nightlyPrice = proofPrice?.nightlyPrice ?? (totalPrice && airbnbCandidate.totalPrice > 0 && airbnbCandidate.nightlyPrice > 0
-      ? Math.round(totalPrice / Math.max(1, Math.round(airbnbCandidate.totalPrice / airbnbCandidate.nightlyPrice)))
-      : 0);
-    return {
-      source: "pm",
-      sourceLabel: `Direct link (${match.domain})`,
-      title: match.title || airbnbCandidate.title,
-      url: match.url,
-      originalSourceUrl: match.url,
-      nightlyPrice,
-      totalPrice,
-      bedrooms: airbnbCandidate.bedrooms,
-      image: airbnbCandidate.image,
-      snippet: match.proof?.summary ?? "Direct booking site found from this Airbnb listing's photos. Direct PM price/availability was not proven.",
-      alternateUrls: [airbnbCandidate.url, match.url],
-      identityKeys: airbnbCandidate.identityKeys,
-      airbnbAnchorUrl: airbnbCandidate.url,
-      airbnbAnchorPrice: airbnbCandidate.totalPrice,
-      directBookingUrl: match.url,
-      directBookingHost: match.domain,
-      directBookingConfidence: match.proof?.sameUnit.status === "passed" ? "high" : "medium",
-      directBookingSource: "airbnb_image_reverse_search",
-      directBookingReason: match.proof?.sameUnit.reason ?? "Google Lens found this direct booking site from the Airbnb listing photos.",
-      directProof: match.proof,
-      photoMatches: [{ url: match.url, title: match.title, domain: match.domain, matchedPhotoCount: match.matchedPhotoCount, minConfidence: match.minConfidence, maxConfidence: match.maxConfidence, proof: match.proof }],
-      verified,
-      verifiedNightlyPrice: verified === "yes" ? nightlyPrice : undefined,
-      verifiedReason: match.proof?.price.reason ?? match.proof?.availability.reason ?? match.proof?.summary,
-      groundFloorStatus: airbnbCandidate.groundFloorStatus,
-      groundFloorEvidence: airbnbCandidate.groundFloorEvidence,
-    };
-  };
-
-  const runDirectBookingScan = async () => {
-    if (directScanRunning || directScanCandidates.length === 0) return;
-    setDirectScanRunning(true);
-    const initialRows = directScanCandidates.map((candidate) => ({
-      candidate,
-      status: "loading" as const,
-      matches: [],
-    }));
-    setDirectScanRows(initialRows);
-    try {
-      for (const candidate of directScanCandidates) {
-        try {
-          const response = await apiRequest("POST", "/api/operations/direct-booking-sites", {
-            sourceUrl: candidate.url,
-            title: candidate.title,
-            resortName: data?.resortName ?? data?.community ?? "",
-            community: data?.community ?? "",
-            checkIn: checkInYmd,
-            checkOut: checkOutYmd,
-            anchorTotalPrice: candidate.totalPrice,
-            anchorNightlyPrice: candidate.nightlyPrice,
-            verifyAvailability: true,
-          });
-          const body = await response.json();
-          const matches = Array.isArray(body?.matches)
-            ? (body.matches as ReverseImageListingMatch[]).filter((match) => match.platformKey === "pm")
-            : [];
-          setDirectScanRows((prev) => prev.map((row) => row.candidate.url === candidate.url
-            ? {
-              candidate,
-              status: "done",
-              matches,
-              message: body?.message,
-              fromCache: body?.fromCache === true,
-            }
-            : row));
-        } catch (e: any) {
-          setDirectScanRows((prev) => prev.map((row) => row.candidate.url === candidate.url
-            ? {
-              candidate,
-              status: "error",
-              matches: [],
-              message: e?.message ?? "Direct booking scan failed",
-            }
-            : row));
-        }
-      }
-    } finally {
-      setDirectScanRunning(false);
-    }
-  };
-
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -11198,23 +10760,6 @@ function LiveSearchSection({
         </div>
         <div className="flex items-center gap-2">
           <SidecarStatusBadge />
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={runDirectBookingScan}
-            disabled={directScanRunning || directScanCandidates.length === 0 || isFetching}
-            title={directScanCandidates.length > 0
-              ? `Scan ${directScanCandidates.length} Airbnb priced candidate${directScanCandidates.length === 1 ? "" : "s"} for direct PM listings`
-              : "No priced Airbnb candidates available to scan"}
-            data-testid="button-direct-booking-airbnb-scan"
-          >
-            {directScanRunning ? (
-              <RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" />
-            ) : (
-              <Globe className="h-3.5 w-3.5 mr-1" />
-            )}
-            Direct-booking Airbnb picks
-          </Button>
           <Button size="sm" variant="ghost" onClick={refreshLiveSearch}>
             <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
           </Button>
@@ -11269,14 +10814,6 @@ function LiveSearchSection({
         <div className="border border-amber-300 bg-amber-50/70 text-amber-800 rounded-md px-3 py-2 text-[11px]">
           Hidden {hiddenAlreadyAttachedCount} option{hiddenAlreadyAttachedCount === 1 ? "" : "s"} already attached to another unit in this reservation.
         </div>
-      )}
-      {directScanRows.length > 0 && (
-        <DirectBookingRecommendations
-          rows={directScanRows}
-          running={directScanRunning}
-          nonAirbnbBaseline={nonAirbnbBaseline}
-          onRecord={(candidate, match) => setRecordTarget(directMatchToCandidate(candidate, match))}
-        />
       )}
       {/* Raw hit counts + drop counts per source — lets us see why a source
           returned few results (upstream empty vs resort/bedroom filtered).
@@ -11522,152 +11059,6 @@ function LiveSearchSection({
           slot={slot}
           onClose={() => setRecordTarget(null)}
         />
-      )}
-    </div>
-  );
-}
-
-function DirectBookingRecommendations({
-  rows,
-  running,
-  nonAirbnbBaseline,
-  onRecord,
-}: {
-  rows: DirectBookingScanRow[];
-  running: boolean;
-  nonAirbnbBaseline: number | null;
-  onRecord: (candidate: LiveCandidate, match: ReverseImageListingMatch) => void;
-}) {
-  const completed = rows.filter((row) => row.status !== "loading").length;
-  const eligible = rows
-    .filter((row) => row.status === "done" && row.matches.length > 0)
-    .sort((a, b) => a.candidate.totalPrice - b.candidate.totalPrice);
-  const cheaperEligible = eligible.filter((row) =>
-    nonAirbnbBaseline === null || row.candidate.totalPrice < nonAirbnbBaseline,
-  );
-  const displayRows = cheaperEligible.length > 0 ? cheaperEligible : eligible;
-  const errorCount = rows.filter((row) => row.status === "error").length;
-
-  return (
-    <div className="rounded-lg border border-sky-300 bg-sky-50/70 p-3 dark:bg-sky-950/20">
-      <div className="flex items-start justify-between gap-3 mb-2">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-sky-900 dark:text-sky-200 flex items-center gap-1.5">
-            <Globe className="h-3.5 w-3.5" />
-            Airbnb listings with direct PM sites
-          </p>
-          <p className="text-[11px] text-sky-900/75 dark:text-sky-200/75 mt-0.5">
-            Scans priced Airbnb listings with Find sites photo proof, then asks the direct PM page for its own date-specific availability/rate when possible.
-            {nonAirbnbBaseline !== null ? ` Non-Airbnb baseline: ${fmtMoney(nonAirbnbBaseline)} total.` : " No priced non-Airbnb baseline found."}
-          </p>
-        </div>
-        <Badge className="bg-sky-700 text-white text-[10px] shrink-0">
-          {running ? `${completed}/${rows.length}` : `${eligible.length} found`}
-        </Badge>
-      </div>
-
-      {running && (
-        <div className="mb-2 text-[11px] text-sky-900/80 inline-flex items-center gap-1.5">
-          <RefreshCw className="h-3 w-3 animate-spin" />
-          Checking Airbnb candidates for direct PM listing pages…
-        </div>
-      )}
-
-      {!running && displayRows.length === 0 && (
-        <p className="rounded-md border border-sky-200 bg-white/70 px-2 py-2 text-[11px] text-muted-foreground">
-          No direct PM listing found from this scan.
-          {errorCount > 0 ? ` ${errorCount} candidate${errorCount === 1 ? "" : "s"} failed during lookup.` : ""}
-        </p>
-      )}
-
-      {displayRows.length > 0 && (
-        <div className="space-y-2">
-          {displayRows.map((row) => {
-            const primaryMatch = row.matches[0];
-            const primaryProof = primaryMatch.proof;
-            const directPrice = directProofPrice(primaryProof);
-            const comparisonTotal = directPrice?.totalPrice ?? row.candidate.totalPrice;
-            const directQuoteProven = !!directPrice?.totalPrice;
-            const beatsBaseline = nonAirbnbBaseline === null || comparisonTotal < nonAirbnbBaseline;
-            const canRecord = directQuoteProven && beatsBaseline;
-            return (
-              <div
-                key={row.candidate.url}
-                className="rounded-md border bg-background p-2.5 flex items-start gap-2.5"
-              >
-                {row.candidate.image && (
-                  <img src={row.candidate.image} alt="" className="h-12 w-12 rounded object-cover shrink-0" />
-                )}
-                <div className="min-w-0 grow">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <Badge className={`text-[9px] ${directQuoteProven ? "bg-emerald-600 text-white" : "bg-sky-700 text-white"}`}>
-                      {directProofShortLabel(primaryProof)}
-                    </Badge>
-                    <Badge className={`text-[9px] ${directQuoteProven && beatsBaseline ? "bg-emerald-600 text-white" : "bg-amber-500 text-white"}`}>
-                      {directQuoteProven
-                        ? beatsBaseline ? "Cheaper than non-Airbnb" : "Direct quote above baseline"
-                        : "Identity proof only"}
-                    </Badge>
-                    {row.fromCache && <Badge variant="outline" className="text-[9px]">cached</Badge>}
-                    <p className="text-sm font-medium truncate">{row.candidate.title}</p>
-                  </div>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">
-                    {directQuoteProven ? (
-                      <>
-                        Direct PM quote: <span className="font-semibold text-foreground">{fmtMoney(directPrice!.totalPrice)}</span>
-                        {directPrice!.nightlyPrice ? ` · ${fmtMoney(directPrice!.nightlyPrice)}/night` : ""}
-                        <span> · Airbnb anchor {fmtMoney(row.candidate.totalPrice)}</span>
-                      </>
-                    ) : (
-                      <>
-                        Airbnb anchor price: <span className="font-semibold text-foreground">{fmtMoney(row.candidate.totalPrice)}</span>
-                        {row.candidate.nightlyPrice > 0 ? ` · ${fmtMoney(row.candidate.nightlyPrice)}/night` : ""}
-                      </>
-                    )}
-                  </p>
-                  <div className="mt-1 flex flex-wrap gap-1.5">
-                    {row.matches.slice(0, 3).map((match) => (
-                      <a
-                        key={`${row.candidate.url}-${match.domain}-${match.url}`}
-                        href={match.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted"
-                        title={match.title}
-                      >
-                        {match.domain}
-                        <ExternalLink className="h-2.5 w-2.5" />
-                      </a>
-                    ))}
-                  </div>
-                </div>
-                <div className="shrink-0 flex flex-col gap-1">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => window.open(primaryMatch.url, "_blank", "noopener,noreferrer")}
-                  >
-                    <ExternalLink className="h-3 w-3 mr-1" /> PM site
-                  </Button>
-                  <Button
-                    size="sm"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => onRecord(row.candidate, primaryMatch)}
-                    disabled={!canRecord}
-                    title={canRecord
-                      ? "Record this direct PM match as the buy-in"
-                      : directQuoteProven
-                        ? "Direct quote found, but it is not cheaper than the non-Airbnb baseline"
-                        : "Record is disabled until the direct PM site returns its own date-specific quote"}
-                  >
-                    <ShoppingCart className="h-3 w-3 mr-1" /> Record
-                  </Button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
       )}
     </div>
   );
