@@ -3339,12 +3339,15 @@ assert.equal(
 assert.ok(
   routesSource.includes("/api/operations/city-vrbo-inventory") &&
     routesSource.includes("runCityVrboInventoryScan"),
-  "routes should expose city VRBO inventory scan for full map export + combo pairing",
+  "routes should expose city VRBO inventory scan for full dropdown export + combo pairing",
 );
 const cityInventorySource = readFileSync("server/city-vrbo-inventory.ts", "utf8");
 assert.ok(
-  cityInventorySource.includes("cityWideInventory: true"),
-  "city VRBO inventory should use a single city search term without resort name variations",
+  cityInventorySource.includes("cityWideInventory: true") &&
+    cityInventorySource.includes('searchMode: "destination_dropdown"') &&
+    !cityInventorySource.includes('searchMode: "map_bounds"') &&
+    !cityInventorySource.includes("mapSearch:"),
+  "city VRBO inventory should use one city dropdown term and must not run map-bounds harvest",
 );
 assert.ok(
   cityInventorySource.includes("cityVrboScrapeCache") &&
@@ -3367,6 +3370,6 @@ assert.ok(
 );
 assert.ok(
   vrboWorkerSource.includes("deepHarvest") && vrboWorkerSource.includes("deepMapHarvest"),
-  "VRBO sidecar worker should support deep city map harvest passes",
+  "VRBO sidecar worker should still support map_bounds deep harvest for legacy callers only",
 );
 console.log("  ✓ city VRBO inventory export + combo pairing");

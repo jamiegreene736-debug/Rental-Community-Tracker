@@ -6,7 +6,7 @@ import {
   type CityVrboComboPair,
   type CityVrboListing,
 } from "@shared/city-vrbo-combo";
-import { BUY_IN_MARKET_LOCATIONS, searchLocationForBuyInMarket } from "@shared/buy-in-market";
+import { searchLocationForBuyInMarket } from "@shared/buy-in-market";
 
 export type CityVrboFilterPipeline = {
   rawSidecar: number;
@@ -54,7 +54,7 @@ const CITY_VRBO_CACHE_TTL_MS = Math.max(
 const cityVrboScrapeCache = new Map<string, CityVrboScrapeCacheEntry>();
 
 function cacheKeyForScrape(community: string, checkIn: string, checkOut: string): string {
-  return `${community.toLowerCase()}|${checkIn}|${checkOut}|city-vrbo-v1`;
+  return `${community.toLowerCase()}|${checkIn}|${checkOut}|city-vrbo-dropdown-v2`;
 }
 
 function rawCandidateBedroomSignal(candidate: SidecarVrboCandidate): number | null {
@@ -197,28 +197,19 @@ async function scrapeCityVrboPool(args: {
       (new Date(`${args.checkOut}T12:00:00`).getTime() - new Date(`${args.checkIn}T12:00:00`).getTime()) / 86_400_000,
     ),
   );
-  const marketLoc = BUY_IN_MARKET_LOCATIONS[args.community];
-  const mapSearchCenter = marketLoc
-    ? { lat: marketLoc.lat, lng: marketLoc.lng }
-    : undefined;
-  const inventoryBedrooms = Math.min(2, ...args.bedroomPlan.filter((br) => br > 0));
-
   const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
+  console.log(
+    `[city-vrbo-inventory] vrbo sidecar start community="${args.community}" ` +
+    `search="${citySearchTerm}" mode=destination-dropdown-export-all`,
+  );
   const r = await searchVrboViaSidecar({
     destination: citySearchTerm,
     searchTerm: citySearchTerm,
     checkIn: args.checkIn,
     checkOut: args.checkOut,
-    bedrooms: inventoryBedrooms,
-    searchMode: "map_bounds",
+    bedrooms: 1,
+    searchMode: "destination_dropdown",
     cityWideInventory: true,
-    mapSearch: {
-      enabled: true,
-      bounds: undefined,
-      center: mapSearchCenter,
-      radiusKm: 6,
-      deepHarvest: true,
-    },
     walletBudgetMs: 240_000,
     queueBudgetMs: 300_000,
     queueContext: {
@@ -227,6 +218,12 @@ async function scrapeCityVrboPool(args: {
       skipResultCache: true,
     },
   });
+  if (r) {
+    console.log(
+      `[city-vrbo-inventory] vrbo sidecar finish community="${args.community}" ` +
+      `exported=${r.candidates?.length ?? 0} reason="${r.reason ?? ""}"`,
+    );
+  }
 
   if (!r) {
     return null;
