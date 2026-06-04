@@ -1241,12 +1241,13 @@ function candidateIsWalkableWithExistingPicks(
   picks: Array<Pick<LiveCandidate, "lat" | "lng" | "title" | "sourceLabel">>,
 ): boolean {
   for (const pick of picks) {
+    if (candidatesShareStrongResortPhrase(candidate, pick)) continue;
     const minutes = candidateWalkMinutes(candidate, pick);
     if (minutes !== null) {
       if (minutes > MAX_BUY_IN_WALK_MINUTES) return false;
       continue;
     }
-    if (!candidatesShareStrongResortPhrase(candidate, pick)) return false;
+    return false;
   }
   return true;
 }
