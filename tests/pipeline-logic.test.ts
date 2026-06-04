@@ -3031,6 +3031,18 @@ assert.ok(
   "alternative-scout-direct-probes route should exist",
 );
 assert.ok(
+  routesSource.includes("const alternativeScoutMinPhotoMatches = 3"),
+  "alternative scout Lens probes should use a 3-photo review threshold instead of the stricter 5-photo attach threshold",
+);
+assert.ok(
+  routesSource.includes("minPhotoMatches: alternativeScoutMinPhotoMatches"),
+  "alternative scout direct probes should pass their Lens photo threshold through to direct-booking-sites",
+);
+assert.ok(
+  routesSource.includes("buy-in-sites:v7-proof") && routesSource.includes("strictDirectMinPhotoMatches"),
+  "direct-booking-sites cache key should include the Lens photo threshold",
+);
+assert.ok(
   routesSource.includes("type DirectBookingProof"),
   "direct booking discovery should expose a structured proof ledger",
 );

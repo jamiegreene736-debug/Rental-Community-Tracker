@@ -14813,6 +14813,11 @@ export async function registerRoutes(
     const anchorNightlyPrice = roundedProofNumber(req.body?.anchorNightlyPrice)
       ?? (anchorTotalPrice && nights > 0 ? roundedProofNumber(anchorTotalPrice / nights) : undefined);
     const verifyAvailabilityRequested = req.body?.verifyAvailability === true;
+    const minPhotoMatchesRaw = Number(req.body?.minPhotoMatches ?? 5);
+    const strictDirectMinPhotoMatches = Number.isFinite(minPhotoMatchesRaw)
+      ? Math.max(2, Math.min(5, Math.trunc(minPhotoMatchesRaw)))
+      : 5;
+    const strictDirectMinConfidence = 0.95;
     if (!sourceUrl) return res.status(400).json({ error: "sourceUrl required" });
     if (!/airbnb\.[^/]+\/rooms\//i.test(sourceUrl)) {
       return res.status(400).json({ error: "direct booking scan only supports Airbnb room listings" });
@@ -14827,7 +14832,7 @@ export async function registerRoutes(
     try {
       const useCache = String(req.query.nocache ?? "") !== "1" && (req.body as any)?.nocache !== true;
       const sourceKey = normalizeListingSurfaceKey(sourceUrl);
-      const cacheKey = `buy-in-sites:v6-proof:${sourceKey}:${checkIn || "nodate"}:${checkOut || "nodate"}:${verifyAvailabilityRequested ? "verify" : "lens"}`;
+      const cacheKey = `buy-in-sites:v7-proof:${sourceKey}:${checkIn || "nodate"}:${checkOut || "nodate"}:${verifyAvailabilityRequested ? "verify" : "lens"}:${strictDirectMinPhotoMatches}`;
       evictExpiredBuyInListingSites();
       const cached = buyInListingSitesCache.get(cacheKey);
       if (useCache && cached && cached.expiresAt > Date.now()) {
@@ -14869,8 +14874,6 @@ export async function registerRoutes(
       }
 
       const sourceDomain = domainFromUrl(sourceUrl);
-      const strictDirectMinPhotoMatches = 5;
-      const strictDirectMinConfidence = 0.95;
       const evidenceBySurface = new Map<string, {
         firstMatch: ReverseImageListingMatch;
         photos: BuyInListingPhotoAudit[];
@@ -15055,6 +15058,8 @@ export async function registerRoutes(
         buyInId: 0,
         sourceUrl,
         sourceLabel: "Airbnb",
+        minPhotoMatches: strictDirectMinPhotoMatches,
+        minConfidence: strictDirectMinConfidence,
         photos: auditedPhotos,
         matches: matches.slice(0, 25),
         rawCount,
@@ -15081,9 +15086,10 @@ export async function registerRoutes(
     }
   });
 
-  // Probe strict Google Lens direct-booking matches for alternative-scout Airbnb samples
-  // before the sidecar queue starts. Reuses direct-booking-sites thresholds (5+ interior
-  // photos at >=95% confidence, PM/direct domains only).
+  // Probe Google Lens direct-booking matches for alternative-scout Airbnb samples
+  // before the sidecar queue starts. Alternative scout is review/discovery UI, so
+  // it asks direct-booking-sites for 3+ interior/private photo matches at >=95%
+  // confidence while the normal buy-in direct-link scan keeps its stricter 5+ default.
   app.post("/api/operations/alternative-scout-direct-probes", async (req: Request, res: Response) => {
     const communities: any[] = Array.isArray(req.body?.communities) ? req.body.communities : [];
     if (communities.length === 0) {
@@ -15108,6 +15114,8 @@ export async function registerRoutes(
       }>;
       status: "done" | "error" | "skipped";
       message?: string;
+      minPhotoMatches?: number;
+      minConfidence?: number;
     }> }> = {};
 
     type AlternativeScoutProbeCommunityRow = { community: string; samples: any[] };
@@ -15127,6 +15135,8 @@ export async function registerRoutes(
       maxConfidence: number;
       proof?: DirectBookingProof;
     };
+    const alternativeScoutMinPhotoMatches = 3;
+    const alternativeScoutMinConfidence = 0.95;
     const communityRows: AlternativeScoutProbeCommunityRow[] = communities
       .map((row: any) => ({
         community: String(row?.community ?? "").trim(),
@@ -15163,6 +15173,7 @@ export async function registerRoutes(
               anchorTotalPrice: sample.totalPrice,
               anchorNightlyPrice: sample.nightlyPrice,
               verifyAvailability: Boolean(checkIn && checkOut),
+              minPhotoMatches: alternativeScoutMinPhotoMatches,
             }),
             signal: AbortSignal.timeout(180_000),
           });
@@ -15175,6 +15186,8 @@ export async function registerRoutes(
               directMatches: [],
               status: "error" as const,
               message: body?.error ? String(body.error) : `HTTP ${response.status}`,
+              minPhotoMatches: alternativeScoutMinPhotoMatches,
+              minConfidence: alternativeScoutMinConfidence,
             };
           }
           const directMatches: AlternativeScoutProbeDirectMatch[] = (Array.isArray(body?.matches) ? body.matches : [])
@@ -15196,6 +15209,8 @@ export async function registerRoutes(
             directMatches,
             status: "done" as const,
             message: body?.message ? String(body.message) : undefined,
+            minPhotoMatches: Number(body?.minPhotoMatches ?? alternativeScoutMinPhotoMatches) || alternativeScoutMinPhotoMatches,
+            minConfidence: Number(body?.minConfidence ?? alternativeScoutMinConfidence) || alternativeScoutMinConfidence,
           };
         } catch (err: any) {
           return {
@@ -15205,6 +15220,8 @@ export async function registerRoutes(
             directMatches: [],
             status: "error" as const,
             message: err?.message ?? String(err),
+            minPhotoMatches: alternativeScoutMinPhotoMatches,
+            minConfidence: alternativeScoutMinConfidence,
           };
         }
       });
