@@ -103,6 +103,7 @@ import {
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
   fetchAmortizedNightlyByBR,
+  filterTopScanSixBedroomComboCandidates,
   hasSixBedroomComboPotential,
   hasSevenEightBedroomComboPotential,
   medianRate,
@@ -36204,12 +36205,13 @@ Return ONLY compact JSON with this exact shape:
             researchCommunitiesForCity(market.city, market.state),
             `${market.city}, ${market.state} research`,
           );
-          const communities = job.cacheRefresh
+          const annotatedCommunities = job.cacheRefresh
             ? researched
             : await withTopMarketScanTimeout(
               annotateCommunitiesWithComboInventory(researched, market.city, market.state),
               `${market.city}, ${market.state} combo inventory`,
             );
+          const communities = filterTopScanSixBedroomComboCandidates(annotatedCommunities as any[]);
           market.sixBedroomPossible = communities.some(hasSixBedroomComboPotential);
           market.sevenEightBedroomPossible = communities.some(hasSevenEightBedroomComboPotential);
           market.status = "done";
@@ -36346,11 +36348,12 @@ Return ONLY compact JSON with this exact shape:
       };
       emit({ type: "market-start", city, state, tag, estimatedComboLow, estimatedComboHigh, index: i + 1, total: markets.length });
       try {
-        const communities = await annotateCommunitiesWithComboInventory(
+        const annotatedCommunities = await annotateCommunitiesWithComboInventory(
           await researchCommunitiesForCity(city, state),
           city,
           state,
         );
+        const communities = filterTopScanSixBedroomComboCandidates(annotatedCommunities as any[]);
         totalCommunities += communities.length;
         for (const c of communities) {
           const score = c.confidenceScore + (c.combinabilityScore ?? 50);

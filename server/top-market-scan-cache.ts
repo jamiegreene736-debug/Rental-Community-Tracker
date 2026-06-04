@@ -2,12 +2,13 @@ import { topMarketScanCache as topMarketScanCacheRows } from "@shared/schema";
 import {
   hasSevenEightBedroomComboPotential,
   hasSixBedroomComboPotential,
+  filterTopScanSixBedroomComboCandidates,
 } from "./community-research";
 import { db } from "./db";
 import { eq } from "drizzle-orm";
 
 /** Bump when combo-badge logic changes so cached market flags are recomputed. */
-export const TOP_MARKET_SCAN_CACHE_LOGIC_VERSION = 3;
+export const TOP_MARKET_SCAN_CACHE_LOGIC_VERSION = 4;
 
 const TOP_MARKET_SCAN_CACHE_VERSION_KEY = "__top_market_scan_cache_logic_version__";
 
@@ -53,7 +54,9 @@ export async function upsertTopMarketScanCache(params: {
 }): Promise<void> {
   const now = new Date();
   const marketKey = topMarketScanCacheKey(params.city, params.state);
-  const communities = Array.isArray(params.communities) ? params.communities : [];
+  const communities = filterTopScanSixBedroomComboCandidates(
+    (Array.isArray(params.communities) ? params.communities : []) as any[],
+  );
   const sixBedroomPossible = communities.some((c) => hasSixBedroomComboPotential(c as any));
   const sevenEightBedroomPossible = communities.some((c) => hasSevenEightBedroomComboPotential(c as any));
   try {
@@ -111,18 +114,23 @@ export async function refreshTopMarketScanCacheComboFlags(): Promise<number> {
     const rows = await db.select().from(topMarketScanCacheRows);
     let updated = 0;
     for (const row of rows) {
-      const communities = Array.isArray(row.communities) ? row.communities : [];
+      const communities = filterTopScanSixBedroomComboCandidates(
+        (Array.isArray(row.communities) ? row.communities : []) as any[],
+      );
       const sixBedroomPossible = communities.some((c) => hasSixBedroomComboPotential(c as any));
       const sevenEightBedroomPossible = communities.some((c) => hasSevenEightBedroomComboPotential(c as any));
       if (
         row.sixBedroomPossible === sixBedroomPossible &&
-        row.sevenEightBedroomPossible === sevenEightBedroomPossible
+        row.sevenEightBedroomPossible === sevenEightBedroomPossible &&
+        row.qualifyingCount === communities.length
       ) {
         continue;
       }
       await db.update(topMarketScanCacheRows).set({
         sixBedroomPossible,
         sevenEightBedroomPossible,
+        qualifyingCount: communities.length,
+        communities,
         updatedAt: new Date(),
       }).where(eq(topMarketScanCacheRows.marketKey, row.marketKey));
       updated += 1;

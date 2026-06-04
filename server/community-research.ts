@@ -1079,6 +1079,19 @@ export function hasSixBedroomComboPotential(
   return hasBedroomPairComboPotential(community, [[3, 3]]);
 }
 
+export function isTopScanSixBedroomComboCandidate(
+  community: Pick<ResearchedCommunity, "unitTypes" | "researchSummary" | "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">,
+): boolean {
+  const typeCheck = checkCommunityType(community.unitTypes, community.researchSummary);
+  return typeCheck.eligible && hasSixBedroomComboPotential(community);
+}
+
+export function filterTopScanSixBedroomComboCandidates<T extends Pick<ResearchedCommunity, "unitTypes" | "researchSummary" | "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">>(
+  communities: T[],
+): T[] {
+  return communities.filter(isTopScanSixBedroomComboCandidate);
+}
+
 export function hasSevenEightBedroomComboPotential(
   community: Pick<ResearchedCommunity, "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">,
 ): boolean {
