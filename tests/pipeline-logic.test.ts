@@ -3163,8 +3163,10 @@ assert.ok(
 assert.ok(
   vrboWorkerSource.includes("starting resort list harvest") &&
     vrboWorkerSource.includes("harvestVrboMapResultCards") &&
+    vrboWorkerSource.includes("dropdown export merged") &&
+    vrboWorkerSource.includes("createVrboGraphqlCollector") &&
     routesSource.includes("resort destination dropdown, dates, and bedroom export"),
-  "VRBO resort dropdown search should scroll-harvest all visible cards and surface dropdown export proof text",
+  "VRBO resort dropdown search should merge GraphQL propertySearchListings with scroll-harvested DOM cards for full export",
 );
 assert.ok(
   vrboWorkerSource.includes("finalHarvestTotal") &&

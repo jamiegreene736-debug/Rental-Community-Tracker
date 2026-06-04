@@ -6218,11 +6218,21 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
             target.scrollTop = before + step;
             target.dispatchEvent?.(new Event("scroll", { bubbles: true }));
             after = target.scrollTop || 0;
+          } else {
+            const winBefore = window.scrollY || 0;
+            window.scrollBy({ top: Math.round((window.innerHeight || 640) * 0.85), left: 0, behavior: "instant" });
+            before = winBefore;
+            after = window.scrollY || 0;
+          }
+          const loadMore = Array.from(document.querySelectorAll("button, a, [role='button']"))
+            .find((el) => el instanceof HTMLElement && /(?:show|see|view|load)\s+(?:\d+\s+)?more|more\s+results|more\s+properties/i.test((el.textContent || "").replace(/\s+/g, " ")));
+          if (loadMore) {
+            try { loadMore.click(); } catch {}
           }
           return {
             pass: passNumber,
             scrollTargets: scrollCandidates.length,
-            scrolledResultsList: Boolean(target),
+            scrolledResultsList: Boolean(target) || after > before,
             visibleCards: document.querySelectorAll('[data-stid="lodging-card-responsive"]').length,
             propertyLinks: Array.from(document.querySelectorAll('a[href]')).filter((a) => /^\/\d+/.test(a.getAttribute("href") || "")).length,
             harvestedCurrent: currentRows.length,
@@ -6254,7 +6264,7 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
     if (harvestedTotal <= lastHarvestTotal) plateauPasses += 1;
     else plateauPasses = 0;
     lastHarvestTotal = harvestedTotal;
-    if (pass >= 4 && plateauPasses >= 3) {
+    if (pass >= 6 && plateauPasses >= 3 && lastHarvestTotal >= 30) {
       log(`vrbo_search ${id}: map harvest plateau at ${harvestedTotal} cards; stopping early after pass ${pass + 1}/${passes}`);
       break;
     }
@@ -6370,6 +6380,16 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     `${checkIn}→${checkOut} ${bedrooms}BR${visibleAttempt ? ` retry=${visibleAttempt}` : ""}`,
   );
   await ensureBrowser();
+  const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
+  const maxGraphqlRows = Math.max(
+    300,
+    Math.min(
+      600,
+      Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_GRAPHQL_MAX_ROWS ?? process.env.SIDECAR_VRBO_GRAPHQL_MAX_ROWS ?? "500"), 10) || 500,
+    ),
+  );
+  const networkCapture = createVrboGraphqlCollector(page, id, expectedNights, effectiveSearchTerm, maxGraphqlRows);
+  try {
   await surfaceVisibleOtaSearchWindow(page, "vrbo_search", id);
   await clearOtaClientSearchState(
     "https://www.vrbo.com",
@@ -6574,11 +6594,6 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   // downstream minimum-bedroom guard remains the authoritative
   // protection against mismatched 1BR/2BR rows.
 
-  // Compute expected nights from the requested window — we always
-  // ask for 7-night (multichannel scanner) but compute robustly so
-  // future callers can ask for different windows.
-  const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
-
   // Scroll the results list so long resort searches (100+ cards) are
   // harvested before extraction. Bedroom/resort filtering happens on
   // the server after the full export returns.
@@ -6596,7 +6611,19 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     `total=${listHarvestStats.finalHarvestTotal} visible=${listHarvestStats.lastVisibleCards}`,
   );
   const domExtract = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm, { minBedrooms: 1 });
-  return (domExtract.cards ?? []).map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
+  const networkCards = networkCapture.candidates();
+  const domCards = domExtract.cards ?? [];
+  const mergedCards = dedupeCandidatesByUrl([...networkCards, ...domCards]);
+  const graphqlStats = networkCapture.stats();
+  log(
+    `vrbo_search ${id}: dropdown export merged ${mergedCards.length} candidates ` +
+    `(network=${networkCards.length}, dom=${domCards.length}, harvestTotal=${listHarvestStats.finalHarvestTotal}, ` +
+    `graphqlResponses=${graphqlStats.matchedResponses}/${graphqlStats.responsesSeen})`,
+  );
+  return mergedCards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
+  } finally {
+    networkCapture.dispose();
+  }
 }
 
 // ─────────────────────── VRBO listing photo scrape ─────────────────
