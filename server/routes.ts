@@ -11050,12 +11050,16 @@ export async function registerRoutes(
       if (!unitConfig || unitConfig.units.length < 2) {
         return res.status(400).json({ error: "Property needs at least two configured unit slots for city combo inventory" });
       }
+      const filterPhrase = typeof req.query.phrase === "string" ? req.query.phrase.trim() : "";
+      const skipCache = req.query.nocache === "1";
       const { runCityVrboInventoryScan } = await import("./city-vrbo-inventory");
       const payload = await runCityVrboInventoryScan({
         community: unitConfig.community,
         checkIn,
         checkOut,
         bedroomPlan: unitConfig.units.map((unit) => unit.bedrooms),
+        filterPhrase: filterPhrase || undefined,
+        skipCache,
       });
       return res.json({
         propertyId,

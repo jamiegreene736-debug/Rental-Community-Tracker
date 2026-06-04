@@ -1369,6 +1369,18 @@ type CityVrboInventoryResponse = {
     rawCount: number;
     mapHarvest: Record<string, unknown> | null;
   };
+  filterPipeline?: {
+    rawSidecar: number;
+    droppedNoPrice: number;
+    droppedBelowMinBedrooms: number;
+    afterNormalize: number;
+    phraseFilter: string | null;
+    afterPhraseFilter: number;
+    byBedroom: Record<number, number>;
+    phraseBuckets: number;
+    suggestedPair: boolean;
+  };
+  fromCache?: boolean;
 };
 
 function liveCandidateFromCityComboPick(
@@ -1494,8 +1506,15 @@ function CityVrboInventoryPanel({
       {data && (
         <>
           <p className="mt-1 text-[10px] text-muted-foreground">
-            Term: {data.citySearchTerm} · {data.listings.length} listing{data.listings.length === 1 ? "" : "s"} scraped
-            {data.sidecar.rawCount ? ` (raw ${data.sidecar.rawCount})` : ""}
+            Term: {data.citySearchTerm}
+            {data.fromCache ? " · cached pool" : ""}
+            {data.filterPipeline
+              ? ` · ${data.filterPipeline.rawSidecar} raw → ${data.filterPipeline.afterNormalize} normalized` +
+                (data.filterPipeline.phraseFilter
+                  ? ` → ${data.filterPipeline.afterPhraseFilter} phrase`
+                  : "") +
+                ` · ${data.listings.length} in view`
+              : ` · ${data.listings.length} listing${data.listings.length === 1 ? "" : "s"} scraped`}
             {harvest && typeof harvest.mergedCount === "number" ? ` · merged ${harvest.mergedCount}` : ""}
           </p>
           {comboOption && (

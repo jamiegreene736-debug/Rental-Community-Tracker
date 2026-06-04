@@ -43,6 +43,7 @@ import { unitVerificationClaims } from "../shared/folder-unit-map";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
 import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
 import {
+  filterCityVrboListingsByPhrase,
   sharedResortPhraseKeys,
   suggestCityVrboComboPair,
   type CityVrboListing,
@@ -3427,6 +3428,11 @@ assert.ok(
 const kamaliiPair = suggestCityVrboComboPair([kamalii3, kamalii2], [3, 2], 6);
 assert.ok(kamaliiPair && kamaliiPair.picks.length === 2, "city VRBO combo matcher should pair 3BR+2BR with shared title");
 assert.equal(kamaliiPair?.resortPhrase.includes("kamalii"), true);
+assert.equal(
+  filterCityVrboListingsByPhrase([kamalii3, kamalii2, { url: "https://www.vrbo.com/9", title: "Random Princeville condo", bedrooms: 3, totalPrice: 5000 }], "Kamalii").length,
+  2,
+  "phrase filter should narrow the in-memory pool before pairing",
+);
 assert.ok(
   routesSource.includes("/api/operations/city-vrbo-inventory") &&
     routesSource.includes("runCityVrboInventoryScan"),
@@ -3436,6 +3442,12 @@ const cityInventorySource = readFileSync("server/city-vrbo-inventory.ts", "utf8"
 assert.ok(
   cityInventorySource.includes("cityWideInventory: true"),
   "city VRBO inventory should use a single city search term without resort name variations",
+);
+assert.ok(
+  cityInventorySource.includes("cityVrboScrapeCache") &&
+    cityInventorySource.includes("filterPipeline") &&
+    cityInventorySource.includes("logFilterPipeline"),
+  "city VRBO inventory should cache the full scrape pool and log per-stage filter counts",
 );
 assert.ok(
   bookingsSource.includes("city-vrbo-inventory") &&

@@ -1,3 +1,4 @@
+import { textMatchesResortPhrase } from "./buy-in-market";
 import { haversineFeet, MAX_BUY_IN_WALK_MINUTES, walkMinutesFromFeet } from "./walking-distance";
 
 export type CityVrboListing = {
@@ -144,6 +145,24 @@ export function suggestCityVrboComboPair(
     }
   }
   return best;
+}
+
+/** Optional operator phrase (e.g. Kamalii) applied to the in-memory scrape pool before pairing. */
+export function filterCityVrboListingsByPhrase(listings: CityVrboListing[], phrase: string): CityVrboListing[] {
+  const trimmed = String(phrase ?? "").trim();
+  if (!trimmed) return listings;
+  return listings.filter((listing) =>
+    textMatchesResortPhrase(`${listing.title ?? ""} ${listing.sourceLabel ?? ""}`, trimmed),
+  );
+}
+
+export function countCityVrboPhraseBuckets(listings: CityVrboListing[]): number {
+  const keys = new Set<string>();
+  for (const listing of listings) {
+    const phraseKey = sharedResortPhraseKeys(listing)[0];
+    if (phraseKey) keys.add(phraseKey);
+  }
+  return keys.size;
 }
 
 export function groupCityVrboByBedroom(listings: CityVrboListing[]): Map<number, CityVrboListing[]> {
