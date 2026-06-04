@@ -384,6 +384,11 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /const \[\s*apifyCounts,\s*zillowSearchApiAdded,\s*rentcastCounts,\s*,\s*realtyApiCounts,\s*\] = await Promise\.all\(\[\s*runApifyDiscovery\(\),\s*runZillowSearchApiDiscovery\(\),\s*runRentCastDiscovery\(\),\s*runSupplementalSearchApiDiscovery\(\),\s*runRealtyApiDiscovery\(\),\s*\]\)/,
+  "fetch-unit-photos must not read RealtyAPI counts from the void supplemental SearchAPI promise",
+);
+assert.match(
+  routesSource,
   /harvestRentCastSaleListings[\s\S]*resolveRentCastCandidatesToPortalUrls/,
   "fetch-unit-photos must resolve RentCast addresses to portal URLs before scrape",
 );

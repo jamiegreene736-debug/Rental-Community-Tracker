@@ -31021,7 +31021,13 @@ Return ONLY compact JSON with this exact shape:
         });
       };
 
-      const [apifyCounts, zillowSearchApiAdded, rentcastCounts, realtyApiCounts] = await Promise.all([
+      const [
+        apifyCounts,
+        zillowSearchApiAdded,
+        rentcastCounts,
+        ,
+        realtyApiCounts,
+      ] = await Promise.all([
         runApifyDiscovery(),
         runZillowSearchApiDiscovery(),
         runRentCastDiscovery(),
