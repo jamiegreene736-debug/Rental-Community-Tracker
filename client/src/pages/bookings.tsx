@@ -1078,6 +1078,35 @@ function isGenericRentalTitle(title: string): boolean {
   return false;
 }
 
+function sharedResortPhraseKeys(candidate: Pick<LiveCandidate, "title" | "sourceLabel">): string[] {
+  const text = normalizedIdentityText([candidate.title, candidate.sourceLabel].filter(Boolean).join(" "));
+  if (!text) return [];
+
+  const keys = new Set<string>();
+  const patterns = [
+    /\b(villas? of [a-z0-9 ]{3,40}?)(?:\s+\d{1,4}|\s+(?:condo|townhome|townhouse|villa|unit|kauai|princeville|hawaii)\b|$)/g,
+    /\b([a-z0-9 ]{3,40}? villas?)(?:\s+\d{1,4}|\s+(?:condo|townhome|townhouse|villa|unit|kauai|princeville|hawaii)\b|$)/g,
+    /\b([a-z0-9 ]{3,40}? resort)(?:\s+\d{1,4}|\s+(?:condo|townhome|townhouse|villa|unit|kauai|princeville|hawaii)\b|$)/g,
+    /\b([a-z0-9 ]{3,40}? plantation)(?:\s+\d{1,4}|\s+(?:condo|townhome|townhouse|villa|unit|kauai|princeville|hawaii)\b|$)/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const key = normalizedIdentityText(match[1]);
+      if (key.length >= 10 && !isGenericRentalTitle(key)) keys.add(key);
+    }
+  }
+  return Array.from(keys);
+}
+
+function candidatesShareStrongResortPhrase(
+  a: Pick<LiveCandidate, "title" | "sourceLabel">,
+  b: Pick<LiveCandidate, "title" | "sourceLabel">,
+): boolean {
+  const aKeys = new Set(sharedResortPhraseKeys(a));
+  if (aKeys.size === 0) return false;
+  return sharedResortPhraseKeys(b).some((key) => aKeys.has(key));
+}
+
 function titleFromBuyInNotes(notes: string | null | undefined): string {
   const raw = String(notes ?? "");
   const firstClause = raw.split(" · ")[0] ?? raw;
@@ -1208,12 +1237,16 @@ function alternativePicksAreWalkable(picks: Array<Pick<LiveCandidate, "lat" | "l
 }
 
 function candidateIsWalkableWithExistingPicks(
-  candidate: Pick<LiveCandidate, "lat" | "lng">,
-  picks: Array<Pick<LiveCandidate, "lat" | "lng">>,
+  candidate: Pick<LiveCandidate, "lat" | "lng" | "title" | "sourceLabel">,
+  picks: Array<Pick<LiveCandidate, "lat" | "lng" | "title" | "sourceLabel">>,
 ): boolean {
   for (const pick of picks) {
     const minutes = candidateWalkMinutes(candidate, pick);
-    if (minutes === null || minutes > MAX_BUY_IN_WALK_MINUTES) return false;
+    if (minutes !== null) {
+      if (minutes > MAX_BUY_IN_WALK_MINUTES) return false;
+      continue;
+    }
+    if (!candidatesShareStrongResortPhrase(candidate, pick)) return false;
   }
   return true;
 }
@@ -1240,7 +1273,6 @@ function bestWalkableAlternativePicks(
   ) => {
     if (cost >= bestCost) return;
     if (depth >= pools.length) {
-      if (!alternativePicksAreWalkable(picks)) return;
       bestPicks = picks;
       bestCost = cost;
       return;

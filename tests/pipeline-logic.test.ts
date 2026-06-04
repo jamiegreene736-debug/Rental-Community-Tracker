@@ -3126,8 +3126,10 @@ assert.ok(
     bookingsSource.includes("candidateWalkMinutes") &&
     bookingsSource.includes("bestWalkableAlternativePicks") &&
     bookingsSource.includes("candidateIsWalkableWithExistingPicks") &&
+    bookingsSource.includes("candidatesShareStrongResortPhrase") &&
+    bookingsSource.includes("sharedResortPhraseKeys") &&
     bookingsSource.includes("slice(0, 40)"),
-  "alternative replacement sets should search candidate combinations and require coordinate-proven walking proximity instead of rejecting a city after one distant cheapest pair",
+  "alternative replacement sets should search candidate combinations and require coordinate-proven walking proximity or a strong shared resort-title fallback instead of rejecting a city after one distant cheapest pair",
 );
 assert.ok(
   bookingsSource.includes("tooFarForBuyInPair") &&
