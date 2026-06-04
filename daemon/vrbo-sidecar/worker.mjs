@@ -2984,18 +2984,21 @@ async function pageLooksLikeVrboHumanChallenge(targetPage = page) {
 }
 
 /**
- * Hard runtime guard: VRBO buy-in / search flows must NEVER use direct
- * constructed search URLs. Those entry vectors trigger aggressive bot
- * detection + slider CAPTCHA that often remains blocking even after
- * manual solve. All VRBO interaction must start from bare homepage +
- * visible typing + visible clicks only ("100% sight and clicking").
+ * Hard runtime guard: legacy VRBO destination-dropdown flows must not use
+ * constructed search URLs. Map-bounds buy-in searches are the explicit
+ * exception: the server supplies resort bounds and the worker immediately
+ * switches to map/search-area behavior instead of trusting autocomplete.
  */
-function assertSafeVrboNavigation(targetUrl, label = "vrbo", id = "") {
+function assertSafeVrboNavigation(targetUrl, label = "vrbo", id = "", options = {}) {
   if (!targetUrl) return;
   const u = String(targetUrl);
   // Bare homepage or root is always allowed (the only permitted page.goto for VRBO form flows)
   const isBareHome = /^https?:\/\/(www\.)?vrbo\.com\/?(?:\?|$|#|$)/i.test(u);
   if (isBareHome) return;
+  const allowMapBoundsSearch = options?.allowMapBoundsSearch === true &&
+    /vrbo\.com\/search/i.test(u) &&
+    /[?&](latLong|mapBounds)=/i.test(u);
+  if (allowMapBoundsSearch) return;
 
   // Any other vrbo.com URL that looks like a pre-constructed search (with destination, dates, q, etc. in query)
   // or deep result path that was reached via automation goto rather than click is forbidden.
@@ -3004,7 +3007,7 @@ function assertSafeVrboNavigation(targetUrl, label = "vrbo", id = "") {
     /[?&](destination|q|checkin|checkout|d1|d2|adults|minBedrooms)=/i.test(u);
 
   if (looksLikeSearchInjection) {
-    const msg = `${label} ${id}: ABORT — direct navigation to VRBO search/injected URL "${u.slice(0, 200)}" is FORBIDDEN. This triggers CAPTCHA that survives manual slider solve. Use only visible homepage form + typing + clicking.`;
+    const msg = `${label} ${id}: ABORT — direct navigation to VRBO search/injected URL "${u.slice(0, 200)}" is FORBIDDEN for dropdown flows. Use map-bounds mode or visible homepage form + typing + clicking.`;
     log(msg);
     throw new Error(msg);
   }
@@ -5376,12 +5379,316 @@ async function processVrboSearch(id, params) {
   const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
   await ensureBrowser();
+  if (params?.searchMode === "map_bounds" || params?.mapSearch?.enabled) {
+    const mapVariant = {
+      typedQuery: effectiveSearchTerm,
+      searchTerm: effectiveSearchTerm,
+      suggestionText: params?.mapSearch?.targetName || effectiveSearchTerm,
+      source: "map-bounds",
+    };
+    const cards = await runVrboMapBoundsSearchVariant(id, params, mapVariant);
+    await postResult(id, {
+      candidates: dedupeCandidatesByUrl(cards),
+      variationsTried: [{
+        term: effectiveSearchTerm,
+        typedQuery: effectiveSearchTerm,
+        suggestionText: mapVariant.suggestionText,
+        source: "map-bounds",
+        success: true,
+        candidateCount: cards.length,
+      }],
+    });
+    return;
+  }
   const variants = await discoverOtaSearchVariants("https://www.vrbo.com/", effectiveSearchTerm, destination, "vrbo_search", id, params);
   const result = await runOtaSearchVariants(id, "vrbo_search", variants, (variant) =>
     runVrboSearchVariant(id, params, variant),
     { stopAfterDuplicateResults: true, maxDuplicateResultRuns: 2 },
   );
   await postResult(id, result);
+}
+
+function numericMapBounds(params) {
+  const b = params?.mapSearch?.bounds;
+  if (!b) return null;
+  const bounds = {
+    sw_lat: Number(b.sw_lat),
+    sw_lng: Number(b.sw_lng),
+    ne_lat: Number(b.ne_lat),
+    ne_lng: Number(b.ne_lng),
+  };
+  return Object.values(bounds).every(Number.isFinite) ? bounds : null;
+}
+
+function vrboMapCenter(params) {
+  const c = params?.mapSearch?.center;
+  const lat = Number(c?.lat);
+  const lng = Number(c?.lng);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  const b = numericMapBounds(params);
+  if (!b) return null;
+  return {
+    lat: (b.sw_lat + b.ne_lat) / 2,
+    lng: (b.sw_lng + b.ne_lng) / 2,
+  };
+}
+
+function buildVrboMapSearchUrl(params, searchTerm) {
+  const { checkIn, checkOut, bedrooms } = params;
+  const url = new URL("https://www.vrbo.com/search");
+  url.searchParams.set("destination", String(searchTerm || params.destination || ""));
+  url.searchParams.set("startDate", checkIn);
+  url.searchParams.set("endDate", checkOut);
+  url.searchParams.set("adults", "2");
+  url.searchParams.set("minBedrooms", String(Math.max(1, Number(bedrooms) || 1)));
+  url.searchParams.set("sort", "PRICE_RELEVANT");
+  const center = vrboMapCenter(params);
+  if (center) {
+    // Vrbo's public URL schema is not formally documented, but current
+    // map URLs commonly preserve a latLong hint. The visible map/search
+    // area controls below remain authoritative if Vrbo ignores this hint.
+    url.searchParams.set("latLong", `${center.lat.toFixed(6)},${center.lng.toFixed(6)}`);
+  }
+  const b = numericMapBounds(params);
+  if (b) {
+    url.searchParams.set("mapBounds", [b.sw_lat, b.sw_lng, b.ne_lat, b.ne_lng].map((n) => n.toFixed(6)).join(","));
+  }
+  return url.toString();
+}
+
+async function clickVrboMapControl(targetPage, label, id) {
+  const result = await targetPage.evaluate(() => {
+    function visible(el) {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 1 && rect.height > 1 && style.visibility !== "hidden" && style.display !== "none";
+    }
+    const controls = Array.from(document.querySelectorAll("button, a[role='button'], a[href]"))
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: (el.textContent || "").replace(/\s+/g, " ").trim(),
+        aria: el.getAttribute("aria-label") || "",
+        href: el.getAttribute("href") || "",
+      }));
+    const mapButton = controls.find((c) => /\b(view\s+)?map(\s+view)?\b|show\s+map|view\s+in\s+map/i.test(`${c.text} ${c.aria}`));
+    if (mapButton) {
+      mapButton.el.scrollIntoView({ block: "center", inline: "center" });
+      mapButton.el.click();
+      return { clicked: true, label: `${mapButton.text} ${mapButton.aria}`.trim().slice(0, 80) };
+    }
+    return { clicked: false };
+  }).catch((e) => ({ clicked: false, error: e?.message ?? String(e) }));
+  if (result.clicked) {
+    log(`${label} ${id}: opened VRBO map view via "${result.label}"`);
+    await boundedPageDelay(targetPage, 1_500);
+    await dismissObstructions(targetPage, `${label}_map`).catch(() => []);
+  }
+  return result.clicked;
+}
+
+async function clickVrboSearchThisArea(targetPage, label, id) {
+  const result = await targetPage.evaluate(() => {
+    function visible(el) {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 1 && rect.height > 1 && style.visibility !== "hidden" && style.display !== "none";
+    }
+    const buttons = Array.from(document.querySelectorAll("button, a[role='button']"))
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: (el.textContent || "").replace(/\s+/g, " ").trim(),
+        aria: el.getAttribute("aria-label") || "",
+      }));
+    const searchArea = buttons.find((b) => /\bsearch\s+(this\s+)?area\b|redo\s+search\s+in\s+map|update\s+results/i.test(`${b.text} ${b.aria}`));
+    if (searchArea) {
+      searchArea.el.scrollIntoView({ block: "center", inline: "center" });
+      searchArea.el.click();
+      return { clicked: true, label: `${searchArea.text} ${searchArea.aria}`.trim().slice(0, 80) };
+    }
+    return { clicked: false };
+  }).catch((e) => ({ clicked: false, error: e?.message ?? String(e) }));
+  if (result.clicked) {
+    log(`${label} ${id}: clicked VRBO map area search "${result.label}"`);
+    await boundedPageDelay(targetPage, 2_000);
+  }
+  return result.clicked;
+}
+
+async function extractVisibleVrboCards(id, params, expectedNights, variantLabel) {
+  const result = await page.evaluate((args) => {
+    const { expectedNights } = args;
+
+    let cardEls = Array.from(document.querySelectorAll('[data-stid="lodging-card-responsive"]'));
+    let selectorSource = "data-stid";
+    if (cardEls.length === 0) {
+      const propertyAnchors = Array.from(document.querySelectorAll('a[href]'))
+        .filter((a) => /^\/\d+/.test(a.getAttribute("href") || ""));
+      const cardSet = new Set();
+      for (const a of propertyAnchors) {
+        let el = a;
+        for (let depth = 0; depth < 6 && el && el.parentElement; depth++) {
+          el = el.parentElement;
+          if (el.querySelector("h3")) {
+            cardSet.add(el);
+            break;
+          }
+        }
+      }
+      cardEls = Array.from(cardSet);
+      selectorSource = "anchor-fallback";
+    }
+    const out = [];
+    const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0 };
+    let firstCardSample = null;
+    for (const card of cardEls) {
+      const titleEl = card.querySelector("h3");
+      const title = titleEl ? titleEl.textContent.trim().replace(/^Photo gallery for\s*/i, "") : "";
+      const fullText = (card.textContent || "").replace(/\s+/g, " ");
+      const bdMatch = fullText.match(/(\d+)\s*bedrooms?/i);
+      const link = card.querySelector("a[href]");
+      const propertyPath = ((link?.getAttribute("href") || "")).replace(/^https?:\/\/[^\/]+/, "").split("?")[0];
+      const bedroomsExtracted = bdMatch ? parseInt(bdMatch[1], 10) : null;
+
+      if (firstCardSample === null) {
+        firstCardSample = {
+          title: title.slice(0, 80),
+          textExcerpt: fullText.slice(0, 240),
+          propertyPath: propertyPath.slice(0, 80),
+          bedroomsExtracted,
+        };
+      }
+
+      if (!/^\/\d+/.test(propertyPath)) { drops.noUrl++; continue; }
+      if (bedroomsExtracted === null) { drops.noBedrooms++; continue; }
+
+      let totalPrice = 0;
+      let totalNights = 0;
+      let priceIncludesTaxes = false;
+      let priceIncludesFees = true;
+      let priceBasis = "pre_tax_total";
+
+      const totalMatch = fullText.match(/\$\s*([\d,]+)\s*total\s*(?:includes\s*taxes)?/i);
+      if (totalMatch) {
+        totalPrice = parseInt(totalMatch[1].replace(/,/g, ""), 10);
+        totalNights = expectedNights;
+        priceIncludesTaxes = /total\s*includes\s*taxes/i.test(fullText);
+        priceIncludesFees = true;
+        priceBasis = priceIncludesTaxes ? "all_in" : "pre_tax_total";
+      } else {
+        const m = fullText.match(/\$\s*([\d,]+)\s*for\s*(\d+)\s*nights/i);
+        if (m) {
+          totalPrice = parseInt(m[1].replace(/,/g, ""), 10);
+          totalNights = parseInt(m[2], 10);
+          priceIncludesTaxes = false;
+          priceIncludesFees = true;
+          priceBasis = "pre_tax_total";
+        }
+      }
+      if (!(totalPrice > 0) || !(totalNights > 0)) {
+        drops.noPrice++;
+        out.push({
+          url: "https://www.vrbo.com" + propertyPath,
+          title: title.slice(0, 80),
+          totalPrice: 0,
+          nightlyPrice: 0,
+          bedrooms: bedroomsExtracted,
+          priceIncludesTaxes: false,
+          priceIncludesFees: false,
+          priceBasis: "unknown",
+          availabilityOnly: true,
+        });
+        continue;
+      }
+
+      out.push({
+        url: "https://www.vrbo.com" + propertyPath,
+        title: title.slice(0, 80),
+        totalPrice,
+        nightlyPrice: Math.round(totalPrice / totalNights),
+        bedrooms: bedroomsExtracted,
+        priceIncludesTaxes,
+        priceIncludesFees,
+        priceBasis,
+      });
+    }
+    return { out, drops, totalSeen: cardEls.length, selectorSource, firstCardSample };
+  }, { expectedNights });
+
+  const cards = result.out;
+  const allInCount = cards.filter((c) => c.priceIncludesTaxes).length;
+  const brList = cards.map((c) => c.bedrooms ?? "?").join(",");
+  log(
+    `vrbo_search ${id}: ${cards.length} cards (${allInCount} all-in / ${cards.length - allInCount} pre-tax) ` +
+    `[selector=${result.totalSeen}/${result.selectorSource}, drops=noUrl:${result.drops.noUrl}/noPrice:${result.drops.noPrice}/noBR:${result.drops.noBedrooms}, BRs=[${brList}]]`,
+  );
+  if (cards.length === 0 && result.firstCardSample) {
+    log(`vrbo_search ${id}: empty-result diagnostic — first card title="${result.firstCardSample.title}" path="${result.firstCardSample.propertyPath}" br=${result.firstCardSample.bedroomsExtracted} text="${result.firstCardSample.textExcerpt}"`);
+  }
+  if (cards.length > 0) {
+    const byBR = new Map();
+    for (const c of cards) {
+      const k = c.bedrooms ?? "?";
+      const bucket = byBR.get(k) ?? [];
+      bucket.push(c.nightlyPrice);
+      byBR.set(k, bucket);
+    }
+    const summary = Array.from(byBR.entries())
+      .sort((a, b) => (typeof a[0] === "number" ? a[0] : 99) - (typeof b[0] === "number" ? b[0] : 99))
+      .map(([br, prices]) => {
+        const min = Math.min(...prices);
+        const max = Math.max(...prices);
+        return `${br}BR n=${prices.length} $${min}-$${max}`;
+      })
+      .join(", ");
+    log(`vrbo_search ${id}: by-BR: ${summary}`);
+  }
+  return cards.map((card) => ({ ...card, searchVariant: variantLabel }));
+}
+
+async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
+  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
+  const bounds = numericMapBounds(params);
+  const center = vrboMapCenter(params);
+  log(
+    `vrbo_search ${id}: map-bounds searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
+    `${checkIn}→${checkOut} ${bedrooms}BR` +
+    (center ? ` center=${center.lat.toFixed(6)},${center.lng.toFixed(6)}` : "") +
+    (bounds ? ` bounds=${bounds.sw_lat.toFixed(5)},${bounds.sw_lng.toFixed(5)},${bounds.ne_lat.toFixed(5)},${bounds.ne_lng.toFixed(5)}` : ""),
+  );
+  await ensureBrowser();
+  await surfaceVisibleOtaSearchWindow(page, "vrbo_search", id);
+  await clearOtaClientSearchState("https://www.vrbo.com", `vrbo_search ${id} map-bounds preflight`);
+  const url = buildVrboMapSearchUrl(params, effectiveSearchTerm);
+  assertSafeVrboNavigation(url, "vrbo_search_map", id, { allowMapBoundsSearch: true });
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  await boundedPageDelay(page, PAGE_SETTLE_MS);
+  await stopVrboProviderIfBlocked(page, "vrbo_search", id);
+  await dismissObstructions(page, "vrbo_search_map");
+  await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
+  await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
+  let state = await dumpPageState("vrbo-map", { id, ...params });
+  throwIfBrightDataKycBlock(state, "vrbo_search", id);
+  if (await stopVrboProviderIfBlocked(page, "vrbo_search", id, state)) {
+    state = await dumpPageState("vrbo-map-after-manual-solve", { id, ...params });
+  }
+  throwIfVrboHardBlock(state, "vrbo_search", id);
+  if (stateLooksLikeVrboHumanChallenge(state)) {
+    throw new VrboHardBlockError("VRBO human-verification page remained visible; provider run stopped and retry is rate-limited until later", {
+      label: "vrbo_search",
+      id,
+      url: state?.url,
+      title: state?.title,
+      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+      retryLater: true,
+    });
+  }
+  const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
+  return extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm);
 }
 
 async function runVrboSearchVariant(id, params, variant = null, visibleAttempt = 0) {

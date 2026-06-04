@@ -1502,11 +1502,10 @@ const BUY_IN_SEARCH_PROVIDER_CONFIG: Array<{
 }> = [
   { key: "airbnb", label: "Airbnb", diagnosticName: /^Airbnb$/i },
   { key: "vrbo", label: "VRBO", diagnosticName: /^Vrbo$/i },
-  { key: "booking", label: "Booking.com", diagnosticName: /^Booking\.com$/i },
   { key: "pm", label: "Direct/Lens", diagnosticName: /Airbnb Lens direct links|Direct/i },
 ];
 
-const BUY_IN_OTA_PROVIDER_KEYS = ["airbnb", "vrbo", "booking"] as const satisfies BuyInSearchProviderKey[];
+const BUY_IN_OTA_PROVIDER_KEYS = ["airbnb", "vrbo"] as const satisfies BuyInSearchProviderKey[];
 
 function metricNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -1977,10 +1976,10 @@ function buyInPoolUnavailableReason(
     0,
   );
   if (verifiedTotal === 0) {
-    return `No verified available ${bedrooms}BR option on Airbnb, VRBO, Booking.com, or direct/Lens`;
+    return `No verified available ${bedrooms}BR option on Airbnb, VRBO, or direct/Lens`;
   }
   if (pricedTotal === 0) {
-    return `No live-priced ${bedrooms}BR option on Airbnb, VRBO, Booking.com, or direct/Lens`;
+    return `No live-priced ${bedrooms}BR option on Airbnb, VRBO, or direct/Lens`;
   }
   return `No unused distinct ${bedrooms}BR option remained after duplicate-unit filtering`;
 }
@@ -2955,7 +2954,7 @@ function SidecarSearchVariationPanel({
     <div className="rounded-md border bg-slate-50/70 p-3 text-xs">
       <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
         <div>
-          <p className="font-semibold text-slate-800">Search dropdown variations</p>
+          <p className="font-semibold text-slate-800">Search variations</p>
           <p className="mt-0.5 text-[11px] text-muted-foreground">
             {loading ? "Loading saved variation policy." : `${status?.communityName || community}${generated.length ? ` · generated ${generated.slice(0, 4).join(", ")}` : ""}`}
           </p>
@@ -2998,7 +2997,7 @@ function SidecarSearchVariationPanel({
                 <span className="truncate text-[10px] text-muted-foreground">
                   {untried.length
                     ? `untried: ${untried.slice(0, 2).join(", ")}${untried.length > 2 ? ` +${untried.length - 2}` : ""}`
-                    : channel?.bestTerm ? `best: ${channel.bestTerm}` : "dropdown policy"}
+                    : channel?.bestTerm ? `best: ${channel.bestTerm}` : "search policy"}
                 </span>
                 <Button
                   type="button"
@@ -3618,7 +3617,7 @@ function ComboComparisonPanel({
                         {pool.candidates.filter(candidateVisibleForTarget).length === 0 ? (
                           <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
                             <p className="font-medium text-amber-900">
-                              {pool.unavailableReason ?? "No verified Airbnb, VRBO, Booking.com, or direct/Lens option in this pool."}
+                              {pool.unavailableReason ?? "No verified Airbnb, VRBO map, or direct/Lens option in this pool."}
                             </p>
                             {(pool.unavailableDetails?.length ?? 0) > 0 && (
                               <ul className="mt-1 list-disc space-y-0.5 pl-4">
@@ -3687,7 +3686,7 @@ function ComboComparisonPanel({
             </div>
           )}
           {!directRunning && directMatches.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground">No full combination could be built using VRBO/Booking.com rows plus Airbnb rows with a direct booking link.</p>
+            <p className="text-[11px] text-muted-foreground">No full combination could be built using VRBO map rows plus Airbnb rows with a direct booking link.</p>
           ) : (
             <div className="space-y-1">
               {bestOptimizedCombo && (
@@ -3813,7 +3812,7 @@ function AutoFillSearchAuditPanel({ audits }: { audits: AutoFillSearchAudit[] })
                     )}
                   </p>
                   <p className="text-[11px] text-muted-foreground">
-                    {audit.counts.scanned} scanned · {audit.counts.priced} priced · {audit.counts.kept} curated · Airbnb {audit.counts.sourceCounts.airbnb}, VRBO {audit.counts.sourceCounts.vrbo}, Booking {audit.counts.sourceCounts.booking}, PM {audit.counts.sourceCounts.pm}
+                    {audit.counts.scanned} scanned · {audit.counts.priced} priced · {audit.counts.kept} curated · Airbnb {audit.counts.sourceCounts.airbnb}, VRBO {audit.counts.sourceCounts.vrbo}, PM {audit.counts.sourceCounts.pm}
                     {audit.counts.groundFloorOnly ? " · ground-floor required" : ""}
                     {audit.counts.targetFiltered > 0
                       ? ` · ${audit.counts.targetFiltered} broad upstream result${audit.counts.targetFiltered === 1 ? "" : "s"} ignored`
@@ -6398,7 +6397,7 @@ export default function Bookings() {
           }),
           { airbnb: 0, vrbo: 0, booking: 0, pm: 0 },
         );
-        const sourceSummary = `Airbnb ${sourceCounts.airbnb}, Vrbo ${sourceCounts.vrbo}, Booking.com ${sourceCounts.booking}, PM ${sourceCounts.pm}`;
+        const sourceSummary = `Airbnb ${sourceCounts.airbnb}, Vrbo ${sourceCounts.vrbo}, PM ${sourceCounts.pm}`;
         const unavailableDetailSummary = searchAudits
           .flatMap((audit) =>
             buyInSearchAvailabilityDetails(audit.counts, audit.diagnostics, audit.bedrooms, {
@@ -7344,7 +7343,7 @@ export default function Bookings() {
         <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Operations</h1>
           <p className="text-xs text-muted-foreground">
-            Bookings · Buy-in tracking · Live sidecar search across Airbnb, VRBO, Booking.com, plus Airbnb Lens direct links
+            Bookings · Buy-in tracking · Live Airbnb search, VRBO map search, plus Airbnb Lens direct links
           </p>
         </div>
         <div className="w-full sm:ml-auto sm:w-auto flex flex-wrap items-center gap-2">
@@ -10095,7 +10094,7 @@ function BuyInListingSitesDialog({
   );
 }
 
-// ─── Live search across Airbnb, Vrbo, Booking.com, plus Airbnb Lens links ───
+// ─── Live search across Airbnb, Vrbo map bounds, plus Airbnb Lens links ───
 
 type LiveCandidate = {
   source: "airbnb" | "vrbo" | "booking" | "pm";
@@ -10422,7 +10421,7 @@ function groundFloorRequirementLabel(req?: GroundFloorRequirement | null): strin
 }
 
 // Sidecar status indicator + manual stop/start controls.
-// The buy-in tool delegates Airbnb, VRBO, Booking.com, and PM website
+// The buy-in tool delegates Airbnb, VRBO map, and PM website
 // searches to a polling worker. In production that worker runs on
 // Railway and drives a server Chrome service; local workers are still
 // supported for development. Polls /heartbeat every 5s anywhere
@@ -11454,7 +11453,7 @@ function LiveSearchSection({
               <Globe className="h-4 w-4" /> Live search
             </p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Searches Airbnb, Vrbo, and Booking.com for {slot.bedrooms}BR+ rentals at the resort
+              Searches Airbnb and Vrbo map view for {slot.bedrooms}BR+ rentals at the resort
               covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}.
             </p>
           </div>
@@ -11495,7 +11494,7 @@ function LiveSearchSection({
       <div className="border rounded-lg p-6 text-sm text-muted-foreground space-y-4">
         <div className="text-center">
           <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />
-          Searching Airbnb (for photo matches), Booking.com, Vrbo, and property management companies for the cheapest {slot.bedrooms}BR+ rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
+          Searching Airbnb (for photo matches), Vrbo map view, and property management companies for the cheapest {slot.bedrooms}BR+ rental covering {fmtDate(reservation.checkIn)} → {fmtDate(reservation.checkOut)}…
         </div>
         {variationCommunity && (
           <SidecarSearchVariationPanel
@@ -12017,14 +12016,13 @@ function LiveSearchSection({
       </details>
 
       {/* By-source sections.
-          Airbnb stays as a priced source plus photo bridge. Vrbo and
-          Booking.com are sidecar-priced. Direct rows are photo-discovered
+          Airbnb stays as a priced source plus photo bridge. Vrbo is
+          sidecar-priced from map view. Direct rows are photo-discovered
           PM pages and only become priced when the direct verifier proves
           availability/rate on the PM site itself. */}
       {[
         { key: "airbnb",  label: "Airbnb (sidecar-priced + direct-link Lens)", items: availableAirbnb,  defaultOpen: false },
-        { key: "vrbo",    label: "Vrbo (sidecar-priced)", items: availableVrbo, defaultOpen: false },
-        { key: "booking", label: "Booking.com",   items: availableBooking, defaultOpen: false },
+        { key: "vrbo",    label: "Vrbo (map-priced)", items: availableVrbo, defaultOpen: false },
         { key: "pm",      label: "Direct links from Airbnb photos", items: availablePm, defaultOpen: false },
       ].map((s) => (
         <details key={s.key} open={s.defaultOpen}>

@@ -80,6 +80,14 @@ export type SidecarVrboParams = {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  searchMode?: "destination_dropdown" | "map_bounds";
+  mapSearch?: {
+    enabled: boolean;
+    targetName?: string;
+    bounds?: { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
+    center?: { lat: number; lng: number };
+    radiusKm?: number;
+  };
   searchVariations?: string[];
   variationMode?: SidecarSearchVariationMode;
   queueContext?: SidecarQueueContext;
@@ -1504,7 +1512,16 @@ function makeRequestKey(
       // the same booking. Keeping bedroom count out of the dedupe key
       // reduces repeat VRBO page loads and lowers block/CAPTCHA pressure
       // without bypassing provider controls.
-      return `${opType}|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|all-bedrooms`;
+      const mode = p.searchMode === "map_bounds" ? "map_bounds" : "destination_dropdown";
+      const boundsKey = p.mapSearch?.bounds
+        ? [
+            p.mapSearch.bounds.sw_lat,
+            p.mapSearch.bounds.sw_lng,
+            p.mapSearch.bounds.ne_lat,
+            p.mapSearch.bounds.ne_lng,
+          ].map((n) => Number(n).toFixed(5)).join(",")
+        : "no-bounds";
+      return `${opType}|${mode}|${boundsKey}|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|all-bedrooms`;
     }
     case "vrbo_photo_scrape": {
       const p = params as SidecarVrboPhotoScrapeParams;
@@ -2216,6 +2233,8 @@ export async function searchVrboViaSidecar(opts: {
   checkIn: string;
   checkOut: string;
   bedrooms: number;
+  searchMode?: SidecarVrboParams["searchMode"];
+  mapSearch?: SidecarVrboParams["mapSearch"];
   queueContext?: SidecarQueueContext;
   rerunOnlyUntried?: boolean;
   searchVariations?: string[];
@@ -2263,6 +2282,8 @@ export async function searchVrboViaSidecar(opts: {
         checkIn: opts.checkIn,
         checkOut: opts.checkOut,
         bedrooms: opts.bedrooms,
+        searchMode: opts.searchMode,
+        mapSearch: opts.mapSearch,
         searchVariations: policy.terms,
         queueContext: opts.queueContext,
         variationMode: {

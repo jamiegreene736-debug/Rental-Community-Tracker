@@ -2221,28 +2221,36 @@ assert.ok(
 assert.ok(
   multichannelBuyInSource.indexOf("const searchApiResults = await Promise.all(searchApiOps)") <
     multichannelBuyInSource.indexOf("const [sidecarBrowserResults, pmResults] = await Promise.all"),
-  "multichannel buy-in should finish SearchAPI before VRBO/Booking sidecar enqueue",
+  "multichannel buy-in should finish SearchAPI before browser sidecar enqueue",
 );
 assert.ok(
   routeSource.includes("const [airbnb, googleHotelsRows] = await Promise.all"),
-  "find-buy-in should run SearchAPI Airbnb + Google Hotels before sidecar VRBO/Booking",
+  "find-buy-in should run SearchAPI Airbnb + Google Hotels before sidecar VRBO map search",
 );
 assert.ok(
   routeSource.indexOf("const [airbnb, googleHotelsRows] = await Promise.all") <
     routeSource.indexOf("const [booking, vrbo] = await Promise.all"),
-  "find-buy-in should finish SearchAPI before VRBO/Booking sidecar searches",
+  "find-buy-in should finish SearchAPI before VRBO map sidecar search",
+);
+assert.ok(
+  routeSource.includes('searchMode: "map_bounds"') && routeSource.includes("mapSearch: {"),
+  "find-buy-in should request VRBO sidecar map-bounds search instead of destination dropdown variants",
+);
+assert.ok(
+  routeSource.includes("Booking.com sidecar buy-in search disabled by operator request"),
+  "find-buy-in should not launch Booking.com through the buy-in sidecar",
 );
 assert.ok(
   routeSource.includes("const candidateHasDateSpecificOtaSearchProof = (c: Candidate): boolean =>"),
   "find-buy-in should centralize date-specific OTA search proof for unit-type confidence",
 );
 assert.ok(
-  routeSource.includes("sidecar searched .* with the resort, dates, and bedroom filter and scraped this priced result card"),
-  "Booking/Vrbo sidecar search proof should contribute to unit-type confidence",
+  routeSource.includes("sidecar searched .* with the resort(?: bounds)?, dates, and bedroom filter and scraped this priced result card"),
+  "Vrbo map sidecar search proof should contribute to unit-type confidence",
 );
 assert.ok(
   routeSource.includes("if (candidateHasDateSpecificOtaSearchProof(c)) score += 30"),
-  "Booking/Vrbo sidecar rows should not stall under the 85 confidence threshold after passing target/BR proof",
+  "Vrbo map sidecar rows should not stall under the 85 confidence threshold after passing target/BR proof",
 );
 console.log("  ✓ buy-in SearchAPI phases complete before local-Chrome sidecar phases");
 

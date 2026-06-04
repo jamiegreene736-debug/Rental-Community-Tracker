@@ -10326,9 +10326,11 @@ export async function registerRoutes(
   //     sources: { airbnb: [...], vrbo: [...], booking: [...], pm: [...] },
   //     cheapest: [top 2 cross-source by nightly price]
   //   }
-  // Buy-in search policy, updated 2026-05-23:
-  //   - search only Airbnb, Vrbo, and Booking.com by resort/community name
-  //     through the Chrome sidecar with stay dates and bedroom count applied;
+  // Buy-in search policy, updated 2026-06-04:
+  //   - search Airbnb through SearchAPI and Vrbo through the Chrome sidecar;
+  //   - Vrbo uses a map-bounds search around the target resort/community
+  //     instead of provider autocomplete/dropdown destination variants;
+  //   - Booking.com is intentionally excluded from the sidecar buy-in scan;
   //   - do not use SearchAPI Google SERPs to discover PM websites;
   //   - do not scrape PM/direct websites for rates;
   //   - for Airbnb only, Google Lens may find a direct-booking URL from the
@@ -10943,7 +10945,7 @@ export async function registerRoutes(
 	    // Result-cache fast path. Honors a `?nocache=1` query for the
     // rare case the operator wants a forced refresh (e.g. they know
     // a unit's pricing changed since the last scan).
-    // OTA: Airbnb (SearchAPI) + VRBO/Booking (sidecar). PM scrapers and
+    // OTA: Airbnb (SearchAPI) + VRBO map-bounds sidecar. PM scrapers and
     // Google Hotels supplement are on unless FIND_BUY_IN_PM_ENABLED=0 or
     // ?includePm=0. Direct PM pages found via Lens still inherit Airbnb proof.
     const includePmDefault = process.env.FIND_BUY_IN_PM_ENABLED !== "0";
@@ -10965,7 +10967,7 @@ export async function registerRoutes(
     const otaSearchBedrooms = buyInBedroomFloor;
     const groundFloorOnly = req.query.groundFloorOnly === "1" || req.query.groundFloor === "required";
     const rerunOnlyUntriedVariations = req.query.rerunUntried === "1";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-pm-gh-v1|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-pm-gh-vrbo-map-v1|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     // Result HTTP cache is off by default (FIND_BUY_IN_TTL_MS=0), but in-flight
     // dedup must stay on unless the caller explicitly opts out with nocache=1.
     // Backgrounding the Operations tab closes the browser socket; without
@@ -11068,6 +11070,32 @@ export async function registerRoutes(
     const buyInPlatformSearch = COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS[community] ?? {};
     const vrboDestination = buyInPlatformSearch.vrbo ?? searchLocation;
     const bounds = COMMUNITY_BOUNDS[community];
+    const mapSearchBounds = bounds
+      ? {
+          sw_lat: bounds.sw_lat,
+          sw_lng: bounds.sw_lng,
+          ne_lat: bounds.ne_lat,
+          ne_lng: bounds.ne_lng,
+        }
+      : undefined;
+    const mapSearchCenter = bounds
+      ? {
+          lat: Number(((bounds.sw_lat + bounds.ne_lat) / 2).toFixed(6)),
+          lng: Number(((bounds.sw_lng + bounds.ne_lng) / 2).toFixed(6)),
+        }
+      : undefined;
+    const mapSearchRadiusKm = bounds
+      ? Math.max(
+          0.4,
+          Math.min(
+            8,
+            Math.hypot(
+              (bounds.ne_lat - bounds.sw_lat) * 111,
+              (bounds.ne_lng - bounds.sw_lng) * 111 * Math.cos((((bounds.sw_lat + bounds.ne_lat) / 2) * Math.PI) / 180),
+            ) / 2,
+          ),
+        )
+      : undefined;
 
     // ── Resort-name resolution ───────────────────────────────────────────
     // The whole business model is combining two units IN THE SAME RESORT.
@@ -11276,11 +11304,10 @@ export async function registerRoutes(
       ? communitySearchName || resortName || community
       : resortName || communitySearchName || community;
     const airbnbWebsiteSearchTerm = buyInPlatformSearch.airbnb ?? websiteSearchTerm;
-    const bookingWebsiteSearchTerm = buyInPlatformSearch.booking ?? websiteSearchTerm;
     const vrboWebsiteSearchTerm = buyInPlatformSearch.vrbo ?? websiteSearchTerm;
     const pmWebsiteSearchTerm = buyInPlatformSearch.pm ?? websiteSearchTerm;
     console.log(
-      `[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" booking="${bookingWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${requestedBedrooms}${otaSearchBedrooms !== requestedBedrooms ? ` otaSearchBedrooms=${otaSearchBedrooms}` : ""} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`,
+      `[find-buy-in] resort="${resortName}" websiteSearchTerm="${websiteSearchTerm}" airbnb="${airbnbWebsiteSearchTerm}" vrbo="${vrboWebsiteSearchTerm}" vrboMap=${mapSearchBounds ? `${mapSearchCenter?.lat},${mapSearchCenter?.lng} r=${mapSearchRadiusKm?.toFixed(2)}km` : "none"} listingResolved="${listingResolvedResortName ?? ""}" listing="${listingTitle}" bedrooms=${requestedBedrooms}${otaSearchBedrooms !== requestedBedrooms ? ` otaSearchBedrooms=${otaSearchBedrooms}` : ""} ${checkIn}→${checkOut} groundFloorOnly=${groundFloorOnly}`,
     );
 
     const scanStartedAt = Date.now();
@@ -11291,7 +11318,7 @@ export async function registerRoutes(
     const findBuyInLaneLabel = `Find buy-in ${community} ${bedrooms}BR ${checkIn}→${checkOut}`;
     // NOTE FOR CODEX: normal find-buy-in searches are sidecar producers,
     // not just individual queue items. This lane prevents a stale Kaha Lani
-    // producer from enqueueing new Airbnb/VRBO/Booking work while Jamie is
+    // producer from enqueueing new Airbnb/VRBO work while Jamie is
     // trying to run a Poipu Kai search. Stop/Clear marks the lane cancelled;
     // the low-level queue cancellation still happens in vrbo-sidecar-queue.
     const findBuyInLane = await acquireSidecarLane({
@@ -11795,8 +11822,8 @@ export async function registerRoutes(
       if (c.source === "airbnb") {
         return /SearchAPI Airbnb engine returned this date-specific priced result/i.test(reason);
       }
-      if (c.source === "booking" || c.source === "vrbo") {
-        return /sidecar searched .* with the resort, dates, and bedroom filter and scraped this priced result card/i.test(reason);
+      if (c.source === "vrbo") {
+        return /sidecar searched .* with the resort(?: bounds)?, dates, and bedroom filter and scraped this priced result card/i.test(reason);
       }
       return false;
     };
@@ -11823,9 +11850,9 @@ export async function registerRoutes(
       }
 
       // OTA search rows are date-verified at search time: Airbnb through
-      // SearchAPI, Booking/Vrbo through the sidecar driving their own search
-      // pages with resort + dates + bedroom filter. Without this layer,
-      // verified Booking/Vrbo cards can pass target/BR proof but stall below
+      // SearchAPI, Vrbo through the sidecar driving a map-bounds search
+      // page with resort + dates + bedroom filter. Without this layer,
+      // verified Vrbo cards can pass target/BR proof but stall below
       // the default 85 safe-attach threshold in alternative buy-in scans.
       if (candidateHasDateSpecificOtaSearchProof(c)) score += 30;
 
@@ -12002,9 +12029,9 @@ export async function registerRoutes(
 
     // ── Airbnb: SearchAPI native Airbnb engine ────────────────────────
     // Operator directive 2026-05-27: Airbnb market / availability scans
-    // should use SearchAPI for speed. VRBO and Booking.com remain on the
-    // real-browser sidecar because SearchAPI has no native engines for
-    // those providers.
+    // should use SearchAPI for speed. Buy-in Vrbo now uses one real-browser
+    // map-bounds search around the target resort. Booking.com is intentionally
+    // disabled for buy-in sidecar scans.
     let airbnbRawCount = 0;
     let airbnbDropped = { noResort: 0, wrongBedrooms: 0 };
     let airbnbPricedCount = 0;
@@ -12147,94 +12174,21 @@ export async function registerRoutes(
       }
     })();
 
-    // ── Booking.com: website search through the local Chrome sidecar ──
-    // Drive booking.com itself with destination, dates, and bedroom
-    // filter. Search cards seed detail verification below.
     let bookingRawCount = 0;
     let bookingDropped = { noResort: 0, wrongBedrooms: 0 };
     let bookingPricedCount = 0;
     let bookingSidecarCount = 0;
     let bookingSidecarOnline = false;
     let bookingSidecarMs = 0;
-    let bookingSidecarReason = "";
+    let bookingSidecarReason = "Booking.com sidecar buy-in search disabled by operator request; use API/search-provider evaluation instead of browser sidecar.";
     let bookingProviderHealth: ProviderHealthSnapshot | null = null;
     let bookingVariationSummary: any = null;
-    const bookingSidecarAbort = makeSidecarAbort("booking-sidecar");
-    const bookingPromise: Promise<Candidate[]> = (async () => {
-      try {
-        const { searchBookingViaSidecar } = await import("./vrbo-sidecar-queue");
-        const r = await searchBookingViaSidecar({
-          destination: bookingWebsiteSearchTerm,
-          searchTerm: bookingWebsiteSearchTerm,
-          checkIn,
-          checkOut,
-          bedrooms: otaSearchBedrooms,
-          walletBudgetMs: 180_000,
-          queueBudgetMs: 285_000,
-          rerunOnlyUntried: rerunOnlyUntriedVariations,
-          signal: bookingSidecarAbort.signal,
-          stopGeneration: sidecarStopGeneration,
-          queueContext: sidecarQueueContextFor("Booking.com"),
-        });
-        bookingRawCount = r.candidates.length;
-        bookingSidecarCount = r.candidates.length;
-        bookingSidecarOnline = r.workerOnline;
-        bookingSidecarMs = r.durationMs;
-        bookingSidecarReason = r.reason;
-        bookingProviderHealth = r.providerHealth ?? null;
-        bookingVariationSummary = r.searchVariationSummary ?? null;
-        if (sidecarReasonIsProviderFailure(r.reason)) {
-          noteSourceError("Booking.com sidecar search", r.reason);
-        }
-        bookingPricedCount = r.candidates.filter((c) => c.totalPrice > 0 || c.nightlyPrice > 0).length;
-        const accepted = r.candidates.filter((c) => {
-          const inferred = rawCandidateBedroomSignal(c);
-          if (inferred !== null && inferred < buyInBedroomFloor) return false;
-          return true;
-        });
-        const dropped = r.candidates.length - accepted.length;
-        bookingDropped = { noResort: 0, wrongBedrooms: dropped };
-        if (dropped > 0) {
-          console.log(`[find-buy-in] booking sidecar: dropped ${dropped}/${r.candidates.length} candidates below ${buyInBedroomFloor}BR`);
-        }
-        return accepted.map((c): Candidate => {
-          const total = Number(c.totalPrice || 0) > 0
-            ? Math.round(Number(c.totalPrice))
-            : Math.round(Number(c.nightlyPrice || 0) * nights);
-          const nightly = Number(c.nightlyPrice || 0) > 0
-            ? Math.round(Number(c.nightlyPrice))
-            : total > 0
-            ? Math.round(total / Math.max(1, nights))
-            : 0;
-          return {
-            source: "booking",
-            sourceLabel: "Booking.com",
-            title: c.title.slice(0, 100),
-            originalSourceUrl: c.url,
-            url: withStayDates("booking", c.url),
-            nightlyPrice: nightly,
-            totalPrice: total,
-            bedrooms: rawCandidateBedroomSignal(c) ?? c.bedrooms,
-            image: c.image,
-            snippet: c.snippet || (total > 0 ? `Booking.com search card showed $${total.toLocaleString()} for the requested stay` : undefined),
-            verified: total > 0 ? "yes" : undefined,
-            verifiedNightlyPrice: nightly > 0 ? nightly : undefined,
-            verifiedReason: total > 0
-              ? "Booking.com sidecar searched booking.com with the resort, dates, and bedroom filter and scraped this priced result card"
-              : undefined,
-          };
-        });
-      } catch (e: any) {
-        console.error(`[find-buy-in] booking sidecar error:`, e?.message ?? e);
-        noteSourceError("Booking.com sidecar search", e);
-        return [];
-      }
-    })();
+    const bookingPromise: Promise<Candidate[]> = Promise.resolve([]);
 
-    // ── Vrbo: website search through the local Chrome sidecar ────────
-    // Website-search-only buy-in methodology: no Apify, no Google
-    // site-search seed list. Drive vrbo.com itself with resort, dates,
-    // and bedroom count, then trust only priced cards from that page.
+    // ── Vrbo: map-bounds search through the local Chrome sidecar ─────
+    // Buy-in needs two units in the same resort/complex. Drive Vrbo to
+    // map view around the configured target bounds instead of walking
+    // provider autocomplete/dropdown destination variants.
     let vrboRawCount = 0;
     let vrboDropped = { noResort: 0, wrongBedrooms: 0 };
     let vrboGoogleCount = 0;
@@ -12256,6 +12210,14 @@ export async function registerRoutes(
           checkIn,
           checkOut,
           bedrooms: otaSearchBedrooms,
+          searchMode: "map_bounds",
+          mapSearch: {
+            enabled: true,
+            targetName: resortName || community,
+            bounds: mapSearchBounds,
+            center: mapSearchCenter,
+            radiusKm: mapSearchRadiusKm,
+          },
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
           rerunOnlyUntried: rerunOnlyUntriedVariations,
@@ -12301,7 +12263,7 @@ export async function registerRoutes(
             snippet: c.snippet,
             verified: "yes",
             verifiedNightlyPrice: c.nightlyPrice,
-            verifiedReason: "Vrbo sidecar searched vrbo.com with the resort, dates, and bedroom filter and scraped this priced result card",
+            verifiedReason: "Vrbo sidecar searched vrbo.com map view with the resort bounds, dates, and bedroom filter and scraped this priced result card",
           };
         });
       } catch (e: any) {
@@ -13099,10 +13061,10 @@ export async function registerRoutes(
       withTimeout(airbnbPromise, sidecarSourceBudgetMs, [] as Candidate[], "airbnb-searchapi", airbnbSidecarAbort.abort),
       withTimeout(googleHotelsPromise, googleHotelsBudgetMs, [] as GoogleHotelsBuyInCandidate[], "google-hotels-searchapi", googleHotelsAbort.abort),
     ]);
-    const [booking, vrbo] = await Promise.all([
-      withTimeout(bookingPromise, sidecarSourceBudgetMs, [] as Candidate[], "booking-sidecar", bookingSidecarAbort.abort),
-      withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo", vrboSidecarAbort.abort),
-    ]);
+	    const [booking, vrbo] = await Promise.all([
+	      bookingPromise,
+	      withTimeout(vrboPromise, sidecarSourceBudgetMs, [] as Candidate[], "vrbo-map-bounds", vrboSidecarAbort.abort),
+	    ]);
     const googleHotels: Candidate[] = googleHotelsRows.map((row) => ({ ...row }));
     let pmGoogle: Candidate[] = [];
     const pmWebsiteSidecarDiscovered: Candidate[] = [];
@@ -13881,12 +13843,12 @@ export async function registerRoutes(
     // (operator handles the channel-specific compliance side) and the
     // sidecar VRBO scrape runs against the operator's real Chrome with
     // dates applied, so prices are real and date-specific — same data
-    // honesty as Airbnb engine + Booking google_hotels engine. Only
+	    // honesty as Airbnb engine + Google Hotels. Only
     // sidecar-sourced VRBO rows make it into priced (Google
     // site:search VRBO rows are unpriced and stay out via the
     // nightlyPrice > 0 filter).
     //
-    // Booking.com and Vrbo are sidecar-priced from their own search pages.
+	    // Vrbo is sidecar-priced from its own map-bounds search page.
     // Direct-link rows are Lens matches under an Airbnb anchor, then
     // checked against the PM page before they can be priced/verified.
     const priced: Candidate[] = [...airbnbTarget, ...bookingTarget, ...vrboTarget, ...pmTarget]
@@ -13966,12 +13928,12 @@ export async function registerRoutes(
     //   - Airbnb listing without matches      → singleton cluster.
     //   - PM with airbnbAnchorUrl pointing into the Airbnb pool → joins
     //     that Airbnb's cluster.
-    //   - VRBO / Booking / standalone PM      → singleton clusters.
+    //   - VRBO / standalone PM                → singleton clusters.
     //
     // VRBO ↔ Airbnb cross-channel matching isn't done yet (would need
-    // photo-match against VRBO listings too). Until then VRBO/Booking
-    // present as one-channel rows. Same for sidecar-Google PM URLs that
-    // didn't share photos with any Airbnb anchor.
+    // photo-match against VRBO listings too). Until then VRBO rows present
+    // as one-channel rows. Same for sidecar-Google PM URLs that didn't share
+    // photos with any Airbnb anchor.
     type ListingChannel = {
       channel: "airbnb" | "vrbo" | "booking" | "pm";
       channelLabel: string;
@@ -14114,12 +14076,11 @@ export async function registerRoutes(
       const compact = String(value ?? "").replace(/\s+/g, " ").trim();
       return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
     };
-    const providerAvailabilitySummary = [
-      `Airbnb raw=${airbnbRawCount}, kept=${airbnbTarget.length}, priced=${pricedCount(airbnbTarget)}, verified=${verifiedYesCount(airbnbTarget)}${airbnbSidecarReason ? ` (${compactReason(airbnbSidecarReason)})` : ""}`,
-      `VRBO raw=${vrboRawCount}, kept=${vrboTarget.length}, priced=${pricedCount(vrboTarget)}, verified=${verifiedYesCount(vrboTarget)}${vrboSidecarReason ? ` (${compactReason(vrboSidecarReason)})` : ""}`,
-      `Booking.com raw=${bookingRawCount + bookingPricedCount + bookingSidecarCount}, kept=${bookingTarget.length}, priced=${pricedCount(bookingTarget)}, verified=${verifiedYesCount(bookingTarget)}`,
-      `Direct/Lens raw=${totalPhotoMatches}, kept=${pmTarget.length}, priced=${pricedCount(pmTarget)}, verified=${verifiedYesCount(pmTarget)}`,
-    ].join("; ");
+	    const providerAvailabilitySummary = [
+	      `Airbnb raw=${airbnbRawCount}, kept=${airbnbTarget.length}, priced=${pricedCount(airbnbTarget)}, verified=${verifiedYesCount(airbnbTarget)}${airbnbSidecarReason ? ` (${compactReason(airbnbSidecarReason)})` : ""}`,
+	      `VRBO raw=${vrboRawCount}, kept=${vrboTarget.length}, priced=${pricedCount(vrboTarget)}, verified=${verifiedYesCount(vrboTarget)}${vrboSidecarReason ? ` (${compactReason(vrboSidecarReason)})` : ""}`,
+	      `Direct/Lens raw=${totalPhotoMatches}, kept=${pmTarget.length}, priced=${pricedCount(pmTarget)}, verified=${verifiedYesCount(pmTarget)}`,
+	    ].join("; ");
     const issueList: Array<{ severity: "warning" | "error"; source: string; summary: string; detail?: string }> = [];
     for (const t of sourceTimeouts) {
       issueList.push({
@@ -14148,7 +14109,7 @@ export async function registerRoutes(
       issueList.push({
         severity: "warning",
         source: "Sidecar rate verifier",
-        summary: "No Booking.com/PM detail URLs were verified by the sidecar",
+        summary: "No PM detail URLs were verified by the sidecar",
         detail: sidecarReasonSummary
           ? `Candidates remain visible with automatic verification states. Top outcomes: ${sidecarReasonSummary}`
           : "Candidates remain visible with automatic verification states, but none were promoted to verified bookable.",
@@ -14309,15 +14270,15 @@ export async function registerRoutes(
         kept: vrboTarget.length,
         priced: pricedCount(vrboTarget),
         verified: verifiedYesCount(vrboTarget),
-        durationMs: vrboSidecarMs,
-        reason: vrboSidecarReason,
-        health: vrboProviderHealth,
-        searchTerm: vrboWebsiteSearchTerm,
-        searchVariationSummary: vrboVariationSummary,
-        accessPattern: "authorized website search via sidecar; one shared all-bedroom VRBO search per resort/date, then server-side bedroom curation",
-        bedroomFilterApplied: false,
-        bedroomFilterMode: "server-side bedroom curation after shared VRBO search",
-        message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}; bedroom filter applied server-side after shared VRBO provider search${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
+	        durationMs: vrboSidecarMs,
+	        reason: vrboSidecarReason,
+	        health: vrboProviderHealth,
+	        searchTerm: vrboWebsiteSearchTerm,
+	        searchVariationSummary: vrboVariationSummary,
+	        accessPattern: "authorized website map-bounds search via sidecar; one shared all-bedroom VRBO map run per resort/date, then server-side bedroom curation",
+	        bedroomFilterApplied: false,
+	        bedroomFilterMode: "server-side bedroom curation after shared VRBO map-bounds search",
+	        message: `sidecarOnline=${vrboSidecarOnline}; sidecarPriced=${vrboSidecarCount}; detailPriced=${vrboDetailPricedCount}; googleSeeds=${vrboGoogleCount}; mapBounds=${mapSearchBounds ? "yes" : "no"}; bedroom filter applied server-side after shared VRBO map-bounds search${vrboSidecarReason ? `; ${vrboSidecarReason}` : ""}.`,
       }),
       enrichProviderDiagnostic({
         source: "Google Hotels",
@@ -14332,7 +14293,7 @@ export async function registerRoutes(
       }),
       enrichProviderDiagnostic({
         source: "Booking.com",
-        status: sourceStatus(["booking-sidecar"], ["Booking.com", "booking"], bookingRawCount + bookingPricedCount + bookingSidecarCount, bookingTarget.length, pricedCount(bookingTarget), verifiedYesCount(bookingTarget), "No Booking.com search-result card produced a bedroom-matching rate", bookingSidecarOnline, bookingSidecarReason),
+        status: "skipped",
         searched: bookingSidecarOnline,
         raw: bookingRawCount + bookingPricedCount + bookingSidecarCount,
         kept: bookingTarget.length,
@@ -14341,9 +14302,9 @@ export async function registerRoutes(
         durationMs: bookingSidecarMs,
         reason: bookingSidecarReason,
         health: bookingProviderHealth,
-        searchTerm: bookingWebsiteSearchTerm,
+        searchTerm: undefined,
         searchVariationSummary: bookingVariationSummary,
-        message: `sidecarOnline=${bookingSidecarOnline}; sidecarPriced=${bookingSidecarCount}; ${bookingSidecarCount} Booking.com website sidecar search card(s). Sidecar-priced search cards are trusted when Booking.com returned them after date and bedroom filtering${bookingSidecarReason ? `; ${bookingSidecarReason}` : ""}.`,
+        message: bookingSidecarReason,
       }),
       enrichProviderDiagnostic({
         source: "Airbnb Lens direct links",
@@ -14435,9 +14396,9 @@ export async function registerRoutes(
         source: livePlausibilityRate > 0 ? "property-market-rates" : staticPlausibilityRate > 0 ? "static-buy-in-rates" : "regional-fallback",
       },
       sources: diagnosticSources,
-      providerStatuses: diagnosticSources.filter((source) =>
-        /^Airbnb$|^Vrbo$|^Booking\.com$/i.test(source.source),
-      ),
+	      providerStatuses: diagnosticSources.filter((source) =>
+	        /^Airbnb$|^Vrbo$/i.test(source.source),
+	      ),
       issues: issueList,
       report: diagnosticsReport,
     };
@@ -14451,8 +14412,8 @@ export async function registerRoutes(
     console.log(
       `[find-buy-in] resort="${resortName}" ${bedrooms}BR ${checkIn}→${checkOut}: `
       + `airbnb=${airbnb.length}/${airbnbRawCount} (searchApi=${airbnbSidecarOnline}/${airbnbSidecarMs}ms${airbnbSidecarReason ? "; " + airbnbSidecarReason : ""}) `
-      + `vrbo=${vrbo.length} (sidecarSearch=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
-      + `booking=${booking.length}/${bookingRawCount}+${bookingPricedCount} (website sidecar search cards) `
+	      + `vrbo=${vrbo.length} (mapSidecar=${vrboSidecarCount}/online=${vrboSidecarOnline}/${vrboSidecarMs}ms, detailPriced=${vrboDetailPricedCount}, googleSeeds=${vrboGoogleCount}${vrboSidecarReason ? "; sidecar: " + vrboSidecarReason : ""}) `
+	      + `booking=0 (sidecar disabled) `
       + `googleHotels=${googleHotels.length}/${googleHotelsRawCount} · `
       + `directLens=${photoMatchPmCandidates.length}/${totalPhotoMatches} (includePm=${includePm}; pmPool=${pm.length}; photoMatch dropped wrong-resort=${photoMatchWrongResortDropped} bedroom-mismatch=${photoMatchBedroomMismatchDropped} landing=${photoMatchLandingDropped}) · `
       + `targetFilter dropped airbnb=${targetFilterDropped.airbnb} booking=${targetFilterDropped.booking} vrbo=${targetFilterDropped.vrbo} pm=${targetFilterDropped.pm} priceFloor=${JSON.stringify(targetFilterPriceDropped)} · `
@@ -14522,12 +14483,16 @@ export async function registerRoutes(
           vrbo: vrboProviderHealth,
           booking: bookingProviderHealth,
         },
-        searchLocation,
-        vrboDestination,
-        airbnbWebsiteSearchTerm,
-        bookingWebsiteSearchTerm,
-        vrboWebsiteSearchTerm,
-        resortName,
+	        searchLocation,
+	        vrboDestination,
+	        airbnbWebsiteSearchTerm,
+	        vrboWebsiteSearchTerm,
+	        vrboMapSearch: {
+	          bounds: mapSearchBounds ?? null,
+	          center: mapSearchCenter ?? null,
+	          radiusKm: mapSearchRadiusKm ?? null,
+	        },
+	        resortName,
       },
       diagnostics,
       scanComplete,
