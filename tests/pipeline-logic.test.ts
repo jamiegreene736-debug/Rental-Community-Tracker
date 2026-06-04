@@ -1990,6 +1990,10 @@ assert.ok(
   "replacement find-unit must resolve canonical resort street when folder map is missing (e.g. Waikoloa)",
 );
 assert.ok(
+  routeSource.includes("isSameHawaiiStreetFamily"),
+  "replacement find-unit must allow sibling Hawaii street-number roots for same-street resort communities like Coconut Plantation",
+);
+assert.ok(
   routeSource.includes("if (canonicalStreetRoot) harvestRootCounts.set(canonicalStreetRoot, 2);"),
   "replacement find-unit must pre-seed street roots so Apify supplement can run before SearchAPI hits",
 );

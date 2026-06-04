@@ -26763,10 +26763,24 @@ Return ONLY compact JSON with this exact shape:
     const escapeRegExp = (value: string): string =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+    const isSameHawaiiStreetFamily = (candidateRoot: string, allowedRoot: string): boolean => {
+      const candidate = candidateRoot.match(/^(\d{1,2})\s+\d{3,5}\s+(.+)$/i);
+      const allowed = allowedRoot.match(/^(\d{1,2})\s+\d{3,5}\s+(.+)$/i);
+      if (!candidate || !allowed) return false;
+      return candidate[1] === allowed[1] && candidate[2] === allowed[2];
+    };
+
     const candidateRootMatches = (url: string, allowedRoots: Set<string>, _contextText = ""): boolean => {
       if (allowedRoots.size === 0) return false;
       const root = streetRootFromListingAddress(parseListingAddressFromUrl(url));
       if (root && allowedRoots.has(root)) return true;
+      if (root) {
+        let sameFamily = false;
+        allowedRoots.forEach((allowed) => {
+          if (!sameFamily && isSameHawaiiStreetFamily(root, allowed)) sameFamily = true;
+        });
+        if (sameFamily) return true;
+      }
       // Match on the listing URL only. Snippet/title context often mentions
       // the resort street for unrelated nearby inventory (e.g. Waikoloa Village
       // homes whose Google blurb references Waikoloa Beach Villas).
