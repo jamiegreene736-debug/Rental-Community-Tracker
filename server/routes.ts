@@ -14709,7 +14709,13 @@ export async function registerRoutes(
     if (!searchResp.ok) {
       const errText = await searchResp.text();
       console.error("[reverse-image-listings] SearchAPI failed:", searchResp.status, errText.slice(0, 500));
-      return res.status(502).json({ error: "Reverse image search failed" });
+      const quotaExhausted = searchResp.status === 429 || /used all of the searches|quota|rate.?limit/i.test(errText);
+      return res.status(quotaExhausted ? 429 : 502).json({
+        error: quotaExhausted
+          ? "SearchAPI Google Lens quota is exhausted or rate-limited; direct-link proof cannot be completed right now."
+          : "Reverse image search failed",
+        upstreamStatus: searchResp.status,
+      });
     }
 
     const searchData = await searchResp.json() as any;
@@ -14884,6 +14890,7 @@ export async function registerRoutes(
         confidences: number[];
       }>();
       let rawCount = 0;
+      const reverseSearchErrors: string[] = [];
       const port = process.env.PORT || "5000";
       const lookupEndpoint = `http://127.0.0.1:${port}/api/operations/reverse-image-listings`;
       const normalizeDirectTargetText = (value: string): string =>
@@ -14937,7 +14944,9 @@ export async function registerRoutes(
             console.warn(
               `[direct-booking-sites] Google Lens lookup HTTP ${response.status} for ${sourceUrl.slice(0, 80)} photo ${photosSearched}: ${body?.error ?? "no error body"}`,
             );
-            photo.skippedReason = body?.error ? `Reverse search failed: ${body.error}` : `Reverse search failed (${response.status})`;
+            const reason = body?.error ? String(body.error) : `Reverse search failed (${response.status})`;
+            photo.skippedReason = reason;
+            reverseSearchErrors.push(reason);
             photo.searched = false;
             continue;
           }
@@ -14962,9 +14971,11 @@ export async function registerRoutes(
             evidenceBySurface.set(key, ev);
           }
         } catch (e: any) {
-          photo.skippedReason = e?.name === "AbortError"
+          const reason = e?.name === "AbortError"
             ? "Reverse search timed out for this photo"
             : `Reverse search failed: ${e?.message ?? String(e)}`;
+          photo.skippedReason = reason;
+          reverseSearchErrors.push(reason);
           photo.searched = false;
         }
       }
@@ -15068,11 +15079,14 @@ export async function registerRoutes(
         matches: matches.slice(0, 25),
         rawCount,
         directAvailabilityVerifiedCount,
+        reverseSearchErrors: Array.from(new Set(reverseSearchErrors)).slice(0, 3),
         generatedAt: new Date().toISOString(),
         ...(scraped.length === 0
           ? { message: scrapeError
             ? "No listing photos could be extracted without browser support for this source page."
             : "No listing photos could be extracted from the source page." }
+          : reverseSearchErrors.some((reason) => /quota|rate.?limit|used all of the searches/i.test(reason))
+          ? { message: "SearchAPI Google Lens quota is exhausted or rate-limited; direct booking proof cannot be completed right now." }
           : searchedCount === 0
           ? { message: "Listing photos were found, but all were classified as shared/exterior/amenity-style photos and skipped." }
           : matches.length === 0

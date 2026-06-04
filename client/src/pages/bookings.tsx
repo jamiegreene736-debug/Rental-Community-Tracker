@@ -2337,6 +2337,9 @@ function AlternativeBuyInWorkflowPanel({
             const directMatches = (result.directBookingProbes ?? []).flatMap((probe) =>
               probe.directMatches.map((match) => ({ ...match, airbnbTitle: probe.title })),
             );
+            const directProbeMessage = (result.directBookingProbes ?? [])
+              .map((probe) => probe.message)
+              .find((message): message is string => !!message && !/^No direct booking site passed the strict Airbnb Lens threshold/i.test(message));
             const directProbeThreshold = (result.directBookingProbes ?? [])
               .map((probe) => ({
                 minPhotoMatches: Number(probe.minPhotoMatches ?? probe.directMatches[0]?.proof?.sameUnit.requiredPhotoCount ?? 3),
@@ -2427,7 +2430,7 @@ function AlternativeBuyInWorkflowPanel({
                       </div>
                     ) : result.directBookingProbes && result.directBookingProbes.length > 0 && active !== "direct-probing" ? (
                       <p className="border-t border-slate-200 pt-1 text-muted-foreground">
-                        No direct booking site passed the Google Lens threshold ({directProbeThreshold?.minPhotoMatches ?? 3}+ interior photo matches at ≥{Math.round((directProbeThreshold?.minConfidence ?? 0.95) * 100)}% confidence).
+                        {directProbeMessage ?? `No direct booking site passed the Google Lens threshold (${directProbeThreshold?.minPhotoMatches ?? 3}+ interior photo matches at ≥${Math.round((directProbeThreshold?.minConfidence ?? 0.95) * 100)}% confidence).`}
                       </p>
                     ) : null}
                   </div>

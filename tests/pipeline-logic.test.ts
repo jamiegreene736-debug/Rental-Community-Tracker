@@ -3047,6 +3047,14 @@ assert.ok(
   "reverse-image-listings should score first visual Lens hits at the 95% direct-link threshold when SearchAPI omits explicit similarity",
 );
 assert.ok(
+  routesSource.includes("SearchAPI Google Lens quota is exhausted or rate-limited"),
+  "direct booking Lens failures should surface SearchAPI quota/rate-limit instead of looking like a true no-match",
+);
+assert.ok(
+  bookingsComboSource.includes("directProbeMessage"),
+  "alternative scout cards should display direct probe failure messages when Lens could not complete",
+);
+assert.ok(
   routesSource.includes("type DirectBookingProof"),
   "direct booking discovery should expose a structured proof ledger",
 );
