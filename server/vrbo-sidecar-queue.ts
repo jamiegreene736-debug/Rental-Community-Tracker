@@ -428,6 +428,7 @@ export type SidecarRequest = {
     | SidecarGuestyDisconnectResult
     | null;
   searchVariationSummary?: SidecarSearchVariationSummary;
+  mapHarvest?: SidecarMapHarvestStats | null;
   error?: string;
   createdAt: number;
   claimedAt?: number;
@@ -487,11 +488,28 @@ export type SidecarProviderHealth = {
 // was VRBO-only.
 export type SidecarVrboCandidate = SidecarPropertyCandidate;
 
+export type SidecarMapHarvestStats = {
+  harvestPasses?: number;
+  finalHarvestTotal?: number;
+  lastVisibleCards?: number;
+  lastPropertyLinks?: number;
+  domSeen?: number;
+  harvestSeenInExtract?: number;
+  extractTotalSeen?: number;
+  extractDrops?: { noUrl?: number; noPrice?: number; noBedrooms?: number } | null;
+  networkCount?: number;
+  pricedNetworkCount?: number;
+  mergedCount?: number;
+  graphqlResponsesMatched?: number;
+  graphqlResponsesSeen?: number;
+};
+
 const queue = new Map<string, SidecarRequest>();
 const requestKeyIndex = new Map<string, string>(); // requestKey → id
 type CachedSidecarResult = {
   results: SidecarRequest["results"];
   searchVariationSummary?: SidecarSearchVariationSummary;
+  mapHarvest?: SidecarMapHarvestStats | null;
   cachedAt: number;
 };
 const successfulResultCache = new Map<string, CachedSidecarResult>();
@@ -654,20 +672,52 @@ function normalizeVariationAttempt(raw: unknown): SidecarSearchVariationAttempt 
   };
 }
 
+function normalizeMapHarvestStats(raw: unknown): SidecarMapHarvestStats | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  const num = (value: unknown) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const extractDrops = item.extractDrops && typeof item.extractDrops === "object" && !Array.isArray(item.extractDrops)
+    ? {
+        noUrl: num((item.extractDrops as Record<string, unknown>).noUrl),
+        noPrice: num((item.extractDrops as Record<string, unknown>).noPrice),
+        noBedrooms: num((item.extractDrops as Record<string, unknown>).noBedrooms),
+      }
+    : null;
+  return {
+    harvestPasses: num(item.harvestPasses),
+    finalHarvestTotal: num(item.finalHarvestTotal),
+    lastVisibleCards: num(item.lastVisibleCards),
+    lastPropertyLinks: num(item.lastPropertyLinks),
+    domSeen: num(item.domSeen),
+    harvestSeenInExtract: num(item.harvestSeenInExtract),
+    extractTotalSeen: num(item.extractTotalSeen),
+    extractDrops,
+    networkCount: num(item.networkCount),
+    pricedNetworkCount: num(item.pricedNetworkCount),
+    mergedCount: num(item.mergedCount),
+    graphqlResponsesMatched: num(item.graphqlResponsesMatched),
+    graphqlResponsesSeen: num(item.graphqlResponsesSeen),
+  };
+}
+
 function normalizeWorkerResultsPayload(
   raw: unknown,
-): { results: SidecarRequest["results"]; variationsTried: SidecarSearchVariationAttempt[] } {
+): { results: SidecarRequest["results"]; variationsTried: SidecarSearchVariationAttempt[]; mapHarvest: SidecarMapHarvestStats | null } {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     const obj = raw as Record<string, unknown>;
     const candidates = Array.isArray(obj.candidates) ? obj.candidates : undefined;
     const variationsTried = Array.isArray(obj.variationsTried)
       ? obj.variationsTried.map(normalizeVariationAttempt).filter((x): x is SidecarSearchVariationAttempt => Boolean(x))
       : [];
+    const mapHarvest = normalizeMapHarvestStats(obj.mapHarvest);
     if (candidates) {
-      return { results: candidates as SidecarPropertyCandidate[], variationsTried };
+      return { results: candidates as SidecarPropertyCandidate[], variationsTried, mapHarvest };
     }
   }
-  return { results: raw as SidecarRequest["results"], variationsTried: [] };
+  return { results: raw as SidecarRequest["results"], variationsTried: [], mapHarvest: null };
 }
 
 async function preferredVariationRows(input: {
@@ -1493,6 +1543,7 @@ function cacheSuccessfulResult(r: SidecarRequest): void {
   successfulResultCache.set(r.requestKey, {
     results: cloneSidecarResult(r.results),
     searchVariationSummary: cloneSidecarResult(r.searchVariationSummary),
+    mapHarvest: cloneSidecarResult(r.mapHarvest ?? null),
     cachedAt: nowMs(),
   });
 }
@@ -1508,6 +1559,7 @@ function cachedSuccessfulResult(requestKey: string): CachedSidecarResult | null 
   return {
     results: cloneSidecarResult(cached.results),
     searchVariationSummary: cloneSidecarResult(cached.searchVariationSummary),
+    mapHarvest: cloneSidecarResult(cached.mapHarvest ?? null),
     cachedAt: cached.cachedAt,
   };
 }
@@ -1783,6 +1835,7 @@ export function complete(opts: {
     r.status = "completed";
     r.results = normalized.results;
     r.searchVariationSummary = recordSearchVariationSummary(r, normalized.variationsTried);
+    r.mapHarvest = normalized.mapHarvest;
     cacheSuccessfulResult(r);
   } else {
     r.status = "failed";
@@ -2285,6 +2338,7 @@ export async function searchVrboViaSidecar(opts: {
   reason: string;
   providerHealth?: SidecarProviderHealth;
   searchVariationSummary?: SidecarSearchVariationSummary;
+  mapHarvest?: SidecarMapHarvestStats | null;
 } | null> {
   const cooldown = activeProviderCooldown("vrbo");
   if (cooldown) return providerCooldownSearchResult("vrbo");
@@ -2345,6 +2399,7 @@ export async function searchVrboViaSidecar(opts: {
     ...result,
     providerHealth: recordProviderOutcome("vrbo", result),
     searchVariationSummary: r.searchVariationSummary,
+    mapHarvest: r.mapHarvest ?? null,
   };
 }
 
@@ -2876,6 +2931,7 @@ async function awaitOpResult(opts: {
 }): Promise<{
   results: SidecarRequest["results"];
   searchVariationSummary?: SidecarSearchVariationSummary;
+  mapHarvest?: SidecarMapHarvestStats | null;
   workerOnline: boolean;
   durationMs: number;
   reason: string;
@@ -2918,6 +2974,7 @@ async function awaitOpResult(opts: {
       return {
         results: cached.results,
         searchVariationSummary: cached.searchVariationSummary,
+        mapHarvest: cached.mapHarvest ?? null,
         workerOnline: true,
         durationMs: nowMs() - startedAt,
         reason: `served from successful sidecar result cache (${Math.round(ageMs / 60000)}m old)`,
@@ -2970,6 +3027,7 @@ async function awaitOpResult(opts: {
         return {
           results: r.results ?? null,
           searchVariationSummary: r.searchVariationSummary,
+          mapHarvest: r.mapHarvest ?? null,
           workerOnline: true,
           durationMs: nowMs() - startedAt,
           reason: `worker returned ${

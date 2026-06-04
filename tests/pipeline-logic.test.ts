@@ -1016,7 +1016,7 @@ console.log("  ✓ correct 3+3 unchanged");
 console.log("\npricing tables suite");
 
 import { getBuyInRate, suggestPricingArea, BUY_IN_RATES, setLivePropertyMarketRates } from "../shared/pricing-rates";
-import { resolveBuyInMarket, searchLocationForBuyInMarket } from "../shared/buy-in-market";
+import { buyInMarketKeyForScoutCommunity, resolveBuyInMarket, searchLocationForBuyInMarket, textMatchesResortPhrase } from "../shared/buy-in-market";
 
 // Pili Mai 5BR is priced as its actual 3BR + 2BR component buy-ins, not
 // as a single 5BR villa comp. The operator-verified September 8-15, 2026
@@ -3084,6 +3084,32 @@ assert.ok(
   "find-buy-in should support city-scope VRBO map bounds for alternative scout scans",
 );
 assert.ok(
+  routesSource.includes("buyInMarketKeyForScoutCommunity") &&
+    routesSource.includes("const scoutMarketKey = alternativeScoutMapSearch ? buyInMarketKeyForScoutCommunity(community)"),
+  "alternative city map should resolve scout labels like Princeville, Hawaii to configured market keys",
+);
+assert.equal(buyInMarketKeyForScoutCommunity("Princeville, Hawaii"), "Princeville");
+assert.ok(
+  textMatchesResortPhrase("Villas of Kamalii 30 · Princeville", "Kamalii"),
+  "resort phrase filter should match Kamalii listing titles",
+);
+assert.ok(
+  routesSource.includes("requestedResortPhrase") &&
+    routesSource.includes("textMatchesResortPhrase") &&
+    bookingsSource.includes('params.set("resortPhrase", mapFilterPhrase)'),
+  "alternative map scans should accept an optional resort phrase filter",
+);
+assert.ok(
+  routesSource.includes("comparisonCandidateCap = alternativeScoutOtaMapOnly ? 150 : 40") &&
+    routesSource.includes("mapHarvest: alternativeScoutMapSearch"),
+  "alternative map scans should expose a larger comparison pool and map harvest diagnostics",
+);
+assert.ok(
+  bookingsSource.includes("AlternativeMapInventoryPanel") &&
+    bookingsSource.includes("downloadAlternativeMapInventoryExport"),
+  "alternative workflow should let operators browse and export the full map inventory",
+);
+assert.ok(
   routesSource.includes("const bounds = resortBounds;") &&
     routesSource.includes("const providerMapBounds = alternativeScoutMapSearch ? undefined : resortBounds;") &&
     routesSource.includes("const mapReferenceBounds = providerMapBounds ?? cityMapBounds;") &&
@@ -3176,8 +3202,14 @@ assert.ok(
 assert.ok(
   vrboWorkerSource.includes("map inventory merged") &&
     vrboWorkerSource.includes("networkCapture.dispose()") &&
+    vrboWorkerSource.includes("mapHarvest") &&
     routesSource.includes("captured this result from VRBO's map inventory response"),
   "VRBO network inventory should be merged with DOM cards, disposed after each run, and surfaced in buy-in proof text",
+);
+assert.ok(
+  vrboWorkerSource.includes("finalHarvestTotal") &&
+    vrboWorkerSource.includes("harvestSeenInExtract"),
+  "VRBO map harvest stats should be returned to the server for alternative diagnostics",
 );
 
 assert.equal(classifyFailureText("HTTP 502 while waiting for sidecar lane").failureClass, "transient");
