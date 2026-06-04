@@ -6239,6 +6239,53 @@ export default function Bookings() {
   const autoFillSidecarActive = activeAutoFillCount > 0
     && isSidecarStatusForSearch(autoFillSidecarQueue.status, earliestAutoFillStartedAtMs);
 
+  const bulkQueueItemsByReservationId = useMemo(() => {
+    return new Map(bulkBuyInQueueItems.map((item) => [item.reservationId, item]));
+  }, [bulkBuyInQueueItems]);
+  const selectedBulkReservationCount = Object.values(bulkSelectedReservations).filter(Boolean).length;
+  const eligibleGlobalReservations = useMemo(() => (
+    reservations.filter((reservation) => {
+      const meta = reservationPropertyMeta.get(reservation._id);
+      return !!meta?.propertyId
+        && reservation.slotsTotal > 0
+        && reservation.slots.some((slot) => !slot.buyIn);
+    })
+  ), [reservationPropertyMeta, reservations]);
+  const selectedBulkEligibleReservations = useMemo(() => (
+    eligibleGlobalReservations.filter((reservation) => bulkSelectedReservations[reservation._id])
+  ), [bulkSelectedReservations, eligibleGlobalReservations]);
+  const setBulkQueueItem = (reservationId: string, patch: Partial<BulkBuyInQueueItem>) => {
+    setBulkBuyInQueueItems((prev) => prev.map((item) => (
+      item.reservationId === reservationId ? { ...item, ...patch } : item
+    )));
+  };
+  const logBulkBuyInQueueEvent = async (
+    item: BulkBuyInQueueItem,
+    level: "info" | "warn" | "error",
+    message: string,
+    meta?: Record<string, unknown>,
+  ) => {
+    try {
+      await apiRequest("POST", "/api/operations/bulk-buy-in-log", {
+        level,
+        message,
+        jobId: item.jobId,
+        reservationId: item.reservationId,
+        propertyId: item.propertyId,
+        listingId: item.listingId,
+        propertyName: item.propertyName,
+        guestName: item.guestName,
+        queuedFor: item.queuedFor,
+        status: item.status,
+        error: item.error,
+        meta,
+      });
+    } catch (error) {
+      console.warn("[bulk-buy-ins] failed to write server log", error);
+    }
+  };
+  const buildBulkQueueItem = (reservation: GuestyReservation, jobId: string): BulkBuyInQueueItem | null => {
+    const meta = reservationPropertyMeta.get(reservation._id);
     if (!meta?.propertyId) return null;
     const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
     return {
