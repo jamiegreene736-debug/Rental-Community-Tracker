@@ -5956,6 +5956,16 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
   const result = await page.evaluate((args) => {
     const { expectedNights } = args;
 
+    function cardRowFromElement(card) {
+      const titleEl = card.querySelector?.("h3");
+      const link = card.querySelector?.("a[href]");
+      return {
+        title: titleEl ? titleEl.textContent.trim().replace(/^Photo gallery for\s*/i, "") : "",
+        fullText: (card.textContent || "").replace(/\s+/g, " "),
+        href: link?.getAttribute("href") || "",
+      };
+    }
+
     let cardEls = Array.from(document.querySelectorAll('[data-stid="lodging-card-responsive"]'));
     let selectorSource = "data-stid";
     if (cardEls.length === 0) {
@@ -5975,16 +5985,32 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
       cardEls = Array.from(cardSet);
       selectorSource = "anchor-fallback";
     }
+    const harvestedRows = Array.isArray(window.__vrboHarvestCards) ? window.__vrboHarvestCards : [];
+    if (harvestedRows.length > 0) selectorSource = `${selectorSource}+harvest`;
+
     const out = [];
     const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0 };
     let firstCardSample = null;
-    for (const card of cardEls) {
-      const titleEl = card.querySelector("h3");
-      const title = titleEl ? titleEl.textContent.trim().replace(/^Photo gallery for\s*/i, "") : "";
-      const fullText = (card.textContent || "").replace(/\s+/g, " ");
+    const seenRows = new Set();
+    const rows = [
+      ...cardEls.map(cardRowFromElement),
+      ...harvestedRows.map((row) => ({
+        title: String(row?.title || ""),
+        fullText: String(row?.fullText || ""),
+        href: String(row?.href || ""),
+      })),
+    ].filter((row) => {
+      const key = `${row.href}|${row.title}|${row.fullText.slice(0, 160)}`;
+      if (seenRows.has(key)) return false;
+      seenRows.add(key);
+      return true;
+    });
+    const seenOut = new Set();
+    for (const row of rows) {
+      const title = row.title;
+      const fullText = row.fullText;
       const bdMatch = fullText.match(/(\d+)\s*bedrooms?/i);
-      const link = card.querySelector("a[href]");
-      const propertyPath = ((link?.getAttribute("href") || "")).replace(/^https?:\/\/[^\/]+/, "").split("?")[0];
+      const propertyPath = row.href.replace(/^https?:\/\/[^\/]+/, "").split("?")[0];
       const bedroomsExtracted = bdMatch ? parseInt(bdMatch[1], 10) : null;
 
       if (firstCardSample === null) {
@@ -6024,7 +6050,7 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
       }
       if (!(totalPrice > 0) || !(totalNights > 0)) {
         drops.noPrice++;
-        out.push({
+        const candidate = {
           url: "https://www.vrbo.com" + propertyPath,
           title: title.slice(0, 80),
           totalPrice: 0,
@@ -6034,11 +6060,16 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
           priceIncludesFees: false,
           priceBasis: "unknown",
           availabilityOnly: true,
-        });
+        };
+        const candidateKey = `${candidate.url}|${candidate.bedrooms}|${candidate.totalPrice}|${candidate.title}`;
+        if (!seenOut.has(candidateKey)) {
+          seenOut.add(candidateKey);
+          out.push(candidate);
+        }
         continue;
       }
 
-      out.push({
+      const candidate = {
         url: "https://www.vrbo.com" + propertyPath,
         title: title.slice(0, 80),
         totalPrice,
@@ -6047,9 +6078,22 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
         priceIncludesTaxes,
         priceIncludesFees,
         priceBasis,
-      });
+      };
+      const candidateKey = `${candidate.url}|${candidate.bedrooms}|${candidate.totalPrice}|${candidate.title}`;
+      if (!seenOut.has(candidateKey)) {
+        seenOut.add(candidateKey);
+        out.push(candidate);
+      }
     }
-    return { out, drops, totalSeen: cardEls.length, selectorSource, firstCardSample };
+    return {
+      out,
+      drops,
+      totalSeen: rows.length,
+      domSeen: cardEls.length,
+      harvestSeen: harvestedRows.length,
+      selectorSource,
+      firstCardSample,
+    };
   }, { expectedNights });
 
   const cards = result.out;
@@ -6057,7 +6101,7 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
   const brList = cards.map((c) => c.bedrooms ?? "?").join(",");
   log(
     `vrbo_search ${id}: ${cards.length} cards (${allInCount} all-in / ${cards.length - allInCount} pre-tax) ` +
-    `[selector=${result.totalSeen}/${result.selectorSource}, drops=noUrl:${result.drops.noUrl}/noPrice:${result.drops.noPrice}/noBR:${result.drops.noBedrooms}, BRs=[${brList}]]`,
+    `[selector=${result.totalSeen}/${result.selectorSource}, dom=${result.domSeen ?? 0}, harvest=${result.harvestSeen ?? 0}, drops=noUrl:${result.drops.noUrl}/noPrice:${result.drops.noPrice}/noBR:${result.drops.noBedrooms}, BRs=[${brList}]]`,
   );
   if (cards.length === 0 && result.firstCardSample) {
     log(`vrbo_search ${id}: empty-result diagnostic — first card title="${result.firstCardSample.title}" path="${result.firstCardSample.propertyPath}" br=${result.firstCardSample.bedroomsExtracted} text="${result.firstCardSample.textExcerpt}"`);
@@ -6093,7 +6137,30 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
     try {
       snapshot = await withSoftTimeout(
         targetPage.evaluate((passNumber) => {
+          function normalizeText(value) {
+            return String(value || "").replace(/\s+/g, " ").trim();
+          }
+          function harvestRowFromElement(card) {
+            const titleEl = card.querySelector?.("h3");
+            const link = card.querySelector?.("a[href]");
+            const href = link?.getAttribute("href") || "";
+            const title = titleEl ? normalizeText(titleEl.textContent).replace(/^Photo gallery for\s*/i, "") : "";
+            const fullText = normalizeText(card.textContent);
+            const propertyPath = href.replace(/^https?:\/\/[^\/]+/, "").split("?")[0];
+            if (!/^\/\d+/.test(propertyPath)) return null;
+            if (!fullText) return null;
+            return { href, title, fullText };
+          }
           const cards = Array.from(document.querySelectorAll('[data-stid="lodging-card-responsive"]'));
+          const currentRows = cards.map(harvestRowFromElement).filter(Boolean);
+          window.__vrboHarvestCards = Array.isArray(window.__vrboHarvestCards) ? window.__vrboHarvestCards : [];
+          const seenHarvest = new Set(window.__vrboHarvestCards.map((row) => `${row.href}|${row.title}|${String(row.fullText || "").slice(0, 160)}`));
+          for (const row of currentRows) {
+            const key = `${row.href}|${row.title}|${row.fullText.slice(0, 160)}`;
+            if (seenHarvest.has(key)) continue;
+            seenHarvest.add(key);
+            window.__vrboHarvestCards.push(row);
+          }
           const firstCard = cards[0] || document.querySelector('a[href^="/"][href*="?"]');
           const candidates = [];
           let el = firstCard;
@@ -6121,6 +6188,8 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
             scrollTargets: candidates.length,
             visibleCards: document.querySelectorAll('[data-stid="lodging-card-responsive"]').length,
             propertyLinks: Array.from(document.querySelectorAll('a[href]')).filter((a) => /^\/\d+/.test(a.getAttribute("href") || "")).length,
+            harvestedCurrent: currentRows.length,
+            harvestedTotal: window.__vrboHarvestCards.length,
             topTargetCards: candidates[0]?.cardCount ?? 0,
             topTargetOverflow: candidates[0]?.overflow ?? 0,
             before,
@@ -6137,6 +6206,7 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
       log(
         `vrbo_search ${id}: map harvest pass ${snapshot.pass}/${passes} ` +
         `targets=${snapshot.scrollTargets} visibleCards=${snapshot.visibleCards} propertyLinks=${snapshot.propertyLinks} ` +
+        `harvest=${snapshot.harvestedCurrent}/${snapshot.harvestedTotal} ` +
         `topCards=${snapshot.topTargetCards} overflow=${snapshot.topTargetOverflow} scroll=${snapshot.before}->${snapshot.after}`,
       );
     } else {
