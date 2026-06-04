@@ -1201,6 +1201,7 @@ function CityVrboInventoryPanel({
   bedroomPlan,
   onAttachCombo,
   attaching,
+  autoScanTrigger = 0,
 }: {
   propertyId: number;
   reservation: GuestyReservation;
@@ -1208,6 +1209,8 @@ function CityVrboInventoryPanel({
   bedroomPlan: number[];
   onAttachCombo: (option: AutoFillComboOption) => void;
   attaching?: boolean;
+  /** Bumped by Auto-fill cheapest when resort search fails so the panel runs without a manual click. */
+  autoScanTrigger?: number;
 }) {
   const toDateOnly = (s: string | undefined): string => {
     if (!s) return "";
@@ -1216,8 +1219,12 @@ function CityVrboInventoryPanel({
   const checkIn = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
   const checkOut = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
   const [scanNonce, setScanNonce] = useState(0);
+  const effectiveScanNonce = Math.max(scanNonce, autoScanTrigger);
+  useEffect(() => {
+    if (autoScanTrigger > scanNonce) setScanNonce(autoScanTrigger);
+  }, [autoScanTrigger, scanNonce]);
   const { data, isFetching, isError, error } = useQuery<CityVrboInventoryResponse>({
-    queryKey: ["/api/operations/city-vrbo-inventory", propertyId, checkIn, checkOut, scanNonce],
+    queryKey: ["/api/operations/city-vrbo-inventory", propertyId, checkIn, checkOut, effectiveScanNonce],
     queryFn: ({ signal }) => {
       const params = new URLSearchParams({
         propertyId: String(propertyId),
@@ -1226,7 +1233,7 @@ function CityVrboInventoryPanel({
       });
       return apiGetJson<CityVrboInventoryResponse>(`/api/operations/city-vrbo-inventory?${params.toString()}`, signal);
     },
-    enabled: scanNonce > 0 && !!checkIn && !!checkOut,
+    enabled: effectiveScanNonce > 0 && !!checkIn && !!checkOut,
     staleTime: 0,
   });
   const comboOption = data ? cityComboOptionFromInventory(data) : null;
@@ -1250,7 +1257,7 @@ function CityVrboInventoryPanel({
           onClick={() => setScanNonce((n) => n + 1)}
         >
           {isFetching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
-          {isFetching ? "Scanning city map…" : scanNonce > 0 ? "Re-scan city map" : "Scan city VRBO map"}
+          {isFetching ? "Scanning city map…" : effectiveScanNonce > 0 ? "Re-scan city map" : "Scan city VRBO map"}
         </Button>
       </div>
       {isError && (
@@ -4331,6 +4338,7 @@ export default function Bookings() {
   };
   const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
   const [lastAutoFillAudits, setLastAutoFillAudits] = useState<Record<string, AutoFillSearchAudit[]>>({});
+  const [cityInventoryScanTrigger, setCityInventoryScanTrigger] = useState<Record<string, number>>({});
   const rawReservationsRef = useRef<GuestyReservation[]>([]);
 
   const [bulkSelectedReservations, setBulkSelectedReservations] = useState<Record<string, boolean>>({});
@@ -5901,29 +5909,44 @@ export default function Bookings() {
 
       const results: AutoFillResult[] = [];
       const comboEvaluation = await evaluateTwoUnitCombos();
-      const comboChoice = comboEvaluation.best;
-      if (comboChoice) {
-        const totalBedrooms = comboChoice.combo.bedrooms.reduce((sum, n) => sum + n, 0);
-        const comboLabel = `Two-unit ${comboChoice.combo.bedrooms.join("+")}BR combo for ${totalBedrooms}BR booking`;
+      const comboCommunity = staticUnitConfig?.community ?? emptySlots.find((slot) => slot.community)?.community ?? "";
+      const comboTargetResort = directBookingTargetResortName(comboCommunity);
+      const resortBest = comboEvaluation.best;
+      const resortOption = resortBest ? comboOptionFrom(resortBest, true) : null;
+      const resortComboComplete = resortOption
+        ? comboOptionIsComplete(resortOption, comboTargetResort, comboCommunity)
+        : false;
+
+      const remainingEmptySlots = () => emptySlots.filter((slot) => !results.some((row) => row.picked && row.slot.unitId === slot.unitId));
+
+      if (resortComboComplete && resortBest) {
+        const totalBedrooms = resortBest.combo.bedrooms.reduce((sum, n) => sum + n, 0);
+        const comboLabel = `Two-unit ${resortBest.combo.bedrooms.join("+")}BR combo for ${totalBedrooms}BR booking`;
         for (let i = 0; i < emptySlots.length; i++) {
-          const result = await createAndAttachPick(
+          results.push(await createAndAttachPick(
             emptySlots[i],
-            comboChoice.picks[i],
-            comboChoice.combo.bedrooms[i],
-            comboChoice.summaries[i],
+            resortBest.picks[i],
+            resortBest.combo.bedrooms[i],
+            resortBest.summaries[i],
             comboLabel,
-          );
-          results.push(result);
+          ));
         }
-        return {
-          reservation,
-          results,
-          comboOptions: comboEvaluation.options,
-          searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
-        };
+        if (results.every((row) => row.picked)) {
+          return {
+            reservation,
+            results,
+            comboOptions: comboEvaluation.options,
+            searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
+          };
+        }
       }
 
-      if (emptySlots.length >= 2 && staticUnitConfig && staticUnitConfig.units.length >= 2) {
+      const slotsForCityFallback = remainingEmptySlots();
+      if (slotsForCityFallback.length >= 2 && staticUnitConfig && staticUnitConfig.units.length >= 2) {
+        setCityInventoryScanTrigger((prev) => ({
+          ...prev,
+          [reservation._id]: (prev[reservation._id] ?? 0) + 1,
+        }));
         try {
           const cityParams = new URLSearchParams({
             propertyId: String(buyInPropertyId),
@@ -5934,7 +5957,7 @@ export default function Bookings() {
             `/api/operations/city-vrbo-inventory?${cityParams.toString()}`,
           );
           const cityCombo = cityComboOptionFromInventory(cityData);
-          if (cityCombo?.totalCost && cityCombo.picks.length >= emptySlots.length) {
+          if (cityCombo?.totalCost && cityCombo.picks.length >= slotsForCityFallback.length) {
             const pickByBedroom = new Map<number, AutoFillComboOption["picks"][number]>();
             cityCombo.bedrooms.forEach((bedrooms, index) => {
               if (!pickByBedroom.has(bedrooms)) pickByBedroom.set(bedrooms, cityCombo.picks[index]);
@@ -5942,7 +5965,7 @@ export default function Bookings() {
             const cityResults: AutoFillResult[] = [];
             const comboLabel = `City VRBO ${cityCombo.label}`;
             let cityAttached = true;
-            for (const slot of emptySlots) {
+            for (const slot of slotsForCityFallback) {
               const rawPick = pickByBedroom.get(slot.bedrooms);
               if (!rawPick) {
                 cityAttached = false;
@@ -5985,7 +6008,7 @@ export default function Bookings() {
                 diagnostics: {
                   severity: "ok",
                   title: "City-wide VRBO map inventory",
-                  summary: `${cityData.listings.length} exported · pair=${cityCombo.resortPhrase}`,
+                  summary: `${cityData.listings.length} exported · pair=${cityData.suggestedPair?.resortPhrase ?? "none"}`,
                   generatedAt: new Date().toISOString(),
                   request: { propertyId: buyInPropertyId, bedrooms, checkIn: ci, checkOut: co },
                   sources: [],
@@ -5994,10 +6017,11 @@ export default function Bookings() {
                 },
               });
             }
+            results.push(...cityResults);
             if (cityAttached && cityResults.every((row) => row.picked)) {
               return {
                 reservation,
-                results: cityResults,
+                results,
                 comboOptions: [cityCombo, ...comboEvaluation.options],
                 searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
                 cityInventory: cityData,
@@ -6020,7 +6044,7 @@ export default function Bookings() {
         candidates: LiveCandidate[];
         searchSummary: AutoFillSearchSummary;
       }> = [];
-      for (const slot of emptySlots) {
+      for (const slot of remainingEmptySlots()) {
         const pool = await getCandidatePool(slot.bedrooms, false);
         fallbackPools.push({ slot, bedrooms: slot.bedrooms, candidates: pool.candidates, searchSummary: pool.searchSummary });
       }
@@ -8056,6 +8080,7 @@ export default function Bookings() {
                             bedroomPlan={PROPERTY_UNIT_CONFIGS[selectedPropertyId]!.units.map((unit) => unit.bedrooms)}
                             onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
                             attaching={attachComboMutation.isPending}
+                            autoScanTrigger={cityInventoryScanTrigger[r._id] ?? 0}
                           />
                         )}
                         {searchAudits.length > 0 && (() => {

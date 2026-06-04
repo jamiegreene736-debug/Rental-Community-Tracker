@@ -3342,8 +3342,10 @@ assert.ok(
 assert.ok(
   bookingsSource.includes("city-vrbo-inventory") &&
     bookingsSource.includes('attachSource === "city-vrbo"') &&
-    bookingsSource.includes("emptySlots.length >= 2"),
-  "auto-fill should run resort search first then city-wide VRBO fallback without per-community scout",
+    bookingsSource.includes("resortComboComplete") &&
+    bookingsSource.includes("remainingEmptySlots") &&
+    bookingsSource.includes("setCityInventoryScanTrigger"),
+  "auto-fill should attach resort combo only when complete, then city-wide VRBO fallback without per-community scout",
 );
 assert.ok(
   bookingsSource.includes("CityVrboInventoryPanel") &&
