@@ -12057,7 +12057,54 @@ export async function registerRoutes(
       if (!isLikelyDirectBookingSurface({ domain, title: c.title, url: c.directBookingUrl })) return false;
       return true;
     };
+    const candidateIsAlternativeScoutMapResult = (c: Candidate): boolean => {
+      if (c.source !== "vrbo" && c.source !== "booking") return false;
+      if (c.verified !== "yes") return false;
+      if (!(c.totalPrice > 0 || c.nightlyPrice > 0)) return false;
+      if (pricePlausibilityReason(c)) return false;
+      if (candidateLooksStandaloneHome(c)) return false;
+      const hay = candidateHaystack(c);
+      if (mentionsKnownNonRegencyPoipuKaiComplex(hay) || mentionsKnownNonPoipuKaiComplex(hay) || mentionsKnownNonKahaLaniComplex(hay)) {
+        return false;
+      }
+      const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
+        .map((m) => parseInt(m[1], 10))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      if (stayNightCounts.some((n) => n !== nights)) return false;
+      const inferredBedrooms = candidateBedroomSignal(c);
+      if (!satisfiesBuyInBedrooms(inferredBedrooms)) return false;
+      return true;
+    };
+    const alternativeScoutMapRejectReason = (c: Candidate): string => {
+      if (c.source !== "vrbo" && c.source !== "booking") return "not a VRBO/Booking.com map result";
+      if (c.verified !== "yes") return `not date-verified (${c.verified ?? "missing"})`;
+      if (!(c.totalPrice > 0 || c.nightlyPrice > 0)) return "no date-priced total/nightly rate";
+      const priceReason = pricePlausibilityReason(c);
+      if (priceReason) return priceReason;
+      if (candidateLooksStandaloneHome(c)) return "standalone house/home, not condo or townhome inventory";
+      const hay = candidateHaystack(c);
+      if (mentionsKnownNonRegencyPoipuKaiComplex(hay)) return "known non-Regency Poipu Kai complex";
+      if (mentionsKnownNonPoipuKaiComplex(hay)) return "known non-Poipu Kai complex";
+      if (mentionsKnownNonKahaLaniComplex(hay)) return "known non-Kaha Lani complex";
+      const stayNightCounts = Array.from(hay.matchAll(/\bfor\s+(\d+)\s+nights?/gi))
+        .map((m) => parseInt(m[1], 10))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      if (stayNightCounts.some((n) => n !== nights)) return "wrong stay-night count in visible text";
+      const inferredBedrooms = candidateBedroomSignal(c);
+      if (!satisfiesBuyInBedrooms(inferredBedrooms)) {
+        return inferredBedrooms === null
+          ? `no explicit ${requestedBedrooms}BR proof on listing/search result`
+          : `bedroom mismatch ${inferredBedrooms}BR != requested ${requestedBedrooms}BR`;
+      }
+      return "unknown alternative city-map rejection";
+    };
     const candidateFinalIdentityRejectReason = async (c: Candidate): Promise<string | null> => {
+      if (alternativeScoutOtaMapOnly && candidateIsAlternativeScoutMapResult(c)) {
+        return null;
+      }
+      if (alternativeScoutOtaMapOnly && (c.source === "vrbo" || c.source === "booking")) {
+        return alternativeScoutMapRejectReason(c);
+      }
       if (c.airbnbAnchorUrl && !candidateHasUsableAirbnbDirectLink(c)) {
         return "Airbnb-backed row has no usable direct booking link";
       }
@@ -12078,12 +12125,13 @@ export async function registerRoutes(
       return null;
     };
     const candidateIsFinalAutoPickSafe = async (c: Candidate): Promise<boolean> =>
-      (!c.airbnbAnchorUrl || candidateHasUsableAirbnbDirectLink(c))
+      (alternativeScoutOtaMapOnly && candidateIsAlternativeScoutMapResult(c))
+      || ((!c.airbnbAnchorUrl || candidateHasUsableAirbnbDirectLink(c))
       && (!c.directBookingUrl || candidateHasUsableAirbnbDirectLink(c))
       && candidateFitsTarget(c, { requireBedroomProof: true })
       && satisfiesBuyInBedrooms(candidateBedroomSignal(c))
       && candidateHasFinalResortProof(c)
-      && computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName) >= (await getUnitTypeConfidenceThreshold(propertyId));  // High-confidence gate (configurable threshold)
+      && computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName) >= (await getUnitTypeConfidenceThreshold(propertyId)));  // High-confidence gate (configurable threshold)
 
     // Append the reservation's check-in/out to the URL so the landing page
     // opens with availability already filtered for those dates. Each platform
@@ -14012,20 +14060,34 @@ export async function registerRoutes(
     const targetFilterPriceDropped = { airbnb: 0, vrbo: 0, booking: 0, pm: 0 };
     const filterTargetCandidates = (items: Candidate[], key: keyof typeof targetFilterDropped): Candidate[] => {
       const dropExamples: string[] = [];
+      const keepExamples: string[] = [];
       const kept = items.filter((item) => {
-        const fits = candidateFitsTarget(item);
+        const fits = alternativeScoutOtaMapOnly && (key === "vrbo" || key === "booking")
+          ? candidateIsAlternativeScoutMapResult(item)
+          : candidateFitsTarget(item);
         if (!fits) {
           if (pricePlausibilityReason(item)) targetFilterPriceDropped[key]++;
           if (dropExamples.length < 6 && (item.totalPrice > 0 || item.nightlyPrice > 0)) {
             const urlHost = (() => {
               try { return new URL(item.url).hostname.replace(/^www\./, ""); } catch { return item.sourceLabel || item.source; }
             })();
-            dropExamples.push(`${candidateTargetRejectReason(item)} :: ${urlHost} :: ${(item.title || item.sourceLabel || item.url).replace(/\s+/g, " ").slice(0, 90)} :: $${Math.round(item.totalPrice || item.nightlyPrice * Math.max(1, nights))}`);
+            const reason = alternativeScoutOtaMapOnly && (key === "vrbo" || key === "booking")
+              ? alternativeScoutMapRejectReason(item)
+              : candidateTargetRejectReason(item);
+            dropExamples.push(`${reason} :: ${urlHost} :: ${(item.title || item.sourceLabel || item.url).replace(/\s+/g, " ").slice(0, 90)} :: $${Math.round(item.totalPrice || item.nightlyPrice * Math.max(1, nights))}`);
           }
+        } else if (alternativeScoutOtaMapOnly && (key === "vrbo" || key === "booking") && keepExamples.length < 8) {
+          const br = candidateBedroomSignal(item);
+          keepExamples.push(`${br ?? "?"}BR :: ${(item.title || item.sourceLabel || item.url).replace(/\s+/g, " ").slice(0, 90)} :: $${Math.round(item.totalPrice || item.nightlyPrice * Math.max(1, nights))}`);
         }
         return fits;
       });
       targetFilterDropped[key] += items.length - kept.length;
+      if (keepExamples.length > 0) {
+        console.log(
+          `[find-buy-in] alternative city-map kept ${key} examples (${kept.length}/${items.length}) search="${websiteSearchTerm}": ${keepExamples.join(" | ")}`,
+        );
+      }
       if (dropExamples.length > 0) {
         console.log(
           `[find-buy-in] target-filter dropped priced ${key} examples (${items.length - kept.length}/${items.length}): ${dropExamples.join(" | ")}`,
