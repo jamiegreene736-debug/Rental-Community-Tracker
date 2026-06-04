@@ -43,6 +43,7 @@ import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
+import { textMatchesResortPhrase } from "@shared/buy-in-market";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -408,6 +409,7 @@ type AlternativeWorkflowState = {
   scout?: AlternativeScoutResponse;
   activeCommunity?: string | null;
   sidecarResults?: Record<string, FindBuyInResponse>;
+  mapFilterPhrase?: string;
   pageUrl?: string | null;
   draft?: { subject: string; body: string } | null;
 };
@@ -1213,7 +1215,127 @@ function mergeAlternativeFindBuyInResponses(
       } verified candidate${cheapest.length === 1 ? "" : "s"} returned.`,
       generatedAt: new Date().toISOString(),
     },
+    debug: primary.debug ? {
+      ...primary.debug,
+      mapHarvest: responses.reduce<Record<string, unknown> | undefined>((merged, response) => {
+        const next = (response.debug as { mapHarvest?: Record<string, unknown> } | undefined)?.mapHarvest;
+        if (!next) return merged;
+        return { ...(merged ?? {}), ...next };
+      }, (primary.debug as { mapHarvest?: Record<string, unknown> }).mapHarvest),
+    } : undefined,
   };
+}
+
+function downloadAlternativeMapInventoryExport(
+  data: FindBuyInResponse,
+  community: string,
+  mapFilterPhrase?: string,
+) {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    community,
+    mapFilterPhrase: mapFilterPhrase || null,
+    mapHarvest: (data.debug as { mapHarvest?: unknown } | undefined)?.mapHarvest ?? null,
+    comparisonSources: data.comparisonSources ?? {},
+    cheapest: data.cheapest ?? [],
+    diagnostics: data.diagnostics ?? null,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `alternative-map-${community.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "export"}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function AlternativeMapInventoryPanel({
+  data,
+  mapFilterPhrase,
+  onMapFilterPhraseChange,
+  onRerun,
+  running,
+}: {
+  data: FindBuyInResponse | undefined;
+  mapFilterPhrase: string;
+  onMapFilterPhraseChange: (value: string) => void;
+  onRerun: () => void;
+  running?: boolean;
+}) {
+  if (!data) return null;
+  const pool = alternativeMapCandidatePool(data, mapFilterPhrase);
+  const harvest = (data.debug as { mapHarvest?: { vrbo?: { sidecar?: Record<string, unknown>; comparisonPool?: number } } } | undefined)?.mapHarvest;
+  const byBedroom = new Map<number, LiveCandidate[]>();
+  for (const row of pool) {
+    const br = typeof row.bedrooms === "number" ? Math.round(row.bedrooms) : 0;
+    if (br <= 0) continue;
+    const bucket = byBedroom.get(br) ?? [];
+    bucket.push(row);
+    byBedroom.set(br, bucket);
+  }
+  const bedroomGroups = Array.from(byBedroom.entries()).sort(([a], [b]) => b - a);
+  return (
+    <div className="mt-2 rounded border border-slate-200 bg-white px-2 py-2 text-[11px]">
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="min-w-[140px] flex-1">
+          <Label className="text-[10px] text-muted-foreground">Map filter (optional)</Label>
+          <Input
+            className="mt-0.5 h-7 text-[11px]"
+            placeholder="e.g. Kamalii"
+            value={mapFilterPhrase}
+            onChange={(event) => onMapFilterPhraseChange(event.target.value)}
+          />
+        </div>
+        <Button size="sm" variant="outline" className="h-7" onClick={onRerun} disabled={running}>
+          {running ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
+          Re-run map
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7"
+          onClick={() => downloadAlternativeMapInventoryExport(data, data.community, mapFilterPhrase)}
+        >
+          <FileText className="mr-1 h-3.5 w-3.5" />
+          Export JSON
+        </Button>
+      </div>
+      {harvest?.vrbo?.sidecar && (
+        <p className="mt-1 text-[10px] text-muted-foreground">
+          VRBO harvest: merged {String(harvest.vrbo.sidecar.mergedCount ?? "?")} · scroll buffer {String(harvest.vrbo.sidecar.finalHarvestTotal ?? "?")} · comparison pool {harvest.vrbo.comparisonPool ?? pool.length}
+        </p>
+      )}
+      <p className="mt-1 font-medium text-slate-900">
+        Map inventory ({pool.length} verified VRBO/Booking row{pool.length === 1 ? "" : "s"})
+      </p>
+      {bedroomGroups.length === 0 ? (
+        <p className="text-muted-foreground">No verified map rows match the current filter.</p>
+      ) : (
+        <div className="mt-1 max-h-40 space-y-2 overflow-y-auto">
+          {bedroomGroups.map(([bedrooms, rows]) => (
+            <div key={bedrooms}>
+              <p className="text-[10px] font-semibold text-slate-700">{bedrooms}BR ({rows.length})</p>
+              {rows.slice(0, 12).map((row) => (
+                <a
+                  key={row.url}
+                  href={row.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block truncate text-sky-800 underline underline-offset-2"
+                  title={row.title}
+                >
+                  {fmtMoney(row.totalPrice || row.nightlyPrice)} · {row.sourceLabel ?? row.source} · {row.title}
+                </a>
+              ))}
+              {rows.length > 12 && (
+                <p className="text-[10px] text-muted-foreground">+{rows.length - 12} more in export</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function candidateWalkMinutes(a: Pick<LiveCandidate, "lat" | "lng">, b: Pick<LiveCandidate, "lat" | "lng">): number | null {
@@ -1252,7 +1374,8 @@ function candidateIsWalkableWithExistingPicks(
   return true;
 }
 
-function alternativeMapCandidatePool(data: FindBuyInResponse): LiveCandidate[] {
+function alternativeMapCandidatePool(data: FindBuyInResponse, resortPhrase?: string): LiveCandidate[] {
+  const phrase = String(resortPhrase ?? "").trim();
   const rows = [
     ...(data.cheapest ?? []),
     ...(data.sources?.vrbo ?? []),
@@ -1263,6 +1386,7 @@ function alternativeMapCandidatePool(data: FindBuyInResponse): LiveCandidate[] {
   const deduped = new Map<string, LiveCandidate>();
   for (const candidate of rows) {
     if (candidate.source !== "vrbo" && candidate.source !== "booking") continue;
+    if (phrase && !textMatchesResortPhrase(`${candidate.title} ${candidate.sourceLabel ?? ""}`, phrase)) continue;
     if (candidate.verified && candidate.verified !== "yes") continue;
     if (!(candidate.totalPrice > 0 || candidate.nightlyPrice > 0)) continue;
     const key = listingIdentityKeys(candidate)[0]
@@ -1279,8 +1403,9 @@ function bestWalkableAlternativePicks(
   data: FindBuyInResponse,
   plan: number[],
   community: string,
+  resortPhrase?: string,
 ): Array<LiveCandidate & { community: string }> | null {
-  const candidatePool = alternativeMapCandidatePool(data);
+  const candidatePool = alternativeMapCandidatePool(data, resortPhrase);
   const pools = plan.map((bedrooms) => candidatePool
     .filter((candidate) => candidate.totalPrice > 0 && candidateMatchesBedroom(candidate, bedrooms))
     .sort((a, b) => a.totalPrice - b.totalPrice)
@@ -1405,7 +1530,7 @@ function bestAlternativeReplacementSet(workflow: AlternativeWorkflowState | unde
         : fallbackPlans;
 
     for (const plan of plans) {
-      const picks = bestWalkableAlternativePicks(data, plan, scoutResult.community);
+      const picks = bestWalkableAlternativePicks(data, plan, scoutResult.community, workflow?.mapFilterPhrase);
 
       if (picks?.length === plan.length) {
         sets.push({
@@ -2424,6 +2549,7 @@ function AlternativeBuyInWorkflowPanel({
   workflow,
   onScout,
   onRunCommunity,
+  onMapFilterPhraseChange,
   onDraftMessage,
   autoScan,
   onStartAutoScan,
@@ -2432,6 +2558,7 @@ function AlternativeBuyInWorkflowPanel({
   workflow: AlternativeWorkflowState | undefined;
   onScout: () => void;
   onRunCommunity: (community: string) => void;
+  onMapFilterPhraseChange?: (value: string) => void;
   onDraftMessage: () => void;
   autoScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
   onStartAutoScan?: () => void;
@@ -2443,6 +2570,10 @@ function AlternativeBuyInWorkflowPanel({
   const scoutSources = alternativeScoutSourceSummary(workflow?.scout);
   const completeReplacementSet = bestAlternativeReplacementSet(workflow);
   const replacementPlanText = alternativeReplacementNeedText(workflow);
+  const mapFilterPhrase = workflow?.mapFilterPhrase ?? "";
+  const primaryCommunity = communities[0]?.community;
+  const primarySidecar = primaryCommunity ? sidecarResults[primaryCommunity] : undefined;
+  const primaryRunning = primaryCommunity ? active === primaryCommunity : false;
   return (
     <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-950">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2543,6 +2674,15 @@ function AlternativeBuyInWorkflowPanel({
                     {sidecar.cheapest?.[0]?.totalPrice ? ` · best ${fmtMoney(sidecar.cheapest[0].totalPrice)}` : ""}
                     <UnitTypeConfidenceBadge confidence={sidecar.cheapest?.[0]?.unitTypeConfidence} />
                   </p>
+                )}
+                {result.community === primaryCommunity && primarySidecar && onMapFilterPhraseChange && (
+                  <AlternativeMapInventoryPanel
+                    data={primarySidecar}
+                    mapFilterPhrase={mapFilterPhrase}
+                    onMapFilterPhraseChange={onMapFilterPhraseChange}
+                    onRerun={() => onRunCommunity(result.community)}
+                    running={primaryRunning}
+                  />
                 )}
                 {(airbnbSamples.length > 0 || directMatches.length > 0 || (result.directBookingProbes?.length ?? 0) > 0) && (
                   <div className="mt-1 space-y-1 rounded bg-slate-50 px-2 py-1.5 text-[11px]">
@@ -4755,6 +4895,7 @@ export default function Bookings() {
       ];
       const scoutRow = scoutedRows.find((row) => row.community === community);
       const communitySearchTerm = scoutRow?.searchTerm || community;
+      const mapFilterPhrase = (workflow?.mapFilterPhrase ?? "").trim();
       const lat = Number(scoutRow?.lat);
       const lng = Number(scoutRow?.lng);
       const searches = bedroomsToSearch.map((bedrooms) => {
@@ -4768,6 +4909,9 @@ export default function Bookings() {
         });
         if (communitySearchTerm) {
           params.set("searchTerm", communitySearchTerm);
+        }
+        if (mapFilterPhrase) {
+          params.set("resortPhrase", mapFilterPhrase);
         }
         if (Number.isFinite(lat) && Number.isFinite(lng)) {
           params.set("mapCenterLat", String(lat));
@@ -8764,6 +8908,7 @@ export default function Bookings() {
 	                                  workflow={alternativeWorkflows[r._id]}
 	                                  onScout={() => scoutAlternativeCommunities(r, advice)}
 	                                  onRunCommunity={(community) => runAlternativeSidecarSearch(r, community, { forceRefresh: true })}
+	                                  onMapFilterPhraseChange={(value) => updateAlternativeWorkflow(r._id, { mapFilterPhrase: value })}
 	                                  onDraftMessage={() => draftAlternativeGuestMessage(r)}
 	                                  autoScan={autoAltScans[r._id] ?? null}
 	                                  onStartAutoScan={() => startAutoAlternativeSidecarScan(r)}
@@ -8966,6 +9111,7 @@ export default function Bookings() {
                                 alternativeWorkflow={alternativeWorkflows[r._id]}
                                 onScoutAlternatives={(advice, opts) => scoutAlternativeCommunities(r, advice, opts)}
                                 onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(r, community, { forceRefresh: true })}
+                                onMapFilterPhraseChange={(value) => updateAlternativeWorkflow(r._id, { mapFilterPhrase: value })}
                                 onDraftAlternativeMessage={() => draftAlternativeGuestMessage(r)}
                                 autoAltScan={autoAltScans[r._id] ?? null}
                                 onStartAutoAltScan={() => startAutoAlternativeSidecarScan(r)}
@@ -9655,6 +9801,7 @@ export default function Bookings() {
               alternativeWorkflow={alternativeWorkflows[picker.reservation._id]}
               onScoutAlternatives={(advice, opts) => scoutAlternativeCommunities(picker.reservation, advice, opts)}
               onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(picker.reservation, community, { forceRefresh: true })}
+              onMapFilterPhraseChange={(value) => updateAlternativeWorkflow(picker.reservation._id, { mapFilterPhrase: value })}
               onDraftAlternativeMessage={() => draftAlternativeGuestMessage(picker.reservation)}
               autoAltScan={autoAltScans[picker.reservation._id] ?? null}
               onStartAutoAltScan={() => startAutoAlternativeSidecarScan(picker.reservation)}
@@ -10047,6 +10194,7 @@ function CandidateList({
   alternativeWorkflow,
   onScoutAlternatives,
   onRunAlternativeCommunity,
+  onMapFilterPhraseChange,
   onDraftAlternativeMessage,
   autoAltScan,
   onStartAutoAltScan,
@@ -10060,6 +10208,7 @@ function CandidateList({
   alternativeWorkflow?: AlternativeWorkflowState;
   onScoutAlternatives?: (advice: BuyInCancellationAdvice, opts?: { auto?: boolean }) => void;
   onRunAlternativeCommunity?: (community: string) => void;
+  onMapFilterPhraseChange?: (value: string) => void;
   onDraftAlternativeMessage?: () => void;
   autoAltScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
   onStartAutoAltScan?: () => void;
@@ -10086,6 +10235,7 @@ function CandidateList({
         alternativeWorkflow={alternativeWorkflow}
         onScoutAlternatives={onScoutAlternatives}
         onRunAlternativeCommunity={onRunAlternativeCommunity}
+        onMapFilterPhraseChange={onMapFilterPhraseChange}
         onDraftAlternativeMessage={onDraftAlternativeMessage}
         autoAltScan={autoAltScan}
         onStartAutoAltScan={onStartAutoAltScan}
@@ -10495,6 +10645,15 @@ type FindBuyInResponse = {
     searchLocation?: string;
     vrboDestination?: string;
     resortName?: string | null;
+    vrboMapSearch?: {
+      scope?: string;
+      scoutMarketKey?: string | null;
+      resortPhrase?: string | null;
+    };
+    mapHarvest?: {
+      vrbo?: Record<string, unknown>;
+      booking?: Record<string, unknown>;
+    };
   };
 };
 
@@ -11270,6 +11429,7 @@ function LiveSearchSection({
   alternativeWorkflow,
   onScoutAlternatives,
   onRunAlternativeCommunity,
+  onMapFilterPhraseChange,
   onDraftAlternativeMessage,
   autoAltScan,
   onStartAutoAltScan,
@@ -11283,6 +11443,7 @@ function LiveSearchSection({
   alternativeWorkflow?: AlternativeWorkflowState;
   onScoutAlternatives?: (advice: BuyInCancellationAdvice, opts?: { auto?: boolean }) => void;
   onRunAlternativeCommunity?: (community: string) => void;
+  onMapFilterPhraseChange?: (value: string) => void;
   onDraftAlternativeMessage?: () => void;
   autoAltScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
   onStartAutoAltScan?: () => void;
@@ -12048,6 +12209,7 @@ function LiveSearchSection({
           workflow={alternativeWorkflow}
           onScout={() => onScoutAlternatives(singleSearchCancellationAdvice!)}
           onRunCommunity={(community) => onRunAlternativeCommunity?.(community)}
+          onMapFilterPhraseChange={onMapFilterPhraseChange}
           onDraftMessage={() => onDraftAlternativeMessage?.()}
           autoScan={autoAltScan ?? null}
           onStartAutoScan={onStartAutoAltScan}

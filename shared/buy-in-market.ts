@@ -256,6 +256,30 @@ export function searchLocationForBuyInMarket(marketKey: string): string | null {
   return BUY_IN_MARKET_SEARCH_LOCATIONS[marketKey] || null;
 }
 
+/** Map scout rows like "Princeville, Hawaii" to configured market keys (e.g. Princeville). */
+export function buyInMarketKeyForScoutCommunity(communityLabel: string): string | null {
+  const trimmed = String(communityLabel ?? "").trim();
+  if (!trimmed) return null;
+  if (BUY_IN_MARKETS[trimmed]) return trimmed;
+  return resolveBuyInMarketFromText(trimmed) ?? resolveBuyInMarket({ name: trimmed });
+}
+
+export function resortPhraseTokens(phrase: string): string[] {
+  return String(phrase ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token.length >= 3);
+}
+
+export function textMatchesResortPhrase(haystack: string, phrase: string): boolean {
+  const tokens = resortPhraseTokens(phrase);
+  if (tokens.length === 0) return true;
+  const normalized = String(haystack ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  return tokens.every((token) => normalized.includes(token));
+}
+
 /** Beachfront/oceanfront sources should only scout other waterfront markets. */
 export function oceanfrontComparableBuyInMarket(community: string | null | undefined): boolean {
   const key = String(community ?? "").toLowerCase();

@@ -136,8 +136,10 @@ import {
   nearbyBuyInMarketsForScout,
   nearbyBuyInMarketsForScoutDetailed,
   oceanfrontComparableBuyInMarket,
+  buyInMarketKeyForScoutCommunity,
   resolveBuyInMarket,
   searchLocationForBuyInMarket,
+  textMatchesResortPhrase,
 } from "@shared/buy-in-market";
 import { draftPhotoFolderRef, isScannableFolder, replacementPhotoFolderRef, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import {
@@ -11044,6 +11046,7 @@ export async function registerRoutes(
     const requestedListingId = typeof req.query.listingId === "string" ? req.query.listingId.trim() : "";
     const requestedCommunity = typeof req.query.community === "string" ? req.query.community.trim() : "";
     const requestedSearchTerm = typeof req.query.searchTerm === "string" ? req.query.searchTerm.trim() : "";
+    const requestedResortPhrase = typeof req.query.resortPhrase === "string" ? req.query.resortPhrase.trim() : "";
     const alternativeScoutMapSearch = /^(1|true|yes)$/i.test(String(req.query.alternativeScout ?? ""));
     const requestedMapCenterLat = Number(req.query.mapCenterLat);
     const requestedMapCenterLng = Number(req.query.mapCenterLng);
@@ -11131,7 +11134,8 @@ export async function registerRoutes(
     const scoutSearchKey = alternativeScoutMapSearch && requestedSearchTerm
       ? `search:${requestedSearchTerm.toLowerCase()}`
       : "search:default";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-no-lens-pm-gh-vrbo-map-v2|${scoutMapKey}|${scoutSearchKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
+    const scoutPhraseKey = requestedResortPhrase ? `phrase:${requestedResortPhrase.toLowerCase()}` : "phrase:none";
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-no-lens-pm-gh-vrbo-map-v2|${scoutMapKey}|${scoutSearchKey}|${scoutPhraseKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     // Result HTTP cache is off by default (FIND_BUY_IN_TTL_MS=0), but in-flight
     // dedup must stay on unless the caller explicitly opts out with nocache=1.
     // Backgrounding the Operations tab closes the browser socket; without
@@ -11239,9 +11243,10 @@ export async function registerRoutes(
     const searchLocation = searchLocationForBuyInMarket(community) || (requestedCommunity ? requestedCommunity : `${community}, Hawaii`);
     const buyInPlatformSearch = COMMUNITY_BUY_IN_PLATFORM_SEARCH_TERMS[community] ?? {};
     const vrboDestination = buyInPlatformSearch.vrbo ?? searchLocation;
-    const resortBounds = COMMUNITY_BOUNDS[community];
+    const scoutMarketKey = alternativeScoutMapSearch ? buyInMarketKeyForScoutCommunity(community) : null;
+    const resortBounds = COMMUNITY_BOUNDS[scoutMarketKey ?? community] ?? COMMUNITY_BOUNDS[community];
     const cityMapBounds = alternativeScoutMapSearch
-      ? cityWideMapBoundsForBuyInMarket(community, requestedMapCenter)
+      ? cityWideMapBoundsForBuyInMarket(scoutMarketKey ?? community, requestedMapCenter)
       : undefined;
     const bounds = resortBounds;
     const providerMapBounds = alternativeScoutMapSearch ? undefined : resortBounds;
@@ -11256,10 +11261,10 @@ export async function registerRoutes(
       : undefined;
     const mapSearchCenter = requestedMapCenter ?? mapBoundsCenter(mapReferenceBounds);
     const mapSearchRadiusKm = mapBoundsRadiusKm(mapReferenceBounds);
-    const mapSearchScope = alternativeScoutMapSearch && cityMapBounds ? "city" : "resort";
+    const mapSearchScope = alternativeScoutMapSearch ? "city" : "resort";
     console.log(
-      `[find-buy-in] map-boundary-plan community="${community}" scope=${mapSearchScope} alternativeScout=${alternativeScoutMapSearch} ` +
-      `requestedSearchTerm="${requestedSearchTerm}" requestedMapCenter=${mapCenterLogValue(requestedMapCenter)} ` +
+      `[find-buy-in] map-boundary-plan community="${community}" scoutMarketKey="${scoutMarketKey ?? ""}" scope=${mapSearchScope} alternativeScout=${alternativeScoutMapSearch} ` +
+      `requestedSearchTerm="${requestedSearchTerm}" resortPhrase="${requestedResortPhrase}" requestedMapCenter=${mapCenterLogValue(requestedMapCenter)} ` +
       `resortBounds=${mapBoundsLogValue(resortBounds)} cityReferenceBounds=${mapBoundsLogValue(cityMapBounds)} ` +
       `providerBounds=${mapBoundsLogValue(mapSearchBounds)} providerCenter=${mapCenterLogValue(mapSearchCenter)} ` +
       `providerRadiusKm=${mapSearchRadiusKm !== undefined ? mapSearchRadiusKm.toFixed(2) : "none"} ` +
@@ -12064,12 +12069,17 @@ export async function registerRoutes(
       if (!isLikelyDirectBookingSurface({ domain, title: c.title, url: c.directBookingUrl })) return false;
       return true;
     };
+    const candidateMatchesResortPhraseFilter = (c: Candidate): boolean => {
+      if (!requestedResortPhrase) return true;
+      return textMatchesResortPhrase(candidateHaystack(c), requestedResortPhrase);
+    };
     const candidateIsAlternativeScoutMapResult = (c: Candidate): boolean => {
       if (c.source !== "vrbo" && c.source !== "booking") return false;
       if (c.verified !== "yes") return false;
       if (!(c.totalPrice > 0 || c.nightlyPrice > 0)) return false;
       if (pricePlausibilityReason(c)) return false;
       if (candidateLooksStandaloneHome(c)) return false;
+      if (!candidateMatchesResortPhraseFilter(c)) return false;
       const hay = candidateHaystack(c);
       if (mentionsKnownNonRegencyPoipuKaiComplex(hay) || mentionsKnownNonPoipuKaiComplex(hay) || mentionsKnownNonKahaLaniComplex(hay)) {
         return false;
@@ -12084,6 +12094,9 @@ export async function registerRoutes(
     };
     const alternativeScoutMapRejectReason = (c: Candidate): string => {
       if (c.source !== "vrbo" && c.source !== "booking") return "not a VRBO/Booking.com map result";
+      if (!candidateMatchesResortPhraseFilter(c)) {
+        return `title does not match resort phrase "${requestedResortPhrase}"`;
+      }
       if (c.verified !== "yes") return `not date-verified (${c.verified ?? "missing"})`;
       if (!(c.totalPrice > 0 || c.nightlyPrice > 0)) return "no date-priced total/nightly rate";
       const priceReason = pricePlausibilityReason(c);
@@ -12526,6 +12539,7 @@ export async function registerRoutes(
     let vrboSidecarReason = "";
     let vrboProviderHealth: ProviderHealthSnapshot | null = null;
     let vrboVariationSummary: any = null;
+    let vrboMapHarvest: Record<string, unknown> | null = null;
     const vrboSidecarAbort = makeSidecarAbort("vrbo");
     const vrboPromise: Promise<Candidate[]> = (async () => {
       const targetSearchTerm = vrboWebsiteSearchTerm;
@@ -12572,6 +12586,7 @@ export async function registerRoutes(
         vrboSidecarReason = r.reason;
         vrboProviderHealth = r.providerHealth ?? null;
         vrboVariationSummary = r.searchVariationSummary ?? null;
+        vrboMapHarvest = r.mapHarvest ?? null;
         if (sidecarReasonIsProviderFailure(r.reason)) {
           noteSourceError("Vrbo sidecar search", r.reason);
         }
@@ -14171,6 +14186,7 @@ export async function registerRoutes(
       const bPrice = b.totalPrice > 0 ? b.totalPrice : b.nightlyPrice * nights;
       return aPrice - bPrice;
     };
+    const comparisonCandidateCap = alternativeScoutOtaMapOnly ? 150 : 40;
     const dedupeComparisonCandidates = (items: Candidate[], opts: { allowAirbnb?: boolean } = {}): Candidate[] =>
       Array.from(
         new Map(
@@ -14179,7 +14195,7 @@ export async function registerRoutes(
             .sort(comparisonSort)
             .map((item) => [item.url, item] as const),
         ).values(),
-      ).slice(0, 40);
+      ).slice(0, comparisonCandidateCap);
     const comparisonSources = {
       airbnb: dedupeComparisonCandidates([...airbnbTarget, ...airbnbWithMatches], { allowAirbnb: true }),
       vrbo: dedupeComparisonCandidates([...vrboTarget, ...vrbo]),
@@ -14848,10 +14864,30 @@ export async function registerRoutes(
         vrboMapSearch: {
           scope: mapSearchScope,
           alternativeScout: alternativeScoutMapSearch,
+          scoutMarketKey: scoutMarketKey ?? null,
           bounds: mapSearchBounds ?? null,
           center: mapSearchCenter ?? null,
           radiusKm: mapSearchRadiusKm ?? null,
+          resortPhrase: requestedResortPhrase || null,
         },
+        mapHarvest: alternativeScoutMapSearch ? {
+          vrbo: {
+            sidecar: vrboMapHarvest,
+            raw: vrboRawCount,
+            keptAfterBedroomFloor: vrboTarget.length,
+            comparisonPool: comparisonSources.vrbo.length,
+            verifiedCheapest: verifiedCheapest.length,
+            targetFilterDropped: targetFilterDropped.vrbo,
+            targetFilterPriceDropped: targetFilterPriceDropped.vrbo,
+          },
+          booking: {
+            raw: bookingRawCount,
+            keptAfterBedroomFloor: bookingTarget.length,
+            comparisonPool: comparisonSources.booking.length,
+            targetFilterDropped: targetFilterDropped.booking,
+            targetFilterPriceDropped: targetFilterPriceDropped.booking,
+          },
+        } : undefined,
         resortName,
       },
       diagnostics,

@@ -5727,10 +5727,12 @@ async function processVrboSearch(id, params) {
       suggestionText: params?.mapSearch?.targetName || effectiveSearchTerm,
       source: "map-bounds",
     };
-    const cards = await runVrboMapBoundsSearchVariant(id, params, mapVariant);
-    const uniqueCards = dedupeCandidatesByUrl(cards);
+    const mapResult = await runVrboMapBoundsSearchVariant(id, params, mapVariant);
+    const rawCards = Array.isArray(mapResult) ? mapResult : (mapResult?.candidates ?? []);
+    const uniqueCards = dedupeCandidatesByUrl(rawCards);
     await postResult(id, {
       candidates: uniqueCards,
+      mapHarvest: Array.isArray(mapResult) ? null : (mapResult?.mapHarvest ?? null),
       variationsTried: [{
         term: effectiveSearchTerm,
         typedQuery: effectiveSearchTerm,
@@ -6124,10 +6126,17 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel)
       .join(", ");
     log(`vrbo_search ${id}: by-BR: ${summary}`);
   }
-  return cards.map((card) => ({ ...card, searchVariant: variantLabel }));
+  return {
+    cards: cards.map((card) => ({ ...card, searchVariant: variantLabel })),
+    domSeen: result.domSeen ?? 0,
+    harvestSeen: result.harvestSeen ?? 0,
+    totalSeen: result.totalSeen ?? cards.length,
+    drops: result.drops ?? { noUrl: 0, noPrice: 0, noBedrooms: 0 },
+  };
 }
 
 async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
+  let lastSnapshot = null;
   for (let pass = 0; pass < passes; pass++) {
     log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} starting`);
     await targetPage.mouse?.click?.(420, 740).catch(() => {});
@@ -6203,6 +6212,7 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
       log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} evaluate failed: ${e?.message || e}`);
     }
     if (snapshot) {
+      lastSnapshot = snapshot;
       log(
         `vrbo_search ${id}: map harvest pass ${snapshot.pass}/${passes} ` +
         `targets=${snapshot.scrollTargets} visibleCards=${snapshot.visibleCards} propertyLinks=${snapshot.propertyLinks} ` +
@@ -6214,6 +6224,12 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
     }
     await boundedPageDelay(targetPage, pass < 2 ? 1_200 : 900);
   }
+  return {
+    passes,
+    finalHarvestTotal: lastSnapshot?.harvestedTotal ?? 0,
+    lastVisibleCards: lastSnapshot?.visibleCards ?? 0,
+    lastPropertyLinks: lastSnapshot?.propertyLinks ?? 0,
+  };
 }
 
 async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
@@ -6265,13 +6281,11 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
         retryLater: true,
       });
     }
+    const harvestPasses = bounds ? 3 : 8;
     log(`vrbo_search ${id}: starting map harvest passes (${bounds ? "bounded" : "city-unbounded"}) before card extraction`);
-    if (!bounds) {
-      await harvestVrboMapResultCards(page, id, 8);
-    } else {
-      await harvestVrboMapResultCards(page, id, 3);
-    }
-    const domCards = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm);
+    const harvestStats = await harvestVrboMapResultCards(page, id, harvestPasses);
+    const domExtract = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm);
+    const domCards = domExtract.cards ?? [];
     const networkCards = networkCapture.candidates();
     const mergedCards = dedupeCandidatesByUrl([...networkCards, ...domCards]);
     const pricedNetworkCards = networkCards.filter((c) => !c.availabilityOnly && c.totalPrice > 0).length;
@@ -6281,7 +6295,24 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
       `(network=${networkCards.length}, networkPriced=${pricedNetworkCards}, dom=${domCards.length}, ` +
       `jsonResponses=${stats.matchedResponses}/${stats.responsesSeen})`,
     );
-    return mergedCards;
+    return {
+      candidates: mergedCards,
+      mapHarvest: {
+        harvestPasses: harvestStats.passes,
+        finalHarvestTotal: harvestStats.finalHarvestTotal,
+        lastVisibleCards: harvestStats.lastVisibleCards,
+        lastPropertyLinks: harvestStats.lastPropertyLinks,
+        domSeen: domExtract.domSeen ?? 0,
+        harvestSeenInExtract: domExtract.harvestSeen ?? 0,
+        extractTotalSeen: domExtract.totalSeen ?? 0,
+        extractDrops: domExtract.drops ?? null,
+        networkCount: networkCards.length,
+        pricedNetworkCount: pricedNetworkCards,
+        mergedCount: mergedCards.length,
+        graphqlResponsesMatched: stats.matchedResponses ?? 0,
+        graphqlResponsesSeen: stats.responsesSeen ?? 0,
+      },
+    };
   } finally {
     networkCapture.dispose();
   }
