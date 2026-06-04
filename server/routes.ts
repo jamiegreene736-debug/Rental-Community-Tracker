@@ -28354,16 +28354,25 @@ Return ONLY compact JSON with this exact shape:
   // replacement into that shared folder made the 3BR render the same
   // replacement gallery in the builder.
   // ============================================================
-  const unitSwapPhotoFolderHasSource = async (folder: string, url: string): Promise<boolean> => {
+  const unitSwapPhotoFolderSavedCount = async (folder: string, url: string): Promise<number | null> => {
     try {
       const folderPath = path.join(process.cwd(), "client/public/photos", folder);
       const files = await fs.promises.readdir(folderPath);
-      const hasPhotos = files.some((f) => /\.(?:jpe?g|png|webp)$/i.test(f));
-      if (!hasPhotos) return false;
+      const photoCount = files.filter((f) => /\.(?:jpe?g|png|webp)$/i.test(f)).length;
+      if (photoCount < MIN_INDEPENDENT_UNIT_PHOTOS) return null;
       const sourceDoc = JSON.parse(await fs.promises.readFile(path.join(folderPath, "_source.json"), "utf8"));
-      return sourceDoc?.sourceListing?.url === url;
+      const proof = sourceDoc?.unitPhotoResolverProof as (UnitPhotoResolverProof & { savedPhotoCount?: number }) | undefined;
+      const savedCount = Number(proof?.savedPhotoCount ?? photoCount);
+      const distinctCount = Number(proof?.distinctPhotoCount ?? photoCount);
+      const valid = sourceDoc?.sourceListing?.url === url
+        && proof?.status !== "rejected"
+        && Number.isFinite(savedCount)
+        && savedCount >= MIN_INDEPENDENT_UNIT_PHOTOS
+        && Number.isFinite(distinctCount)
+        && distinctCount >= MIN_INDEPENDENT_UNIT_PHOTOS;
+      return valid ? savedCount : null;
     } catch {
-      return false;
+      return null;
     }
   };
 
@@ -28379,10 +28388,18 @@ Return ONLY compact JSON with this exact shape:
     const url = swap.newSourceUrl;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
     if (!/^https?:\/\//i.test(url)) return { ok: false, folder, savedCount: 0, error: "Replacement source URL is invalid" };
-    if (await unitSwapPhotoFolderHasSource(folder, url)) return { ok: true, folder, savedCount: 1 };
+    const existingSavedCount = await unitSwapPhotoFolderSavedCount(folder, url);
+    if (existingSavedCount !== null) return { ok: true, folder, savedCount: existingSavedCount };
 
+    const photosBase = path.join(process.cwd(), "client/public/photos");
+    const folderPath = path.join(photosBase, folder);
+    const stagingFolder = `.${folder}.staging-${Date.now()}-${randomBytes(4).toString("hex")}`;
+    const stagingPath = path.join(photosBase, stagingFolder);
+    const cleanupStaging = async () => {
+      await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
+      await storage.deletePhotoLabelsByFolder(stagingFolder).catch(() => {});
+    };
     try {
-      const folderPath = path.join(process.cwd(), "client/public/photos", folder);
       const listingFacts: ListingFacts = {};
       const scraped = await scrapeListingPhotos(url, undefined, listingFacts, SCRAPE_WITHOUT_SIDECAR);
       if (!scraped.length) {
@@ -28406,8 +28423,8 @@ Return ONLY compact JSON with this exact shape:
       }
 
       const result = await downloadAndPrioritize({
-        folder,
-        folderPath,
+        folder: stagingFolder,
+        folderPath: stagingPath,
         scrapedUrls: scraped.map((s) => s.url),
         maxKeep: 25,
         anthropicKey: process.env.ANTHROPIC_API_KEY,
@@ -28417,6 +28434,7 @@ Return ONLY compact JSON with this exact shape:
       });
       console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
       if (result.kept < MIN_INDEPENDENT_UNIT_PHOTOS) {
+        await cleanupStaging();
         return {
           ok: false,
           folder,
@@ -28433,6 +28451,7 @@ Return ONLY compact JSON with this exact shape:
         contentFingerprints: result.keptContentFingerprints,
       });
       if (persistedProof.status === "rejected") {
+        await cleanupStaging();
         return {
           ok: false,
           folder,
@@ -28441,7 +28460,7 @@ Return ONLY compact JSON with this exact shape:
         };
       }
 
-      const sourcePath = path.join(folderPath, "_source.json");
+      const sourcePath = path.join(stagingPath, "_source.json");
       let sourceDoc: any = {};
       try { sourceDoc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")); } catch {}
       sourceDoc.sourceListing = {
@@ -28462,9 +28481,16 @@ Return ONLY compact JSON with this exact shape:
       sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
       sourceDoc.verifiedBy = "unit-swap";
       await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
+      await fs.promises.rm(folderPath, { recursive: true, force: true });
+      await fs.promises.rename(stagingPath, folderPath);
+      await storage.deletePhotoLabelsByFolder(stagingFolder).catch(() => {});
+      await queueMissingPhotoLabels(folder, "unit-swap").catch((error) => {
+        console.warn(`[unit-swap rescrape] ${folder}: label queue failed ${error?.message ?? error}`);
+      });
 
       return { ok: true, folder, savedCount: result.kept };
     } catch (e: any) {
+      await cleanupStaging();
       console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
       return { ok: false, folder, savedCount: 0, error: e?.message ?? "Replacement photo scrape failed" };
     }

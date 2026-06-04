@@ -199,6 +199,16 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /unitSwapPhotoFolderSavedCount[\s\S]*photoCount < MIN_INDEPENDENT_UNIT_PHOTOS[\s\S]*proof\?\.status !== "rejected"[\s\S]*return valid \? savedCount : null/,
+  "unit replacement must revalidate existing replacement photo folders before treating them as already hydrated",
+);
+assert.match(
+  routesSource,
+  /stagingFolder = `\.\$\{folder\}\.staging[\s\S]*downloadAndPrioritize\(\{[\s\S]*folder: stagingFolder[\s\S]*fs\.promises\.rename\(stagingPath, folderPath\)/,
+  "unit replacement photo hydration must stage downloads and only swap into the final folder after proof checks pass",
+);
+assert.match(
+  routesSource,
   /propertyId < 0 && swaps\.length > 0[\s\S]*unit1PhotoFolder/,
   "commit replacement must point promoted-draft unit photo folders at the replacement gallery",
 );
