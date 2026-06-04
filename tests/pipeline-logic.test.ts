@@ -1671,6 +1671,21 @@ assert.match(
 );
 assert.match(
   workerSource,
+  /runBookingMapBoundsSearchVariant/,
+  "Booking sidecar should support map-bounds searches for buy-in scans",
+);
+assert.match(
+  workerSource,
+  /buildBookingMapSearchUrl/,
+  "Booking map-bounds searches should load dated Booking.com map/result URLs",
+);
+assert.match(
+  workerSource,
+  /booking_map_search_results/,
+  "Booking map-bounds cards should be marked as map-search inventory proof",
+);
+assert.match(
+  workerSource,
   /bookingCardMatchMinHits/,
   "Booking card filtering should allow partial token matches for resort-area inventory",
 );
@@ -2234,11 +2249,13 @@ assert.ok(
 );
 assert.ok(
   routeSource.includes('searchMode: "map_bounds"') && routeSource.includes("mapSearch: {"),
-  "find-buy-in should request VRBO sidecar map-bounds search instead of destination dropdown variants",
+  "find-buy-in should request sidecar map-bounds searches instead of destination dropdown variants",
 );
 assert.ok(
-  routeSource.includes("Booking.com sidecar buy-in search disabled by operator request"),
-  "find-buy-in should not launch Booking.com through the buy-in sidecar",
+  routeSource.includes("searchBookingViaSidecar") &&
+    routeSource.includes('sourceLabel: "Booking.com"') &&
+    routeSource.includes("bookingWebsiteSearchTerm"),
+  "find-buy-in should launch Booking.com through the sidecar with the same map-search term plumbing as VRBO",
 );
 assert.ok(
   routeSource.includes("const candidateHasDateSpecificOtaSearchProof = (c: Candidate): boolean =>"),

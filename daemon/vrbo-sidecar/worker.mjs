@@ -6509,6 +6509,28 @@ async function processBookingSearch(id, params) {
   const { destination, searchTerm } = params;
   const effectiveSearchTerm = String(searchTerm || destination || "").trim();
   await ensureBrowser();
+  if (params?.searchMode === "map_bounds" || params?.mapSearch?.enabled) {
+    const mapVariant = {
+      searchTerm: effectiveSearchTerm,
+      typedQuery: effectiveSearchTerm,
+      suggestionText: params?.mapSearch?.targetName || effectiveSearchTerm,
+      source: "map-bounds",
+    };
+    const cards = await runBookingMapBoundsSearchVariant(id, params, mapVariant);
+    const uniqueCards = dedupeCandidatesByUrl(cards);
+    await postResult(id, {
+      candidates: uniqueCards,
+      variationsTried: [{
+        term: effectiveSearchTerm,
+        typedQuery: effectiveSearchTerm,
+        suggestionText: mapVariant.suggestionText,
+        source: "map-bounds",
+        success: true,
+        candidateCount: uniqueCards.length,
+      }],
+    });
+    return;
+  }
   const variants = await discoverOtaSearchVariants("https://www.booking.com/", effectiveSearchTerm, destination, "booking_search", id, params);
   const result = await runOtaSearchVariants(id, "booking_search", variants, (variant) =>
     runBookingSearchVariant(id, params, variant),
@@ -6652,6 +6674,314 @@ function buildBookingDatedSearchUrl(searchTerm, checkIn, checkOut, bedrooms) {
   url.searchParams.set("order", "price");
   if (bedrooms) url.searchParams.set("nflt", `entire_place_bedroom_count=${bedrooms}`);
   return url.toString();
+}
+
+function buildBookingMapSearchUrl(params, searchTerm) {
+  const url = new URL(buildBookingDatedSearchUrl(searchTerm, params.checkIn, params.checkOut, params.bedrooms));
+  url.searchParams.set("map", "1");
+  const center = vrboMapCenter(params);
+  if (center) {
+    url.searchParams.set("latitude", center.lat.toFixed(6));
+    url.searchParams.set("longitude", center.lng.toFixed(6));
+  }
+  return url.toString();
+}
+
+async function clickBookingMapControl(targetPage, label, id) {
+  const result = await targetPage.evaluate(() => {
+    function visible(el) {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 1 && rect.height > 1 && style.visibility !== "hidden" && style.display !== "none";
+    }
+    const controls = Array.from(document.querySelectorAll("button, a[role='button'], a[href]"))
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: (el.textContent || "").replace(/\s+/g, " ").trim(),
+        aria: el.getAttribute("aria-label") || "",
+        href: el.getAttribute("href") || "",
+      }));
+    const mapButton = controls.find((c) => /\b(view\s+)?map(\s+view)?\b|show\s+(?:on\s+)?map|open\s+map|view\s+on\s+map/i.test(`${c.text} ${c.aria}`));
+    if (mapButton) {
+      mapButton.el.scrollIntoView({ block: "center", inline: "center" });
+      mapButton.el.click();
+      return { clicked: true, label: `${mapButton.text} ${mapButton.aria}`.trim().slice(0, 80) };
+    }
+    return { clicked: false };
+  }).catch((e) => ({ clicked: false, error: e?.message ?? String(e) }));
+  if (result.clicked) {
+    log(`${label} ${id}: opened Booking.com map view via "${result.label}"`);
+    await boundedPageDelay(targetPage, 1_500);
+    await dismissBookingPopups(targetPage, `${label}_map`).catch(() => []);
+  }
+  return result.clicked;
+}
+
+async function clickBookingSearchThisArea(targetPage, label, id) {
+  const result = await targetPage.evaluate(() => {
+    function visible(el) {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 1 && rect.height > 1 && style.visibility !== "hidden" && style.display !== "none";
+    }
+    const buttons = Array.from(document.querySelectorAll("button, a[role='button']"))
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: (el.textContent || "").replace(/\s+/g, " ").trim(),
+        aria: el.getAttribute("aria-label") || "",
+      }));
+    const searchArea = buttons.find((b) => /\bsearch\s+(this\s+)?area\b|update\s+results|show\s+results|redo\s+search/i.test(`${b.text} ${b.aria}`));
+    if (searchArea) {
+      searchArea.el.scrollIntoView({ block: "center", inline: "center" });
+      searchArea.el.click();
+      return { clicked: true, label: `${searchArea.text} ${searchArea.aria}`.trim().slice(0, 80) };
+    }
+    return { clicked: false };
+  }).catch((e) => ({ clicked: false, error: e?.message ?? String(e) }));
+  if (result.clicked) {
+    log(`${label} ${id}: clicked Booking.com map area search "${result.label}"`);
+    await boundedPageDelay(targetPage, 2_000);
+  }
+  return result.clicked;
+}
+
+async function extractVisibleBookingCards(targetPage, id, params, expectedNights, requiredTargetTokens, requiredTargetMinHits, variantLabel) {
+  const cards = await targetPage.evaluate(({ minBd, expectedNights, requiredTargetTokens, requiredTargetMinHits }) => {
+    const cardSet = new Set();
+    for (const selector of [
+      '[data-testid="property-card"]',
+      '[data-testid="property-card-container"]',
+      '[data-testid*="property-card" i]',
+      'article:has(a[href*="/hotel/"])',
+      '[role="listitem"]:has(a[href*="/hotel/"])',
+      '[class*="property-card" i]',
+      '[class*="sr_property_block" i]',
+    ]) {
+      document.querySelectorAll(selector).forEach((el) => cardSet.add(el));
+    }
+    for (const link of document.querySelectorAll('a[href*="/hotel/"]')) {
+      let el = link;
+      let picked = null;
+      for (let depth = 0; depth < 7 && el; depth++, el = el.parentElement) {
+        if (!(el instanceof HTMLElement)) continue;
+        const text = (el.textContent || "").replace(/\s+/g, " ");
+        if (text.length >= 80 && (/(?:US\$|\$)\s*[\d,]+/.test(text) || /\bbed(?:room)?s?\b|\bbr\b/i.test(text))) picked = el;
+      }
+      if (picked) cardSet.add(picked);
+    }
+    const out = [];
+    const drops = { noUrl: 0, noPrice: 0, noBedrooms: 0, wrongTarget: 0 };
+    let firstCardSample = null;
+    function moneyAmounts(text) {
+      return Array.from(String(text || "").matchAll(/(?:US\$|\$)\s*([\d,]+(?:\.\d+)?)/g))
+        .map((m) => Math.round(parseFloat(m[1].replace(/,/g, ""))))
+        .filter((n) => Number.isFinite(n) && n > 0);
+    }
+    function bedroomNumber(text) {
+      const raw = String(text || "");
+      const digitMatch = raw.match(/(\d+)\s*(?:bedrooms?|beds?|br|bd)\b/i);
+      if (digitMatch) return parseInt(digitMatch[1], 10);
+      const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+      const wordMatch = raw.toLowerCase().match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)[-\s]*(?:bedrooms?|beds?|br|bd)\b/i);
+      return wordMatch ? words[wordMatch[1]] : 0;
+    }
+    function plausibleStayTotals(amounts, minStayTotal, maxStayTotal) {
+      return amounts.filter((n) => n >= minStayTotal && n <= maxStayTotal);
+    }
+    function numAttr(el, names) {
+      for (const name of names) {
+        const value = Number(el.getAttribute?.(name) || el.dataset?.[name.replace(/^data-/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase())]);
+        if (Number.isFinite(value)) return value;
+      }
+      return null;
+    }
+    for (const card of Array.from(cardSet)) {
+      const titleEl = card.querySelector([
+        '[data-testid="title"]',
+        '[data-testid*="title" i]',
+        '[data-testid*="name" i]',
+        '[itemprop="name"]',
+        '[aria-label*="property" i]',
+        '[class*="title" i]',
+        '[class*="name" i]',
+        "h3",
+        "h2",
+        'a[href*="/hotel/"]',
+      ].join(", ")) ?? card.querySelector("h3, h2, a[href*='/hotel/']");
+      const title = titleEl
+        ? (titleEl.textContent || titleEl.getAttribute?.("aria-label") || titleEl.getAttribute?.("title") || "").trim()
+        : "";
+      const link = card.matches?.('a[href*="/hotel/"]') ? card : card.querySelector('a[href*="/hotel/"]');
+      const href = link ? link.getAttribute("href") || "" : "";
+      const imgEls = Array.from(card.querySelectorAll("img")).slice(0, 5);
+      const images = imgEls
+        .map((img) => img.currentSrc || img.src || img.getAttribute("data-src") || "")
+        .filter((src) => /^https?:\/\//i.test(src));
+      const url = href.startsWith("http") ? href.split("?")[0] : href ? "https://www.booking.com" + href.split("?")[0] : "";
+      const fullText = [
+        card.textContent || "",
+        card.getAttribute?.("aria-label") || "",
+        card.getAttribute?.("title") || "",
+        Array.from(card.querySelectorAll("[aria-label], [title]")).slice(0, 20)
+          .map((el) => `${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`)
+          .join(" "),
+      ].join(" ").replace(/\s+/g, " ");
+      const targetHaystack = `${title} ${url} ${fullText}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      const targetHits = Array.isArray(requiredTargetTokens)
+        ? requiredTargetTokens.filter((token) => targetHaystack.includes(token)).length
+        : 0;
+      const hasRequiredTarget = !Array.isArray(requiredTargetTokens) ||
+        requiredTargetTokens.length === 0 ||
+        targetHits >= (requiredTargetMinHits || requiredTargetTokens.length);
+      const priceEl = card.querySelector([
+        '[data-testid="price-and-discounted-price"]',
+        '[data-testid*="price" i]',
+        '[aria-label*="$"]',
+        '[class*="price" i]',
+        '[class*="rate" i]',
+      ].join(", "));
+      const priceText = priceEl ? priceEl.textContent.replace(/\s+/g, " ") : "";
+      const minStayTotal = Math.max(250, expectedNights * 175);
+      const maxStayTotal = Math.max(30_000, expectedNights * Math.max(minBd, 1) * 2_500);
+      const fullStayTotals = plausibleStayTotals(moneyAmounts(fullText), minStayTotal, maxStayTotal);
+      const priceElStayTotals = plausibleStayTotals(moneyAmounts(priceText), 1, maxStayTotal);
+      let totalPrice = fullStayTotals.length > 0
+        ? Math.max(...fullStayTotals)
+        : priceElStayTotals.length > 0
+          ? Math.max(...priceElStayTotals)
+          : 0;
+      if (minBd >= 3 && totalPrice > 0 && totalPrice < minStayTotal) totalPrice = 0;
+      const bedrooms = bedroomNumber(fullText);
+      const lat = numAttr(card, ["data-lat", "data-latitude", "lat", "latitude"]);
+      const lng = numAttr(card, ["data-lng", "data-lon", "data-longitude", "lng", "lon", "longitude"]);
+      const hotelId = (url.match(/\/hotel\/[^/]+\/([^/.?#]+)/i)?.[1] || url.match(/hotel_id=(\d+)/i)?.[1] || "").slice(0, 80);
+      if (firstCardSample === null) {
+        firstCardSample = { title: title.slice(0, 80), url: url.slice(0, 120), bedrooms, price: totalPrice, textExcerpt: fullText.slice(0, 240) };
+      }
+      if (!url) { drops.noUrl++; continue; }
+      if (!hasRequiredTarget) { drops.wrongTarget++; continue; }
+      if (!(totalPrice > 0)) { drops.noPrice++; continue; }
+      if (bedrooms < minBd) { drops.noBedrooms++; continue; }
+      out.push({
+        url,
+        title: title.slice(0, 110),
+        totalPrice,
+        nightlyPrice: Math.round(totalPrice / expectedNights),
+        bedrooms: bedrooms || undefined,
+        bedroomSource: bedrooms ? "search-card" : "unknown",
+        priceIncludesTaxes: true,
+        priceIncludesFees: true,
+        priceBasis: "all_in",
+        image: images[0],
+        images,
+        lat,
+        lng,
+        bookingId: hotelId || undefined,
+        captureSource: "booking_map_search_results",
+        snippet: fullText.slice(0, 260),
+      });
+    }
+    return { out, drops, totalSeen: cardSet.size, firstCardSample };
+  }, { minBd: params.bedrooms, expectedNights, requiredTargetTokens, requiredTargetMinHits });
+
+  const resultCards = cards.out || [];
+  log(
+    `booking_search ${id}: ${resultCards.length} map cards for "${variantLabel}" ` +
+    `[seen=${cards.totalSeen ?? 0}, drops=noUrl:${cards.drops?.noUrl ?? 0}/wrongTarget:${cards.drops?.wrongTarget ?? 0}/noPrice:${cards.drops?.noPrice ?? 0}/noBR:${cards.drops?.noBedrooms ?? 0}]`,
+  );
+  if (resultCards.length === 0 && cards.firstCardSample) {
+    log(
+      `booking_search ${id}: empty map-result diagnostic — first card title="${cards.firstCardSample.title}" ` +
+      `url="${cards.firstCardSample.url}" br=${cards.firstCardSample.bedrooms} price=${cards.firstCardSample.price} ` +
+      `text="${cards.firstCardSample.textExcerpt}"`,
+    );
+  }
+  return resultCards.map((card) => ({ ...card, searchVariant: variantLabel }));
+}
+
+async function runBookingMapBoundsSearchVariant(id, params, variant = null) {
+  const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
+  const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
+  const typedQuery = String(variant?.typedQuery || effectiveSearchTerm).trim();
+  const bounds = numericMapBounds(params);
+  const center = vrboMapCenter(params);
+  log(
+    `booking_search ${id}: map-bounds searchTerm="${effectiveSearchTerm}" destination="${destination}" ` +
+    `${checkIn}→${checkOut} ${bedrooms}BR` +
+    (center ? ` center=${center.lat.toFixed(6)},${center.lng.toFixed(6)}` : "") +
+    (bounds ? ` bounds=${bounds.sw_lat.toFixed(5)},${bounds.sw_lng.toFixed(5)},${bounds.ne_lat.toFixed(5)},${bounds.ne_lng.toFixed(5)}` : ""),
+  );
+  await ensureBrowser();
+  throwIfRequestCancelled(id);
+  if (!page || page.isClosed?.()) {
+    throw new SidecarCancelledError(`booking_search ${id}: browser page unavailable`);
+  }
+  await surfaceVisibleOtaSearchWindow(page, "booking_search", id);
+  await clearOtaClientSearchState("https://www.booking.com", `booking_search ${id} map-bounds preflight`);
+  const url = buildBookingMapSearchUrl(params, effectiveSearchTerm);
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  await page.waitForTimeout(PAGE_SETTLE_MS);
+  await stopOtaProviderIfBlocked(page, "booking_search", id);
+  await dismissBookingPopups(page, "booking_search_map_after_dated_url");
+  await clickBookingMapControl(page, "booking_search", id).catch(() => false);
+  await clickBookingSearchThisArea(page, "booking_search", id).catch(() => false);
+  await page.waitForTimeout(PAGE_SETTLE_MS);
+  await dismissBookingPopups(page, "booking_search_map_before_scrape");
+  const resultsSurface = await waitForBookingResultsSurface(page, id, effectiveSearchTerm);
+  let state = await dumpPageState("booking-map", { id, ...params });
+  throwIfBrightDataKycBlock(state, "booking_search", id);
+  if (await stopOtaProviderIfBlocked(page, "booking_search", id, state)) {
+    state = await dumpPageState("booking-map-after-captcha", { id, ...params });
+  }
+  const lateDismissals = await dismissBookingPopups(page, "booking_search_map_after_block_check");
+  if (lateDismissals.length > 0) {
+    await page.waitForTimeout(800).catch(() => {});
+    state = await dumpPageState("booking-map-after-popup-dismiss", { id, ...params });
+  }
+  throwIfBlankSearchPage(state, "booking.com", "booking_search", id);
+  if (state && stateLooksLikeVrboHumanChallenge(state)) {
+    throw new VrboHardBlockError(
+      "Booking.com human-verification page remained visible after CapSolver/manual handling",
+      { label: "booking_search", id, url: state?.url, retryLater: true },
+    );
+  }
+  if (state && /access denied|are you a robot|please verify/i.test(state.bodyExcerpt)) {
+    throw new Error("Booking.com bot wall — refresh cookies or retry after proxy rotation");
+  }
+  const expectedNights = nightsBetween(checkIn, checkOut);
+  const requiredTargetTokens = bookingCardTargetTokens(params, effectiveSearchTerm, typedQuery, destination);
+  const requiredTargetMinHits = bookingCardMatchMinHits(requiredTargetTokens);
+  if (!bookingStateHasTargetSearchQuery(state, requiredTargetTokens)) {
+    throw new ProviderBrowserUnavailableError(
+      `Booking.com map results URL no longer includes required target token(s) ${requiredTargetTokens.join("+")}; refusing broad results.`,
+      {
+        label: "booking_search",
+        id,
+        provider: "booking",
+        url: state?.url,
+        title: state?.title,
+        requiredTargetTokens,
+      },
+    );
+  }
+  if (!bookingStateHasRequestedDates(state, checkIn, checkOut) && resultsSurface.propertyCards > 0 && resultsSurface.priceMentions === 0) {
+    throw new ProviderBrowserUnavailableError(
+      `Booking.com map search reached an unpriced results page without preserving ${checkIn}→${checkOut}; refusing to treat that as a completed dated search.`,
+      {
+        label: "booking_search",
+        id,
+        provider: "booking",
+        url: state?.url,
+        title: state?.title,
+        resultsSurface,
+      },
+    );
+  }
+  return extractVisibleBookingCards(page, id, params, expectedNights, requiredTargetTokens, requiredTargetMinHits, effectiveSearchTerm);
 }
 
 async function applyOtaHomepageDateInputs(targetPage, checkIn, checkOut, label = "booking_search", provider = "booking") {
