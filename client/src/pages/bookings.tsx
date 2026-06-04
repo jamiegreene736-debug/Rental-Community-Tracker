@@ -1189,7 +1189,7 @@ function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFill
       nightlyPrice: pick.nightlyPrice,
       url: pick.url,
       verified: "yes",
-      verifiedReason: "Matched resort phrase in city VRBO map inventory",
+      verifiedReason: "Matched resort phrase in city VRBO dropdown inventory",
     })),
   };
 }
@@ -1245,9 +1245,9 @@ function CityVrboInventoryPanel({
     <div className="rounded border border-violet-200 bg-violet-50/40 px-3 py-2 text-[11px]">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <p className="font-semibold text-violet-950">City VRBO map inventory</p>
+          <p className="font-semibold text-violet-950">City VRBO inventory</p>
           <p className="text-[10px] text-muted-foreground">
-            Runs automatically after Auto-fill cheapest if resort search fails. One city-wide VRBO search ({community} + dates), then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title (not separate community names).
+            Runs automatically after Auto-fill cheapest if resort search fails. One city destination dropdown on VRBO ({community} + dates), exports all priced cards, then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title (not separate community names).
           </p>
         </div>
         <Button
@@ -1257,7 +1257,7 @@ function CityVrboInventoryPanel({
           onClick={() => setScanNonce((n) => n + 1)}
         >
           {isFetching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
-          {isFetching ? "Scanning city map…" : effectiveScanNonce > 0 ? "Re-scan city map" : "Scan city VRBO map"}
+          {isFetching ? "Scanning city VRBO…" : effectiveScanNonce > 0 ? "Re-scan city VRBO" : "Scan city VRBO"}
         </Button>
       </div>
       {isError && (
