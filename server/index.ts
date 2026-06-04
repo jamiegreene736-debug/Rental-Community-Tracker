@@ -12,7 +12,9 @@ import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 import { ensureRuntimeSchema } from "./schema-maintenance";
 import { ensureTopMarketScanCacheLogicVersion } from "./top-market-scan-cache";
 import { requireAuth, loginPageHandler, loginPostHandler, logoutHandler } from "./auth";
+import { installSearchApiFetchFallback } from "./searchapi";
 
+installSearchApiFetchFallback();
 const app = express();
 const httpServer = createServer(app);
 
