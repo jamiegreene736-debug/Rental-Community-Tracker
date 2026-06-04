@@ -3138,6 +3138,12 @@ assert.ok(
   "auto-fill combo selection should reject non-walkable pairs before creating partial buy-in attachments",
 );
 assert.ok(
+  bookingsSource.includes("attaching buy-ins now") &&
+    bookingsSource.includes("attachAlternativeReplacementSet(reservation, complete)") &&
+    bookingsSource.includes("Alternative buy-ins attached"),
+  "auto alternative city-map scan should attach the first complete walkable replacement set it finds",
+);
+assert.ok(
   vrboWorkerSource.includes("createVrboGraphqlCollector") &&
     vrboWorkerSource.includes("propertySearchListings") &&
     vrboWorkerSource.includes("extractLatLngDeep") &&

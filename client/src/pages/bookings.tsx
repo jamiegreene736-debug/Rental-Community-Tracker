@@ -6747,8 +6747,25 @@ export default function Bookings() {
       if (complete) {
         // success!
         setAutoAltScans((prev) => ({ ...prev, [resId]: { ...scan, isRunning: false, foundComboIn: complete.community } }));
-        toast({ title: "Combo found via alternative!", description: `${complete.community} · ${complete.plan.join("+")}BR for ${fmtMoney(complete.totalCost)} — ready to draft guest message.` });
+        toast({ title: "Combo found via alternative!", description: `${complete.community} · ${complete.plan.join("+")}BR for ${fmtMoney(complete.totalCost)} — attaching buy-ins now.` });
         updateAlternativeWorkflow(resId, { activeCommunity: null });
+        const reservation = rawReservationsRef.current.find((r) => r._id === resId);
+        if (reservation?.slots?.length) {
+          void attachAlternativeReplacementSet(reservation, complete)
+            .then(() => {
+              toast({
+                title: "Alternative buy-ins attached",
+                description: `${complete.picks.length} buy-in${complete.picks.length === 1 ? "" : "s"} attached from ${complete.community}.`,
+              });
+            })
+            .catch((error: any) => {
+              toast({
+                title: "Alternative attach failed",
+                description: error?.message ?? String(error),
+                variant: "destructive",
+              });
+            });
+        }
         return;
       }
       const ordered = alternativeCommunitiesForSidecar(wf.scout!);
