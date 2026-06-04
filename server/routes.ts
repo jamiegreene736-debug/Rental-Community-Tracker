@@ -3357,6 +3357,29 @@ async function harvestRealtorUrlsViaApifySearch(
   }
 }
 
+// Primary listing discovery — native Zillow/Realtor search APIs via Apify.
+// Stacked in parallel with SearchAPI Google `site:` queries; not a late supplement.
+async function harvestApifyPhotoDiscoveryBatch(opts: {
+  cities: string[];
+  state: string;
+  maxItemsPerCity: number;
+  timeoutMs: number;
+  harvestOptions?: ApifySearchHarvestOptions;
+}): Promise<{ zillow: string[]; realtor: string[] }> {
+  const { cities, state, maxItemsPerCity, timeoutMs, harvestOptions } = opts;
+  if (!process.env.APIFY_API_TOKEN || cities.length === 0 || !String(state ?? "").trim()) {
+    return { zillow: [], realtor: [] };
+  }
+  const [zillowByCity, realtorByCity] = await Promise.all([
+    Promise.all(cities.map((c) => harvestZillowUrlsViaApifySearch(c, state, maxItemsPerCity, timeoutMs, harvestOptions))),
+    Promise.all(cities.map((c) => harvestRealtorUrlsViaApifySearch(c, state, maxItemsPerCity, timeoutMs, harvestOptions))),
+  ]);
+  return {
+    zillow: [...new Set(zillowByCity.flat())],
+    realtor: [...new Set(realtorByCity.flat())],
+  };
+}
+
 // CODEX NOTE (2026-05-05, claude/realtor-source): Realtor.com
 // scraper via direct fetch + JSON-LD parsing. Realtor.com's
 // anti-bot is much lighter than Zillow's — straight fetch with a
@@ -3512,20 +3535,132 @@ type ScrapeOptions = {
 // Railway — opening the operator's local Chrome is unexpected there.
 const SCRAPE_WITHOUT_SIDECAR: ScrapeOptions = { sidecarWalletMs: 0 };
 
-async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
-  try {
-    const resp = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!resp.ok) return { urls: [], facts: {} };
-    const html = await resp.text();
-    if (html.length < 1000) return { urls: [], facts: {} };
+function listingScrapePlatform(url: string): "realtor" | "zillow" | "redfin" | "homes" | "other" {
+  if (/realtor\.com\/realestateandhomes-detail/i.test(url)) return "realtor";
+  if (/zillow\.com\/homedetails/i.test(url)) return "zillow";
+  if (/redfin\.com\/.+\/home\/\d+/i.test(url)) return "redfin";
+  if (/homes\.com\/property\//i.test(url)) return "homes";
+  return "other";
+}
 
+function mergeListingFactsInto(target: ListingFacts, source: ListingFacts): void {
+  if (source.bedrooms != null) target.bedrooms = source.bedrooms;
+  if (source.bathrooms != null) target.bathrooms = source.bathrooms;
+  if (source.homeType != null) target.homeType = source.homeType;
+  if (source.homeStatus != null) target.homeStatus = source.homeStatus;
+  if (source.propertySubType != null) target.propertySubType = source.propertySubType;
+  if (source.photoCount != null) target.photoCount = source.photoCount;
+}
+
+function pickBestParallelScrapeResult(
+  results: Array<{ url: string; photos: ScrapedPhoto[]; facts: ListingFacts }>,
+): typeof results[0] | null {
+  let best: typeof results[0] | null = null;
+  for (const row of results) {
+    if (!best || row.photos.length > best.photos.length) best = row;
+  }
+  return best;
+}
+
+function parallelStackUrlsFromCandidates(urls: string[]): {
+  realtorUrl: string | null;
+  zillowUrl: string | null;
+  redfinUrl: string | null;
+  homesUrl: string | null;
+  otherUrls: string[];
+} {
+  let realtorUrl: string | null = null;
+  let zillowUrl: string | null = null;
+  let redfinUrl: string | null = null;
+  let homesUrl: string | null = null;
+  const otherUrls: string[] = [];
+  for (const raw of urls) {
+    const u = String(raw ?? "").trim();
+    if (!u) continue;
+    if (!realtorUrl && /realtor\.com\/realestateandhomes-detail/i.test(u)) {
+      realtorUrl = u;
+      continue;
+    }
+    if (!zillowUrl && /zillow\.com\/homedetails/i.test(u)) {
+      zillowUrl = u;
+      continue;
+    }
+    if (!redfinUrl && /redfin\.com\/.+\/home\/\d+/i.test(u)) {
+      redfinUrl = u;
+      continue;
+    }
+    if (!homesUrl && /homes\.com\/property\//i.test(u)) {
+      homesUrl = u;
+      continue;
+    }
+    if (!otherUrls.includes(u)) otherUrls.push(u);
+  }
+  return { realtorUrl, zillowUrl, redfinUrl, homesUrl, otherUrls };
+}
+
+// Scrape every portal URL for the same unit in parallel (Realtor, Zillow,
+// Redfin, Homes). No platform ordering — all legs start together; the
+// richest gallery wins (photo count only).
+async function scrapeListingPhotosDualSource(
+  candidateUrls: string[],
+  listingFacts?: ListingFacts,
+  options?: ScrapeOptions,
+): Promise<{ photos: ScrapedPhoto[]; sourceUrl: string; platform: "realtor" | "zillow" | "redfin" | "homes" | "other" }> {
+  const unique = Array.from(new Set(candidateUrls.map((u) => String(u ?? "").trim()).filter(Boolean)));
+  if (unique.length === 0) {
+    return { photos: [], sourceUrl: "", platform: "other" };
+  }
+
+  const { realtorUrl, zillowUrl, redfinUrl, homesUrl, otherUrls } = parallelStackUrlsFromCandidates(unique);
+  const parallelTargets = [realtorUrl, zillowUrl, redfinUrl, homesUrl].filter((u): u is string => !!u);
+
+  if (parallelTargets.length > 0) {
+    console.log(
+      `[scrapeStack] parallel scrape: ` +
+      `realtor=${!!realtorUrl} zillow=${!!zillowUrl} redfin=${!!redfinUrl} homes=${!!homesUrl}`,
+    );
+    const results = await Promise.all(parallelTargets.map(async (url) => {
+      const facts: ListingFacts = {};
+      const photos = await scrapeListingPhotos(url, undefined, facts, options);
+      return { url, photos, facts };
+    }));
+    const best = pickBestParallelScrapeResult(results);
+    if (best && best.photos.length > 0) {
+      if (listingFacts) mergeListingFactsInto(listingFacts, best.facts);
+      const platform = listingScrapePlatform(best.url);
+      const counts = Object.fromEntries(
+        (["realtor", "zillow", "redfin", "homes"] as const).map((p) => [
+          p,
+          results.find((r) => listingScrapePlatform(r.url) === p)?.photos.length ?? 0,
+        ]),
+      );
+      console.log(
+        `[scrapeStack] parallel winner=${platform} photos=${best.photos.length} ` +
+        `counts=${JSON.stringify(counts)}`,
+      );
+      return { photos: best.photos, sourceUrl: best.url, platform };
+    }
+    console.log(`[scrapeStack] parallel stack returned 0 photos across ${parallelTargets.length} portals`);
+  }
+
+  for (const url of otherUrls) {
+    const facts: ListingFacts = {};
+    const photos = await scrapeListingPhotos(url, undefined, facts, options);
+    if (photos.length > 0) {
+      if (listingFacts) mergeListingFactsInto(listingFacts, facts);
+      return { photos, sourceUrl: url, platform: listingScrapePlatform(url) };
+    }
+  }
+
+  const fallbackUrl = parallelTargets[0] ?? unique[0];
+  return { photos: [], sourceUrl: fallbackUrl, platform: listingScrapePlatform(fallbackUrl) };
+}
+
+function listingClusterKey(url: string, streetRootFn: (url: string) => string | null): string {
+  return streetRootFn(url) ?? `__url:${url}`;
+}
+
+function extractGenericRealEstateGalleryFromHtml(html: string): { urls: string[]; facts: ListingFacts } {
     const plain = html
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -3611,10 +3746,53 @@ async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: str
       pushSrcset(m[1]);
     }
 
-    console.log(`[scrapeGenericRealEstate] ${url} → ${urls.length} photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
     return { urls, facts };
+}
+
+async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!resp.ok) return { urls: [], facts: {} };
+    const html = await resp.text();
+    if (html.length < 1000) return { urls: [], facts: {} };
+    const result = extractGenericRealEstateGalleryFromHtml(html);
+    console.log(
+      `[scrapeGenericRealEstate] ${url} → ${result.urls.length} photos ` +
+      `(facts: ${result.facts.bedrooms ?? "?"}BR / ${result.facts.bathrooms ?? "?"}BA)`,
+    );
+    return result;
   } catch (e: any) {
     console.warn(`[scrapeGenericRealEstate] ${url}: ${e?.message ?? e}`);
+    return { urls: [], facts: {} };
+  }
+}
+
+async function scrapeGenericRealEstateViaScrapingBee(
+  url: string,
+  timeoutMs = 60_000,
+): Promise<{ urls: string[]; facts: ListingFacts }> {
+  const key = process.env.SCRAPINGBEE_API_KEY;
+  if (!key) return { urls: [], facts: {} };
+  try {
+    const resp = await fetch(
+      `https://app.scrapingbee.com/api/v1/?api_key=${encodeURIComponent(key)}&url=${encodeURIComponent(url)}&render_js=true`,
+      { signal: AbortSignal.timeout(timeoutMs) },
+    );
+    if (!resp.ok) return { urls: [], facts: {} };
+    const html = await resp.text();
+    if (html.length < 1000) return { urls: [], facts: {} };
+    const result = extractGenericRealEstateGalleryFromHtml(html);
+    console.log(`[scrapeGenericRealEstate:SB] ${url} → ${result.urls.length} photos`);
+    return result;
+  } catch (e: any) {
+    console.warn(`[scrapeGenericRealEstate:SB] ${url}: ${e?.message ?? e}`);
     return { urls: [], facts: {} };
   }
 }
@@ -3728,7 +3906,10 @@ async function scrapeListingPhotos(
     if (result.urls.length > 0) {
       return result.urls.map((u) => ({ url: u, title: "Realtor.com listing photo", source: "Realtor.com", sourceLink: primaryUrl }));
     }
-    if (!fallbackUrl || /realtor\.com/i.test(fallbackUrl)) return [];
+    if (fallbackUrl && !/realtor\.com/i.test(fallbackUrl)) {
+      return scrapeListingPhotos(fallbackUrl, undefined, listingFacts, options);
+    }
+    return [];
   }
 
   if (/zillow\.com/i.test(primaryUrl)) {
@@ -3832,7 +4013,10 @@ async function scrapeListingPhotos(
     if (result.urls.length > 0) {
       return result.urls.map((u) => ({ url: u, title: "Zillow listing photo", source: "Zillow", sourceLink: primaryUrl }));
     }
-    if (!fallbackUrl || /zillow\.com/i.test(fallbackUrl)) return [];
+    if (fallbackUrl && !/zillow\.com/i.test(fallbackUrl)) {
+      return scrapeListingPhotos(fallbackUrl, undefined, listingFacts, options);
+    }
+    return [];
   }
 
   // Redfin / Homes.com: fetch JSON-LD + embedded gallery URLs before
@@ -3840,7 +4024,11 @@ async function scrapeListingPhotos(
   // returns only og:image for Redfin, which fails the replacement
   // photo-count gate even when the listing has a full gallery.
   if (/redfin\.com|homes\.com/i.test(primaryUrl)) {
-    const result = await scrapeGenericRealEstateViaFetch(primaryUrl);
+    let result = await scrapeGenericRealEstateViaFetch(primaryUrl);
+    if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
+      console.log(`[scrapeGenericRealEstate] fetch returned 0, trying ScrapingBee for ${primaryUrl}`);
+      result = await scrapeGenericRealEstateViaScrapingBee(primaryUrl, options?.scrapingBeeTimeoutMs);
+    }
     if (listingFacts) {
       if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
       if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;
@@ -3853,6 +4041,10 @@ async function scrapeListingPhotos(
       const host = /redfin\.com/i.test(primaryUrl) ? "Redfin" : "Homes.com";
       return result.urls.map((u) => ({ url: u, title: `${host} listing photo`, source: host, sourceLink: primaryUrl }));
     }
+    if (fallbackUrl && !/redfin\.com|homes\.com/i.test(fallbackUrl)) {
+      return scrapeListingPhotos(fallbackUrl, undefined, listingFacts, options);
+    }
+    return [];
   }
 
   const isKnownRealEstateHost = /(?:zillow\.com|realtor\.com|redfin\.com|homes\.com)/i.test(primaryUrl);
@@ -26864,110 +27056,65 @@ Return ONLY compact JSON with this exact shape:
       }
     };
 
-    const runFindUnitApifySupplement = async (trigger: "parallel" | "late"): Promise<void> => {
+    const runFindUnitStackedApifyDiscovery = async (): Promise<void> => {
       const communityLoc = communityLocForQueries;
-      const allowedRoots = repeatedCandidateRoots();
-      if (directRoot) allowedRoots.add(directRoot);
-      for (const root of communityAddressRoots) allowedRoots.add(root);
-      const needsApifyForBedroomSearch = !!requiredBedroomCount && (
-        countQualifyingDiscoveryCandidates() < DISCOVERY_CANDIDATE_TARGET
-        || countExplicitBedroomCandidates() < DISCOVERY_BEDROOM_EXPLICIT_TARGET
-      );
-      const forceApifyDiscovery = candidates.length === 0;
-      const shouldRunApifySupplement = forceApifyDiscovery
-        || candidates.length < APIFY_SKIP_WHEN_CANDIDATES_AT
-        || needsApifyForBedroomSearch
-        || !!requiredBedroomCount
-        || expandedSearch;
-      if (
-        !communityLoc
-        || !(suppliedStreetRoot || allowedRoots.size > 0)
-        || !shouldRunApifySupplement
-        || (trigger === "late" && !hasDiscoveryBudget())
-      ) {
-        console.error(
-          `[find-unit] Apify supplement skipped (${trigger}): ` +
-          `location=${communityLoc ? `${communityLoc.city}, ${communityLoc.state}` : "unknown"} ` +
-          `roots=${Array.from(allowedRoots).join(", ") || "none"} ` +
-          `candidates=${candidates.length} qualifying=${countQualifyingDiscoveryCandidates()} ` +
-          `explicit${requiredBedroomCount ?? "?"}BR=${countExplicitBedroomCandidates()} ` +
-          `needsBedroomSupplement=${needsApifyForBedroomSearch}`,
-        );
-        return;
-      }
+      if (!communityLoc || !process.env.APIFY_API_TOKEN) return;
       const apifyDiscoveryCities = [...new Set(discoverySearchCitiesForPhotoSearch({
         city: bodyLocation?.city ?? communityLoc.city,
         communityName,
         streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
       }))].slice(0, 3);
+      if (apifyDiscoveryCities.length === 0) return;
       const perCityMax = requiredBedroomCount
-        ? Math.max(40, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)))
-        : Math.max(20, Math.ceil(300 / Math.max(apifyDiscoveryCities.length, 1)));
-      const apifyBudgetMs = trigger === "parallel"
-        ? APIFY_SUPPLEMENT_BUDGET_MS
-        : Math.min(
-          APIFY_SUPPLEMENT_BUDGET_MS,
-          Math.max(5_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
-        );
+        ? Math.max(40, Math.ceil(300 / apifyDiscoveryCities.length))
+        : Math.max(20, Math.ceil(300 / apifyDiscoveryCities.length));
+      const apifyBudgetMs = Math.min(
+        APIFY_SUPPLEMENT_BUDGET_MS,
+        Math.max(8_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
+      );
       const apifyHarvestOptions: ApifySearchHarvestOptions = {
         minBedrooms: requiredBedroomCount,
         streetAddress: canonicalStreet || communityAddress || normalizedStreetAddress || addressStreet,
       };
-      const [zillowApifyUrls, realtorApifyUrls] = await withStepTimeout(
-        Promise.all([
-          Promise.all(
-            apifyDiscoveryCities.map((searchCity) =>
-              harvestZillowUrlsViaApifySearch(
-                searchCity,
-                communityLoc.state,
-                perCityMax,
-                apifyBudgetMs,
-                apifyHarvestOptions,
-              ),
-            ),
-          ).then((rows) => [...new Set(rows.flat())]),
-          Promise.all(
-            apifyDiscoveryCities.map((searchCity) =>
-              harvestRealtorUrlsViaApifySearch(
-                searchCity,
-                communityLoc.state,
-                perCityMax,
-                apifyBudgetMs,
-                apifyHarvestOptions,
-              ),
-            ),
-          ).then((rows) => [...new Set(rows.flat())]),
-        ]),
+      const batch = await withStepTimeout(
+        harvestApifyPhotoDiscoveryBatch({
+          cities: apifyDiscoveryCities,
+          state: communityLoc.state,
+          maxItemsPerCity: perCityMax,
+          timeoutMs: apifyBudgetMs,
+          harvestOptions: apifyHarvestOptions,
+        }),
         apifyBudgetMs,
-        [[], []] as [string[], string[]],
-        "Apify replacement supplement",
+        { zillow: [], realtor: [] },
+        "stacked Apify discovery",
       );
+      const allowedRoots = repeatedCandidateRoots();
+      if (directRoot) allowedRoots.add(directRoot);
+      for (const root of communityAddressRoots) allowedRoots.add(root);
+      if (suppliedStreetRoot) allowedRoots.add(suppliedStreetRoot);
+      const filterRoots = suppliedStreetRoot
+        ? new Set([suppliedStreetRoot])
+        : allowedRoots.size > 0
+          ? allowedRoots
+          : directAllowedRoots;
       const beforeApify = candidates.length;
-      const apifyRealtorRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;
-      for (const link of realtorApifyUrls) addCandidateUrl(link, "realtor", "", "", apifyRealtorRoots);
-      const zillowApifyRoots = suppliedStreetRoot ? new Set([suppliedStreetRoot]) : allowedRoots;
-      for (const link of zillowApifyUrls) {
-        addCandidateUrl(link, "zillow", "", "", zillowApifyRoots);
-      }
+      for (const link of batch.realtor) addCandidateUrl(link, "realtor", "", "", filterRoots);
+      for (const link of batch.zillow) addCandidateUrl(link, "zillow", "", "", filterRoots);
       console.error(
-        `[find-unit] Apify supplement (${trigger}): cities=${apifyDiscoveryCities.join("|")}, state=${communityLoc.state}, ` +
-        `street=${apifyHarvestOptions.streetAddress ?? "city-wide"}, ` +
+        `[find-unit] stacked Apify discovery (parallel with SearchAPI): cities=${apifyDiscoveryCities.join("|")}, ` +
+        `state=${communityLoc.state}, street=${apifyHarvestOptions.streetAddress ?? "city-wide"}, ` +
         `minBedrooms=${apifyHarvestOptions.minBedrooms ?? "any"}, ` +
-        `roots=${Array.from(allowedRoots).join(", ")}, zillow=${zillowApifyUrls.length}, ` +
-        `realtor=${realtorApifyUrls.length}, added=${candidates.length - beforeApify}`,
+        `roots=${filterRoots ? Array.from(filterRoots).join(", ") : "none"}, ` +
+        `zillow=${batch.zillow.length}, realtor=${batch.realtor.length}, added=${candidates.length - beforeApify}`,
       );
     };
 
-    let apifyParallelPromise: Promise<void> | null = null;
-    if (
-      !skipDiscovery
-      && communityLocForQueries
-      && (suppliedStreetRoot || communityAddressRoots.size > 0)
-    ) {
-      apifyParallelPromise = runFindUnitApifySupplement("parallel").catch((e: any) => {
-        console.error(`[find-unit] Apify parallel supplement failed: ${e?.message ?? e}`);
+    let apifyDiscoveryPromise: Promise<void> | null = null;
+    if (!skipDiscovery && communityLocForQueries) {
+      apifyDiscoveryPromise = runFindUnitStackedApifyDiscovery().catch((e: any) => {
+        console.error(`[find-unit] stacked Apify discovery failed: ${e?.message ?? e}`);
       });
-      console.error("[find-unit] Apify supplement started in parallel with Google discovery");
+      console.error("[find-unit] stacked Apify discovery started in parallel with SearchAPI/Google discovery");
     }
 
     if (!skipDiscovery) {
@@ -27066,11 +27213,22 @@ Return ONLY compact JSON with this exact shape:
         );
       }
 
-      if (apifyParallelPromise) {
-        await apifyParallelPromise;
-      } else {
-        await runFindUnitApifySupplement("late");
+      if (apifyDiscoveryPromise) {
+        await apifyDiscoveryPromise;
+      } else if (!skipDiscovery && communityLocForQueries && process.env.APIFY_API_TOKEN) {
+        await runFindUnitStackedApifyDiscovery();
       }
+    }
+
+    const listingUrlsByCluster = new Map<string, string[]>();
+    for (const candidate of candidates) {
+      const root = streetRootFromListingAddress(
+        parseListingAddressFromUrl(candidate.sourceUrl) ?? parseListingAddressFromText(candidate.contextText),
+      ) ?? `__url:${candidate.sourceUrl}`;
+      const bucket = listingUrlsByCluster.get(root) ?? [];
+      const key = unitSwapListingKey(candidate.sourceUrl);
+      if (key && !bucket.some((u) => unitSwapListingKey(u) === key)) bucket.push(candidate.sourceUrl);
+      listingUrlsByCluster.set(root, bucket);
     }
 
     // PR #329 / #338: sort candidates by source priority before
@@ -27337,19 +27495,25 @@ Return ONLY compact JSON with this exact shape:
             continue;
           }
           const facts: ListingFacts = {};
-          const scraped = await withStepTimeout(
-            scrapeListingPhotos(link, undefined, facts, SCRAPE_WITHOUT_SIDECAR),
+          const clusterKey = streetRootFromListingAddress(
+            parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${hit?.title || ""} ${hit?.snippet || ""}`),
+          ) ?? `__url:${link}`;
+          const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [link];
+          const dual = await withStepTimeout(
+            scrapeListingPhotosDualSource(clusterUrls.length > 0 ? clusterUrls : [link], facts, SCRAPE_WITHOUT_SIDECAR),
             PHOTO_SCRAPE_TIMEOUT_MS,
-            [] as ScrapedPhoto[],
+            { photos: [] as ScrapedPhoto[], sourceUrl: link, platform: "other" as const },
             `equivalent photo scrape ${link}`,
           );
-          const photos = scraped.map((p) => p.url);
+          const photos = dual.photos.map((p) => p.url);
+          const resolvedLink = dual.sourceUrl || link;
           console.error(`[find-unit] equivalent source ${link} → ${photos.length} photos for ${candidate.sourceUrl}`);
           if (photos.length >= minPhotos) {
+            const resolvedSource = detectSource(resolvedLink) ?? source;
             return {
-              sourceUrl: link,
-              source,
-              address: displayAddressFromUrl(link, source) || candidate.address,
+              sourceUrl: resolvedLink,
+              source: resolvedSource,
+              address: displayAddressFromUrl(resolvedLink, resolvedSource) || candidate.address,
               unitNumber: altUnit || unit,
               photos,
               facts,
@@ -27510,14 +27674,31 @@ Return ONLY compact JSON with this exact shape:
           const MIN_PHOTOS = expandedSearch ? 3 : 5;
           let scrapedPhotoUrls: string[] = [];
           let candidateFacts: ListingFacts = {};
+          const clusterKey = streetRootFromListingAddress(
+            parseListingAddressFromUrl(sourceUrl) ?? parseListingAddressFromText(candidate.contextText),
+          ) ?? `__url:${sourceUrl}`;
+          const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [sourceUrl];
           try {
-            const scraped = await withStepTimeout(
-              scrapeListingPhotos(sourceUrl, undefined, candidateFacts, SCRAPE_WITHOUT_SIDECAR),
+            const dual = await withStepTimeout(
+              scrapeListingPhotosDualSource(clusterUrls, candidateFacts, SCRAPE_WITHOUT_SIDECAR),
               PHOTO_SCRAPE_TIMEOUT_MS,
-              [] as ScrapedPhoto[],
+              { photos: [] as ScrapedPhoto[], sourceUrl, platform: listingScrapePlatform(sourceUrl) },
               `photo scrape ${sourceUrl}`,
             );
-            scrapedPhotoUrls = scraped.map((p) => p.url);
+            scrapedPhotoUrls = dual.photos.map((p) => p.url);
+            if (dual.sourceUrl && dual.sourceUrl !== sourceUrl) {
+              const resolved = detectSource(dual.sourceUrl);
+              if (resolved) {
+                console.error(
+                  `[find-unit] [${source}] parallel scrape picked ${dual.platform} ${dual.sourceUrl} ` +
+                  `(${scrapedPhotoUrls.length} photos) instead of ${sourceUrl}`,
+                );
+                sourceUrl = dual.sourceUrl;
+                source = resolved;
+                address = displayAddressFromUrl(sourceUrl, source) || address;
+                unitNumber = extractUnitNumber(sourceUrl, source, candidate.contextText) || unitNumber;
+              }
+            }
           } catch { scrapedPhotoUrls = []; }
           if (scrapedPhotoUrls.length < MIN_PHOTOS) {
             const alternate = await findEquivalentPhotoSource({
@@ -30379,16 +30560,16 @@ Return ONLY compact JSON with this exact shape:
         return res.status(400).json({ error: "url required (or communityName + bedrooms for discovery)" });
       }
       const searchApiKey = process.env.SEARCHAPI_API_KEY;
-      if (!searchApiKey) {
-        return res.status(503).json({ error: "Discovery requires SEARCHAPI_API_KEY (only direct url calls work without it)" });
+      const hasApifyDiscovery = !!process.env.APIFY_API_TOKEN;
+      if (!searchApiKey && !hasApifyDiscovery) {
+        return res.status(503).json({
+          error: "Discovery requires APIFY_API_TOKEN and/or SEARCHAPI_API_KEY (only direct url calls work without either)",
+        });
       }
-      // Multi-source real-estate discovery for Add Community / Combo
-      // Step 4. SearchAPI finds resort-anchored Zillow/Realtor detail
-      // URLs first; once we know the resort's street roots, Apify's
-      // native city search actors supplement both Zillow and Realtor
-      // and are filtered back down to those roots. This keeps Apify's
-      // better inventory coverage without letting broad city results
-      // leak into the selected resort.
+      // Stacked discovery: Apify native Zillow/Realtor search runs in
+      // parallel with SearchAPI Google site: queries (Zillow, Realtor,
+      // Redfin, Homes). Apify is primary inventory; SearchAPI supplements
+      // and anchors on resort name/street — not the only path.
       const listingKey = (raw: string): string => {
         try {
           const u = new URL(raw);
@@ -30509,90 +30690,88 @@ Return ONLY compact JSON with this exact shape:
         }));
       };
 
-      await Promise.all([
-        runDiscoveryQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
-        runDiscoveryQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
-        runDiscoveryQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
-        runDiscoveryQueries(homesQueries, /homes\.com\/property\//i, "homes"),
-      ]);
-
       const apifyCities = [...new Set(discoverySearchCitiesForPhotoSearch({ city, communityName, streetAddress }))].slice(0, 3);
-      if (apifyCities.length > 0 && state) {
-        const roots = repeatedRoots();
-        const focusedScrapeableCandidates = candidateUrls.filter(
-          (candidate) => candidate.source === "zillow" || candidate.source === "realtor",
-        ).length;
-        const hasEnoughFocusedCandidates = candidateLimit !== null
-          ? focusedScrapeableCandidates >= Math.min(2, candidateLimit)
-          : false;
-        // Mauna Lani / Waikoloa: SearchAPI often surfaces Zillow URLs that
-        // scrape to 0 photos on Railway; skipping Apify in that case leaves
-        // only dead links. When we know the resort street, always supplement.
-        const runApifySupplement = roots.size > 0 && (
-          !hasEnoughFocusedCandidates
-          || (isBoundedDiscovery && !!suppliedStreetRoot)
-        );
-        if (runApifySupplement) {
-          const apifyMaxItems = candidateLimit
-            ? Math.max(30, Math.min(80, candidateLimit * 8))
-            : 300;
-          const apifySearchTimeoutMs = isBoundedDiscovery ? 55_000 : 180_000;
-          const perCityMax = Math.max(20, Math.ceil(apifyMaxItems / apifyCities.length));
-          const zillowByCity = await Promise.all(
-            apifyCities.map((apifyCity) => harvestZillowUrlsViaApifySearch(apifyCity, state, perCityMax, apifySearchTimeoutMs)),
-          );
-          const realtorByCity = await Promise.all(
-            apifyCities.map((apifyCity) => harvestRealtorUrlsViaApifySearch(apifyCity, state, perCityMax, apifySearchTimeoutMs)),
-          );
-          const zillowApifyUrls = [...new Set(zillowByCity.flat())];
-          const realtorApifyUrls = [...new Set(realtorByCity.flat())];
-          // Bounded preflight with a known resort street: do not filter Apify
-          // Zillow through the broad repeatedRoots set (many Olani rows). That
-          // was dropping every homedetails URL while Redfin filled the pool.
-          const apifyRealtorRoots = isBoundedDiscovery && suppliedStreetRoot
-            ? new Set([suppliedStreetRoot])
-            : roots;
-          for (const link of zillowApifyUrls) {
-            if (isBoundedDiscovery && suppliedStreetRoot) {
-              if (listingStreetRoot(link) === suppliedStreetRoot) addCandidate(link, "zillow");
-            } else {
-              addCandidate(link, "zillow", "", "", roots);
-            }
-          }
-          for (const link of realtorApifyUrls) addCandidate(link, "realtor", "", "", apifyRealtorRoots);
-          console.log(
-            `[fetch-unit-photos] Apify supplement for "${communityName}": ` +
-            `cities=${apifyCities.join("|")} zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
-            `roots=${Array.from(roots).join(", ") || "none"} total=${candidateUrls.length}`,
-          );
-        } else {
-          console.log(
-            hasEnoughFocusedCandidates && !(isBoundedDiscovery && suppliedStreetRoot)
-              ? `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because focused discovery already found ${focusedScrapeableCandidates} Zillow/Realtor candidates`
-              : `[fetch-unit-photos] Apify supplement skipped for "${communityName}" because no resort street root was discovered`,
-          );
-        }
-      }
+      const apifyMaxItems = candidateLimit
+        ? Math.max(30, Math.min(80, candidateLimit * 8))
+        : 300;
+      const apifySearchTimeoutMs = isBoundedDiscovery ? 55_000 : 180_000;
+      const perCityMax = apifyCities.length > 0
+        ? Math.max(20, Math.ceil(apifyMaxItems / apifyCities.length))
+        : apifyMaxItems;
+      const apifyHarvestOptions: ApifySearchHarvestOptions = {};
+      if (streetAddress) apifyHarvestOptions.streetAddress = streetAddress;
+      if (requestedBedrooms) apifyHarvestOptions.minBedrooms = requestedBedrooms;
 
-      // Prefer Zillow/Realtor (reliable photo scrapers). Redfin often returns
-      // 0 photos on Railway and should not consume bounded preflight attempts.
-      const canonicalStreetRoot = suppliedStreetRoot;
-      const photoScrapeSourcePriority: Record<DiscoverySource, number> = {
-        zillow: 0,
-        realtor: 1,
-        homes: 2,
-        redfin: 3,
+      const runApifyDiscovery = async (): Promise<{ zillow: number; realtor: number }> => {
+        if (!hasApifyDiscovery || apifyCities.length === 0 || !state) {
+          return { zillow: 0, realtor: 0 };
+        }
+        const batch = await harvestApifyPhotoDiscoveryBatch({
+          cities: apifyCities,
+          state,
+          maxItemsPerCity: perCityMax,
+          timeoutMs: apifySearchTimeoutMs,
+          harvestOptions: apifyHarvestOptions,
+        });
+        const rootsAfterSearch = repeatedRoots();
+        const filterRoots = isBoundedDiscovery && suppliedStreetRoot
+          ? new Set([suppliedStreetRoot])
+          : rootsAfterSearch.size > 0
+            ? rootsAfterSearch
+            : suppliedStreetRoot
+              ? new Set([suppliedStreetRoot])
+              : undefined;
+        for (const link of batch.zillow) {
+          if (isBoundedDiscovery && suppliedStreetRoot) {
+            if (listingStreetRoot(link) === suppliedStreetRoot) addCandidate(link, "zillow");
+          } else if (filterRoots && filterRoots.size > 0) {
+            addCandidate(link, "zillow", "", "", filterRoots);
+          } else {
+            addCandidate(link, "zillow");
+          }
+        }
+        for (const link of batch.realtor) {
+          if (filterRoots && filterRoots.size > 0) {
+            addCandidate(link, "realtor", "", "", filterRoots);
+          } else {
+            addCandidate(link, "realtor");
+          }
+        }
+        return { zillow: batch.zillow.length, realtor: batch.realtor.length };
       };
+
+      const runSearchApiDiscovery = async (): Promise<void> => {
+        if (!searchApiKey) return;
+        await Promise.all([
+          runDiscoveryQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
+          runDiscoveryQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
+          runDiscoveryQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
+          runDiscoveryQueries(homesQueries, /homes\.com\/property\//i, "homes"),
+        ]);
+      };
+
+      const apifyCounts = await Promise.all([
+        runApifyDiscovery(),
+        runSearchApiDiscovery(),
+      ]).then(([counts]) => counts);
+      console.log(
+        `[fetch-unit-photos] stacked discovery for "${communityName}": ` +
+        `apify(zillow=${apifyCounts.zillow} realtor=${apifyCounts.realtor}) ` +
+        `searchapi=${searchApiKey ? "yes" : "no"} total=${candidateUrls.length}`,
+      );
+
+      const canonicalStreetRoot = suppliedStreetRoot;
       candidateUrls.sort((a, b) => {
         const aOnStreet = canonicalStreetRoot && listingStreetRoot(a.url) === canonicalStreetRoot ? 0 : 1;
         const bOnStreet = canonicalStreetRoot && listingStreetRoot(b.url) === canonicalStreetRoot ? 0 : 1;
-        if (aOnStreet !== bOnStreet) return aOnStreet - bOnStreet;
-        return photoScrapeSourcePriority[a.source] - photoScrapeSourcePriority[b.source];
+        return aOnStreet - bOnStreet;
       });
 
       let orderedCandidates = candidateUrls;
       if (isBoundedDiscovery) {
-        const scrapeable = candidateUrls.filter((c) => c.source === "zillow" || c.source === "realtor");
+        const scrapeable = candidateUrls.filter(
+          (c) => c.source === "zillow" || c.source === "realtor" || c.source === "redfin" || c.source === "homes",
+        );
         orderedCandidates = scrapeable;
         if (canonicalStreetRoot) {
           const onStreet = orderedCandidates.filter((c) => listingStreetRoot(c.url) === canonicalStreetRoot);
@@ -30614,11 +30793,16 @@ Return ONLY compact JSON with this exact shape:
         ? orderedCandidates.slice(offset, offset + candidateLimit)
         : orderedCandidates.slice(offset);
       if (isBoundedDiscovery) {
-        const zillowInTry = candidatesToTry.filter((c) => c.source === "zillow").length;
+        const bySource = Object.fromEntries(
+          (["zillow", "realtor", "redfin", "homes"] as const).map((s) => [
+            s,
+            candidatesToTry.filter((c) => c.source === s).length,
+          ]),
+        );
         console.log(
           `[fetch-unit-photos] bounded try pool community="${communityName ?? ""}" ` +
           `total=${candidateUrls.length} scrapeable=${orderedCandidates.length} ` +
-          `trying=${candidatesToTry.length} zillowInTry=${zillowInTry} ` +
+          `trying=${candidatesToTry.length} bySource=${JSON.stringify(bySource)} ` +
           `canonicalStreet=${canonicalStreetRoot ?? "none"}`,
         );
       }
@@ -30631,6 +30815,7 @@ Return ONLY compact JSON with this exact shape:
         facts: ListingFacts;
         scrapedBedrooms: number;
       } | null = null;
+      const triedListingClusters = new Set<string>();
       const considerRepresentativeFallback = (
         candidate: { url: string; source: DiscoverySource },
         photos: ScrapedPhoto[],
@@ -30659,7 +30844,6 @@ Return ONLY compact JSON with this exact shape:
           );
           break;
         }
-        triedCandidateUrls.push(candidate.url);
         const candidateStreetRoot = listingStreetRoot(candidate.url);
         const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
         if (isBoundedDiscovery && canonicalStreetRoot && candidateStreetRoot !== canonicalStreetRoot && !isConfiguredPhotoSource) {
@@ -30669,39 +30853,55 @@ Return ONLY compact JSON with this exact shape:
           );
           continue;
         }
+        const clusterKey = listingClusterKey(candidate.url, listingStreetRoot);
+        if (triedListingClusters.has(clusterKey)) continue;
+        triedListingClusters.add(clusterKey);
+        const clusterUrls = candidatesToTry
+          .filter((c) => listingClusterKey(c.url, listingStreetRoot) === clusterKey)
+          .map((c) => c.url);
+        for (const clusterUrl of clusterUrls) {
+          if (!triedCandidateUrls.includes(clusterUrl)) triedCandidateUrls.push(clusterUrl);
+        }
         const facts: ListingFacts = {};
         try {
           const remainingBudgetMs = discoveryWallBudgetMs === null
             ? null
             : Math.max(8_000, discoveryWallBudgetMs - discoveryElapsedMs());
-          const photos = await scrapeListingPhotos(candidate.url, undefined, facts, isBoundedDiscovery ? {
+          const scrapeOpts = isBoundedDiscovery ? {
             detailTimeoutMs: Math.min(28_000, remainingBudgetMs ?? 28_000),
             scrapingBeeTimeoutMs: Math.min(18_000, remainingBudgetMs ?? 18_000),
             ...SCRAPE_WITHOUT_SIDECAR,
-          } : SCRAPE_WITHOUT_SIDECAR);
+          } : SCRAPE_WITHOUT_SIDECAR;
+          const dual = await scrapeListingPhotosDualSource(clusterUrls, facts, scrapeOpts);
+          const photos = dual.photos;
+          const sourceUrl = dual.sourceUrl || candidate.url;
+          const sourceLabel = (dual.platform === "other" ? candidate.source : dual.platform) as DiscoverySource;
           if (photos.length === 0) {
-            console.warn(`[fetch-unit-photos] ${candidate.source} candidate returned 0 photos: ${candidate.url}`);
+            console.warn(
+              `[fetch-unit-photos] parallel scrape returned 0 photos for cluster ` +
+              `(${clusterUrls.length} urls): ${clusterUrls.join(" | ")}`,
+            );
             continue;
           }
           const scrapedBR = facts.bedrooms ?? null;
           if (requestedBedrooms && scrapedBR !== null && scrapedBR !== requestedBedrooms) {
-            considerRepresentativeFallback(candidate, photos, facts);
-            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
+            considerRepresentativeFallback({ url: sourceUrl, source: sourceLabel as DiscoverySource }, photos, facts);
+            console.warn(`[fetch-unit-photos] skipping ${sourceUrl}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
             continue;
           }
           if (!requestedBedrooms && minimumBedrooms && scrapedBR !== null && scrapedBR < minimumBedrooms) {
-            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR is below requested minimum ${minimumBedrooms}BR`);
+            console.warn(`[fetch-unit-photos] skipping ${sourceUrl}: ${scrapedBR}BR is below requested minimum ${minimumBedrooms}BR`);
             continue;
           }
           console.log(
             `[fetch-unit-photos] success community="${communityName ?? ""}" ` +
-            `source=${candidate.source} photos=${photos.length} url=${candidate.url} ` +
-            `elapsedMs=${Date.now() - startedAt}`,
+            `source=${sourceLabel} photos=${photos.length} url=${sourceUrl} ` +
+            `clusterUrls=${clusterUrls.length} elapsedMs=${Date.now() - startedAt}`,
           );
           const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
           const resolverProof = buildUnitPhotoResolverProof({
             photos: responsePhotos,
-            sourceUrl: candidate.url,
+            sourceUrl,
             foundVia: "search",
             requestedBedrooms,
             minimumBedrooms,
@@ -30710,7 +30910,7 @@ Return ONLY compact JSON with this exact shape:
           });
           res.json({
             photos: responsePhotos,
-            sourceUrl: candidate.url,
+            sourceUrl,
             foundVia: "search",
             facts,
             resolverProof,
@@ -30718,11 +30918,13 @@ Return ONLY compact JSON with this exact shape:
               code: resolverProof.status === "accepted" ? "unit-photo-proof-accepted" : "unit-photo-proof-review",
               triedCandidateUrls,
               resolverProof,
+              dualSourceCluster: clusterUrls,
+              winningPlatform: dual.platform,
             },
           });
           return;
         } catch (e: any) {
-          console.warn(`[fetch-unit-photos] candidate scrape failed for ${candidate.url}: ${e.message}`);
+          console.warn(`[fetch-unit-photos] cluster scrape failed (${clusterUrls.join(" | ")}): ${e.message}`);
         }
       }
 
@@ -31948,46 +32150,43 @@ Return ONLY compact JSON with this exact shape:
       }
     };
 
-    // CODEX NOTE (2026-05-04, claude/single-listing-citywide-cap):
-    // City-wide mode tries Apify SEARCH actors first
-    // (igolaizola~zillow-scraper-ppe / dz_omar~realtor-scraper) — they hit
-    // Zillow's/Realtor's own search APIs and return 200-500+
-    // candidate URLs vs Google site:'s hard ceiling at ~35.
-    // Recommended by Grok consult 2026-05-04. Falls back to the
-    // existing Google site: discovery if Apify is not configured
-    // (no APIFY_API_TOKEN), the actor errors out, or it returns
-    // zero URLs. Community-anchored mode also uses Apify below,
-    // but only after Google/SearchAPI has discovered repeated
-    // street roots, so the broad city-wide actor output can be
-    // narrowed back to the selected resort.
-    if (isCityWide) {
-      const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
-        harvestZillowUrlsViaApifySearch(city, state, 500),
-        harvestRealtorUrlsViaApifySearch(city, state, 500),
-      ]);
-      addApifyCandidateUrls(zillowApifyUrls, "zillow");
-      addApifyCandidateUrls(realtorApifyUrls, "realtor");
-      console.log(
-        `[find-clean-unit] city-wide Apify search: ` +
-        `zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
-        `(deduped to total=${candidateUrls.length})`,
-      );
-    }
+    const discoveryCitiesForApify = isCityWide
+      ? [city]
+      : [...new Set(discoverySearchCitiesForPhotoSearch({ city, communityName }))].slice(0, 3);
+    const apifyMaxPerCity = isCityWide ? 500 : 300;
+    const apifyHarvestOptions: ApifySearchHarvestOptions = {};
+    if (!isAnyBedroom && numericBedrooms) apifyHarvestOptions.minBedrooms = numericBedrooms;
 
-    // Google site: queries — runs unconditionally. Acts as a
-    // fallback when Apify returned 0 in city-wide mode (key
-    // missing, actor error), and as the PRIMARY discovery path
-    // for community-anchored mode (where the resort name in the
-    // query restricts hits in a way the Apify city-search can't
-    // match). Dedup is automatic via the `seen` Set above.
-    await Promise.all([
-      harvestQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
-      harvestQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
-      // CODEX NOTE (2026-05-04, claude/single-listing-replacement-mirror):
-      // Redfin discovery — matches replacement-tool's three-source pattern.
-      harvestQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
-      harvestQueries(brokerageQueries, /^https?:\/\//i, "brokerage"),
-    ]);
+    const runApifyDiscovery = async () => {
+      if (!process.env.APIFY_API_TOKEN || discoveryCitiesForApify.length === 0) return;
+      const batch = await harvestApifyPhotoDiscoveryBatch({
+        cities: discoveryCitiesForApify,
+        state,
+        maxItemsPerCity: apifyMaxPerCity,
+        timeoutMs: isCityWide ? 180_000 : 120_000,
+        harvestOptions: apifyHarvestOptions,
+      });
+      addApifyCandidateUrls(batch.zillow, "zillow");
+      addApifyCandidateUrls(batch.realtor, "realtor");
+      console.log(
+        `[find-clean-unit] stacked Apify discovery: ` +
+        `zillow=${batch.zillow.length} realtor=${batch.realtor.length} total=${candidateUrls.length}`,
+      );
+    };
+
+    const runSearchApiDiscovery = async () => {
+      await Promise.all([
+        harvestQueries(zillowQueries, /zillow\.com\/homedetails\//i, "zillow"),
+        harvestQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
+        harvestQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
+        harvestQueries(brokerageQueries, /^https?:\/\//i, "brokerage"),
+      ]);
+    };
+
+    // Stacked discovery: Apify native search + SearchAPI Google site:
+    // in parallel (not SearchAPI-first with Apify as a late supplement).
+    await Promise.all([runApifyDiscovery(), runSearchApiDiscovery()]);
+
     const addressRootSet = repeatedHarvestRoots();
     if (!isCityWide && addressRootSet.size > 0) {
       const rootRealtorQueries = Array.from(addressRootSet).flatMap((root) => {
@@ -32017,24 +32216,29 @@ Return ONLY compact JSON with this exact shape:
       console.log(
         `[find-clean-unit] address-root expansion for "${communityName}": roots=${Array.from(addressRootSet).join(", ")} total=${candidateUrls.length}`,
       );
-      // Community mode used to skip Apify entirely because raw city-wide
-      // Apify results are too broad for a resort. At this point we have
-      // discovered the resort's repeated street roots from Google/SearchAPI,
-      // so city-wide Apify can be safely narrowed back down to this resort.
-      // This matters for large Fort Myers Beach condos where Google finds
-      // many stale stub URLs but Apify's native Zillow/Realtor search can
-      // surface fresher detail URLs for the same building roots.
-      const [zillowApifyUrls, realtorApifyUrls] = await Promise.all([
-        harvestZillowUrlsViaApifySearch(city, state, 300),
-        harvestRealtorUrlsViaApifySearch(city, state, 300),
+      // Second pass: street-root-targeted SearchAPI + Apify filtered to
+      // roots discovered in the first stacked pass.
+      const beforeRootPass = candidateUrls.length;
+      await Promise.all([
+        harvestQueries(rootRealtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor", { addressRoots: addressRootSet }),
+        harvestQueries(rootRedfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin", { addressRoots: addressRootSet }),
+        harvestQueries(rootZillowQueries, /zillow\.com\/homedetails\//i, "zillow", { addressRoots: addressRootSet }),
+        (async () => {
+          if (!process.env.APIFY_API_TOKEN) return;
+          const batch = await harvestApifyPhotoDiscoveryBatch({
+            cities: discoveryCitiesForApify,
+            state,
+            maxItemsPerCity: apifyMaxPerCity,
+            timeoutMs: 120_000,
+            harvestOptions: apifyHarvestOptions,
+          });
+          addApifyCandidateUrls(batch.zillow, "zillow", { addressRoots: addressRootSet });
+          addApifyCandidateUrls(batch.realtor, "realtor", { addressRoots: addressRootSet });
+        })(),
       ]);
-      const beforeApify = candidateUrls.length;
-      addApifyCandidateUrls(zillowApifyUrls, "zillow", { addressRoots: addressRootSet });
-      addApifyCandidateUrls(realtorApifyUrls, "realtor", { addressRoots: addressRootSet });
       console.log(
-        `[find-clean-unit] community Apify supplement for "${communityName}": ` +
-        `zillow=${zillowApifyUrls.length} realtor=${realtorApifyUrls.length} ` +
-        `added=${candidateUrls.length - beforeApify} total=${candidateUrls.length}`,
+        `[find-clean-unit] address-root stacked pass for "${communityName}": ` +
+        `roots=${Array.from(addressRootSet).join(", ")} added=${candidateUrls.length - beforeRootPass} total=${candidateUrls.length}`,
       );
     }
     const brokerageDetailScore = (url: string): number => {
@@ -32199,6 +32403,18 @@ Return ONLY compact JSON with this exact shape:
       rejectedBecause: string;
     };
     const attempts: Attempt[] = [];
+    const listingUrlsByCluster = new Map<string, string[]>();
+    for (const candidateUrl of candidateUrls) {
+      const meta = candidateMeta.get(candidateUrl.toLowerCase());
+      const addressGuess = addressFromSlug(candidateUrl)
+        ?? addressFromSearchText(`${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
+      const clusterKey = addressGuess
+        ? (streetRootFromAddress(addressGuess) ?? `__url:${candidateUrl}`)
+        : `__url:${candidateUrl}`;
+      const bucket = listingUrlsByCluster.get(clusterKey) ?? [];
+      if (!bucket.includes(candidateUrl)) bucket.push(candidateUrl);
+      listingUrlsByCluster.set(clusterKey, bucket);
+    }
     // CODEX NOTE (2026-05-05, codex/single-listing-photo-gate):
     // A candidate must have photos and those photos must pass Lens
     // against Airbnb / VRBO / Booking before we accept it. Address
@@ -32470,12 +32686,24 @@ Return ONLY compact JSON with this exact shape:
         continue;
       }
 
-      // 4) Apify scrape — only candidates that passed OTA reach here.
+      // 4) Scrape Realtor + Zillow in parallel when both URLs exist for
+      // this address cluster; pick whichever gallery returned more photos.
       const facts: ListingFacts = {};
       let photos: ScrapedPhoto[] = [];
       let scrapeError: string | null = null;
+      const clusterKey = addressGuess
+        ? (streetRootFromAddress(addressGuess) ?? `__url:${url}`)
+        : `__url:${url}`;
+      const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [url];
       try {
-        photos = await scrapeListingPhotos(url, undefined, facts, { sidecarWalletMs: 25_000 });
+        const dual = await scrapeListingPhotosDualSource(clusterUrls, facts, { sidecarWalletMs: 25_000 });
+        photos = dual.photos;
+        if (dual.sourceUrl && dual.sourceUrl !== url) {
+          console.log(
+            `[find-clean-unit] parallel scrape picked ${dual.platform} (${photos.length} photos) ` +
+            `instead of ${listingScrapePlatform(url)} for cluster ${clusterKey}`,
+          );
+        }
       } catch (e: any) {
         scrapeError = e?.message ?? String(e);
       }
