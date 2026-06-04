@@ -3123,8 +3123,11 @@ assert.ok(
 assert.ok(
   bookingsSource.includes("alternativePicksAreWalkable") &&
     bookingsSource.includes("MAX_BUY_IN_WALK_MINUTES") &&
-    bookingsSource.includes("candidateWalkMinutes"),
-  "alternative replacement sets should require coordinate-proven walking proximity",
+    bookingsSource.includes("candidateWalkMinutes") &&
+    bookingsSource.includes("bestWalkableAlternativePicks") &&
+    bookingsSource.includes("candidateIsWalkableWithExistingPicks") &&
+    bookingsSource.includes("slice(0, 40)"),
+  "alternative replacement sets should search candidate combinations and require coordinate-proven walking proximity instead of rejecting a city after one distant cheapest pair",
 );
 assert.ok(
   bookingsSource.includes("tooFarForBuyInPair") &&

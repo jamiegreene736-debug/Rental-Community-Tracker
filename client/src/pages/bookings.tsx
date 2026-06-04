@@ -1207,6 +1207,58 @@ function alternativePicksAreWalkable(picks: Array<Pick<LiveCandidate, "lat" | "l
   return true;
 }
 
+function candidateIsWalkableWithExistingPicks(
+  candidate: Pick<LiveCandidate, "lat" | "lng">,
+  picks: Array<Pick<LiveCandidate, "lat" | "lng">>,
+): boolean {
+  for (const pick of picks) {
+    const minutes = candidateWalkMinutes(candidate, pick);
+    if (minutes === null || minutes > MAX_BUY_IN_WALK_MINUTES) return false;
+  }
+  return true;
+}
+
+function bestWalkableAlternativePicks(
+  data: FindBuyInResponse,
+  plan: number[],
+  community: string,
+): Array<LiveCandidate & { community: string }> | null {
+  const pools = plan.map((bedrooms) => (data.cheapest ?? [])
+    .filter((candidate) => candidate.totalPrice > 0 && candidateMatchesBedroom(candidate, bedrooms))
+    .sort((a, b) => a.totalPrice - b.totalPrice)
+    .slice(0, 40));
+  if (pools.some((pool) => pool.length === 0)) return null;
+
+  let bestPicks: Array<LiveCandidate & { community: string }> | null = null;
+  let bestCost = Number.POSITIVE_INFINITY;
+
+  const search = (
+    depth: number,
+    used: Set<string>,
+    picks: Array<LiveCandidate & { community: string }>,
+    cost: number,
+  ) => {
+    if (cost >= bestCost) return;
+    if (depth >= pools.length) {
+      if (!alternativePicksAreWalkable(picks)) return;
+      bestPicks = picks;
+      bestCost = cost;
+      return;
+    }
+
+    for (const candidate of pools[depth]) {
+      if (hasUsedListingIdentity(used, candidate)) continue;
+      if (!candidateIsWalkableWithExistingPicks(candidate, picks)) continue;
+      const nextUsed = new Set(used);
+      addUsedListingIdentity(nextUsed, candidate);
+      search(depth + 1, nextUsed, [...picks, { ...candidate, community }], cost + candidate.totalPrice);
+    }
+  };
+
+  search(0, new Set<string>(), [], 0);
+  return bestPicks;
+}
+
 function UnitTypeConfidenceBadge({ confidence }: { confidence?: number | null }) {
   if (typeof confidence !== "number") return null;
   const color = confidence >= 85 ? "emerald" : confidence >= 70 ? "amber" : "rose";
@@ -1296,24 +1348,9 @@ function bestAlternativeReplacementSet(workflow: AlternativeWorkflowState | unde
         : fallbackPlans;
 
     for (const plan of plans) {
-      const used = new Set<string>();
-      const picks: Array<LiveCandidate & { community: string }> = [];
+      const picks = bestWalkableAlternativePicks(data, plan, scoutResult.community);
 
-      for (const bedrooms of plan) {
-        const pick = (data.cheapest ?? [])
-          .filter((candidate) => candidate.totalPrice > 0 && candidateMatchesBedroom(candidate, bedrooms))
-          .sort((a, b) => a.totalPrice - b.totalPrice)
-          .find((candidate) => !hasUsedListingIdentity(used, candidate));
-      if (pick) {
-        // Note: unitTypeConfidence is available on pick for future display
-      }
-        if (!pick) break;
-        addUsedListingIdentity(used, pick);
-        picks.push({ ...pick, community: scoutResult.community });
-      }
-
-      if (picks.length === plan.length) {
-        if (!alternativePicksAreWalkable(picks)) continue;
+      if (picks?.length === plan.length) {
         sets.push({
           community: scoutResult.community,
           plan,
