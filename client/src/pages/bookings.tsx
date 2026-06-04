@@ -2368,7 +2368,7 @@ function AlternativeBuyInWorkflowPanel({
                     {active === "direct-probing" && (
                       <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] text-sky-800">
                         <Loader2 className="h-3 w-3 animate-spin" />
-                        Google Lens direct-site probe running…
+                        Direct-site probe skipped…
                       </span>
                     )}
                     {autoScan && autoScan.scanned.includes(result.community) && (
@@ -2391,7 +2391,7 @@ function AlternativeBuyInWorkflowPanel({
                   <div className="mt-1 space-y-1 rounded bg-slate-50 px-2 py-1.5 text-[11px]">
                     {sampleGroups.length > 0 && (
                       <div className="space-y-1">
-                        <p className="font-medium text-slate-900">Airbnb listings checked (Google Lens)</p>
+                        <p className="font-medium text-slate-900">Airbnb listings checked</p>
                         {sampleGroups.map((group) => (
                           <div key={`${result.community}-${group.label}`} className="space-y-0.5">
                             <p className="text-[10px] font-medium text-slate-700">{group.label}</p>
@@ -2415,7 +2415,7 @@ function AlternativeBuyInWorkflowPanel({
                     )}
                     {directMatches.length > 0 ? (
                       <div className="space-y-0.5 border-t border-slate-200 pt-1">
-                        <p className="font-medium text-slate-900">Google Lens direct booking matches</p>
+                        <p className="font-medium text-slate-900">Direct booking matches</p>
                         {directMatches.map((match) => (
                           <a
                             key={match.url}
@@ -2431,7 +2431,7 @@ function AlternativeBuyInWorkflowPanel({
                       </div>
                     ) : result.directBookingProbes && result.directBookingProbes.length > 0 && active !== "direct-probing" ? (
                       <p className="border-t border-slate-200 pt-1 text-muted-foreground">
-                        {directProbeMessage ?? `No direct booking site passed the Google Lens threshold (${directProbeThreshold?.minPhotoMatches ?? 3}+ interior photo matches at ≥${Math.round((directProbeThreshold?.minConfidence ?? 0.95) * 100)}% confidence).`}
+                        {directProbeMessage ?? "Google Lens direct-booking probes are disabled to preserve SearchAPI quota."}
                       </p>
                     ) : null}
                   </div>
@@ -6535,27 +6535,7 @@ export default function Bookings() {
       }).then((r) => r.json()) as AlternativeScoutResponse;
       updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
 
-      const probeCommunities = alternativeScoutCommunitiesForDisplay(response)
-        .map((row) => ({
-          community: row.community,
-          samples: (row.samples ?? []).filter((sample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url)),
-        }))
-        .filter((row) => row.samples.length > 0);
-
       let enrichedScout = response;
-      if (probeCommunities.length > 0) {
-        updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: "direct-probing" });
-        try {
-          const probeResponse = await apiRequest("POST", "/api/operations/alternative-scout-direct-probes", {
-            communities: probeCommunities,
-            checkIn,
-            checkOut,
-          }).then((r) => r.json()) as { probesByCommunity?: Record<string, { listings?: AlternativeScoutDirectProbe[] }> };
-          enrichedScout = mergeScoutDirectProbes(response, probeResponse.probesByCommunity ?? {});
-        } catch (probeError: any) {
-          console.warn("[alternative-scout] direct booking probe failed", probeError?.message ?? probeError);
-        }
-      }
 
       updateAlternativeWorkflow(reservation._id, { scout: enrichedScout, activeCommunity: null });
       const sidecarQueue = alternativeCommunitiesForSidecar(enrichedScout);
@@ -12922,36 +12902,17 @@ function ReverseImageListingLookup({
 }) {
   const [state, setState] = useState<ReverseImageLookupState>({ status: "idle" });
   const isLoading = state.status === "loading";
+  void sourceUrl;
+  void title;
+  void resortName;
+  void community;
 
   const runLookup = async () => {
     if (!imageUrl || isLoading) return;
-    setState({ status: "loading" });
-    try {
-      const response = await fetch("/api/operations/reverse-image-listings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          imageUrl,
-          sourceUrl,
-          title,
-          resortName,
-          community,
-          maxResults: 15,
-        }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body?.error || `Reverse image lookup failed (${response.status})`);
-      }
-      setState({
-        status: "loaded",
-        matches: Array.isArray(body?.matches) ? body.matches : [],
-        fromCache: body?.fromCache === true,
-      });
-    } catch (e: any) {
-      setState({ status: "error", message: e?.message ?? "Reverse image lookup failed" });
-    }
+    setState({
+      status: "error",
+      message: "Google Lens reverse-image lookup is disabled to preserve SearchAPI quota.",
+    });
   };
 
   return (
@@ -12962,8 +12923,8 @@ function ReverseImageListingLookup({
           variant="outline"
           className="h-7 px-2 text-[11px]"
           onClick={runLookup}
-          disabled={!imageUrl || isLoading}
-          title={imageUrl ? "Find other listing sites from the first listing photo" : "No image available for reverse image search"}
+          disabled
+          title="Google Lens reverse-image lookup is disabled to preserve SearchAPI quota"
           data-testid="button-reverse-image-listings"
         >
           {isLoading ? (
@@ -12971,7 +12932,7 @@ function ReverseImageListingLookup({
           ) : (
             <Camera className="h-3 w-3 mr-1" />
           )}
-          {isLoading ? "Searching..." : state.status === "loaded" ? "Refresh listing sites" : "Find listing sites"}
+          Lookup disabled
         </Button>
         {state.status === "loaded" && (
           <span className="text-[10px] text-muted-foreground">

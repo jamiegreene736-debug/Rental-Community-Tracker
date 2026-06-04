@@ -233,6 +233,11 @@ function isProviderUnavailableError(message?: string): boolean {
 }
 
 async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
+  void imageUrl;
+  return {
+    ok: false,
+    error: "Google Lens reverse-image search is disabled to preserve SearchAPI quota.",
+  };
   if (!SEARCHAPI_KEY) return { ok: false, error: "SEARCHAPI_API_KEY not configured" };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), LENS_TIMEOUT_MS);

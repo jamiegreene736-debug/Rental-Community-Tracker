@@ -1205,7 +1205,7 @@ function BestBuyInFinder() {
 
           {activePlatform === "vrbo" && (
             <div className="p-3 rounded-md bg-muted/50 text-xs text-muted-foreground">
-              VRBO results come from the live sidecar browser flow (visible search, same filters as find-buy-in). Often 0 results even when Airbnb finds the required 2+ unique condos because: Airbnb has far more Hawaii inventory via SearchAPI (confirmed in multichannel-buy-in.ts); sidecar hits CAPTCHA/bot walls or stale sessions on VRBO. Same physical units are discoverable on VRBO/Booking via Google Lens reverse-image on the Airbnb photos — the main Operations/find-buy-in already does this cross-OTA match automatically (see routes.ts lensMatches + google_lens via SearchAPI).
+              VRBO results come from the live sidecar browser flow (visible search, same filters as find-buy-in). Often 0 results even when Airbnb finds the required 2+ unique condos because Airbnb has far more Hawaii inventory via SearchAPI and sidecar can hit CAPTCHA/bot walls or stale sessions on VRBO. Google Lens reverse-image matching is disabled to preserve SearchAPI quota.
             </div>
           )}
           {activePlatform === "booking" && (

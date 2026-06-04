@@ -97,6 +97,7 @@ import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigS
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts } from "./auto-reply";
 import { loopbackRequestHeaders } from "./auth";
+import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import {
@@ -5747,7 +5748,7 @@ export async function registerRoutes(
   });
 
   app.get("/api/photos/find-replacement", async (req, res) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
+    const apiKey = getSearchApiKey();
     if (!apiKey) return res.status(500).json({ error: "SearchAPI not configured" });
     const { communityName, location, bedrooms } = req.query as Record<string, string>;
     if (!communityName || !location) return res.status(400).json({ error: "communityName and location required" });
@@ -7665,7 +7666,7 @@ export async function registerRoutes(
 
   app.post("/api/operations/alternative-buy-in-scout", async (req, res) => {
     try {
-      const apiKey = process.env.SEARCHAPI_API_KEY;
+      const apiKey = getSearchApiKey();
       if (!apiKey) return res.status(503).json({ error: "SEARCHAPI_API_KEY not configured" });
       const propertyId = parseInt(String(req.body?.propertyId ?? ""), 10);
       const bedrooms = parseInt(String(req.body?.bedrooms ?? ""), 10);
@@ -7727,11 +7728,10 @@ export async function registerRoutes(
               engine: "google_maps",
               q,
               ll: `@${baseLocation.lat},${baseLocation.lng},32187m`,
-              api_key: apiKey,
               gl: "us",
               hl: "en",
             });
-            const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+            const response = await fetchSearchApiWithFallback(params);
             if (!response.ok) return null;
             return response.json() as Promise<any>;
           }));
@@ -7799,11 +7799,10 @@ export async function registerRoutes(
                 to: `${place.lat},${place.lng}`,
                 travel_mode: "driving",
                 distance_units: "mi",
-                api_key: apiKey,
                 gl: "us",
                 hl: "en",
               });
-              const response = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+              const response = await fetchSearchApiWithFallback(params);
               if (!response.ok) return null;
               const data = await response.json() as any;
               const route = (Array.isArray(data?.directions) ? data.directions : [])
@@ -7878,13 +7877,12 @@ export async function registerRoutes(
                 bedrooms: String(brCount),
                 type_of_place: "entire_home",
                 currency: "USD",
-                api_key: apiKey,
               };
               if (discoveredBounds) {
                 params.bounding_box = `[[${discoveredBounds.ne_lat},${discoveredBounds.ne_lng}],[${discoveredBounds.sw_lat},${discoveredBounds.sw_lng}]]`;
               }
               try {
-                const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
+                const response = await fetchSearchApiWithFallback(new URLSearchParams(params));
                 if (!response.ok) return { bedroomCount: brCount, count: 0, samples: [] as any[] };
                 const data = await response.json() as any;
                 const rows = Array.isArray(data?.properties) ? data.properties : [];
@@ -7963,7 +7961,6 @@ export async function registerRoutes(
               bedrooms: String(bedroomCount),
               type_of_place: "entire_home",
               currency: "USD",
-              api_key: apiKey,
             };
             if (bounds) {
               params.bounding_box = `[[${bounds.ne_lat},${bounds.ne_lng}],[${bounds.sw_lat},${bounds.sw_lng}]]`;
@@ -7972,7 +7969,7 @@ export async function registerRoutes(
               params.lng = String(loc.lng);
             }
             try {
-              const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
+              const response = await fetchSearchApiWithFallback(new URLSearchParams(params));
               if (!response.ok) {
                 return { bedroomCount, error: `HTTP ${response.status}`, count: 0, samples: [] as any[] };
               }
@@ -11030,10 +11027,11 @@ export async function registerRoutes(
     // a unit's pricing changed since the last scan).
     // OTA: Airbnb (SearchAPI) + VRBO map-bounds sidecar. PM scrapers and
     // Google Hotels supplement are on unless FIND_BUY_IN_PM_ENABLED=0 or
-    // ?includePm=0. Direct PM pages found via Lens still inherit Airbnb proof.
+    // ?includePm=0. Google Lens reverse-image discovery is disabled because
+    // it burned SearchAPI quota without producing reliable direct-booking proof.
     const includePmDefault = process.env.FIND_BUY_IN_PM_ENABLED !== "0";
     const includePm = includePmDefault && req.query.includePm !== "0";
-    const airbnbDirectLensEnabled = req.query.directLens !== "0";
+    const airbnbDirectLensEnabled = false;
     const propertyUnitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
     const googleDiscoveryEnabled = airbnbDirectLensEnabled;
     const pmGoogleDiscoveryEnabled = includePm && googleDiscoveryEnabled;
@@ -11053,7 +11051,7 @@ export async function registerRoutes(
     const scoutMapKey = alternativeScoutMapSearch
       ? `alt-city-map:${requestedMapCenter ? `${requestedMapCenter.lat.toFixed(5)},${requestedMapCenter.lng.toFixed(5)}` : "configured"}`
       : "resort-map";
-    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-lens-pm-gh-vrbo-map-v2|${scoutMapKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
+    const cacheKey = `${propertyId}|${resolvedGuestyListingId ?? ""}|${config.community}|${bedrooms}|${checkIn}|${checkOut}|ota-no-lens-pm-gh-vrbo-map-v2|${scoutMapKey}|${includePm ? "pm" : "ota"}|${groundFloorOnly ? "ground" : "any-floor"}|${rerunOnlyUntriedVariations ? "untried" : "all"}`;
     // Result HTTP cache is off by default (FIND_BUY_IN_TTL_MS=0), but in-flight
     // dedup must stay on unless the caller explicitly opts out with nocache=1.
     // Backgrounding the Operations tab closes the browser socket; without
@@ -12061,8 +12059,8 @@ export async function registerRoutes(
       const resortQualifier = resortName ? `"${resortName}"` : searchLocation;
       const query = `site:${siteDomain} ${resortQualifier} ${bedrooms} bedroom`;
       try {
-        const params = new URLSearchParams({ engine: "google", q: query, num: "15", api_key: apiKey });
-        const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+        const params = new URLSearchParams({ engine: "google", q: query, num: "15" });
+        const r = await fetchSearchApiWithFallback(params);
         if (!r.ok) return { candidates: [], raw: 0, dropped: { noResort: 0, wrongBedrooms: 0 } };
         const data = await r.json() as any;
         const organic = Array.isArray(data?.organic_results) ? data.organic_results : [];
@@ -12140,11 +12138,10 @@ export async function registerRoutes(
           bedrooms: String(otaSearchBedrooms),
           type_of_place: "entire_home",
           currency: "USD",
-          api_key: apiKey,
         };
         addAirbnbBoundingBox(sp, bounds);
         const started = Date.now();
-        const r = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`, {
+        const r = await fetchSearchApiWithFallback(new URLSearchParams(sp), {
           signal: airbnbSidecarAbort.signal,
         });
         airbnbSidecarOnline = true;
@@ -13275,8 +13272,8 @@ export async function registerRoutes(
     async function lensMatches(imgUrl: string): Promise<AirbnbDirectLensMatch[]> {
       if (!googleDiscoveryEnabled) return [];
       try {
-        const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl, api_key: apiKey || "" });
-        const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`);
+        const sp = new URLSearchParams({ engine: "google_lens", url: imgUrl });
+        const r = await fetchSearchApiWithFallback(sp);
         if (!r.ok) return [];
         const data = await r.json() as any;
         const rows: Array<{ source: string; row: any; idx: number }> = [
@@ -14614,7 +14611,12 @@ export async function registerRoutes(
   // listing surfaces: OTAs, PM/direct sites, and other rental listing
   // pages where the same cheapest-unit photo appears.
   app.post("/api/operations/reverse-image-listings", async (req: Request, res: Response) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
+    return res.status(410).json({
+      error: "Google Lens reverse-image search is disabled to preserve SearchAPI quota.",
+      matches: [],
+      rawCount: 0,
+    });
+    const apiKey = getSearchApiKey();
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const imageUrl = String(req.body?.imageUrl ?? "").trim();
@@ -14850,7 +14852,19 @@ export async function registerRoutes(
   // generic "same photo" sites are useful audit evidence, but they are not
   // enough to qualify an Airbnb candidate for direct-booking buy-in.
   app.post("/api/operations/direct-booking-sites", async (req: Request, res: Response) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
+    return res.json({
+      buyInId: 0,
+      sourceUrl: String(req.body?.sourceUrl ?? "").trim(),
+      sourceLabel: "Airbnb",
+      photos: [],
+      matches: [],
+      directMatchCount: 0,
+      rawCount: 0,
+      fromCache: false,
+      generatedAt: new Date().toISOString(),
+      message: "Google Lens reverse-image direct-booking proof is disabled to preserve SearchAPI quota.",
+    });
+    const apiKey = getSearchApiKey();
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const sourceUrl = String(req.body?.sourceUrl ?? "").trim();
@@ -15158,8 +15172,6 @@ export async function registerRoutes(
     }
     const checkIn = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkIn ?? "")) ? String(req.body.checkIn) : "";
     const checkOut = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.checkOut ?? "")) ? String(req.body.checkOut) : "";
-    const port = process.env.PORT || "5000";
-    const directEndpoint = `http://127.0.0.1:${port}/api/operations/direct-booking-sites`;
     const probesByCommunity: Record<string, { listings: Array<{
       airbnbUrl: string;
       title: string;
@@ -15196,8 +15208,8 @@ export async function registerRoutes(
       maxConfidence: number;
       proof?: DirectBookingProof;
     };
-    const alternativeScoutMinPhotoMatches = 3;
-    const alternativeScoutMinConfidence = 0.95;
+    const alternativeScoutMinPhotoMatches = 0;
+    const alternativeScoutMinConfidence = 0;
     const communityRows: AlternativeScoutProbeCommunityRow[] = communities
       .map((row: any) => ({
         community: String(row?.community ?? "").trim(),
@@ -15219,73 +15231,16 @@ export async function registerRoutes(
         .filter((sample: AlternativeScoutProbeAirbnbSample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url))
         .slice(0, 3);
 
-      const listings = await mapLimited(airbnbSamples, 1, async (sample) => {
-        try {
-          const response = await fetch(directEndpoint, {
-            method: "POST",
-            headers: loopbackRequestHeaders(),
-            body: JSON.stringify({
-              sourceUrl: sample.url,
-              title: sample.title,
-              resortName,
-              community: row.community,
-              checkIn,
-              checkOut,
-              anchorTotalPrice: sample.totalPrice,
-              anchorNightlyPrice: sample.nightlyPrice,
-              verifyAvailability: Boolean(checkIn && checkOut),
-              minPhotoMatches: alternativeScoutMinPhotoMatches,
-            }),
-            signal: AbortSignal.timeout(180_000),
-          });
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok) {
-            return {
-              airbnbUrl: sample.url,
-              title: sample.title,
-              bedrooms: sample.bedrooms,
-              directMatches: [],
-              status: "error" as const,
-              message: body?.error ? String(body.error) : `HTTP ${response.status}`,
-              minPhotoMatches: alternativeScoutMinPhotoMatches,
-              minConfidence: alternativeScoutMinConfidence,
-            };
-          }
-          const directMatches: AlternativeScoutProbeDirectMatch[] = (Array.isArray(body?.matches) ? body.matches : [])
-            .filter((match: any) => match?.platformKey === "pm")
-            .map((match: any) => ({
-              url: String(match.url ?? ""),
-              domain: String(match.domain ?? ""),
-              title: String(match.title ?? match.domain ?? "Direct booking site"),
-              matchedPhotoCount: Number(match.matchedPhotoCount ?? 0) || 0,
-              minConfidence: Number(match.minConfidence ?? match.confidence ?? 0) || 0,
-              maxConfidence: Number(match.maxConfidence ?? match.confidence ?? 0) || 0,
-              proof: match.proof,
-            }))
-            .filter((match: AlternativeScoutProbeDirectMatch) => match.url);
-          return {
-            airbnbUrl: sample.url,
-            title: sample.title,
-            bedrooms: sample.bedrooms,
-            directMatches,
-            status: "done" as const,
-            message: body?.message ? String(body.message) : undefined,
-            minPhotoMatches: Number(body?.minPhotoMatches ?? alternativeScoutMinPhotoMatches) || alternativeScoutMinPhotoMatches,
-            minConfidence: Number(body?.minConfidence ?? alternativeScoutMinConfidence) || alternativeScoutMinConfidence,
-          };
-        } catch (err: any) {
-          return {
-            airbnbUrl: sample.url,
-            title: sample.title,
-            bedrooms: sample.bedrooms,
-            directMatches: [],
-            status: "error" as const,
-            message: err?.message ?? String(err),
-            minPhotoMatches: alternativeScoutMinPhotoMatches,
-            minConfidence: alternativeScoutMinConfidence,
-          };
-        }
-      });
+      const listings = airbnbSamples.map((sample) => ({
+        airbnbUrl: sample.url,
+        title: sample.title,
+        bedrooms: sample.bedrooms,
+        directMatches: [] as AlternativeScoutProbeDirectMatch[],
+        status: "skipped" as const,
+        message: "Google Lens reverse-image direct-booking probes are disabled to preserve SearchAPI quota.",
+        minPhotoMatches: alternativeScoutMinPhotoMatches,
+        minConfidence: alternativeScoutMinConfidence,
+      }));
       probesByCommunity[row.community] = { listings };
     });
 
@@ -15299,7 +15254,12 @@ export async function registerRoutes(
   // answers "where else is this exact buy-in unit listed?" without using
   // our community folders, which are intentionally noisy for reverse search.
   app.post("/api/buy-ins/:id/listing-sites", async (req: Request, res: Response) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
+    return res.status(410).json({
+      error: "Google Lens reverse-image listing-site search is disabled to preserve SearchAPI quota.",
+      matches: [],
+      rawCount: 0,
+    });
+    const apiKey = getSearchApiKey();
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -25148,11 +25108,6 @@ Return ONLY compact JSON with this exact shape:
   // Checks whether a photo (local or via URL) appears on Airbnb, VRBO, or Booking.com.
   // Local photos are first uploaded to ImgBB to get a public URL.
   app.post("/api/photos/platform-check", async (req, res) => {
-    const searchApiKey = process.env.SEARCHAPI_API_KEY;
-    const imgbbKey = process.env.IMGBB_API_KEY;
-
-    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-
     const { folder, filename, imageUrl, communityName, location } = req.body as {
       folder?: string;
       filename?: string;
@@ -25160,6 +25115,20 @@ Return ONLY compact JSON with this exact shape:
       communityName?: string;
       location?: string;
     };
+    void communityName;
+    void location;
+    return res.status(410).json({
+      filename: filename || null,
+      platforms: [],
+      checkedUrl: imageUrl || null,
+      skipped: true,
+      reason: "Google Lens reverse-image platform checks are disabled to preserve SearchAPI quota.",
+    });
+
+    const searchApiKey = process.env.SEARCHAPI_API_KEY;
+    const imgbbKey = process.env.IMGBB_API_KEY;
+
+    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     if (isCommunityOrSharedPhotoCandidate({ folder, filename, url: imageUrl })) {
       return res.json({
         filename: filename || null,
@@ -25311,7 +25280,6 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/preflight/platform-check", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     const imgbbKey = process.env.IMGBB_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
 
     const name = (req.query.name as string || "").trim();
     const unitsParam = (req.query.units as string || "[]");
@@ -25321,6 +25289,18 @@ Return ONLY compact JSON with this exact shape:
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     const city = normalizePlatformCheckCity(String(req.query.city ?? ""), units[0]?.address);
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
+    const disabledUnits = units.map((unit) => ({
+      ...unit,
+      platforms: [],
+      photoSignals: { airbnb: false, vrbo: false, booking: false },
+      photoMatchedUrls: { airbnb: null, vrbo: null, booking: null },
+      photoMatchCounts: { airbnb: 0, vrbo: 0, booking: 0 },
+      photoMatches: 0,
+      checkedPhotos: 0,
+      error: "Google Lens reverse-image platform checks are disabled to preserve SearchAPI quota.",
+    }));
+    return res.json({ units: disabledUnits, photoMode: "disabled" });
+    if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     const photoModeRaw = String(req.query.photoMode ?? req.query.photoAudit ?? "").toLowerCase();
     const fullPhotoAudit = photoModeRaw === "full" || photoModeRaw === "all" || photoModeRaw === "unit-audit" || req.query.fullPhotoAudit === "1";
     const singleListingMode = ["1", "true", "yes"].includes(String(req.query.singleListing ?? req.query.standalone ?? "").toLowerCase());
@@ -25947,14 +25927,23 @@ Return ONLY compact JSON with this exact shape:
 
   // Photo audit: runs reverse image search on each unit photo to detect platform listings
   app.get("/api/preflight/photo-audit", async (req, res) => {
+    const foldersParam = (req.query.folders as string || "");
+    const folders = foldersParam.split(",").map(f => f.replace(/[^a-zA-Z0-9_-]/g, "")).filter(Boolean);
+    if (folders.length === 0) return res.status(400).json({ error: "folders is required" });
+    return res.status(410).json({
+      results: folders.map((folder) => ({
+        folder,
+        filename: "",
+        url: "",
+        found: null,
+        platforms: [],
+        error: "Google Lens reverse-image photo audit is disabled to preserve SearchAPI quota.",
+      })),
+    });
     const apiKey = process.env.SEARCHAPI_API_KEY;
     const imgbbKey = process.env.IMGBB_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     if (!imgbbKey) return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
-
-    const foldersParam = (req.query.folders as string || "");
-    const folders = foldersParam.split(",").map(f => f.replace(/[^a-zA-Z0-9_-]/g, "")).filter(Boolean);
-    if (folders.length === 0) return res.status(400).json({ error: "folders is required" });
     const singleListingMode = ["1", "true", "yes"].includes(String(req.query.singleListing ?? req.query.standalone ?? "").toLowerCase());
 
     const photosBase = path.join(process.cwd(), "client", "public", "photos");
@@ -31514,6 +31503,11 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/community/check-photo-url", async (req, res) => {
     const { imageUrl } = req.body as { imageUrl: string };
     if (!imageUrl) return res.status(400).json({ error: "imageUrl required" });
+    return res.status(410).json({
+      error: "Google Lens reverse-image search is disabled to preserve SearchAPI quota.",
+      matches: [],
+      clean: false,
+    });
 
     const searchApiKey = process.env.SEARCHAPI_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
@@ -31838,9 +31832,12 @@ Return ONLY compact JSON with this exact shape:
     matches: { airbnb: string[]; vrbo: string[]; booking: string[] };
     checked: number;
   }> {
+    void apiKey;
+    void options;
     if (photoUrls.length === 0) {
       return { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 };
     }
+    return { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 };
     const PLATFORM_PATTERNS: Array<{ key: "airbnb" | "vrbo" | "booking"; urlPattern: RegExp }> = [
       { key: "airbnb", urlPattern: /airbnb\.com\/(rooms|h)\// },
       { key: "vrbo",   urlPattern: /vrbo\.com\/\d+/ },

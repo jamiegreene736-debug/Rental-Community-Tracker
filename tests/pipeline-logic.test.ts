@@ -3017,6 +3017,7 @@ assert.ok(
 console.log("  ✓ LiveSearchSection auto alternative scout hook placement");
 
 const bookingsComboSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
+const searchApiSource = readFileSync("server/searchapi.ts", "utf8");
 assert.ok(
   bookingsComboSource.includes("ComboOptionWalkDistance"),
   "bookings combo panel should show walking distance between combo units",
@@ -3032,12 +3033,12 @@ assert.ok(
 console.log("  ✓ combo option walking distance UI + API");
 
 assert.ok(
-  bookingsComboSource.includes("alternative-scout-direct-probes"),
-  "alternative buy-in workflow should probe Google Lens direct sites before sidecar",
+  !bookingsComboSource.includes('apiRequest("POST", "/api/operations/alternative-scout-direct-probes"'),
+  "alternative buy-in workflow should skip Google Lens direct-site probes before sidecar",
 );
 assert.ok(
-  bookingsComboSource.includes("Google Lens direct booking matches"),
-  "alternative buy-in community cards should list Lens direct booking URLs",
+  bookingsComboSource.includes("Google Lens direct-booking probes are disabled to preserve SearchAPI quota"),
+  "alternative buy-in community cards should explain that Lens direct booking probes are disabled",
 );
 assert.ok(
   bookingsComboSource.includes("groupAlternativeScoutSamplesByPlan"),
@@ -3048,32 +3049,32 @@ assert.ok(
   "alternative scout sample groups should label combo legs",
 );
 assert.ok(
-  routesSource.includes("loopbackRequestHeaders()"),
-  "direct-booking Lens lookups should use loopback auth headers",
+  routesSource.includes("Google Lens reverse-image search is disabled to preserve SearchAPI quota"),
+  "reverse-image-listings should return a disabled response before spending SearchAPI Lens quota",
 );
 assert.ok(
   routesSource.includes('app.post("/api/operations/alternative-scout-direct-probes"'),
-  "alternative-scout-direct-probes route should exist",
+  "alternative-scout-direct-probes compatibility route should exist",
 );
 assert.ok(
-  routesSource.includes("const alternativeScoutMinPhotoMatches = 3"),
-  "alternative scout Lens probes should use a 3-photo review threshold instead of the stricter 5-photo attach threshold",
+  routesSource.includes("const alternativeScoutMinPhotoMatches = 0"),
+  "alternative scout Lens probe compatibility response should report a disabled threshold",
 );
 assert.ok(
-  routesSource.includes("minPhotoMatches: alternativeScoutMinPhotoMatches"),
-  "alternative scout direct probes should pass their Lens photo threshold through to direct-booking-sites",
+  routesSource.includes('status: "skipped" as const') && routesSource.includes("Google Lens reverse-image direct-booking probes are disabled"),
+  "alternative scout direct probes should mark samples skipped without calling Lens",
 );
 assert.ok(
-  routesSource.includes("buy-in-sites:v7-proof") && routesSource.includes("strictDirectMinPhotoMatches"),
-  "direct-booking-sites cache key should include the Lens photo threshold",
+  routesSource.includes("Google Lens reverse-image direct-booking proof is disabled to preserve SearchAPI quota"),
+  "direct-booking-sites should return a disabled no-match response without scraping Lens",
 );
 assert.ok(
-  routesSource.includes('source === "visual" && position === 1 ? 0.95 : 0'),
-  "reverse-image-listings should score first visual Lens hits at the 95% direct-link threshold when SearchAPI omits explicit similarity",
+  routesSource.includes("airbnbDirectLensEnabled = false"),
+  "find-buy-in direct Lens discovery should be hard-disabled by default",
 );
 assert.ok(
-  routesSource.includes("SearchAPI Google Lens quota is exhausted or rate-limited"),
-  "direct booking Lens failures should surface SearchAPI quota/rate-limit instead of looking like a true no-match",
+  searchApiSource.includes("SEARCHAPI_API_KEY_2"),
+  "SearchAPI calls should support a second Railway key for quota fallback",
 );
 assert.ok(
   bookingsComboSource.includes("directProbeMessage"),
