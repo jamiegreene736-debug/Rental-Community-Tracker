@@ -7848,45 +7848,30 @@ export async function registerRoutes(
         if (loc?.city && loc?.state) return `${loc.city}, ${loc.state}`;
         return searchLocationForBuyInMarket(community) ?? community;
       };
-      const configuredResults = similar.map((community) => {
-        const driveMinutesFromBase = driveMinutesBetweenBuyInMarkets(baseCommunity, community);
-        return {
-          community,
-          searchTerm: citySearchForCommunity(community),
-          status: "queued-vrbo-map",
-          count: 0,
-          raw: 0,
-          recommended: true,
-          reason: `Queued for VRBO city map scan${driveMinutesFromBase != null ? ` · ~${driveMinutesFromBase} min drive` : ""}. Two matching units must be proven by VRBO and within a 5-10 minute walk of each other.`,
-          countsByBedroom: {},
-          airbnbCountsByBedroom: {},
-          passingPlans: replacementPlans,
-          replacementPlans,
-          oceanfrontComparable: oceanfrontComparableBuyInMarket(community),
-          driveMinutesFromBase,
-          errors: [],
-          durationMs: 0,
-          samples: [],
-          directPmUsed: false,
-        };
-      });
-      const discoveredQueued = discoveredResorts.map((d: any) => ({
-        ...d,
-        searchTerm: baseLocation?.city && baseLocation?.state ? `${baseLocation.city}, ${baseLocation.state}` : (d.searchTerm || d.community),
-        status: "queued-vrbo-map",
+      const citySearchTerm = baseLocation?.city && baseLocation?.state
+        ? `${baseLocation.city}, ${baseLocation.state}`
+        : citySearchForCommunity(baseCommunity);
+      const cityMapResult = {
+        community: citySearchTerm,
+        searchTerm: citySearchTerm,
+        status: "queued-city-map",
         count: 0,
         raw: 0,
         recommended: true,
-        reason: `${d.reason || "Nearby resort discovered within drive radius"} — queued for VRBO city map scan; two matching units must be within a 5-10 minute walk.`,
+        reason: `Queued for one VRBO/Booking.com city map scan. Search the city map for ${citySearchTerm}; choose two qualifying units within a 5-10 minute walk so the map result, not a dropdown community, proves the replacement community.`,
         countsByBedroom: {},
         airbnbCountsByBedroom: {},
         passingPlans: replacementPlans,
         replacementPlans,
+        oceanfrontComparable: sourceRequiresOceanfront,
+        driveMinutesFromBase: 0,
+        lat: baseLocation?.lat ?? null,
+        lng: baseLocation?.lng ?? null,
+        errors: [],
+        durationMs: 0,
         samples: [],
         directPmUsed: false,
-      }));
-      const vrboQueuedRecommended = [...configuredResults, ...discoveredQueued]
-        .sort((a: any, b: any) => (a.driveMinutesFromBase ?? 99) - (b.driveMinutesFromBase ?? 99) || a.community.localeCompare(b.community));
+      };
       return res.json({
         propertyId,
         baseCommunity,
@@ -7897,11 +7882,11 @@ export async function registerRoutes(
         requiresOceanfrontComparable: sourceRequiresOceanfront,
         replacementPlans,
         nearbyWithinDriveMinutes: driveNearbyDetailed,
-        results: vrboQueuedRecommended,
-        recommended: vrboQueuedRecommended,
+        results: [cityMapResult],
+        recommended: [cityMapResult],
         rejected: [],
-        scouted: vrboQueuedRecommended,
-        discoveredResorts: discoveredQueued,
+        scouted: [cityMapResult],
+        discoveredResorts: [],
         generatedAt: new Date().toISOString(),
       });
       const minAirbnbResults = Math.max(1, Math.min(20, parseInt(String(req.body?.minAirbnbResults ?? "1"), 10) || 1));
@@ -16861,18 +16846,6 @@ export async function registerRoutes(
         });
       }
 
-      // Attach-time re-validation for unit type correctness (surgical addition)
-      // For combo bookings, we want high confidence that each attached buy-in
-      // is the correct bedroom count in the right sub-community.
-      // Currently we rely on the search-time 85+ gate + verified=yes.
-      // Future: store unitTypeConfidence on the BuyIn record for exact re-check here.
-      if (candidate.verified !== "yes") {
-        return res.status(409).json({
-          error: "Buy-in not sufficiently verified at search time",
-          message: "Only buy-ins with verified=yes (high unit-type confidence from search) can be attached. Refresh the search and re-select.",
-        });
-      }
-
       // Per-slot combo awareness and stricter enforcement (surgical addition for this PR)
       // For multi-unit combo bookings, validate that the buy-in matches an unfilled slot's requirements
       // (bedrooms + high unit-type confidence / sub-community match).
@@ -16887,7 +16860,11 @@ export async function registerRoutes(
         const neededSlots = propertyConfig.units.filter((u) => !filledUnitIds.has(u.unitId || `slot-${u.bedrooms}`)); // simplistic
 
         if (neededSlots.length > 0) {
-          const candidateBedrooms = candidate.bedrooms || 0; // assume BuyIn may store it or infer from notes
+          const configuredSlot = pid
+            ? PROPERTY_UNIT_CONFIGS[pid]?.units.find((unit) => unit.unitId === candidate.unitId)
+            : undefined;
+          const candidateBedrooms = configuredSlot?.bedrooms
+            ?? (Number(String(candidate.notes ?? "").match(/(?:^|[^\d])(\d+)\s*BR\b/i)?.[1]) || 0);
           const matchingSlot = neededSlots.find((slot) => slot.bedrooms === candidateBedrooms);
 
           if (!matchingSlot) {

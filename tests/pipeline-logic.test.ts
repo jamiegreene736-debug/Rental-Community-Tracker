@@ -3086,10 +3086,24 @@ assert.ok(
   "alternative find-buy-in scans should target the nearby community instead of the original Guesty listing title",
 );
 assert.ok(
-  routesSource.includes("Queued for VRBO city map scan") &&
+  routesSource.includes("Queued for one VRBO/Booking.com city map scan") &&
     routesSource.includes("threshold: 0") &&
-    bookingsSource.includes("VRBO city map scan required"),
-  "alternative scout should queue VRBO city map scans directly without Airbnb inventory qualification",
+    bookingsSource.includes("City map scan required"),
+  "alternative scout should queue a VRBO/Booking.com city map scan directly without Airbnb inventory qualification",
+);
+assert.ok(
+  routesSource.includes("const cityMapResult = {") &&
+    routesSource.includes("community: citySearchTerm") &&
+    routesSource.includes("results: [cityMapResult]") &&
+    routesSource.includes("recommended: [cityMapResult]") &&
+    routesSource.includes("discoveredResorts: []"),
+  "alternative scout should enqueue one city-level map scan instead of one sidecar scan per discovered community",
+);
+assert.ok(
+  !routesSource.includes("candidate.verified !== \"yes\"") &&
+    routesSource.includes("const configuredSlot = pid") &&
+    bookingsSource.includes("unitTypeConfidence: Math.round(pick.unitTypeConfidence)"),
+  "attached buy-ins should not depend on a non-persisted verified column and should persist search confidence when available",
 );
 assert.ok(
   bookingsSource.includes("alternativePicksAreWalkable") &&

@@ -2314,7 +2314,7 @@ function AlternativeBuyInWorkflowPanel({
         <div>
           <p className="font-semibold">Alternative buy-in workflow</p>
           <p className="text-[11px] opacity-80">
-            After the primary buy-in search finishes, nearby communities are scouted on Airbnb (SearchAPI), then sidecar find-buy-in runs only where inventory was confirmed (~20 min drive of {workflow?.scout?.baseCommunity ?? "this resort"}
+            After the primary buy-in search finishes, the sidecar runs one city-level VRBO/Booking.com map scan for the surrounding town. The final pair must prove matching bedroom slots and a 5-10 minute walk (~20 min drive context from {workflow?.scout?.baseCommunity ?? "this resort"}
             {workflow?.scout?.requiresOceanfrontComparable ? ", waterfront comparable only" : ""}).
           </p>
           {(workflow?.scout?.nearbyWithinDriveMinutes?.length ?? 0) > 0 && (
@@ -2329,7 +2329,7 @@ function AlternativeBuyInWorkflowPanel({
           )}
           {replacementPlanText && (
             <p className="mt-0.5 text-[11px] opacity-80">
-              VRBO city map scan required: {replacementPlanText}{workflow?.scout?.requiresOceanfrontComparable ? " · oceanfront comparable only" : ""} · units must be within a 10-minute walk
+              City map scan required: {replacementPlanText}{workflow?.scout?.requiresOceanfrontComparable ? " · oceanfront comparable only" : ""} · units must be within a 10-minute walk
             </p>
           )}
         </div>
@@ -2378,12 +2378,12 @@ function AlternativeBuyInWorkflowPanel({
                       <AlternativeScoutSourceBadge result={result} />
                     </p>
                     <p className="text-[11px] text-muted-foreground">
-                      VRBO map queue: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} needed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
+                      City map queue: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} needed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
                       <UnitTypeConfidenceBadge confidence={sidecar?.cheapest?.[0]?.unitTypeConfidence} />
                     </p>
                     {inventoryText && (
                       <p className="mt-0.5 text-[11px] font-medium text-sky-900">
-                        VRBO inventory need: {inventoryText}
+                        Map inventory need: {inventoryText}
                       </p>
                     )}
                     <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.reason}</p>
@@ -5846,6 +5846,10 @@ export default function Bookings() {
             groundFloorEvidence: pick.groundFloorEvidence ?? null,
             notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${lensProvenanceSuffix}${directProofSuffix}${groundFloorSuffix}${identitySuffix}`,
             status: "active",
+            ...(typeof pick.unitTypeConfidence === "number" ? {
+              unitTypeConfidence: Math.round(pick.unitTypeConfidence),
+              unitTypeConfidenceBreakdown: pick.unitTypeConfidenceBreakdown ?? null,
+            } : {}),
           }).then((r) => r.json());
           if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
 
@@ -6549,17 +6553,17 @@ export default function Bookings() {
       }
       if (!opts?.auto) {
         toast({
-          title: response.recommended.length ? "Alternative communities found" : "No strong alternative community yet",
+          title: response.recommended.length ? "City map alternative queued" : "No city map alternative yet",
           description: response.recommended.length
-            ? `${response.recommended.length} nearby community option${response.recommended.length === 1 ? "" : "s"} queued for VRBO city map search.${sidecarQueue.length > 0 ? " Sidecar queue started for those communities." : ""}`
+            ? `${response.recommended[0]?.searchTerm ?? "City"} queued for VRBO/Booking.com map search.${sidecarQueue.length > 0 ? " Sidecar city scan started." : ""}`
             : sidecarQueue.length > 0
-              ? "Sidecar queue started for nearby communities."
-              : "No nearby communities were available for VRBO city map scanning.",
+              ? "Sidecar city scan started."
+              : "No city map scan target was available.",
         });
       } else if (sidecarQueue.length > 0) {
         toast({
-          title: "Scanning nearby alternatives",
-          description: `Running VRBO city map scans for ${sidecarQueue.length} nearby communit${sidecarQueue.length === 1 ? "y" : "ies"}.`,
+          title: "Scanning city map alternative",
+          description: `Running one VRBO/Booking.com map scan for ${sidecarQueue[0]?.searchTerm ?? "the city"}.`,
         });
       }
     } catch (error: any) {
@@ -6590,7 +6594,7 @@ export default function Bookings() {
       return { ...prev, [resId]: { isRunning: true, scanned: [], foundComboIn: null, stopped: false } };
     });
     // Sequencing is driven by the reactive useEffect below (watches sidecarResults + activeCommunity).
-    toast({ title: "Auto sidecar scan started", description: `Will run VRBO city map scans on up to ${communities.length} nearby communit${communities.length === 1 ? "y" : "ies"} until a walkable combo is found.` });
+    toast({ title: "Auto sidecar scan started", description: `Will run one city map scan for ${communities[0]?.searchTerm ?? "the surrounding city"} until a walkable combo is found.` });
   };
 
   const stopAutoAlternativeSidecarScan = (reservationId: string) => {
@@ -6683,6 +6687,10 @@ export default function Bookings() {
         groundFloorEvidence: pick.groundFloorEvidence ?? null,
         notes: `Attached from alternative community ${replacement.community} — ${pick.bedrooms ?? slot.bedrooms}BR ${pick.sourceLabel} — ${pick.title}.${proximityNote} Guest-facing draft/page intentionally omitted buy-in pricing.`,
         status: "active",
+        ...(typeof pick.unitTypeConfidence === "number" ? {
+          unitTypeConfidence: Math.round(pick.unitTypeConfidence),
+          unitTypeConfidenceBreakdown: pick.unitTypeConfidenceBreakdown ?? null,
+        } : {}),
       }).then((r) => r.json());
       if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
       await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
