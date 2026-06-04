@@ -3083,112 +3083,37 @@ assert.equal(
   ),
   "Kiahuna Plantation",
 );
-console.log("  ✓ alternative scout resort vs listing title guards");
+console.log("  ✓ resort vs listing title guards");
 
 const bookingsSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
 const vrboWorkerSource = readFileSync("daemon/vrbo-sidecar/worker.mjs", "utf8");
 
 assert.ok(
-  routesSource.includes("fetchNearbyVacationRentalResortsFromLlm"),
-  "alternative scout should call LLM for nearby vacation rental resorts",
+  !routesSource.includes('app.post("/api/operations/alternative-buy-in-scout"'),
+  "alternative-buy-in-scout route should be removed",
+);
+assert.ok(
+  !routesSource.includes('app.post("/api/bookings/:reservationId/alternative-message-draft"'),
+  "alternative-message-draft route should be removed",
+);
+assert.ok(
+  !bookingsSource.includes('alternativeScout: "1"') &&
+    !bookingsSource.includes("AlternativeMapInventoryPanel") &&
+    !bookingsSource.includes("attachAlternativeReplacementSet") &&
+    !bookingsSource.includes("scoutAlternativeCommunities") &&
+    !bookingsSource.includes("shouldAutoTriggerAlternativeScout") &&
+    !bookingsSource.includes("autoAlternativeScoutAfterSearchRef") &&
+    !bookingsSource.includes("mergeAlternativeFindBuyInResponses"),
+  "bookings UI should not expose alternative community scout workflow",
 );
 assert.ok(
   routesSource.includes("looksLikeIndividualListingTitle"),
-  "alternative scout should reject individual listing titles from Maps discovery",
-);
-assert.ok(
-  bookingsSource.includes('alternativeScout: "1"'),
-  "alternative sidecar find-buy-in calls should mark the scan as an alternative scout",
-);
-assert.ok(
-  bookingsSource.includes("community: scoutRow?.community || community") &&
-    bookingsSource.includes("const replacementBedrooms = (workflow?.scout?.replacementPlans ?? [])") &&
-    bookingsSource.includes("const bedroomsToSearch = replacementBedrooms.length > 0") &&
-    bookingsSource.includes("Array.from(new Set(replacementBedrooms)).sort") &&
-    bookingsSource.includes("Promise.all(searches)") &&
-    bookingsSource.includes("mergeAlternativeFindBuyInResponses") &&
-    bookingsSource.includes("if (communitySearchTerm)") &&
-    bookingsSource.includes('params.set("searchTerm", communitySearchTerm)') &&
-    !bookingsSource.includes("communitySearchTerm !=="),
-  "alternative sidecar find-buy-in calls should search one city target for every bedroom count needed by the replacement plan and keep OTA map text separate from canonical community",
-);
-assert.ok(
-  bookingsSource.includes('params.set("mapCenterLat"') && bookingsSource.includes('params.set("mapCenterLng"'),
-  "alternative sidecar find-buy-in calls should pass discovered resort coordinates when available",
-);
-assert.ok(
-  routesSource.includes("cityWideMapBoundsForBuyInMarket") && routesSource.includes("mapSearchScope"),
-  "find-buy-in should support city-scope VRBO map bounds for alternative scout scans",
-);
-assert.ok(
-  routesSource.includes("buyInMarketKeyForScoutCommunity") &&
-    routesSource.includes("const scoutMarketKey = alternativeScoutMapSearch ? buyInMarketKeyForScoutCommunity(community)"),
-  "alternative city map should resolve scout labels like Princeville, Hawaii to configured market keys",
+  "listing title guards should remain for resort inference",
 );
 assert.equal(buyInMarketKeyForScoutCommunity("Princeville, Hawaii"), "Princeville");
 assert.ok(
   textMatchesResortPhrase("Villas of Kamalii 30 · Princeville", "Kamalii"),
   "resort phrase filter should match Kamalii listing titles",
-);
-assert.ok(
-  routesSource.includes("requestedResortPhrase") &&
-    routesSource.includes("textMatchesResortPhrase") &&
-    bookingsSource.includes('params.set("resortPhrase", mapFilterPhrase)'),
-  "alternative map scans should accept an optional resort phrase filter",
-);
-assert.ok(
-  routesSource.includes("comparisonCandidateCap = alternativeScoutOtaMapOnly ? 150 : 40") &&
-    routesSource.includes("mapHarvest: alternativeScoutMapSearch"),
-  "alternative map scans should expose a larger comparison pool and map harvest diagnostics",
-);
-assert.ok(
-  bookingsSource.includes("AlternativeMapInventoryPanel") &&
-    bookingsSource.includes("downloadAlternativeMapInventoryExport"),
-  "alternative workflow should let operators browse and export the full map inventory",
-);
-assert.ok(
-  routesSource.includes("const bounds = resortBounds;") &&
-    routesSource.includes("const providerMapBounds = alternativeScoutMapSearch ? undefined : resortBounds;") &&
-    routesSource.includes("const mapReferenceBounds = providerMapBounds ?? cityMapBounds;") &&
-    routesSource.includes("map-boundary-plan") &&
-    routesSource.includes("providerBoundsPolicy="),
-  "alternative scout should use city map center hints without sending provider boundary boxes",
-);
-assert.ok(
-  routesSource.includes("const requestedSearchTerm = typeof req.query.searchTerm") &&
-    routesSource.includes("alternativeScoutMapSearch && requestedSearchTerm") &&
-    routesSource.includes("scoutSearchKey"),
-  "find-buy-in should use the alternative scout OTA search term with city/map bounds without reusing stale cache entries",
-);
-assert.ok(
-  routesSource.includes("alternativeScoutMapSearch && communitySearchName") &&
-    routesSource.includes("resortName = communitySearchName"),
-  "alternative find-buy-in scans should target the nearby community instead of the original Guesty listing title",
-);
-assert.ok(
-  routesSource.includes("Queued for one VRBO city map scan") &&
-    routesSource.includes("threshold: 0") &&
-    bookingsSource.includes("City map scan required"),
-  "alternative scout should queue a VRBO city map scan directly without Airbnb inventory qualification",
-);
-assert.ok(
-  routesSource.includes("const cityMapResult = {") &&
-    routesSource.includes("community: citySearchTerm") &&
-    routesSource.includes("results: [cityMapResult]") &&
-    routesSource.includes("recommended: [cityMapResult]") &&
-    routesSource.includes("discoveredResorts: []"),
-  "alternative scout should enqueue one city-level map scan instead of one sidecar scan per discovered community",
-);
-assert.ok(
-  routesSource.includes("const alternativeScoutOtaMapOnly = alternativeScoutMapSearch") &&
-    routesSource.includes("Skipped for alternative city map scout; VRBO map results are authoritative.") &&
-    routesSource.includes("const pricedSources = alternativeScoutOtaMapOnly") &&
-    routesSource.includes("candidateIsAlternativeScoutMapResult") &&
-    routesSource.includes("alternative city-map kept") &&
-    bookingsSource.includes("alternativeMapCandidatePool") &&
-    bookingsSource.includes("data.comparisonSources?.vrbo") &&
-    bookingsSource.includes('candidate.source !== "vrbo"'),
-  "alternative city-map scout should use only VRBO map results, not Airbnb/SearchAPI, Booking.com, or Google Hotels",
 );
 assert.ok(
   !routesSource.includes("candidate.verified !== \"yes\"") &&
@@ -3199,26 +3124,18 @@ assert.ok(
 assert.ok(
   bookingsSource.includes("alternativePicksAreWalkable") &&
     bookingsSource.includes("MAX_BUY_IN_WALK_MINUTES") &&
-    bookingsSource.includes("candidateWalkMinutes") &&
-    bookingsSource.includes("bestWalkableAlternativePicks") &&
-    bookingsSource.includes("candidateIsWalkableWithExistingPicks") &&
-    bookingsSource.includes("candidatesShareStrongResortPhrase") &&
     bookingsSource.includes("sharedResortPhraseKeys") &&
-    bookingsSource.includes("slice(0, 40)"),
-  "alternative replacement sets should search candidate combinations and require coordinate-proven walking proximity or a strong shared resort-title fallback instead of rejecting a city after one distant cheapest pair",
-);
-assert.ok(
-  bookingsSource.includes("tooFarForBuyInPair") &&
+    bookingsSource.includes("tooFarForBuyInPair") &&
     bookingsSource.includes("Matched units are too far apart for a buy-in pair") &&
     bookingsSource.includes("!tooFarForBuyInPair"),
   "auto-fill combo selection should reject non-walkable pairs before creating partial buy-in attachments",
 );
 assert.ok(
-  bookingsSource.includes("attaching buy-ins now") &&
-    bookingsSource.includes("attachAlternativeReplacementSet(reservation, complete)") &&
-    bookingsSource.includes("Alternative buy-ins attached"),
-  "auto alternative city-map scan should attach the first complete walkable replacement set it finds",
+  bookingsSource.includes("/api/operations/city-vrbo-inventory") &&
+    bookingsSource.includes('"city-vrbo"'),
+  "auto-fill should fall back to city-wide VRBO inventory and attach with city-vrbo source",
 );
+
 assert.ok(
   vrboWorkerSource.includes("createVrboGraphqlCollector") &&
     vrboWorkerSource.includes("propertySearchListings") &&
@@ -3291,17 +3208,10 @@ console.log("  ✓ operation diagnostics + remediate helpers");
 const liveSearchSectionStart = bookingsSource.indexOf("function LiveSearchSection");
 assert.ok(liveSearchSectionStart >= 0, "LiveSearchSection should exist in bookings page");
 const liveSearchSectionBody = bookingsSource.slice(liveSearchSectionStart);
-const autoScoutHookIdx = liveSearchSectionBody.indexOf("autoAlternativeScoutAfterSearchRef");
-const firstEarlyReturnIdx = liveSearchSectionBody.indexOf("if (isLoading && !data)");
-assert.ok(autoScoutHookIdx >= 0, "LiveSearchSection should declare auto alternative scout ref");
-assert.ok(firstEarlyReturnIdx >= 0, "LiveSearchSection should have loading early return");
 assert.ok(
-  autoScoutHookIdx < firstEarlyReturnIdx,
-  "auto alternative scout hook must run before loading early return (Rules of Hooks)",
-);
-assert.ok(
-  liveSearchSectionBody.indexOf("onScoutAlternatives(advice, { auto: true })") >= 0,
-  "LiveSearchSection should auto-trigger alternative scout after failed search",
+  !liveSearchSectionBody.includes("autoAlternativeScoutAfterSearchRef") &&
+    !liveSearchSectionBody.includes("onScoutAlternatives"),
+  "LiveSearchSection should not auto-trigger alternative community scout",
 );
 assert.ok(
   liveSearchSectionBody.includes("return fetchFindBuyInWithRetry("),
@@ -3315,15 +3225,7 @@ assert.ok(
   bookingsSource.includes("sidecarLaneSummary"),
   "Operations progress should surface when find-buy-in is waiting behind another sidecar lane owner",
 );
-assert.ok(
-  bookingsSource.includes("function shouldAutoTriggerAlternativeScout"),
-  "bookings page should auto-scout alternatives for multi-unit bookings with partial attachables",
-);
-assert.ok(
-  liveSearchSectionBody.includes("shouldAutoTriggerAlternativeScout(reservation, attachableCount)"),
-  "LiveSearchSection should auto-trigger alternative scout when combo coverage is incomplete",
-);
-console.log("  ✓ LiveSearchSection auto alternative scout hook placement");
+console.log("  ✓ LiveSearchSection resort find-buy-in only");
 
 const bookingsComboSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
 const searchApiSource = readFileSync("server/searchapi.ts", "utf8");
@@ -3350,14 +3252,6 @@ assert.ok(
     bookingsComboSource.includes("const autoDirectBookingCandidatesFor") &&
     bookingsComboSource.includes("return [];"),
   "find-buy-in and auto-fill should not run PM/direct source discovery",
-);
-assert.ok(
-  bookingsComboSource.includes("groupAlternativeScoutSamplesByPlan"),
-  "alternative scout cards should group Airbnb samples by combo plan legs",
-);
-assert.ok(
-  bookingsComboSource.includes("BR combo ·"),
-  "alternative scout sample groups should label combo legs",
 );
 assert.ok(
   routesSource.includes("Google Lens reverse-image search is disabled to preserve SearchAPI quota"),
@@ -3388,10 +3282,6 @@ assert.ok(
   "SearchAPI calls should support a second Railway key for quota fallback",
 );
 assert.ok(
-  bookingsComboSource.includes("directProbeMessage"),
-  "alternative scout cards should display direct probe failure messages when Lens could not complete",
-);
-assert.ok(
   routesSource.includes("type DirectBookingProof"),
   "direct booking discovery should expose a structured proof ledger",
 );
@@ -3403,7 +3293,7 @@ assert.ok(
   bookingsComboSource.includes("directProofShortLabel"),
   "bookings UI should display direct proof level for Lens/direct matches",
 );
-console.log("  ✓ alternative scout direct booking probe UI + API");
+console.log("  ✓ direct booking probe compatibility API");
 
 const kamalii3: CityVrboListing = {
   url: "https://www.vrbo.com/111",
@@ -3452,7 +3342,7 @@ assert.ok(
 assert.ok(
   bookingsSource.includes("city-vrbo-inventory") &&
     bookingsSource.includes('attachSource === "city-vrbo"') &&
-    bookingsSource.includes("multiUnitConfigured"),
+    bookingsSource.includes("emptySlots.length >= 2"),
   "auto-fill should run resort search first then city-wide VRBO fallback without per-community scout",
 );
 assert.ok(

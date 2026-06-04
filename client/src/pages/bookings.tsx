@@ -293,16 +293,6 @@ type BuyInCancellationAdvice = {
   pricedCount: number;
 };
 
-type AlternativeScoutSample = {
-  title: string;
-  url: string;
-  image?: string;
-  totalPrice?: number | null;
-  nightlyPrice?: number | null;
-  sourceLabel?: string;
-  bedrooms?: number;
-  proof?: DirectBookingProof;
-};
 
 type DirectBookingProof = {
   verdict: "same_unit_direct_page" | "direct_price_available" | "direct_unavailable" | "needs_review";
@@ -343,83 +333,6 @@ type DirectBookingProof = {
   };
 };
 
-type AlternativeScoutDirectMatch = {
-  url: string;
-  domain: string;
-  title: string;
-  matchedPhotoCount: number;
-  minConfidence: number;
-  maxConfidence: number;
-  proof?: DirectBookingProof;
-};
-
-type AlternativeScoutDirectProbe = {
-  airbnbUrl: string;
-  title: string;
-  bedrooms?: number;
-  directMatches: AlternativeScoutDirectMatch[];
-  status: "done" | "error" | "skipped";
-  message?: string;
-  minPhotoMatches?: number;
-  minConfidence?: number;
-};
-
-type AlternativeScoutResult = {
-  community: string;
-  searchTerm: string;
-  lat?: number | null;
-  lng?: number | null;
-  status: "ok" | "error" | string;
-  count: number;
-  raw: number;
-  recommended: boolean;
-  reason: string;
-  countsByBedroom?: Record<string, number>;
-  airbnbCountsByBedroom?: Record<string, number>;
-  directBookingProbes?: AlternativeScoutDirectProbe[];
-  passingPlans?: number[][];
-  replacementPlans?: number[][];
-  oceanfrontComparable?: boolean;
-  errors?: string[];
-  durationMs?: number;
-  driveMinutesFromBase?: number | null;
-  isDiscovered?: boolean;
-  samples: AlternativeScoutSample[];
-};
-
-type AlternativeScoutResponse = {
-  propertyId: number;
-  baseCommunity: string;
-  bedrooms: number;
-  checkIn: string;
-  checkOut: string;
-  threshold: number;
-  requiresOceanfrontComparable?: boolean;
-  replacementPlans?: number[][];
-  nearbyWithinDriveMinutes?: Array<{ community: string; driveMinutes: number }>;
-  results: AlternativeScoutResult[];
-  recommended: AlternativeScoutResult[];
-  rejected?: AlternativeScoutResult[];
-  scouted?: AlternativeScoutResult[];
-  discoveredResorts?: AlternativeScoutResult[];
-  generatedAt: string;
-};
-
-type AlternativeWorkflowState = {
-  scout?: AlternativeScoutResponse;
-  activeCommunity?: string | null;
-  sidecarResults?: Record<string, FindBuyInResponse>;
-  mapFilterPhrase?: string;
-  pageUrl?: string | null;
-  draft?: { subject: string; body: string } | null;
-};
-
-type AlternativeReplacementSet = {
-  community: string;
-  plan: number[];
-  picks: Array<LiveCandidate & { community: string }>;
-  totalCost: number;
-};
 
 type AutoFillComboOption = {
   label: string;
@@ -1177,166 +1090,6 @@ function candidateMatchesBedroom(candidate: Pick<LiveCandidate, "bedrooms">, bed
   return typeof candidate.bedrooms !== "number" || Math.round(candidate.bedrooms) === bedrooms;
 }
 
-function mergeAlternativeFindBuyInResponses(
-  responses: FindBuyInResponse[],
-  bedroomsSearched: number[],
-): FindBuyInResponse {
-  const primary = responses[0];
-  if (!primary) throw new Error("No alternative city map search response returned.");
-  if (responses.length <= 1) return primary;
-
-  const flatCandidates = (key: keyof FindBuyInResponse["sources"]) => responses.flatMap((response) => response.sources?.[key] ?? []);
-  const cheapest = responses.flatMap((response) => response.cheapest ?? []);
-  return {
-    ...primary,
-    bedrooms: Math.min(...bedroomsSearched),
-    sources: {
-      airbnb: flatCandidates("airbnb"),
-      vrbo: flatCandidates("vrbo"),
-      booking: flatCandidates("booking"),
-      pm: flatCandidates("pm"),
-    },
-    comparisonSources: {
-      airbnb: responses.flatMap((response) => response.comparisonSources?.airbnb ?? []),
-      vrbo: responses.flatMap((response) => response.comparisonSources?.vrbo ?? []),
-      booking: [],
-      pm: responses.flatMap((response) => response.comparisonSources?.pm ?? []),
-    },
-    cheapest,
-    cheapestUnits: responses.flatMap((response) => response.cheapestUnits ?? []),
-    totalPricedResults: responses.reduce((sum, response) => sum + (response.totalPricedResults ?? response.cheapest?.length ?? 0), 0),
-    fromCache: responses.every((response) => response.fromCache),
-    scanComplete: responses.every((response) => response.scanComplete !== false),
-    autoFillSafe: responses.every((response) => response.autoFillSafe !== false),
-    diagnostics: {
-      ...primary.diagnostics,
-      summary: `City map searched ${bedroomsSearched.map((bedrooms) => `${bedrooms}BR`).join(" + ")} for the replacement plan. ${
-        cheapest.length
-      } verified candidate${cheapest.length === 1 ? "" : "s"} returned.`,
-      generatedAt: new Date().toISOString(),
-    },
-    debug: primary.debug ? {
-      ...primary.debug,
-      mapHarvest: responses.reduce<Record<string, unknown> | undefined>((merged, response) => {
-        const next = (response.debug as { mapHarvest?: Record<string, unknown> } | undefined)?.mapHarvest;
-        if (!next) return merged;
-        return { ...(merged ?? {}), ...next };
-      }, (primary.debug as { mapHarvest?: Record<string, unknown> }).mapHarvest),
-    } : undefined,
-  };
-}
-
-function downloadAlternativeMapInventoryExport(
-  data: FindBuyInResponse,
-  community: string,
-  mapFilterPhrase?: string,
-) {
-  const payload = {
-    exportedAt: new Date().toISOString(),
-    community,
-    mapFilterPhrase: mapFilterPhrase || null,
-    mapHarvest: (data.debug as { mapHarvest?: unknown } | undefined)?.mapHarvest ?? null,
-    comparisonSources: data.comparisonSources ?? {},
-    cheapest: data.cheapest ?? [],
-    diagnostics: data.diagnostics ?? null,
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `alternative-map-${community.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "export"}.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function AlternativeMapInventoryPanel({
-  data,
-  mapFilterPhrase,
-  onMapFilterPhraseChange,
-  onRerun,
-  running,
-}: {
-  data: FindBuyInResponse | undefined;
-  mapFilterPhrase: string;
-  onMapFilterPhraseChange: (value: string) => void;
-  onRerun: () => void;
-  running?: boolean;
-}) {
-  if (!data) return null;
-  const pool = alternativeMapCandidatePool(data, mapFilterPhrase);
-  const harvest = (data.debug as { mapHarvest?: { vrbo?: { sidecar?: Record<string, unknown>; comparisonPool?: number } } } | undefined)?.mapHarvest;
-  const byBedroom = new Map<number, LiveCandidate[]>();
-  for (const row of pool) {
-    const br = typeof row.bedrooms === "number" ? Math.round(row.bedrooms) : 0;
-    if (br <= 0) continue;
-    const bucket = byBedroom.get(br) ?? [];
-    bucket.push(row);
-    byBedroom.set(br, bucket);
-  }
-  const bedroomGroups = Array.from(byBedroom.entries()).sort(([a], [b]) => b - a);
-  return (
-    <div className="mt-2 rounded border border-slate-200 bg-white px-2 py-2 text-[11px]">
-      <div className="flex flex-wrap items-end gap-2">
-        <div className="min-w-[140px] flex-1">
-          <Label className="text-[10px] text-muted-foreground">Map filter (optional)</Label>
-          <Input
-            className="mt-0.5 h-7 text-[11px]"
-            placeholder="e.g. Kamalii"
-            value={mapFilterPhrase}
-            onChange={(event) => onMapFilterPhraseChange(event.target.value)}
-          />
-        </div>
-        <Button size="sm" variant="outline" className="h-7" onClick={onRerun} disabled={running}>
-          {running ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
-          Re-run map
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7"
-          onClick={() => downloadAlternativeMapInventoryExport(data, data.community, mapFilterPhrase)}
-        >
-          <FileText className="mr-1 h-3.5 w-3.5" />
-          Export JSON
-        </Button>
-      </div>
-      {harvest?.vrbo?.sidecar && (
-        <p className="mt-1 text-[10px] text-muted-foreground">
-          VRBO harvest: merged {String(harvest.vrbo.sidecar.mergedCount ?? "?")} · scroll buffer {String(harvest.vrbo.sidecar.finalHarvestTotal ?? "?")} · comparison pool {harvest.vrbo.comparisonPool ?? pool.length}
-        </p>
-      )}
-      <p className="mt-1 font-medium text-slate-900">
-        Map inventory ({pool.length} verified VRBO row{pool.length === 1 ? "" : "s"})
-      </p>
-      {bedroomGroups.length === 0 ? (
-        <p className="text-muted-foreground">No verified map rows match the current filter.</p>
-      ) : (
-        <div className="mt-1 max-h-40 space-y-2 overflow-y-auto">
-          {bedroomGroups.map(([bedrooms, rows]) => (
-            <div key={bedrooms}>
-              <p className="text-[10px] font-semibold text-slate-700">{bedrooms}BR ({rows.length})</p>
-              {rows.slice(0, 12).map((row) => (
-                <a
-                  key={row.url}
-                  href={row.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="block truncate text-sky-800 underline underline-offset-2"
-                  title={row.title}
-                >
-                  {fmtMoney(row.totalPrice || row.nightlyPrice)} · {row.sourceLabel ?? row.source} · {row.title}
-                </a>
-              ))}
-              {rows.length > 12 && (
-                <p className="text-[10px] text-muted-foreground">+{rows.length - 12} more in export</p>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 type CityVrboInventoryResponse = {
   propertyId: number;
@@ -1600,70 +1353,6 @@ function candidateIsWalkableWithExistingPicks(
   return true;
 }
 
-function alternativeMapCandidatePool(data: FindBuyInResponse, resortPhrase?: string): LiveCandidate[] {
-  const phrase = String(resortPhrase ?? "").trim();
-  const rows = [
-    ...(data.cheapest ?? []),
-    ...(data.sources?.vrbo ?? []),
-    ...(data.comparisonSources?.vrbo ?? []),
-  ];
-  const deduped = new Map<string, LiveCandidate>();
-  for (const candidate of rows) {
-    if (candidate.source !== "vrbo") continue;
-    if (phrase && !textMatchesResortPhrase(`${candidate.title} ${candidate.sourceLabel ?? ""}`, phrase)) continue;
-    if (candidate.verified && candidate.verified !== "yes") continue;
-    if (!(candidate.totalPrice > 0 || candidate.nightlyPrice > 0)) continue;
-    const key = listingIdentityKeys(candidate)[0]
-      ?? `${candidate.source}:${normalizedIdentityText(candidate.title)}:${candidate.bedrooms ?? "unknown"}:${Math.round(candidate.totalPrice || candidate.nightlyPrice || 0)}`;
-    const previous = deduped.get(key);
-    const candidateTotal = candidate.totalPrice > 0 ? candidate.totalPrice : candidate.nightlyPrice;
-    const previousTotal = previous ? (previous.totalPrice > 0 ? previous.totalPrice : previous.nightlyPrice) : Infinity;
-    if (!previous || candidateTotal < previousTotal) deduped.set(key, candidate);
-  }
-  return Array.from(deduped.values());
-}
-
-function bestWalkableAlternativePicks(
-  data: FindBuyInResponse,
-  plan: number[],
-  community: string,
-  resortPhrase?: string,
-): Array<LiveCandidate & { community: string }> | null {
-  const candidatePool = alternativeMapCandidatePool(data, resortPhrase);
-  const pools = plan.map((bedrooms) => candidatePool
-    .filter((candidate) => candidate.totalPrice > 0 && candidateMatchesBedroom(candidate, bedrooms))
-    .sort((a, b) => a.totalPrice - b.totalPrice)
-    .slice(0, 40));
-  if (pools.some((pool) => pool.length === 0)) return null;
-
-  let bestPicks: Array<LiveCandidate & { community: string }> | null = null;
-  let bestCost = Number.POSITIVE_INFINITY;
-
-  const search = (
-    depth: number,
-    used: Set<string>,
-    picks: Array<LiveCandidate & { community: string }>,
-    cost: number,
-  ) => {
-    if (cost >= bestCost) return;
-    if (depth >= pools.length) {
-      bestPicks = picks;
-      bestCost = cost;
-      return;
-    }
-
-    for (const candidate of pools[depth]) {
-      if (hasUsedListingIdentity(used, candidate)) continue;
-      if (!candidateIsWalkableWithExistingPicks(candidate, picks)) continue;
-      const nextUsed = new Set(used);
-      addUsedListingIdentity(nextUsed, candidate);
-      search(depth + 1, nextUsed, [...picks, { ...candidate, community }], cost + candidate.totalPrice);
-    }
-  };
-
-  search(0, new Set<string>(), [], 0);
-  return bestPicks;
-}
 
 function UnitTypeConfidenceBadge({ confidence }: { confidence?: number | null }) {
   if (typeof confidence !== "number") return null;
@@ -1738,178 +1427,6 @@ function ForceAttachConfirmDialog({
   );
 }
 
-function bestAlternativeReplacementSet(workflow: AlternativeWorkflowState | undefined): AlternativeReplacementSet | null {
-  const sidecarResults = workflow?.sidecarResults ?? {};
-  const scoutResults = workflow?.scout?.recommended ?? workflow?.scout?.results ?? [];
-  const fallbackPlans = workflow?.scout?.replacementPlans ?? [];
-  const sets: AlternativeReplacementSet[] = [];
-
-  for (const scoutResult of scoutResults) {
-    const data = sidecarResults[scoutResult.community];
-    if (!data) continue;
-    const plans = scoutResult.passingPlans?.length
-      ? scoutResult.passingPlans
-      : scoutResult.replacementPlans?.length
-        ? scoutResult.replacementPlans
-        : fallbackPlans;
-
-    for (const plan of plans) {
-      const picks = bestWalkableAlternativePicks(data, plan, scoutResult.community, workflow?.mapFilterPhrase);
-
-      if (picks?.length === plan.length) {
-        sets.push({
-          community: scoutResult.community,
-          plan,
-          picks,
-          totalCost: picks.reduce((sum, pick) => sum + pick.totalPrice, 0),
-        });
-      }
-    }
-  }
-
-  return sets.sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
-}
-
-function alternativeReplacementNeedText(workflow: AlternativeWorkflowState | undefined): string | null {
-  const plans = workflow?.scout?.replacementPlans ?? [];
-  if (!plans.length) return null;
-  return plans.map((plan) => `${plan.join("+")}BR`).join(" or ");
-}
-
-function alternativeScoutSourceKind(result: AlternativeScoutResult): "discovered" | "configured" {
-  return result.isDiscovered ? "discovered" : "configured";
-}
-
-function AlternativeScoutSourceBadge({ result }: { result: AlternativeScoutResult }) {
-  if (alternativeScoutSourceKind(result) === "discovered") {
-    return (
-      <span
-        className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800"
-        title="Found via AI + Maps within ~20 min drive (vacation rental resort, not a single listing); not in buy-in config yet"
-      >
-        Discovered
-      </span>
-    );
-  }
-  return (
-    <span
-      className="ml-1 rounded bg-slate-100 px-1 py-0.5 text-[10px] font-medium text-slate-700"
-      title="Configured buy-in market within ~20 min drive"
-    >
-      Configured
-    </span>
-  );
-}
-
-function alternativeScoutSourceSummary(scout: AlternativeScoutResponse | undefined): { configured: number; discovered: number; total: number } | null {
-  if (!scout) return null;
-  const byCommunity = new Map<string, AlternativeScoutResult>();
-  for (const row of [...(scout.scouted ?? []), ...(scout.results ?? []), ...(scout.discoveredResorts ?? [])]) {
-    byCommunity.set(row.community, row);
-  }
-  const unique = Array.from(byCommunity.values());
-  if (unique.length === 0) return null;
-  const discovered = unique.filter((row) => row.isDiscovered).length;
-  return { configured: unique.length - discovered, discovered, total: unique.length };
-}
-
-/** Nearby communities queued for city-level VRBO map sidecar find-buy-in. */
-function alternativeCommunitiesForSidecar(scout: AlternativeScoutResponse): AlternativeScoutResult[] {
-  const byCommunity = new Map<string, AlternativeScoutResult>();
-  for (const row of [...(scout.recommended ?? []), ...(scout.results ?? [])]) {
-    if (row.recommended) byCommunity.set(row.community, row);
-  }
-  for (const row of scout.discoveredResorts ?? []) {
-    if (row.recommended && !byCommunity.has(row.community)) byCommunity.set(row.community, row);
-  }
-  return Array.from(byCommunity.values()).sort(
-    (a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999),
-  );
-}
-
-function alternativeScoutCommunitiesForDisplay(scout: AlternativeScoutResponse | undefined): AlternativeScoutResult[] {
-  if (!scout) return [];
-  const byCommunity = new Map<string, AlternativeScoutResult>();
-  for (const row of [
-    ...(scout.scouted ?? []),
-    ...(scout.results ?? []),
-    ...(scout.discoveredResorts ?? []),
-    ...(scout.rejected ?? []),
-  ]) {
-    if (!byCommunity.has(row.community)) byCommunity.set(row.community, row);
-  }
-  return Array.from(byCommunity.values()).sort(
-    (a, b) => (a.driveMinutesFromBase ?? 999) - (b.driveMinutesFromBase ?? 999),
-  );
-}
-
-function groupAlternativeScoutSamplesByPlan(
-  samples: AlternativeScoutSample[],
-  passingPlans?: number[][],
-): Array<{ label: string; bedrooms: number; samples: AlternativeScoutSample[] }> {
-  const plans = (passingPlans ?? []).filter((plan) => plan.length > 0);
-  if (plans.length === 0) {
-    const byBedroom = new Map<number, AlternativeScoutSample[]>();
-    for (const sample of samples) {
-      const br = Number(sample.bedrooms);
-      if (!Number.isFinite(br) || br <= 0) continue;
-      const bucket = byBedroom.get(br) ?? [];
-      bucket.push(sample);
-      byBedroom.set(br, bucket);
-    }
-    return Array.from(byBedroom.entries())
-      .sort(([a], [b]) => b - a)
-      .map(([bedrooms, legSamples]) => ({
-        label: `${bedrooms}BR`,
-        bedrooms,
-        samples: legSamples,
-      }));
-  }
-  const seenPlan = new Set<string>();
-  const legs: Array<{ label: string; bedrooms: number; samples: AlternativeScoutSample[] }> = [];
-  for (const plan of plans) {
-    const planKey = plan.join("+");
-    if (seenPlan.has(planKey)) continue;
-    seenPlan.add(planKey);
-    for (const bedrooms of plan) {
-      const legSamples = samples.filter((sample) => Number(sample.bedrooms) === bedrooms);
-      legs.push({
-        label: `${planKey}BR combo · ${bedrooms}BR`,
-        bedrooms,
-        samples: legSamples,
-      });
-    }
-  }
-  return legs;
-}
-
-function formatAirbnbInventoryCounts(counts?: Record<string, number>): string | null {
-  if (!counts) return null;
-  const parts = Object.entries(counts)
-    .map(([br, count]) => [Number.parseInt(br, 10), Number(count)] as const)
-    .filter(([br, count]) => Number.isFinite(br) && br > 0 && Number.isFinite(count) && count > 0)
-    .sort((a, b) => b[0] - a[0])
-    .map(([br, count]) => `${count}× ${br}BR`);
-  return parts.length ? parts.join(" · ") : null;
-}
-
-function mergeScoutDirectProbes(
-  scout: AlternativeScoutResponse,
-  probesByCommunity: Record<string, { listings?: AlternativeScoutDirectProbe[] }>,
-): AlternativeScoutResponse {
-  const enrich = (row: AlternativeScoutResult): AlternativeScoutResult => ({
-    ...row,
-    directBookingProbes: probesByCommunity[row.community]?.listings ?? row.directBookingProbes ?? [],
-  });
-  return {
-    ...scout,
-    results: (scout.results ?? []).map(enrich),
-    recommended: (scout.recommended ?? []).map(enrich),
-    scouted: (scout.scouted ?? []).map(enrich),
-    discoveredResorts: (scout.discoveredResorts ?? []).map(enrich),
-    rejected: (scout.rejected ?? []).map(enrich),
-  };
-}
 
 type TwoUnitBedroomCombo = { bedrooms: number[] };
 
@@ -2499,26 +2016,6 @@ function buyInCancellationTier(score: number): BuyInCancellationTier {
   return "do_not_cancel";
 }
 
-function shouldShowAlternativeBuyInWorkflow(
-  advice: BuyInCancellationAdvice | null,
-  opts?: { noCompleteCombo?: boolean },
-): boolean {
-  if (!advice) return false;
-  if (opts?.noCompleteCombo) return true;
-  if (advice.basis === "no_inventory" || advice.basis === "insufficient_coverage") return true;
-  return advice.score >= 50;
-}
-
-function shouldAutoTriggerAlternativeScout(
-  reservation: GuestyReservation,
-  attachableCount: number,
-): boolean {
-  const emptySlots = reservation.slots.filter((slot) => !slot.buyIn).length;
-  if (attachableCount === 0) return true;
-  // Multi-unit bookings need a full combo — one attachable row for one slot
-  // should still trigger the nearby-community scout.
-  return emptySlots > 1 && attachableCount < emptySlots;
-}
 
 function countAttachableBuyInCandidates(audits: AutoFillSearchAudit[]): number {
   return audits.flatMap((audit) => audit.candidates).filter((candidate) => {
@@ -2768,247 +2265,6 @@ function BuyInCancellationAdviceCard({ advice }: { advice: BuyInCancellationAdvi
   );
 }
 
-function AlternativeBuyInWorkflowPanel({
-  workflow,
-  onScout,
-  onRunCommunity,
-  onMapFilterPhraseChange,
-  onDraftMessage,
-  autoScan,
-  onStartAutoScan,
-  onStopAutoScan,
-}: {
-  workflow: AlternativeWorkflowState | undefined;
-  onScout: () => void;
-  onRunCommunity: (community: string) => void;
-  onMapFilterPhraseChange?: (value: string) => void;
-  onDraftMessage: () => void;
-  autoScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
-  onStartAutoScan?: () => void;
-  onStopAutoScan?: () => void;
-}) {
-  const active = workflow?.activeCommunity ?? null;
-  const sidecarResults = workflow?.sidecarResults ?? {};
-  const communities = alternativeScoutCommunitiesForDisplay(workflow?.scout);
-  const scoutSources = alternativeScoutSourceSummary(workflow?.scout);
-  const completeReplacementSet = bestAlternativeReplacementSet(workflow);
-  const replacementPlanText = alternativeReplacementNeedText(workflow);
-  const mapFilterPhrase = workflow?.mapFilterPhrase ?? "";
-  const primaryCommunity = communities[0]?.community;
-  const primarySidecar = primaryCommunity ? sidecarResults[primaryCommunity] : undefined;
-  const primaryRunning = primaryCommunity ? active === primaryCommunity : false;
-  return (
-    <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-950">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <p className="font-semibold">Alternative buy-in workflow</p>
-          <p className="text-[11px] opacity-80">
-            After the primary buy-in search finishes, the sidecar runs one city-level VRBO map scan for the surrounding town. The final pair must prove matching bedroom slots and a 5-10 minute walk (~20 min drive context from {workflow?.scout?.baseCommunity ?? "this resort"}
-            {workflow?.scout?.requiresOceanfrontComparable ? ", waterfront comparable only" : ""}).
-          </p>
-          {(workflow?.scout?.nearbyWithinDriveMinutes?.length ?? 0) > 0 && (
-            <p className="mt-0.5 text-[11px] opacity-80">
-              Within 20 min (configured): {workflow!.scout!.nearbyWithinDriveMinutes!.map((row) => `${row.community} (~${row.driveMinutes} min)`).join(" · ")}
-            </p>
-          )}
-          {scoutSources && (
-            <p className="mt-0.5 text-[11px] opacity-80">
-              Scout sources: {scoutSources.configured} configured · {scoutSources.discovered} discovered (Google Maps, not in system yet)
-            </p>
-          )}
-          {replacementPlanText && (
-            <p className="mt-0.5 text-[11px] opacity-80">
-              City map scan required: {replacementPlanText}{workflow?.scout?.requiresOceanfrontComparable ? " · oceanfront comparable only" : ""} · units must be within a 10-minute walk
-            </p>
-          )}
-        </div>
-        <Button size="sm" variant="outline" className="h-7 bg-white" onClick={onScout} disabled={active === "scouting" || active === "direct-probing"}>
-          {active === "scouting" || active === "direct-probing" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
-          Scout similar areas
-        </Button>
-        {onStartAutoScan && communities.length > 0 && !completeReplacementSet && (
-          autoScan?.isRunning ? (
-            <Button size="sm" variant="destructive" className="h-7" onClick={() => onStopAutoScan?.()}>
-              <XCircle className="mr-1 h-3.5 w-3.5" /> Stop auto sidecar
-            </Button>
-          ) : (
-            <Button size="sm" className="h-7 bg-sky-600 hover:bg-sky-700 text-white" onClick={onStartAutoScan} disabled={active === "scouting" || active === "direct-probing"}>
-              <Zap className="mr-1 h-3.5 w-3.5" /> Auto sidecar until combo (20min)
-            </Button>
-          )
-        )}
-      </div>
-      {communities.length > 0 && (
-        <div className="mt-2 grid gap-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {communities.map((result) => {
-            const running = active === result.community;
-            const sidecar = sidecarResults[result.community];
-            const inventoryText = formatAirbnbInventoryCounts(result.airbnbCountsByBedroom ?? result.countsByBedroom);
-            const airbnbSamples = (result.samples ?? []).filter((sample) => /airbnb\.[^/]+\/rooms\//i.test(sample.url));
-            const sampleGroups = groupAlternativeScoutSamplesByPlan(airbnbSamples, result.passingPlans);
-            const directMatches = (result.directBookingProbes ?? []).flatMap((probe) =>
-              probe.directMatches.map((match) => ({ ...match, airbnbTitle: probe.title })),
-            );
-            const directProbeMessage = (result.directBookingProbes ?? [])
-              .map((probe) => probe.message)
-              .find((message): message is string => !!message && !/^No direct booking site passed the strict Airbnb Lens threshold/i.test(message));
-            const directProbeThreshold = (result.directBookingProbes ?? [])
-              .map((probe) => ({
-                minPhotoMatches: Number(probe.minPhotoMatches ?? probe.directMatches[0]?.proof?.sameUnit.requiredPhotoCount ?? 3),
-                minConfidence: Number(probe.minConfidence ?? probe.directMatches[0]?.proof?.sameUnit.requiredConfidence ?? 0.95),
-              }))
-              .find((threshold) => Number.isFinite(threshold.minPhotoMatches) && threshold.minPhotoMatches > 0);
-            return (
-              <div key={result.community} className="rounded border bg-white/80 px-2 py-2">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <p className="font-semibold">
-                      {result.community}
-                      <AlternativeScoutSourceBadge result={result} />
-                    </p>
-                    <p className="text-[11px] text-muted-foreground">
-                      City map queue: {result.passingPlans?.length ? `${result.passingPlans.map((plan) => `${plan.join("+")}BR`).join(" or ")} needed` : `${result.count} result${result.count === 1 ? "" : "s"}`} · recommended
-                      <UnitTypeConfidenceBadge confidence={sidecar?.cheapest?.[0]?.unitTypeConfidence} />
-                    </p>
-                    {inventoryText && (
-                      <p className="mt-0.5 text-[11px] font-medium text-sky-900">
-                        Map inventory need: {inventoryText}
-                      </p>
-                    )}
-                    <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.reason}</p>
-                    {active === "direct-probing" && (
-                      <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] text-sky-800">
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                        Direct-site probe skipped…
-                      </span>
-                    )}
-                    {autoScan && autoScan.scanned.includes(result.community) && (
-                      <span className="mt-0.5 inline-block text-[10px] px-1 rounded bg-sky-200 text-sky-800">auto-scanned</span>
-                    )}
-                  </div>
-                  <Button size="sm" className="h-7 shrink-0" onClick={() => onRunCommunity(result.community)} disabled={running || active === "direct-probing"}>
-                    {running ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <MonitorPlay className="mr-1 h-3.5 w-3.5" />}
-                    Sidecar
-                  </Button>
-                </div>
-                {sidecar && (
-                  <p className="mt-1 rounded bg-slate-50 px-2 py-1 text-[11px]">
-                    Full search: {sidecar.cheapest?.length ?? 0} verified candidate{(sidecar.cheapest?.length ?? 0) === 1 ? "" : "s"}
-                    {sidecar.cheapest?.[0]?.totalPrice ? ` · best ${fmtMoney(sidecar.cheapest[0].totalPrice)}` : ""}
-                    <UnitTypeConfidenceBadge confidence={sidecar.cheapest?.[0]?.unitTypeConfidence} />
-                  </p>
-                )}
-                {result.community === primaryCommunity && primarySidecar && onMapFilterPhraseChange && (
-                  <AlternativeMapInventoryPanel
-                    data={primarySidecar}
-                    mapFilterPhrase={mapFilterPhrase}
-                    onMapFilterPhraseChange={onMapFilterPhraseChange}
-                    onRerun={() => onRunCommunity(result.community)}
-                    running={primaryRunning}
-                  />
-                )}
-                {(airbnbSamples.length > 0 || directMatches.length > 0 || (result.directBookingProbes?.length ?? 0) > 0) && (
-                  <div className="mt-1 space-y-1 rounded bg-slate-50 px-2 py-1.5 text-[11px]">
-                    {sampleGroups.length > 0 && (
-                      <div className="space-y-1">
-                        <p className="font-medium text-slate-900">Airbnb listings checked</p>
-                        {sampleGroups.map((group) => (
-                          <div key={`${result.community}-${group.label}`} className="space-y-0.5">
-                            <p className="text-[10px] font-medium text-slate-700">{group.label}</p>
-                            {group.samples.length > 0 ? group.samples.slice(0, 4).map((sample) => (
-                              <a
-                                key={sample.url}
-                                href={sample.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="block truncate text-sky-800 underline underline-offset-2"
-                                title={sample.title}
-                              >
-                                {sample.bedrooms ? `${sample.bedrooms}BR · ` : ""}{sample.title}
-                              </a>
-                            )) : (
-                              <p className="text-[10px] text-muted-foreground">No sample link saved for this leg</p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {directMatches.length > 0 ? (
-                      <div className="space-y-0.5 border-t border-slate-200 pt-1">
-                        <p className="font-medium text-slate-900">Direct booking matches</p>
-                        {directMatches.map((match) => (
-                          <a
-                            key={match.url}
-                            href={match.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="block truncate text-emerald-800 underline underline-offset-2"
-                            title={match.proof?.summary ?? match.title}
-                          >
-                            {match.domain} · {match.matchedPhotoCount} photos · ≥{Math.round(match.minConfidence * 100)}% match · {directProofShortLabel(match.proof)}
-                          </a>
-                        ))}
-                      </div>
-                    ) : result.directBookingProbes && result.directBookingProbes.length > 0 && active !== "direct-probing" ? (
-                      <p className="border-t border-slate-200 pt-1 text-muted-foreground">
-                        {directProbeMessage ?? "Google Lens direct-booking probes are disabled to preserve SearchAPI quota."}
-                      </p>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {autoScan?.isRunning && (
-        <div className="mt-2 rounded border border-sky-300 bg-sky-100 px-2 py-1 text-[11px] text-sky-900">
-          Auto sidecar scan running: checked {autoScan.scanned.length} so far — stops at first full combo match. Use Stop button above to pause.
-        </div>
-      )}
-      {autoScan && !autoScan.isRunning && autoScan.foundComboIn && (
-        <div className="mt-2 rounded border border-green-300 bg-green-50 px-2 py-1 text-[11px] text-green-900 font-medium">
-          ✓ Auto scan found combo in {autoScan.foundComboIn}. Draft guest message ready below.
-        </div>
-      )}
-      {autoScan && !autoScan.isRunning && !autoScan.foundComboIn && (autoScan.scanned.length > 0 || autoScan.stopped) && (
-        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
-          Auto scan complete: no full combo found across the alternatives within 20min drive. The cancellation advice above reflects this.
-        </div>
-      )}
-      {Object.keys(sidecarResults).length > 0 && !completeReplacementSet && replacementPlanText && (
-        <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-2 text-[11px] text-amber-900">
-          Need a complete replacement set before drafting: {replacementPlanText}. For a 3BR+3BR booking, the sidecar must return two distinct 3BR candidates in the new community.
-        </div>
-      )}
-      {completeReplacementSet && (
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded border bg-white/80 px-2 py-2">
-          <div>
-            <p className="font-medium">Guest alternative message</p>
-            <p className="text-[11px] text-muted-foreground">
-              Creates a temporary hosted photo/details page and drafts the guest note for manual send. Ready set: {completeReplacementSet.plan.join("+")}BR in {completeReplacementSet.community}.
-            </p>
-          </div>
-          <Button size="sm" className="h-7" onClick={onDraftMessage}>
-            <Mail className="mr-1 h-3.5 w-3.5" />
-            Draft guest alternative
-          </Button>
-        </div>
-      )}
-      {workflow?.pageUrl && (
-        <a className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-sky-800 underline" href={workflow.pageUrl} target="_blank" rel="noreferrer">
-          View hosted alternative page <ExternalLink className="h-3 w-3" />
-        </a>
-      )}
-      {workflow?.draft && (
-        <div className="mt-2 rounded border bg-white/80 p-2">
-          <p className="mb-1 text-[11px] font-semibold">Draft copied to clipboard</p>
-          <Textarea value={workflow.draft.body} readOnly rows={6} className="text-xs" />
-        </div>
-      )}
-    </div>
-  );
-}
 
 function directBookingTargetResortName(community: string): string {
   if (community === "Poipu Kai") return "Poipu Kai";
@@ -5075,116 +4331,8 @@ export default function Bookings() {
   };
   const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
   const [lastAutoFillAudits, setLastAutoFillAudits] = useState<Record<string, AutoFillSearchAudit[]>>({});
-  const [alternativeWorkflows, setAlternativeWorkflows] = useState<Record<string, AlternativeWorkflowState>>({});
-  const [autoAltScans, setAutoAltScans] = useState<Record<string, { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean }>>({});
-  const alternativeWorkflowsRef = useRef<Record<string, AlternativeWorkflowState>>({});
-  useEffect(() => { alternativeWorkflowsRef.current = alternativeWorkflows; }, [alternativeWorkflows]);
-  const autoAlternativeScoutStartedRef = useRef<Set<string>>(new Set());
   const rawReservationsRef = useRef<GuestyReservation[]>([]);
 
-  // Hoisted early (before first reference in the runAlternativeSidecarSearchRef initializer)
-  // to fix TDZ ReferenceError "Cannot access '...' before initialization" (minified 'jt')
-  // when the Operations (/bookings) page mounts. The definition was after the early
-  // useRef/useEffect that close over the name during component body execution.
-  const runAlternativeSidecarSearch = async (reservation: GuestyReservation, community: string, opts?: { forceRefresh?: boolean }) => {
-    const resId = reservation._id;
-    const resForData: GuestyReservation = (reservation as any).slots ? reservation : (rawReservationsRef.current.find((r) => r._id === resId) || (reservation as any));
-    if (!(resForData as any).slots) {
-      toast({ title: `Sidecar search failed for ${community}`, description: "Reservation details unavailable.", variant: "destructive" });
-      updateAlternativeWorkflow(resId, { activeCommunity: null });
-      return;
-    }
-    const meta = reservationPropertyMeta.get(resId);
-    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
-    const checkIn = (resForData.checkInDateLocalized ?? resForData.checkIn ?? "").slice(0, 10);
-    const checkOut = (resForData.checkOutDateLocalized ?? resForData.checkOut ?? "").slice(0, 10);
-    const fallbackBedrooms = resForData.slots.find((slot) => !slot.buyIn)?.bedrooms ?? resForData.slots[0]?.bedrooms;
-    if (!propertyId || !fallbackBedrooms || !checkIn || !checkOut) return;
-    updateAlternativeWorkflow(resId, { activeCommunity: community });
-    try {
-      const workflow = alternativeWorkflowsRef.current[resId] ?? alternativeWorkflows[resId];
-      const replacementBedrooms = (workflow?.scout?.replacementPlans ?? [])
-        .flat()
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value) && value > 0);
-      const bedroomsToSearch = replacementBedrooms.length > 0
-        ? Array.from(new Set(replacementBedrooms)).sort((a, b) => a - b)
-        : [fallbackBedrooms];
-      const scoutedRows = [
-        ...(workflow?.scout?.scouted ?? []),
-        ...(workflow?.scout?.results ?? []),
-        ...(workflow?.scout?.rejected ?? []),
-        ...(workflow?.scout?.discoveredResorts ?? []),
-      ];
-      const scoutRow = scoutedRows.find((row) => row.community === community);
-      const communitySearchTerm = scoutRow?.searchTerm || community;
-      const mapFilterPhrase = (workflow?.mapFilterPhrase ?? "").trim();
-      const lat = Number(scoutRow?.lat);
-      const lng = Number(scoutRow?.lng);
-      const searches = bedroomsToSearch.map((bedrooms) => {
-        const params = new URLSearchParams({
-          propertyId: String(propertyId),
-          bedrooms: String(bedrooms),
-          checkIn,
-          checkOut,
-          community: scoutRow?.community || community,
-          alternativeScout: "1",
-        });
-        if (communitySearchTerm) {
-          params.set("searchTerm", communitySearchTerm);
-        }
-        if (mapFilterPhrase) {
-          params.set("resortPhrase", mapFilterPhrase);
-        }
-        if (Number.isFinite(lat) && Number.isFinite(lng)) {
-          params.set("mapCenterLat", String(lat));
-          params.set("mapCenterLng", String(lng));
-        }
-        if (opts?.forceRefresh) params.set("nocache", "1");
-        if (meta?.guestyListingId) params.set("listingId", meta.guestyListingId);
-        return fetchFindBuyInWithRetry(`/api/operations/find-buy-in?${params.toString()}`);
-      });
-      const data = mergeAlternativeFindBuyInResponses(await Promise.all(searches), bedroomsToSearch);
-      updateAlternativeWorkflow(resId, {
-        activeCommunity: null,
-        sidecarResults: {
-          ...(alternativeWorkflowsRef.current[resId]?.sidecarResults ?? {}),
-          [community]: data,
-        },
-      });
-      const autoRunning = autoAltScans[resId]?.isRunning && !autoAltScans[resId]?.stopped;
-      if (!autoRunning) {
-        toast({
-          title: `Sidecar search finished for ${community}`,
-          description: data.cheapest?.length
-            ? `${data.cheapest.length} verified candidate${data.cheapest.length === 1 ? "" : "s"} returned.`
-            : data.diagnostics?.summary ?? "No verified candidate returned.",
-        });
-      }
-    } catch (error: any) {
-      updateAlternativeWorkflow(resId, {
-        activeCommunity: null,
-        sidecarResults: {
-          ...(alternativeWorkflowsRef.current[resId]?.sidecarResults ?? {}),
-          [community]: {
-            cheapest: [],
-            diagnostics: {
-              severity: "error",
-              summary: error?.message ?? String(error),
-              generatedAt: new Date().toISOString(),
-            },
-          } as FindBuyInResponse,
-        },
-      });
-      const autoRunning = autoAltScans[resId]?.isRunning && !autoAltScans[resId]?.stopped;
-      if (!autoRunning) {
-        toast({ title: `Sidecar search failed for ${community}`, description: error?.message ?? String(error), variant: "destructive" });
-      }
-    }
-  };
-
-  const runAlternativeSidecarSearchRef = useRef(runAlternativeSidecarSearch);
-  useEffect(() => { runAlternativeSidecarSearchRef.current = runAlternativeSidecarSearch; }, [runAlternativeSidecarSearch]);
   const [bulkSelectedReservations, setBulkSelectedReservations] = useState<Record<string, boolean>>({});
   const [bulkBuyInQueueOpen, setBulkBuyInQueueOpen] = useState(false);
   const [bulkBuyInQueueItems, setBulkBuyInQueueItems] = useState<BulkBuyInQueueItem[]>([]);
@@ -7000,13 +6148,6 @@ export default function Bookings() {
           noCompleteCombo: noCompleteComboForScout,
           attachableVerifiedCount: countAttachableBuyInCandidates(searchAudits),
         });
-        const multiUnitConfigured = (PROPERTY_UNIT_CONFIGS[selectedBuyInPropertyId ?? 0]?.units.length ?? 0) >= 2;
-        if (
-          !multiUnitConfigured
-          && shouldShowAlternativeBuyInWorkflow(postFillAdvice, { noCompleteCombo: noCompleteComboForScout })
-        ) {
-          void scoutAlternativeCommunities(reservation, postFillAdvice, { auto: true });
-        }
       }
       if (variables?.silent) return;
       if (filled.length === 0) {
@@ -7098,335 +6239,6 @@ export default function Bookings() {
   const autoFillSidecarActive = activeAutoFillCount > 0
     && isSidecarStatusForSearch(autoFillSidecarQueue.status, earliestAutoFillStartedAtMs);
 
-  const updateAlternativeWorkflow = (reservationId: string, patch: Partial<AlternativeWorkflowState>) => {
-    setAlternativeWorkflows((prev) => {
-      const nextState = { ...(prev[reservationId] ?? {}), ...patch };
-      const updated = { ...prev, [reservationId]: nextState };
-      alternativeWorkflowsRef.current = updated;
-      return updated;
-    });
-  };
-
-  const scoutAlternativeCommunities = async (
-    reservation: GuestyReservation,
-    advice: BuyInCancellationAdvice,
-    opts?: { auto?: boolean },
-  ) => {
-    const meta = reservationPropertyMeta.get(reservation._id);
-    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
-    const bedrooms = reservation.slots.find((slot) => !slot.buyIn)?.bedrooms ?? reservation.slots[0]?.bedrooms;
-    const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
-    const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
-    if (!opts?.auto) {
-      autoAlternativeScoutStartedRef.current.delete(reservation._id);
-    } else {
-      if (alternativeWorkflowsRef.current[reservation._id]?.scout) return;
-      const active = alternativeWorkflowsRef.current[reservation._id]?.activeCommunity;
-      if (active === "scouting" || active === "direct-probing") return;
-    }
-    if (!propertyId || !bedrooms || !checkIn || !checkOut) {
-      if (!opts?.auto) {
-        toast({ title: "Cannot scout alternatives", description: "Missing property, bedroom, or stay dates.", variant: "destructive" });
-      } else {
-        console.warn("[alternative-scout] auto scout skipped: missing property, bedroom, or stay dates", {
-          reservationId: reservation._id,
-          propertyId,
-          bedrooms,
-          checkIn,
-          checkOut,
-        });
-      }
-      return;
-    }
-    if (opts?.auto) {
-      autoAlternativeScoutStartedRef.current.add(reservation._id);
-    }
-    updateAlternativeWorkflow(reservation._id, { activeCommunity: "scouting" });
-    try {
-      const response = await apiRequest("POST", "/api/operations/alternative-buy-in-scout", {
-        propertyId,
-        bedrooms,
-        checkIn,
-        checkOut,
-        community: PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? reservation.slots.find((slot) => slot.community)?.community ?? undefined,
-      }).then((r) => r.json()) as AlternativeScoutResponse;
-      updateAlternativeWorkflow(reservation._id, { scout: response, activeCommunity: null });
-
-      let enrichedScout = response;
-
-      updateAlternativeWorkflow(reservation._id, { scout: enrichedScout, activeCommunity: null });
-      const sidecarQueue = alternativeCommunitiesForSidecar(enrichedScout);
-      if (sidecarQueue.length > 0) {
-        // Defer until scout state is committed so the auto-scan driver effect
-        // always sees workflow.scout + isRunning in the same render.
-        queueMicrotask(() => startAutoAlternativeSidecarScan(reservation));
-      }
-      if (!opts?.auto) {
-        toast({
-          title: response.recommended.length ? "City map alternative queued" : "No city map alternative yet",
-          description: response.recommended.length
-            ? `${response.recommended[0]?.searchTerm ?? "City"} queued for VRBO map search.${sidecarQueue.length > 0 ? " Sidecar city scan started." : ""}`
-            : sidecarQueue.length > 0
-              ? "Sidecar city scan started."
-              : "No city map scan target was available.",
-        });
-      } else if (sidecarQueue.length > 0) {
-        toast({
-          title: "Scanning city map alternative",
-          description: `Running one VRBO map scan for ${sidecarQueue[0]?.searchTerm ?? "the city"}.`,
-        });
-      }
-    } catch (error: any) {
-      updateAlternativeWorkflow(reservation._id, { activeCommunity: null });
-      autoAlternativeScoutStartedRef.current.delete(reservation._id);
-      toast({ title: "Alternative scout failed", description: error?.message ?? String(error), variant: "destructive" });
-    }
-  };
-
-  // Auto sidecar scan for alternatives: sequentially runs sidecar (find-buy-in) on 20min-drive communities
-  // until a full combo replacement set is found or all are exhausted. Updates autoAltScans state for UI.
-  const startAutoAlternativeSidecarScan = async (reservation: GuestyReservation) => {
-    const resId = reservation._id;
-    const wf = alternativeWorkflowsRef.current[resId] ?? alternativeWorkflows[resId];
-    const scout = wf?.scout;
-    if (!scout) {
-      toast({ title: "No scout results", description: "Run 'Scout similar areas' first.", variant: "destructive" });
-      return;
-    }
-    const communities = alternativeCommunitiesForSidecar(scout);
-    if (communities.length === 0) {
-      toast({ title: "No alternatives", description: "No nearby community is queued yet — run Scout similar areas first." });
-      return;
-    }
-    setAutoAltScans((prev) => {
-      const cur = prev[resId];
-      if (cur?.isRunning && !cur.stopped) return prev;
-      return { ...prev, [resId]: { isRunning: true, scanned: [], foundComboIn: null, stopped: false } };
-    });
-    // Sequencing is driven by the reactive useEffect below (watches sidecarResults + activeCommunity).
-    toast({ title: "Auto sidecar scan started", description: `Will run one city map scan for ${communities[0]?.searchTerm ?? "the surrounding city"} until a walkable combo is found.` });
-  };
-
-  const stopAutoAlternativeSidecarScan = (reservationId: string) => {
-    setAutoAltScans((prev) => {
-      const cur = prev[reservationId];
-      if (!cur) return prev;
-      return { ...prev, [reservationId]: { ...cur, isRunning: false, stopped: true } };
-    });
-    // also clear any active in workflow
-    updateAlternativeWorkflow(reservationId, { activeCommunity: null });
-    toast({ title: "Auto scan stopped", description: "Stopped sequential sidecar on alternatives." });
-  };
-
-  // Reactive driver for auto alt scan: when flag on, no active running, pick next unscanned community and run it.
-  // After result lands (sidecarResults grows), re-eval; if complete set found, stop + toast.
-  useEffect(() => {
-    Object.entries(autoAltScans).forEach(([resId, scan]) => {
-      if (!scan.isRunning || scan.stopped) return;
-      const wf = alternativeWorkflowsRef.current[resId] ?? alternativeWorkflows[resId];
-      if (!wf?.scout) return;
-      const complete = bestAlternativeReplacementSet(wf);
-      if (complete) {
-        // success!
-        setAutoAltScans((prev) => ({ ...prev, [resId]: { ...scan, isRunning: false, foundComboIn: complete.community } }));
-        toast({ title: "Combo found via alternative!", description: `${complete.community} · ${complete.plan.join("+")}BR for ${fmtMoney(complete.totalCost)} — attaching buy-ins now.` });
-        updateAlternativeWorkflow(resId, { activeCommunity: null });
-        const reservation = rawReservationsRef.current.find((r) => r._id === resId);
-        if (reservation?.slots?.length) {
-          void attachAlternativeReplacementSet(reservation, complete)
-            .then(() => {
-              toast({
-                title: "Alternative buy-ins attached",
-                description: `${complete.picks.length} buy-in${complete.picks.length === 1 ? "" : "s"} attached from ${complete.community}.`,
-              });
-            })
-            .catch((error: any) => {
-              toast({
-                title: "Alternative attach failed",
-                description: error?.message ?? String(error),
-                variant: "destructive",
-              });
-            });
-        }
-        return;
-      }
-      const ordered = alternativeCommunitiesForSidecar(wf.scout!);
-      const next = ordered.find((c) => !wf.sidecarResults?.[c.community]);
-      if (!next) {
-        // exhausted
-        if (scan.isRunning) {
-          setAutoAltScans((prev) => ({ ...prev, [resId]: { ...scan, isRunning: false, stopped: true, scanned: ordered.map((c) => c.community) } }));
-          toast({ title: "No combo in 20min alternatives", description: `Scanned all ${ordered.length} nearby communities — none yielded a full replacement combo. Consider cancel.` , variant: "destructive" });
-        }
-        return;
-      }
-      if (wf.activeCommunity) return; // one running, wait
-      const reservation = rawReservationsRef.current.find((r) => r._id === resId);
-      if (!reservation?.slots?.length) return;
-      runAlternativeSidecarSearchRef.current(reservation, next.community);
-    });
-  }, [autoAltScans, alternativeWorkflows]);  // run func via ref; avoid re-trigger loops
-
-  const attachAlternativeReplacementSet = async (reservation: GuestyReservation, replacement: AlternativeReplacementSet) => {
-    const meta = reservationPropertyMeta.get(reservation._id);
-    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
-    if (!propertyId) throw new Error("No property selected for this booking.");
-    const propertyName = meta?.propertyName || selectedDisplayName || `Property ${propertyId}`;
-    const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
-    const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
-      throw new Error("Alternative attach needs valid check-in/check-out dates.");
-    }
-    const proximityMinutes = replacement.picks.length >= 2
-      ? candidateWalkMinutes(replacement.picks[0], replacement.picks[1])
-      : null;
-    const proximityNote = proximityMinutes !== null
-      ? ` · Proximity: selected units are ~${proximityMinutes} min walk apart by VRBO map coordinates.`
-      : "";
-
-    const usedSlots = new Set<number>();
-    const assignments = replacement.picks.map((pick) => {
-      const slotIndex = reservation.slots.findIndex((slot, index) =>
-        !usedSlots.has(index) && Math.round(slot.bedrooms) === Math.round(pick.bedrooms ?? slot.bedrooms),
-      );
-      if (slotIndex < 0) throw new Error(`No ${pick.bedrooms ?? "matching"}BR reservation slot available for ${pick.title}.`);
-      usedSlots.add(slotIndex);
-      return { slot: reservation.slots[slotIndex], pick };
-    });
-
-    for (const { slot } of assignments) {
-      if (!slot.buyIn?.id) continue;
-      await apiRequest("POST", `/api/bookings/detach-buy-in/${slot.buyIn.id}`).then((r) => r.json());
-    }
-
-    for (const { slot, pick } of assignments) {
-      const created = await apiRequest("POST", "/api/buy-ins", {
-        propertyId,
-        propertyName,
-        unitId: slot.unitId,
-        unitLabel: slot.unitLabel,
-        checkIn,
-        checkOut,
-        costPaid: pick.totalPrice.toFixed(2),
-        airbnbConfirmation: null,
-        airbnbListingUrl: pick.url,
-        groundFloorStatus: pick.groundFloorStatus ?? "unknown",
-        groundFloorEvidence: pick.groundFloorEvidence ?? null,
-        notes: `Attached from alternative community ${replacement.community} — ${pick.bedrooms ?? slot.bedrooms}BR ${pick.sourceLabel} — ${pick.title}.${proximityNote} Guest-facing draft/page intentionally omitted buy-in pricing.`,
-        status: "active",
-        ...(typeof pick.unitTypeConfidence === "number" ? {
-          unitTypeConfidence: Math.round(pick.unitTypeConfidence),
-          unitTypeConfidenceBreakdown: pick.unitTypeConfidenceBreakdown ?? null,
-        } : {}),
-      }).then((r) => r.json());
-      if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
-      await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
-        buyInId: created.id,
-      }).then((r) => r.json());
-    }
-
-    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", meta?.guestyListingId ?? selectedListingId] });
-    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-  };
-
-  const draftAlternativeGuestMessage = async (reservation: GuestyReservation) => {
-    const workflow = alternativeWorkflows[reservation._id];
-    const replacement = bestAlternativeReplacementSet(workflow);
-    if (!replacement) {
-      const need = alternativeReplacementNeedText(workflow);
-      toast({
-        title: "Need a complete alternative set",
-        description: need
-          ? `Run sidecar until one community has distinct candidates for ${need}.`
-          : "Run a sidecar search for one suggested community first.",
-        variant: "destructive",
-      });
-      return;
-    }
-    try {
-      const guestName = reservation.guest?.firstName ?? reservation.guest?.fullName ?? "there";
-      const checkIn = (reservation.checkInDateLocalized ?? reservation.checkIn ?? "").slice(0, 10);
-      const checkOut = (reservation.checkOutDateLocalized ?? reservation.checkOut ?? "").slice(0, 10);
-      const page = await apiRequest("POST", "/api/booking-alternatives", {
-        reservationId: reservation._id,
-        guestName,
-        checkIn,
-        checkOut,
-        alternatives: replacement.picks,
-      }).then((r) => r.json()) as { url: string };
-      const draft = await apiRequest("POST", `/api/bookings/${reservation._id}/alternative-message-draft`, {
-        guestName,
-        checkIn,
-        checkOut,
-        alternativeUrl: page.url,
-        alternatives: replacement.picks.map((candidate) => ({ ...candidate, totalPrice: null })),
-      }).then((r) => r.json()) as { subject: string; body: string };
-      updateAlternativeWorkflow(reservation._id, { pageUrl: page.url, draft });
-      await navigator.clipboard?.writeText(draft.body).catch(() => undefined);
-      toast({ title: "Guest alternative draft ready", description: "Draft copied to clipboard and saved below the scorecard." });
-      const shouldAttach = window.confirm(
-        `Attach ${replacement.picks.length} new buy-in${replacement.picks.length === 1 ? "" : "s"} from ${replacement.community} to this booking now?\n\nThis will replace any currently attached buy-ins for the matching unit slots.`,
-      );
-      if (shouldAttach) {
-        await attachAlternativeReplacementSet(reservation, replacement);
-        toast({
-          title: "Alternative buy-ins attached",
-          description: `${replacement.picks.length} buy-in${replacement.picks.length === 1 ? "" : "s"} attached from ${replacement.community}.`,
-        });
-      }
-    } catch (error: any) {
-      toast({ title: "Alternative draft failed", description: error?.message ?? String(error), variant: "destructive" });
-    }
-  };
-
-  const bulkQueueItemsByReservationId = useMemo(() => {
-    return new Map(bulkBuyInQueueItems.map((item) => [item.reservationId, item]));
-  }, [bulkBuyInQueueItems]);
-  const selectedBulkReservationCount = Object.values(bulkSelectedReservations).filter(Boolean).length;
-  const eligibleGlobalReservations = useMemo(() => (
-    reservations.filter((reservation) => {
-      const meta = reservationPropertyMeta.get(reservation._id);
-      return !!meta?.propertyId
-        && reservation.slotsTotal > 0
-        && reservation.slots.some((slot) => !slot.buyIn);
-    })
-  ), [reservationPropertyMeta, reservations]);
-  const selectedBulkEligibleReservations = useMemo(() => (
-    eligibleGlobalReservations.filter((reservation) => bulkSelectedReservations[reservation._id])
-  ), [bulkSelectedReservations, eligibleGlobalReservations]);
-  const setBulkQueueItem = (reservationId: string, patch: Partial<BulkBuyInQueueItem>) => {
-    setBulkBuyInQueueItems((prev) => prev.map((item) => (
-      item.reservationId === reservationId ? { ...item, ...patch } : item
-    )));
-  };
-  const logBulkBuyInQueueEvent = async (
-    item: BulkBuyInQueueItem,
-    level: "info" | "warn" | "error",
-    message: string,
-    meta?: Record<string, unknown>,
-  ) => {
-    try {
-      await apiRequest("POST", "/api/operations/bulk-buy-in-log", {
-        level,
-        message,
-        jobId: item.jobId,
-        reservationId: item.reservationId,
-        propertyId: item.propertyId,
-        listingId: item.listingId,
-        propertyName: item.propertyName,
-        guestName: item.guestName,
-        queuedFor: item.queuedFor,
-        status: item.status,
-        error: item.error,
-        meta,
-      });
-    } catch (error) {
-      console.warn("[bulk-buy-ins] failed to write server log", error);
-    }
-  };
-  const buildBulkQueueItem = (reservation: GuestyReservation, jobId: string): BulkBuyInQueueItem | null => {
-    const meta = reservationPropertyMeta.get(reservation._id);
     if (!meta?.propertyId) return null;
     const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
     return {
@@ -9227,18 +8039,6 @@ export default function Bookings() {
 	                          return (
 	                            <div className="space-y-2">
 	                              <BuyInCancellationAdviceCard advice={advice} />
-	                              {shouldShowAlternativeBuyInWorkflow(advice, { noCompleteCombo }) && (
-	                                <AlternativeBuyInWorkflowPanel
-	                                  workflow={alternativeWorkflows[r._id]}
-	                                  onScout={() => scoutAlternativeCommunities(r, advice)}
-	                                  onRunCommunity={(community) => runAlternativeSidecarSearch(r, community, { forceRefresh: true })}
-	                                  onMapFilterPhraseChange={(value) => updateAlternativeWorkflow(r._id, { mapFilterPhrase: value })}
-	                                  onDraftMessage={() => draftAlternativeGuestMessage(r)}
-	                                  autoScan={autoAltScans[r._id] ?? null}
-	                                  onStartAutoScan={() => startAutoAlternativeSidecarScan(r)}
-	                                  onStopAutoScan={() => stopAutoAlternativeSidecarScan(r._id)}
-	                                />
-	                              )}
 	                            </div>
 	                          );
 	                        })()}
@@ -9432,14 +8232,6 @@ export default function Bookings() {
                                 slot={slot}
                                 listingId={selectedListingId}
                                 enableGroundFloorRequirement={selectedHasBuyInConfig}
-                                alternativeWorkflow={alternativeWorkflows[r._id]}
-                                onScoutAlternatives={(advice, opts) => scoutAlternativeCommunities(r, advice, opts)}
-                                onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(r, community, { forceRefresh: true })}
-                                onMapFilterPhraseChange={(value) => updateAlternativeWorkflow(r._id, { mapFilterPhrase: value })}
-                                onDraftAlternativeMessage={() => draftAlternativeGuestMessage(r)}
-                                autoAltScan={autoAltScans[r._id] ?? null}
-                                onStartAutoAltScan={() => startAutoAlternativeSidecarScan(r)}
-                                onStopAutoAltScan={() => stopAutoAlternativeSidecarScan(r._id)}
                               />
                             </div>
                           )}
@@ -10122,14 +8914,6 @@ export default function Bookings() {
               slot={picker.slot}
               listingId={selectedListingId}
               enableGroundFloorRequirement={selectedHasBuyInConfig}
-              alternativeWorkflow={alternativeWorkflows[picker.reservation._id]}
-              onScoutAlternatives={(advice, opts) => scoutAlternativeCommunities(picker.reservation, advice, opts)}
-              onRunAlternativeCommunity={(community) => runAlternativeSidecarSearch(picker.reservation, community, { forceRefresh: true })}
-              onMapFilterPhraseChange={(value) => updateAlternativeWorkflow(picker.reservation._id, { mapFilterPhrase: value })}
-              onDraftAlternativeMessage={() => draftAlternativeGuestMessage(picker.reservation)}
-              autoAltScan={autoAltScans[picker.reservation._id] ?? null}
-              onStartAutoAltScan={() => startAutoAlternativeSidecarScan(picker.reservation)}
-              onStopAutoAltScan={() => stopAutoAlternativeSidecarScan(picker.reservation._id)}
             />
           )}
         </DialogContent>
@@ -10515,28 +9299,12 @@ function CandidateList({
   slot,
   listingId,
   enableGroundFloorRequirement = true,
-  alternativeWorkflow,
-  onScoutAlternatives,
-  onRunAlternativeCommunity,
-  onMapFilterPhraseChange,
-  onDraftAlternativeMessage,
-  autoAltScan,
-  onStartAutoAltScan,
-  onStopAutoAltScan,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
   listingId?: string | null;
   enableGroundFloorRequirement?: boolean;
-  alternativeWorkflow?: AlternativeWorkflowState;
-  onScoutAlternatives?: (advice: BuyInCancellationAdvice, opts?: { auto?: boolean }) => void;
-  onRunAlternativeCommunity?: (community: string) => void;
-  onMapFilterPhraseChange?: (value: string) => void;
-  onDraftAlternativeMessage?: () => void;
-  autoAltScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
-  onStartAutoAltScan?: () => void;
-  onStopAutoAltScan?: () => void;
 }) {
   // Existing-buy-ins picker was removed (was here historically): when
   // auto-fill creates buy-in records and the operator detaches them,
@@ -10556,14 +9324,6 @@ function CandidateList({
         slot={slot}
         listingId={listingId}
         enableGroundFloorRequirement={enableGroundFloorRequirement}
-        alternativeWorkflow={alternativeWorkflow}
-        onScoutAlternatives={onScoutAlternatives}
-        onRunAlternativeCommunity={onRunAlternativeCommunity}
-        onMapFilterPhraseChange={onMapFilterPhraseChange}
-        onDraftAlternativeMessage={onDraftAlternativeMessage}
-        autoAltScan={autoAltScan}
-        onStartAutoAltScan={onStartAutoAltScan}
-        onStopAutoAltScan={onStopAutoAltScan}
       />
     </div>
   );
@@ -11750,28 +10510,12 @@ function LiveSearchSection({
   slot,
   listingId,
   enableGroundFloorRequirement = true,
-  alternativeWorkflow,
-  onScoutAlternatives,
-  onRunAlternativeCommunity,
-  onMapFilterPhraseChange,
-  onDraftAlternativeMessage,
-  autoAltScan,
-  onStartAutoAltScan,
-  onStopAutoAltScan,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   slot: SlotInfo;
   listingId?: string | null;
   enableGroundFloorRequirement?: boolean;
-  alternativeWorkflow?: AlternativeWorkflowState;
-  onScoutAlternatives?: (advice: BuyInCancellationAdvice, opts?: { auto?: boolean }) => void;
-  onRunAlternativeCommunity?: (community: string) => void;
-  onMapFilterPhraseChange?: (value: string) => void;
-  onDraftAlternativeMessage?: () => void;
-  autoAltScan?: { isRunning: boolean; scanned: string[]; foundComboIn?: string | null; stopped?: boolean } | null;
-  onStartAutoAltScan?: () => void;
-  onStopAutoAltScan?: () => void;
 }) {
   const { toast } = useToast();
   const [recordTarget, setRecordTarget] = useState<LiveCandidate | null>(null);
@@ -11779,7 +10523,6 @@ function LiveSearchSection({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [confirmationOpen, setConfirmationOpen] = useState(false);
   const confirmationKeyRef = useRef<string>("");
-  const autoAlternativeScoutAfterSearchRef = useRef("");
   const [searchStartedAtMs, setSearchStartedAtMs] = useState(() => Date.now());
   const [searchEnabled, setSearchEnabled] = useState(() => !slot.buyIn);
   const [rerunUntriedOnly, setRerunUntriedOnly] = useState(false);
@@ -12027,43 +10770,6 @@ function LiveSearchSection({
     if (!searchDiagnostics?.generatedAt || !variationCommunity) return;
     void queryClient.invalidateQueries({ queryKey: variationQueryKey });
   }, [searchDiagnostics?.generatedAt, variationCommunity]);
-  // Must live before any conditional return — an earlier version placed this
-  // hook after the loading/error early returns, so React skipped it on the
-  // loading render and never reliably fired auto alternative scout on completion.
-  useEffect(() => {
-    if ((!data && !hardErrorDiagnostics) || isLoading || isFetching || isPlaceholderData || !onScoutAlternatives || !confirmationAudit) return;
-    if (alternativeWorkflow?.scout) return;
-    const searchCompletionKey = `${reservation._id}|${refreshNonce}|${searchDiagnostics?.generatedAt ?? dataUpdatedAt ?? ""}`;
-    if (autoAlternativeScoutAfterSearchRef.current === searchCompletionKey) return;
-    const attachableCount = countAttachableBuyInCandidates([confirmationAudit]);
-    if (!shouldAutoTriggerAlternativeScout(reservation, attachableCount)) return;
-    const emptySlots = reservation.slots.filter((slot) => !slot.buyIn).length;
-    const advice = buildBuyInCancellationAdvice({
-      reservation,
-      audits: [confirmationAudit],
-      proposedCost: null,
-      currentSlotId: slot.unitId,
-      noCompleteCombo: emptySlots > 1 || attachableCount === 0,
-      attachableVerifiedCount: attachableCount,
-    });
-    if (!shouldShowAlternativeBuyInWorkflow(advice, { noCompleteCombo: emptySlots > 1 || attachableCount === 0 })) return;
-    autoAlternativeScoutAfterSearchRef.current = searchCompletionKey;
-    onScoutAlternatives(advice, { auto: true });
-  }, [
-    data,
-    hardErrorDiagnostics,
-    isLoading,
-    isFetching,
-    isPlaceholderData,
-    onScoutAlternatives,
-    confirmationAudit,
-    alternativeWorkflow?.scout,
-    reservation,
-    slot.unitId,
-    refreshNonce,
-    searchDiagnostics?.generatedAt,
-    dataUpdatedAt,
-  ]);
 
   const attachedElsewhereKeys = useMemo(() => new Set(
     reservation.slots
@@ -12525,19 +11231,6 @@ function LiveSearchSection({
         </div>
       )}
 
-      <BuyInCancellationAdviceCard advice={singleSearchCancellationAdvice} />
-      {shouldShowAlternativeBuyInWorkflow(singleSearchCancellationAdvice, { noCompleteCombo: singleSearchNoBookableReplacement }) && onScoutAlternatives && (
-        <AlternativeBuyInWorkflowPanel
-          workflow={alternativeWorkflow}
-          onScout={() => onScoutAlternatives(singleSearchCancellationAdvice!)}
-          onRunCommunity={(community) => onRunAlternativeCommunity?.(community)}
-          onMapFilterPhraseChange={onMapFilterPhraseChange}
-          onDraftMessage={() => onDraftAlternativeMessage?.()}
-          autoScan={autoAltScan ?? null}
-          onStartAutoScan={onStartAutoAltScan}
-          onStopAutoScan={onStopAutoAltScan}
-        />
-      )}
 
       {/* Cheapest callout — gated server-side on verified=yes (real
           availability + real per-night rate confirmed for these dates).
