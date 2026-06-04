@@ -2112,8 +2112,23 @@ export const TOP_MARKET_SEEDS: TopMarketSeed[] = [
   { city: "Panama City Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 375, estimatedComboHigh: 750 },
   { city: "Santa Rosa Beach",    state: "Florida",        tag: "30A",        estimatedComboLow: 650, estimatedComboHigh: 1200 },
   { city: "Naples",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 500, estimatedComboHigh: 950 },
+  { city: "Marco Island",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 550, estimatedComboHigh: 1050 },
+  { city: "Siesta Key",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 500, estimatedComboHigh: 950 },
+  { city: "St. Pete Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 475, estimatedComboHigh: 900 },
+  { city: "Madeira Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 450, estimatedComboHigh: 850 },
+  { city: "Indian Rocks Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 425, estimatedComboHigh: 825 },
+  { city: "Miramar Beach",    state: "Florida",        tag: "30A",        estimatedComboLow: 600, estimatedComboHigh: 1150 },
   // Atlantic Florida + Southeast
   { city: "Clearwater Beach",    state: "Florida",        tag: "Gulf Coast", estimatedComboLow: 450, estimatedComboHigh: 850 },
+  { city: "Cocoa Beach",    state: "Florida",        tag: "Atlantic",   estimatedComboLow: 375, estimatedComboHigh: 750 },
+  { city: "Daytona Beach Shores",    state: "Florida",        tag: "Atlantic",   estimatedComboLow: 350, estimatedComboHigh: 700 },
+  { city: "St. Augustine Beach",    state: "Florida",        tag: "Atlantic",   estimatedComboLow: 425, estimatedComboHigh: 850 },
+  { city: "Hollywood Beach",    state: "Florida",        tag: "Atlantic",   estimatedComboLow: 425, estimatedComboHigh: 850 },
+  { city: "Key West",    state: "Florida",        tag: "Florida Keys", estimatedComboLow: 700, estimatedComboHigh: 1500 },
+  // Central Florida — resort condo/townhome inventory with 3BR+ options
+  { city: "Kissimmee",    state: "Florida",        tag: "Central Florida", estimatedComboLow: 325, estimatedComboHigh: 700 },
+  { city: "Davenport",    state: "Florida",        tag: "Central Florida", estimatedComboLow: 300, estimatedComboHigh: 650 },
+  { city: "Orlando",    state: "Florida",        tag: "Central Florida", estimatedComboLow: 375, estimatedComboHigh: 800 },
   { city: "Hilton Head",    state: "South Carolina", tag: "Atlantic",   estimatedComboLow: 500, estimatedComboHigh: 1000 },
   { city: "Myrtle Beach",    state: "South Carolina", tag: "Atlantic",   estimatedComboLow: 300, estimatedComboHigh: 650 },
   // Gulf Alabama
