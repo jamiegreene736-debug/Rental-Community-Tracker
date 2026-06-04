@@ -8,6 +8,7 @@ const {
   harvestRentCastSaleListings,
   isRentCastDiscoveryEnabled,
   passesRentCastBedroomFilter,
+  rentCastDiscoveryTuning,
   shouldRejectRentCastListing,
   stateToAbbrevForRentCast,
   streetRootFromRentCastAddress,
@@ -100,6 +101,13 @@ else delete process.env.RENTCAST_API_KEY;
 if (prevEnabled !== undefined) process.env.RENTCAST_DISCOVERY_ENABLED = prevEnabled;
 else delete process.env.RENTCAST_DISCOVERY_ENABLED;
 console.log("  ✓ enablement flag");
+
+const bounded = rentCastDiscoveryTuning("bounded");
+assert.equal(bounded.maxResolverLookups, 25);
+process.env.RENTCAST_RESOLVER_MAX_LOOKUPS = "12";
+assert.equal(rentCastDiscoveryTuning("bounded").maxResolverLookups, 12);
+delete process.env.RENTCAST_RESOLVER_MAX_LOOKUPS;
+console.log("  ✓ tuning env overrides");
 
 const empty = await harvestRentCastSaleListings({
   cities: ["Lihue"],

@@ -394,6 +394,11 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /rentCastDiscoveryTuning/,
+  "photo discovery must use shared RentCast tuning helper",
+);
+assert.match(
+  routesSource,
   /isBoundedDiscovery[\s\S]*c\.source === "zillow" \|\| c\.source === "realtor" \|\| c\.source === "redfin" \|\| c\.source === "homes"/,
   "bounded preflight must try all four portal scrapers in parallel stack",
 );

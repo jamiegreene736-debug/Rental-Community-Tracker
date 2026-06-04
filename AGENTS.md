@@ -1030,6 +1030,36 @@ established it so you can read the rationale in the commit message.
     incomplete. Pure inverse-filter would lose legitimate clean
     candidates.
 
+43. **RentCast is discovery-only for photo search — never a photo
+    source.** PRs #503–#505. `server/rentcast-discovery.ts` queries
+    RentCast `GET /v1/listings/sale` (active Condo/Townhouse by city +
+    bedrooms). RentCast does **not** ship listing photos or Zillow
+    URLs in its API response. Each hit is resolved to
+    `zillow.com/homedetails` and/or `realtor.com/realestateandhomes-detail`
+    URLs via SearchAPI Google (`resolveRentCastCandidatesToPortalUrls`),
+    then merged into the same candidate pool as Apify + Zillow
+    SearchAPI discovery. **Photos and bed/bath facts always come from
+    the existing portal scrape stack** (`scrapeListingPhotos` /
+    `scrapeListingPhotosDualSource` — Apify-first per Load-Bearing #5).
+
+    Stacked in parallel on:
+    - `POST /api/community/fetch-unit-photos`
+    - `POST /api/replacement/find-unit` (RentCast leg + existing Google queries)
+    - `POST /api/single-listing/find-clean-unit`
+
+    **Requires both** `RENTCAST_API_KEY` and `SEARCHAPI_API_KEY` for
+    the RentCast leg to add candidates (harvest alone is useless without
+    portal resolution). Disable with `RENTCAST_DISCOVERY_ENABLED=0`.
+    Tune on Railway without code changes:
+    `RENTCAST_LIMIT_PER_CITY`, `RENTCAST_RESOLVER_MAX_LOOKUPS`,
+    `RENTCAST_REQUEST_TIMEOUT_MS`, `RENTCAST_RESOLVER_CONCURRENCY`
+    (see `rentCastDiscoveryTuning()` and `docs/rentcast-photo-discovery.md`).
+
+    **Do NOT** call RentCast for photo bytes or bypass Apify/ScrapingBee
+    on RentCast IDs. **Do NOT** remove supplemental Realtor/Redfin/Homes
+    SearchAPI legs — RentCast expands address inventory, not replace
+    those portals.
+
 ### Inbox auto-reply
 
 24. **Auto-reply has a three-layer safety stack — input filter,
@@ -1185,6 +1215,7 @@ Examples:
 2026-05-04 · Jamie tested Fort Myers Beach in the single-listing wizard and Santa Maria Resort wasn't surfacing in the community list — followed up: "Also, when I click a resort, I should not need to enter a street address etc. I should just like select the say the bedroom count and click continue and then it automatically search Zillow for that resort and that bedroom count and find a unit with that bedroom count and then scan to make sure it's not on Aibnb,VRBO, and/or Booking.com. If it is listed on any of those sites please then find another unit." · ACCEPTED · Two-PR ship: (1) `researchCommunitiesForCity` got a `mode` param — single mode drops combinability filter, lifts world-knowledge cap 3→15, returns up to 20, runs on Sonnet, uses an expanded 5-query SearchAPI sweep, and includes per-market example-resort lists in the prompt as a recall anchor (Load-Bearing #36). (2) New `/api/single-listing/find-clean-unit` endpoint does Zillow discovery + scrape + bedroom-match filter + OTA qualifier per candidate, returning the first clean match with photos pre-loaded; the `runOtaQualifier` helper extracted from the original `/qualify` endpoint is shared between both paths. Wizard Step 1 replaced the operator-typed propertyName + streetAddress fields with a bedroom-count picker + "Find a clean {N}BR unit" button; Step 2 now displays the auto-discovered unit + qualifier with a "Try another unit" button (re-calls the endpoint with skipUrls). Manual-mode escape hatch preserved for resorts not on Zillow. (Load-Bearing #37.)
 2026-05-04 · Jamie reviewed the deployed Step 1 form ("4 fields: name + address + state + city") and asked to switch it to a discovery flow: "type a city → drop down list of cities → top 20 best vacation rental communities to choose from." Follow-up: "for now just keep it focused on Hawaii and Florida." · ACCEPTED · Step 1 of `add-single-listing.tsx` rewritten as: nationwide city autocomplete (new `/api/community/city-suggest-any` endpoint, Photon + state allowlist) → kicks off `/api/community/research` automatically on city pick → top-20 community cards → operator picks a community (or hits "enter manually") → fills the unit-specific street address. Picked community pre-fills `propertyName`. Hawaii + Florida scope lives in `ALLOWED_STATES` set in the new endpoint — see Load-Bearing #35. Combo flow's existing state-scoped city-suggest endpoint is untouched; only the new single-listing wizard uses the nationwide variant.
 2026-05-05 · Jamie reported Add Single Listing could not find clean units and suspected Apify was returning no results · ACCEPTED · Production debug showed the default Zillow search actor was a 404 (`epctex~zillow-scraper`) and the default Realtor actor was not rented (`epctex~realtor-scraper`). Defaults now use runnable actors (`igolaizola~zillow-scraper-ppe`, `dz_omar~realtor-scraper`) with actor-specific input shapes, and find-clean-unit now accepts a candidate only after scraped photos pass the Google Lens OTA check, restoring parity with the combo preflight photo methodology.
+2026-06-04 · Jamie asked to integrate RentCast API into photo-search discovery alongside Apify and Zillow · ACCEPTED · Four-PR ship (#503–#506): RentCast client, `fetch-unit-photos` 3-leg stack, find-unit + find-clean-unit wiring, AGENTS #43 + Railway tuning env vars. RentCast supplies addresses only; SearchAPI resolves to portal URLs; scrape stack unchanged.
 2026-04-29 · Jamie: "You are not running the browser session locally like I asked. You have to run the browser on my PC." After multi-PR investigation showed Vrbo's anti-bot fingerprints every Browserbase residential session even with persistent context + real-Chrome cookies (IP-level flag — "There is a robot on the same network as you"). Direct Chrome MCP test from operator's home IP returned 42 priced properties for the same query that Browserbase couldn't load past the bot wall. · ACCEPTED · New "VRBO local-Chrome sidecar" architecture: in-memory queue on Railway (`server/vrbo-sidecar-queue.ts`) bridges find-buy-in to a `/loop` worker running inside the operator's Claude Code session. find-buy-in calls `searchVrboViaSidecar()` as path 9 (parallel with the existing 8 paths, prioritized FIRST in the dedup chain when results return because it's the only path that beats the IP wall). When the worker is offline, the wallet budget (75s) expires and we gracefully fall back. Endpoints `POST /api/vrbo-sidecar/enqueue`, `GET /api/admin/vrbo-sidecar/next`, `POST /api/admin/vrbo-sidecar/result`, `GET /api/vrbo-sidecar/result/:id`. Worker is a /loop task in Claude Code that polls /next, drives Chrome MCP through Vrbo's search UI on the operator's actual browser, extracts priced cards, and POSTs the result. This is the "OpenClaw"-style local-agent pattern — Claude Code on the operator's Mac is the bridge between Railway and their real-IP browser.
 ```
 
@@ -1195,6 +1226,8 @@ Examples:
 - `server/routes.ts` — single big Express router. Zillow scrapers
   (`scrapeZillowViaApify` / `scrapeZillowViaScrapingBee`) live here,
   as do the photo-label + availability endpoints.
+- `server/rentcast-discovery.ts` — RentCast sale-listing harvest +
+  SearchAPI portal URL resolution for photo discovery (Load-Bearing #43).
 - `server/photo-pipeline.ts` — download → label → rename orchestration.
   `downloadAndPrioritize` is the entry point.
 - `server/photo-labeler.ts` — Claude Haiku vision classifier. One
