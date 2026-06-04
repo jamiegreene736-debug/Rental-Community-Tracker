@@ -3053,10 +3053,12 @@ assert.ok(
 );
 assert.ok(
   bookingsSource.includes("community: scoutRow?.community || community") &&
+    bookingsSource.includes("const replacementBedrooms = (workflow?.scout?.replacementPlans ?? [])") &&
+    bookingsSource.includes("Math.min(...replacementBedrooms)") &&
     bookingsSource.includes("if (communitySearchTerm)") &&
     bookingsSource.includes('params.set("searchTerm", communitySearchTerm)') &&
     !bookingsSource.includes("communitySearchTerm !=="),
-  "alternative sidecar find-buy-in calls should always send the OTA map search text separately from canonical community",
+  "alternative sidecar find-buy-in calls should search the city with the smallest needed bedroom filter and keep OTA map text separate from canonical community",
 );
 assert.ok(
   bookingsSource.includes('params.set("mapCenterLat"') && bookingsSource.includes('params.set("mapCenterLng"'),

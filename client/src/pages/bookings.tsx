@@ -4598,13 +4598,20 @@ export default function Bookings() {
     }
     const meta = reservationPropertyMeta.get(resId);
     const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
-    const bedrooms = resForData.slots.find((slot) => !slot.buyIn)?.bedrooms ?? resForData.slots[0]?.bedrooms;
     const checkIn = (resForData.checkInDateLocalized ?? resForData.checkIn ?? "").slice(0, 10);
     const checkOut = (resForData.checkOutDateLocalized ?? resForData.checkOut ?? "").slice(0, 10);
-    if (!propertyId || !bedrooms || !checkIn || !checkOut) return;
+    const fallbackBedrooms = resForData.slots.find((slot) => !slot.buyIn)?.bedrooms ?? resForData.slots[0]?.bedrooms;
+    if (!propertyId || !fallbackBedrooms || !checkIn || !checkOut) return;
     updateAlternativeWorkflow(resId, { activeCommunity: community });
     try {
       const workflow = alternativeWorkflowsRef.current[resId] ?? alternativeWorkflows[resId];
+      const replacementBedrooms = (workflow?.scout?.replacementPlans ?? [])
+        .flat()
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0);
+      const bedrooms = replacementBedrooms.length > 0
+        ? Math.min(...replacementBedrooms)
+        : fallbackBedrooms;
       const scoutedRows = [
         ...(workflow?.scout?.scouted ?? []),
         ...(workflow?.scout?.results ?? []),
