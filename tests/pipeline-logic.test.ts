@@ -429,8 +429,18 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /find-clean-unit[\s\S]*harvestApifyPhotoDiscoveryBatch[\s\S]*runSearchApiDiscovery/,
-  "find-clean-unit must stack Apify and SearchAPI discovery in parallel",
+  /find-clean-unit[\s\S]*runApifyDiscovery[\s\S]*runZillowSearchApiDiscovery[\s\S]*runRentCastDiscovery[\s\S]*Promise\.all/,
+  "find-clean-unit must stack Apify, Zillow SearchAPI, and RentCast discovery in parallel",
+);
+assert.match(
+  routesSource,
+  /find-unit[\s\S]*runFindUnitStackedRentCastDiscovery[\s\S]*harvestRentCastSaleListings/,
+  "find-unit must run RentCast discovery in parallel with Apify and SearchAPI",
+);
+assert.match(
+  routesSource,
+  /find-unit[\s\S]*resolveRentCastCandidatesToPortalUrls/,
+  "find-unit must resolve RentCast addresses to portal URLs",
 );
 assert.match(
   routesSource,
