@@ -1841,6 +1841,26 @@ assert.ok(
   "replacement discovery must run Apify when bedroom-scoped pool is still thin",
 );
 assert.ok(
+  routeSource.includes("Street-root expansion: roots="),
+  "replacement discovery must run second-wave Google queries scoped to resort street roots",
+);
+assert.ok(
+  routeSource.includes("harvestZillowBuildingPageUrls"),
+  "replacement discovery must harvest homedetails URLs from Zillow building pages",
+);
+assert.ok(
+  routeSource.includes("zillowStreetSearchUrl"),
+  "replacement Apify supplement must support address-specific Zillow search URLs",
+);
+assert.ok(
+  routeSource.includes("extractListingUrlsFromApifyItems"),
+  "replacement Apify supplement must filter dataset items by minimum bedroom count",
+);
+assert.ok(
+  routeSource.includes("zillowBuildingUrl"),
+  "community address rules may pin a Zillow building page for deep unit discovery",
+);
+assert.ok(
   routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
   "replacement search must reserve a dedicated candidate-check budget after discovery",
 );

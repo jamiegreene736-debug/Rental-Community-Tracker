@@ -4,6 +4,8 @@ export type CommunityAddressRule = {
   city: string;
   cityAliases?: string[];
   state: string;
+  /** Optional Zillow building (/b/...) page listing many in-resort units. */
+  zillowBuildingUrl?: string;
 };
 
 export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
