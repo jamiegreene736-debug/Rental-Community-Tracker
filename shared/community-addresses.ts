@@ -6,6 +6,8 @@ export type CommunityAddressRule = {
   state: string;
   /** Optional Zillow building (/b/...) page listing many in-resort units. */
   zillowBuildingUrl?: string;
+  /** Alphanumeric condo unit labels for targeted Google discovery (e.g. C1, O1). */
+  discoveryUnitLabels?: string[];
 };
 
 export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
@@ -24,7 +26,14 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Waikiki Banyan", "Aston at the Waikiki Banyan"], street: "201 Ohua Ave", city: "Honolulu", state: "HI" },
   { names: ["Waikiki Sunset", "Aston Waikiki Sunset"], street: "229 Paoakalani Ave", city: "Honolulu", state: "HI" },
   { names: ["Island Colony", "Island Colony Waikiki"], street: "445 Seaside Ave", city: "Honolulu", state: "HI" },
-  { names: ["Waikoloa Beach Villas", "Waikoloa Villas", "Beach Villas at Waikoloa Beach Resort"], street: "69-180 Waikoloa Beach Dr", city: "Waikoloa", cityAliases: ["Mauna Kea"], state: "HI" },
+  {
+    names: ["Waikoloa Beach Villas", "Waikoloa Villas", "Beach Villas at Waikoloa Beach Resort"],
+    street: "69-180 Waikoloa Beach Dr",
+    city: "Waikoloa",
+    cityAliases: ["Mauna Kea"],
+    state: "HI",
+    discoveryUnitLabels: ["C1", "O1", "P1", "F1", "C4", "I4", "C23", "P33", "M23", "L23", "G33", "J2"],
+  },
   { names: ["Fairway Villas Waikoloa", "Fairway Villas at Waikoloa", "Waikoloa Fairway Villas", "Fairway Villas Waikoloa Beach Resort"], street: "69-200 Pohakulana Pl", city: "Waikoloa", cityAliases: ["Waikoloa Beach Resort", "Mauna Kea"], state: "HI" },
   { names: ["Halii Kai", "Hali'i Kai", "Haliʻi Kai", "Halii Kai at Waikoloa", "Hali'i Kai at Waikoloa", "Haliʻi Kai at Waikoloa", "Castle Halii Kai at Waikoloa", "Castle Haliʻi Kai at Waikoloa"], street: "69-1029 Nawahine Pl", city: "Waikoloa", cityAliases: ["Waikoloa Beach Resort", "Mauna Kea"], state: "HI" },
   { names: ["Mauna Lani Point", "Mauna Lani Point Condominium", "Mauna Lani"], street: "68-1050 Mauna Lani Point Dr", city: "Kamuela", cityAliases: ["Waikoloa", "Puako", "Mauna Lani", "Mauna Kea", "Waimea"], state: "HI" },
@@ -248,4 +257,34 @@ export function discoveryCommunityNameAliases(name: string | null | undefined): 
   const rule = communityAddressRuleForName(base);
   for (const alt of rule?.names ?? []) aliases.add(alt);
   return Array.from(aliases).filter(Boolean);
+}
+
+/** Targeted Google queries for resorts with alphanumeric unit IDs (e.g. Waikoloa C1). */
+export function discoveryUnitLabelSearchQueries(input: {
+  communityName?: string | null;
+  street?: string | null;
+  city?: string | null;
+  requiredBedrooms?: number | null;
+  maxLabels?: number;
+}): string[] {
+  const rule = communityAddressRuleForName(input.communityName);
+  const labels = rule?.discoveryUnitLabels ?? [];
+  if (labels.length === 0) return [];
+  const street = String(input.street ?? rule?.street ?? "").trim();
+  if (!street) return [];
+  const city = String(input.city ?? rule?.city ?? "").trim();
+  const cap = Math.max(1, Math.min(input.maxLabels ?? 12, labels.length));
+  const bedroomSuffix = input.requiredBedrooms ? ` "${input.requiredBedrooms} bedroom"` : "";
+  const queries: string[] = [];
+  for (const label of labels.slice(0, cap)) {
+    const unitTerm = `"unit ${label}"`;
+    queries.push(
+      `site:redfin.com "${street}" ${unitTerm}${bedroomSuffix}`.trim(),
+      `site:zillow.com/homedetails "${street}" "${label}"${bedroomSuffix}`.trim(),
+    );
+    if (city) {
+      queries.push(`site:realtor.com "${street}" ${unitTerm} "${city}"${bedroomSuffix}`.trim());
+    }
+  }
+  return queries;
 }

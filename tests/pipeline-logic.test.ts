@@ -1817,12 +1817,12 @@ assert.ok(
   "replacement search should use most of Railway's request window before giving up",
 );
 assert.ok(
-  routeSource.includes("const DISCOVERY_BUDGET_MS = expandedSearch ? 70_000 : 60_000"),
+  routeSource.includes("const DISCOVERY_BUDGET_MS = expandedSearch ? 75_000 : 65_000"),
   "replacement discovery must cap SearchAPI/Apify time so candidate checks keep budget",
 );
 assert.ok(
-  routeSource.includes("const DISCOVERY_CANDIDATE_TARGET = expandedSearch ? 28 : 20"),
-  "replacement discovery must stop once enough candidates are queued for checking",
+  routeSource.includes("const DISCOVERY_CANDIDATE_TARGET = (expandedSearch && requiredBedroomCount)"),
+  "replacement discovery must stop once enough qualifying bedroom candidates are queued for checking",
 );
 assert.ok(
   routeSource.includes("const DISCOVERY_BEDROOM_EXPLICIT_TARGET = expandedSearch ? 8 : 5"),
@@ -1859,6 +1859,22 @@ assert.ok(
 assert.ok(
   routeSource.includes("zillowBuildingUrl"),
   "community address rules may pin a Zillow building page for deep unit discovery",
+);
+assert.ok(
+  routeSource.includes("discoveryUnitLabelSearchQueries"),
+  "replacement discovery must run unit-label Google queries for alphanumeric condo resorts",
+);
+assert.ok(
+  routeSource.includes("Apify supplement started in parallel with Google discovery"),
+  "replacement discovery must start Apify in parallel with Google so bedroom pools are not starved",
+);
+assert.ok(
+  routeSource.includes("site:redfin.com/inurl:"),
+  "replacement discovery must use Redfin inurl queries for Hawaii hyphenated street slugs",
+);
+assert.ok(
+  routeSource.includes("runFindUnitApifySupplement"),
+  "replacement discovery must centralize Apify supplement in one helper invoked parallel and late",
 );
 assert.ok(
   routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
