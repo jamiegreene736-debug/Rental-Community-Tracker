@@ -21,7 +21,9 @@ Optional: `RENTCAST_DISCOVERY_ENABLED=0` turns off the RentCast leg only.
 3. **Single-listing wizard** — `POST /api/single-listing/find-clean-unit`
 
 Each runs **in parallel**: Apify search, Zillow `site:` SearchAPI, RentCast
-harvest + resolve, plus supplemental Realtor/Redfin/Homes where applicable.
+harvest + resolve, **RealtyAPI** community Realtor search (see
+`docs/realtyapi-photo-discovery.md`), plus supplemental Realtor/Redfin/Homes
+where applicable.
 
 ## Log lines to verify after deploy
 

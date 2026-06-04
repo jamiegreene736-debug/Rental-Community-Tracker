@@ -1060,6 +1060,24 @@ established it so you can read the rationale in the commit message.
     SearchAPI legs — RentCast expands address inventory, not replace
     those portals.
 
+44. **RealtyAPI is discovery-only for community Realtor inventory — never
+    the final photo source.** `server/realtyapi-discovery.ts` paginates
+    RealtyAPI `GET /search/bylocation` using a community-first location plan
+    (name → canonical street → ZIP → discovery cities), with
+    `propertyType=Condo,Townhome`, `hasPhotos=true`, and optional bedroom
+    filters. Each hit already includes a `realtor.com/realestateandhomes-detail`
+    URL, so this leg **does not** spend SearchAPI credits on address→URL
+    resolution (unlike RentCast #43).
+
+    Stacked in parallel on the same three surfaces as RentCast:
+    `fetch-unit-photos`, `find-unit`, `find-clean-unit`. Disable with
+    `REALTYAPI_DISCOVERY_ENABLED=0`. Requires `REALTYAPI_API_KEY` only
+    (no SearchAPI dependency for this leg).
+
+    **Do NOT** skip `scrapeListingPhotos` because search results include
+    thumbnail URLs. **Do NOT** remove Apify/RentCast/Google legs — RealtyAPI
+    is the primary Realtor URL harvester, not the only discovery source.
+
 ### Inbox auto-reply
 
 24. **Auto-reply has a three-layer safety stack — input filter,
