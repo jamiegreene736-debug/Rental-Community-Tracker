@@ -12628,9 +12628,18 @@ function VrboGuestPageDialog({
   const { toast } = useToast();
   const [vrboUrls, setVrboUrls] = useState("");
   const [pageTitle, setPageTitle] = useState(propertyName);
+  const [walkMinutes, setWalkMinutes] = useState("");
   const [notes, setNotes] = useState("");
+  const [createdPage, setCreatedPage] = useState<{
+    url: string;
+    expiresAt?: string;
+    guestMessage: string;
+    alternatives?: Array<{ title: string; photoCount: number; photoSource: string; descriptionGeneratedBy: string }>;
+  } | null>(null);
+  const [guestMessage, setGuestMessage] = useState("");
   const parsedUrls = useMemo(() => parseUrlList(vrboUrls).filter((url) => /(?:^|\.)vrbo\.com$/i.test(new URL(url).hostname)), [vrboUrls]);
-  const canCreate = parsedUrls.length > 0;
+  const parsedWalkMinutes = Number(walkMinutes);
+  const canCreate = parsedUrls.length > 0 && Number.isFinite(parsedWalkMinutes) && parsedWalkMinutes > 0;
 
   const createPage = useMutation({
     mutationFn: async () => {
@@ -12641,17 +12650,21 @@ function VrboGuestPageDialog({
         checkOut: checkOutOf(reservation),
         propertyName: pageTitle.trim() || propertyName,
         urls: parsedUrls,
+        walkMinutes: parsedWalkMinutes,
         notes,
       }).then((r) => r.json());
       if (!response?.url) throw new Error(response?.message || response?.error || "Guest page create failed");
       return response as {
         url: string;
         expiresAt?: string;
+        guestMessage: string;
         alternatives?: Array<{ title: string; photoCount: number; photoSource: string; descriptionGeneratedBy: string }>;
       };
     },
     onSuccess: async (data) => {
       const totalPhotos = (data.alternatives ?? []).reduce((sum, item) => sum + (item.photoCount ?? 0), 0);
+      setCreatedPage(data);
+      setGuestMessage(data.guestMessage || "");
       try {
         await navigator.clipboard?.writeText(data.url);
         toast({ title: "Guest page ready", description: `Link copied. ${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} pulled through.` });
@@ -12659,9 +12672,38 @@ function VrboGuestPageDialog({
         toast({ title: "Guest page ready", description: `${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} pulled through. Copy the URL from the new tab.` });
       }
       window.open(data.url, "_blank", "noopener,noreferrer");
-      onClose();
     },
     onError: (e: any) => toast({ title: "Guest page failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
+  const copyGuestMessage = async () => {
+    if (!guestMessage.trim()) return;
+    try {
+      await navigator.clipboard?.writeText(guestMessage);
+      toast({ title: "Message copied" });
+    } catch {
+      toast({ title: "Copy failed", description: "Select and copy the message manually.", variant: "destructive" });
+    }
+  };
+
+  const sendGuestMessage = useMutation({
+    mutationFn: async () => {
+      if (!createdPage?.url) throw new Error("Create the guest page first");
+      const response = await apiRequest("POST", "/api/booking-alternatives/send-guest-message", {
+        reservationId: reservation._id,
+        body: guestMessage,
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body?.ok !== true) {
+        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${response.status}`);
+      }
+      return body as { ok: true; conversationId: string };
+    },
+    onSuccess: () => {
+      toast({ title: "Guest message sent", description: "Sent through the Guesty conversation." });
+      onClose();
+    },
+    onError: (e: any) => toast({ title: "Message send failed", description: e?.message ?? String(e), variant: "destructive" }),
   });
 
   return (
@@ -12703,6 +12745,19 @@ function VrboGuestPageDialog({
             </p>
           </div>
           <div>
+            <Label htmlFor="vrboGuestPageWalkMinutes" className="text-xs">Minutes walking between properties</Label>
+            <Input
+              id="vrboGuestPageWalkMinutes"
+              type="number"
+              min="1"
+              step="1"
+              value={walkMinutes}
+              onChange={(e) => setWalkMinutes(e.target.value)}
+              placeholder="5"
+              data-testid="input-vrbo-guest-page-walk-minutes"
+            />
+          </div>
+          <div>
             <Label htmlFor="vrboGuestPageNotes" className="text-xs">Optional description guidance</Label>
             <Textarea
               id="vrboGuestPageNotes"
@@ -12713,6 +12768,51 @@ function VrboGuestPageDialog({
               data-testid="input-vrbo-guest-page-notes"
             />
           </div>
+          {createdPage && (
+            <div className="space-y-2 rounded border bg-muted/30 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium">Guest page and message ready</p>
+                  <a className="block truncate text-xs text-primary underline" href={createdPage.url} target="_blank" rel="noreferrer">
+                    {createdPage.url}
+                  </a>
+                </div>
+                <Button size="sm" variant="outline" onClick={() => window.open(createdPage.url, "_blank", "noopener,noreferrer")}>
+                  <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                  Open
+                </Button>
+              </div>
+              <div>
+                <Label htmlFor="vrboGuestMessage" className="text-xs">Guest inbox message</Label>
+                <Textarea
+                  id="vrboGuestMessage"
+                  rows={11}
+                  value={guestMessage}
+                  onChange={(e) => setGuestMessage(e.target.value)}
+                  data-testid="input-vrbo-guest-message"
+                />
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button type="button" variant="outline" onClick={copyGuestMessage} disabled={!guestMessage.trim()}>
+                  <Copy className="mr-1 h-3.5 w-3.5" />
+                  Copy message
+                </Button>
+                <Button type="button" onClick={() => sendGuestMessage.mutate()} disabled={!guestMessage.trim() || sendGuestMessage.isPending}>
+                  {sendGuestMessage.isPending ? (
+                    <>
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                      Sending...
+                    </>
+                  ) : (
+                    <>
+                      <Mail className="mr-1 h-3.5 w-3.5" />
+                      Send through inbox
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>

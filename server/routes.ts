@@ -7580,6 +7580,65 @@ Requirements:
     }
   };
 
+  const firstNameForGuestMessage = (name: unknown): string => {
+    const cleaned = normalizeAlternativeText(name, 80);
+    return cleaned.split(/\s+/).filter(Boolean)[0] ?? "";
+  };
+
+  const buildAlternativeGuestInboxMessage = (args: {
+    guestName?: string;
+    alternativeUrl: string;
+    walkMinutes?: number | null;
+  }): string => {
+    const firstName = firstNameForGuestMessage(args.guestName);
+    const greeting = firstName ? `Aloha ${firstName},` : "Aloha,";
+    const walkMinutes = Number(args.walkMinutes);
+    const walkPhrase = Number.isFinite(walkMinutes) && walkMinutes > 0
+      ? `The properties in this combination are about a ${Math.round(walkMinutes)}-minute walk from each other.`
+      : "The properties in this combination are close to each other.";
+
+    return [
+      greeting,
+      "",
+      "I'm so sorry, but there was an issue with your current unit. We do have another combination available that I think could work well for your stay.",
+      "",
+      walkPhrase,
+      "",
+      `You can review the alternative option here: ${args.alternativeUrl}`,
+      "",
+      "If this is okay with you, I will send your arrival details through within the next 24-48 hours. I sincerely apologize for the inconvenience.",
+      "",
+      "You can also view our website here: https://www.magicalislandvacations.com",
+      "",
+      "If you do not want this alternative, I completely understand. I will issue a full refund today and send you the receipt.",
+      "",
+      "Mahalo,",
+      "John Carpenter",
+      "Magical Island Vacations",
+    ].join("\n");
+  };
+
+  const cleanGuestyConversationModule = (mod: any): Record<string, unknown> => {
+    const clean: Record<string, unknown> = {};
+    if (mod && typeof mod === "object") {
+      for (const key of ["type", "channelId", "platform", "integrationId"] as const) {
+        if (mod[key] !== undefined) clean[key] = mod[key];
+      }
+    }
+    if (!clean.type) clean.type = "email";
+    return clean;
+  };
+
+  const findGuestyConversationForReservation = async (reservationId: string): Promise<{ id: string; module: Record<string, unknown> } | null> => {
+    const data = await guestyRequest("GET", `/communication/conversations?reservationId=${encodeURIComponent(reservationId)}&limit=1&fields=`) as any;
+    const rows = unwrapGuestyList(data, ["conversations", "results", "data"]);
+    const conversation = rows[0];
+    const id = conversation?._id ?? conversation?.id;
+    if (!id) return null;
+    const module = cleanGuestyConversationModule(conversation?.module ?? conversation?.lastPost?.module ?? conversation?.meta?.lastPost?.module);
+    return { id: String(id), module };
+  };
+
   app.get("/alternatives/:token", async (req, res) => {
     try {
       const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -7719,7 +7778,17 @@ Requirements:
         expiresAt,
       };
       await fs.promises.writeFile(path.join(dir, `${token}.json`), JSON.stringify(payload, null, 2));
-      return res.json({ url: `${agreementBaseUrl(req)}/alternatives/${token}`, expiresAt, alternatives: hydratedAlternatives });
+      const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
+      return res.json({
+        url,
+        expiresAt,
+        alternatives: hydratedAlternatives,
+        guestMessage: buildAlternativeGuestInboxMessage({
+          guestName: stay.guestName,
+          alternativeUrl: url,
+          walkMinutes: Number(req.body?.walkMinutes) || null,
+        }),
+      });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to create alternative page", message: err?.message ?? String(err) });
     }
@@ -7781,9 +7850,15 @@ Requirements:
         expiresAt,
       };
       await fs.promises.writeFile(path.join(dir, `${token}.json`), JSON.stringify(payload, null, 2));
+      const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
       return res.json({
-        url: `${agreementBaseUrl(req)}/alternatives/${token}`,
+        url,
         expiresAt,
+        guestMessage: buildAlternativeGuestInboxMessage({
+          guestName: stay.guestName,
+          alternativeUrl: url,
+          walkMinutes: Number(req.body?.walkMinutes) || null,
+        }),
         alternatives: hydratedAlternatives.map((item, index) => ({
           title: item.title,
           photoCount: item.photos.length,
@@ -7793,6 +7868,26 @@ Requirements:
       });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to create VRBO alternative page", message: err?.message ?? String(err) });
+    }
+  });
+
+  app.post("/api/booking-alternatives/send-guest-message", async (req, res) => {
+    try {
+      const reservationId = normalizeAlternativeText(req.body?.reservationId, 120);
+      const body = sanitizeForChatText(String(req.body?.body ?? ""), { maxLength: 4_000 }).trim();
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      if (!body) return res.status(400).json({ error: "message body required" });
+
+      const conversation = await findGuestyConversationForReservation(reservationId);
+      if (!conversation) return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
+
+      await guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversation.id)}/send-message`, {
+        body,
+        module: conversation.module,
+      });
+      return res.json({ ok: true, conversationId: conversation.id });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to send guest message", message: err?.message ?? String(err) });
     }
   });
 
