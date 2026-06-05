@@ -3167,8 +3167,13 @@ assert.ok(
     vrboWorkerSource.includes("graphql settled") &&
     vrboWorkerSource.includes("post-map-view") &&
     vrboWorkerSource.includes("createVrboGraphqlCollector") &&
+    vrboWorkerSource.includes("paginateVrboGraphqlInventory") &&
+    vrboWorkerSource.includes("replayNextGraphqlPage") &&
+    vrboWorkerSource.includes("extractVrboGraphqlPaginationMeta") &&
+    vrboWorkerSource.includes("clickVrboResultsNextPage") &&
+    vrboWorkerSource.includes("hasNextPage=false") &&
     routesSource.includes("resort destination dropdown, dates, and bedroom export"),
-  "VRBO resort dropdown search should merge GraphQL propertySearchListings with scroll-harvested DOM cards for full export",
+  "VRBO resort dropdown search should paginate GraphQL inventory via cursor replay with UI Next fallback, then merge DOM harvest",
 );
 assert.ok(
   vrboWorkerSource.includes("finalHarvestTotal") &&
