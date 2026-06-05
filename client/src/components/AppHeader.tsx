@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarSearch, Home, ListTodo, MessageSquare, PhoneMissed } from "lucide-react";
+import { CalendarSearch, Home, ListTodo, LogIn, LogOut, MessageSquare, PhoneMissed, UserRound } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { usePortalSession } from "@/lib/auth";
 
@@ -133,6 +133,40 @@ export default function AppHeader() {
                 <CalendarSearch className="h-4 w-4 text-[hsl(var(--brand-orange))]" />
                 <span className="hidden md:inline">Operations</span>
               </Link>
+            )}
+            <span className="mx-0.5 hidden h-6 w-px bg-[hsl(var(--brand-blue)/0.14)] sm:block" aria-hidden="true" />
+            {session?.authenticated ? (
+              <div className="flex items-center gap-1">
+                <span
+                  className="hidden h-10 items-center gap-2 rounded-lg border border-[hsl(var(--brand-blue)/0.14)] bg-background/80 px-3 text-sm font-medium text-muted-foreground md:inline-flex"
+                  title={`Signed in as ${session.username}`}
+                  data-testid="header-current-user"
+                >
+                  <UserRound className="h-4 w-4 text-[hsl(var(--brand-blue))]" />
+                  <span className="max-w-24 truncate capitalize">{session.username}</span>
+                </span>
+                <form method="POST" action="/logout">
+                  <button
+                    type="submit"
+                    className="inline-flex h-10 items-center gap-2 rounded-lg border border-transparent px-2 text-sm font-medium text-muted-foreground transition-colors hover:border-[hsl(var(--brand-blue)/0.18)] hover:bg-background hover:text-foreground sm:px-3"
+                    aria-label="Log out"
+                    title="Log out"
+                    data-testid="button-header-logout"
+                  >
+                    <LogOut className="h-4 w-4 text-[hsl(var(--brand-blue))]" />
+                    <span className="hidden lg:inline">Log out</span>
+                  </button>
+                </form>
+              </div>
+            ) : (
+              <a
+                href={`/login?next=${encodeURIComponent(location || "/")}`}
+                className="inline-flex h-10 items-center gap-2 rounded-lg border border-transparent px-2 text-sm font-medium text-muted-foreground transition-colors hover:border-[hsl(var(--brand-blue)/0.18)] hover:bg-background hover:text-foreground sm:px-3"
+                data-testid="link-header-login"
+              >
+                <LogIn className="h-4 w-4 text-[hsl(var(--brand-blue))]" />
+                <span className="hidden lg:inline">Log in</span>
+              </a>
             )}
           </nav>
         </div>
