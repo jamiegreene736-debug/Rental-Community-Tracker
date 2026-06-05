@@ -5602,7 +5602,22 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   // future callers can ask for different windows.
   const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
 
-  const result = await page.evaluate((args) => {
+  // === Full results harvest for city-wide / broad VRBO searches (e.g. 157 properties) ===
+  // Initial render typically only shows the first ~16 cards. We repeatedly scroll the
+  // viewport to trigger lazy-load / next-batch GraphQL + DOM updates, re-extracting
+  // unique cards by URL until the set stabilizes (no new for 2 passes) or cap.
+  // This is the user-visible "drive like a user" approach; also logs detected "X of Y"
+  // totals from the page for operator visibility. Stops early on small resort results.
+  const MAX_HARVEST = 300;
+  const cardsByUrl = new Map();
+  let harvestPasses = 0;
+  const MAX_PASSES = 28;
+  let stable = 0;
+  let lastSize = 0;
+  let detectedTotal = 0;
+  let lastSel = '';
+
+  const doExtract = async () => page.evaluate((args) => {
     const { expectedNights } = args;
 
     // Card selector with fallback chain. Vrbo's data-stid attribute
@@ -5715,22 +5730,81 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
         priceBasis,
       });
     }
-    return { out, drops, totalSeen: cardEls.length, selectorSource, firstCardSample };
+
+    // Detect "1-16 of 157 Properties" (or similar) totals from the results page text.
+    // Used for logging so operators see when we truncated vs full city set.
+    const bodyText = (document.body?.innerText || document.body?.textContent || '').replace(/\s+/g, ' ');
+    let detectedTotal = 0;
+    let m = bodyText.match(/(\d{1,3}(?:,\d{3})?)\s*(?:–|-|of)\s*(\d{1,3}(?:,\d{3})?)\s*(?:properties?|results?|listings?|vacation rentals?)/i);
+    if (m) detectedTotal = parseInt((m[2] || '').replace(/,/g, ''), 10) || 0;
+    if (!detectedTotal) {
+      m = bodyText.match(/(\d{2,4})\s+(?:properties?|results?|listings?)\b/i);
+      if (m) detectedTotal = parseInt(m[1].replace(/,/g, ''), 10) || 0;
+    }
+    return { out, drops, totalSeen: cardEls.length, selectorSource, firstCardSample, detectedTotal, bodySample: bodyText.slice(180, 420) };
   }, { expectedNights });
 
-  const cards = result.out;
+  // Initial extract (after settle from caller)
+  let batch = await doExtract();
+  for (const c of batch.out || []) {
+    if (c?.url && !cardsByUrl.has(c.url)) cardsByUrl.set(c.url, c);
+  }
+  lastSel = `${batch.totalSeen}/${batch.selectorSource}`;
+  detectedTotal = batch.detectedTotal || 0;
+  if (detectedTotal) log(`vrbo_search ${id}: page text reports ≈${detectedTotal} total results`);
+  log(
+    `vrbo_search ${id}: ${cardsByUrl.size} cards (initial; sel=${lastSel}) ` +
+    `[detectedTotal≈${detectedTotal || '?'}]`,
+  );
+  if (cardsByUrl.size === 0 && batch.firstCardSample) {
+    log(`vrbo_search ${id}: empty-result diagnostic — first card title="${batch.firstCardSample.title}" path="${batch.firstCardSample.propertyPath}" br=${batch.firstCardSample.bedroomsExtracted} text="${batch.firstCardSample.textExcerpt}"`);
+  }
+
+  // Scroll + re-extract loop to load the rest (city searches, recommended sort, etc.)
+  while (harvestPasses < MAX_PASSES && cardsByUrl.size < MAX_HARVEST) {
+    await page.evaluate(() => {
+      window.scrollBy({ top: Math.round(window.innerHeight * 0.82), left: 0, behavior: 'instant' });
+    }).catch(() => {});
+    await page.waitForTimeout(700 + Math.random() * 550);
+    // Allow lazy DOM/XHR population
+    await page.waitForFunction((prev) => {
+      const cnt = document.querySelectorAll('[data-stid="lodging-card-responsive"], a[href^="/"] h3').length;
+      return cnt > prev;
+    }, { timeout: 1800 }, batch.totalSeen || 0).catch(() => null);
+
+    batch = await doExtract();
+    let added = 0;
+    for (const c of batch.out || []) {
+      if (c?.url && !cardsByUrl.has(c.url)) {
+        cardsByUrl.set(c.url, c);
+        added++;
+      }
+    }
+    const curr = cardsByUrl.size;
+    lastSel = `${batch.totalSeen}/${batch.selectorSource}`;
+    if (batch.detectedTotal) detectedTotal = batch.detectedTotal;
+    log(`vrbo_search ${id}: harvest pass ${harvestPasses + 1}: ${curr} total (+${added}), detectedTotal≈${detectedTotal || '?'}, sel=${lastSel}`);
+    if (curr === lastSize) {
+      stable++;
+      if (stable >= 2) break;
+    } else {
+      stable = 0;
+    }
+    lastSize = curr;
+    if (curr >= MAX_HARVEST) break;
+    harvestPasses++;
+  }
+
+  const cards = Array.from(cardsByUrl.values());
   const allInCount = cards.filter((c) => c.priceIncludesTaxes).length;
   // Bedroom distribution across the extracted cards — surfaces UI
   // changes where the regex matches the wrong number (e.g. matches
   // "Sleeps 4 · 1 bedroom" → 4 instead of 1).
   const brList = cards.map((c) => c.bedrooms ?? "?").join(",");
   log(
-    `vrbo_search ${id}: ${cards.length} cards (${allInCount} all-in / ${cards.length - allInCount} pre-tax) ` +
-    `[selector=${result.totalSeen}/${result.selectorSource}, drops=noUrl:${result.drops.noUrl}/noPrice:${result.drops.noPrice}/noBR:${result.drops.noBedrooms}, BRs=[${brList}]]`,
+    `vrbo_search ${id}: FINAL ${cards.length} cards (${allInCount} all-in / ${cards.length - allInCount} pre-tax) ` +
+    `[harvested after ${harvestPasses} scrolls + initial; detectedTotal≈${detectedTotal || '?'}; lastSel=${lastSel}]`,
   );
-  if (cards.length === 0 && result.firstCardSample) {
-    log(`vrbo_search ${id}: empty-result diagnostic — first card title="${result.firstCardSample.title}" path="${result.firstCardSample.propertyPath}" br=${result.firstCardSample.bedroomsExtracted} text="${result.firstCardSample.textExcerpt}"`);
-  }
   // Per-card detail. Log min/max nightly per BR bucket so we can spot
   // outliers without flooding logs with 19+ lines per scan.
   if (cards.length > 0) {

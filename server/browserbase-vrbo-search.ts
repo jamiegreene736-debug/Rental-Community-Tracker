@@ -235,7 +235,7 @@ export async function searchVrboViaBrowserbase(opts: {
       const ct = resp.headers()["content-type"] || "";
       if (!/json/i.test(ct)) return;
       const body = await resp.text().catch(() => "");
-      if (graphqlBodies.length < 60) graphqlBodies.push(body);
+      if (graphqlBodies.length < 120) graphqlBodies.push(body);
       // Heuristic: results body has many "$X" amounts and "/<id>" detail paths.
       // We pick the body with the most property-card-shaped entries.
       if (
@@ -255,8 +255,20 @@ export async function searchVrboViaBrowserbase(opts: {
       await page.waitForTimeout(500);
     }
 
+    // Scroll to trigger additional lazy-load batches / paged GraphQL responses
+    // (city searches can have 150+; initial load only gives first page ~16-24).
+    // The response listener (above) will capture more /graphql bodies during scrolls.
+    for (let sc = 0; sc < 10; sc++) {
+      await page.evaluate(() => {
+        window.scrollBy({ top: Math.round(window.innerHeight * 0.75), left: 0, behavior: 'instant' });
+      }).catch(() => {});
+      await page.waitForTimeout(650);
+    }
+    await page.waitForTimeout(800).catch(() => {});
+
     // Even if no specific results body matched our heuristic, scan all
-    // captured bodies for property cards as a fallback.
+    // captured bodies for property cards as a fallback. Walk *every* body
+    // (no early break) so later paged responses from scrolls are included.
     const cards: any[] = [];
     const considered = resultsBody ? [resultsBody] : graphqlBodies;
     for (const body of considered) {
@@ -283,7 +295,6 @@ export async function searchVrboViaBrowserbase(opts: {
             for (const k of Object.keys(node)) stack.push((node as any)[k]);
           }
         }
-        if (cards.length > 0) break; // found in this body
       } catch { /* not parseable JSON, skip */ }
     }
 
