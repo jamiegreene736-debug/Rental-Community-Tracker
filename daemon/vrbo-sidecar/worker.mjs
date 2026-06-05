@@ -5846,22 +5846,44 @@ async function clickVrboResultsNextPage(targetPage, id) {
   return false;
 }
 
+// Poll the visible "N-M of T" range until the start index advances past the
+// previous page. VRBO swaps the SRP list asynchronously after a Next click, so
+// harvesting immediately scrapes a transitional/duplicate page and the
+// next-button briefly disappears — that combination is what truncated the walk.
+async function waitForVrboResultsPageAdvance(targetPage, prevStart, timeoutMs = 9_000) {
+  const deadline = Date.now() + Math.max(2_000, timeoutMs);
+  let lastHint = null;
+  while (Date.now() < deadline) {
+    const hint = await readVrboResultsPageRangeHint(targetPage);
+    lastHint = hint;
+    if (hint?.start != null && (prevStart == null || hint.start > prevStart)) return hint;
+    await boundedPageDelay(targetPage, 500);
+  }
+  return lastHint;
+}
+
 async function walkVrboResultsUiPages(targetPage, id, options = {}) {
-  const maxPages = Math.min(12, Math.max(1, Number(options.maxPages) || 8));
-  const passesPerPage = Math.max(3, Math.min(12, Number(options.passesPerPage) || 6));
+  const maxPages = Math.min(14, Math.max(1, Number(options.maxPages) || 8));
+  const passesPerPage = Math.max(4, Math.min(16, Number(options.passesPerPage) || 8));
   const targetTotal = Number.isFinite(Number(options.targetTotal)) && Number(options.targetTotal) > 0
     ? Math.round(Number(options.targetTotal))
     : null;
   let pagesWalked = 0;
   let stopReason = "ui-next-unavailable";
   const pageRanges = [];
+  let prevStart = null;
 
   for (let pageIdx = 0; pageIdx < maxPages; pageIdx += 1) {
+    // Scroll the pagination footer into view: this drags the full 50-card page
+    // through the viewport so VRBO's virtualized list instantiates every card
+    // before we harvest. (Resetting to the top instead leaves the lower cards
+    // unrendered and the per-page harvest only captures ~20 of 50.)
     await scrollVrboResultsPaginationIntoView(targetPage);
     await boundedPageDelay(targetPage, 700);
 
     const rangeHint = await readVrboResultsPageRangeHint(targetPage);
     if (rangeHint?.range) pageRanges.push(rangeHint.range);
+    if (rangeHint?.start != null) prevStart = rangeHint.start;
 
     await harvestVrboMapResultCards(targetPage, id, passesPerPage, { exhaustive: false });
     const harvestTotal = await targetPage.evaluate(
@@ -5874,12 +5896,24 @@ async function walkVrboResultsUiPages(targetPage, id, options = {}) {
       `${targetTotal ? ` target=${targetTotal}` : ""}`,
     );
 
+    // Reached and harvested the final page (e.g. "201-210 of 210") — stop clean.
+    if (rangeHint?.total && rangeHint?.end && rangeHint.end >= rangeHint.total) {
+      stopReason = "range-end-reached";
+      break;
+    }
     if (targetTotal && harvestTotal >= targetTotal - 2) {
       stopReason = "target-reached";
       break;
     }
 
-    if (!(await isVrboResultsNextPageAvailable(targetPage))) {
+    // Next-button availability flickers during the page swap; re-check once
+    // after a short settle before concluding we've hit the end.
+    let nextAvail = await isVrboResultsNextPageAvailable(targetPage);
+    if (!nextAvail) {
+      await boundedPageDelay(targetPage, 1_000);
+      nextAvail = await isVrboResultsNextPageAvailable(targetPage);
+    }
+    if (!nextAvail) {
       stopReason = pageIdx === 0 ? "ui-next-unavailable" : "ui-next-end";
       break;
     }
@@ -5890,7 +5924,10 @@ async function walkVrboResultsUiPages(targetPage, id, options = {}) {
       break;
     }
     pagesWalked += 1;
-    await boundedPageDelay(targetPage, 2_200);
+    // Block until the SRP actually advances to the next page before the next
+    // iteration harvests it.
+    const advancedHint = await waitForVrboResultsPageAdvance(targetPage, prevStart, 9_000);
+    if (advancedHint?.start != null) prevStart = advancedHint.start;
     await dismissObstructions(targetPage, `vrbo_search_ui_page_${pagesWalked}`).catch(() => []);
   }
 
@@ -5909,6 +5946,14 @@ async function paginateVrboGraphqlInventory(targetPage, networkCapture, id, opti
   const maxPages = Math.max(1, Number(options.maxPages) || 40);
   const maxRows = Math.max(50, Number(options.maxRows) || 500);
   const plateauLimit = Math.max(1, Number(options.plateauLimit) || 2);
+  // City-wide export drives a dedicated UI page walk (walkVrboResultsUiPages)
+  // that harvests every SRP page's DOM cards as it clicks the blue Next button.
+  // GraphQL replay doesn't work on VRBO's list view (it yields 0 rows), so if we
+  // let this phase fall back to UI-Next clicks it silently advances the SRP past
+  // pages it never harvests — the walk then starts mid-list (e.g. "151-200 of
+  // 210") and only captures the tail. For city-wide, stay GraphQL-replay-only so
+  // the SRP remains on page 1 and the walk can harvest 1→N from the start.
+  const allowUiNext = options.allowUiNext !== false;
   let replayPages = 0;
   let uiPages = 0;
   let plateau = 0;
@@ -5949,6 +5994,14 @@ async function paginateVrboGraphqlInventory(targetPage, networkCapture, id, opti
         break;
       }
       continue;
+    }
+    if (!allowUiNext) {
+      stopReason = replay?.reason ? `replay-${replay.reason}-no-ui` : "graphql-replay-exhausted";
+      log(
+        `vrbo_search ${id}: graphql pagination stop (ui-next disabled for city-wide) at ${lastCount} rows ` +
+        `after ${replayPages} replay page(s); UI page walk will harvest from page 1`,
+      );
+      break;
     }
     const clicked = await clickVrboResultsNextPage(targetPage, id);
     if (!clicked) {
@@ -7621,6 +7674,10 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     maxRows: maxGraphqlRows,
     maxPages: exhaustiveCityExport ? 80 : 50,
     plateauLimit: exhaustiveCityExport ? 3 : 2,
+    // Don't let GraphQL pagination advance the SRP via UI-Next for city-wide;
+    // the dedicated walkVrboResultsUiPages below owns page navigation + harvest
+    // so it must start on page 1. See note in paginateVrboGraphqlInventory.
+    allowUiNext: !exhaustiveCityExport,
   });
   log(
     `vrbo_search ${id}: graphql pagination done replay=${paginationStats.replayPages} ui=${paginationStats.uiPages} ` +
@@ -8699,6 +8756,42 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
         return visibleMonths();
       }
 
+      function isEnabledDay(el) {
+        return !(el.disabled || el.getAttribute?.("aria-disabled") === "true");
+      }
+
+      function dayButtonsWithin(root) {
+        return Array.from(root.querySelectorAll(".uitk-day-button, [class*='day-button' i], [data-day], [role='button']"))
+          .filter((el) => el instanceof HTMLElement && isVisible(el))
+          .filter((el) => {
+            const text = clean(el.textContent);
+            const dataDay = clean(el.getAttribute?.("data-day"));
+            const dataDate = clean(el.getAttribute?.("data-date"));
+            const datetime = clean(el.getAttribute?.("datetime"));
+            return /^\d{1,2}$/.test(text) || /^\d{1,2}$/.test(dataDay) ||
+              /^\d{4}-\d{2}-\d{2}$/.test(dataDate) || /^\d{4}-\d{2}-\d{2}$/.test(datetime);
+          });
+      }
+
+      function monthHeadingEls() {
+        const out = [];
+        for (const el of Array.from(document.querySelectorAll("*"))) {
+          if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
+          const text = clean(el.textContent);
+          if (text.length > 40) continue;
+          if (/^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}$/i.test(text)) {
+            out.push(el);
+          }
+        }
+        return out;
+      }
+
+      // VRBO/Expedia renders TWO months at once and the day cells are usually
+      // bare numbers ("20" exists in both June and July). The previous scorer
+      // gave a bare-number/role match enough points to "win", so it silently
+      // clicked the FIRST "20" in the DOM — the current month — instead of the
+      // requested month. That landed July 20→27 on June 20→27. Disambiguate by
+      // real metadata first, then by month-grid container, then by column x.
       function findVisibleDay(target, months) {
         const buttons = dayButtons();
         const monthName = monthNames[target.month - 1];
@@ -8708,8 +8801,13 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
         const dd = String(target.day).padStart(2, "0");
         const iso = `${yyyy}-${mm}-${dd}`;
         const dayNeedle = new RegExp(`\\b${target.day}\\b`);
-        const explicit = buttons
+
+        // 1) STRICT metadata match. Only cells that actually encode the target
+        //    month+year (or the full ISO date) may win here. A bare day number
+        //    is intentionally NOT scored — it cannot tell June 20 from July 20.
+        const strict = buttons
           .map((el) => {
+            if (!isEnabledDay(el)) return null;
             const hay = [
               textOf(el),
               el.getAttribute?.("data-day"),
@@ -8718,16 +8816,54 @@ async function applyVrboVisibleCalendarDates(targetPage, checkIn, checkOut, labe
             ].filter(Boolean).join(" ").toLowerCase();
             let score = 0;
             if (hay.includes(iso)) score += 500;
-            if (hay.includes(monthName) && hay.includes(yyyy) && dayNeedle.test(hay)) score += 350;
-            if (hay.includes(monthShort) && hay.includes(yyyy) && dayNeedle.test(hay)) score += 260;
-            if (clean(el.textContent) === String(target.day)) score += 30;
-            if (el.tagName.toLowerCase() === "button" || el.getAttribute?.("role") === "button") score += 20;
-            if (el.disabled || el.getAttribute?.("aria-disabled") === "true") score -= 1_000;
+            else if (hay.includes(monthName) && hay.includes(yyyy) && dayNeedle.test(hay)) score += 350;
+            else if (hay.includes(monthShort) && hay.includes(yyyy) && dayNeedle.test(hay)) score += 260;
             return score > 0 ? { el, score } : null;
           })
           .filter(Boolean)
           .sort((a, b) => b.score - a.score)[0]?.el;
-        if (explicit) return explicit;
+        if (strict) return strict;
+
+        // 2) MONTH-CONTAINER match. Day cells are bare numbers: walk up from the
+        //    target month's heading to the grid that holds its day buttons (and
+        //    no OTHER month heading), then pick the day inside that grid. Robust
+        //    to the current month hiding past days and to vertical layouts.
+        const allHeadings = monthHeadingEls();
+        const targetHeadingText = `${monthName} ${yyyy}`.toLowerCase();
+        const heading = allHeadings.find((el) => clean(el.textContent).toLowerCase() === targetHeadingText);
+        if (heading) {
+          let node = heading;
+          for (let i = 0; i < 6 && node; i++) {
+            const parent = node.parentElement;
+            if (!parent) break;
+            const within = dayButtonsWithin(parent);
+            const headingsInside = allHeadings.filter((h) => parent.contains(h));
+            if (within.length >= 20 && headingsInside.length === 1) {
+              const cell = within.find((el) => isEnabledDay(el) && clean(el.textContent) === String(target.day));
+              if (cell) return cell;
+              break;
+            }
+            node = parent;
+          }
+        }
+
+        // 3) POSITIONAL column match. Months render left→right (earlier→later);
+        //    pick the same-day cell whose column index matches the target
+        //    month's index in the visible-month list.
+        const idx = months.findIndex((m) => m.month === target.month && m.year === target.year);
+        if (idx >= 0) {
+          const sameDay = buttons
+            .filter((el) => isEnabledDay(el) && clean(el.textContent) === String(target.day))
+            .map((el) => {
+              const rect = el.getBoundingClientRect();
+              return { el, x: rect.left + rect.width / 2 };
+            })
+            .sort((a, b) => a.x - b.x);
+          if (sameDay.length === 1) return sameDay[0].el;
+          if (sameDay.length > 1 && idx < sameDay.length) return sameDay[idx].el;
+        }
+
+        // 4) Last resort: original offset-by-daysInMonth slice.
         let offset = 0;
         for (const month of months) {
           const count = daysInMonth(month.year, month.month);
