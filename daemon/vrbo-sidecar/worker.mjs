@@ -5197,6 +5197,168 @@ function normalizeVrboGraphqlListing(row, expectedNights, variantLabel) {
   };
 }
 
+function parseVrboGraphqlPostBody(postData) {
+  const raw = String(postData || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((entry) => entry && typeof entry === "object");
+    }
+    if (parsed && typeof parsed === "object") return [parsed];
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function isVrboPropertySearchGraphqlOperation(operation) {
+  if (!operation || typeof operation !== "object") return false;
+  const blob = [
+    operation.operationName,
+    operation.query,
+    JSON.stringify(operation.variables ?? {}),
+  ].join(" ").toLowerCase();
+  return /propertysearch|searchlistings|lodgingsearch|propertysearchlistings|searchproperties|listingsearch/i.test(blob);
+}
+
+function extractVrboGraphqlPaginationMeta(root) {
+  const meta = {
+    hasNextPage: null,
+    endCursor: null,
+    offset: null,
+    limit: null,
+    totalCount: null,
+    pageNumber: null,
+  };
+  const stack = [{ value: root, path: "", depth: 0 }];
+  const seen = new Set();
+  while (stack.length) {
+    const { value, path, depth } = stack.pop();
+    if (value == null || depth > 14) continue;
+    if (typeof value !== "object") continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (let i = Math.min(value.length - 1, 120); i >= 0; i--) {
+        stack.push({ value: value[i], path: `${path}[${i}]`, depth: depth + 1 });
+      }
+      continue;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = path ? `${path}.${key}` : key;
+      const lk = key.toLowerCase();
+      if (lk === "hasnextpage" && typeof child === "boolean") meta.hasNextPage = child;
+      if (lk === "hasmore" && typeof child === "boolean" && meta.hasNextPage == null) meta.hasNextPage = child;
+      if ((lk === "endcursor" || lk === "nextcursor") && typeof child === "string" && child) meta.endCursor = child;
+      if (lk === "cursor" && typeof child === "string" && child && !/^\{/.test(child)) meta.endCursor = meta.endCursor || child;
+      if (lk === "offset" && Number.isFinite(Number(child))) meta.offset = Number(child);
+      if ((lk === "limit" || lk === "pagesize" || lk === "page_size" || lk === "size") && Number.isFinite(Number(child))) {
+        meta.limit = meta.limit ?? Number(child);
+      }
+      if (/^total(count|results|listings|records)?$/i.test(key) && Number.isFinite(Number(child))) {
+        meta.totalCount = meta.totalCount ?? Number(child);
+      }
+      if ((lk === "pagenumber" || lk === "page" || lk === "pageindex") && Number.isFinite(Number(child))) {
+        meta.pageNumber = Number(child);
+      }
+      if (child && typeof child === "object") {
+        stack.push({ value: child, path: childPath, depth: depth + 1 });
+      }
+    }
+  }
+  return meta;
+}
+
+function extractVrboGraphqlOffsetLimitFromVariables(variables) {
+  const found = { offset: null, limit: null };
+  const stack = [{ value: variables, depth: 0 }];
+  const seen = new Set();
+  while (stack.length) {
+    const { value, depth } = stack.pop();
+    if (!value || typeof value !== "object" || depth > 10 || seen.has(value)) continue;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const child of value) stack.push({ value: child, depth: depth + 1 });
+      continue;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      const lk = key.toLowerCase();
+      if (lk === "offset" && Number.isFinite(Number(child))) found.offset = Number(child);
+      if ((lk === "limit" || lk === "pagesize" || lk === "page_size" || lk === "size") && Number.isFinite(Number(child))) {
+        found.limit = Number(child);
+      }
+      if (child && typeof child === "object") stack.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return found;
+}
+
+function patchVrboGraphqlVariablesForNextPage(variables, paginationMeta, pagingState) {
+  const next = JSON.parse(JSON.stringify(variables ?? {}));
+  let patched = false;
+  const cursor = paginationMeta?.endCursor || pagingState?.lastCursor || null;
+  const nextOffset = pagingState?.nextOffset;
+  const walk = (node, depth = 0) => {
+    if (!node || typeof node !== "object" || depth > 10) return;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child, depth + 1);
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      const lk = key.toLowerCase();
+      if (cursor && /^(after|endcursor|cursor|nextcursor|pagetoken|nextpagetoken|continuationtoken)$/i.test(key)) {
+        node[key] = cursor;
+        patched = true;
+      } else if (nextOffset != null && /^offset$/i.test(key)) {
+        node[key] = nextOffset;
+        patched = true;
+      } else if (nextOffset != null && pagingState?.pageSize && /^(page|pagenumber|pageindex)$/i.test(key)) {
+        node[key] = Math.floor(nextOffset / pagingState.pageSize);
+        patched = true;
+      } else if (typeof node[key] === "object") {
+        walk(node[key], depth + 1);
+      }
+    }
+  };
+  walk(next);
+  return { variables: next, patched };
+}
+
+function ingestVrboGraphqlPayload(rows, payload, expectedNights, variantLabel, maxRows, ingestState) {
+  const listings = collectVrboPropertySearchListings(payload);
+  const pagination = extractVrboGraphqlPaginationMeta(payload);
+  if (
+    pagination.hasNextPage !== null
+    || pagination.endCursor
+    || pagination.totalCount != null
+    || pagination.offset != null
+  ) {
+    ingestState.lastPagination = {
+      ...pagination,
+      listingsInPage: listings.length,
+      at: Date.now(),
+    };
+    if (pagination.endCursor) ingestState.lastCursor = pagination.endCursor;
+    if (pagination.offset != null && pagination.limit) {
+      ingestState.nextOffset = pagination.offset + pagination.limit;
+      ingestState.pageSize = pagination.limit;
+    }
+  }
+  if (listings.length === 0) return 0;
+  ingestState.matchedResponses += 1;
+  let added = 0;
+  for (const listing of listings) {
+    const normalized = normalizeVrboGraphqlListing(listing, expectedNights, variantLabel);
+    if (normalized) {
+      rows.push(normalized);
+      added += 1;
+    }
+    if (rows.length >= maxRows) break;
+  }
+  return added;
+}
+
 function collectVrboPropertySearchListings(root, out = [], maxDepth = 10) {
   const stack = [{ value: root, path: "", depth: 0 }];
   const seen = new Set();
@@ -5238,8 +5400,47 @@ function collectVrboPropertySearchListings(root, out = [], maxDepth = 10) {
 function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel, maxRows = 300) {
   const rows = [];
   let responsesSeen = 0;
-  let matchedResponses = 0;
   let inFlight = 0;
+  let requestTemplate = null;
+  const ingestState = {
+    matchedResponses: 0,
+    lastPagination: null,
+    lastCursor: null,
+    nextOffset: null,
+    pageSize: null,
+  };
+  const captureRequestTemplate = (request) => {
+    try {
+      const method = String(request?.method?.() || "").toUpperCase();
+      if (method !== "POST") return;
+      const url = String(request?.url?.() || "");
+      if (!/vrbo\.com|expediagroup|egds|graphql/i.test(url)) return;
+      const postData = request?.postData?.() || "";
+      const operations = parseVrboGraphqlPostBody(postData);
+      if (!operations?.length) return;
+      const operation = operations.find(isVrboPropertySearchGraphqlOperation);
+      if (!operation) return;
+      requestTemplate = {
+        url,
+        operation,
+        operations: operations.length > 1 ? operations : null,
+        capturedAt: Date.now(),
+      };
+      const { offset, limit } = extractVrboGraphqlOffsetLimitFromVariables(operation.variables);
+      if (offset != null && limit) {
+        ingestState.nextOffset = offset + limit;
+        ingestState.pageSize = limit;
+      } else if (limit) {
+        ingestState.pageSize = limit;
+      }
+      log(
+        `vrbo_search ${id}: captured GraphQL request template ` +
+        `op=${String(operation.operationName || "unknown").slice(0, 80)} url=${url.slice(0, 100)}`,
+      );
+    } catch (e) {
+      log(`vrbo_search ${id}: GraphQL request capture skipped: ${e?.message ?? e}`);
+    }
+  };
   const ingestResponse = async (response) => {
     try {
       const request = response.request?.();
@@ -5252,43 +5453,56 @@ function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel
       responsesSeen++;
       const payload = await response.json().catch(() => null);
       if (!payload || typeof payload !== "object") return;
-      const listings = collectVrboPropertySearchListings(payload);
-      if (listings.length === 0) return;
-      matchedResponses++;
-      for (const listing of listings) {
-        const normalized = normalizeVrboGraphqlListing(listing, expectedNights, variantLabel);
-        if (normalized) rows.push(normalized);
+      const payloads = Array.isArray(payload) ? payload : [payload];
+      let addedTotal = 0;
+      for (const item of payloads) {
+        const added = ingestVrboGraphqlPayload(rows, item, expectedNights, variantLabel, maxRows, ingestState);
+        addedTotal += added;
         if (rows.length >= maxRows) break;
       }
-      log(`vrbo_search ${id}: captured ${listings.length} listing rows from ${method} ${url.slice(0, 120)}`);
+      if (addedTotal > 0) {
+        log(
+          `vrbo_search ${id}: captured ${addedTotal} listing rows from ${method} ${url.slice(0, 120)} ` +
+          `(hasNextPage=${ingestState.lastPagination?.hasNextPage ?? "?"}, endCursor=${ingestState.lastPagination?.endCursor ? "yes" : "no"})`,
+        );
+      }
     } catch (e) {
       log(`vrbo_search ${id}: VRBO network capture skipped response: ${e?.message ?? e}`);
     }
   };
-  const handler = (response) => {
+  const responseHandler = (response) => {
     inFlight += 1;
     ingestResponse(response)
       .finally(() => {
         inFlight = Math.max(0, inFlight - 1);
       });
   };
+  const requestHandler = (request) => captureRequestTemplate(request);
   const disposers = [];
   if (targetPage?.on) {
-    targetPage.on("response", handler);
-    disposers.push(() => targetPage.off?.("response", handler));
+    targetPage.on("response", responseHandler);
+    targetPage.on("request", requestHandler);
+    disposers.push(() => targetPage.off?.("response", responseHandler));
+    disposers.push(() => targetPage.off?.("request", requestHandler));
   }
   const browserContext = targetPage?.context?.();
   if (browserContext?.on) {
-    browserContext.on("response", handler);
-    disposers.push(() => browserContext.off?.("response", handler));
+    browserContext.on("response", responseHandler);
+    browserContext.on("request", requestHandler);
+    disposers.push(() => browserContext.off?.("response", responseHandler));
+    disposers.push(() => browserContext.off?.("request", requestHandler));
   }
   return {
     candidates: () => dedupeCandidatesByUrl(rows),
+    getRequestTemplate: () => requestTemplate,
+    getLastPagination: () => ingestState.lastPagination,
     stats: () => ({
       responsesSeen,
-      matchedResponses,
+      matchedResponses: ingestState.matchedResponses,
       normalized: dedupeCandidatesByUrl(rows).length,
       inFlight,
+      hasRequestTemplate: Boolean(requestTemplate),
+      lastPagination: ingestState.lastPagination,
     }),
     async settle(label, maxWaitMs = 10_000) {
       const start = Date.now();
@@ -5306,20 +5520,224 @@ function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel
           lastCount = count;
         }
         if (stablePasses >= 3 && inFlight === 0) {
-          log(`vrbo_search ${id}: ${label} graphql settled at ${count} rows (${matchedResponses}/${responsesSeen} matched responses)`);
+          log(
+            `vrbo_search ${id}: ${label} graphql settled at ${count} rows ` +
+            `(${ingestState.matchedResponses}/${responsesSeen} matched responses)`,
+          );
           return count;
         }
       }
       const count = dedupeCandidatesByUrl(rows).length;
       log(
         `vrbo_search ${id}: ${label} graphql settle timeout at ${count} rows ` +
-        `(inFlight=${inFlight}, matched=${matchedResponses}/${responsesSeen})`,
+        `(inFlight=${inFlight}, matched=${ingestState.matchedResponses}/${responsesSeen})`,
       );
       return count;
+    },
+    async replayNextGraphqlPage() {
+      const template = requestTemplate;
+      if (!template?.operation) return { ok: false, reason: "no-template" };
+      const pagination = ingestState.lastPagination || {};
+      if (pagination.hasNextPage === false) return { ok: false, reason: "hasNextPage=false" };
+      const pagingState = {
+        lastCursor: ingestState.lastCursor,
+        nextOffset: ingestState.nextOffset,
+        pageSize: ingestState.pageSize,
+      };
+      const { variables, patched } = patchVrboGraphqlVariablesForNextPage(
+        template.operation.variables,
+        pagination,
+        pagingState,
+      );
+      if (!patched) return { ok: false, reason: "no-patch" };
+      const replayPayload = {
+        url: template.url,
+        operationName: template.operation.operationName || "",
+        query: template.operation.query || "",
+        variables,
+        batchOperations: template.operations,
+      };
+      let payload = null;
+      try {
+        payload = await targetPage.evaluate(async (replay) => {
+          const headers = { "content-type": "application/json", accept: "application/json" };
+          let body = "";
+          if (Array.isArray(replay.batchOperations) && replay.batchOperations.length > 1) {
+            const ops = replay.batchOperations.map((op) => {
+              const sameOp =
+                String(op.operationName || "") === String(replay.operationName || "") ||
+                String(op.query || "") === String(replay.query || "");
+              return sameOp ? { ...op, variables: replay.variables } : op;
+            });
+            body = JSON.stringify(ops);
+          } else {
+            body = JSON.stringify({
+              operationName: replay.operationName || undefined,
+              query: replay.query || undefined,
+              variables: replay.variables,
+            });
+          }
+          const res = await fetch(replay.url, {
+            method: "POST",
+            headers,
+            credentials: "include",
+            body,
+          });
+          if (!res.ok) return { __replayError: res.status };
+          return res.json();
+        }, replayPayload);
+      } catch (e) {
+        return { ok: false, reason: `evaluate-failed:${e?.message ?? e}` };
+      }
+      if (!payload || payload.__replayError) {
+        return { ok: false, reason: `http-${payload?.__replayError ?? "unknown"}` };
+      }
+      const payloads = Array.isArray(payload) ? payload : [payload];
+      let added = 0;
+      for (const item of payloads) {
+        added += ingestVrboGraphqlPayload(rows, item, expectedNights, variantLabel, maxRows, ingestState);
+        if (rows.length >= maxRows) break;
+      }
+      if (ingestState.lastPagination?.offset != null && ingestState.lastPagination?.limit) {
+        ingestState.nextOffset = ingestState.lastPagination.offset + ingestState.lastPagination.limit;
+        ingestState.pageSize = ingestState.lastPagination.limit;
+      } else if (ingestState.pageSize && ingestState.nextOffset != null) {
+        ingestState.nextOffset += ingestState.pageSize;
+      }
+      return {
+        ok: true,
+        added,
+        pagination: ingestState.lastPagination,
+        total: dedupeCandidatesByUrl(rows).length,
+      };
     },
     dispose: () => {
       for (const dispose of disposers) dispose();
     },
+  };
+}
+
+async function clickVrboResultsNextPage(targetPage, id) {
+  if (!targetPage || targetPage.isClosed?.()) return false;
+  const clicked = await targetPage.evaluate(() => {
+    function normalizeText(value) {
+      return String(value || "").replace(/\s+/g, " ").trim();
+    }
+    function isVisible(el) {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 4 && rect.height > 4 &&
+        rect.bottom >= 0 && rect.right >= 0 &&
+        rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+        style.display !== "none" && style.visibility !== "hidden" &&
+        Number(style.opacity || "1") > 0.05;
+    }
+    const candidates = Array.from(document.querySelectorAll("button, a, [role='button']"))
+      .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true");
+    const next = candidates.find((el) => {
+      const text = normalizeText(el.textContent);
+      const aria = normalizeText(el.getAttribute("aria-label"));
+      const testId = normalizeText(el.getAttribute("data-stid"));
+      const hay = `${text} ${aria} ${testId}`;
+      if (/(?:show|load|see|view)\s+(?:\d+\s+)?more|more\s+results|more\s+properties/i.test(hay)) return false;
+      return /^(?:next|next page|›|»|→)$/i.test(text) ||
+        /\bnext\s+page\b/i.test(hay) ||
+        /pagination.*next|next.*pagination/i.test(testId) ||
+        (/\bnext\b/i.test(aria) && /\b(?:page|result|listing|property)\b/i.test(aria));
+    });
+    if (!next) return false;
+    try {
+      next.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }).catch(() => false);
+  if (clicked) log(`vrbo_search ${id}: clicked UI results Next page button (graphql replay fallback)`);
+  return clicked;
+}
+
+async function paginateVrboGraphqlInventory(targetPage, networkCapture, id, options = {}) {
+  const maxPages = Math.max(1, Number(options.maxPages) || 40);
+  const maxRows = Math.max(50, Number(options.maxRows) || 500);
+  const plateauLimit = Math.max(1, Number(options.plateauLimit) || 2);
+  let replayPages = 0;
+  let uiPages = 0;
+  let plateau = 0;
+  let lastCount = networkCapture.candidates().length;
+  let stopReason = "max-pages";
+  for (let pageIdx = 0; pageIdx < maxPages; pageIdx += 1) {
+    const pagination = networkCapture.getLastPagination?.() || {};
+    if (pagination.hasNextPage === false) {
+      stopReason = "hasNextPage=false";
+      log(`vrbo_search ${id}: graphql pagination stop hasNextPage=false at ${lastCount} rows`);
+      break;
+    }
+    if (lastCount >= maxRows) {
+      stopReason = "max-rows";
+      break;
+    }
+    const replay = await networkCapture.replayNextGraphqlPage();
+    if (replay?.ok) {
+      replayPages += 1;
+      await networkCapture.settle(`graphql-pagination-replay-${replayPages}`, 8_000);
+      const newCount = networkCapture.candidates().length;
+      const meta = replay.pagination || networkCapture.getLastPagination?.() || {};
+      log(
+        `vrbo_search ${id}: graphql pagination replay page=${replayPages} added=${replay.added ?? 0} ` +
+        `total=${newCount} hasNextPage=${meta.hasNextPage ?? "?"} endCursor=${meta.endCursor ? "yes" : "no"} ` +
+        `offset=${meta.offset ?? "?"} totalCount=${meta.totalCount ?? "?"}`,
+      );
+      if (newCount <= lastCount) plateau += 1;
+      else plateau = 0;
+      lastCount = newCount;
+      if (plateau >= plateauLimit) {
+        stopReason = "plateau";
+        log(`vrbo_search ${id}: graphql pagination plateau at ${newCount} rows after ${replayPages} replay pages`);
+        break;
+      }
+      if (networkCapture.getLastPagination?.()?.hasNextPage === false) {
+        stopReason = "hasNextPage=false";
+        break;
+      }
+      continue;
+    }
+    const clicked = await clickVrboResultsNextPage(targetPage, id);
+    if (!clicked) {
+      stopReason = replay?.reason ? `replay-${replay.reason}` : "ui-next-unavailable";
+      log(
+        `vrbo_search ${id}: graphql pagination stop (${stopReason}, ui-next=false) at ${lastCount} rows ` +
+        `(replayPages=${replayPages}, uiPages=${uiPages})`,
+      );
+      break;
+    }
+    uiPages += 1;
+    await networkCapture.settle(`graphql-pagination-ui-next-${uiPages}`, 8_000);
+    const newCount = networkCapture.candidates().length;
+    log(
+      `vrbo_search ${id}: graphql pagination UI next page=${uiPages} total=${newCount} ` +
+      `hasNextPage=${networkCapture.getLastPagination?.()?.hasNextPage ?? "?"}`,
+    );
+    if (newCount <= lastCount) plateau += 1;
+    else plateau = 0;
+    lastCount = newCount;
+    if (plateau >= plateauLimit) {
+      stopReason = "plateau";
+      log(`vrbo_search ${id}: graphql pagination plateau at ${newCount} rows after ${uiPages} UI next clicks`);
+      break;
+    }
+    if (networkCapture.getLastPagination?.()?.hasNextPage === false) {
+      stopReason = "hasNextPage=false";
+      break;
+    }
+  }
+  return {
+    replayPages,
+    uiPages,
+    finalCount: lastCount,
+    stopReason,
+    lastPagination: networkCapture.getLastPagination?.() || null,
   };
 }
 
@@ -6385,10 +6803,23 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
         retryLater: true,
       });
     }
-    const harvestPasses = deepMapHarvest ? 18 : (bounds ? 3 : 8);
+    await networkCapture.settle("post-map-load", 12_000);
+    const paginationStats = await paginateVrboGraphqlInventory(page, networkCapture, id, {
+      maxRows: maxGraphqlRows,
+      maxPages: deepMapHarvest ? 50 : 30,
+    });
+    log(
+      `vrbo_search ${id}: graphql pagination done replay=${paginationStats.replayPages} ui=${paginationStats.uiPages} ` +
+      `total=${paginationStats.finalCount} stop=${paginationStats.stopReason} ` +
+      `hasNextPage=${paginationStats.lastPagination?.hasNextPage ?? "?"}`,
+    );
+    const graphqlPrefillCount = networkCapture.candidates().length;
+    const harvestPasses = graphqlPrefillCount >= 100
+      ? Math.min(deepMapHarvest ? 8 : 6, deepMapHarvest ? 18 : (bounds ? 3 : 8))
+      : (deepMapHarvest ? 18 : (bounds ? 3 : 8));
     log(
       `vrbo_search ${id}: starting map harvest passes (${deepMapHarvest ? "deep-city" : bounds ? "bounded" : "city-unbounded"}) ` +
-      `count=${harvestPasses} before card extraction`,
+      `count=${harvestPasses} graphqlPrefill=${graphqlPrefillCount} before card extraction`,
     );
     const harvestStats = await harvestVrboMapResultCards(page, id, harvestPasses);
     const domExtract = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm);
@@ -6418,6 +6849,9 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
         mergedCount: mergedCards.length,
         graphqlResponsesMatched: stats.matchedResponses ?? 0,
         graphqlResponsesSeen: stats.responsesSeen ?? 0,
+        graphqlReplayPages: paginationStats.replayPages ?? 0,
+        graphqlUiPages: paginationStats.uiPages ?? 0,
+        graphqlPaginationStop: paginationStats.stopReason ?? null,
       },
     };
   } finally {
@@ -6644,32 +7078,46 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, destination);
     throwIfVrboDateMismatch(state, "vrbo_search", id, checkIn, checkOut);
   }
-  // Let the first propertySearchListings GraphQL batch land before scrolling.
+  // Let the first propertySearchListings GraphQL batch land before pagination replay.
   await networkCapture.settle("post-submit", 12_000);
-  // On the results page, switch to map view (still the same dated search) so VRBO
-  // loads the full inventory GraphQL payload without injecting a /search URL.
-  const openedMapView = await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
-  if (openedMapView) {
-    await disableVrboSearchAsMapMoves(page, "vrbo_search", id).catch(() => false);
-    await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
-    await boundedPageDelay(page, 2_500);
-    await networkCapture.settle("post-map-view", 14_000);
+  let openedMapView = false;
+  if (!networkCapture.getRequestTemplate()) {
+    // Bootstrap GraphQL request capture via map view when the first page did not expose a replay template.
+    openedMapView = await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
+    if (openedMapView) {
+      await disableVrboSearchAsMapMoves(page, "vrbo_search", id).catch(() => false);
+      await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
+      await boundedPageDelay(page, 2_500);
+      await networkCapture.settle("post-map-view", 14_000);
+    }
   }
+  const paginationStats = await paginateVrboGraphqlInventory(page, networkCapture, id, {
+    maxRows: maxGraphqlRows,
+    maxPages: 50,
+  });
+  log(
+    `vrbo_search ${id}: graphql pagination done replay=${paginationStats.replayPages} ui=${paginationStats.uiPages} ` +
+    `total=${paginationStats.finalCount} stop=${paginationStats.stopReason} ` +
+    `hasNextPage=${paginationStats.lastPagination?.hasNextPage ?? "?"}`,
+  );
 
-  // Scroll the results list so long resort searches (100+ cards) are
-  // harvested before extraction. Bedroom/resort filtering happens on
-  // the server after the full export returns.
+  // Light DOM harvest supplements GraphQL replay; skip heavy scrolling when replay already filled inventory.
   await page.evaluate(() => {
     window.__vrboHarvestCards = [];
   }).catch(() => {});
-  const listHarvestPasses = Math.max(
+  const graphqlPrefillCount = networkCapture.candidates().length;
+  const defaultListHarvestPasses = Math.max(
     12,
     Math.min(
       24,
       Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_HARVEST_PASSES ?? "18"), 10) || 18,
     ),
   );
-  log(`vrbo_search ${id}: starting dropdown list harvest (${listHarvestPasses} passes) before card extraction`);
+  const listHarvestPasses = graphqlPrefillCount >= 80 ? Math.min(6, defaultListHarvestPasses) : defaultListHarvestPasses;
+  log(
+    `vrbo_search ${id}: starting dropdown list harvest (${listHarvestPasses} passes, graphqlPrefill=${graphqlPrefillCount}) ` +
+    `before card extraction`,
+  );
   const listHarvestStats = await harvestVrboMapResultCards(page, id, listHarvestPasses);
   log(
     `vrbo_search ${id}: dropdown list harvest done passes=${listHarvestStats.passes} ` +
@@ -6684,7 +7132,8 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   log(
     `vrbo_search ${id}: dropdown export merged ${mergedCards.length} candidates ` +
     `(network=${networkCards.length}, dom=${domCards.length}, harvestTotal=${listHarvestStats.finalHarvestTotal}, ` +
-    `mapView=${openedMapView ? "yes" : "no"}, graphqlResponses=${graphqlStats.matchedResponses}/${graphqlStats.responsesSeen})`,
+    `mapView=${openedMapView ? "yes" : "no"}, graphqlReplay=${paginationStats.replayPages}, graphqlUi=${paginationStats.uiPages}, ` +
+    `graphqlResponses=${graphqlStats.matchedResponses}/${graphqlStats.responsesSeen})`,
   );
   return mergedCards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
   } finally {
