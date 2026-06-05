@@ -5207,7 +5207,7 @@ function collectVrboPropertySearchListings(root, out = [], maxDepth = 10) {
     if (seen.has(value)) continue;
     seen.add(value);
     if (Array.isArray(value)) {
-      if (/propertySearchListings$|searchListings$|listings$|lodgings$/i.test(path)) {
+      if (/propertySearchListings|propertySearchResults|searchListings|listingSearch|lodgingSearch|searchResults/i.test(path)) {
         for (const item of value) {
           if (item && typeof item === "object") out.push(item);
           if (out.length >= 600) break;
@@ -5219,7 +5219,10 @@ function collectVrboPropertySearchListings(root, out = [], maxDepth = 10) {
     } else {
       for (const [key, child] of Object.entries(value).reverse()) {
         const childPath = path ? `${path}.${key}` : key;
-        if (key === "propertySearchListings" && Array.isArray(child)) {
+        if (
+          /^(propertySearchListings|propertySearchResults|searchListings|listingSearchResults|lodgingSearchListings)$/i.test(key)
+          && Array.isArray(child)
+        ) {
           for (const item of child) {
             if (item && typeof item === "object") out.push(item);
             if (out.length >= 600) break;
@@ -5236,7 +5239,8 @@ function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel
   const rows = [];
   let responsesSeen = 0;
   let matchedResponses = 0;
-  const handler = async (response) => {
+  let inFlight = 0;
+  const ingestResponse = async (response) => {
     try {
       const request = response.request?.();
       const url = response.url?.() || "";
@@ -5261,11 +5265,61 @@ function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel
       log(`vrbo_search ${id}: VRBO network capture skipped response: ${e?.message ?? e}`);
     }
   };
-  targetPage.on("response", handler);
+  const handler = (response) => {
+    inFlight += 1;
+    ingestResponse(response)
+      .finally(() => {
+        inFlight = Math.max(0, inFlight - 1);
+      });
+  };
+  const disposers = [];
+  if (targetPage?.on) {
+    targetPage.on("response", handler);
+    disposers.push(() => targetPage.off?.("response", handler));
+  }
+  const browserContext = targetPage?.context?.();
+  if (browserContext?.on) {
+    browserContext.on("response", handler);
+    disposers.push(() => browserContext.off?.("response", handler));
+  }
   return {
     candidates: () => dedupeCandidatesByUrl(rows),
-    stats: () => ({ responsesSeen, matchedResponses, normalized: rows.length }),
-    dispose: () => targetPage.off?.("response", handler),
+    stats: () => ({
+      responsesSeen,
+      matchedResponses,
+      normalized: dedupeCandidatesByUrl(rows).length,
+      inFlight,
+    }),
+    async settle(label, maxWaitMs = 10_000) {
+      const start = Date.now();
+      let lastCount = -1;
+      let stablePasses = 0;
+      while (Date.now() - start < maxWaitMs) {
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        while (inFlight > 0 && Date.now() - start < maxWaitMs) {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+        const count = dedupeCandidatesByUrl(rows).length;
+        if (count === lastCount) stablePasses += 1;
+        else {
+          stablePasses = 0;
+          lastCount = count;
+        }
+        if (stablePasses >= 3 && inFlight === 0) {
+          log(`vrbo_search ${id}: ${label} graphql settled at ${count} rows (${matchedResponses}/${responsesSeen} matched responses)`);
+          return count;
+        }
+      }
+      const count = dedupeCandidatesByUrl(rows).length;
+      log(
+        `vrbo_search ${id}: ${label} graphql settle timeout at ${count} rows ` +
+        `(inFlight=${inFlight}, matched=${matchedResponses}/${responsesSeen})`,
+      );
+      return count;
+    },
+    dispose: () => {
+      for (const dispose of disposers) dispose();
+    },
   };
 }
 
@@ -6590,9 +6644,17 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, destination);
     throwIfVrboDateMismatch(state, "vrbo_search", id, checkIn, checkOut);
   }
-  // Extract all visible cards and bucket by BR client-side. The
-  // downstream minimum-bedroom guard remains the authoritative
-  // protection against mismatched 1BR/2BR rows.
+  // Let the first propertySearchListings GraphQL batch land before scrolling.
+  await networkCapture.settle("post-submit", 12_000);
+  // On the results page, switch to map view (still the same dated search) so VRBO
+  // loads the full inventory GraphQL payload without injecting a /search URL.
+  const openedMapView = await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
+  if (openedMapView) {
+    await disableVrboSearchAsMapMoves(page, "vrbo_search", id).catch(() => false);
+    await clickVrboSearchThisArea(page, "vrbo_search", id).catch(() => false);
+    await boundedPageDelay(page, 2_500);
+    await networkCapture.settle("post-map-view", 14_000);
+  }
 
   // Scroll the results list so long resort searches (100+ cards) are
   // harvested before extraction. Bedroom/resort filtering happens on
@@ -6601,15 +6663,19 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     window.__vrboHarvestCards = [];
   }).catch(() => {});
   const listHarvestPasses = Math.max(
-    8,
-    Math.min(20, Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_HARVEST_PASSES ?? "14"), 10) || 14),
+    12,
+    Math.min(
+      24,
+      Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_HARVEST_PASSES ?? "18"), 10) || 18,
+    ),
   );
-  log(`vrbo_search ${id}: starting resort list harvest (${listHarvestPasses} passes) before card extraction`);
+  log(`vrbo_search ${id}: starting dropdown list harvest (${listHarvestPasses} passes) before card extraction`);
   const listHarvestStats = await harvestVrboMapResultCards(page, id, listHarvestPasses);
   log(
-    `vrbo_search ${id}: resort list harvest done passes=${listHarvestStats.passes} ` +
+    `vrbo_search ${id}: dropdown list harvest done passes=${listHarvestStats.passes} ` +
     `total=${listHarvestStats.finalHarvestTotal} visible=${listHarvestStats.lastVisibleCards}`,
   );
+  await networkCapture.settle("post-harvest", 10_000);
   const domExtract = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm, { minBedrooms: 1 });
   const networkCards = networkCapture.candidates();
   const domCards = domExtract.cards ?? [];
@@ -6618,7 +6684,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   log(
     `vrbo_search ${id}: dropdown export merged ${mergedCards.length} candidates ` +
     `(network=${networkCards.length}, dom=${domCards.length}, harvestTotal=${listHarvestStats.finalHarvestTotal}, ` +
-    `graphqlResponses=${graphqlStats.matchedResponses}/${graphqlStats.responsesSeen})`,
+    `mapView=${openedMapView ? "yes" : "no"}, graphqlResponses=${graphqlStats.matchedResponses}/${graphqlStats.responsesSeen})`,
   );
   return mergedCards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
   } finally {

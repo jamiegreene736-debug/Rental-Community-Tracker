@@ -10822,7 +10822,7 @@ function LiveSearchSection({
       {data?.debug?.rawCounts && (
         <div className="text-[11px] text-muted-foreground -mt-1 space-y-0.5">
           <div>
-            Raw: airbnb site {data.debug.rawCounts.airbnb ?? 0} · airbnb priced {data.debug.rawCounts.airbnbEngine ?? 0} · vrbo {data.debug.rawCounts.vrbo ?? 0} · direct links {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
+            Raw: airbnb site {data.debug.rawCounts.airbnb ?? 0} · airbnb priced {data.debug.rawCounts.airbnbEngine ?? 0} · vrbo {typeof (data.debug.rawCounts as { vrboExported?: number }).vrboExported === "number" ? (data.debug.rawCounts as { vrboExported: number }).vrboExported : (data.debug.rawCounts.vrbo ?? 0)} · direct links {pmSourceBreakdown.reduce((a, s) => a + (s.count ?? 0), 0)}
             {pmSourceBreakdown.length > 0 && (
               <> ({pmSourceBreakdown.filter((s) => s.count > 0).length}/{pmSourceBreakdown.length} direct-link sources had results)</>
             )}
