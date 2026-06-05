@@ -30,6 +30,28 @@ import { resolveChromeProxyConfig, runChromeProxyStartupPreflight } from "./prox
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COOKIES_FILE = path.join(__dirname, "cookies.json");
+// Env-gated diagnostics: when enabled, dump raw VRBO GraphQL request/response
+// payloads so we can inspect the live schema (operation names, listing array
+// keys, pagination cursor/offset fields) and repair parsing when VRBO changes.
+const VRBO_GRAPHQL_DUMP_ENABLED = process.env.SIDECAR_VRBO_GRAPHQL_DUMP === "1";
+const VRBO_GRAPHQL_DUMP_DIR = path.join(__dirname, "graphql-dumps");
+let __vrboGraphqlDumpCount = 0;
+function dumpVrboGraphqlArtifact(kind, id, data) {
+  if (!VRBO_GRAPHQL_DUMP_ENABLED) return;
+  try {
+    if (__vrboGraphqlDumpCount === 0) fs.mkdirSync(VRBO_GRAPHQL_DUMP_DIR, { recursive: true });
+    if (__vrboGraphqlDumpCount >= 120) return;
+    __vrboGraphqlDumpCount += 1;
+    const safeId = String(id || "unknown").replace(/[^a-z0-9]/gi, "").slice(0, 16);
+    const file = path.join(
+      VRBO_GRAPHQL_DUMP_DIR,
+      `${Date.now()}-${safeId}-${kind}-${__vrboGraphqlDumpCount}.json`,
+    );
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+  } catch {
+    // Diagnostics must never break a live scrape.
+  }
+}
 const CHROME_DATA_DIR = path.join(
   os.homedir(),
   "Library/Application Support/VrboSidecar-Chrome",
@@ -5534,10 +5556,39 @@ function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel
       if (!payload || typeof payload !== "object") return;
       const payloads = Array.isArray(payload) ? payload : [payload];
       let addedTotal = 0;
+      let listingsSeenTotal = 0;
       for (const item of payloads) {
+        if (VRBO_GRAPHQL_DUMP_ENABLED) {
+          listingsSeenTotal += collectVrboPropertySearchListings(item).length;
+        }
         const added = ingestVrboGraphqlPayload(rows, item, expectedNights, variantLabel, maxRows, ingestState);
         addedTotal += added;
         if (rows.length >= maxRows) break;
+      }
+      if (VRBO_GRAPHQL_DUMP_ENABLED) {
+        let requestBody = null;
+        try { requestBody = request?.postData?.() || null; } catch { requestBody = null; }
+        // Only dump GraphQL responses whose payload actually carries the SRP
+        // property-search root (data.propertySearch / propertySearchListings),
+        // so the dump budget targets the listings grid query rather than the
+        // dozens of supporting homepage/SRP module queries.
+        const payloadStr = (() => { try { return JSON.stringify(payload); } catch { return ""; } })();
+        const looksLikeSearchResults =
+          /\"propertySearch\"|propertySearchListings|\"summary\".*\"resultMessages\"|\"listings\"\s*:\s*\[/i.test(payloadStr)
+          || /mojoSection/i.test(payloadStr);
+        const isGraphql = /\/graphql/i.test(url);
+        if (isGraphql && (looksLikeSearchResults || listingsSeenTotal > 0)) {
+          dumpVrboGraphqlArtifact("response", id, {
+            url,
+            method,
+            contentType,
+            status: response.status?.() ?? null,
+            extractedListings: listingsSeenTotal,
+            addedToRows: addedTotal,
+            requestBody: requestBody ? String(requestBody).slice(0, 40000) : null,
+            payload,
+          });
+        }
       }
       if (addedTotal > 0) {
         log(
@@ -5696,45 +5747,162 @@ function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel
   };
 }
 
+async function scrollVrboResultsPaginationIntoView(targetPage) {
+  return targetPage.evaluate(() => {
+    const nextBtn = document.querySelector('[data-stid="next-button"]');
+    if (nextBtn instanceof HTMLElement) {
+      nextBtn.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      return "next-button";
+    }
+    const cards = document.querySelectorAll('[data-stid="lodging-card-responsive"]');
+    const last = cards[cards.length - 1];
+    if (last instanceof HTMLElement) {
+      last.scrollIntoView({ block: "end", behavior: "instant" });
+      return "last-card";
+    }
+    window.scrollTo(0, document.body.scrollHeight);
+    return "document-bottom";
+  }).catch(() => null);
+}
+
+async function readVrboResultsPageRangeHint(targetPage) {
+  return targetPage.evaluate(() => {
+    const text = String(document.body?.innerText || "").replace(/\s+/g, " ");
+    const rangeMatch = text.match(/\b(\d{1,4})\s*[-–]\s*(\d{1,4})\s+of\s+(\d{1,4})\b/i);
+    if (rangeMatch) {
+      return {
+        start: Number(rangeMatch[1]),
+        end: Number(rangeMatch[2]),
+        total: Number(rangeMatch[3]),
+        range: `${rangeMatch[1]}-${rangeMatch[2]} of ${rangeMatch[3]}`,
+      };
+    }
+    return null;
+  }).catch(() => null);
+}
+
+async function isVrboResultsNextPageAvailable(targetPage) {
+  return targetPage.evaluate(() => {
+    const btn = document.querySelector('[data-stid="next-button"]');
+    if (!(btn instanceof HTMLButtonElement)) return false;
+    if (btn.disabled || btn.getAttribute("aria-disabled") === "true") return false;
+    const style = window.getComputedStyle(btn);
+    return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
+  }).catch(() => false);
+}
+
 async function clickVrboResultsNextPage(targetPage, id) {
   if (!targetPage || targetPage.isClosed?.()) return false;
+  await scrollVrboResultsPaginationIntoView(targetPage);
+  await boundedPageDelay(targetPage, 500);
   const clicked = await targetPage.evaluate(() => {
     function normalizeText(value) {
       return String(value || "").replace(/\s+/g, " ").trim();
     }
-    function isVisible(el) {
-      if (!el || !(el instanceof HTMLElement)) return false;
-      const rect = el.getBoundingClientRect();
+    function isClickable(el) {
+      if (!(el instanceof HTMLElement)) return false;
+      if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
       const style = window.getComputedStyle(el);
-      return rect.width > 4 && rect.height > 4 &&
-        rect.bottom >= 0 && rect.right >= 0 &&
-        rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
-        style.display !== "none" && style.visibility !== "hidden" &&
-        Number(style.opacity || "1") > 0.05;
+      return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0.05;
     }
-    const candidates = Array.from(document.querySelectorAll("button, a, [role='button']"))
-      .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true");
+    function tryClick(el, via) {
+      if (!isClickable(el)) return null;
+      try {
+        el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+        el.click();
+        return via;
+      } catch {
+        return null;
+      }
+    }
+
+    const explicit = document.querySelector('[data-stid="next-button"]');
+    const explicitVia = tryClick(explicit, "data-stid=next-button");
+    if (explicitVia) return { ok: true, via: explicitVia };
+
+    const candidates = Array.from(document.querySelectorAll('button[aria-label*="Next" i], button, a, [role="button"]'))
+      .filter(isClickable);
     const next = candidates.find((el) => {
       const text = normalizeText(el.textContent);
       const aria = normalizeText(el.getAttribute("aria-label"));
       const testId = normalizeText(el.getAttribute("data-stid"));
       const hay = `${text} ${aria} ${testId}`;
       if (/(?:show|load|see|view)\s+(?:\d+\s+)?more|more\s+results|more\s+properties/i.test(hay)) return false;
+      if (/\b(?:prev|previous|back)\b/i.test(hay)) return false;
       return /^(?:next|next page|›|»|→)$/i.test(text) ||
         /\bnext\s+page\b/i.test(hay) ||
+        /(?:^|-)next-button$/i.test(testId) ||
         /pagination.*next|next.*pagination/i.test(testId) ||
         (/\bnext\b/i.test(aria) && /\b(?:page|result|listing|property)\b/i.test(aria));
     });
-    if (!next) return false;
-    try {
-      next.click();
-      return true;
-    } catch {
-      return false;
+    const fallbackVia = next ? tryClick(next, "aria/text") : null;
+    if (fallbackVia) return { ok: true, via: fallbackVia };
+    return { ok: false, via: null };
+  }).catch(() => ({ ok: false, via: null }));
+  if (clicked?.ok) {
+    log(`vrbo_search ${id}: clicked UI results Next page button via ${clicked.via}`);
+    return true;
+  }
+  return false;
+}
+
+async function walkVrboResultsUiPages(targetPage, id, options = {}) {
+  const maxPages = Math.min(12, Math.max(1, Number(options.maxPages) || 8));
+  const passesPerPage = Math.max(3, Math.min(12, Number(options.passesPerPage) || 6));
+  const targetTotal = Number.isFinite(Number(options.targetTotal)) && Number(options.targetTotal) > 0
+    ? Math.round(Number(options.targetTotal))
+    : null;
+  let pagesWalked = 0;
+  let stopReason = "ui-next-unavailable";
+  const pageRanges = [];
+
+  for (let pageIdx = 0; pageIdx < maxPages; pageIdx += 1) {
+    await scrollVrboResultsPaginationIntoView(targetPage);
+    await boundedPageDelay(targetPage, 700);
+
+    const rangeHint = await readVrboResultsPageRangeHint(targetPage);
+    if (rangeHint?.range) pageRanges.push(rangeHint.range);
+
+    await harvestVrboMapResultCards(targetPage, id, passesPerPage, { exhaustive: false });
+    const harvestTotal = await targetPage.evaluate(
+      () => (Array.isArray(window.__vrboHarvestCards) ? window.__vrboHarvestCards.length : 0),
+    ).catch(() => 0);
+
+    log(
+      `vrbo_search ${id}: UI page walk page=${pageIdx + 1}` +
+      `${rangeHint?.range ? ` range=${rangeHint.range}` : ""} harvestTotal=${harvestTotal}` +
+      `${targetTotal ? ` target=${targetTotal}` : ""}`,
+    );
+
+    if (targetTotal && harvestTotal >= targetTotal - 2) {
+      stopReason = "target-reached";
+      break;
     }
-  }).catch(() => false);
-  if (clicked) log(`vrbo_search ${id}: clicked UI results Next page button (graphql replay fallback)`);
-  return clicked;
+
+    if (!(await isVrboResultsNextPageAvailable(targetPage))) {
+      stopReason = pageIdx === 0 ? "ui-next-unavailable" : "ui-next-end";
+      break;
+    }
+
+    const clicked = await clickVrboResultsNextPage(targetPage, id);
+    if (!clicked) {
+      stopReason = pageIdx === 0 ? "ui-next-unavailable" : "ui-next-end";
+      break;
+    }
+    pagesWalked += 1;
+    await boundedPageDelay(targetPage, 2_200);
+    await dismissObstructions(targetPage, `vrbo_search_ui_page_${pagesWalked}`).catch(() => []);
+  }
+
+  const finalHarvestTotal = await targetPage.evaluate(
+    () => (Array.isArray(window.__vrboHarvestCards) ? window.__vrboHarvestCards.length : 0),
+  ).catch(() => 0);
+
+  log(
+    `vrbo_search ${id}: UI page walk done pages=${pagesWalked} harvestTotal=${finalHarvestTotal} stop=${stopReason}` +
+    `${pageRanges.length ? ` ranges=[${pageRanges.join(", ")}]` : ""}`,
+  );
+  return { pagesWalked, stopReason, finalHarvestTotal, pageRanges };
 }
 
 async function paginateVrboGraphqlInventory(targetPage, networkCapture, id, options = {}) {
@@ -6424,6 +6592,14 @@ async function clickVrboListViewControl(targetPage, label, id) {
 async function readVrboResultsTotalHint(targetPage) {
   return targetPage.evaluate(() => {
     const text = String(document.body?.innerText || "").replace(/\s+/g, " ");
+    const rangeMatch = text.match(/\b(\d{1,4})\s*[-–]\s*(\d{1,4})\s+of\s+(\d{1,4})\b/i);
+    if (rangeMatch) {
+      return {
+        visible: Number(rangeMatch[2]) - Number(rangeMatch[1]) + 1,
+        total: Number(rangeMatch[3]),
+        range: `${rangeMatch[1]}-${rangeMatch[2]} of ${rangeMatch[3]}`,
+      };
+    }
     const patterns = [
       /(\d{1,4})\s+(?:stays?|properties|results?|rentals?)\b/i,
       /\b(?:showing|viewing)\s+(\d{1,4})\s+of\s+(\d{1,4})\b/i,
@@ -6780,11 +6956,27 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
 
 async function harvestVrboMapResultCards(targetPage, id, passes = 10, options = {}) {
   const exhaustive = options.exhaustive === true;
+  // VRBO's search results page (SRP) server-renders the grid and lazy-loads more
+  // as you approach the bottom of the WINDOW (the list is virtualized: DOM rows
+  // recycle, so we must accumulate harvested cards across passes rather than rely
+  // on the cards currently in the DOM). When a target total is known (read from
+  // the "N properties" hint), we keep scrolling until we reach it; otherwise we
+  // stop after sustained no-growth at the document bottom.
+  const targetTotal = Number.isFinite(Number(options.targetTotal)) && Number(options.targetTotal) > 0
+    ? Math.round(Number(options.targetTotal))
+    : null;
+  // When a target is known, give the loop enough runway to actually reach it
+  // even if VRBO loads ~30-50 cards per "page". The caller's `passes` is treated
+  // as a floor, not a hard ceiling, for exhaustive city exports with a target.
+  const maxPasses = exhaustive && targetTotal
+    ? Math.max(passes, Math.ceil(targetTotal / 12) + 20)
+    : passes;
   let lastSnapshot = null;
   let lastHarvestTotal = 0;
   let plateauPasses = 0;
-  for (let pass = 0; pass < passes; pass++) {
-    log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} starting`);
+  let atBottomPasses = 0;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${maxPasses} starting`);
     let snapshot = null;
     try {
       snapshot = await withSoftTimeout(
@@ -6805,13 +6997,23 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 10, options = 
           }
           const cards = Array.from(document.querySelectorAll('[data-stid="lodging-card-responsive"]'));
           const currentRows = cards.map(harvestRowFromElement).filter(Boolean);
+          // Dedupe accumulation keyed primarily by property id (href path) so a
+          // recycled DOM node with a slightly different price/badge string does
+          // not create duplicate rows or block a genuinely new listing.
           window.__vrboHarvestCards = Array.isArray(window.__vrboHarvestCards) ? window.__vrboHarvestCards : [];
-          const seenHarvest = new Set(window.__vrboHarvestCards.map((row) => `${row.href}|${row.title}|${String(row.fullText || "").slice(0, 160)}`));
+          if (!window.__vrboHarvestSeen) window.__vrboHarvestSeen = {};
+          const seen = window.__vrboHarvestSeen;
           for (const row of currentRows) {
-            const key = `${row.href}|${row.title}|${row.fullText.slice(0, 160)}`;
-            if (seenHarvest.has(key)) continue;
-            seenHarvest.add(key);
-            window.__vrboHarvestCards.push(row);
+            const idKey = (row.href.replace(/^https?:\/\/[^\/]+/, "").split("?")[0].match(/\/(\d{5,})/) || [])[1]
+              || `${row.href}|${row.title}`;
+            const existing = seen[idKey];
+            if (existing == null) {
+              seen[idKey] = window.__vrboHarvestCards.length;
+              window.__vrboHarvestCards.push(row);
+            } else if (row.fullText.length > (window.__vrboHarvestCards[existing]?.fullText?.length || 0)) {
+              // Keep the richest snapshot of a card (priced text beats placeholder).
+              window.__vrboHarvestCards[existing] = row;
+            }
           }
           function looksLikeMapPane(rect) {
             if (!rect || rect.width < 1 || rect.height < 1) return false;
@@ -6822,6 +7024,16 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 10, options = 
             const tall = rect.height >= vh * 0.45;
             return wide && rightHeavy && tall;
           }
+          // Drive lazy-loading from BOTH the document/window and any inner
+          // scrollable results container. Modern VRBO SRPs lazy-load on window
+          // scroll; older/map layouts use an inner pane. Scrolling both is safe.
+          const docEl = document.scrollingElement || document.documentElement;
+          const winBefore = (docEl?.scrollTop ?? window.scrollY) || 0;
+          const winMax = Math.max(0, (docEl?.scrollHeight || 0) - (window.innerHeight || 0));
+          const winStep = Math.round((window.innerHeight || 720) * 0.9);
+          try { window.scrollBy({ top: winStep, left: 0, behavior: "instant" }); } catch { window.scrollTo(0, winBefore + winStep); }
+          const winAfter = (docEl?.scrollTop ?? window.scrollY) || 0;
+
           const scrollCandidates = [];
           const seed = cards[0] || document.querySelector('[data-stid="lodging-card-responsive"]');
           let el = seed;
@@ -6833,85 +7045,219 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 10, options = 
             if (looksLikeMapPane(rect)) continue;
             const cardCount = el.querySelectorAll?.('[data-stid="lodging-card-responsive"]')?.length ?? 0;
             if (cardCount < 1) continue;
-            scrollCandidates.push({
-              el,
-              overflow,
-              cardCount,
-              before: el.scrollTop || 0,
-            });
+            scrollCandidates.push({ el, overflow, cardCount, before: el.scrollTop || 0 });
           }
           scrollCandidates.sort((a, b) => (b.cardCount - a.cardCount) || (b.overflow - a.overflow));
-          const target = scrollCandidates[0]?.el ?? null;
-          let before = 0;
-          let after = 0;
-          if (target) {
-            before = target.scrollTop || 0;
-            const step = Math.max(360, Math.round((target.clientHeight || 640) * 0.72));
-            target.scrollTop = before + step;
-            target.dispatchEvent?.(new Event("scroll", { bubbles: true }));
-            after = target.scrollTop || 0;
-          } else {
-            const winBefore = window.scrollY || 0;
-            window.scrollBy({ top: Math.round((window.innerHeight || 640) * 0.85), left: 0, behavior: "instant" });
-            before = winBefore;
-            after = window.scrollY || 0;
+          const innerTarget = scrollCandidates[0]?.el ?? null;
+          let innerBefore = 0;
+          let innerAfter = 0;
+          let innerAtBottom = true;
+          if (innerTarget) {
+            innerBefore = innerTarget.scrollTop || 0;
+            // Use the proven step size (~72% of the container height). Larger steps
+            // overshoot VRBO's lazy-load trigger and the list stops growing.
+            const step = Math.max(360, Math.round((innerTarget.clientHeight || 640) * 0.72));
+            innerTarget.scrollTop = innerBefore + step;
+            innerTarget.dispatchEvent?.(new Event("scroll", { bubbles: true }));
+            innerAfter = innerTarget.scrollTop || 0;
+            // The container grows as cards lazy-load; treat "at bottom" as being
+            // within a card-height of the current bottom AND the height not having
+            // grown this pass (checked across passes via plateau tracking).
+            innerAtBottom = (innerTarget.scrollHeight - innerTarget.clientHeight - innerAfter) < 40;
           }
+
           const loadMore = Array.from(document.querySelectorAll("button, a, [role='button']"))
-            .find((el) => el instanceof HTMLElement && /(?:show|see|view|load)\s+(?:\d+\s+)?more|more\s+results|more\s+properties/i.test((el.textContent || "").replace(/\s+/g, " ")));
-          if (loadMore) {
-            try { loadMore.click(); } catch {}
-          }
+            .find((b) => b instanceof HTMLElement && /(?:show|see|view|load)\s+(?:\d+\s+)?more|more\s+results|more\s+properties/i.test((b.textContent || "").replace(/\s+/g, " ")));
+          if (loadMore) { try { loadMore.click(); } catch {} }
+
+          const winAtBottom = winMax < 40 ? true : (winMax - winAfter) < 60;
+          // "At bottom" is governed by whichever element we are actually scrolling.
+          // VRBO's SRP keeps the document static and scrolls an inner results
+          // container, so when an inner target exists its bottom state wins. The
+          // inner container's scrollHeight grows as more cards lazy-load, so being
+          // momentarily at the bottom is normal until growth truly stops.
+          const effectiveAtBottom = innerTarget ? innerAtBottom : winAtBottom;
+          const effBefore = innerTarget ? innerBefore : winBefore;
+          const effAfter = innerTarget ? innerAfter : winAfter;
           return {
             pass: passNumber,
             scrollTargets: scrollCandidates.length,
-            scrolledResultsList: Boolean(target) || after > before,
+            scrolledResultsList: Boolean(innerTarget) || winAfter > winBefore,
             visibleCards: document.querySelectorAll('[data-stid="lodging-card-responsive"]').length,
             propertyLinks: Array.from(document.querySelectorAll('a[href]')).filter((a) => /^\/\d+/.test(a.getAttribute("href") || "")).length,
             harvestedCurrent: currentRows.length,
             harvestedTotal: window.__vrboHarvestCards.length,
             topTargetCards: scrollCandidates[0]?.cardCount ?? 0,
             topTargetOverflow: scrollCandidates[0]?.overflow ?? 0,
-            before,
-            after,
+            innerScroll: Boolean(innerTarget),
+            atBottom: effectiveAtBottom,
+            before: effBefore,
+            after: effAfter,
           };
         }, pass + 1),
-        5_000,
+        6_000,
         null,
       );
     } catch (e) {
-      log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} evaluate failed: ${e?.message || e}`);
+      log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${maxPasses} evaluate failed: ${e?.message || e}`);
     }
     if (snapshot) {
       lastSnapshot = snapshot;
       log(
-        `vrbo_search ${id}: map harvest pass ${snapshot.pass}/${passes} ` +
+        `vrbo_search ${id}: map harvest pass ${snapshot.pass}/${maxPasses} ` +
         `targets=${snapshot.scrollTargets} scrolledList=${snapshot.scrolledResultsList} visibleCards=${snapshot.visibleCards} propertyLinks=${snapshot.propertyLinks} ` +
-        `harvest=${snapshot.harvestedCurrent}/${snapshot.harvestedTotal} ` +
-        `topCards=${snapshot.topTargetCards} overflow=${snapshot.topTargetOverflow} scroll=${snapshot.before}->${snapshot.after}`,
+        `harvest=${snapshot.harvestedCurrent}/${snapshot.harvestedTotal}` +
+        `${targetTotal ? `/target=${targetTotal}` : ""} ` +
+        `atBottom=${snapshot.atBottom} scroll=${snapshot.before}->${snapshot.after}`,
       );
     } else {
-      log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${passes} did not return a DOM snapshot`);
+      log(`vrbo_search ${id}: map harvest pass ${pass + 1}/${maxPasses} did not return a DOM snapshot`);
     }
     const harvestedTotal = lastSnapshot?.harvestedTotal ?? 0;
     if (harvestedTotal <= lastHarvestTotal) plateauPasses += 1;
     else plateauPasses = 0;
     lastHarvestTotal = harvestedTotal;
+    // Track how many consecutive passes we have been wedged at the bottom with
+    // no new cards — that is the real "nothing left to load" signal.
+    if (lastSnapshot?.atBottom && plateauPasses > 0) atBottomPasses += 1;
+    else atBottomPasses = 0;
+
+    // If we have a known target, keep going until we essentially reach it.
+    const reachedTarget = targetTotal ? harvestedTotal >= targetTotal - 2 : false;
+    if (reachedTarget) {
+      log(`vrbo_search ${id}: harvest reached target ${harvestedTotal}/${targetTotal} cards after pass ${pass + 1}`);
+      break;
+    }
+
     if (!exhaustive && pass >= 6 && plateauPasses >= 3 && lastHarvestTotal >= 30) {
-      log(`vrbo_search ${id}: map harvest plateau at ${harvestedTotal} cards; stopping early after pass ${pass + 1}/${passes}`);
+      log(`vrbo_search ${id}: map harvest plateau at ${harvestedTotal} cards; stopping early after pass ${pass + 1}/${maxPasses}`);
       break;
     }
-    if (exhaustive && pass >= 12 && plateauPasses >= 5) {
-      log(`vrbo_search ${id}: exhaustive harvest plateau at ${harvestedTotal} cards; stopping after pass ${pass + 1}/${passes}`);
+    // Exhaustive: only give up once we are wedged at the document bottom with
+    // no growth for several passes (so we do not quit while VRBO is still
+    // lazy-loading). Allow more patience when a target is set and unmet.
+    const bottomGiveUp = targetTotal ? 6 : 4;
+    if (exhaustive && pass >= 12 && atBottomPasses >= bottomGiveUp) {
+      log(
+        `vrbo_search ${id}: exhaustive harvest exhausted at ${harvestedTotal}` +
+        `${targetTotal ? `/${targetTotal}` : ""} cards (bottomPasses=${atBottomPasses}) after pass ${pass + 1}/${maxPasses}`,
+      );
       break;
     }
-    await boundedPageDelay(targetPage, pass < 2 ? 1_200 : 900);
+    await boundedPageDelay(targetPage, pass < 2 ? 1_400 : 1_000);
   }
   return {
-    passes,
+    passes: maxPasses,
     finalHarvestTotal: lastSnapshot?.harvestedTotal ?? 0,
     lastVisibleCards: lastSnapshot?.visibleCards ?? 0,
     lastPropertyLinks: lastSnapshot?.propertyLinks ?? 0,
+    targetTotal,
   };
+}
+
+function vrboPropertyIdFromHref(href) {
+  const path = String(href || "").replace(/^https?:\/\/[^/]+/, "").split("?")[0];
+  const m = path.match(/\/(\d{5,})/);
+  return m ? m[1] : null;
+}
+
+function buildVrboSortVariantUrl(baseUrl, sort, extraParams) {
+  try {
+    const u = new URL(baseUrl, "https://www.vrbo.com");
+    if (sort) u.searchParams.set("sort", sort);
+    if (extraParams && typeof extraParams === "object") {
+      for (const [k, v] of Object.entries(extraParams)) u.searchParams.set(k, String(v));
+    }
+    return u.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
+// VRBO's SRP paginates in ~50-result pages with a footer Next control
+// (data-stid="next-button", aria-label="Next page"). walkVrboResultsUiPages is
+// the primary city-export path. When that still falls short, re-run the SAME
+// dated search under different sort orders (+ bedroom filters): each sort returns
+// a different slice, so the union across variants approaches the reported total.
+async function exhaustiveCityHarvestAllSorts(targetPage, id, baseSrpUrl, options = {}) {
+  const targetTotal = Number.isFinite(Number(options.targetTotal)) && Number(options.targetTotal) > 0
+    ? Math.round(Number(options.targetTotal))
+    : null;
+  const passesPerVariant = Math.max(20, Number(options.passesPerVariant) || 35);
+  // Order matters: RECOMMENDED first (matches the page the user already landed
+  // on), then the two price extremes (which the live probe showed contribute the
+  // most net-new listings), then bedroom-filtered slices for extra coverage.
+  const variants = [
+    { label: "RECOMMENDED", sort: "RECOMMENDED" },
+    { label: "PRICE_HIGH_TO_LOW", sort: "PRICE_HIGH_TO_LOW" },
+    { label: "PRICE_LOW_TO_HIGH", sort: "PRICE_LOW_TO_HIGH" },
+    { label: "RECOMMENDED+2BR", sort: "RECOMMENDED", extra: { bedroom_count_gt: 1 } },
+    { label: "RECOMMENDED+3BR", sort: "RECOMMENDED", extra: { bedroom_count_gt: 2 } },
+  ];
+
+  const merged = new Map(); // propertyId -> { href, title, fullText }
+  // Seed with whatever the initial harvest already collected on the current page.
+  try {
+    const seedRows = await targetPage.evaluate(
+      () => (Array.isArray(window.__vrboHarvestCards) ? window.__vrboHarvestCards : []),
+    );
+    for (const row of seedRows || []) {
+      const pid = vrboPropertyIdFromHref(row?.href) || `${row?.href}|${row?.title}`;
+      if (!merged.has(pid)) merged.set(pid, row);
+    }
+  } catch { /* seeding is best-effort */ }
+  log(`vrbo_search ${id}: exhaustive multi-sort harvest seeded with ${merged.size} cards from initial page`);
+
+  const variantStats = [];
+  for (const variant of variants) {
+    if (targetTotal && merged.size >= targetTotal - 2) {
+      log(`vrbo_search ${id}: multi-sort harvest reached target ${merged.size}/${targetTotal}; skipping remaining variants`);
+      break;
+    }
+    const url = buildVrboSortVariantUrl(baseSrpUrl, variant.sort, variant.extra);
+    const before = merged.size;
+    try {
+      await targetPage.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+      await boundedPageDelay(targetPage, 2_200);
+      await dismissObstructions(targetPage, `vrbo_search_sort_${variant.label}`).catch(() => []);
+      // Fresh per-variant accumulator in the page context.
+      await targetPage.evaluate(() => { window.__vrboHarvestCards = []; window.__vrboHarvestSeen = {}; }).catch(() => {});
+      const stats = await harvestVrboMapResultCards(targetPage, id, passesPerVariant, {
+        exhaustive: true,
+        targetTotal: null, // per-variant cap is VRBO's ~90; do not chase the city total within one sort
+      });
+      const rows = await targetPage.evaluate(
+        () => (Array.isArray(window.__vrboHarvestCards) ? window.__vrboHarvestCards : []),
+      );
+      for (const row of rows || []) {
+        const pid = vrboPropertyIdFromHref(row?.href) || `${row?.href}|${row?.title}`;
+        if (!pid) continue;
+        const existing = merged.get(pid);
+        if (!existing || String(row?.fullText || "").length > String(existing?.fullText || "").length) {
+          merged.set(pid, row);
+        }
+      }
+      variantStats.push({ label: variant.label, harvested: rows?.length ?? 0, unionAfter: merged.size, gained: merged.size - before, passes: stats.passes });
+      log(
+        `vrbo_search ${id}: multi-sort variant ${variant.label} harvested=${rows?.length ?? 0} ` +
+        `union=${merged.size} (+${merged.size - before} new)` +
+        `${targetTotal ? ` target=${targetTotal}` : ""}`,
+      );
+    } catch (e) {
+      log(`vrbo_search ${id}: multi-sort variant ${variant.label} failed: ${e?.message ?? e}`);
+      variantStats.push({ label: variant.label, error: String(e?.message ?? e) });
+    }
+  }
+
+  // Write the merged union back into the page so the unchanged extraction path
+  // (extractVisibleVrboCards reads window.__vrboHarvestCards) sees everything.
+  const unionRows = Array.from(merged.values());
+  await targetPage.evaluate((rows) => {
+    window.__vrboHarvestCards = rows;
+    window.__vrboHarvestSeen = {};
+  }, unionRows).catch(() => {});
+  log(`vrbo_search ${id}: exhaustive multi-sort harvest union=${unionRows.length}${targetTotal ? `/${targetTotal}` : ""} across ${variantStats.length} variant(s)`);
+  return { unionTotal: unionRows.length, targetTotal, variantStats };
 }
 
 async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
@@ -7287,6 +7633,17 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     window.__vrboHarvestCards = [];
   }).catch(() => {});
   const graphqlPrefillCount = networkCapture.candidates().length;
+  let uiPageWalkStats = null;
+  if (exhaustiveCityExport) {
+    const estimatedPages = resultsTotalHint?.total
+      ? Math.ceil(resultsTotalHint.total / 50) + 1
+      : 8;
+    uiPageWalkStats = await walkVrboResultsUiPages(page, id, {
+      maxPages: estimatedPages,
+      targetTotal: resultsTotalHint?.total,
+      passesPerPage: 6,
+    });
+  }
   const defaultListHarvestPasses = Math.max(
     20,
     Math.min(
@@ -7294,18 +7651,50 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
       Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_HARVEST_PASSES ?? "30"), 10) || 30,
     ),
   );
+  const uiWalkHarvestTotal = uiPageWalkStats?.finalHarvestTotal ?? 0;
+  const uiWalkReachedTarget = Boolean(
+    resultsTotalHint?.total && uiWalkHarvestTotal >= resultsTotalHint.total - 2,
+  );
   const listHarvestPasses = exhaustiveCityExport
-    ? Math.max(35, defaultListHarvestPasses)
+    ? (uiWalkReachedTarget ? 6 : Math.max(35, defaultListHarvestPasses))
     : (graphqlPrefillCount >= 80 ? Math.min(6, defaultListHarvestPasses) : defaultListHarvestPasses);
   log(
     `vrbo_search ${id}: starting dropdown list harvest (${listHarvestPasses} passes, graphqlPrefill=${graphqlPrefillCount}` +
-    `${exhaustiveCityExport ? ", cityWide=exhaustive" : ""}) before card extraction`,
+    `${exhaustiveCityExport ? ", cityWide=exhaustive" : ""}` +
+    `${uiPageWalkStats ? `, uiPages=${uiPageWalkStats.pagesWalked}` : ""}) before card extraction`,
   );
-  const listHarvestStats = await harvestVrboMapResultCards(page, id, listHarvestPasses, { exhaustive: exhaustiveCityExport });
+  const listHarvestStats = await harvestVrboMapResultCards(page, id, listHarvestPasses, {
+    exhaustive: exhaustiveCityExport && !uiWalkReachedTarget,
+    targetTotal: exhaustiveCityExport && !uiWalkReachedTarget ? resultsTotalHint?.total : undefined,
+  });
   log(
     `vrbo_search ${id}: dropdown list harvest done passes=${listHarvestStats.passes} ` +
     `total=${listHarvestStats.finalHarvestTotal} visible=${listHarvestStats.lastVisibleCards}`,
   );
+  // City-wide exports: if UI page-walk + scroll still fall short, re-run under
+  // multiple sort orders and merge unique listings (e.g. ~218 for Princeville).
+  let multiSortStats = null;
+  const postHarvestTotal = await page.evaluate(
+    () => (Array.isArray(window.__vrboHarvestCards) ? window.__vrboHarvestCards.length : 0),
+  ).catch(() => listHarvestStats.finalHarvestTotal);
+  const needsMultiSort = exhaustiveCityExport &&
+    resultsTotalHint?.total &&
+    postHarvestTotal < resultsTotalHint.total - 10;
+  if (needsMultiSort) {
+    const baseSrpUrl = page.url();
+    if (/\/search\b/i.test(String(baseSrpUrl))) {
+      multiSortStats = await exhaustiveCityHarvestAllSorts(page, id, baseSrpUrl, {
+        targetTotal: resultsTotalHint?.total,
+        passesPerVariant: Math.min(26, listHarvestPasses),
+      });
+      log(
+        `vrbo_search ${id}: multi-sort exhaustive harvest union=${multiSortStats.unionTotal}` +
+        `${multiSortStats.targetTotal ? `/${multiSortStats.targetTotal}` : ""}`,
+      );
+    } else {
+      log(`vrbo_search ${id}: skipped multi-sort harvest; current URL is not a /search SRP (${String(baseSrpUrl).slice(0, 80)})`);
+    }
+  }
   await networkCapture.settle("post-harvest", 10_000);
   const domExtract = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm, { minBedrooms: 1 });
 	  const networkCards = networkCapture.candidates();
@@ -7340,6 +7729,12 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
 	      graphqlUiPages: paginationStats.uiPages ?? 0,
 	      graphqlPaginationStop: paginationStats.stopReason ?? null,
 	      graphqlTotalCount: paginationStats.lastPagination?.totalCount ?? resultsTotalHint?.total ?? undefined,
+	      reportedTotal: resultsTotalHint?.total ?? undefined,
+	      uiPageWalkPages: uiPageWalkStats?.pagesWalked ?? undefined,
+	      uiPageWalkStop: uiPageWalkStats?.stopReason ?? undefined,
+	      uiPageWalkRanges: uiPageWalkStats?.pageRanges ?? undefined,
+	      multiSortUnion: multiSortStats?.unionTotal ?? undefined,
+	      multiSortVariants: multiSortStats?.variantStats ?? undefined,
 	    },
 	  };
 	  } finally {

@@ -3364,6 +3364,8 @@ const cityInventorySource = readFileSync("server/city-vrbo-inventory.ts", "utf8"
 	    vrboWorkerSource.includes("cityWideInventory") &&
 	    vrboWorkerSource.includes("clickVrboListViewControl") &&
 	    vrboWorkerSource.includes("paginateVrboGraphqlInventory") &&
+	    vrboWorkerSource.includes("walkVrboResultsUiPages") &&
+	    vrboWorkerSource.includes('data-stid="next-button"') &&
     cityInventorySource.includes('searchMode: "destination_dropdown"') &&
     !cityInventorySource.includes('searchMode: "map_bounds"') &&
     !cityInventorySource.includes("mapSearch:"),
