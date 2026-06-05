@@ -12024,6 +12024,12 @@ export async function registerRoutes(
           checkOut,
           bedrooms: otaSearchBedrooms,
           searchMode: "destination_dropdown",
+          searchVariations: [targetSearchTerm],
+          variationMode: {
+            maxVariations: 1,
+            allowDiscovery: false,
+            filterTokens: [],
+          },
           walletBudgetMs: 180_000,
           queueBudgetMs: 285_000,
           rerunOnlyUntried: rerunOnlyUntriedVariations,

@@ -93,6 +93,8 @@ export type SidecarVrboParams = {
   searchVariations?: string[];
   variationMode?: SidecarSearchVariationMode;
   queueContext?: SidecarQueueContext;
+  /** City-wide VRBO inventory export (single term, exhaustive list scroll + GraphQL pagination). */
+  cityWideInventory?: boolean;
 };
 
 export type SidecarVrboPhotoScrapeParams = {
@@ -2390,6 +2392,7 @@ export async function searchVrboViaSidecar(opts: {
         mapSearch: opts.mapSearch,
         searchVariations: policy.terms,
         queueContext: opts.queueContext,
+        cityWideInventory: Boolean(opts.cityWideInventory),
         variationMode: {
           filterTokens: policy.filterTokens,
           maxVariations: policy.maxVariations,

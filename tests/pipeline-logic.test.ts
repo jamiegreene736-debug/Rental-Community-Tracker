@@ -2381,8 +2381,10 @@ assert.ok(
 );
 assert.ok(
   findBuyInRouteSource.includes('searchMode: "destination_dropdown"')
-    && !findBuyInRouteSource.includes('searchMode: "map_bounds"'),
-  "find-buy-in should request sidecar resort-name dropdown searches instead of map-bounds harvest",
+    && !findBuyInRouteSource.includes('searchMode: "map_bounds"')
+    && findBuyInRouteSource.includes("maxVariations: 1")
+    && findBuyInRouteSource.includes("searchVariations: [targetSearchTerm]"),
+  "find-buy-in should request a single resort dropdown VRBO search instead of map-bounds or multi-variation repeats",
 );
 assert.ok(
   findBuyInRouteSource.includes("sources: {")
@@ -3167,8 +3169,13 @@ assert.ok(
     vrboWorkerSource.includes("graphql settled") &&
     vrboWorkerSource.includes("post-map-view") &&
     vrboWorkerSource.includes("createVrboGraphqlCollector") &&
+    vrboWorkerSource.includes("paginateVrboGraphqlInventory") &&
+    vrboWorkerSource.includes("replayNextGraphqlPage") &&
+    vrboWorkerSource.includes("extractVrboGraphqlPaginationMeta") &&
+    vrboWorkerSource.includes("clickVrboResultsNextPage") &&
+    vrboWorkerSource.includes("hasNextPage=false") &&
     routesSource.includes("resort destination dropdown, dates, and bedroom export"),
-  "VRBO resort dropdown search should merge GraphQL propertySearchListings with scroll-harvested DOM cards for full export",
+  "VRBO resort dropdown search should paginate GraphQL inventory via cursor replay with UI Next fallback, then merge DOM harvest",
 );
 assert.ok(
   vrboWorkerSource.includes("finalHarvestTotal") &&
@@ -3348,6 +3355,9 @@ assert.ok(
 const cityInventorySource = readFileSync("server/city-vrbo-inventory.ts", "utf8");
 assert.ok(
   cityInventorySource.includes("cityWideInventory: true") &&
+    vrboWorkerSource.includes("cityWideInventory") &&
+    vrboWorkerSource.includes("clickVrboListViewControl") &&
+    vrboWorkerSource.includes("paginateVrboGraphqlInventory") &&
     cityInventorySource.includes('searchMode: "destination_dropdown"') &&
     !cityInventorySource.includes('searchMode: "map_bounds"') &&
     !cityInventorySource.includes("mapSearch:"),
