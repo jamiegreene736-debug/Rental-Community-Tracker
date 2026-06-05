@@ -34,7 +34,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick,
-  ShieldCheck, Paperclip, X, Minimize2,
+  ShieldCheck, Paperclip, X, Minimize2, Plus,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -813,6 +813,27 @@ function sourceLabelForUrl(url: string | null | undefined): string {
   } catch {
     return "site";
   }
+}
+
+const MANUAL_BUY_IN_PHOTO_MARKER = "Manual photo URLs:";
+
+function parseUrlList(value: string): string[] {
+  const seen = new Set<string>();
+  return value
+    .split(/[\s,\n]+/)
+    .map((url) => url.trim())
+    .filter((url) => {
+      if (!/^https?:\/\/\S+$/i.test(url)) return false;
+      if (seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+}
+
+function manualBuyInPhotoUrlsFromNotes(notes: string | null | undefined): string[] {
+  if (!notes?.includes(MANUAL_BUY_IN_PHOTO_MARKER)) return [];
+  const afterMarker = notes.split(MANUAL_BUY_IN_PHOTO_MARKER).slice(1).join(MANUAL_BUY_IN_PHOTO_MARKER);
+  return parseUrlList(afterMarker).slice(0, 12);
 }
 
 function isAirbnbUrl(url: string | null | undefined): boolean {
@@ -4052,6 +4073,10 @@ export default function Bookings() {
     | { reservation: GuestyReservation; slot: SlotInfo }
     | null
   >(null);
+  const [manualBuyInTarget, setManualBuyInTarget] = useState<
+    | { reservation: GuestyReservation; slot: SlotInfo; propertyId: number; propertyName: string }
+    | null
+  >(null);
   const [cancellationRange, setCancellationRange] = useState<"all" | "365" | "90">("all");
   const [verifyTarget, setVerifyTarget] = useState<
     | { buyIn: BuyIn; reservation: GuestyReservation }
@@ -4321,6 +4346,15 @@ export default function Bookings() {
   const selectedBuyInPropertyId = !isGlobalView
     ? ((bookingsData as any)?.propertyId ?? selectedQueryPropertyId)
     : null;
+  const buyInPropertyMetaForReservation = (reservation: GuestyReservation) => {
+    const meta = reservationPropertyMeta.get(reservation._id);
+    const propertyId = meta?.propertyId ?? selectedBuyInPropertyId ?? selectedQueryPropertyId;
+    if (!propertyId) return null;
+    return {
+      propertyId,
+      propertyName: meta?.propertyName || selectedDisplayName || `Property ${propertyId}`,
+    };
+  };
 
   const {
     data: cancellationsData,
@@ -7785,6 +7819,8 @@ export default function Bookings() {
                         {r.slots.map((slot) => {
                           const slotIsExpanded = expandedSlots.has(slotKey(r._id, slot.unitId));
                           const firstBuyInId = r.slots.find((s) => s.buyIn)?.buyIn?.id ?? null;
+                          const manualMeta = buyInPropertyMetaForReservation(r);
+                          const manualPhotoUrls = manualBuyInPhotoUrlsFromNotes(slot.buyIn?.notes);
                           return (
                           <div
                             key={slot.unitId}
@@ -7871,6 +7907,23 @@ export default function Bookings() {
                                         );
                                       })()}
                                     </div>
+                                    {manualPhotoUrls.length > 0 && (
+                                      <div className="mt-2 flex max-w-full gap-1.5 overflow-x-auto pb-0.5">
+                                        {manualPhotoUrls.slice(0, 6).map((url, idx) => (
+                                          <a
+                                            key={`${url}-${idx}`}
+                                            href={url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="block h-14 w-20 shrink-0 overflow-hidden rounded border bg-muted"
+                                            title="Manual buy-in photo"
+                                          >
+                                            <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" />
+                                          </a>
+                                        ))}
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               ) : (
@@ -7930,14 +7983,32 @@ export default function Bookings() {
                                   </Button>
                                 </>
                               ) : (
-                                <Button
-                                  size="sm"
-                                  onClick={() => setPicker({ reservation: r, slot })}
-                                  data-testid={`button-find-buyin-${r._id}-${slot.unitId}`}
-                                >
-                                  <Search className="h-3.5 w-3.5 mr-1" />
-                                  Find {slot.bedrooms}BR+ buy-in
-                                </Button>
+                                <>
+                                  <Button
+                                    size="sm"
+                                    onClick={() => setPicker({ reservation: r, slot })}
+                                    data-testid={`button-find-buyin-${r._id}-${slot.unitId}`}
+                                  >
+                                    <Search className="h-3.5 w-3.5 mr-1" />
+                                    Find {slot.bedrooms}BR+ buy-in
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => manualMeta && setManualBuyInTarget({
+                                      reservation: r,
+                                      slot,
+                                      propertyId: manualMeta.propertyId,
+                                      propertyName: manualMeta.propertyName,
+                                    })}
+                                    disabled={!manualMeta}
+                                    data-testid={`button-manual-buyin-${r._id}-${slot.unitId}`}
+                                    title={manualMeta ? "Record and attach a manually booked buy-in" : "Select a buy-in property target first"}
+                                  >
+                                    <Plus className="h-3.5 w-3.5 mr-1" />
+                                    Manual
+                                  </Button>
+                                </>
                               )}
                               {/* Per-slot toggle for the inline live-search
                                   panel. This starts a fresh audit search,
@@ -8657,6 +8728,16 @@ export default function Bookings() {
           )}
         </DialogContent>
       </Dialog>
+
+      {manualBuyInTarget && (
+        <ManualBuyInDialog
+          reservation={manualBuyInTarget.reservation}
+          propertyId={manualBuyInTarget.propertyId}
+          propertyName={manualBuyInTarget.propertyName}
+          slot={manualBuyInTarget.slot}
+          onClose={() => setManualBuyInTarget(null)}
+        />
+      )}
 
       {/* Per-slot Verify rate dialog — runs verify-pm-listing on demand
           and shows the screenshot inline. Decoupled from auto-fill so a
@@ -12416,6 +12497,254 @@ function VerifyRateDialog({
             disabled={updateCost.isPending || state.kind === "loading"}
           >
             {updateCost.isPending ? "Saving..." : "Save cost"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Dialog: records an operator-sourced buy-in without running live OTA search.
+// Photo URLs are persisted in notes so operators get durable visual context
+// without requiring a schema migration for this narrow workflow.
+function ManualBuyInDialog({
+  reservation,
+  propertyId,
+  propertyName,
+  slot,
+  onClose,
+}: {
+  reservation: GuestyReservation;
+  propertyId: number;
+  propertyName: string;
+  slot: SlotInfo;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const toDateOnly = (s: string | undefined): string => {
+    if (!s) return "";
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+  };
+  const [costPaid, setCostPaid] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [listingUrl, setListingUrl] = useState("");
+  const [photoUrlText, setPhotoUrlText] = useState("");
+  const [unitAddress, setUnitAddress] = useState("");
+  const [managementCompany, setManagementCompany] = useState("");
+  const [managementContact, setManagementContact] = useState("");
+  const [notes, setNotes] = useState("");
+  const checkIn = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
+  const checkOut = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+  const photoUrls = useMemo(() => parseUrlList(photoUrlText).slice(0, 12), [photoUrlText]);
+  const duplicateSlot = useMemo(() => {
+    const candidateKeys = new Set(listingIdentityKeys({
+      url: listingUrl,
+      title: notes,
+      alternateUrls: photoUrls,
+    }));
+    if (candidateKeys.size === 0) return null;
+    return reservation.slots.find(
+      (s) => s.unitId !== slot.unitId
+        && s.buyIn
+        && listingIdentityKeys({
+          url: s.buyIn.airbnbListingUrl,
+          title: titleFromBuyInNotes(s.buyIn.notes),
+          alternateUrls: manualBuyInPhotoUrlsFromNotes(s.buyIn.notes),
+        }).some((key) => candidateKeys.has(key)),
+    ) ?? null;
+  }, [listingUrl, notes, photoUrls, reservation.slots, slot.unitId]);
+  const parsedCost = Number(costPaid);
+  const canSave = Number.isFinite(parsedCost) && parsedCost > 0 && !!listingUrl.trim() && !duplicateSlot;
+
+  const createAndAttach = useMutation({
+    mutationFn: async () => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        throw new Error("Manual buy-in needs valid check-in/check-out dates.");
+      }
+      if (!canSave) {
+        throw new Error("Enter a positive total cost and a listing URL before saving.");
+      }
+      const noteParts = [
+        `Manually recorded buy-in for ${slot.unitLabel}.`,
+        notes.trim(),
+        photoUrls.length > 0 ? `${MANUAL_BUY_IN_PHOTO_MARKER} ${photoUrls.join(" ")}` : "",
+      ].filter(Boolean);
+      const created = await apiRequest("POST", "/api/buy-ins", {
+        propertyId,
+        propertyName,
+        unitId: slot.unitId,
+        unitLabel: slot.unitLabel,
+        checkIn,
+        checkOut,
+        costPaid: parsedCost.toFixed(2),
+        airbnbConfirmation: confirmation.trim() || null,
+        airbnbListingUrl: listingUrl.trim(),
+        unitAddress: unitAddress.trim() || null,
+        managementCompany: managementCompany.trim() || null,
+        managementContact: managementContact.trim() || null,
+        groundFloorStatus: "unknown",
+        groundFloorEvidence: null,
+        notes: noteParts.join(" "),
+        status: "active",
+      }).then((r) => r.json());
+      if (!created?.id) throw new Error(created?.error || "Buy-in create failed");
+      const attach = await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
+        buyInId: created.id,
+      }).then((r) => r.json());
+      if (!attach?.id) throw new Error(attach?.error || "Attach failed");
+      return created;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      toast({ title: "Manual buy-in recorded and attached" });
+      onClose();
+    },
+    onError: (e: any) => toast({ title: "Save failed", description: e.message, variant: "destructive" }),
+  });
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Manually add buy-in for {slot.unitLabel}</DialogTitle>
+          <DialogDescription>
+            {reservation.guest?.fullName ?? "Guest"} · {fmtDate(checkIn)} → {fmtDate(checkOut)} · {propertyName}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <Label htmlFor="manualCostPaid" className="text-xs">Total cost paid (USD)</Label>
+                <Input
+                  id="manualCostPaid"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={costPaid}
+                  onChange={(e) => setCostPaid(e.target.value)}
+                  data-testid="input-manual-buyin-cost"
+                />
+              </div>
+              <div>
+                <Label htmlFor="manualConfirmation" className="text-xs">Confirmation code</Label>
+                <Input
+                  id="manualConfirmation"
+                  value={confirmation}
+                  onChange={(e) => setConfirmation(e.target.value)}
+                  placeholder="Confirmation or booking ID"
+                  data-testid="input-manual-buyin-confirmation"
+                />
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="manualListingUrl" className="text-xs">Listing URL</Label>
+              <Input
+                id="manualListingUrl"
+                value={listingUrl}
+                onChange={(e) => setListingUrl(e.target.value)}
+                placeholder="https://..."
+                data-testid="input-manual-buyin-listing-url"
+              />
+              {duplicateSlot && (
+                <p className="mt-1 text-[11px] text-destructive">
+                  This listing or photo evidence already matches {duplicateSlot.unitLabel}. Use a different physical unit for {slot.unitLabel}.
+                </p>
+              )}
+            </div>
+            <div>
+              <Label htmlFor="manualPhotoUrls" className="text-xs">Image URLs</Label>
+              <Textarea
+                id="manualPhotoUrls"
+                rows={4}
+                value={photoUrlText}
+                onChange={(e) => setPhotoUrlText(e.target.value)}
+                placeholder="Paste one or more image URLs, separated by lines, commas, or spaces"
+                data-testid="input-manual-buyin-photo-urls"
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <Label htmlFor="manualUnitAddress" className="text-xs">Unit address</Label>
+                <Input
+                  id="manualUnitAddress"
+                  value={unitAddress}
+                  onChange={(e) => setUnitAddress(e.target.value)}
+                  data-testid="input-manual-buyin-address"
+                />
+              </div>
+              <div>
+                <Label htmlFor="manualManagementCompany" className="text-xs">Management company</Label>
+                <Input
+                  id="manualManagementCompany"
+                  value={managementCompany}
+                  onChange={(e) => setManagementCompany(e.target.value)}
+                  data-testid="input-manual-buyin-management-company"
+                />
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="manualManagementContact" className="text-xs">Manager contact</Label>
+              <Input
+                id="manualManagementContact"
+                value={managementContact}
+                onChange={(e) => setManagementContact(e.target.value)}
+                placeholder="Email, phone, or portal contact"
+                data-testid="input-manual-buyin-management-contact"
+              />
+            </div>
+            <div>
+              <Label htmlFor="manualNotes" className="text-xs">Notes</Label>
+              <Textarea
+                id="manualNotes"
+                rows={3}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Rate details, cancellation terms, payment status, or anything to verify later"
+                data-testid="input-manual-buyin-notes"
+              />
+            </div>
+          </div>
+          <div className="space-y-3">
+            <div className="rounded border bg-muted/30 p-3 text-xs">
+              <p className="font-medium">{slot.unitLabel} · {slot.bedrooms}BR minimum</p>
+              <p className="text-muted-foreground">{fmtDate(checkIn)} → {fmtDate(checkOut)}</p>
+              <p className="mt-1 text-muted-foreground">{photoUrls.length} image URL{photoUrls.length === 1 ? "" : "s"} ready</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {photoUrls.length > 0 ? photoUrls.map((url, idx) => (
+                <a
+                  key={`${url}-${idx}`}
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group overflow-hidden rounded border bg-background"
+                  title={url}
+                >
+                  <div className="aspect-[4/3] bg-muted">
+                    <img src={url} alt="" className="h-full w-full object-cover transition group-hover:scale-[1.02]" loading="lazy" />
+                  </div>
+                  <div className="truncate px-2 py-1 text-[10px] text-muted-foreground">
+                    {sourceLabelForUrl(url)}
+                  </div>
+                </a>
+              )) : (
+                <div className="col-span-2 rounded border border-dashed bg-background p-6 text-center text-xs text-muted-foreground">
+                  Image previews appear here as soon as URLs are pasted.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button
+            onClick={() => createAndAttach.mutate()}
+            disabled={!canSave || createAndAttach.isPending}
+            data-testid="button-save-manual-buy-in"
+          >
+            {createAndAttach.isPending ? "Saving…" : "Save & attach"}
           </Button>
         </DialogFooter>
       </DialogContent>
