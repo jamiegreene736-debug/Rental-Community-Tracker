@@ -44,6 +44,7 @@ import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log"
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
+import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1075,17 +1076,24 @@ function cleanGuestAlternativeLabel(value: string | null | undefined): string {
     .trim();
 }
 
+function usableGuestAlternativeCommunity(value: string | null | undefined): string {
+  const label = cleanGuestAlternativeLabel(value);
+  if (!label || label.length < 4) return "";
+  if (/manually attached from combo|auto-filled from|selected from saved|manual photo urls/i.test(label)) return "";
+  if (/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(label)) return "";
+  return label;
+}
+
 function alternativeCommunityFromBuyInNotes(notes: string | null | undefined, listingTitle: string): string {
   const raw = String(notes ?? "");
-  const comboCommunity = cleanGuestAlternativeLabel(
-    raw.match(/Manually attached from combo\s+[^·]+·\s*([^—·]+)/i)?.[1],
+  const comboLabel = cleanGuestAlternativeLabel(
+    raw.match(/Manually attached from combo\s+(.+?)\s+—\s+\d+\s*BR\s+[^—·]+—/i)?.[1],
   );
-  if (comboCommunity && !/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(comboCommunity)) return comboCommunity;
-  const titleLead = cleanGuestAlternativeLabel(listingTitle.split(/\s+[-–—|]\s+/)[0]);
+  const comboCommunity = usableGuestAlternativeCommunity(comboLabel.split(/\s*·\s*/).pop());
+  if (comboCommunity) return comboCommunity;
+  const titleLead = usableGuestAlternativeCommunity(listingTitle.split(/\s+[-–—|]\s+/)[0]);
   if (
     titleLead &&
-    titleLead.length >= 4 &&
-    !/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(titleLead) &&
     !/^(?:gorgeous|beautiful|stunning|luxury|spacious|updated|renovated|private|oceanfront|beachfront|sleeps?|bedrooms?|condos?|villas?|homes?|townhomes?|units?|studio)\b/i.test(titleLead)
   ) {
     return titleLead;
@@ -1095,10 +1103,21 @@ function alternativeCommunityFromBuyInNotes(notes: string | null | undefined, li
 
 function originalCommunityForAlternativePage(reservation: GuestyReservation, slots: Array<SlotInfo & { buyIn: BuyIn }>): string {
   const propertyId = Number(slots[0]?.buyIn?.propertyId);
+  const builder = Number.isFinite(propertyId) ? getUnitBuilderByPropertyId(propertyId) : undefined;
+  return cleanGuestAlternativeLabel(
+    builder?.complexName ??
+      (Number.isFinite(propertyId) ? PROPERTY_UNIT_CONFIGS[propertyId]?.community : undefined) ??
+      reservation.slots.find((slot) => slot.community)?.community ??
+      slots[0]?.buyIn?.propertyName,
+  );
+}
+
+function originalAreaForAlternativePage(reservation: GuestyReservation, slots: Array<SlotInfo & { buyIn: BuyIn }>): string {
+  const propertyId = Number(slots[0]?.buyIn?.propertyId);
   return cleanGuestAlternativeLabel(
     (Number.isFinite(propertyId) ? PROPERTY_UNIT_CONFIGS[propertyId]?.community : undefined) ??
       reservation.slots.find((slot) => slot.community)?.community ??
-      slots[0]?.buyIn?.propertyName,
+      "",
   );
 }
 
@@ -4663,7 +4682,9 @@ export default function Bookings() {
       const originalCommunity = cleanGuestAlternativeLabel(
         readyProximity?.community ?? originalCommunityForAlternativePage(reservation, slotsForPage),
       );
-      const sharedAlternativeCommunity = cleanGuestAlternativeLabel(readyProximity?.resortName);
+      const originalCommunityName = originalCommunityForAlternativePage(reservation, slotsForPage);
+      const originalArea = originalAreaForAlternativePage(reservation, slotsForPage);
+      const sharedAlternativeCommunity = usableGuestAlternativeCommunity(readyProximity?.resortName);
       const alternatives = slotsForPage.map((s) => {
         const b = s.buyIn;
         const photoUrls = manualBuyInPhotoUrlsFromNotes(b.notes);
@@ -4674,7 +4695,7 @@ export default function Bookings() {
         return {
           title: listingTitle,
           community: alternativeCommunity,
-          originalCommunity,
+          originalCommunity: originalCommunityName || originalCommunity,
           alternativeCommunity,
           url: b.airbnbListingUrl,
           image: photoUrls[0] ?? "",
@@ -4686,14 +4707,19 @@ export default function Bookings() {
           notes: b.notes,
         };
       });
+      const primaryAlternativeCommunity = alternatives.find((item) => {
+        const label = usableGuestAlternativeCommunity(item.alternativeCommunity);
+        return label && label !== originalArea && label !== originalCommunityName;
+      })?.alternativeCommunity || alternatives[0]?.alternativeCommunity || sharedAlternativeCommunity || "";
       const response = await apiRequest("POST", "/api/booking-alternatives", {
         reservationId: reservation._id,
         guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
         checkIn: checkInOf(reservation),
         checkOut: checkOutOf(reservation),
-        originalCommunity,
-        alternativeCommunity: sharedAlternativeCommunity || alternatives[0]?.alternativeCommunity || "",
-        walkMinutes: readyProximity?.walk?.minutes ?? null,
+        originalCommunity: originalCommunityName || originalCommunity,
+        areaName: originalArea || originalCommunity,
+        alternativeCommunity: primaryAlternativeCommunity,
+        driveMinutes: readyProximity?.walk?.minutes ?? null,
         alternatives,
       }).then((r) => r.json());
       if (!response?.url) throw new Error(response?.message || response?.error || "Alternative page create failed");

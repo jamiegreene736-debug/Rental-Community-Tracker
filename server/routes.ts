@@ -229,7 +229,7 @@ import {
   looksLikeIndividualListingTitle,
   mergeDiscoveredScoutRowsByResort,
 } from "@shared/alternative-scout-resort";
-import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, haversineFeet, MAX_BUY_IN_WALK_MINUTES, walkMinutesFromFeet, type WalkResult } from "@shared/walking-distance";
+import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
   unitBuilderData,
@@ -7482,8 +7482,25 @@ export async function registerRoutes(
   const normalizeCommunityContext = (value: unknown, max = 120): string =>
     normalizeAlternativeText(value, max).replace(/^[\s·\-–—|,:;]+|[\s·\-–—|,:;]+$/g, "");
 
+  const usableCommunityContext = (value: unknown): string => {
+    const label = normalizeCommunityContext(value);
+    if (!label || label.length < 4) return "";
+    if (/manually attached from combo|auto-filled from|selected from saved|manual photo urls/i.test(label)) return "";
+    if (/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(label)) return "";
+    return label;
+  };
+
   const sameCommunityContext = (a: string, b: string): boolean =>
     normalizeResortText(a) === normalizeResortText(b);
+
+  const communityFromAlternativeTitle = (value: unknown): string => {
+    const lead = usableCommunityContext(String(value ?? "").split(/\s+[-–—|]\s+/)[0]);
+    if (!lead) return "";
+    if (/^(?:gorgeous|beautiful|stunning|luxury|luxurious|spacious|cozy|charming|amazing|lovely|modern|new(?:ly)?|updated|renovated|private|oceanfront|beachfront|ocean|beach|sleeps?|bedrooms?|condos?|villas?|homes?|townhomes?|units?|studio)\b/i.test(lead)) {
+      return "";
+    }
+    return lead;
+  };
 
   const communityGeocodeQuery = (name: string, referenceCommunity: string): string => {
     const loc = COMMUNITY_LOCATION_BY_KEY[referenceCommunity] ?? BUY_IN_MARKET_LOCATIONS[referenceCommunity];
@@ -7492,21 +7509,86 @@ export async function registerRoutes(
     return [name, loc.city, loc.state].filter(Boolean).join(", ");
   };
 
-  const estimateCommunityWalkMinutes = async (
+  const estimateCommunityDriveMinutes = async (
     originalCommunity: string,
     alternativeCommunity: string,
+    areaName = "",
   ): Promise<number | null> => {
     if (!originalCommunity || !alternativeCommunity || sameCommunityContext(originalCommunity, alternativeCommunity)) {
       return null;
     }
-    const fromQuery = communityGeocodeQuery(originalCommunity, originalCommunity);
-    const toQuery = communityGeocodeQuery(alternativeCommunity, originalCommunity);
+    const referenceCommunity = areaName || originalCommunity;
+    const fromQuery = communityGeocodeQuery(originalCommunity, referenceCommunity);
+    const toQuery = communityGeocodeQuery(alternativeCommunity, referenceCommunity);
     const [from, to] = await Promise.all([
       geocode(fromQuery).catch(() => null),
       geocode(toQuery).catch(() => null),
     ]);
     if (!from || !to) return null;
-    return walkMinutesFromFeet(haversineFeet(from.lat, from.lng, to.lat, to.lng));
+    return driveMinutesBetweenCoords(from.lat, from.lng, to.lat, to.lng);
+  };
+
+  const firstAlternativeNumber = (...values: unknown[]): number | null => {
+    for (const value of values) {
+      const n = typeof value === "string" ? Number.parseFloat(value) : Number(value);
+      if (Number.isFinite(n) && n > 0 && n < 100) return Math.round(n * 2) / 2;
+    }
+    return null;
+  };
+
+  const formatAlternativeNumber = (value: unknown): string => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, "");
+  };
+
+  const extractAlternativeFactsFromText = (value: unknown): {
+    bedrooms: number | null;
+    bathrooms: number | null;
+    sleeps: number | null;
+    basicDetails: string[];
+  } => {
+    const text = normalizeAlternativeText(value, 3000);
+    const bedrooms = firstAlternativeNumber(
+      text.match(/\b(\d+(?:\.\d+)?)\s*(?:bedrooms?|beds?|br|bd)\b/i)?.[1],
+    );
+    const bathrooms = firstAlternativeNumber(
+      text.match(/\b(\d+(?:\.\d+)?)\s*(?:bathrooms?|baths?|ba)\b/i)?.[1],
+    );
+    const sleeps = firstAlternativeNumber(
+      text.match(/\bsleeps?\s*(\d{1,2})\b/i)?.[1],
+      text.match(/\b(\d{1,2})\s*(?:guests?|sleeps?)\b/i)?.[1],
+    );
+    const basicDetails = Array.from(new Set(
+      text
+        .split(/(?:·|\||•|\n| - )/)
+        .map((part) => normalizeAlternativeText(part, 90))
+        .filter((part) => part.length > 0 && /\b(?:bed|bath|sleep|guest|condo|villa|townhome|home|apartment|pool|kitchen|lanai|view|parking|wifi|wi-fi|air conditioning|ac)\b/i.test(part)),
+    )).slice(0, 8);
+    return {
+      bedrooms: bedrooms ? Math.round(bedrooms) : null,
+      bathrooms,
+      sleeps: sleeps ? Math.round(sleeps) : null,
+      basicDetails,
+    };
+  };
+
+  const uniqueAlternativeDetails = (...groups: Array<unknown>): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const group of groups) {
+      const values = Array.isArray(group) ? group : [group];
+      for (const value of values) {
+        const detail = normalizeAlternativeText(value, 90);
+        if (!detail) continue;
+        const key = detail.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(detail);
+        if (out.length >= 8) return out;
+      }
+    }
+    return out;
   };
 
   const vrboAlternativeUrlsFrom = (value: unknown): string[] => {
@@ -7525,7 +7607,14 @@ export async function registerRoutes(
       .slice(0, 4);
   };
 
-  const extractVrboMetadataFallback = async (url: string): Promise<{ title: string; photos: string[]; bedrooms: number | null }> => {
+  const extractVrboMetadataFallback = async (url: string): Promise<{
+    title: string;
+    photos: string[];
+    bedrooms: number | null;
+    bathrooms: number | null;
+    sleeps: number | null;
+    basicDetails: string[];
+  }> => {
     try {
       const response = await fetch(url, {
         headers: {
@@ -7553,6 +7642,11 @@ export async function registerRoutes(
         html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] ||
         "",
       ).replace(/\s+\|\s*Vrbo.*$/i, "");
+      const visibleText = decode(html
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " "));
       const photos = Array.from(new Set([
         metaContent("og:image"),
         metaContent("twitter:image"),
@@ -7562,14 +7656,17 @@ export async function registerRoutes(
         /(?:images\.trvl-media\.com|mediaim\.expedia\.com|odis\.homeaway\.com|vrbo\.com|homeaway\.com)/i.test(photo) &&
         !/logo|icon|sprite|avatar|favicon|placeholder|transparent|map/i.test(photo),
       ))).slice(0, 16);
-      const bedroomsMatch = html.match(/(\d+)\s*(?:bedroom|bedrooms|br)\b/i);
+      const facts = extractAlternativeFactsFromText(`${title} ${visibleText}`);
       return {
         title: title || "Vacation rental option",
         photos,
-        bedrooms: bedroomsMatch ? Number(bedroomsMatch[1]) : null,
+        bedrooms: facts.bedrooms,
+        bathrooms: facts.bathrooms,
+        sleeps: facts.sleeps,
+        basicDetails: facts.basicDetails,
       };
     } catch {
-      return { title: "Vacation rental option", photos: [], bedrooms: null };
+      return { title: "Vacation rental option", photos: [], bedrooms: null, bathrooms: null, sleeps: null, basicDetails: [] };
     }
   };
 
@@ -7577,6 +7674,9 @@ export async function registerRoutes(
     title: string;
     photos: string[];
     bedrooms: number | null;
+    bathrooms: number | null;
+    sleeps: number | null;
+    basicDetails: string[];
     photoSource: "sidecar" | "html" | "none";
     scrapeReason: string;
   }> => {
@@ -7605,6 +7705,9 @@ export async function registerRoutes(
       title: fallback.title,
       photos,
       bedrooms: fallback.bedrooms,
+      bathrooms: fallback.bathrooms,
+      sleeps: fallback.sleeps,
+      basicDetails: fallback.basicDetails,
       photoSource: sidecarPhotos.length > 0 ? "sidecar" : fallback.photos.length > 0 ? "html" : "none",
       scrapeReason: sidecarReason,
     };
@@ -7614,14 +7717,17 @@ export async function registerRoutes(
     const title = normalizeAlternativeText(item.title || item.community || "this alternative option", 120);
     const community = normalizeAlternativeText(item.community, 100);
     const bedrooms = Number(item.bedrooms);
+    const bathrooms = Number(item.bathrooms);
+    const sleeps = Number(item.sleeps);
     const bedroomText = Number.isFinite(bedrooms) && bedrooms > 0 ? `${Math.round(bedrooms)} bedroom${Math.round(bedrooms) === 1 ? "" : "s"}` : "comfortable sleeping space";
+    const bathroomText = Number.isFinite(bathrooms) && bathrooms > 0 ? `${formatAlternativeNumber(bathrooms)} bathroom${bathrooms === 1 ? "" : "s"}` : "";
+    const sleepsText = Number.isFinite(sleeps) && sleeps > 0 ? `sleeping up to ${Math.round(sleeps)}` : "";
     const address = normalizeAlternativeText(item.address, 180);
-    const dateText = stay.checkIn && stay.checkOut ? ` for ${stay.checkIn} to ${stay.checkOut}` : "";
+    const detailText = [bedroomText, bathroomText, sleepsText].filter(Boolean).join(", ");
     return [
-      `We prepared ${title} as a comparable alternative${dateText}.`,
-      `It offers ${bedroomText}${community ? ` in or near ${community}` : ""}, giving your group a practical option while staying in the same general area.`,
+      `${title} is a comparable vacation rental${community ? ` in ${community}` : ""}.`,
+      `It offers ${detailText || bedroomText}, with the photos on this page available for review.`,
       address ? `The saved location detail is ${address}.` : "",
-      "The photos below are the current reference images we have for review.",
     ].filter(Boolean).join(" ");
   };
 
@@ -7634,14 +7740,14 @@ export async function registerRoutes(
     if (!anthropicKey) return { description: fallback, generatedBy: "fallback", warning: "ANTHROPIC_API_KEY not configured" };
 
     const facts = {
-      guestName: normalizeAlternativeText(stay.guestName, 80),
-      checkIn: normalizeAlternativeText(stay.checkIn, 20),
-      checkOut: normalizeAlternativeText(stay.checkOut, 20),
       title: normalizeAlternativeText(item.title, 160),
       community: normalizeAlternativeText(item.community, 120),
       bedrooms: Number(item.bedrooms) || null,
+      bathrooms: Number(item.bathrooms) || null,
+      sleeps: Number(item.sleeps) || null,
       unitLabel: normalizeAlternativeText(item.unitLabel, 80),
       address: normalizeAlternativeText(item.address, 220),
+      basicDetails: Array.isArray(item.basicDetails) ? item.basicDetails.slice(0, 8) : [],
       operatorNotes: normalizeAlternativeText(item.notes, 900),
       photoCount: Array.isArray(item.photos) ? item.photos.length : 0,
     };
@@ -7665,12 +7771,14 @@ Facts:
 ${JSON.stringify(facts, null, 2)}
 
 Requirements:
-- 2 short paragraphs, warm and professional.
+- 1-2 short paragraphs, warm and professional.
 - Plain text only. No markdown, bullets, headings, emojis, or sales hype.
+- This is property-detail copy for a review page, not a direct message. Do not address the guest by name.
+- Do not use the guest's name, even if it appears in surrounding context.
 - Do not mention buy-in, cost paid, internal operations, arbitrage, owner, supplier, confidence, or verification.
 - Do not mention VRBO, third-party marketplaces, source listings, or where the option came from.
 - Do not promise amenities not in the facts.
-- Make it sound like a helpful host presenting one of our comparable properties for the guest to review.
+- Focus on concrete property details: bedroom count, bathroom count, sleeps count, community, layout, address/location detail, and photos when available.
 - Return only the copy.`,
           }],
         }),
@@ -7759,19 +7867,34 @@ Requirements:
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
       const originalCommunity = normalizeCommunityContext(payload.originalCommunity);
-      const alternativeCommunity = normalizeCommunityContext(
-        payload.alternativeCommunity
-          || alternatives.find((item: any) => normalizeCommunityContext(item?.alternativeCommunity))?.alternativeCommunity
-          || alternatives.find((item: any) => normalizeCommunityContext(item?.community))?.community,
-      );
-      const communityWalkMinutes = Number(payload.communityWalkMinutes);
+      const alternativeCommunity =
+        usableCommunityContext(payload.alternativeCommunity) ||
+        usableCommunityContext(alternatives.find((item: any) => usableCommunityContext(item?.alternativeCommunity))?.alternativeCommunity) ||
+        usableCommunityContext(alternatives.find((item: any) => usableCommunityContext(item?.community))?.community) ||
+        communityFromAlternativeTitle(alternatives.find((item: any) => communityFromAlternativeTitle(item?.title))?.title);
+      const areaName = normalizeCommunityContext(payload.areaName) || originalCommunity || alternativeCommunity;
+      const communityDriveMinutes = Number(payload.communityDriveMinutes ?? payload.driveMinutes);
       const availabilityContext = originalCommunity && alternativeCommunity && !sameCommunityContext(originalCommunity, alternativeCommunity)
-        ? Number.isFinite(communityWalkMinutes) && communityWalkMinutes > 0
-          ? `Instead of ${escapeHtml(originalCommunity)}, we have availability in ${escapeHtml(alternativeCommunity)}, which is only about a ${Math.round(communityWalkMinutes)}-minute walk away from ${escapeHtml(originalCommunity)}.`
-          : `Instead of ${escapeHtml(originalCommunity)}, we have availability in nearby ${escapeHtml(alternativeCommunity)}.`
+        ? Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0
+          ? `We have availability in ${escapeHtml(alternativeCommunity)}. This community is in ${escapeHtml(areaName)}, like your original community of ${escapeHtml(originalCommunity)}, and the two communities are only a short ${Math.round(communityDriveMinutes)}-minute drive from each other.`
+          : `We have availability in ${escapeHtml(alternativeCommunity)}. This community is in ${escapeHtml(areaName)}, like your original community of ${escapeHtml(originalCommunity)}, and the two communities are only a short drive from each other.`
         : alternativeCommunity
           ? `We have availability in ${escapeHtml(alternativeCommunity)} for this stay.`
           : `We prepared ${alternatives.length === 1 ? "this unit" : "these units"} so you can review a comparable stay in the same general area.`;
+      const totalBedrooms = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.bedrooms) > 0 ? Math.round(Number(item.bedrooms)) : 0), 0);
+      const totalBathrooms = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.bathrooms) > 0 ? Number(item.bathrooms) : 0), 0);
+      const totalSleeps = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.sleeps) > 0 ? Math.round(Number(item.sleeps)) : 0), 0);
+      const overviewDetails = [
+        alternatives.length > 0 ? `${alternatives.length} unit${alternatives.length === 1 ? "" : "s"}` : "",
+        totalBedrooms > 0 ? `${totalBedrooms} bedroom${totalBedrooms === 1 ? "" : "s"} total` : "",
+        totalBathrooms > 0 ? `${formatAlternativeNumber(totalBathrooms)} bathroom${totalBathrooms === 1 ? "" : "s"} total` : "",
+        totalSleeps > 0 ? `sleeps up to ${totalSleeps}` : "",
+        alternativeCommunity ? `community: ${escapeHtml(alternativeCommunity)}` : "",
+        areaName ? `area: ${escapeHtml(areaName)}` : "",
+      ].filter(Boolean);
+      const overviewBlock = overviewDetails.length
+        ? `<div class="overview">${overviewDetails.map((detail) => `<span>${detail}</span>`).join("")}</div>`
+        : "";
       const photoBlocks = alternatives.map((item: any, index: number) => {
         const photos = Array.from(new Set([
           item.image,
@@ -7798,7 +7921,10 @@ Requirements:
           : `<div class="empty-photos">Photos are still being gathered for this option.</div>`;
         const details = [
           item.bedrooms ? `${escapeHtml(item.bedrooms)} bedroom${Number(item.bedrooms) === 1 ? "" : "s"}` : "",
+          item.bathrooms ? `${escapeHtml(formatAlternativeNumber(item.bathrooms))} bathroom${Number(item.bathrooms) === 1 ? "" : "s"}` : "",
+          item.sleeps ? `sleeps ${escapeHtml(item.sleeps)}` : "",
           item.unitLabel ? escapeHtml(item.unitLabel) : "",
+          ...(Array.isArray(item.basicDetails) ? item.basicDetails.slice(0, 4).map((detail: string) => escapeHtml(detail)) : []),
           item.address ? escapeHtml(item.address) : "",
         ].filter(Boolean);
         return `
@@ -7824,6 +7950,8 @@ Requirements:
           header div{max-width:1040px;margin:0 auto}
           main{max-width:1040px;margin:0 auto;padding:24px 16px 52px}
           .intro{font-size:16px;color:#45556b;margin:0 0 18px}
+          .overview{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}
+          .overview span{border:1px solid #0f766e33;border-radius:999px;background:#ecfdf5;color:#115e59;padding:6px 11px;font-size:13px;font-weight:700}
           .option{background:white;border:1px solid #dbe4ea;border-radius:10px;padding:18px;margin:0 0 18px;box-shadow:0 8px 20px rgba(15,23,42,.06)}
           .option-copy{max-width:860px}
           .eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;margin:0 0 4px}
@@ -7849,6 +7977,7 @@ Requirements:
         <header><div><h1>Alternative stay options</h1><p>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(payload.checkIn || "")} to ${escapeHtml(payload.checkOut || "")}</p></div></header>
         <main>
           <p class="intro">${availabilityContext}</p>
+          ${overviewBlock}
           ${photoBlocks || "<p>No alternative options were attached to this page yet.</p>"}
           <footer>Photos and details are provided for review and may be finalized before arrival details are sent.</footer>
         </main>
@@ -7897,6 +8026,7 @@ Requirements:
         checkOut: normalizeAlternativeText(req.body?.checkOut, 20),
       };
       const originalCommunity = normalizeCommunityContext(req.body?.originalCommunity);
+      const areaName = normalizeCommunityContext(req.body?.areaName);
       const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any) => {
         const sourceUrl = normalizeAlternativeUrl(item?.url);
         const initialPhotos = Array.from(new Set([
@@ -7914,7 +8044,26 @@ Requirements:
           item?.title || vrboDetails?.title || item?.community || "Alternative stay",
           160,
         );
-        const alternativeCommunity = normalizeCommunityContext(item?.alternativeCommunity || item?.community);
+        const alternativeCommunity =
+          usableCommunityContext(item?.alternativeCommunity) ||
+          usableCommunityContext(item?.community) ||
+          communityFromAlternativeTitle(title);
+        const extractedFacts = extractAlternativeFactsFromText([
+          title,
+          item?.notes,
+          vrboDetails?.title,
+          ...(vrboDetails?.basicDetails ?? []),
+        ].filter(Boolean).join(" "));
+        const bedrooms = Number(item?.bedrooms) > 0
+          ? Math.round(Number(item.bedrooms))
+          : Number(vrboDetails?.bedrooms) > 0 ? Math.round(Number(vrboDetails?.bedrooms)) : extractedFacts.bedrooms;
+        const bathrooms = firstAlternativeNumber(item?.bathrooms, vrboDetails?.bathrooms, extractedFacts.bathrooms);
+        const sleeps = firstAlternativeNumber(item?.sleeps, vrboDetails?.sleeps, extractedFacts.sleeps);
+        const basicDetails = uniqueAlternativeDetails(
+          item?.basicDetails,
+          vrboDetails?.basicDetails,
+          extractedFacts.basicDetails,
+        );
         const base = {
           title,
           community: alternativeCommunity || normalizeAlternativeText(item?.community, 100),
@@ -7923,9 +8072,10 @@ Requirements:
           url: sourceUrl,
           image: photos[0] ?? "",
           photos,
-          bedrooms: Number(item?.bedrooms) > 0
-            ? Math.round(Number(item.bedrooms))
-            : Number(vrboDetails?.bedrooms) > 0 ? Math.round(Number(vrboDetails?.bedrooms)) : null,
+          bedrooms,
+          bathrooms,
+          sleeps,
+          basicDetails,
           unitLabel: normalizeAlternativeText(item?.unitLabel, 80),
           address: normalizeAlternativeText(item?.address, 220),
           sourceLabel: normalizeAlternativeText(item?.sourceLabel, 80),
@@ -7943,18 +8093,18 @@ Requirements:
           descriptionWarning: drafted.warning ?? null,
         };
       }));
-      const alternativeCommunity = normalizeCommunityContext(
-        req.body?.alternativeCommunity
-          || hydratedAlternatives.find((item) => normalizeCommunityContext(item.alternativeCommunity))?.alternativeCommunity
-          || hydratedAlternatives.find((item) => normalizeCommunityContext(item.community))?.community,
-      );
-      const explicitCommunityWalkMinutes = Number(req.body?.communityWalkMinutes);
-      const fallbackWalkMinutes = Number(req.body?.walkMinutes);
-      const estimatedCommunityWalkMinutes = await estimateCommunityWalkMinutes(originalCommunity, alternativeCommunity);
-      const communityWalkMinutes = Number.isFinite(explicitCommunityWalkMinutes) && explicitCommunityWalkMinutes > 0
-        ? Math.round(explicitCommunityWalkMinutes)
-        : estimatedCommunityWalkMinutes ?? (Number.isFinite(fallbackWalkMinutes) && fallbackWalkMinutes > 0
-          ? Math.round(fallbackWalkMinutes)
+      const alternativeCommunity =
+        usableCommunityContext(req.body?.alternativeCommunity) ||
+        usableCommunityContext(hydratedAlternatives.find((item) => usableCommunityContext(item.alternativeCommunity))?.alternativeCommunity) ||
+        usableCommunityContext(hydratedAlternatives.find((item) => usableCommunityContext(item.community))?.community) ||
+        communityFromAlternativeTitle(hydratedAlternatives.find((item) => communityFromAlternativeTitle(item.title))?.title);
+      const explicitCommunityDriveMinutes = Number(req.body?.communityDriveMinutes);
+      const fallbackDriveMinutes = Number(req.body?.driveMinutes ?? req.body?.walkMinutes);
+      const estimatedCommunityDriveMinutes = await estimateCommunityDriveMinutes(originalCommunity, alternativeCommunity, areaName);
+      const communityDriveMinutes = Number.isFinite(explicitCommunityDriveMinutes) && explicitCommunityDriveMinutes > 0
+        ? Math.round(explicitCommunityDriveMinutes)
+        : estimatedCommunityDriveMinutes ?? (Number.isFinite(fallbackDriveMinutes) && fallbackDriveMinutes > 0
+          ? Math.round(fallbackDriveMinutes)
           : null);
       const payload = {
         reservationId: String(req.body?.reservationId ?? ""),
@@ -7962,8 +8112,9 @@ Requirements:
         checkIn: stay.checkIn,
         checkOut: stay.checkOut,
         originalCommunity,
+        areaName,
         alternativeCommunity,
-        communityWalkMinutes,
+        communityDriveMinutes,
         alternatives: hydratedAlternatives,
         createdAt: new Date().toISOString(),
         expiresAt,
@@ -7998,6 +8149,9 @@ Requirements:
         image: detail.photos[0] ?? "",
         photos: detail.photos,
         bedrooms: detail.bedrooms,
+        bathrooms: detail.bathrooms,
+        sleeps: detail.sleeps,
+        basicDetails: detail.basicDetails,
         unitLabel: urls.length > 1 ? `Property ${index + 1}` : "Property",
         sourceLabel: "",
         notes: [
