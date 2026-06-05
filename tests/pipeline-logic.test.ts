@@ -3161,9 +3161,11 @@ assert.ok(
   "VRBO city map scans should turn off map auto-search and avoid binding city searches to the visible map viewport",
 );
 assert.ok(
-  vrboWorkerSource.includes("starting resort list harvest") &&
+  vrboWorkerSource.includes("starting dropdown list harvest") &&
     vrboWorkerSource.includes("harvestVrboMapResultCards") &&
     vrboWorkerSource.includes("dropdown export merged") &&
+    vrboWorkerSource.includes("graphql settled") &&
+    vrboWorkerSource.includes("post-map-view") &&
     vrboWorkerSource.includes("createVrboGraphqlCollector") &&
     routesSource.includes("resort destination dropdown, dates, and bedroom export"),
   "VRBO resort dropdown search should merge GraphQL propertySearchListings with scroll-harvested DOM cards for full export",
