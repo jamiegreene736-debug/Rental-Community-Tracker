@@ -135,6 +135,51 @@ established it so you can read the rationale in the commit message.
    Booking.com 30. Update these numbers when the platforms publish
    new limits. Do not make them dynamic / DB-driven.
 
+43. **Unit-interior photo discovery has a property-site image fallback,
+    and the bedroom match is RELAXED (prefer-exact, then closest, then
+    images).** `/api/community/fetch-unit-photos` (the shared discovery
+    endpoint behind combo-add, single-listing, and preflight "add/find
+    photos") historically only found interiors when the exact unit was
+    listed FOR SALE on Zillow/Realtor/Redfin/Homes. Vacation-rental condos
+    almost never are — `site:zillow.com "Pili Mai"` returns ZERO
+    homedetails results, and Kaha Lani returns only two 1BR units — so the
+    endpoint returned empty for most communities even though the photos
+    exist abundantly on PM/property sites. Two changes (PR
+    claude/unit-photo-discovery) close the gap:
+
+    - **Property-site image fallback.** `discoverPropertySitePhotos` (in
+      `server/routes.ts`, defined right after `scrapeListingPhotos`) runs
+      `google_images` SearchAPI queries for the community's interiors and
+      returns direct image URLs. It is the SAME engine the community/
+      exterior path (`/api/community-photos/search`) already uses, just
+      pointed at interiors and gated to PM/property/real-estate hosts.
+      Fires only when the for-sale candidate loop yields no exact-BR match.
+
+    - **Relaxed bedroom filter.** The candidate loop no longer discards a
+      BR-mismatch listing; it stashes the closest-BR one as `brFallback`.
+      Final tiered decision: exact-BR listing → property-site images (if
+      ≥6, or if no fallback) → closest-BR listing (with a note) → empty.
+      The direct-`url` branch now returns the listing's photos with a
+      mismatch note instead of an empty set.
+
+    **POLICY (extends Load-Bearing PR #338, does NOT override it):** OTA
+    booking platforms (Airbnb / VRBO / Booking / HomeAway / Expedia /
+    TripAdvisor / aggregators) are HARD-EXCLUDED from the image fallback
+    via `OTA_PHOTO_HOSTS_RE`. The photo-listing scanner watches those exact
+    platforms for the operator's photos; sourcing interiors from them
+    re-fires the duplicate alert. PM/property sites are a step removed
+    (photos owned by the PM/agent) and are not in the scanner's OTA set, so
+    they're policy-safe. **NOTE FOR CODEX: do not add an OTA host to
+    `PROPERTY_PHOTO_HOSTS_RE`, and do not delete the relaxed-BR fallback —
+    returning a wrong-size unit's interiors (or a curated property-site
+    set) is the operator-chosen behavior, not a bug.** Operator decision
+    2026-06-05 explicitly kept the OTA exclusion while adding the
+    google_images interior fallback + BR relax. Native per-PM gallery
+    extraction (Suite Paradise / Parrish / VRP page galleries) is a staged
+    follow-up — the google_images path already surfaces those same
+    property galleries via Google's index, and native extraction needs
+    live SearchAPI/Apify verification to wire safely.
+
 ### Availability & pricing
 
 10. **Auto-scan scheduler flips ON when the tab loads for any
@@ -1186,6 +1231,7 @@ Examples:
 2026-05-04 · Jamie reviewed the deployed Step 1 form ("4 fields: name + address + state + city") and asked to switch it to a discovery flow: "type a city → drop down list of cities → top 20 best vacation rental communities to choose from." Follow-up: "for now just keep it focused on Hawaii and Florida." · ACCEPTED · Step 1 of `add-single-listing.tsx` rewritten as: nationwide city autocomplete (new `/api/community/city-suggest-any` endpoint, Photon + state allowlist) → kicks off `/api/community/research` automatically on city pick → top-20 community cards → operator picks a community (or hits "enter manually") → fills the unit-specific street address. Picked community pre-fills `propertyName`. Hawaii + Florida scope lives in `ALLOWED_STATES` set in the new endpoint — see Load-Bearing #35. Combo flow's existing state-scoped city-suggest endpoint is untouched; only the new single-listing wizard uses the nationwide variant.
 2026-05-05 · Jamie reported Add Single Listing could not find clean units and suspected Apify was returning no results · ACCEPTED · Production debug showed the default Zillow search actor was a 404 (`epctex~zillow-scraper`) and the default Realtor actor was not rented (`epctex~realtor-scraper`). Defaults now use runnable actors (`igolaizola~zillow-scraper-ppe`, `dz_omar~realtor-scraper`) with actor-specific input shapes, and find-clean-unit now accepts a candidate only after scraped photos pass the Google Lens OTA check, restoring parity with the combo preflight photo methodology.
 2026-04-29 · Jamie: "You are not running the browser session locally like I asked. You have to run the browser on my PC." After multi-PR investigation showed Vrbo's anti-bot fingerprints every Browserbase residential session even with persistent context + real-Chrome cookies (IP-level flag — "There is a robot on the same network as you"). Direct Chrome MCP test from operator's home IP returned 42 priced properties for the same query that Browserbase couldn't load past the bot wall. · ACCEPTED · New "VRBO local-Chrome sidecar" architecture: in-memory queue on Railway (`server/vrbo-sidecar-queue.ts`) bridges find-buy-in to a `/loop` worker running inside the operator's Claude Code session. find-buy-in calls `searchVrboViaSidecar()` as path 9 (parallel with the existing 8 paths, prioritized FIRST in the dedup chain when results return because it's the only path that beats the IP wall). When the worker is offline, the wallet budget (75s) expires and we gracefully fall back. Endpoints `POST /api/vrbo-sidecar/enqueue`, `GET /api/admin/vrbo-sidecar/next`, `POST /api/admin/vrbo-sidecar/result`, `GET /api/vrbo-sidecar/result/:id`. Worker is a /loop task in Claude Code that polls /next, drives Chrome MCP through Vrbo's search UI on the operator's actual browser, extracts priced cards, and POSTs the result. This is the "OpenClaw"-style local-agent pattern — Claude Code on the operator's Mac is the bridge between Railway and their real-IP browser.
+2026-06-05 · Jamie: "The search can never find the photos … I need it to find photos of the units in the communities." Deep dive found the unit-interior path (`/api/community/fetch-unit-photos`, shared by combo-add, single-listing, and preflight) was structurally limited to Zillow/Realtor/Redfin/Homes FOR-SALE listings, which barely exist for vacation condos (`site:zillow.com "Pili Mai"` → 0 homedetails; Kaha Lani → 2 tiny 1BR units that the exact-BR filter then discarded). · ACCEPTED, three of four offered fixes (operator kept the OTA exclusion) · (1) Added `discoverPropertySitePhotos` — a `google_images` interior fallback gated to PM/property hosts, OTA HARD-EXCLUDED per PR #338 — fired when no exact-BR for-sale listing matches. (2) Relaxed the bedroom filter to prefer-exact → property-images → closest-BR → empty; the direct-`url` branch now returns photos + a mismatch note instead of empty. (3) Native per-PM gallery extraction (Suite Paradise / Parrish / VRP) staged as a follow-up — google_images already surfaces those galleries via Google's index and native parsing needs live API verification. Load-Bearing #43. NOTE: operator chose "assume plumbing works," but the 2026-05-05 entry shows Apify actors silently 404 — if photos are still scarce after this, verify `APIFY_API_TOKEN` / `SCRAPINGBEE_API_KEY` / the Zillow actor via `/api/operations/debug-citywide-apify` first.
 ```
 
 (Populate on first dispute.)

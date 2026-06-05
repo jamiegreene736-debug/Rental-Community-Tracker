@@ -3439,6 +3439,127 @@ async function scrapeListingPhotos(
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Property-site interior photo discovery (PR claude/unit-photo-discovery)
+//
+// WHY: the Zillow/Realtor for-sale chain in scrapeListingPhotos only finds
+// INTERIOR unit photos when the exact unit happens to be listed FOR SALE on
+// a real-estate site. Vacation-rental condos almost never are — e.g.
+// `site:zillow.com "Pili Mai"` returns ZERO homedetails results, while the
+// same community has dozens of photo-rich listings on PM/property sites
+// (Suite Paradise, koloakai, alohacondos, Hawaii Life, Parrish). That gap is
+// the top cause of "the search can never find unit photos." This helper
+// closes it by pulling interiors from Google Images (the same `google_images`
+// SearchAPI engine the community/exterior path already uses), gated to
+// PM / property / real-estate domains.
+//
+// POLICY (Load-Bearing — PR #338 feedback-loop rule): OTA booking platforms
+// (Airbnb / VRBO / Booking / HomeAway / Expedia / TripAdvisor / aggregators)
+// are HARD-EXCLUDED. The photo-listing scanner watches those exact platforms
+// for your photos; sourcing interiors from them re-fires the duplicate
+// alert. PM/property sites are a step removed (photos owned by the PM/agent)
+// and are not in the scanner's OTA set, so they're policy-safe. NOTE FOR
+// CODEX: do NOT add an OTA host to PROPERTY_PHOTO_HOSTS_RE — the OTA
+// exclusion is the whole reason this path is allowed to exist.
+const OTA_PHOTO_HOSTS_RE =
+  /(?:airbnb|vrbo|booking|homeaway|expedia|hotels|agoda|trip|priceline|kayak|tripadvisor|marriott|hilton)\.[a-z.]+/i;
+const PROPERTY_PHOTO_HOSTS_RE =
+  /(?:suite-?paradise|koloakai|koloa-landing|alohacondos|hawaiilife|parrish|princeville|castleresorts|outrigger|holua|kauaibeachrentals|jeanandabbott|hawaiigaga|redweek|vacasa|zillow|realtor|redfin|homes)\.[a-z.]+/i;
+const NON_PHOTO_HINT_RE =
+  /(?:floor\s?-?plan|site\s?-?map|sitemap|\bmap\b|logo|favicon|sprite|\bicon\b|brochure|diagram|placeholder|avatar|banner)/i;
+
+// Returns interior ScrapedPhoto[] sourced from PM/property sites via Google
+// Images. Empty array on no SearchAPI key / no hits — callers fall through.
+async function discoverPropertySitePhotos(opts: {
+  apiKey: string;
+  communityName: string;
+  city?: string;
+  state?: string;
+  streetAddress?: string;
+  bedrooms?: number | null;
+  maxPhotos?: number;
+}): Promise<ScrapedPhoto[]> {
+  const { apiKey, communityName } = opts;
+  const city = (opts.city ?? "").trim();
+  const state = (opts.state ?? "").trim();
+  const streetAddress = (opts.streetAddress ?? "").trim();
+  const maxPhotos = opts.maxPhotos ?? 40;
+  const brHint = opts.bedrooms && opts.bedrooms > 0 ? `${opts.bedrooms} bedroom` : "";
+  const geo = [city, state].filter(Boolean).join(" ");
+  const nameWords = communityName.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+
+  const queries = [
+    `"${communityName}" ${brHint} interior ${geo}`,
+    `"${communityName}" bedroom living room kitchen ${geo}`,
+    `"${communityName}" condo interior ${geo}`,
+  ];
+  if (streetAddress) queries.push(`"${streetAddress}" ${communityName} interior`);
+
+  const seen = new Set<string>();
+  type Hit = ScrapedPhoto & { preferred: boolean };
+  const hits: Hit[] = [];
+
+  await Promise.all(
+    queries
+      .map((q) => q.replace(/\s+/g, " ").trim())
+      .map(async (q) => {
+        try {
+          const params = new URLSearchParams({
+            engine: "google_images",
+            q,
+            api_key: apiKey,
+            num: "40",
+            safe: "active",
+          });
+          const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+            signal: AbortSignal.timeout(12_000),
+          });
+          if (!resp.ok) {
+            console.warn(`[discover-property-photos] SearchAPI ${resp.status} for "${q}"`);
+            return;
+          }
+          const data = (await resp.json()) as any;
+          for (const img of (data.images || []) as any[]) {
+            const url = String(img.original?.link ?? "");
+            if (!url) continue;
+            const sourceLink = String(img.source?.link ?? "");
+            const title = String(img.title ?? "");
+            const key = url.replace(/[?#].*$/, "");
+            if (seen.has(key)) continue;
+            const haystack = `${url} ${sourceLink} ${title}`.toLowerCase();
+            // Policy: never source interior photos from OTA booking platforms.
+            if (OTA_PHOTO_HOSTS_RE.test(haystack)) continue;
+            if (NON_PHOTO_HINT_RE.test(haystack)) continue;
+            if (/\.(?:svg|gif)(?:[?#]|$)/i.test(url)) continue;
+            const w = Number(img.original?.width ?? 0);
+            const h = Number(img.original?.height ?? 0);
+            if (w && h && (w < 500 || h < 350)) continue; // drop thumbnails / icons
+            // Require the community name in context so we don't surface
+            // unrelated stock interiors (mirrors the community-photo path).
+            if (nameWords.length > 0 && !nameWords.some((wd) => haystack.includes(wd))) continue;
+            seen.add(key);
+            let host = "property site";
+            try { host = new URL(sourceLink || url).hostname.replace(/^www\./, ""); } catch {}
+            hits.push({
+              url,
+              title: title.slice(0, 90) || `${communityName} interior`,
+              source: host,
+              sourceLink: sourceLink || url,
+              preferred: PROPERTY_PHOTO_HOSTS_RE.test(haystack),
+            });
+          }
+        } catch (e: any) {
+          console.warn(`[discover-property-photos] "${q}": ${e?.message ?? e}`);
+        }
+      }),
+  );
+
+  // Known PM / property / real-estate hosts first, then the rest (still
+  // non-OTA), preserving discovery order within each tier.
+  hits.sort((a, b) => Number(b.preferred) - Number(a.preferred));
+  return hits.slice(0, maxPhotos).map(({ preferred, ...p }) => p);
+}
+
 // ========== AI MAKEOVER JOB SYSTEM ==========
 interface MakeoverJobPhoto {
   index: number;
@@ -27466,6 +27587,33 @@ Return ONLY compact JSON with this exact shape:
       const candidatesToTry = candidateLimit
         ? candidateUrls.slice(offset, offset + candidateLimit)
         : candidateUrls.slice(offset);
+      // Relaxed bedroom matching (PR claude/unit-photo-discovery): an exact-BR
+      // match still wins and returns immediately. A BR-MISMATCH listing is no
+      // longer discarded — it's stashed as a fallback (closest BR to the
+      // request) so "Zillow only has a 1BR when you wanted 3BR" yields the
+      // 1BR's real interiors instead of nothing. The fallback is only used
+      // after property-site image discovery (below) comes up short, because a
+      // community-matched interior set generally beats a wrong-size unit.
+      let brFallback:
+        | { photos: ScrapedPhoto[]; sourceUrl: string; facts: ListingFacts; scrapedBR: number }
+        | null = null;
+      const considerFallback = (
+        photos: ScrapedPhoto[],
+        sourceUrl: string,
+        facts: ListingFacts,
+        scrapedBR: number,
+      ) => {
+        if (!brFallback) {
+          brFallback = { photos, sourceUrl, facts, scrapedBR };
+          return;
+        }
+        if (requestedBedrooms) {
+          const closer =
+            Math.abs(scrapedBR - requestedBedrooms) <
+            Math.abs(brFallback.scrapedBR - requestedBedrooms);
+          if (closer) brFallback = { photos, sourceUrl, facts, scrapedBR };
+        }
+      };
       for (const candidate of candidatesToTry) {
         const facts: ListingFacts = {};
         try {
@@ -27475,12 +27623,12 @@ Return ONLY compact JSON with this exact shape:
             continue;
           }
           const scrapedBR = facts.bedrooms ?? null;
-          if (requestedBedrooms && scrapedBR !== null && scrapedBR !== requestedBedrooms) {
-            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR does not match requested ${requestedBedrooms}BR`);
-            continue;
-          }
-          if (!requestedBedrooms && minimumBedrooms && scrapedBR !== null && scrapedBR < minimumBedrooms) {
-            console.warn(`[fetch-unit-photos] skipping ${candidate.url}: ${scrapedBR}BR is below requested minimum ${minimumBedrooms}BR`);
+          const brMismatch =
+            (requestedBedrooms != null && scrapedBR !== null && scrapedBR !== requestedBedrooms) ||
+            (requestedBedrooms == null && minimumBedrooms != null && scrapedBR !== null && scrapedBR < minimumBedrooms);
+          if (brMismatch) {
+            console.warn(`[fetch-unit-photos] BR-mismatch fallback ${candidate.url}: ${scrapedBR}BR vs requested ${requestedBedrooms ?? `>=${minimumBedrooms}`}`);
+            considerFallback(photos, candidate.url, facts, scrapedBR ?? 0);
             continue;
           }
           res.json({
@@ -27495,14 +27643,55 @@ Return ONLY compact JSON with this exact shape:
         }
       }
 
+      // No exact-BR real-estate listing. Before settling for a wrong-size
+      // unit (or empty), pull interiors from PM/property sites via Google
+      // Images — the structural fix for vacation communities that have no
+      // for-sale Zillow inventory. OTA platforms are hard-excluded inside
+      // discoverPropertySitePhotos (Load-Bearing PR #338 feedback-loop rule).
+      try {
+        const propertyPhotos = await discoverPropertySitePhotos({
+          apiKey: searchApiKey,
+          communityName,
+          city,
+          state,
+          streetAddress,
+          bedrooms: requestedBedrooms ?? minimumBedrooms ?? null,
+        });
+        // A real listing's full gallery beats a handful of scattered images,
+        // so only short-circuit to property photos when we found a usable set
+        // (>= 6) OR when there's no BR-mismatch listing to fall back on.
+        if (propertyPhotos.length >= 6 || (propertyPhotos.length > 0 && !brFallback)) {
+          console.log(`[fetch-unit-photos] property-site image discovery: ${propertyPhotos.length} photo(s) for "${communityName}"`);
+          return res.json({
+            photos: propertyPhotos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+            sourceUrl: null,
+            foundVia: "image-search",
+            note: `Found ${propertyPhotos.length} interior photo(s) from property sites (no for-sale listing matched).`,
+          });
+        }
+      } catch (e: any) {
+        console.warn(`[fetch-unit-photos] property-site discovery failed: ${e?.message ?? e}`);
+      }
+
+      // Wrong-size real-estate listing is still better than nothing.
+      if (brFallback) {
+        const fb = brFallback as { photos: ScrapedPhoto[]; sourceUrl: string; facts: ListingFacts; scrapedBR: number };
+        return res.json({
+          photos: fb.photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+          sourceUrl: fb.sourceUrl,
+          foundVia: "search",
+          facts: fb.facts,
+          note: `Closest available listing has ${fb.scrapedBR}BR (requested ${requestedBedrooms ?? `${minimumBedrooms}+`}).`,
+        });
+      }
+
       if (!listingUrl) {
-        // No matching real-estate listing — return empty so the page's
-        // empty state covers it. Not an error.
+        // Nothing from real-estate listings OR property-site images.
         return res.json({
           photos: [],
           sourceUrl: null,
           foundVia: "search",
-          note: `No real-estate listing found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${candidatesToTry.length} candidate${candidatesToTry.length === 1 ? "" : "s"}.`,
+          note: `No real-estate or property-site photos found for "${communityName}"${requestedBedrooms ? ` (${requestedBedrooms}BR)` : ""} after checking ${candidatesToTry.length} candidate${candidatesToTry.length === 1 ? "" : "s"}.`,
         });
       }
     }
@@ -27519,12 +27708,17 @@ Return ONLY compact JSON with this exact shape:
       const scrapedBR = facts.bedrooms ?? null;
       const expectedBedrooms = requestedBedrooms ?? minimumBedrooms;
       if (expectedBedrooms && scrapedBR !== null && scrapedBR !== expectedBedrooms) {
+        // Relaxed (PR claude/unit-photo-discovery): the operator pointed us at
+        // this specific URL, so surface what it actually has with a mismatch
+        // note instead of an empty set. Returning zero photos here was a
+        // common "the search can't find photos" failure when a slightly-off
+        // listing was the only one available.
         return res.json({
-          photos: [],
-          sourceUrl: null,
+          photos: photos.map((p) => ({ url: p.url, label: p.title || "Photo" })),
+          sourceUrl: listingUrl,
           foundVia,
           facts,
-          note: `Listing has ${scrapedBR}BR, but ${expectedBedrooms}BR was requested.`,
+          note: `Heads up: this listing has ${scrapedBR}BR, not ${expectedBedrooms}BR.`,
         });
       }
       res.json({
