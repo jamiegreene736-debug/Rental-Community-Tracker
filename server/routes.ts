@@ -7477,6 +7477,7 @@ export async function registerRoutes(
 
   const isVrboAlternativeUrl = (url: string): boolean =>
     /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
+  const MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS = 10;
 
   const vrboAlternativeUrlsFrom = (value: unknown): string[] => {
     const input = Array.isArray(value) ? value.join("\n") : String(value ?? "");
@@ -7857,7 +7858,7 @@ Requirements:
           normalizeAlternativeUrl(item?.image),
           ...(Array.isArray(item?.photos) ? item.photos.map((url: unknown) => normalizeAlternativeUrl(url)) : []),
         ].filter(Boolean))).slice(0, 24);
-        const vrboDetails = isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < 3
+        const vrboDetails = isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS
           ? await scrapeVrboAlternativeDetails(sourceUrl)
           : null;
         const photos = Array.from(new Set([

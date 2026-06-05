@@ -3406,7 +3406,8 @@ assert.ok(
   "buy-in Guest Page action should submit the full attached combo and any saved listing photos",
 );
 assert.ok(
-  routesSource.includes("isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < 3") &&
+  routesSource.includes("MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS = 10") &&
+    routesSource.includes("isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS") &&
     routesSource.includes("scrapeVrboAlternativeDetails(sourceUrl)") &&
     routesSource.includes("photoSource") &&
     routesSource.includes("photoScrapeReason"),
