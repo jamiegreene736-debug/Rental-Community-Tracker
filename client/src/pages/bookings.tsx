@@ -352,6 +352,7 @@ type AutoFillComboOption = {
     url: string;
     originalSourceUrl?: string;
     image?: string;
+    images?: string[];
     airbnbAnchorUrl?: string | null;
     airbnbAnchorPrice?: number;
     directBookingUrl?: string;
@@ -836,6 +837,18 @@ function manualBuyInPhotoUrlsFromNotes(notes: string | null | undefined): string
   return parseUrlList(afterMarker).slice(0, 12);
 }
 
+// Build the trailing "Manual photo URLs:" marker block from a candidate's
+// listing photos (VRBO/Airbnb/etc.) so the guest-facing alternative page can
+// render real listing photos. The marker MUST be appended LAST in the notes —
+// manualBuyInPhotoUrlsFromNotes() parses every URL after it, so any other URLs
+// in the notes (e.g. same-unit evidence links) must appear before this block.
+function buyInPhotoNotesSuffix(photos: Array<string | null | undefined>): string {
+  const urls = Array.from(new Set(
+    photos.map((url) => String(url ?? "").trim()).filter((url) => /^https?:\/\/\S+$/i.test(url)),
+  )).slice(0, 12);
+  return urls.length ? ` · ${MANUAL_BUY_IN_PHOTO_MARKER} ${urls.join(" ")}` : "";
+}
+
 function isAirbnbUrl(url: string | null | undefined): boolean {
   if (!url) return false;
   try {
@@ -1127,6 +1140,8 @@ type CityVrboInventoryListing = {
   locationText?: string | null;
   snippet?: string;
   basicDetails?: string[];
+  image?: string | null;
+  images?: string[];
 };
 
 type CityVrboInventoryResponse = {
@@ -1179,6 +1194,8 @@ function liveCandidateFromCityComboPick(
     nightlyPrice: pick.nightlyPrice ?? Math.round(pick.totalPrice / Math.max(1, nights)),
     totalPrice: pick.totalPrice,
     bedrooms: slotBedrooms,
+    image: pick.image,
+    images: pick.images,
     verified: pick.verified ?? "yes",
     verifiedReason: pick.verifiedReason ?? "City VRBO map inventory title match",
     identityKeys: listingIdentityKeys({ url: pick.url, title: pick.title, sourceLabel: pick.sourceLabel }),
@@ -1218,6 +1235,12 @@ function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFill
       totalPrice: Number(pick.totalPrice) || 0,
       nightlyPrice: pick.nightlyPrice,
       url: pick.url,
+      // Carry the VRBO listing photos through so they reach the buy-in notes
+      // and, ultimately, the guest-facing alternative page.
+      image: pick.image ?? undefined,
+      images: Array.isArray(pick.images) && pick.images.length
+        ? pick.images
+        : (pick.image ? [pick.image] : undefined),
       verified: "yes",
       verifiedReason: "Matched resort phrase in city VRBO dropdown inventory",
     })),
@@ -4583,25 +4606,40 @@ export default function Bookings() {
 
   const guestAlternativePageMutation = useMutation({
     mutationFn: async ({ reservation, slot, buyIn }: { reservation: GuestyReservation; slot: SlotInfo; buyIn: BuyIn }) => {
-      const photoUrls = manualBuyInPhotoUrlsFromNotes(buyIn.notes);
-      const listingTitle = titleFromBuyInNotes(buyIn.notes);
+      // Present the FULL alternative combination the operator attached (e.g. a
+      // city-wide VRBO pair), not just the clicked slot — the guest message
+      // refers to "the properties in this combination." Each unit carries its
+      // own VRBO listing photos (from the Manual photo URLs marker) and gets an
+      // AI-written description server-side.
+      const attachedSlots = reservation.slots.filter(
+        (s): s is SlotInfo & { buyIn: BuyIn } => !!s.buyIn,
+      );
+      const slotsForPage = attachedSlots.length
+        ? attachedSlots
+        : [{ ...slot, buyIn }];
+      const alternatives = slotsForPage.map((s) => {
+        const b = s.buyIn;
+        const photoUrls = manualBuyInPhotoUrlsFromNotes(b.notes);
+        const listingTitle = titleFromBuyInNotes(b.notes);
+        return {
+          title: listingTitle || `${b.propertyName} - ${b.unitLabel}`,
+          community: b.propertyName,
+          url: b.airbnbListingUrl,
+          image: photoUrls[0] ?? "",
+          photos: photoUrls,
+          bedrooms: s.bedrooms,
+          unitLabel: b.unitLabel,
+          address: b.unitAddress,
+          sourceLabel: sourceLabelForUrl(b.airbnbListingUrl),
+          notes: b.notes,
+        };
+      });
       const response = await apiRequest("POST", "/api/booking-alternatives", {
         reservationId: reservation._id,
         guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
         checkIn: checkInOf(reservation),
         checkOut: checkOutOf(reservation),
-        alternatives: [{
-          title: listingTitle || `${buyIn.propertyName} - ${buyIn.unitLabel}`,
-          community: buyIn.propertyName,
-          url: buyIn.airbnbListingUrl,
-          image: photoUrls[0] ?? "",
-          photos: photoUrls,
-          bedrooms: slot.bedrooms,
-          unitLabel: buyIn.unitLabel,
-          address: buyIn.unitAddress,
-          sourceLabel: sourceLabelForUrl(buyIn.airbnbListingUrl),
-          notes: buyIn.notes,
-        }],
+        alternatives,
       }).then((r) => r.json());
       if (!response?.url) throw new Error(response?.message || response?.error || "Alternative page create failed");
       return response as { url: string; expiresAt?: string };
@@ -4703,7 +4741,7 @@ export default function Bookings() {
           airbnbListingUrl: pick.url,
           groundFloorStatus: pick.groundFloorStatus ?? "unknown",
           groundFloorEvidence: pick.groundFloorEvidence ?? null,
-          notes: `Manually attached from combo ${option.label} — ${pick.bedrooms}BR ${pick.sourceLabel} — ${pick.title} · Selected from saved auto-fill comparison for ${ci}→${co}.${anchorSuffix}${lensProvenanceSuffix}${directProofSuffix}${identitySuffix}`,
+          notes: `Manually attached from combo ${option.label} — ${pick.bedrooms}BR ${pick.sourceLabel} — ${pick.title} · Selected from saved auto-fill comparison for ${ci}→${co}.${anchorSuffix}${lensProvenanceSuffix}${directProofSuffix}${identitySuffix}${buyInPhotoNotesSuffix([pick.image, ...(pick.images ?? [])])}`,
           status: "active",
         }).then((r) => r.json());
         if (!createdBuyIn?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
@@ -5284,7 +5322,7 @@ export default function Bookings() {
             airbnbListingUrl: pick.url,
             groundFloorStatus: pick.groundFloorStatus ?? "unknown",
             groundFloorEvidence: pick.groundFloorEvidence ?? null,
-            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${lensProvenanceSuffix}${directProofSuffix}${groundFloorSuffix}${identitySuffix}`,
+            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${lensProvenanceSuffix}${directProofSuffix}${groundFloorSuffix}${identitySuffix}${buyInPhotoNotesSuffix([pick.image, ...(pick.images ?? [])])}`,
             status: "active",
             ...(typeof pick.unitTypeConfidence === "number" ? {
               unitTypeConfidence: Math.round(pick.unitTypeConfidence),
@@ -9447,6 +9485,10 @@ type LiveCandidate = {
   totalPrice: number;
   bedrooms?: number;
   image?: string;
+  // Full listing photo gallery (VRBO/Airbnb/etc.) when the source card exposes
+  // more than the single hero image. Carried through to the buy-in notes so the
+  // guest-facing alternative page can show real listing photos.
+  images?: string[];
   lat?: number;
   lng?: number;
   snippet?: string;
