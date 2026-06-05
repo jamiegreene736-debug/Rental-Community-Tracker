@@ -7613,7 +7613,7 @@ Requirements:
       "If you do not want this alternative, I completely understand. I will issue a full refund today and send you the receipt.",
       "",
       "Mahalo,",
-      "John Carpenter",
+      "John Carptenter",
       "Magical Island Vacations",
     ].join("\n");
   };
