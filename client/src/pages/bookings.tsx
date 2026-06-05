@@ -1058,11 +1058,48 @@ function candidatesShareStrongResortPhrase(
 
 function titleFromBuyInNotes(notes: string | null | undefined): string {
   const raw = String(notes ?? "");
+  const manualCombo = raw.match(/Manually attached from combo\s+.+?\s+—\s+\d+\s*BR\s+[^—]+—\s*([^·]+)/i);
+  if (manualCombo?.[1]) return manualCombo[1].trim();
+  const autoFilled = raw.match(/(?:Auto-filled from|Bought via)\s+[^—-]+[—-]\s*([^·]+)/i);
+  if (autoFilled?.[1]) return autoFilled[1].trim();
   const firstClause = raw.split(" · ")[0] ?? raw;
   const dash = firstClause.indexOf(" — ");
   if (dash >= 0) return firstClause.slice(dash + 3).trim();
-  const bought = firstClause.match(/^Bought via .+? — (.+)$/i);
-  return bought?.[1]?.trim() ?? "";
+  return "";
+}
+
+function cleanGuestAlternativeLabel(value: string | null | undefined): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s·\-–—|,:;]+|[\s·\-–—|,:;]+$/g, "")
+    .trim();
+}
+
+function alternativeCommunityFromBuyInNotes(notes: string | null | undefined, listingTitle: string): string {
+  const raw = String(notes ?? "");
+  const comboCommunity = cleanGuestAlternativeLabel(
+    raw.match(/Manually attached from combo\s+[^·]+·\s*([^—·]+)/i)?.[1],
+  );
+  if (comboCommunity && !/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(comboCommunity)) return comboCommunity;
+  const titleLead = cleanGuestAlternativeLabel(listingTitle.split(/\s+[-–—|]\s+/)[0]);
+  if (
+    titleLead &&
+    titleLead.length >= 4 &&
+    !/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(titleLead) &&
+    !/^(?:gorgeous|beautiful|stunning|luxury|spacious|updated|renovated|private|oceanfront|beachfront|sleeps?|bedrooms?|condos?|villas?|homes?|townhomes?|units?|studio)\b/i.test(titleLead)
+  ) {
+    return titleLead;
+  }
+  return "";
+}
+
+function originalCommunityForAlternativePage(reservation: GuestyReservation, slots: Array<SlotInfo & { buyIn: BuyIn }>): string {
+  const propertyId = Number(slots[0]?.buyIn?.propertyId);
+  return cleanGuestAlternativeLabel(
+    (Number.isFinite(propertyId) ? PROPERTY_UNIT_CONFIGS[propertyId]?.community : undefined) ??
+      reservation.slots.find((slot) => slot.community)?.community ??
+      slots[0]?.buyIn?.propertyName,
+  );
 }
 
 function listingIdentityKeys(item: {
@@ -4617,13 +4654,28 @@ export default function Bookings() {
       const slotsForPage = attachedSlots.length
         ? attachedSlots
         : [{ ...slot, buyIn }];
+      const proximity = attachedSlots.length >= 2
+        ? await apiGetJson<UnitProximityResponse>(
+            `/api/bookings/${encodeURIComponent(reservation._id)}/unit-proximity`,
+          ).catch(() => null)
+        : null;
+      const readyProximity = proximity?.status === "ready" ? proximity : null;
+      const originalCommunity = cleanGuestAlternativeLabel(
+        readyProximity?.community ?? originalCommunityForAlternativePage(reservation, slotsForPage),
+      );
+      const sharedAlternativeCommunity = cleanGuestAlternativeLabel(readyProximity?.resortName);
       const alternatives = slotsForPage.map((s) => {
         const b = s.buyIn;
         const photoUrls = manualBuyInPhotoUrlsFromNotes(b.notes);
         const listingTitle = titleFromBuyInNotes(b.notes);
+        const alternativeCommunity = alternativeCommunityFromBuyInNotes(b.notes, listingTitle)
+          || sharedAlternativeCommunity
+          || cleanGuestAlternativeLabel(b.propertyName);
         return {
-          title: listingTitle || `${b.propertyName} - ${b.unitLabel}`,
-          community: b.propertyName,
+          title: listingTitle,
+          community: alternativeCommunity,
+          originalCommunity,
+          alternativeCommunity,
           url: b.airbnbListingUrl,
           image: photoUrls[0] ?? "",
           photos: photoUrls,
@@ -4639,6 +4691,9 @@ export default function Bookings() {
         guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
         checkIn: checkInOf(reservation),
         checkOut: checkOutOf(reservation),
+        originalCommunity,
+        alternativeCommunity: sharedAlternativeCommunity || alternatives[0]?.alternativeCommunity || "",
+        walkMinutes: readyProximity?.walk?.minutes ?? null,
         alternatives,
       }).then((r) => r.json());
       if (!response?.url) throw new Error(response?.message || response?.error || "Alternative page create failed");

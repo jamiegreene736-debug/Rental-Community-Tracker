@@ -229,7 +229,7 @@ import {
   looksLikeIndividualListingTitle,
   mergeDiscoveredScoutRowsByResort,
 } from "@shared/alternative-scout-resort";
-import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
+import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, haversineFeet, MAX_BUY_IN_WALK_MINUTES, walkMinutesFromFeet, type WalkResult } from "@shared/walking-distance";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
   unitBuilderData,
@@ -7479,6 +7479,36 @@ export async function registerRoutes(
     /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
   const MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS = 10;
 
+  const normalizeCommunityContext = (value: unknown, max = 120): string =>
+    normalizeAlternativeText(value, max).replace(/^[\s·\-–—|,:;]+|[\s·\-–—|,:;]+$/g, "");
+
+  const sameCommunityContext = (a: string, b: string): boolean =>
+    normalizeResortText(a) === normalizeResortText(b);
+
+  const communityGeocodeQuery = (name: string, referenceCommunity: string): string => {
+    const loc = COMMUNITY_LOCATION_BY_KEY[referenceCommunity] ?? BUY_IN_MARKET_LOCATIONS[referenceCommunity];
+    const hasPlaceHint = /\b(?:hawaii|hi|florida|fl|california|ca|utah|ut|arizona|az|south carolina|sc|north carolina|nc|tennessee|tn)\b/i.test(name);
+    if (!loc || hasPlaceHint) return name;
+    return [name, loc.city, loc.state].filter(Boolean).join(", ");
+  };
+
+  const estimateCommunityWalkMinutes = async (
+    originalCommunity: string,
+    alternativeCommunity: string,
+  ): Promise<number | null> => {
+    if (!originalCommunity || !alternativeCommunity || sameCommunityContext(originalCommunity, alternativeCommunity)) {
+      return null;
+    }
+    const fromQuery = communityGeocodeQuery(originalCommunity, originalCommunity);
+    const toQuery = communityGeocodeQuery(alternativeCommunity, originalCommunity);
+    const [from, to] = await Promise.all([
+      geocode(fromQuery).catch(() => null),
+      geocode(toQuery).catch(() => null),
+    ]);
+    if (!from || !to) return null;
+    return walkMinutesFromFeet(haversineFeet(from.lat, from.lng, to.lat, to.lng));
+  };
+
   const vrboAlternativeUrlsFrom = (value: unknown): string[] => {
     const input = Array.isArray(value) ? value.join("\n") : String(value ?? "");
     const seen = new Set<string>();
@@ -7728,6 +7758,20 @@ Requirements:
         return res.status(410).send("This alternative page has expired.");
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
+      const originalCommunity = normalizeCommunityContext(payload.originalCommunity);
+      const alternativeCommunity = normalizeCommunityContext(
+        payload.alternativeCommunity
+          || alternatives.find((item: any) => normalizeCommunityContext(item?.alternativeCommunity))?.alternativeCommunity
+          || alternatives.find((item: any) => normalizeCommunityContext(item?.community))?.community,
+      );
+      const communityWalkMinutes = Number(payload.communityWalkMinutes);
+      const availabilityContext = originalCommunity && alternativeCommunity && !sameCommunityContext(originalCommunity, alternativeCommunity)
+        ? Number.isFinite(communityWalkMinutes) && communityWalkMinutes > 0
+          ? `Instead of ${escapeHtml(originalCommunity)}, we have availability in ${escapeHtml(alternativeCommunity)}, which is only about a ${Math.round(communityWalkMinutes)}-minute walk away from ${escapeHtml(originalCommunity)}.`
+          : `Instead of ${escapeHtml(originalCommunity)}, we have availability in nearby ${escapeHtml(alternativeCommunity)}.`
+        : alternativeCommunity
+          ? `We have availability in ${escapeHtml(alternativeCommunity)} for this stay.`
+          : `We prepared ${alternatives.length === 1 ? "this unit" : "these units"} so you can review a comparable stay in the same general area.`;
       const photoBlocks = alternatives.map((item: any, index: number) => {
         const photos = Array.from(new Set([
           item.image,
@@ -7760,14 +7804,14 @@ Requirements:
         return `
           <section class="option">
             <div class="option-copy">
-              <p class="eyebrow">Option ${index + 1}</p>
+              <p class="eyebrow">Unit ${index + 1}</p>
               <h2>${escapeHtml(item.title || item.community || "Alternative stay")}</h2>
               ${item.community ? `<p class="community">${escapeHtml(item.community)}</p>` : ""}
               ${details.length ? `<div class="details">${details.map((detail) => `<span>${detail}</span>`).join("")}</div>` : ""}
-              ${item.description ? `<p class="description">${escapeHtml(item.description)}</p>` : ""}
-              ${item.showSourceLink && item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
             </div>
             ${carousel}
+            ${item.description ? `<p class="description">${escapeHtml(item.description)}</p>` : ""}
+            ${item.showSourceLink && item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
           </section>`;
       }).join("");
       res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -7804,7 +7848,7 @@ Requirements:
         </style></head><body>
         <header><div><h1>Alternative stay options</h1><p>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(payload.checkIn || "")} to ${escapeHtml(payload.checkOut || "")}</p></div></header>
         <main>
-          <p class="intro">We prepared ${alternatives.length === 1 ? "this option" : "these options"} so you can review a comparable stay in the same general area.</p>
+          <p class="intro">${availabilityContext}</p>
           ${photoBlocks || "<p>No alternative options were attached to this page yet.</p>"}
           <footer>Photos and details are provided for review and may be finalized before arrival details are sent.</footer>
         </main>
@@ -7852,6 +7896,7 @@ Requirements:
         checkIn: normalizeAlternativeText(req.body?.checkIn, 20),
         checkOut: normalizeAlternativeText(req.body?.checkOut, 20),
       };
+      const originalCommunity = normalizeCommunityContext(req.body?.originalCommunity);
       const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any) => {
         const sourceUrl = normalizeAlternativeUrl(item?.url);
         const initialPhotos = Array.from(new Set([
@@ -7869,9 +7914,12 @@ Requirements:
           item?.title || vrboDetails?.title || item?.community || "Alternative stay",
           160,
         );
+        const alternativeCommunity = normalizeCommunityContext(item?.alternativeCommunity || item?.community);
         const base = {
           title,
-          community: normalizeAlternativeText(item?.community, 100),
+          community: alternativeCommunity || normalizeAlternativeText(item?.community, 100),
+          originalCommunity,
+          alternativeCommunity,
           url: sourceUrl,
           image: photos[0] ?? "",
           photos,
@@ -7895,11 +7943,27 @@ Requirements:
           descriptionWarning: drafted.warning ?? null,
         };
       }));
+      const alternativeCommunity = normalizeCommunityContext(
+        req.body?.alternativeCommunity
+          || hydratedAlternatives.find((item) => normalizeCommunityContext(item.alternativeCommunity))?.alternativeCommunity
+          || hydratedAlternatives.find((item) => normalizeCommunityContext(item.community))?.community,
+      );
+      const explicitCommunityWalkMinutes = Number(req.body?.communityWalkMinutes);
+      const fallbackWalkMinutes = Number(req.body?.walkMinutes);
+      const estimatedCommunityWalkMinutes = await estimateCommunityWalkMinutes(originalCommunity, alternativeCommunity);
+      const communityWalkMinutes = Number.isFinite(explicitCommunityWalkMinutes) && explicitCommunityWalkMinutes > 0
+        ? Math.round(explicitCommunityWalkMinutes)
+        : estimatedCommunityWalkMinutes ?? (Number.isFinite(fallbackWalkMinutes) && fallbackWalkMinutes > 0
+          ? Math.round(fallbackWalkMinutes)
+          : null);
       const payload = {
         reservationId: String(req.body?.reservationId ?? ""),
         guestName: stay.guestName || "Guest",
         checkIn: stay.checkIn,
         checkOut: stay.checkOut,
+        originalCommunity,
+        alternativeCommunity,
+        communityWalkMinutes,
         alternatives: hydratedAlternatives,
         createdAt: new Date().toISOString(),
         expiresAt,

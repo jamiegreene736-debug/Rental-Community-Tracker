@@ -3402,8 +3402,11 @@ assert.ok(
 assert.ok(
   bookingsSource.includes("guestAlternativePageMutation") &&
     bookingsSource.includes("slotsForPage") &&
-    bookingsSource.includes("manualBuyInPhotoUrlsFromNotes"),
-  "buy-in Guest Page action should submit the full attached combo and any saved listing photos",
+    bookingsSource.includes("manualBuyInPhotoUrlsFromNotes") &&
+    bookingsSource.includes("/unit-proximity") &&
+    bookingsSource.includes("originalCommunity") &&
+    bookingsSource.includes("alternativeCommunity"),
+  "buy-in Guest Page action should submit the full attached combo, saved listing photos, and community proximity context",
 );
 assert.ok(
   routesSource.includes("MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS = 10") &&
@@ -3417,8 +3420,16 @@ assert.ok(
   routesSource.includes('class="carousel" data-carousel') &&
     routesSource.includes("data-carousel-prev") &&
     routesSource.includes("data-carousel-next") &&
-    routesSource.includes("carousel-track"),
-  "guest-facing alternatives page should render scraped listing photos as a carousel",
+    routesSource.includes("carousel-track") &&
+    routesSource.includes("Unit ${index + 1}") &&
+    routesSource.includes("Instead of ${escapeHtml(originalCommunity)}, we have availability in ${escapeHtml(alternativeCommunity)}") &&
+    routesSource.includes("fallbackWalkMinutes"),
+  "guest-facing alternatives page should render scraped listing photos as a carousel with unit labels and community availability copy",
+);
+assert.ok(
+  routesSource.indexOf("${carousel}") >= 0 &&
+    routesSource.indexOf("${item.description ? `<p class=\"description\"") > routesSource.indexOf("${carousel}"),
+  "guest-facing alternatives page should place each AI unit description below that unit's photo carousel",
 );
 assert.ok(
   vrboWorkerSource.includes("deepHarvest") && vrboWorkerSource.includes("deepMapHarvest"),
