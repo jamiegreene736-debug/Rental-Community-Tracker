@@ -4106,6 +4106,10 @@ export default function Bookings() {
     | { reservation: GuestyReservation; slot: SlotInfo; propertyId: number; propertyName: string }
     | null
   >(null);
+  const [vrboGuestPageTarget, setVrboGuestPageTarget] = useState<
+    | { reservation: GuestyReservation; propertyName: string }
+    | null
+  >(null);
   const [cancellationRange, setCancellationRange] = useState<"all" | "365" | "90">("all");
   const [verifyTarget, setVerifyTarget] = useState<
     | { buyIn: BuyIn; reservation: GuestyReservation }
@@ -7620,6 +7624,7 @@ export default function Bookings() {
                 const comboOptions = lastAutoFillCombos[r._id] ?? [];
                 const searchAudits = lastAutoFillAudits[r._id] ?? [];
                 const manualReservation = isManualReservation(r);
+                const reservationMeta = buyInPropertyMetaForReservation(r);
                 return (
                   <div
                     key={r._id}
@@ -7763,6 +7768,26 @@ export default function Bookings() {
                         )}
                         {manualReservation && <ManualReservationContactPanel reservation={r} />}
                         {!manualReservation && <ReservationCancellationPolicyNotice reservation={r} />}
+                        <div className="flex justify-end">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 px-2 text-xs"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setVrboGuestPageTarget({
+                                reservation: r,
+                                propertyName: reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental",
+                              });
+                            }}
+                            data-testid={`button-vrbo-guest-page-${r._id}`}
+                            title="Create a guest-facing custom page from one or more VRBO listing URLs"
+                          >
+                            <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                            VRBO guest page
+                          </Button>
+                        </div>
                         {/* Auto-fill: one click to search + attach cheapest
                             priced option for every empty slot on this row. */}
                         {r.slotsFilled < r.slotsTotal && (
@@ -8815,6 +8840,14 @@ export default function Bookings() {
           propertyName={manualBuyInTarget.propertyName}
           slot={manualBuyInTarget.slot}
           onClose={() => setManualBuyInTarget(null)}
+        />
+      )}
+
+      {vrboGuestPageTarget && (
+        <VrboGuestPageDialog
+          reservation={vrboGuestPageTarget.reservation}
+          propertyName={vrboGuestPageTarget.propertyName}
+          onClose={() => setVrboGuestPageTarget(null)}
         />
       )}
 
@@ -12576,6 +12609,129 @@ function VerifyRateDialog({
             disabled={updateCost.isPending || state.kind === "loading"}
           >
             {updateCost.isPending ? "Saving..." : "Save cost"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function VrboGuestPageDialog({
+  reservation,
+  propertyName,
+  onClose,
+}: {
+  reservation: GuestyReservation;
+  propertyName: string;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const [vrboUrls, setVrboUrls] = useState("");
+  const [pageTitle, setPageTitle] = useState(propertyName);
+  const [notes, setNotes] = useState("");
+  const parsedUrls = useMemo(() => parseUrlList(vrboUrls).filter((url) => /(?:^|\.)vrbo\.com$/i.test(new URL(url).hostname)), [vrboUrls]);
+  const canCreate = parsedUrls.length > 0;
+
+  const createPage = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("POST", "/api/booking-alternatives/from-vrbo", {
+        reservationId: reservation._id,
+        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
+        checkIn: checkInOf(reservation),
+        checkOut: checkOutOf(reservation),
+        propertyName: pageTitle.trim() || propertyName,
+        urls: parsedUrls,
+        notes,
+      }).then((r) => r.json());
+      if (!response?.url) throw new Error(response?.message || response?.error || "Guest page create failed");
+      return response as {
+        url: string;
+        expiresAt?: string;
+        alternatives?: Array<{ title: string; photoCount: number; photoSource: string; descriptionGeneratedBy: string }>;
+      };
+    },
+    onSuccess: async (data) => {
+      const totalPhotos = (data.alternatives ?? []).reduce((sum, item) => sum + (item.photoCount ?? 0), 0);
+      try {
+        await navigator.clipboard?.writeText(data.url);
+        toast({ title: "Guest page ready", description: `Link copied. ${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} pulled through.` });
+      } catch {
+        toast({ title: "Guest page ready", description: `${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} pulled through. Copy the URL from the new tab.` });
+      }
+      window.open(data.url, "_blank", "noopener,noreferrer");
+      onClose();
+    },
+    onError: (e: any) => toast({ title: "Guest page failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Create guest page from VRBO URLs</DialogTitle>
+          <DialogDescription>
+            Paste the proposed property URLs. The guest page will present them as your alternative properties and will not mention VRBO or buy-ins.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="rounded border bg-muted/30 p-3 text-xs">
+            <p className="font-medium">{reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest"}</p>
+            <p className="text-muted-foreground">{fmtDate(checkInOf(reservation))} → {fmtDate(checkOutOf(reservation))}</p>
+          </div>
+          <div>
+            <Label htmlFor="vrboGuestPageTitle" className="text-xs">Guest-facing property name</Label>
+            <Input
+              id="vrboGuestPageTitle"
+              value={pageTitle}
+              onChange={(e) => setPageTitle(e.target.value)}
+              placeholder="Poipu Kai resort option"
+              data-testid="input-vrbo-guest-page-title"
+            />
+          </div>
+          <div>
+            <Label htmlFor="vrboGuestPageUrls" className="text-xs">VRBO URLs</Label>
+            <Textarea
+              id="vrboGuestPageUrls"
+              rows={5}
+              value={vrboUrls}
+              onChange={(e) => setVrboUrls(e.target.value)}
+              placeholder="Paste one or two VRBO listing URLs, one per line"
+              data-testid="input-vrbo-guest-page-urls"
+            />
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              {parsedUrls.length} valid VRBO URL{parsedUrls.length === 1 ? "" : "s"} detected.
+            </p>
+          </div>
+          <div>
+            <Label htmlFor="vrboGuestPageNotes" className="text-xs">Optional description guidance</Label>
+            <Textarea
+              id="vrboGuestPageNotes"
+              rows={3}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Mention anything the guest should know, like close to beach, good for families, ground-floor preference, etc."
+              data-testid="input-vrbo-guest-page-notes"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button
+            onClick={() => createPage.mutate()}
+            disabled={!canCreate || createPage.isPending}
+            data-testid="button-create-vrbo-guest-page"
+          >
+            {createPage.isPending ? (
+              <>
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                Pulling photos...
+              </>
+            ) : (
+              <>
+                <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                Create custom URL
+              </>
+            )}
           </Button>
         </DialogFooter>
       </DialogContent>

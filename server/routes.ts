@@ -7402,19 +7402,119 @@ export async function registerRoutes(
     return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
   };
 
+  const vrboAlternativeUrlsFrom = (value: unknown): string[] => {
+    const input = Array.isArray(value) ? value.join("\n") : String(value ?? "");
+    const seen = new Set<string>();
+    return input
+      .split(/[\s,\n]+/)
+      .map((url) => normalizeAlternativeUrl(url, 1000))
+      .filter((url) => {
+        if (!/^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url)) return false;
+        const key = url.replace(/[?#].*$/, "");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 4);
+  };
+
+  const extractVrboMetadataFallback = async (url: string): Promise<{ title: string; photos: string[]; bedrooms: number | null }> => {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 VacationRentalExpertzBot/1.0 (+https://vacationrentalexpertz.com)",
+          "Accept": "text/html,application/xhtml+xml",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const decode = (value: string) => value
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\\//g, "/")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, "\"")
+        .replace(/&#39;/g, "'")
+        .trim();
+      const metaContent = (name: string): string => {
+        const pattern = new RegExp(`<meta[^>]+(?:property|name)=["']${name}["'][^>]+content=["']([^"']+)["'][^>]*>`, "i");
+        return decode(html.match(pattern)?.[1] ?? "");
+      };
+      const title = decode(
+        metaContent("og:title") ||
+        metaContent("twitter:title") ||
+        html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] ||
+        "",
+      ).replace(/\s+\|\s*Vrbo.*$/i, "");
+      const photos = Array.from(new Set([
+        metaContent("og:image"),
+        metaContent("twitter:image"),
+        ...Array.from(html.matchAll(/https?:\/\/[^"' <>()]+?(?:jpe?g|webp|png)(?:\?[^"' <>()]*)?/gi)).map((match) => decode(match[0])),
+      ].filter((photo) =>
+        /^https?:\/\//i.test(photo) &&
+        /(?:images\.trvl-media\.com|mediaim\.expedia\.com|odis\.homeaway\.com|vrbo\.com|homeaway\.com)/i.test(photo) &&
+        !/logo|icon|sprite|avatar|favicon|placeholder|transparent|map/i.test(photo),
+      ))).slice(0, 16);
+      const bedroomsMatch = html.match(/(\d+)\s*(?:bedroom|bedrooms|br)\b/i);
+      return {
+        title: title || "Vacation rental option",
+        photos,
+        bedrooms: bedroomsMatch ? Number(bedroomsMatch[1]) : null,
+      };
+    } catch {
+      return { title: "Vacation rental option", photos: [], bedrooms: null };
+    }
+  };
+
+  const scrapeVrboAlternativeDetails = async (url: string): Promise<{
+    title: string;
+    photos: string[];
+    bedrooms: number | null;
+    photoSource: "sidecar" | "html" | "none";
+    scrapeReason: string;
+  }> => {
+    const fallbackPromise = extractVrboMetadataFallback(url);
+    let sidecarPhotos: string[] = [];
+    let sidecarReason = "";
+    try {
+      const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
+      const result = await scrapeVrboPhotosViaSidecar({
+        url,
+        maxPhotos: 24,
+        walletBudgetMs: 75_000,
+        pollIntervalMs: 1200,
+      });
+      sidecarPhotos = result.photos;
+      sidecarReason = result.reason;
+    } catch (error: any) {
+      sidecarReason = error?.message ?? String(error);
+    }
+    const fallback = await fallbackPromise;
+    const photos = Array.from(new Set([
+      ...sidecarPhotos,
+      ...fallback.photos,
+    ])).slice(0, 24);
+    return {
+      title: fallback.title,
+      photos,
+      bedrooms: fallback.bedrooms,
+      photoSource: sidecarPhotos.length > 0 ? "sidecar" : fallback.photos.length > 0 ? "html" : "none",
+      scrapeReason: sidecarReason,
+    };
+  };
+
   const alternativeGuestDescriptionFallback = (item: Record<string, any>, stay: { checkIn?: string; checkOut?: string }): string => {
     const title = normalizeAlternativeText(item.title || item.community || "this alternative option", 120);
     const community = normalizeAlternativeText(item.community, 100);
     const bedrooms = Number(item.bedrooms);
     const bedroomText = Number.isFinite(bedrooms) && bedrooms > 0 ? `${Math.round(bedrooms)} bedroom${Math.round(bedrooms) === 1 ? "" : "s"}` : "comfortable sleeping space";
-    const source = normalizeAlternativeText(item.sourceLabel, 80);
     const address = normalizeAlternativeText(item.address, 180);
     const dateText = stay.checkIn && stay.checkOut ? ` for ${stay.checkIn} to ${stay.checkOut}` : "";
     return [
       `We prepared ${title} as a comparable alternative${dateText}.`,
       `It offers ${bedroomText}${community ? ` in or near ${community}` : ""}, giving your group a practical option while staying in the same general area.`,
       address ? `The saved location detail is ${address}.` : "",
-      source ? `The source listing is from ${source}, and the photos below are the current reference images we have for review.` : "The photos below are the current reference images we have for review.",
+      "The photos below are the current reference images we have for review.",
     ].filter(Boolean).join(" ");
   };
 
@@ -7435,8 +7535,6 @@ export async function registerRoutes(
       bedrooms: Number(item.bedrooms) || null,
       unitLabel: normalizeAlternativeText(item.unitLabel, 80),
       address: normalizeAlternativeText(item.address, 220),
-      sourceLabel: normalizeAlternativeText(item.sourceLabel, 100),
-      listingUrl: normalizeAlternativeUrl(item.url),
       operatorNotes: normalizeAlternativeText(item.notes, 900),
       photoCount: Array.isArray(item.photos) ? item.photos.length : 0,
     };
@@ -7463,8 +7561,9 @@ Requirements:
 - 2 short paragraphs, warm and professional.
 - Plain text only. No markdown, bullets, headings, emojis, or sales hype.
 - Do not mention buy-in, cost paid, internal operations, arbitrage, owner, supplier, confidence, or verification.
+- Do not mention VRBO, third-party marketplaces, source listings, or where the option came from.
 - Do not promise amenities not in the facts.
-- Make it sound like a helpful host presenting a comparable option for the guest to review.
+- Make it sound like a helpful host presenting one of our comparable properties for the guest to review.
 - Return only the copy.`,
           }],
         }),
@@ -7505,7 +7604,6 @@ Requirements:
           item.bedrooms ? `${escapeHtml(item.bedrooms)} bedroom${Number(item.bedrooms) === 1 ? "" : "s"}` : "",
           item.unitLabel ? escapeHtml(item.unitLabel) : "",
           item.address ? escapeHtml(item.address) : "",
-          item.sourceLabel ? `Source: ${escapeHtml(item.sourceLabel)}` : "",
         ].filter(Boolean);
         return `
           <section class="option">
@@ -7515,7 +7613,7 @@ Requirements:
               ${item.community ? `<p class="community">${escapeHtml(item.community)}</p>` : ""}
               ${details.length ? `<div class="details">${details.map((detail) => `<span>${detail}</span>`).join("")}</div>` : ""}
               ${item.description ? `<p class="description">${escapeHtml(item.description)}</p>` : ""}
-              ${item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
+              ${item.showSourceLink && item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
             </div>
             <div class="photos">
               ${photos.map((url: string) => `<img src="${escapeHtml(url)}" alt="${escapeHtml(item.title || item.community || "Alternative")}" loading="lazy" />`).join("")}
@@ -7600,6 +7698,7 @@ Requirements:
           address: normalizeAlternativeText(item?.address, 220),
           sourceLabel: normalizeAlternativeText(item?.sourceLabel, 80),
           notes: normalizeAlternativeText(item?.notes, 1000),
+          showSourceLink: item?.showSourceLink === true,
           communityPhotos: await communityPhotosFor(String(item?.community ?? "")),
         };
         const drafted = await draftAlternativeGuestDescription(base, stay);
@@ -7623,6 +7722,77 @@ Requirements:
       return res.json({ url: `${agreementBaseUrl(req)}/alternatives/${token}`, expiresAt, alternatives: hydratedAlternatives });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to create alternative page", message: err?.message ?? String(err) });
+    }
+  });
+
+  app.post("/api/booking-alternatives/from-vrbo", async (req, res) => {
+    try {
+      const urls = vrboAlternativeUrlsFrom(req.body?.urls ?? req.body?.vrboUrls);
+      if (urls.length === 0) return res.status(400).json({ error: "At least one VRBO URL is required" });
+      const propertyName = normalizeAlternativeText(req.body?.propertyName || req.body?.community || "Vacation rental", 120);
+      const details = await Promise.all(urls.map((url) => scrapeVrboAlternativeDetails(url)));
+      const alternatives = details.map((detail, index) => ({
+        title: detail.title || `${propertyName} option ${index + 1}`,
+        community: propertyName,
+        url: urls[index],
+        image: detail.photos[0] ?? "",
+        photos: detail.photos,
+        bedrooms: detail.bedrooms,
+        unitLabel: urls.length > 1 ? `Property ${index + 1}` : "Property",
+        sourceLabel: "",
+        notes: [
+          `Operator supplied VRBO URL ${index + 1}.`,
+          `Photo scrape source: ${detail.photoSource}.`,
+          detail.scrapeReason ? `Scrape note: ${detail.scrapeReason}` : "",
+          normalizeAlternativeText(req.body?.notes, 500),
+        ].filter(Boolean).join(" "),
+        showSourceLink: false,
+      }));
+      req.body = {
+        ...req.body,
+        alternatives,
+      };
+
+      const token = randomBytes(12).toString("hex");
+      const dir = path.join(process.cwd(), "tmp", "booking-alternatives");
+      await fs.promises.mkdir(dir, { recursive: true });
+      const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+      const stay = {
+        guestName: normalizeAlternativeText(req.body?.guestName ?? "Guest", 100),
+        checkIn: normalizeAlternativeText(req.body?.checkIn, 20),
+        checkOut: normalizeAlternativeText(req.body?.checkOut, 20),
+      };
+      const hydratedAlternatives = await Promise.all(alternatives.map(async (item) => {
+        const drafted = await draftAlternativeGuestDescription(item, stay);
+        return {
+          ...item,
+          description: drafted.description,
+          descriptionGeneratedBy: drafted.generatedBy,
+          descriptionWarning: drafted.warning ?? null,
+        };
+      }));
+      const payload = {
+        reservationId: normalizeAlternativeText(req.body?.reservationId, 120),
+        guestName: stay.guestName || "Guest",
+        checkIn: stay.checkIn,
+        checkOut: stay.checkOut,
+        alternatives: hydratedAlternatives,
+        createdAt: new Date().toISOString(),
+        expiresAt,
+      };
+      await fs.promises.writeFile(path.join(dir, `${token}.json`), JSON.stringify(payload, null, 2));
+      return res.json({
+        url: `${agreementBaseUrl(req)}/alternatives/${token}`,
+        expiresAt,
+        alternatives: hydratedAlternatives.map((item, index) => ({
+          title: item.title,
+          photoCount: item.photos.length,
+          photoSource: details[index]?.photoSource ?? "none",
+          descriptionGeneratedBy: item.descriptionGeneratedBy,
+        })),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to create VRBO alternative page", message: err?.message ?? String(err) });
     }
   });
 
