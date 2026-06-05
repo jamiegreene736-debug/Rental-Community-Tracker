@@ -5235,7 +5235,7 @@ function collectVrboPropertySearchListings(root, out = [], maxDepth = 10) {
   return out;
 }
 
-function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel, maxRows = 300) {
+function createVrboGraphqlCollector(targetPage, id, expectedNights, variantLabel, maxRows = 400) {
   const rows = [];
   let responsesSeen = 0;
   let matchedResponses = 0;
@@ -6201,7 +6201,7 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
   };
 }
 
-async function harvestVrboMapResultCards(targetPage, id, passes = 6) {
+async function harvestVrboMapResultCards(targetPage, id, passes = 10) {
   let lastSnapshot = null;
   let lastHarvestTotal = 0;
   let plateauPasses = 0;
@@ -6385,7 +6385,7 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
         retryLater: true,
       });
     }
-    const harvestPasses = deepMapHarvest ? 18 : (bounds ? 3 : 8);
+    const harvestPasses = deepMapHarvest ? 25 : (bounds ? 4 : 15);
     log(
       `vrbo_search ${id}: starting map harvest passes (${deepMapHarvest ? "deep-city" : bounds ? "bounded" : "city-unbounded"}) ` +
       `count=${harvestPasses} before card extraction`,
@@ -6436,7 +6436,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   await ensureBrowser();
   const expectedNights = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / (24 * 60 * 60 * 1000)));
   const maxGraphqlRows = Math.max(
-    300,
+    400,
     Math.min(
       600,
       Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_GRAPHQL_MAX_ROWS ?? process.env.SIDECAR_VRBO_GRAPHQL_MAX_ROWS ?? "500"), 10) || 500,
@@ -6663,10 +6663,10 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     window.__vrboHarvestCards = [];
   }).catch(() => {});
   const listHarvestPasses = Math.max(
-    12,
+    20,
     Math.min(
-      24,
-      Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_HARVEST_PASSES ?? "18"), 10) || 18,
+      35,
+      Number.parseInt(String(process.env.SIDECAR_VRBO_LIST_HARVEST_PASSES ?? "30"), 10) || 30,
     ),
   );
   log(`vrbo_search ${id}: starting dropdown list harvest (${listHarvestPasses} passes) before card extraction`);
