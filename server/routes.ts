@@ -229,7 +229,7 @@ import {
   looksLikeIndividualListingTitle,
   mergeDiscoveredScoutRowsByResort,
 } from "@shared/alternative-scout-resort";
-import { fallbackWalkForResort, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
+import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
   unitBuilderData,
@@ -2163,6 +2163,79 @@ function titleFromBuyInNoteText(notes: string | null | undefined): string {
     raw.match(/(?:Auto-filled from|Bought via)\s+[^—-]+[—-]\s*([^·]+)/i) ||
     raw.match(/^(?:Auto-filled from|Bought via)\s+([^·]+)/i);
   return (m?.[1] ?? raw.split(" · ")[0] ?? "").trim();
+}
+
+function normalizeResortText(value: string | null | undefined): string {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// Derive a guest-facing resort/community name from the attached units' own
+// listing titles. City-wide buy-ins frequently come from a DIFFERENT resort
+// than the reservation's configured property, so the configured resort
+// (PROPERTY_UNIT_NEEDS[...].community / COMMUNITY_LOCATION searchName) is the
+// wrong label for the walking-distance card. The units' shared title prefix is
+// the ground truth for which resort they actually belong to. Returns null when
+// no confident shared phrase exists (callers fall back to the configured name).
+function commonResortNameFromTitles(titles: Array<string | null | undefined>): string | null {
+  const cleaned = titles
+    .map((t) => String(t ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (cleaned.length < 2) return null;
+  const tokenLists = cleaned.map((t) => t.split(" "));
+  const minLen = Math.min(...tokenLists.map((toks) => toks.length));
+  const lcp: string[] = [];
+  for (let i = 0; i < minLen; i++) {
+    const tok = tokenLists[0][i];
+    if (tokenLists.every((toks) => toks[i].toLowerCase() === tok.toLowerCase())) {
+      lcp.push(tok);
+    } else {
+      break;
+    }
+  }
+  // Keep only the leading place segment before the first " - "/"|" separator.
+  // City-wide titles are "<Resort/Community> - <N>BR <Type> - Sleeps <X>", so
+  // two units with identical/near-identical titles would otherwise yield the
+  // WHOLE title as the label (worse than the original bug). Splitting at the
+  // first separator caps it at the resort/community lead.
+  let name = lcp.join(" ").split(/\s+[-–—|]\s+/)[0].replace(/[\s\-–—|,:;]+$/g, "").trim();
+  if (!name || name.length < 4 || !/[a-z]/i.test(name)) return null;
+  // Reject size-only and marketing/descriptor-led phrases so an adjective or a
+  // "5BR Sleeps" prefix never becomes the resort label (mirrors the find-buy-in
+  // resort guard). When this returns null the caller keeps the configured name.
+  if (/^\d+\s*(?:br|bd|ba|bedrooms?|baths?)?\b/i.test(name)) return null;
+  if (/^(?:gorgeous|beautiful|stunning|luxury|luxurious|spacious|cozy|charming|amazing|lovely|modern|new(?:ly)?|updated|renovated|private|oceanfront|beachfront|ocean|beach|sleeps?|bedrooms?|condos?|villas?|homes?|townhomes?|units?|studio)\b/i.test(name)) return null;
+  return name;
+}
+
+// Re-label a computed walk's description with a different resort name without
+// changing the distance/minutes. Used so the walking-distance card can show the
+// resort the attached units actually belong to while the minute estimate stays
+// anchored to the configured resort footprint.
+function relabelWalkDescription(walk: WalkResult, resortName: string | undefined): WalkResult {
+  if (!resortName) return walk;
+  const description = walk.source === "geocoded"
+    ? describeWalk(walk.feet, walk.minutes, resortName)
+    : describeWalkFromMinutes(walk.minutes, resortName);
+  return { ...walk, description };
+}
+
+// Pick the resort label for the walking-distance card: trust the configured
+// resort when the attached units' titles actually mention it, otherwise use the
+// units' shared title phrase (city-wide buy-ins from a different resort).
+function resortLabelForAttachedUnits(
+  configuredResort: string | undefined,
+  unitTitles: Array<string | null | undefined>,
+): string | undefined {
+  const unitsResort = commonResortNameFromTitles(unitTitles);
+  const configuredInTitles = configuredResort
+    ? unitTitles.some((t) => {
+        const title = normalizeResortText(t);
+        const resort = normalizeResortText(configuredResort);
+        return Boolean(resort) && Boolean(title) && title.includes(resort);
+      })
+    : false;
+  if (!configuredInTitles && unitsResort) return unitsResort;
+  return configuredResort ?? unitsResort ?? undefined;
 }
 
 function extractUnitTokenFromText(value: string): string | null {
@@ -7652,12 +7725,11 @@ Requirements:
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
       const photoBlocks = alternatives.map((item: any, index: number) => {
-        const photos = [
+        const photos = Array.from(new Set([
           item.image,
           ...(Array.isArray(item.photos) ? item.photos : []),
           ...(Array.isArray(item.communityPhotos) ? item.communityPhotos : []),
-        ]
-          .filter(Boolean)
+        ].filter(Boolean)))
           .slice(0, 10);
         const details = [
           item.bedrooms ? `${escapeHtml(item.bedrooms)} bedroom${Number(item.bedrooms) === 1 ? "" : "s"}` : "",
@@ -8250,7 +8322,17 @@ Requirements:
       String(sorted[0]?.propertyName ?? "").trim() ??
       null;
     const loc = communityName ? COMMUNITY_LOCATION_BY_KEY[communityName] : undefined;
-    const resortName = loc?.searchName ?? communityName ?? undefined;
+    const configuredResort = loc?.searchName ?? communityName ?? undefined;
+    // City-wide buy-ins can come from a different resort than the configured
+    // property. We DISPLAY the resort the attached units actually belong to
+    // (from their listing titles), but the walk itself is computed against the
+    // configured resort so the geocode hints and the resort-footprint fallback
+    // minutes are unchanged — only the displayed name is relabeled below.
+    const displayResort = resortLabelForAttachedUnits(
+      configuredResort,
+      sorted.map((b) => titleFromBuyInNoteText(b.notes) || String(b.propertyName ?? "")),
+    );
+    const resortName = configuredResort;
 
     const units = await Promise.all(
       sorted.map(async (buyIn) => {
@@ -8297,12 +8379,13 @@ Requirements:
     }
 
     if (!worstPair) return null;
+    const displayWalk = relabelWalkDescription(worstPair.walk, displayResort ?? resortName);
     return {
       propertyId: Number.isFinite(propertyId) ? propertyId : null,
       community: communityName,
-      resortName,
+      resortName: displayResort ?? resortName,
       units,
-      walk: worstPair.walk,
+      walk: displayWalk,
       confidence: exactAddressCount >= 2 && worstPair.walk.source === "geocoded"
         ? "exact-address" as const
         : worstPair.walk.source === "geocoded"
@@ -8333,7 +8416,16 @@ Requirements:
     const loc = communityName
       ? (COMMUNITY_LOCATION_BY_KEY[communityName] ?? BUY_IN_MARKET_LOCATIONS[communityName])
       : undefined;
-    const resortName = loc?.searchName ?? communityName ?? undefined;
+    const configuredResort = loc?.searchName ?? communityName ?? undefined;
+    // Display the resort the listings actually belong to when the configured
+    // resort isn't in their titles, but compute the walk against the configured
+    // resort so only the displayed name changes (see resortLabelForAttachedUnits
+    // + relabelWalkDescription).
+    const displayResort = resortLabelForAttachedUnits(
+      configuredResort,
+      pair.map((listing) => listing.title),
+    );
+    const resortName = configuredResort;
     const units = await Promise.all(
       pair.map(async (listing) => {
         const listingTitle = String(listing.title ?? "").trim()
@@ -8370,10 +8462,11 @@ Requirements:
     if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
       walk = fallbackWalkForResort(resortName);
     }
+    walk = relabelWalkDescription(walk, displayResort ?? resortName);
 
     return {
       community: communityName,
-      resortName,
+      resortName: displayResort ?? resortName,
       units,
       walk,
       confidence: exactAddressCount >= 2 && walk.source === "geocoded"
