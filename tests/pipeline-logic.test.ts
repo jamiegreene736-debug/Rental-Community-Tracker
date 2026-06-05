@@ -3145,13 +3145,16 @@ assert.ok(
   "auto-fill should fall back to city-wide VRBO inventory and attach with city-vrbo source",
 );
 
-assert.ok(
-  vrboWorkerSource.includes("createVrboGraphqlCollector") &&
-    vrboWorkerSource.includes("propertySearchListings") &&
-    vrboWorkerSource.includes("extractLatLngDeep") &&
-    vrboWorkerSource.includes("captureSource: \"vrbo_graphql_propertySearchListings\""),
-  "VRBO map-bounds search should passively capture propertySearchListings inventory and coordinates from the visible map search",
-);
+	assert.ok(
+	  vrboWorkerSource.includes("createVrboGraphqlCollector") &&
+	    vrboWorkerSource.includes("propertySearchListings") &&
+	    vrboWorkerSource.includes("extractLatLngDeep") &&
+	    vrboWorkerSource.includes("extractVrboBathroomsFromText") &&
+	    vrboWorkerSource.includes("extractVrboSleepsFromText") &&
+	    vrboWorkerSource.includes("reviewCount") &&
+	    vrboWorkerSource.includes("captureSource: \"vrbo_graphql_propertySearchListings\""),
+	  "VRBO map-bounds search should passively capture propertySearchListings inventory, coordinates, and basic listing details from the visible search",
+	);
 assert.ok(
   vrboWorkerSource.includes("disableVrboSearchAsMapMoves") &&
     vrboWorkerSource.includes("city map search has no provider mapBounds") &&
@@ -3177,11 +3180,13 @@ assert.ok(
     routesSource.includes("resort destination dropdown, dates, and bedroom export"),
   "VRBO resort dropdown search should paginate GraphQL inventory via cursor replay with UI Next fallback, then merge DOM harvest",
 );
-assert.ok(
-  vrboWorkerSource.includes("finalHarvestTotal") &&
-    vrboWorkerSource.includes("harvestSeenInExtract"),
-  "VRBO map harvest stats should be returned to the server for alternative diagnostics",
-);
+	assert.ok(
+	  vrboWorkerSource.includes("finalHarvestTotal") &&
+	    vrboWorkerSource.includes("harvestSeenInExtract") &&
+	    vrboWorkerSource.includes("graphqlPaginationStop") &&
+	    vrboWorkerSource.includes("graphqlTotalCount"),
+	  "VRBO harvest stats should return pagination diagnostics to the server",
+	);
 
 assert.equal(classifyFailureText("HTTP 502 while waiting for sidecar lane").failureClass, "transient");
 assert.equal(classifyFailureText("waiting-sidecar-lane held by bulk combo").failureClass, "sidecar");
@@ -3353,22 +3358,24 @@ assert.ok(
   "routes should expose city VRBO inventory scan for full dropdown export + combo pairing",
 );
 const cityInventorySource = readFileSync("server/city-vrbo-inventory.ts", "utf8");
-assert.ok(
-  cityInventorySource.includes("cityWideInventory: true") &&
-    vrboWorkerSource.includes("cityWideInventory") &&
-    vrboWorkerSource.includes("clickVrboListViewControl") &&
-    vrboWorkerSource.includes("paginateVrboGraphqlInventory") &&
+	assert.ok(
+	  cityInventorySource.includes("cityWideInventory: true") &&
+	    cityInventorySource.includes("rawListings") &&
+	    vrboWorkerSource.includes("cityWideInventory") &&
+	    vrboWorkerSource.includes("clickVrboListViewControl") &&
+	    vrboWorkerSource.includes("paginateVrboGraphqlInventory") &&
     cityInventorySource.includes('searchMode: "destination_dropdown"') &&
     !cityInventorySource.includes('searchMode: "map_bounds"') &&
     !cityInventorySource.includes("mapSearch:"),
   "city VRBO inventory should use one city dropdown term and must not run map-bounds harvest",
 );
-assert.ok(
-  cityInventorySource.includes("cityVrboScrapeCache") &&
-    cityInventorySource.includes("filterPipeline") &&
-    cityInventorySource.includes("logFilterPipeline"),
-  "city VRBO inventory should cache the full scrape pool and log per-stage filter counts",
-);
+	assert.ok(
+	  cityInventorySource.includes("cityVrboScrapeCache") &&
+	    cityInventorySource.includes("filterPipeline") &&
+	    cityInventorySource.includes("logFilterPipeline") &&
+	    cityInventorySource.includes("CITY_VRBO_INVENTORY_WALLET_BUDGET_MS"),
+	  "city VRBO inventory should cache the full scrape pool, use an export-sized budget, and log per-stage filter counts",
+	);
 assert.ok(
   bookingsSource.includes("city-vrbo-inventory") &&
     bookingsSource.includes('attachSource === "city-vrbo"') &&
@@ -3377,11 +3384,19 @@ assert.ok(
     bookingsSource.includes("setCityInventoryScanTrigger"),
   "auto-fill should attach resort combo only when complete, then city-wide VRBO fallback without per-community scout",
 );
-assert.ok(
-  bookingsSource.includes("CityVrboInventoryPanel") &&
-    !bookingsSource.includes("downloadCityVrboInventoryExport"),
-  "bookings UI should show city VRBO inventory results without JSON file export",
-);
+	assert.ok(
+	  bookingsSource.includes("CityVrboInventoryPanel") &&
+	    bookingsSource.includes("format: \"csv\"") &&
+	    bookingsSource.includes("<Download"),
+	  "bookings UI should expose a city VRBO CSV download for the raw inventory export",
+	);
+	assert.ok(
+	  routesSource.includes("cityVrboInventoryCsv") &&
+	    routesSource.includes("Content-Disposition") &&
+	    routesSource.includes("format") &&
+	    routesSource.includes("rawListings"),
+	  "city VRBO inventory route should return JSON plus a CSV download of the raw export rows",
+	);
 assert.ok(
   vrboWorkerSource.includes("deepHarvest") && vrboWorkerSource.includes("deepMapHarvest"),
   "VRBO sidecar worker should still support map_bounds deep harvest for legacy callers only",

@@ -10660,6 +10660,37 @@ Requirements:
     }
   });
 
+  function csvCell(value: unknown): string {
+    if (Array.isArray(value)) return csvCell(value.filter(Boolean).join(" | "));
+    if (value === null || value === undefined) return "";
+    const text = String(value).replace(/\r?\n/g, " ").trim();
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  function cityVrboInventoryCsv(rows: Array<Record<string, unknown>>): string {
+    const columns = [
+      "title",
+      "url",
+      "bedrooms",
+      "bathrooms",
+      "sleeps",
+      "nightlyPrice",
+      "totalPrice",
+      "rating",
+      "reviewCount",
+      "locationText",
+      "priceBasis",
+      "captureSource",
+      "availabilityOnly",
+      "basicDetails",
+      "snippet",
+    ];
+    return [
+      columns.join(","),
+      ...rows.map((row) => columns.map((column) => csvCell(row[column])).join(",")),
+    ].join("\n");
+  }
+
   app.get("/api/operations/city-vrbo-inventory", async (req: Request, res: Response) => {
     try {
       const propertyId = parseInt(req.query.propertyId as string, 10);
@@ -10686,13 +10717,21 @@ Requirements:
         filterPhrase: filterPhrase || undefined,
         skipCache,
       });
-      return res.json({
+      const responsePayload = {
         propertyId,
         community: unitConfig.community,
         unitLabels: unitConfig.units.map((unit) => unit.unitLabel),
         bedroomPlan: unitConfig.units.map((unit) => unit.bedrooms),
         ...payload,
-      });
+      };
+      if (String(req.query.format ?? "").toLowerCase() === "csv") {
+        const rows = (payload.rawListings?.length ? payload.rawListings : payload.listings) as Array<Record<string, unknown>>;
+        const safeCommunity = unitConfig.community.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "vrbo-city";
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${safeCommunity}-vrbo-inventory-${checkIn}-to-${checkOut}.csv"`);
+        return res.send(cityVrboInventoryCsv(rows));
+      }
+      return res.json(responsePayload);
     } catch (e: any) {
       console.error("[city-vrbo-inventory] error:", e?.message ?? e);
       return res.status(500).json({ error: e?.message ?? String(e) });

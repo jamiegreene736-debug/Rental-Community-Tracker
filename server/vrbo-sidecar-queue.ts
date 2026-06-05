@@ -273,11 +273,17 @@ export type SidecarPropertyCandidate = {
   totalPrice: number;
   nightlyPrice: number;
   bedrooms?: number;
+  bathrooms?: number;
+  sleeps?: number;
+  rating?: number;
+  reviewCount?: number;
   bedroomSource?: "search-card" | "search-filter" | "detail-page" | "unknown";
   sourceLabel?: string;
   image?: string;
   images?: string[];
   snippet?: string;
+  locationText?: string;
+  basicDetails?: string[];
   lat?: number;
   lng?: number;
   // PR #299: when daemon extracted from Vrbo's new "$X total includes
@@ -304,7 +310,7 @@ export type SidecarPropertyCandidate = {
   searchVariant?: string;
   vrboId?: string;
   bookingId?: string;
-  captureSource?: "vrbo_graphql_propertySearchListings" | "booking_map_search_results";
+  captureSource?: "vrbo_graphql_propertySearchListings" | "vrbo_dom_search_card" | "booking_map_search_results";
 };
 
 export type SidecarSearchVariationMode =
@@ -506,6 +512,10 @@ export type SidecarMapHarvestStats = {
   mergedCount?: number;
   graphqlResponsesMatched?: number;
   graphqlResponsesSeen?: number;
+  graphqlReplayPages?: number;
+  graphqlUiPages?: number;
+  graphqlPaginationStop?: string | null;
+  graphqlTotalCount?: number;
 };
 
 const queue = new Map<string, SidecarRequest>();
@@ -704,6 +714,10 @@ function normalizeMapHarvestStats(raw: unknown): SidecarMapHarvestStats | null {
     mergedCount: num(item.mergedCount),
     graphqlResponsesMatched: num(item.graphqlResponsesMatched),
     graphqlResponsesSeen: num(item.graphqlResponsesSeen),
+    graphqlReplayPages: num(item.graphqlReplayPages),
+    graphqlUiPages: num(item.graphqlUiPages),
+    graphqlPaginationStop: typeof item.graphqlPaginationStop === "string" ? item.graphqlPaginationStop : null,
+    graphqlTotalCount: num(item.graphqlTotalCount),
   };
 }
 

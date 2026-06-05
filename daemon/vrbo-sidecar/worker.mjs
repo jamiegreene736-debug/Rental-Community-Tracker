@@ -4271,6 +4271,7 @@ async function runOtaSearchVariants(id, label, variants, runVariant, options = {
   const allCards = [];
   const failures = [];
   const variationsTried = [];
+  let lastMapHarvest = null;
   let completedVariants = 0;
   const duplicateResultCounts = new Map();
   for (let i = 0; i < variants.length; i++) {
@@ -4278,7 +4279,9 @@ async function runOtaSearchVariants(id, label, variants, runVariant, options = {
     const variant = variants[i];
     log(`${label} ${id}: running destination variant ${i + 1}/${variants.length}: "${variant.searchTerm}"`);
     try {
-      const cards = await runVariant(variant);
+      const variantResult = await runVariant(variant);
+      const cards = Array.isArray(variantResult) ? variantResult : (variantResult?.candidates ?? []);
+      if (!Array.isArray(variantResult) && variantResult?.mapHarvest) lastMapHarvest = variantResult.mapHarvest;
       completedVariants += 1;
       variationsTried.push({
         term: variant.searchTerm,
@@ -4338,7 +4341,7 @@ async function runOtaSearchVariants(id, label, variants, runVariant, options = {
     `; ${completedVariants} completed${failures.length ? `; ${failures.length} variant failure(s)` : ""}`,
   );
   if (completedVariants === 0 && failures.length > 0) throw failures[0];
-  return { candidates: deduped, variationsTried };
+  return { candidates: deduped, variationsTried, mapHarvest: lastMapHarvest };
 }
 
 async function primeOtaHomepageSearch(homeUrl, searchTerm, label, requestId = "homepage", options = {}) {
@@ -5067,6 +5070,53 @@ function extractVrboBedroomsFromText(raw) {
   return null;
 }
 
+function extractVrboBathroomsFromText(raw) {
+  const text = cleanText(raw).toLowerCase();
+  const direct = text.match(/\b(\d+(?:\.\d+)?)\s*(?:ba|bath|baths|bathrooms?)\b/);
+  return direct ? Number.parseFloat(direct[1]) : null;
+}
+
+function extractVrboSleepsFromText(raw) {
+  const text = cleanText(raw).toLowerCase();
+  const direct =
+    text.match(/\bsleeps?\s*(\d{1,2})\b/) ||
+    text.match(/\b(\d{1,2})\s*(?:guests?|sleeps?)\b/);
+  return direct ? Number.parseInt(direct[1], 10) : null;
+}
+
+function extractVrboRatingFromText(raw) {
+  const text = cleanText(raw);
+  const direct =
+    text.match(/\b(\d(?:\.\d)?)\s*(?:out of\s*)?5\b/i) ||
+    text.match(/\b(\d(?:\.\d)?)\s*(?:stars?|rating)\b/i);
+  const value = direct ? Number.parseFloat(direct[1]) : null;
+  return value !== null && value >= 0 && value <= 5 ? value : null;
+}
+
+function extractVrboReviewCountFromText(raw) {
+  const text = cleanText(raw);
+  const direct = text.match(/\b(\d{1,5})\s*reviews?\b/i);
+  return direct ? Number.parseInt(direct[1], 10) : null;
+}
+
+function collectVrboBasicDetails(row, textBlob) {
+  const details = collectStringsDeep(
+    row,
+    (text, path) => (
+      text.length <= 120 &&
+      /(?:bed|bath|sleep|guest|studio|condo|villa|townhome|house|apartment|location|neighborhood|rating|review)/i.test(`${path} ${text}`) &&
+      !/\$|http|vrbo\.com|photo gallery|sign in|reserve|book now/i.test(text)
+    ),
+    7,
+    7,
+  );
+  const textDetails = cleanText(textBlob)
+    .split(/(?<=\b(?:bedrooms?|bathrooms?|guests?|sleeps?|reviews?))\b/i)
+    .map((part) => cleanText(part).slice(0, 120))
+    .filter((part) => /\b(?:bed|bath|sleep|guest|review)\b/i.test(part));
+  return Array.from(new Set([...details, ...textDetails])).slice(0, 10);
+}
+
 function parseVrboPriceText(raw, expectedNights) {
   const text = cleanText(raw);
   if (!text) return null;
@@ -5161,6 +5211,29 @@ function normalizeVrboGraphqlListing(row, expectedNights, variantLabel) {
   const bedrooms =
     firstNumberDeep(row, /bedrooms?|bedroomCount|bedCount|rooms\.bed/i, 1, 30, 6) ??
     extractVrboBedroomsFromText(textBlob);
+  const bathrooms =
+    firstNumberDeep(row, /bathrooms?|bathroomCount|bathCount|rooms\.bath/i, 0.5, 30, 6) ??
+    extractVrboBathroomsFromText(textBlob);
+  const sleeps =
+    firstNumberDeep(row, /sleeps?|sleepCount|occupancy|maxOccupancy|guestCount|guests?|personCapacity|accommodates/i, 1, 100, 6) ??
+    extractVrboSleepsFromText(textBlob);
+  const rating =
+    firstNumberDeep(row, /(?:^|\.)(?:rating|averageRating|overallRating|starRating|reviewScore|score)$/i, 0, 10, 6) ??
+    extractVrboRatingFromText(textBlob);
+  const reviewCount =
+    firstNumberDeep(row, /(?:reviews?|reviewCount|totalReviews|reviewsCount)$/i, 0, 100000, 6) ??
+    extractVrboReviewCountFromText(textBlob);
+  const locationText = firstNonEmpty(
+    row.location?.text,
+    row.location?.name,
+    row.neighborhood?.name,
+    row.address?.localizedAddress,
+    row.address?.city,
+    findFirstStringDeep(row, [
+      (text, path) => /(?:location|neighborhood|address|distance|region|city|area)/i.test(path) && text.length <= 120 && !/\$|http|check[- ]?in|check[- ]?out/i.test(text),
+    ], 6),
+  );
+  const basicDetails = collectVrboBasicDetails(row, textBlob);
   const priceText = firstNonEmpty(
     row.priceSection?.priceSummary,
     row.priceSection?.primary?.lineItems?.map?.((x) => x?.value || x?.text)?.join(" "),
@@ -5181,12 +5254,18 @@ function normalizeVrboGraphqlListing(row, expectedNights, variantLabel) {
     totalPrice: price?.totalPrice ?? 0,
     nightlyPrice: price?.nightlyPrice ?? 0,
     bedrooms: Number.isFinite(bedrooms) ? Math.round(bedrooms) : undefined,
+    bathrooms: Number.isFinite(bathrooms) ? Math.round(bathrooms * 2) / 2 : undefined,
+    sleeps: Number.isFinite(sleeps) ? Math.round(sleeps) : undefined,
+    rating: Number.isFinite(rating) ? Math.round(rating * 10) / 10 : undefined,
+    reviewCount: Number.isFinite(reviewCount) ? Math.round(reviewCount) : undefined,
     bedroomSource: Number.isFinite(bedrooms) ? "search-card" : "unknown",
     image: images[0],
     images,
     lat: coords?.lat,
     lng: coords?.lng,
+    locationText: locationText || undefined,
     snippet,
+    basicDetails,
     priceIncludesTaxes: price?.priceIncludesTaxes ?? false,
     priceIncludesFees: price?.priceIncludesFees ?? false,
     priceBasis: price?.priceBasis ?? "unknown",
@@ -6544,8 +6623,23 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
       const title = row.title;
       const fullText = row.fullText;
       const bdMatch = fullText.match(/(\d+)\s*bedrooms?/i);
+      const bathMatch = fullText.match(/\b(\d+(?:\.\d+)?)\s*(?:ba|bath|baths|bathrooms?)\b/i);
+      const sleepMatch = fullText.match(/\bsleeps?\s*(\d{1,2})\b/i) || fullText.match(/\b(\d{1,2})\s*guests?\b/i);
+      const ratingMatch = fullText.match(/\b(\d(?:\.\d)?)\s*(?:out of\s*)?5\b/i) || fullText.match(/\b(\d(?:\.\d)?)\s*(?:stars?|rating)\b/i);
+      const reviewMatch = fullText.match(/\b(\d{1,5})\s*reviews?\b/i);
       const propertyPath = row.href.replace(/^https?:\/\/[^\/]+/, "").split("?")[0];
       const bedroomsExtracted = bdMatch ? parseInt(bdMatch[1], 10) : null;
+      const bathroomsExtracted = bathMatch ? Math.round(parseFloat(bathMatch[1]) * 2) / 2 : undefined;
+      const sleepsExtracted = sleepMatch ? parseInt(sleepMatch[1], 10) : undefined;
+      const ratingExtracted = ratingMatch ? Math.round(parseFloat(ratingMatch[1]) * 10) / 10 : undefined;
+      const reviewCountExtracted = reviewMatch ? parseInt(reviewMatch[1], 10) : undefined;
+      const basicDetails = Array.from(new Set(
+        fullText
+          .split(/(?:·|\||•|\n)/)
+          .map((part) => part.replace(/\s+/g, " ").trim())
+          .filter((part) => part.length > 0 && part.length <= 100 && /\b(?:bed|bath|sleep|guest|review|condo|villa|townhome|home|apartment)\b/i.test(part))
+      )).slice(0, 8);
+      const locationText = (fullText.match(/\b(?:in|near)\s+([A-Z][A-Za-z ,'-]{3,80})/)?.[1] || "").trim() || undefined;
 
       if (firstCardSample === null) {
         firstCardSample = {
@@ -6588,14 +6682,22 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
         const candidate = {
           url: "https://www.vrbo.com" + propertyPath,
           title: title.slice(0, 80),
-          totalPrice: 0,
-          nightlyPrice: 0,
-          bedrooms: bedroomsExtracted,
-          priceIncludesTaxes: false,
-          priceIncludesFees: false,
-          priceBasis: "unknown",
-          availabilityOnly: true,
-        };
+	          totalPrice: 0,
+	          nightlyPrice: 0,
+	          bedrooms: bedroomsExtracted,
+	          bathrooms: bathroomsExtracted,
+	          sleeps: sleepsExtracted,
+	          rating: ratingExtracted,
+	          reviewCount: reviewCountExtracted,
+	          locationText,
+	          snippet: fullText.slice(0, 260),
+	          basicDetails,
+	          priceIncludesTaxes: false,
+	          priceIncludesFees: false,
+	          priceBasis: "unknown",
+	          availabilityOnly: true,
+	          captureSource: "vrbo_dom_search_card",
+	        };
         const candidateKey = `${candidate.url}|${candidate.bedrooms}|${candidate.totalPrice}|${candidate.title}`;
         if (!seenOut.has(candidateKey)) {
           seenOut.add(candidateKey);
@@ -6607,13 +6709,21 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
       const candidate = {
         url: "https://www.vrbo.com" + propertyPath,
         title: title.slice(0, 80),
-        totalPrice,
-        nightlyPrice: Math.round(totalPrice / totalNights),
-        bedrooms: bedroomsExtracted,
-        priceIncludesTaxes,
-        priceIncludesFees,
-        priceBasis,
-      };
+	        totalPrice,
+	        nightlyPrice: Math.round(totalPrice / totalNights),
+	        bedrooms: bedroomsExtracted,
+	        bathrooms: bathroomsExtracted,
+	        sleeps: sleepsExtracted,
+	        rating: ratingExtracted,
+	        reviewCount: reviewCountExtracted,
+	        locationText,
+	        snippet: fullText.slice(0, 260),
+	        basicDetails,
+	        priceIncludesTaxes,
+	        priceIncludesFees,
+	        priceBasis,
+	        captureSource: "vrbo_dom_search_card",
+	      };
       const candidateKey = `${candidate.url}|${candidate.bedrooms}|${candidate.totalPrice}|${candidate.title}`;
       if (!seenOut.has(candidateKey)) {
         seenOut.add(candidateKey);
@@ -6904,10 +7014,11 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
         mergedCount: mergedCards.length,
         graphqlResponsesMatched: stats.matchedResponses ?? 0,
         graphqlResponsesSeen: stats.responsesSeen ?? 0,
-        graphqlReplayPages: paginationStats.replayPages ?? 0,
-        graphqlUiPages: paginationStats.uiPages ?? 0,
-        graphqlPaginationStop: paginationStats.stopReason ?? null,
-      },
+	        graphqlReplayPages: paginationStats.replayPages ?? 0,
+	        graphqlUiPages: paginationStats.uiPages ?? 0,
+	        graphqlPaginationStop: paginationStats.stopReason ?? null,
+	        graphqlTotalCount: paginationStats.lastPagination?.totalCount ?? undefined,
+	      },
     };
   } finally {
     networkCapture.dispose();
@@ -7197,19 +7308,41 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   );
   await networkCapture.settle("post-harvest", 10_000);
   const domExtract = await extractVisibleVrboCards(id, params, expectedNights, effectiveSearchTerm, { minBedrooms: 1 });
-  const networkCards = networkCapture.candidates();
-  const domCards = domExtract.cards ?? [];
-  const mergedCards = dedupeCandidatesByUrl([...networkCards, ...domCards]);
-  const graphqlStats = networkCapture.stats();
-  log(
+	  const networkCards = networkCapture.candidates();
+	  const domCards = domExtract.cards ?? [];
+	  const mergedCards = dedupeCandidatesByUrl([...networkCards, ...domCards]);
+	  const pricedNetworkCards = networkCards.filter((c) => !c.availabilityOnly && c.totalPrice > 0).length;
+	  const graphqlStats = networkCapture.stats();
+	  log(
     `vrbo_search ${id}: dropdown export merged ${mergedCards.length} candidates ` +
     `(network=${networkCards.length}, dom=${domCards.length}, harvestTotal=${listHarvestStats.finalHarvestTotal}, ` +
     `mapView=${openedMapView ? "yes" : "no"}, cityWide=${exhaustiveCityExport ? "yes" : "no"}, ` +
-    `graphqlReplay=${paginationStats.replayPages}, graphqlUi=${paginationStats.uiPages}, ` +
-    `graphqlResponses=${graphqlStats.matchedResponses}/${graphqlStats.responsesSeen})`,
-  );
-  return mergedCards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm }));
-  } finally {
+	    `graphqlReplay=${paginationStats.replayPages}, graphqlUi=${paginationStats.uiPages}, ` +
+	    `graphqlResponses=${graphqlStats.matchedResponses}/${graphqlStats.responsesSeen})`,
+	  );
+	  return {
+	    candidates: mergedCards.map((card) => ({ ...card, searchVariant: effectiveSearchTerm })),
+	    mapHarvest: {
+	      harvestPasses: listHarvestStats.passes,
+	      finalHarvestTotal: listHarvestStats.finalHarvestTotal,
+	      lastVisibleCards: listHarvestStats.lastVisibleCards,
+	      lastPropertyLinks: listHarvestStats.lastPropertyLinks,
+	      domSeen: domExtract.domSeen ?? 0,
+	      harvestSeenInExtract: domExtract.harvestSeen ?? 0,
+	      extractTotalSeen: domExtract.totalSeen ?? 0,
+	      extractDrops: domExtract.drops ?? null,
+	      networkCount: networkCards.length,
+	      pricedNetworkCount: pricedNetworkCards,
+	      mergedCount: mergedCards.length,
+	      graphqlResponsesMatched: graphqlStats.matchedResponses ?? 0,
+	      graphqlResponsesSeen: graphqlStats.responsesSeen ?? 0,
+	      graphqlReplayPages: paginationStats.replayPages ?? 0,
+	      graphqlUiPages: paginationStats.uiPages ?? 0,
+	      graphqlPaginationStop: paginationStats.stopReason ?? null,
+	      graphqlTotalCount: paginationStats.lastPagination?.totalCount ?? resultsTotalHint?.total ?? undefined,
+	    },
+	  };
+	  } finally {
     networkCapture.dispose();
   }
 }

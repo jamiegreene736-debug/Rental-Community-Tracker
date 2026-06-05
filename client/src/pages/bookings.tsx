@@ -33,7 +33,7 @@ import {
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
-  MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick,
+  MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick, Download,
   ShieldCheck, Paperclip, X, Minimize2, Plus,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -1111,27 +1111,36 @@ function candidateMatchesBedroom(candidate: Pick<LiveCandidate, "bedrooms">, bed
   return typeof candidate.bedrooms !== "number" || Math.round(candidate.bedrooms) === bedrooms;
 }
 
+type CityVrboInventoryListing = {
+  url: string;
+  title: string;
+  bedrooms?: number | null;
+  bathrooms?: number | null;
+  sleeps?: number | null;
+  nightlyPrice?: number;
+  totalPrice?: number;
+  rating?: number | null;
+  reviewCount?: number | null;
+  lat?: number | null;
+  lng?: number | null;
+  sourceLabel?: string;
+  locationText?: string | null;
+  snippet?: string;
+  basicDetails?: string[];
+};
 
 type CityVrboInventoryResponse = {
   propertyId: number;
   community: string;
   citySearchTerm: string;
   nights: number;
-  listings: Array<{
-    url: string;
-    title: string;
-    bedrooms?: number | null;
-    nightlyPrice?: number;
-    totalPrice?: number;
-    lat?: number | null;
-    lng?: number | null;
-    sourceLabel?: string;
-  }>;
-  byBedroom: Record<number, Array<CityVrboInventoryResponse["listings"][number]>>;
+  rawListings?: CityVrboInventoryListing[];
+  listings: CityVrboInventoryListing[];
+  byBedroom: Record<number, CityVrboInventoryListing[]>;
   suggestedPair: {
     resortPhrase: string;
     bedrooms: number[];
-    picks: CityVrboInventoryResponse["listings"];
+    picks: CityVrboInventoryListing[];
     totalCost: number;
     walkMinutes: number | null;
     walkSource: string;
@@ -1262,6 +1271,17 @@ function CityVrboInventoryPanel({
     ? Object.entries(data.byBedroom).sort(([a], [b]) => Number(b) - Number(a))
     : [];
   const harvest = data?.sidecar?.mapHarvest;
+  const csvDownloadHref = useMemo(() => {
+    if (!checkIn || !checkOut) return "";
+    const params = new URLSearchParams({
+      propertyId: String(propertyId),
+      checkIn,
+      checkOut,
+      format: "csv",
+    });
+    return `/api/operations/city-vrbo-inventory?${params.toString()}`;
+  }, [propertyId, checkIn, checkOut]);
+  const rawExportCount = data?.rawListings?.length ?? data?.sidecar?.rawCount ?? 0;
   return (
     <div className="rounded border border-violet-200 bg-violet-50/40 px-3 py-2 text-[11px]">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1280,6 +1300,14 @@ function CityVrboInventoryPanel({
           {isFetching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
           {isFetching ? "Scanning city VRBO…" : effectiveScanNonce > 0 ? "Re-scan city VRBO" : "Scan city VRBO"}
         </Button>
+        {data && csvDownloadHref && (
+          <Button size="sm" variant="outline" className="h-7" asChild>
+            <a href={csvDownloadHref}>
+              <Download className="mr-1 h-3.5 w-3.5" />
+              CSV
+            </a>
+          </Button>
+        )}
       </div>
       {isError && (
         <p className="mt-1 text-red-700">{(error as Error)?.message ?? "City inventory scan failed"}</p>
@@ -1290,13 +1318,14 @@ function CityVrboInventoryPanel({
             Term: {data.citySearchTerm}
             {data.fromCache ? " · cached pool" : ""}
             {data.filterPipeline
-              ? ` · ${data.filterPipeline.rawSidecar} raw → ${data.filterPipeline.afterNormalize} normalized` +
+              ? ` · ${rawExportCount} exported → ${data.filterPipeline.afterNormalize} priced 2BR+` +
                 (data.filterPipeline.phraseFilter
                   ? ` → ${data.filterPipeline.afterPhraseFilter} phrase`
                   : "") +
                 ` · ${data.listings.length} in view`
               : ` · ${data.listings.length} listing${data.listings.length === 1 ? "" : "s"} scraped`}
             {harvest && typeof harvest.mergedCount === "number" ? ` · merged ${harvest.mergedCount}` : ""}
+            {harvest && typeof harvest.graphqlPaginationStop === "string" ? ` · stop ${harvest.graphqlPaginationStop}` : ""}
           </p>
           {comboOption && (
             <div className="mt-1">

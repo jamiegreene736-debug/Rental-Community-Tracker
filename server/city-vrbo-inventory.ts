@@ -26,16 +26,30 @@ type SidecarVrboCandidate = {
   nightlyPrice?: number;
   totalPrice?: number;
   bedrooms?: number;
+  bathrooms?: number;
+  sleeps?: number;
+  rating?: number;
+  reviewCount?: number;
   lat?: number;
   lng?: number;
+  locationText?: string;
   snippet?: string;
+  image?: string;
+  images?: string[];
+  basicDetails?: string[];
+  vrboId?: string;
   captureSource?: string;
+  priceBasis?: string;
+  priceIncludesTaxes?: boolean;
+  priceIncludesFees?: boolean;
+  availabilityOnly?: boolean;
 };
 
 type CityVrboScrapeCacheEntry = {
   expiresAt: number;
   citySearchTerm: string;
   nights: number;
+  rawListings: CityVrboListing[];
   listings: CityVrboListing[];
   sidecar: {
     workerOnline: boolean;
@@ -50,6 +64,14 @@ type CityVrboScrapeCacheEntry = {
 const CITY_VRBO_CACHE_TTL_MS = Math.max(
   60_000,
   Number(process.env.CITY_VRBO_INVENTORY_TTL_MS ?? 20 * 60_000),
+);
+const CITY_VRBO_WALLET_BUDGET_MS = Math.max(
+  240_000,
+  Number(process.env.CITY_VRBO_INVENTORY_WALLET_BUDGET_MS ?? 8 * 60_000),
+);
+const CITY_VRBO_QUEUE_BUDGET_MS = Math.max(
+  CITY_VRBO_WALLET_BUDGET_MS + 60_000,
+  Number(process.env.CITY_VRBO_INVENTORY_QUEUE_BUDGET_MS ?? 10 * 60_000),
 );
 const cityVrboScrapeCache = new Map<string, CityVrboScrapeCacheEntry>();
 
@@ -69,7 +91,8 @@ function rawCandidateBedroomSignal(candidate: SidecarVrboCandidate): number | nu
 function normalizeSidecarCandidates(
   candidates: SidecarVrboCandidate[],
   nights: number,
-): { listings: CityVrboListing[]; pipeline: CityVrboScrapeCacheEntry["normalizePipeline"] } {
+): { rawListings: CityVrboListing[]; listings: CityVrboListing[]; pipeline: CityVrboScrapeCacheEntry["normalizePipeline"] } {
+  const rawDeduped = new Map<string, CityVrboListing>();
   const deduped = new Map<string, CityVrboListing>();
   let droppedNoPrice = 0;
   let droppedBelowMinBedrooms = 0;
@@ -77,38 +100,65 @@ function normalizeSidecarCandidates(
     const total = Math.round(Number(candidate.totalPrice) || 0);
     const nightly = Number(candidate.nightlyPrice) > 0
       ? Math.round(Number(candidate.nightlyPrice))
-      : total > 0
-        ? Math.round(total / Math.max(1, nights))
-        : 0;
-    if (total <= 0 && nightly <= 0) {
-      droppedNoPrice += 1;
-      continue;
-    }
+        : total > 0
+          ? Math.round(total / Math.max(1, nights))
+          : 0;
     const bedrooms = rawCandidateBedroomSignal(candidate);
-    if (bedrooms === null || bedrooms < 2) {
-      droppedBelowMinBedrooms += 1;
-      continue;
-    }
     const mapped: CityVrboListing = {
       url: candidate.url,
       title: candidate.title,
       bedrooms,
+      bathrooms: typeof candidate.bathrooms === "number" && Number.isFinite(candidate.bathrooms) ? candidate.bathrooms : null,
+      sleeps: typeof candidate.sleeps === "number" && Number.isFinite(candidate.sleeps) ? Math.round(candidate.sleeps) : null,
       nightlyPrice: nightly > 0 ? nightly : undefined,
-      totalPrice: total > 0 ? total : nightly * Math.max(1, nights),
+      totalPrice: total > 0 ? total : nightly > 0 ? nightly * Math.max(1, nights) : undefined,
+      rating: typeof candidate.rating === "number" && Number.isFinite(candidate.rating) ? candidate.rating : null,
+      reviewCount: typeof candidate.reviewCount === "number" && Number.isFinite(candidate.reviewCount) ? Math.round(candidate.reviewCount) : null,
       lat: typeof candidate.lat === "number" && Number.isFinite(candidate.lat) ? candidate.lat : null,
       lng: typeof candidate.lng === "number" && Number.isFinite(candidate.lng) ? candidate.lng : null,
       sourceLabel: "Vrbo",
+      locationText: candidate.locationText || null,
+      snippet: candidate.snippet,
+      image: candidate.image,
+      images: Array.isArray(candidate.images) ? candidate.images.filter(Boolean).slice(0, 12) : undefined,
+      basicDetails: Array.isArray(candidate.basicDetails) ? candidate.basicDetails.filter(Boolean).slice(0, 12) : undefined,
+      vrboId: candidate.vrboId,
+      captureSource: candidate.captureSource,
+      priceBasis: candidate.priceBasis,
+      priceIncludesTaxes: candidate.priceIncludesTaxes,
+      priceIncludesFees: candidate.priceIncludesFees,
+      availabilityOnly: candidate.availabilityOnly,
     };
-    const previous = deduped.get(mapped.url);
+    const rawPrevious = rawDeduped.get(mapped.url);
     const mappedTotal = mapped.totalPrice ?? 0;
+    const rawPreviousTotal = rawPrevious?.totalPrice ?? 0;
+    if (!rawPrevious || (mappedTotal > 0 && (rawPreviousTotal <= 0 || mappedTotal < rawPreviousTotal))) {
+      rawDeduped.set(mapped.url, mapped);
+    }
+    if (total <= 0 && nightly <= 0) {
+      droppedNoPrice += 1;
+      continue;
+    }
+    if (bedrooms === null || bedrooms < 2) {
+      droppedBelowMinBedrooms += 1;
+      continue;
+    }
+    const previous = deduped.get(mapped.url);
     const previousTotal = previous?.totalPrice ?? Number.POSITIVE_INFINITY;
     if (!previous || mappedTotal < previousTotal) deduped.set(mapped.url, mapped);
   }
+  const rawListings = Array.from(rawDeduped.values()).sort((a, b) => {
+    const aTotal = a.totalPrice ?? Number.POSITIVE_INFINITY;
+    const bTotal = b.totalPrice ?? Number.POSITIVE_INFINITY;
+    if (aTotal !== bTotal) return aTotal - bTotal;
+    return a.title.localeCompare(b.title);
+  });
   const listings = Array.from(deduped.values()).sort((a, b) => (a.totalPrice ?? 0) - (b.totalPrice ?? 0));
   const byBedroomMap = groupCityVrboByBedroom(listings);
   const byBedroom: Record<number, number> = {};
   for (const [br, rows] of byBedroomMap) byBedroom[br] = rows.length;
   return {
+    rawListings,
     listings,
     pipeline: {
       rawSidecar: candidates.length,
@@ -210,8 +260,8 @@ async function scrapeCityVrboPool(args: {
     bedrooms: 1,
     searchMode: "destination_dropdown",
     cityWideInventory: true,
-    walletBudgetMs: 240_000,
-    queueBudgetMs: 300_000,
+    walletBudgetMs: CITY_VRBO_WALLET_BUDGET_MS,
+    queueBudgetMs: CITY_VRBO_QUEUE_BUDGET_MS,
     queueContext: {
       scanLabel: `city-vrbo-inventory:${args.community}`,
       dateLabel: `${args.checkIn}→${args.checkOut}`,
@@ -229,11 +279,12 @@ async function scrapeCityVrboPool(args: {
     return null;
   }
 
-  const { listings, pipeline } = normalizeSidecarCandidates(r.candidates ?? [], nights);
+  const { rawListings, listings, pipeline } = normalizeSidecarCandidates(r.candidates ?? [], nights);
   return {
     expiresAt: Date.now() + CITY_VRBO_CACHE_TTL_MS,
     citySearchTerm,
     nights,
+    rawListings,
     listings,
     sidecar: {
       workerOnline: r.workerOnline,
@@ -256,6 +307,7 @@ export async function runCityVrboInventoryScan(args: {
 }): Promise<{
   citySearchTerm: string;
   nights: number;
+  rawListings: CityVrboListing[];
   listings: CityVrboListing[];
   byBedroom: Record<number, CityVrboListing[]>;
   suggestedPair: CityVrboComboPair | null;
@@ -312,6 +364,7 @@ export async function runCityVrboInventoryScan(args: {
     return {
       citySearchTerm,
       nights,
+      rawListings: [],
       listings: [],
       byBedroom: {},
       suggestedPair: null,
@@ -339,6 +392,7 @@ export async function runCityVrboInventoryScan(args: {
   return {
     citySearchTerm: scrapeEntry.citySearchTerm,
     nights: scrapeEntry.nights,
+    rawListings: scrapeEntry.rawListings,
     listings: filtered.listings,
     byBedroom: filtered.byBedroom,
     suggestedPair: filtered.suggestedPair,

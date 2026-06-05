@@ -5,11 +5,26 @@ export type CityVrboListing = {
   url: string;
   title: string;
   bedrooms?: number | null;
+  bathrooms?: number | null;
+  sleeps?: number | null;
   nightlyPrice?: number;
   totalPrice?: number;
+  rating?: number | null;
+  reviewCount?: number | null;
   lat?: number | null;
   lng?: number | null;
   sourceLabel?: string;
+  locationText?: string | null;
+  snippet?: string;
+  image?: string;
+  images?: string[];
+  basicDetails?: string[];
+  vrboId?: string;
+  captureSource?: string;
+  priceBasis?: string;
+  priceIncludesTaxes?: boolean;
+  priceIncludesFees?: boolean;
+  availabilityOnly?: boolean;
 };
 
 export type CityVrboComboPair = {
