@@ -43,6 +43,48 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-05 (city VRBO inventory: full ~210 export end-to-end, follow-up to #528):
+  e2e-tested `/api/operations/city-vrbo-inventory` against prod + the local
+  sidecar for Princeville (propertyId 19, 2026-07-20→27, VRBO reports 210) and
+  fixed THREE bugs in `daemon/vrbo-sidecar/worker.mjs` that left it at 0 then
+  170 cards. All three are load-bearing — see AGENTS.md "VRBO city inventory
+  export" under Load-Bearing Decisions for the why.
+  1. **Date picker month disambiguation** (`findVisibleDay` in
+     `applyVrboVisibleCalendarDates`): VRBO shows TWO months at once and the day
+     cells are bare numbers, so "20" exists in both June and July. The old scorer
+     gave a bare-number/role match enough points to win and clicked the FIRST
+     "20" (current month) → requested July 20→27 landed on June 20→27, the
+     homepage form-guard rejected it, and the search never ran (0 results). Fix
+     is layered: strict month/year/ISO metadata match → month-grid container
+     match → positional left→right column match → original offset slice.
+  2. **GraphQL phase advancing the SRP** (`paginateVrboGraphqlInventory` +
+     call site): GraphQL replay yields 0 rows on VRBO's list view, so the phase
+     fell back to clicking UI-Next, silently advancing the SRP to page 4 before
+     the dedicated walk even started — the walk then harvested only the tail
+     ("151-200 of 210"). For city-wide export the call now passes
+     `allowUiNext:false` so the phase stays replay-only and the SRP stays on
+     page 1. The blue-Next-button walk owns pagination.
+  3. **Walk truncating at a page boundary** (`walkVrboResultsUiPages`): after a
+     Next click VRBO swaps the list async, so harvesting immediately scraped a
+     transitional page and the next-button briefly vanished → premature stop.
+     Added `waitForVrboResultsPageAdvance` (poll the "N-M of T" range until the
+     start index advances), a re-check of next-availability before giving up,
+     and a clean `range-end-reached` stop when end>=total. Keep the bottom-scroll
+     (`scrollVrboResultsPaginationIntoView`) before each page's harvest — it drags
+     all 50 virtualized cards through the viewport; resetting to the top instead
+     only captured ~20/50.
+  Verified run: walk steps 1-50 → 51-100 → 101-150 → 151-200 → 201-210, stop
+  `range-end-reached`, 206 unique listings merged (multi-sort fallback NOT
+  needed). The multi-sort union path (`exhaustiveCityHarvestAllSorts`, which
+  re-navigates `/search?...&sort=` URLs) now only fires when the walk genuinely
+  falls short — worth migrating off injected URLs later per the VRBO sight+click
+  policy. Live worker is at `~/.vrbo-sidecar-daemon/worker.mjs` (managed by
+  launchd `com.vrbosidecar.worker`; `launchctl kickstart -k gui/$(id -u)/com.vrbosidecar.worker`
+  to restart) — NOT the stale `~/Downloads/vrbo-sidecar/` copy the older notes
+  reference. Note: that daemon's stdout to `sidecar-launchd.log` is block-buffered,
+  so prefer the JSON response's `sidecar.mapHarvest` for diagnostics over tailing
+  the log mid-run.
+
 - 2026-06-04 (RentCast photo discovery, PRs #503–#506): `server/rentcast-discovery.ts`
   harvests active sale listings; SearchAPI resolves addresses to Zillow/Realtor URLs;
   wired on `fetch-unit-photos`, find-unit, and find-clean-unit in parallel with Apify +

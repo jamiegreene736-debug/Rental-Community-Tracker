@@ -63,6 +63,43 @@ alternative unit scouting, or live pricing flows.**
 If a legacy scraper or debug tool (`apify-vrbo`, `browserbase-vrbo-search`,
 etc.) is still reachable from a buy-in UI path, refactor it to the
 sidecar or mark it explicitly deprecated for VRBO.
+
+### VRBO city inventory export — full SRP pagination (Load-Bearing, 2026-06-05)
+
+`/api/operations/city-vrbo-inventory` (`server/city-vrbo-inventory.ts` →
+`searchVrboViaSidecar({cityWideInventory:true})`) exports a city's *entire*
+VRBO inventory (~210 for Princeville), which spans ~5 SRP pages of 50. The
+authoritative harvester is the **UI page walk** in
+`walkVrboResultsUiPages` (`daemon/vrbo-sidecar/worker.mjs`): it clicks the
+real blue Next control (`[data-stid="next-button"]`) and DOM-harvests each
+page. Three constraints make it actually reach the full count — don't
+"simplify" any of them away:
+
+1. **GraphQL pagination must NOT advance the SRP for city-wide.**
+   `paginateVrboGraphqlInventory` is called with `allowUiNext:false` when
+   `exhaustiveCityExport`. VRBO's list-view GraphQL replay returns 0 rows, so
+   letting it click UI-Next just walks the SRP forward *without harvesting* and
+   the page walk then starts mid-list (the "151-200 of 210, only the tail" bug).
+   Replay-only keeps the SRP on page 1 so the walk owns navigation.
+2. **The page walk waits for the SRP to actually advance** after each Next
+   click (`waitForVrboResultsPageAdvance` polls the visible "N-M of T" range
+   until the start index increases), re-checks next-availability before
+   concluding it's at the end (the control flickers during the async list swap),
+   and stops cleanly on `range-end-reached` (end>=total). It scrolls the
+   pagination footer into view (`scrollVrboResultsPaginationIntoView`) before
+   harvesting each page so all 50 virtualized cards render — do NOT reset to the
+   top instead (that only captured ~20/50).
+3. **The date picker selects by month, not by bare day number.**
+   `findVisibleDay` in `applyVrboVisibleCalendarDates` must disambiguate which
+   of the two visible months a "20" belongs to (strict metadata → month-grid
+   container → left→right column → offset slice). A number-only match clicks the
+   current month's cell and the homepage form-guard then rejects the search.
+
+`exhaustiveCityHarvestAllSorts` (multi-sort union) remains a fallback for when
+the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so
+is in tension with the zero-tolerance rule above — it should only fire rarely
+and is a candidate to migrate onto the sight+click walk.
+
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
   wrong because…"* rather than *"this code has a bug"*.
