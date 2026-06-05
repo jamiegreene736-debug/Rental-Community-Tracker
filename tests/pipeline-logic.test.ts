@@ -3400,6 +3400,26 @@ assert.ok(
 	  "city VRBO inventory route should return JSON plus a CSV download of the raw export rows",
 	);
 assert.ok(
+  bookingsSource.includes("guestAlternativePageMutation") &&
+    bookingsSource.includes("slotsForPage") &&
+    bookingsSource.includes("manualBuyInPhotoUrlsFromNotes"),
+  "buy-in Guest Page action should submit the full attached combo and any saved listing photos",
+);
+assert.ok(
+  routesSource.includes("isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < 3") &&
+    routesSource.includes("scrapeVrboAlternativeDetails(sourceUrl)") &&
+    routesSource.includes("photoSource") &&
+    routesSource.includes("photoScrapeReason"),
+  "booking alternatives route should scrape attached VRBO URLs when buy-in notes do not already carry a gallery",
+);
+assert.ok(
+  routesSource.includes('class="carousel" data-carousel') &&
+    routesSource.includes("data-carousel-prev") &&
+    routesSource.includes("data-carousel-next") &&
+    routesSource.includes("carousel-track"),
+  "guest-facing alternatives page should render scraped listing photos as a carousel",
+);
+assert.ok(
   vrboWorkerSource.includes("deepHarvest") && vrboWorkerSource.includes("deepMapHarvest"),
   "VRBO sidecar worker should still support map_bounds deep harvest for legacy callers only",
 );

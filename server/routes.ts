@@ -7475,6 +7475,9 @@ export async function registerRoutes(
     return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
   };
 
+  const isVrboAlternativeUrl = (url: string): boolean =>
+    /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
+
   const vrboAlternativeUrlsFrom = (value: unknown): string[] => {
     const input = Array.isArray(value) ? value.join("\n") : String(value ?? "");
     const seen = new Set<string>();
@@ -7482,7 +7485,7 @@ export async function registerRoutes(
       .split(/[\s,\n]+/)
       .map((url) => normalizeAlternativeUrl(url, 1000))
       .filter((url) => {
-        if (!/^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url)) return false;
+        if (!isVrboAlternativeUrl(url)) return false;
         const key = url.replace(/[?#].*$/, "");
         if (seen.has(key)) return false;
         seen.add(key);
@@ -7731,6 +7734,23 @@ Requirements:
           ...(Array.isArray(item.communityPhotos) ? item.communityPhotos : []),
         ].filter(Boolean)))
           .slice(0, 10);
+        const carousel = photos.length > 0
+          ? `<div class="carousel" data-carousel>
+              <div class="carousel-track">
+                ${photos.map((url: string, photoIndex: number) => `
+                  <figure class="slide">
+                    <img src="${escapeHtml(url)}" alt="${escapeHtml(item.title || item.community || "Alternative")} photo ${photoIndex + 1}" loading="${photoIndex === 0 ? "eager" : "lazy"}" />
+                    <figcaption>${photoIndex + 1} / ${photos.length}</figcaption>
+                  </figure>`).join("")}
+              </div>
+              ${photos.length > 1 ? `
+                <div class="carousel-nav">
+                  <button type="button" data-carousel-prev aria-label="Previous photo">Previous</button>
+                  <span>${photos.length} photos</span>
+                  <button type="button" data-carousel-next aria-label="Next photo">Next</button>
+                </div>` : ""}
+            </div>`
+          : `<div class="empty-photos">Photos are still being gathered for this option.</div>`;
         const details = [
           item.bedrooms ? `${escapeHtml(item.bedrooms)} bedroom${Number(item.bedrooms) === 1 ? "" : "s"}` : "",
           item.unitLabel ? escapeHtml(item.unitLabel) : "",
@@ -7746,9 +7766,7 @@ Requirements:
               ${item.description ? `<p class="description">${escapeHtml(item.description)}</p>` : ""}
               ${item.showSourceLink && item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
             </div>
-            <div class="photos">
-              ${photos.map((url: string) => `<img src="${escapeHtml(url)}" alt="${escapeHtml(item.title || item.community || "Alternative")}" loading="lazy" />`).join("")}
-            </div>
+            ${carousel}
           </section>`;
       }).join("");
       res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -7771,8 +7789,15 @@ Requirements:
           .details{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
           .details span{border:1px solid #d7e1e8;border-radius:999px;padding:5px 10px;background:#f8fafc;font-size:13px;color:#334155}
           .description{white-space:pre-line;font-size:15px;color:#263446;margin:14px 0}
-          .photos{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:16px}
-          img{width:100%;height:190px;object-fit:cover;border-radius:8px;background:#eef2f7}
+          .carousel{margin-top:16px}
+          .carousel-track{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;padding:0 0 8px;-webkit-overflow-scrolling:touch}
+          .slide{flex:0 0 min(82vw,520px);margin:0;scroll-snap-align:start}
+          .slide img{width:100%;height:300px;object-fit:cover;border-radius:8px;background:#eef2f7;display:block}
+          figcaption{font-size:12px;color:#64748b;margin-top:5px}
+          .carousel-nav{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:6px;color:#64748b;font-size:13px}
+          .carousel-nav button{border:1px solid #cbd5e1;background:#fff;color:#0f766e;border-radius:8px;padding:6px 10px;font-weight:700;cursor:pointer}
+          .carousel-nav button:hover{background:#ecfdf5}
+          .empty-photos{margin-top:16px;border:1px dashed #cbd5e1;border-radius:8px;background:#f8fafc;color:#64748b;padding:18px;font-size:14px}
           a{color:#0f766e;font-weight:700}
           footer{margin-top:28px;color:#64748b;font-size:13px}
         </style></head><body>
@@ -7781,7 +7806,20 @@ Requirements:
           <p class="intro">We prepared ${alternatives.length === 1 ? "this option" : "these options"} so you can review a comparable stay in the same general area.</p>
           ${photoBlocks || "<p>No alternative options were attached to this page yet.</p>"}
           <footer>Photos and details are provided for review and may be finalized before arrival details are sent.</footer>
-        </main></body></html>`);
+        </main>
+        <script>
+          document.querySelectorAll("[data-carousel]").forEach((carousel) => {
+            const track = carousel.querySelector(".carousel-track");
+            if (!track) return;
+            const scrollOne = (direction) => {
+              const distance = Math.max(280, Math.round(track.clientWidth * 0.9));
+              track.scrollBy({ left: direction * distance, behavior: "smooth" });
+            };
+            carousel.querySelector("[data-carousel-prev]")?.addEventListener("click", () => scrollOne(-1));
+            carousel.querySelector("[data-carousel-next]")?.addEventListener("click", () => scrollOne(1));
+          });
+        </script>
+        </body></html>`);
     } catch (err: any) {
       return res.status(500).send(`Failed to render alternative page: ${escapeHtml(err?.message ?? err)}`);
     }
@@ -7814,23 +7852,39 @@ Requirements:
         checkOut: normalizeAlternativeText(req.body?.checkOut, 20),
       };
       const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any) => {
-        const photos = Array.from(new Set([
+        const sourceUrl = normalizeAlternativeUrl(item?.url);
+        const initialPhotos = Array.from(new Set([
           normalizeAlternativeUrl(item?.image),
           ...(Array.isArray(item?.photos) ? item.photos.map((url: unknown) => normalizeAlternativeUrl(url)) : []),
-        ].filter(Boolean))).slice(0, 12);
+        ].filter(Boolean))).slice(0, 24);
+        const vrboDetails = isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < 3
+          ? await scrapeVrboAlternativeDetails(sourceUrl)
+          : null;
+        const photos = Array.from(new Set([
+          ...initialPhotos,
+          ...(vrboDetails?.photos ?? []),
+        ].filter(Boolean))).slice(0, 24);
+        const title = normalizeAlternativeText(
+          item?.title || vrboDetails?.title || item?.community || "Alternative stay",
+          160,
+        );
         const base = {
-          title: normalizeAlternativeText(item?.title ?? item?.community ?? "Alternative stay", 160),
+          title,
           community: normalizeAlternativeText(item?.community, 100),
-          url: normalizeAlternativeUrl(item?.url),
+          url: sourceUrl,
           image: photos[0] ?? "",
           photos,
-          bedrooms: Number(item?.bedrooms) > 0 ? Math.round(Number(item.bedrooms)) : null,
+          bedrooms: Number(item?.bedrooms) > 0
+            ? Math.round(Number(item.bedrooms))
+            : Number(vrboDetails?.bedrooms) > 0 ? Math.round(Number(vrboDetails?.bedrooms)) : null,
           unitLabel: normalizeAlternativeText(item?.unitLabel, 80),
           address: normalizeAlternativeText(item?.address, 220),
           sourceLabel: normalizeAlternativeText(item?.sourceLabel, 80),
           notes: normalizeAlternativeText(item?.notes, 1000),
           showSourceLink: item?.showSourceLink === true,
           communityPhotos: await communityPhotosFor(String(item?.community ?? "")),
+          photoSource: vrboDetails?.photoSource ?? (initialPhotos.length > 0 ? "provided" : "none"),
+          photoScrapeReason: vrboDetails?.scrapeReason ?? "",
         };
         const drafted = await draftAlternativeGuestDescription(base, stay);
         return {
