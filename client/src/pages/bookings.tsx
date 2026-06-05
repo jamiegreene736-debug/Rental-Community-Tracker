@@ -4548,6 +4548,43 @@ export default function Bookings() {
     });
   };
 
+  const guestAlternativePageMutation = useMutation({
+    mutationFn: async ({ reservation, slot, buyIn }: { reservation: GuestyReservation; slot: SlotInfo; buyIn: BuyIn }) => {
+      const photoUrls = manualBuyInPhotoUrlsFromNotes(buyIn.notes);
+      const listingTitle = titleFromBuyInNotes(buyIn.notes);
+      const response = await apiRequest("POST", "/api/booking-alternatives", {
+        reservationId: reservation._id,
+        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
+        checkIn: checkInOf(reservation),
+        checkOut: checkOutOf(reservation),
+        alternatives: [{
+          title: listingTitle || `${buyIn.propertyName} - ${buyIn.unitLabel}`,
+          community: buyIn.propertyName,
+          url: buyIn.airbnbListingUrl,
+          image: photoUrls[0] ?? "",
+          photos: photoUrls,
+          bedrooms: slot.bedrooms,
+          unitLabel: buyIn.unitLabel,
+          address: buyIn.unitAddress,
+          sourceLabel: sourceLabelForUrl(buyIn.airbnbListingUrl),
+          notes: buyIn.notes,
+        }],
+      }).then((r) => r.json());
+      if (!response?.url) throw new Error(response?.message || response?.error || "Alternative page create failed");
+      return response as { url: string; expiresAt?: string };
+    },
+    onSuccess: async (data) => {
+      try {
+        await navigator.clipboard?.writeText(data.url);
+        toast({ title: "Guest page ready", description: "Link copied and opened for review." });
+      } catch {
+        toast({ title: "Guest page ready", description: "Opened for review. Copy the URL from the new tab if needed." });
+      }
+      window.open(data.url, "_blank", "noopener,noreferrer");
+    },
+    onError: (e: any) => toast({ title: "Guest page failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
   const detachMutation = useMutation({
     mutationFn: ({ buyInId }: { buyInId: number; reservationId: string }) =>
       apiRequest("POST", `/api/bookings/detach-buy-in/${buyInId}`).then((r) => r.json()),
@@ -7971,6 +8008,19 @@ export default function Bookings() {
                                   >
                                     <FileText className="h-3.5 w-3.5 mr-1" />
                                     Unit details
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => slot.buyIn && guestAlternativePageMutation.mutate({ reservation: r, slot, buyIn: slot.buyIn })}
+                                    disabled={guestAlternativePageMutation.isPending}
+                                    data-testid={`button-guest-alternative-page-${r._id}-${slot.unitId}`}
+                                    title="Create a guest-facing alternative option page"
+                                  >
+                                    {guestAlternativePageMutation.isPending
+                                      ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                                      : <ExternalLink className="h-3.5 w-3.5 mr-1" />}
+                                    Guest page
                                   </Button>
                                   <Button
                                     size="sm"

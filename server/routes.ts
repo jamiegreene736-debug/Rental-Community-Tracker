@@ -7393,6 +7393,94 @@ export async function registerRoutes(
     }
   });
 
+  const normalizeAlternativeUrl = (value: unknown, max = 1200): string => {
+    const text = String(value ?? "").trim().slice(0, max);
+    return /^https?:\/\/\S+$/i.test(text) ? text : "";
+  };
+
+  const normalizeAlternativeText = (value: unknown, max = 500): string => {
+    return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+  };
+
+  const alternativeGuestDescriptionFallback = (item: Record<string, any>, stay: { checkIn?: string; checkOut?: string }): string => {
+    const title = normalizeAlternativeText(item.title || item.community || "this alternative option", 120);
+    const community = normalizeAlternativeText(item.community, 100);
+    const bedrooms = Number(item.bedrooms);
+    const bedroomText = Number.isFinite(bedrooms) && bedrooms > 0 ? `${Math.round(bedrooms)} bedroom${Math.round(bedrooms) === 1 ? "" : "s"}` : "comfortable sleeping space";
+    const source = normalizeAlternativeText(item.sourceLabel, 80);
+    const address = normalizeAlternativeText(item.address, 180);
+    const dateText = stay.checkIn && stay.checkOut ? ` for ${stay.checkIn} to ${stay.checkOut}` : "";
+    return [
+      `We prepared ${title} as a comparable alternative${dateText}.`,
+      `It offers ${bedroomText}${community ? ` in or near ${community}` : ""}, giving your group a practical option while staying in the same general area.`,
+      address ? `The saved location detail is ${address}.` : "",
+      source ? `The source listing is from ${source}, and the photos below are the current reference images we have for review.` : "The photos below are the current reference images we have for review.",
+    ].filter(Boolean).join(" ");
+  };
+
+  const draftAlternativeGuestDescription = async (
+    item: Record<string, any>,
+    stay: { guestName?: string; checkIn?: string; checkOut?: string },
+  ): Promise<{ description: string; generatedBy: "ai" | "fallback"; warning?: string }> => {
+    const fallback = alternativeGuestDescriptionFallback(item, stay);
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) return { description: fallback, generatedBy: "fallback", warning: "ANTHROPIC_API_KEY not configured" };
+
+    const facts = {
+      guestName: normalizeAlternativeText(stay.guestName, 80),
+      checkIn: normalizeAlternativeText(stay.checkIn, 20),
+      checkOut: normalizeAlternativeText(stay.checkOut, 20),
+      title: normalizeAlternativeText(item.title, 160),
+      community: normalizeAlternativeText(item.community, 120),
+      bedrooms: Number(item.bedrooms) || null,
+      unitLabel: normalizeAlternativeText(item.unitLabel, 80),
+      address: normalizeAlternativeText(item.address, 220),
+      sourceLabel: normalizeAlternativeText(item.sourceLabel, 100),
+      listingUrl: normalizeAlternativeUrl(item.url),
+      operatorNotes: normalizeAlternativeText(item.notes, 900),
+      photoCount: Array.isArray(item.photos) ? item.photos.length : 0,
+    };
+
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 550,
+          messages: [{
+            role: "user",
+            content: `Write guest-facing copy for an alternative vacation rental option.
+
+Facts:
+${JSON.stringify(facts, null, 2)}
+
+Requirements:
+- 2 short paragraphs, warm and professional.
+- Plain text only. No markdown, bullets, headings, emojis, or sales hype.
+- Do not mention buy-in, cost paid, internal operations, arbitrage, owner, supplier, confidence, or verification.
+- Do not promise amenities not in the facts.
+- Make it sound like a helpful host presenting a comparable option for the guest to review.
+- Return only the copy.`,
+          }],
+        }),
+      });
+      const data = await response.json().catch(() => null) as any;
+      if (!response.ok) {
+        throw new Error(data?.error?.message ?? `HTTP ${response.status}`);
+      }
+      const text = String(data?.content?.[0]?.text ?? "").trim();
+      if (!text) throw new Error("empty AI response");
+      return { description: text.slice(0, 1800), generatedBy: "ai" };
+    } catch (error: any) {
+      return { description: fallback, generatedBy: "fallback", warning: error?.message ?? String(error) };
+    }
+  };
+
   app.get("/alternatives/:token", async (req, res) => {
     try {
       const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -7406,15 +7494,27 @@ export async function registerRoutes(
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
       const photoBlocks = alternatives.map((item: any, index: number) => {
-        const photos = [item.image, ...(Array.isArray(item.communityPhotos) ? item.communityPhotos : [])]
+        const photos = [
+          item.image,
+          ...(Array.isArray(item.photos) ? item.photos : []),
+          ...(Array.isArray(item.communityPhotos) ? item.communityPhotos : []),
+        ]
           .filter(Boolean)
-          .slice(0, 5);
+          .slice(0, 10);
+        const details = [
+          item.bedrooms ? `${escapeHtml(item.bedrooms)} bedroom${Number(item.bedrooms) === 1 ? "" : "s"}` : "",
+          item.unitLabel ? escapeHtml(item.unitLabel) : "",
+          item.address ? escapeHtml(item.address) : "",
+          item.sourceLabel ? `Source: ${escapeHtml(item.sourceLabel)}` : "",
+        ].filter(Boolean);
         return `
           <section class="option">
-            <div>
+            <div class="option-copy">
               <p class="eyebrow">Option ${index + 1}</p>
               <h2>${escapeHtml(item.title || item.community || "Alternative stay")}</h2>
-              <p>${escapeHtml(item.community || "")}</p>
+              ${item.community ? `<p class="community">${escapeHtml(item.community)}</p>` : ""}
+              ${details.length ? `<div class="details">${details.map((detail) => `<span>${detail}</span>`).join("")}</div>` : ""}
+              ${item.description ? `<p class="description">${escapeHtml(item.description)}</p>` : ""}
               ${item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
             </div>
             <div class="photos">
@@ -7427,19 +7527,31 @@ export async function registerRoutes(
         <html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
         <title>Alternative Stay Options</title>
         <style>
-          body{font-family:Inter,Arial,sans-serif;margin:0;background:#f7fafc;color:#172033}
-          header{padding:32px 20px;background:#0f766e;color:white}
-          main{max-width:980px;margin:0 auto;padding:24px 16px 48px}
+          body{font-family:Inter,Arial,sans-serif;margin:0;background:#f6f8fb;color:#172033;line-height:1.55}
+          header{padding:34px 20px;background:#0f766e;color:white}
+          header div{max-width:1040px;margin:0 auto}
+          main{max-width:1040px;margin:0 auto;padding:24px 16px 52px}
+          .intro{font-size:16px;color:#45556b;margin:0 0 18px}
           .option{background:white;border:1px solid #dbe4ea;border-radius:10px;padding:18px;margin:0 0 18px;box-shadow:0 8px 20px rgba(15,23,42,.06)}
+          .option-copy{max-width:860px}
           .eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;margin:0 0 4px}
-          h1,h2{margin:.2rem 0}.photos{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:14px}
-          img{width:100%;height:150px;object-fit:cover;border-radius:8px;background:#eef2f7}
+          .community{color:#475569;margin:.2rem 0 .8rem}
+          h1,h2{margin:.2rem 0;line-height:1.15}
+          h1{font-size:clamp(28px,5vw,46px)}
+          h2{font-size:clamp(22px,3.4vw,32px)}
+          .details{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+          .details span{border:1px solid #d7e1e8;border-radius:999px;padding:5px 10px;background:#f8fafc;font-size:13px;color:#334155}
+          .description{white-space:pre-line;font-size:15px;color:#263446;margin:14px 0}
+          .photos{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:16px}
+          img{width:100%;height:190px;object-fit:cover;border-radius:8px;background:#eef2f7}
           a{color:#0f766e;font-weight:700}
+          footer{margin-top:28px;color:#64748b;font-size:13px}
         </style></head><body>
-        <header><h1>Alternative stay options</h1><p>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(payload.checkIn || "")} to ${escapeHtml(payload.checkOut || "")}</p></header>
+        <header><div><h1>Alternative stay options</h1><p>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(payload.checkIn || "")} to ${escapeHtml(payload.checkOut || "")}</p></div></header>
         <main>
-          <p>We prepared these nearby options so you can review a comparable stay in the same general area.</p>
+          <p class="intro">We prepared ${alternatives.length === 1 ? "this option" : "these options"} so you can review a comparable stay in the same general area.</p>
           ${photoBlocks || "<p>No alternative options were attached to this page yet.</p>"}
+          <footer>Photos and details are provided for review and may be finalized before arrival details are sent.</footer>
         </main></body></html>`);
     } catch (err: any) {
       return res.status(500).send(`Failed to render alternative page: ${escapeHtml(err?.message ?? err)}`);
@@ -7467,20 +7579,42 @@ export async function registerRoutes(
           .slice(0, 4)
           .map((file) => `${publicBase}/photos/${folder}/${encodeURIComponent(file)}`);
       };
-      const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any) => ({
-        title: String(item?.title ?? item?.community ?? "Alternative stay").slice(0, 160),
-        community: String(item?.community ?? "").slice(0, 80),
-        url: String(item?.url ?? "").slice(0, 800),
-        image: String(item?.image ?? "").slice(0, 800),
-        totalPrice: item?.totalPrice ? `$${Math.round(Number(item.totalPrice)).toLocaleString()}` : null,
-        sourceLabel: String(item?.sourceLabel ?? "").slice(0, 80),
-        communityPhotos: await communityPhotosFor(String(item?.community ?? "")),
-      })));
+      const stay = {
+        guestName: normalizeAlternativeText(req.body?.guestName ?? "Guest", 100),
+        checkIn: normalizeAlternativeText(req.body?.checkIn, 20),
+        checkOut: normalizeAlternativeText(req.body?.checkOut, 20),
+      };
+      const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any) => {
+        const photos = Array.from(new Set([
+          normalizeAlternativeUrl(item?.image),
+          ...(Array.isArray(item?.photos) ? item.photos.map((url: unknown) => normalizeAlternativeUrl(url)) : []),
+        ].filter(Boolean))).slice(0, 12);
+        const base = {
+          title: normalizeAlternativeText(item?.title ?? item?.community ?? "Alternative stay", 160),
+          community: normalizeAlternativeText(item?.community, 100),
+          url: normalizeAlternativeUrl(item?.url),
+          image: photos[0] ?? "",
+          photos,
+          bedrooms: Number(item?.bedrooms) > 0 ? Math.round(Number(item.bedrooms)) : null,
+          unitLabel: normalizeAlternativeText(item?.unitLabel, 80),
+          address: normalizeAlternativeText(item?.address, 220),
+          sourceLabel: normalizeAlternativeText(item?.sourceLabel, 80),
+          notes: normalizeAlternativeText(item?.notes, 1000),
+          communityPhotos: await communityPhotosFor(String(item?.community ?? "")),
+        };
+        const drafted = await draftAlternativeGuestDescription(base, stay);
+        return {
+          ...base,
+          description: drafted.description,
+          descriptionGeneratedBy: drafted.generatedBy,
+          descriptionWarning: drafted.warning ?? null,
+        };
+      }));
       const payload = {
         reservationId: String(req.body?.reservationId ?? ""),
-        guestName: String(req.body?.guestName ?? "Guest"),
-        checkIn: String(req.body?.checkIn ?? ""),
-        checkOut: String(req.body?.checkOut ?? ""),
+        guestName: stay.guestName || "Guest",
+        checkIn: stay.checkIn,
+        checkOut: stay.checkOut,
         alternatives: hydratedAlternatives,
         createdAt: new Date().toISOString(),
         expiresAt,
