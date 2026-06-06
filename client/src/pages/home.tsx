@@ -51,6 +51,9 @@ import {
   MapPin,
   Star,
   TrendingUp,
+  TrendingDown,
+  Wallet,
+  CheckCircle2,
   Ban,
   CreditCard,
   AlertTriangle,
@@ -1661,7 +1664,27 @@ function AdminDashboard() {
     paymentsTaken30Days?: number;
     fundsCollected48Hours?: number;
     paymentsTaken48Hours?: number;
+    refunds30Days?: number;
+    refundCount30Days?: number;
+    refunds48Hours?: number;
+    refundCount48Hours?: number;
+    netCollected30Days?: number;
+    netCollected48Hours?: number;
+    revenue48Hours?: number;
+    bookingCount48Hours?: number;
     bookingCount: number;
+    refunds?: Array<{
+      id: string;
+      reservationId: string;
+      listingId: string | null;
+      guestName: string;
+      listingName: string;
+      confirmationCode: string | null;
+      source: string;
+      refundedAt: string;
+      amount: number;
+      description: string;
+    }>;
     payments?: Array<{
       id: string;
       reservationId: string;
@@ -1795,6 +1818,48 @@ function AdminDashboard() {
       });
     },
   });
+
+  // Resolve a cancellation: stamps operatorStatus on the audit row via the
+  // existing PATCH endpoint. "refunded" / "no_refund_due" both drop the row out
+  // of `reviewNeeded`, so the "guest cancelled — payment on file" alert clears.
+  const [resolvingCancellationId, setResolvingCancellationId] = useState<number | null>(null);
+  const cancellationResolveMutation = useMutation({
+    mutationFn: ({ id, operatorStatus, operatorNotes }: { id: number; operatorStatus: string; operatorNotes?: string }) =>
+      apiRequest("PATCH", `/api/operations/cancellations/${id}`, { operatorStatus, operatorNotes }).then((r) => r.json()),
+    onMutate: ({ id }) => setResolvingCancellationId(id),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/cancellations"] });
+      const title = variables.operatorStatus === "refunded"
+        ? "Refund confirmed"
+        : variables.operatorStatus === "needs_review"
+          ? "Reopened for review"
+          : "Cancellation resolved";
+      const description = variables.operatorStatus === "refunded"
+        ? "Marked refunded — this booking will drop off the refund alert."
+        : variables.operatorStatus === "needs_review"
+          ? "Moved back to needs-review; it returns to the alert if money is still on file."
+          : "Marked resolved — cleared from the refund alert.";
+      toast({ title, description });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Could not update cancellation",
+        description: error?.message ?? "The refund status change did not save.",
+        variant: "destructive",
+      });
+    },
+    onSettled: () => setResolvingCancellationId(null),
+  });
+
+  // Cancellations where money was taken and not (fully) refunded AND the
+  // operator hasn't resolved them yet — the actionable "issue a refund" set
+  // that drives the dashboard alert banner.
+  const refundAlertRows = useMemo(
+    () => cancellationRows.filter((row) =>
+      row.operatorStatus === "needs_review" && moneyNumber(row.totalPaid) > moneyNumber(row.totalRefunded)
+    ),
+    [cancellationRows],
+  );
 
   // Reverse-image-search status for the Photo Match column. One row
   // per photo folder. The per-property status is the WORST across that
@@ -2432,7 +2497,7 @@ function AdminDashboard() {
           </Link>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 mb-6">
           <Card className="p-4">
             <div className="flex items-center gap-2 mb-1">
               <Building2 className="h-4 w-4 text-muted-foreground" />
@@ -2519,6 +2584,11 @@ function AdminDashboard() {
                   48 hours: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollected48Hours ?? 0)}
                   {revenueSummary ? ` · ${revenueSummary.paymentsTaken48Hours ?? 0} payment${(revenueSummary.paymentsTaken48Hours ?? 0) === 1 ? "" : "s"}` : ""}
                 </p>
+                {revenueSummary && (revenueSummary.refunds30Days ?? 0) > 0 && (
+                  <p className="mt-0.5 text-xs leading-snug text-rose-600 dark:text-rose-400">
+                    − {formatCurrency(revenueSummary.refunds30Days ?? 0)} refunded · net {formatCurrency(revenueSummary.netCollected30Days ?? ((revenueSummary.fundsCollected30Days ?? 0) - (revenueSummary.refunds30Days ?? 0)))}
+                  </p>
+                )}
               </button>
             </DialogTrigger>
             <DialogContent className="max-h-[85vh] w-[calc(100vw-2rem)] max-w-5xl overflow-hidden p-0">
@@ -2534,13 +2604,23 @@ function AdminDashboard() {
                   </span>
                   <span className="font-semibold">
                     {formatCurrency(revenueSummary?.fundsCollected30Days ?? 0)} collected from {revenueSummary?.paymentsTaken30Days ?? 0} payment{(revenueSummary?.paymentsTaken30Days ?? 0) === 1 ? "" : "s"}
+                    {(revenueSummary?.refunds30Days ?? 0) > 0
+                      ? ` · −${formatCurrency(revenueSummary?.refunds30Days ?? 0)} refunded · net ${formatCurrency(revenueSummary?.netCollected30Days ?? ((revenueSummary?.fundsCollected30Days ?? 0) - (revenueSummary?.refunds30Days ?? 0)))}`
+                      : ""}
                   </span>
                 </div>
-                <div className="grid gap-2 text-sm sm:grid-cols-3">
+                <div className="grid gap-2 text-sm sm:grid-cols-4">
                   <div className="rounded-md border bg-muted/30 p-3">
                     <p className="text-xs font-medium text-muted-foreground">Payments taken, 48 hours</p>
                     <p className="mt-1 text-lg font-semibold">{formatCurrency(revenueSummary?.fundsCollected48Hours ?? 0)}</p>
                     <p className="text-xs text-muted-foreground">{revenueSummary?.paymentsTaken48Hours ?? 0} payment{(revenueSummary?.paymentsTaken48Hours ?? 0) === 1 ? "" : "s"}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Refunds issued, 30 days</p>
+                    <p className="mt-1 text-lg font-semibold text-rose-600 dark:text-rose-400">−{formatCurrency(revenueSummary?.refunds30Days ?? 0)}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {revenueSummary?.refundCount30Days ?? 0} refund{(revenueSummary?.refundCount30Days ?? 0) === 1 ? "" : "s"} · net {formatCurrency(revenueSummary?.netCollected30Days ?? ((revenueSummary?.fundsCollected30Days ?? 0) - (revenueSummary?.refunds30Days ?? 0)))}
+                    </p>
                   </div>
                   <div className="rounded-md border bg-muted/30 p-3">
                     <p className="text-xs font-medium text-muted-foreground">Bookings made, 30 days</p>
@@ -2549,8 +2629,8 @@ function AdminDashboard() {
                   </div>
                   <div className="rounded-md border bg-muted/30 p-3">
                     <p className="text-xs font-medium text-muted-foreground">Collection basis</p>
-                    <p className="mt-1 text-sm font-semibold">Guesty paid payment records</p>
-                    <p className="text-xs text-muted-foreground">Excludes scheduled, pending, failed, voided, and refunded rows</p>
+                    <p className="mt-1 text-sm font-semibold">Guesty paid records, net of refunds</p>
+                    <p className="text-xs text-muted-foreground">Collected excludes scheduled/pending/failed/voided; refunds shown separately</p>
                   </div>
                 </div>
                 {revenueSummaryLoading ? (
@@ -2590,6 +2670,40 @@ function AdminDashboard() {
                 ) : (
                   <p className="text-sm text-muted-foreground">No collected payment records found in this rolling 30-day window.</p>
                 )}
+                {revenueSummary?.refunds?.length ? (
+                  <div className="max-w-full overflow-x-auto rounded-md border">
+                    <div className="border-b bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+                      Refunds issued in this 30-day window — netted out of funds collected above
+                    </div>
+                    <Table className="min-w-[760px] table-fixed">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[130px]">Refunded</TableHead>
+                          <TableHead className="w-[170px]">Guest</TableHead>
+                          <TableHead className="w-[220px]">Listing</TableHead>
+                          <TableHead className="w-[150px]">Description</TableHead>
+                          <TableHead className="w-[110px] text-right">Amount</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {revenueSummary.refunds.map((refund) => (
+                          <TableRow key={refund.id}>
+                            <TableCell className="whitespace-nowrap align-top">{formatShortDateTime(refund.refundedAt)}</TableCell>
+                            <TableCell className="align-top">
+                              <div className="font-medium">{refund.guestName}</div>
+                              {refund.confirmationCode && (
+                                <div className="text-xs text-muted-foreground">{refund.confirmationCode}</div>
+                              )}
+                            </TableCell>
+                            <TableCell className="align-top">{refund.listingName}</TableCell>
+                            <TableCell className="align-top">{refund.description || "Refund"}</TableCell>
+                            <TableCell className="whitespace-nowrap text-right align-top font-medium text-rose-600 dark:text-rose-400">−{formatCurrency(refund.amount)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                ) : null}
                 {revenueSummary?.bookings?.length ? (
                   <div className="max-w-full overflow-x-auto rounded-md border">
                     <div className="border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
@@ -2634,6 +2748,22 @@ function AdminDashboard() {
               </div>
             </DialogContent>
           </Dialog>
+          <Card className="p-4" data-testid="card-booking-revenue">
+            <div className="flex items-center gap-2 mb-1">
+              <Wallet className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground font-medium">Revenue, past 30 days</span>
+            </div>
+            <p className="text-2xl font-bold" data-testid="text-booking-revenue-30">
+              {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue ?? 0)}
+            </p>
+            <p className="mt-1 text-xs leading-snug text-muted-foreground">
+              {revenueSummary?.bookingCount ?? 0} booking{(revenueSummary?.bookingCount ?? 0) === 1 ? "" : "s"} made
+            </p>
+            <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-booking-revenue-48">
+              48 hours: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue48Hours ?? 0)}
+              {revenueSummary ? ` · ${revenueSummary.bookingCount48Hours ?? 0} booking${(revenueSummary.bookingCount48Hours ?? 0) === 1 ? "" : "s"}` : ""}
+            </p>
+          </Card>
           <Dialog>
             <DialogTrigger asChild>
               <button
@@ -2815,6 +2945,56 @@ function AdminDashboard() {
                             </div>
                           )}
 
+                          {/* Resolve controls — same PATCH the dashboard alert
+                              banner uses; keeps the modal and the alert in sync. */}
+                          <div className="rounded border bg-background px-3 py-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Refund status</p>
+                              <span className="text-xs font-medium">{operatorStatusLabel(selectedCancellation.operatorStatus)}</span>
+                            </div>
+                            {selectedCancellation.operatorStatus === "needs_review" ? (
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <Button
+                                  size="sm"
+                                  className="bg-emerald-600 text-white hover:bg-emerald-700"
+                                  disabled={resolvingCancellationId === selectedCancellation.id && cancellationResolveMutation.isPending}
+                                  onClick={() => cancellationResolveMutation.mutate({ id: selectedCancellation.id, operatorStatus: "refunded" })}
+                                  data-testid={`button-modal-confirm-refund-${selectedCancellation.id}`}
+                                >
+                                  {resolvingCancellationId === selectedCancellation.id && cancellationResolveMutation.isPending
+                                    ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                                    : <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />}
+                                  Confirm refund done
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={resolvingCancellationId === selectedCancellation.id && cancellationResolveMutation.isPending}
+                                  onClick={() => cancellationResolveMutation.mutate({ id: selectedCancellation.id, operatorStatus: "no_refund_due" })}
+                                  data-testid={`button-modal-no-refund-${selectedCancellation.id}`}
+                                >
+                                  No refund due
+                                </Button>
+                              </div>
+                            ) : (
+                              <div className="mt-2 flex items-center justify-between gap-2">
+                                <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                                  <CheckCircle2 className="h-3.5 w-3.5" /> Resolved
+                                </span>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 text-xs"
+                                  disabled={resolvingCancellationId === selectedCancellation.id && cancellationResolveMutation.isPending}
+                                  onClick={() => cancellationResolveMutation.mutate({ id: selectedCancellation.id, operatorStatus: "needs_review" })}
+                                  data-testid={`button-modal-reopen-${selectedCancellation.id}`}
+                                >
+                                  Reopen
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+
                           <div>
                             <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
                               <CreditCard className="h-4 w-4" /> Payments
@@ -2879,6 +3059,80 @@ function AdminDashboard() {
             </DialogContent>
           </Dialog>
         </div>
+
+        {/* Guest-cancelled-with-payment alert. Surfaces cancelled bookings that
+            still have money collected and unrefunded, and that the operator
+            hasn't resolved. "Confirm refund done" / "No refund due" PATCH the
+            audit's operatorStatus, which drops the row out of `reviewNeeded` so
+            the banner clears itself. Hidden entirely when there's nothing to act
+            on. */}
+        {refundAlertRows.length > 0 && (
+          <div className="mb-4 rounded-xl border border-red-300 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950/40" data-testid="alert-refund-due">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-400" />
+              <div className="min-w-0 flex-1">
+                <h2 className="text-sm font-semibold text-red-800 dark:text-red-200">
+                  Guest cancelled — payment on file ({refundAlertRows.length})
+                </h2>
+                <p className="mt-0.5 text-xs text-red-700/80 dark:text-red-300/80">
+                  These cancelled bookings still have money collected that hasn't been fully refunded. Issue the refund in Guesty, then confirm it here to clear the alert.
+                </p>
+                <div className="mt-3 space-y-2">
+                  {refundAlertRows.map((row) => {
+                    const owed = moneyNumber(row.totalPaid) - moneyNumber(row.totalRefunded);
+                    const busy = resolvingCancellationId === row.id && cancellationResolveMutation.isPending;
+                    return (
+                      <div
+                        key={row.id}
+                        className="flex flex-col gap-2 rounded-lg border border-red-200 bg-white px-3 py-2.5 dark:border-red-900 dark:bg-background sm:flex-row sm:items-center sm:justify-between"
+                        data-testid={`alert-refund-row-${row.id}`}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium">{row.guestName || "Guest"}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {propertyNameById.get(row.propertyId) ?? `Property ${row.propertyId}`}
+                            </span>
+                            {row.channel && (
+                              <Badge variant="outline" className="text-[10px] capitalize">{row.channel}</Badge>
+                            )}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {formatShortDate(row.checkIn)} – {formatShortDate(row.checkOut)} · cancelled {formatShortDate(row.cancelledAt)} · {row.confirmationCode ?? row.guestyReservationId}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
+                          <span className="mr-1 text-sm font-semibold text-red-700 dark:text-red-300" title="Payment still on file (paid minus refunded)">
+                            {formatCurrency(owed)} on file
+                          </span>
+                          <Button
+                            size="sm"
+                            className="bg-emerald-600 text-white hover:bg-emerald-700"
+                            disabled={busy}
+                            onClick={() => cancellationResolveMutation.mutate({ id: row.id, operatorStatus: "refunded" })}
+                            data-testid={`button-confirm-refund-${row.id}`}
+                          >
+                            {busy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />}
+                            Confirm refund done
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => cancellationResolveMutation.mutate({ id: row.id, operatorStatus: "no_refund_due" })}
+                            data-testid={`button-no-refund-${row.id}`}
+                          >
+                            No refund due
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* PR #318: dashboard alerts banner removed. Alerts now live
             inside each listing's per-channel rows in the listing
