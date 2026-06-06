@@ -58,6 +58,14 @@ import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch } from "./photo-ma
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
 const SEARCHAPI_KEY = process.env.SEARCHAPI_API_KEY;
+// The dashboard "Photos" match column depends on Google Lens reverse-image
+// search. It was hard-disabled to preserve SearchAPI quota, which left every
+// icon greyed ("unknown"). Re-enabled by default so the column works; the
+// operator can still turn it off via env (PHOTO_LISTING_LENS_DISABLED=1)
+// without a code change if quota becomes a concern.
+const PHOTO_LISTING_LENS_DISABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PHOTO_LISTING_LENS_DISABLED ?? "").trim(),
+);
 const PUBLIC_HOST = (() => {
   if (process.env.PUBLIC_PHOTO_BASE_URL) return process.env.PUBLIC_PHOTO_BASE_URL.replace(/\/+$/, "");
   if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
@@ -233,11 +241,12 @@ function isProviderUnavailableError(message?: string): boolean {
 }
 
 async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
-  void imageUrl;
-  return {
-    ok: false,
-    error: "Google Lens reverse-image search is disabled to preserve SearchAPI quota.",
-  };
+  if (PHOTO_LISTING_LENS_DISABLED) {
+    return {
+      ok: false,
+      error: "Google Lens reverse-image search is disabled (PHOTO_LISTING_LENS_DISABLED) to preserve SearchAPI quota.",
+    };
+  }
   if (!SEARCHAPI_KEY) return { ok: false, error: "SEARCHAPI_API_KEY not configured" };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), LENS_TIMEOUT_MS);
