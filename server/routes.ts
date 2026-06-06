@@ -8007,6 +8007,9 @@ Requirements:
     alternativeUrl: string;
     walkMinutes?: number | null;
     propertyLabel?: string | null;
+    communityDriveMinutes?: number | null;
+    sleeps?: number | null;
+    bedrooms?: number | null;
   }): string => {
     const firstName = firstNameForGuestMessage(args.guestName);
     const greeting = firstName ? `Hi ${firstName},` : "Hi,";
@@ -8024,10 +8027,28 @@ Requirements:
     const arrangeLine = place
       ? `I am very sorry, but we have had an unexpected issue with the unit you originally booked and it is no longer available for your dates. To make sure your trip is not disrupted, I have arranged a comparable stay for you at ${place}.`
       : `I am very sorry, but we have had an unexpected issue with the unit you originally booked and it is no longer available for your dates. To make sure your trip is not disrupted, I have arranged a comparable replacement stay for you in the same area.`;
+    // Same city + how close it drives to the original booking (city-wide buy-in
+    // alternatives are in the same city by design).
+    const driveMin = Number(args.communityDriveMinutes);
+    const drivePhrase = Number.isFinite(driveMin) && driveMin > 0
+      ? `, only about a ${Math.round(driveMin)}-minute drive from where you were originally going to stay`
+      : "";
+    const proximityLine = `It is in the same city as your original booking${drivePhrase}, so you will be right in the same area you planned for.`;
+    // Friendly "this is genuinely a great comparable unit" pitch.
+    const sleeps = Number(args.sleeps);
+    const bedrooms = Number(args.bedrooms);
+    const sleepsClause = Number.isFinite(sleeps) && sleeps > 0
+      ? ` It comfortably sleeps up to ${Math.round(sleeps)} guests${Number.isFinite(bedrooms) && bedrooms > 0 ? ` across ${Math.round(bedrooms)} bedrooms` : ""}.`
+      : "";
+    const pitchLine = `Honestly, this is a really nice, well-kept place and a great comparable to the unit you booked.${sleepsClause} I think you and your group will really enjoy it.`;
     const lines = [
       greeting,
       "",
       arrangeLine,
+      "",
+      proximityLine,
+      "",
+      pitchLine,
       "",
       // Always reassure the guest there is no cost change. Plain ASCII so it
       // survives the Booking.com sanitizer.
@@ -8577,6 +8598,9 @@ Requirements:
         || hydratedAlternatives.map((a) => a.community).find((c) => usableCommunityContext(c))
         || communityFromAlternativeTitle(hydratedAlternatives[0]?.title)
         || null;
+      // Total capacity across the attached units for the friendly pitch line.
+      const totalSleeps = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : 0), 0) || null;
+      const totalBedrooms = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : 0), 0) || null;
       return res.json({
         url,
         token,
@@ -8594,6 +8618,9 @@ Requirements:
           alternativeUrl: url,
           walkMinutes,
           propertyLabel,
+          communityDriveMinutes,
+          sleeps: totalSleeps,
+          bedrooms: totalBedrooms,
         }),
       });
     } catch (err: any) {
@@ -8675,10 +8702,12 @@ Requirements:
       const walkMinutes = Number(req.body?.walkMinutes) || null;
       const propertyLabel =
         usableCommunityContext(req.body?.propertyName || req.body?.community)
-        || hydratedAlternatives.map((a) => a.alternativeCommunity).find((c) => usableCommunityContext(c))
         || hydratedAlternatives.map((a) => a.community).find((c) => usableCommunityContext(c))
         || communityFromAlternativeTitle(hydratedAlternatives[0]?.title)
         || null;
+      const driveMinutes = Number(req.body?.communityDriveMinutes ?? req.body?.driveMinutes) || null;
+      const totalSleeps = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : 0), 0) || null;
+      const totalBedrooms = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : 0), 0) || null;
       return res.json({
         url,
         token,
@@ -8695,6 +8724,9 @@ Requirements:
           alternativeUrl: url,
           walkMinutes,
           propertyLabel,
+          communityDriveMinutes: driveMinutes,
+          sleeps: totalSleeps,
+          bedrooms: totalBedrooms,
         }),
         alternatives: hydratedAlternatives.map((item, index) => ({
           title: item.title,

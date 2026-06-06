@@ -13018,15 +13018,22 @@ function RelocateGuestDialog({
       // message can name the community and the walking distance.
       let walkMinutes: number | null = null;
       let propertyLabel: string | null = null;
+      let originalCommunity: string | null = null;
+      let alternativeCommunity: string | null = null;
       try {
         const prox = await apiGetJson<UnitProximityResponse>(
           `/api/bookings/${encodeURIComponent(reservation._id)}/unit-proximity`,
         );
         if (prox?.status === "ready") {
           walkMinutes = prox.walk?.minutes ?? null;
+          // prox.community = the reservation's ORIGINAL community; prox.resortName
+          // = the resort the attached (alternative) units actually belong to.
+          // Send both so the server can compute the same-city drive distance.
+          originalCommunity = prox.community ?? null;
+          alternativeCommunity = prox.resortName ?? null;
           propertyLabel = prox.resortName ?? prox.community ?? null;
         }
-      } catch { /* non-fatal — message still drafts without the walk line */ }
+      } catch { /* non-fatal — message still drafts without the walk/drive line */ }
       const alternatives = attachedSlots.map((s) => {
         const b = s.buyIn;
         const photoUrls = manualBuyInPhotoUrlsFromNotes(b.notes);
@@ -13051,7 +13058,11 @@ function RelocateGuestDialog({
         checkOut: checkOutOf(reservation),
         channel,
         walkMinutes,
+        unitWalkMinutes: walkMinutes,
         propertyLabel,
+        originalCommunity,
+        areaName: originalCommunity,
+        alternativeCommunity,
         alternatives,
       }).then((r) => r.json());
       if (!resp?.url || !resp?.token) throw new Error(resp?.message || resp?.error || "Guest page create failed");
