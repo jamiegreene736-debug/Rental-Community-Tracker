@@ -6856,36 +6856,6 @@ export async function registerRoutes(
       return items;
     };
 
-    // Refund accounting. The operator wants refunds reflected in the
-    // "Funds collected / payments taken" tile. reservationPaymentItems()
-    // deliberately EXCLUDES refunds so the gross-collected figure stays
-    // pure, so this is a SEPARATE pass that pulls every refund-shaped row
-    // (negative amount, or a refund/reversal/chargeback type/status) from
-    // money.refunds, money.payments, money.transactions, and the top-level
-    // refunds array.
-    const refundLooksReal = (entry: any): boolean => {
-      const status = String(entry?.status ?? entry?.paymentStatus ?? "").toLowerCase();
-      const type = String(entry?.type ?? entry?.kind ?? entry?.subType ?? "").toLowerCase();
-      const description = paymentDescription(entry).toLowerCase();
-      const blob = `${status} ${type} ${description}`;
-      if (/(fail|declin|void|cancel|pending|scheduled|authorized|authorization)/.test(blob)) return false;
-      if (/(refund|reversal|chargeback)/.test(blob)) return true;
-      // A bare negative payment line is a refund even without a label.
-      return paymentAmount(entry) < 0;
-    };
-    const reservationRefundItems = (reservation: any): any[] => {
-      const money = reservation?.money ?? {};
-      const pools: any[] = [
-        ...(Array.isArray(reservation?.refunds) ? reservation.refunds : []),
-        ...(Array.isArray(money?.refunds) ? money.refunds : []),
-        ...(Array.isArray(reservation?.payments) ? reservation.payments : []),
-        ...(Array.isArray(money?.payments) ? money.payments : []),
-        ...(Array.isArray(money?.transactions) ? money.transactions : []),
-      ];
-      return pools.filter(refundLooksReal);
-    };
-    const refundAmount = (entry: any): number => Math.abs(paymentAmount(entry));
-
     const reservationNights = (reservation: any): number => {
       const explicit = asNum(reservation?.nightsCount ?? reservation?.nights);
       if (explicit > 0) return Math.round(explicit);
@@ -6914,7 +6884,7 @@ export async function registerRoutes(
     };
 
     try {
-      const fields = encodeURIComponent("_id status createdAt updatedAt confirmedAt bookedAt reservationDate checkIn checkOut nightsCount listing listingId money payments refunds guest source integration confirmationCode");
+      const fields = encodeURIComponent("_id status createdAt updatedAt confirmedAt bookedAt reservationDate checkIn checkOut nightsCount listing listingId money payments guest source integration confirmationCode");
       const filters = encodeURIComponent(JSON.stringify([
         { field: "createdAt", operator: "$gte", value: start.toISOString() },
       ]));
@@ -6964,18 +6934,8 @@ export async function registerRoutes(
       let paymentsTaken30Days = 0;
       let fundsCollected48Hours = 0;
       let paymentsTaken48Hours = 0;
-      // Refunds within the rolling windows (issued back to guests).
-      let refunds30Days = 0;
-      let refundCount30Days = 0;
-      let refunds48Hours = 0;
-      let refundCount48Hours = 0;
-      // Booking revenue (bookings MADE in the window) for the 48-hour slice;
-      // the 30-day equivalents are `revenue` / `bookingCount` below.
-      let revenue48Hours = 0;
-      let bookingCount48Hours = 0;
       const fortyEightHourStart = new Date(now.getTime() - 48 * 60 * 60 * 1000);
       const seenPayments = new Set<string>();
-      const seenRefunds = new Set<string>();
       const listingRevenue = new Map<string, {
         listingId: string;
         listingName: string;
@@ -7005,18 +6965,6 @@ export async function registerRoutes(
         confirmationCode: string | null;
         source: string;
         paidAt: string;
-        amount: number;
-        description: string;
-      }> = [];
-      const refunds: Array<{
-        id: string;
-        reservationId: string;
-        listingId: string | null;
-        guestName: string;
-        listingName: string;
-        confirmationCode: string | null;
-        source: string;
-        refundedAt: string;
         amount: number;
         description: string;
       }> = [];
@@ -7069,40 +7017,6 @@ export async function registerRoutes(
           }
         }
 
-        for (const refund of reservationRefundItems(reservation)) {
-          const amount = refundAmount(refund);
-          if (amount <= 0) continue;
-          const refundedAt = paymentDate(refund);
-          if (!refundedAt || refundedAt < start || refundedAt > now) continue;
-          const key = [
-            reservationId,
-            refundedAt.toISOString(),
-            amount.toFixed(2),
-            paymentDescription(refund).toLowerCase(),
-            "refund",
-          ].join("|");
-          if (seenRefunds.has(key)) continue;
-          seenRefunds.add(key);
-          refunds30Days += amount;
-          refundCount30Days += 1;
-          refunds.push({
-            id: key,
-            reservationId,
-            listingId: reservationListingId || null,
-            guestName,
-            listingName,
-            confirmationCode,
-            source,
-            refundedAt: refundedAt.toISOString(),
-            amount,
-            description: paymentDescription(refund) || "Refund issued",
-          });
-          if (refundedAt >= fortyEightHourStart) {
-            refunds48Hours += amount;
-            refundCount48Hours += 1;
-          }
-        }
-
         const madeAt = bookingActivityAt(reservation);
         if (reservationDatedPaymentCount === 0 && madeAt && madeAt >= start && madeAt <= now) {
           const totalPaid = asNum(reservation?.money?.totalPaid ?? reservation?.totalPaid);
@@ -7142,10 +7056,6 @@ export async function registerRoutes(
         if (amount <= 0) continue;
         revenue += amount;
         bookingCount += 1;
-        if (madeAt >= fortyEightHourStart) {
-          revenue48Hours += amount;
-          bookingCount48Hours += 1;
-        }
         const listingKey = reservationListingId || String(listing?.nickname ?? listing?.title ?? "Listing");
         const existingListing = listingRevenue.get(listingKey) ?? {
           listingId: listingKey,
@@ -7174,7 +7084,6 @@ export async function registerRoutes(
 
       const sortedBookings = bookings.sort((a, b) => b.bookedAt.localeCompare(a.bookedAt));
       const sortedPayments = payments.sort((a, b) => b.paidAt.localeCompare(a.paidAt));
-      const sortedRefunds = refunds.sort((a, b) => b.refundedAt.localeCompare(a.refundedAt));
       const largestBooking = bookings
         .slice()
         .sort((a, b) => (b.nights - a.nights) || (b.amount - a.amount))[0] ?? null;
@@ -7191,19 +7100,7 @@ export async function registerRoutes(
         paymentsTaken30Days,
         fundsCollected48Hours,
         paymentsTaken48Hours,
-        // Refunds issued in-window + net-of-refunds collected, so the
-        // "payments taken" tile reflects money actually kept.
-        refunds30Days,
-        refundCount30Days,
-        refunds48Hours,
-        refundCount48Hours,
-        netCollected30Days: fundsCollected30Days - refunds30Days,
-        netCollected48Hours: fundsCollected48Hours - refunds48Hours,
-        refunds: sortedRefunds,
         bookingCount,
-        // Booking revenue for the 48-hour slice (30-day is `revenue`).
-        revenue48Hours,
-        bookingCount48Hours,
         payments: sortedPayments,
         bookings: sortedBookings,
         largestBooking,
@@ -12089,13 +11986,8 @@ Requirements:
         return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
       }
       const unitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
-      // >= 1 unit (was >= 2). Single-unit properties (e.g. Keauhou) use this as
-      // the city-wide VRBO fallback after a resort-name search comes up empty —
-      // they read `byBedroom` for the cheapest matching unit. `suggestedPair`
-      // stays null for single-unit plans (suggestCityVrboComboPair needs >= 2),
-      // so combo behaviour is unchanged.
-      if (!unitConfig || unitConfig.units.length < 1) {
-        return res.status(400).json({ error: "Property needs at least one configured unit slot for city VRBO inventory" });
+      if (!unitConfig || unitConfig.units.length < 2) {
+        return res.status(400).json({ error: "Property needs at least two configured unit slots for city combo inventory" });
       }
       const filterPhrase = typeof req.query.phrase === "string" ? req.query.phrase.trim() : "";
       const skipCache = req.query.nocache === "1";
@@ -17294,61 +17186,9 @@ Requirements:
     };
   };
 
-  // ── Background auto-refresh ──────────────────────────────────────────
-  // Cancellation audits only populate on a scan, so without this the
-  // dashboard "guest cancelled — payment on file" alert could lag a real
-  // cancellation by hours (until the operator hit Refresh). The dashboard GET
-  // now kicks off a throttled, single-flight background scan across all mapped
-  // properties; the client polls /cancellations every 2 min, so it picks up
-  // the freshly-written audits on its next refetch. Throttled so multiple
-  // dashboard tabs / refetches can't hammer Guesty's reservation API.
-  const CANCELLATION_AUTO_SCAN_INTERVAL_MS = 20 * 60 * 1000;
-  let cancellationAutoScanInFlight = false;
-  let cancellationAutoScanLastStartedAt = 0;
-  const runAllCancellationAuditScans = async (range: string) => {
-    const map = await storage.getGuestyPropertyMap();
-    const propertyIds = Array.from(new Set(
-      map
-        .map((row) => row.propertyId)
-        .filter((id): id is number => typeof id === "number" && Number.isFinite(id)),
-    ));
-    const results = [];
-    // Sequential: Guesty's reservation API is the bottleneck, not local CPU.
-    for (const propertyId of propertyIds) {
-      try {
-        results.push(await scanCancellationAuditsForProperty(propertyId, range));
-      } catch (error: any) {
-        results.push({
-          propertyId,
-          guestyListingId: null,
-          scanned: 0,
-          saved: 0,
-          skipped: false,
-          error: error?.message ?? String(error),
-        });
-      }
-    }
-    return results;
-  };
-  const maybeAutoScanCancellations = () => {
-    const now = Date.now();
-    if (cancellationAutoScanInFlight) return;
-    if (now - cancellationAutoScanLastStartedAt < CANCELLATION_AUTO_SCAN_INTERVAL_MS) return;
-    cancellationAutoScanInFlight = true;
-    cancellationAutoScanLastStartedAt = now;
-    // Fire-and-forget: the request returns current audits immediately and the
-    // client's next poll surfaces whatever this scan writes.
-    void runAllCancellationAuditScans(String(dashboardCancellationWindowDays))
-      .catch((error: any) => console.warn("[cancellations] background auto-scan failed:", error?.message ?? error))
-      .finally(() => { cancellationAutoScanInFlight = false; });
-  };
-
   app.get("/api/dashboard/cancellations", async (_req, res) => {
     try {
       const audits = dashboardCancellationAudits(await storage.getAllReservationCancellationAudits());
-      // Kick a throttled background refresh so the alert stays current without
-      // the operator hitting "Refresh from Guesty" manually.
-      maybeAutoScanCancellations();
       res.json({
         windowDays: dashboardCancellationWindowDays,
         audits,
@@ -17362,9 +17202,31 @@ Requirements:
   app.post("/api/dashboard/cancellations/scan", async (req, res) => {
     try {
       const range = String(req.body?.range ?? "30");
-      // Operator-triggered "Refresh from Guesty" — reuse the same per-property
-      // sweep the background auto-scan uses.
-      const results = await runAllCancellationAuditScans(range);
+      const map = await storage.getGuestyPropertyMap();
+      const propertyIds = Array.from(new Set(
+        map
+          .map((row) => row.propertyId)
+          .filter((id): id is number => typeof id === "number" && Number.isFinite(id)),
+      ));
+
+      const results = [];
+      // Keep this sequential: this endpoint is operator-triggered from the
+      // dashboard and Guesty's reservation API is the bottleneck, not local CPU.
+      for (const propertyId of propertyIds) {
+        try {
+          results.push(await scanCancellationAuditsForProperty(propertyId, range));
+        } catch (error: any) {
+          results.push({
+            propertyId,
+            guestyListingId: null,
+            scanned: 0,
+            saved: 0,
+            skipped: false,
+            error: error?.message ?? String(error),
+          });
+        }
+      }
+
       const audits = dashboardCancellationAudits(await storage.getAllReservationCancellationAudits());
       res.json({
         windowDays: dashboardCancellationWindowDays,
