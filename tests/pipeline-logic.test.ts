@@ -3436,7 +3436,13 @@ assert.ok(
     routesSource.includes("unitWalkMinutes") &&
     routesSource.includes("overviewDetails") &&
     routesSource.includes("Community & Amenity Preview") &&
-    routesSource.includes("vacation-rental-expertz-horizontal-transparent.png") &&
+    routesSource.includes("Unit A/B Walk") &&
+    routesSource.includes("amenity-showcase") &&
+    routesSource.includes("vacation-rental-expertz-mark.png") &&
+    routesSource.includes("communityAmenityFallbackTags") &&
+    routesSource.includes("const topCommunityPhotos = communityPhotoUrls.slice(0, 6)") &&
+    !routesSource.includes("attachedPhotoUrls") &&
+    !routesSource.includes("vacation-rental-expertz-horizontal-transparent.png") &&
     !routesSource.includes("Instead of ${escapeHtml(originalCommunity)}"),
   "guest-facing alternatives page should render scraped listing photos as a carousel with unit labels, details, and community drive copy",
 );

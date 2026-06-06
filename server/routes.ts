@@ -7907,6 +7907,15 @@ Requirements:
     return `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${paths[name]}</svg>`;
   };
 
+  const communityAmenityFallbackTags = (community: unknown): string[] => {
+    const normalized = normalizeResortText(String(community ?? ""));
+    if (!normalized) return [];
+    if (normalized.includes("villas of kamalii") || normalized.includes("villas at kamalii") || normalized.includes("kamalii")) {
+      return ["Heated Pool", "Hot Tub", "BBQ Area", "Gated Community"];
+    }
+    return [];
+  };
+
   const firstNameForGuestMessage = (name: unknown): string => {
     const cleaned = normalizeAlternativeText(name, 80);
     return cleaned.split(/\s+/).filter(Boolean)[0] ?? "";
@@ -8066,7 +8075,7 @@ Requirements:
       const alternativeCommunityDisplay = displayAlternativeLabel(alternativeCommunity);
       const areaNameDisplay = displayAlternativeLabel(areaName);
       const communityDriveMinutes = Number(payload.communityDriveMinutes);
-      const unitWalkMinutes = Number(payload.unitWalkMinutes ?? payload.walkMinutes ?? payload.driveMinutes);
+      const unitWalkMinutes = Number(payload.unitWalkMinutes ?? payload.walkMinutes ?? payload.driveMinutes ?? (alternatives.length > 1 ? payload.communityDriveMinutes : null));
       const stayDateText = [formatAlternativeDisplayDate(payload.checkIn), formatAlternativeDisplayDate(payload.checkOut)]
         .filter(Boolean)
         .join(" to ");
@@ -8098,7 +8107,7 @@ Requirements:
         totalBathrooms > 0 ? { icon: "bath" as const, label: `${formatAlternativeNumber(totalBathrooms)} Bathroom Total` } : null,
         totalSleeps > 0 ? { icon: "sleep" as const, label: `Sleeps ${totalSleeps}` } : null,
         alternativeCommunityDisplay ? { icon: "community" as const, label: `Community: ${alternativeCommunityDisplay}` } : null,
-        Number.isFinite(unitWalkMinutes) && unitWalkMinutes > 0 ? { icon: "walk" as const, label: `Unit Walking Distance: ${Math.round(unitWalkMinutes)} Minute Walk` } : null,
+        Number.isFinite(unitWalkMinutes) && unitWalkMinutes > 0 ? { icon: "walk" as const, label: `Unit A/B Walk: ${Math.round(unitWalkMinutes)} Minute Walk` } : null,
         Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "car" as const, label: `Community Drive: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
       ].filter(Boolean) as Array<{ icon: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "sleep" | "walk"; label: string }>;
       const overviewBlock = overviewDetails.length
@@ -8111,24 +8120,26 @@ Requirements:
       const communityPhotoUrls = Array.from(new Set(alternatives.flatMap((item: any) =>
         Array.isArray(item?.communityPhotos) ? item.communityPhotos.map(safeGuestPhotoUrl).filter(Boolean) : [],
       ))).slice(0, 6);
-      const attachedPhotoUrls = Array.from(new Set(alternatives.flatMap((item: any) => [
-        safeGuestPhotoUrl(item?.image),
-        ...(Array.isArray(item?.photos) ? item.photos.map(safeGuestPhotoUrl) : []),
-      ].filter(Boolean)))).slice(0, 6);
-      const topCommunityPhotos = (communityPhotoUrls.length > 0 ? communityPhotoUrls : attachedPhotoUrls).slice(0, 6);
+      const topCommunityPhotos = communityPhotoUrls.slice(0, 6);
       const topAmenities = Array.from(new Map(alternatives
-        .flatMap((item: any) => extractAlternativeAmenityTags(alternativeSearchText(item)))
+        .flatMap((item: any) => [
+          ...communityAmenityFallbackTags(item?.community || alternativeCommunity),
+          ...extractAlternativeAmenityTags(alternativeSearchText(item)),
+        ])
         .map((label) => [label.toLowerCase(), label] as const)).values()).slice(0, 10);
+      const amenityCards = topAmenities.slice(0, 6).map((tag) => `<article class="amenity-card">${alternativeIconSvg("amenity")}<span>${escapeHtml(tag)}</span></article>`).join("");
+      const communityPreviewTitle = topCommunityPhotos.length ? "Community & Amenity Preview" : "Community Amenities";
       const topCommunityBlock = topCommunityPhotos.length || topAmenities.length
         ? `<section class="community-preview">
             <div class="section-heading">
               <p class="eyebrow">${escapeHtml(alternativeCommunityDisplay || areaNameDisplay || "Community")}</p>
-              <h2>Community & Amenity Preview</h2>
+              <h2>${communityPreviewTitle}</h2>
             </div>
             ${topCommunityPhotos.length ? `<div class="community-gallery">${topCommunityPhotos.map((url, index) => `
               <figure>
                 <img src="${escapeHtml(url)}" alt="${escapeHtml(alternativeCommunityDisplay || areaNameDisplay || "Community")} photo ${index + 1}" loading="${index === 0 ? "eager" : "lazy"}" />
               </figure>`).join("")}</div>` : ""}
+            ${!topCommunityPhotos.length && amenityCards ? `<div class="amenity-showcase">${amenityCards}</div>` : ""}
             ${topAmenities.length ? `<div class="amenities">${topAmenities.map((tag) => `<span>${alternativeIconSvg("amenity")}${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
           </section>`
         : "";
@@ -8205,7 +8216,9 @@ Requirements:
           body{font-family:Inter,Arial,sans-serif;margin:0;background:#f4f7f2;color:#172033;line-height:1.55}
           .hero{background:linear-gradient(135deg,#0b5f5a 0%,#14867c 58%,#e6bd6b 100%);color:white;padding:28px 20px 76px}
           .hero-inner{max-width:1120px;margin:0 auto;display:grid;gap:28px}
-          .brand-logo{width:min(300px,74vw);height:auto;filter:drop-shadow(0 10px 18px rgba(0,0,0,.16))}
+          .brand-lockup{display:inline-flex;align-items:center;gap:12px;width:max-content;max-width:100%;padding:8px 16px 8px 10px;border:1px solid rgba(255,255,255,.72);border-radius:8px;background:rgba(255,255,255,.95);box-shadow:0 14px 30px rgba(13,52,65,.18)}
+          .brand-mark{width:54px;height:44px;object-fit:contain;display:block}
+          .brand-name{color:#124760;font-size:19px;font-weight:900;line-height:1;white-space:nowrap}
           .hero-copy{max-width:760px}
           .eyebrow{font-size:12px;letter-spacing:0;text-transform:uppercase;font-weight:800;margin:0 0 6px;color:#2f5f68}
           .hero .eyebrow{color:#dff8ee}
@@ -8230,6 +8243,9 @@ Requirements:
           .community-gallery figure{margin:0;min-height:130px}
           .community-gallery figure:first-child{grid-row:span 2}
           .community-gallery img{width:100%;height:100%;min-height:130px;object-fit:cover;border-radius:8px;display:block;background:#e6edf0}
+          .amenity-showcase{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0 0 14px}
+          .amenity-card{min-height:96px;border:1px solid #d5e5dd;border-radius:8px;background:#f6fbf7;color:#125c56;padding:14px;display:flex;align-items:center;gap:10px;font-size:15px;font-weight:900}
+          .amenity-card svg{width:24px;height:24px;flex:0 0 24px;color:#0f766e}
           .amenities,.feature-tags{display:flex;flex-wrap:wrap;gap:8px}
           .amenities span,.feature-tags span{display:inline-flex;align-items:center;gap:6px;border:1px solid #d5e5dd;background:#fbf8ef;color:#49513c;border-radius:999px;padding:7px 10px;font-size:13px;font-weight:700}
           .amenities svg{width:15px;height:15px;flex:0 0 15px;color:#0f766e}
@@ -8255,6 +8271,8 @@ Requirements:
           footer{margin-top:28px;color:#64748b;font-size:13px;text-align:center}
           @media (max-width:760px){
             .hero{padding:22px 16px 66px}
+            .brand-mark{width:48px;height:40px}
+            .brand-name{font-size:17px}
             h1{font-size:36px}
             h2{font-size:26px}
             main{margin-top:-38px;padding-inline:12px}
@@ -8262,6 +8280,7 @@ Requirements:
             .intro{font-size:16px}
             .community-gallery{grid-template-columns:1fr 1fr}
             .community-gallery figure:first-child{grid-column:span 2;grid-row:auto}
+            .amenity-showcase{grid-template-columns:1fr 1fr}
             .unit-facts{grid-template-columns:1fr}
             .slide img{height:260px}
             .section-heading{display:block}
@@ -8269,7 +8288,9 @@ Requirements:
           @media (max-width:480px){
             .hero{padding:18px 12px 54px}
             .hero-inner{gap:18px}
-            .brand-logo{width:min(240px,80vw)}
+            .brand-lockup{padding:7px 11px 7px 8px;gap:9px}
+            .brand-mark{width:42px;height:34px}
+            .brand-name{font-size:15px}
             h1{font-size:30px}
             h2{font-size:22px}
             .stay-line{font-size:15px}
@@ -8280,6 +8301,7 @@ Requirements:
             .community-gallery{grid-template-columns:1fr}
             .community-gallery figure:first-child{grid-column:auto}
             .community-gallery img{min-height:170px}
+            .amenity-showcase{grid-template-columns:1fr}
             .amenities span,.feature-tags span{border-radius:8px}
             .slide{flex-basis:100%}
             .slide img{height:230px}
@@ -8289,7 +8311,10 @@ Requirements:
         </style></head><body>
         <header class="hero">
           <div class="hero-inner">
-            <img class="brand-logo" src="/brand/vacation-rental-expertz-horizontal-transparent.png" alt="VacationRentalExpertz" />
+            <div class="brand-lockup" aria-label="VacationRentalExpertz">
+              <img class="brand-mark" src="/brand/vacation-rental-expertz-mark.png" alt="" />
+              <span class="brand-name">VacationRentalExpertz</span>
+            </div>
             <div class="hero-copy">
               <p class="eyebrow">VacationRentalExpertz</p>
               <h1>Alternative Stay Options</h1>
