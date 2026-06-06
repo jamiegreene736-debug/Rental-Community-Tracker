@@ -6172,6 +6172,104 @@ export default function Bookings() {
             };
         results.push(slotResult);
       }
+
+      // ── City-wide VRBO fallback for any slot the resort search left empty ──
+      // The two-unit combo path above already runs a city scan for >=2 empty
+      // slots. This catches the rest with the SAME "resort name first, then
+      // city-wide VRBO" methodology, applied per remaining slot: single-unit
+      // reservations (e.g. Keauhou) and the leftover slot of a partially-filled
+      // multi-unit booking. The server caches the city scrape by (community,
+      // checkIn, checkOut), so when both this and the combo path fire for one
+      // reservation the VRBO sidecar is only driven once.
+      const stillEmptyAfterResort = results.filter((row) => !row.picked).map((row) => row.slot);
+      if (stillEmptyAfterResort.length > 0 && staticUnitConfig) {
+        setCityInventoryScanTrigger((prev) => ({
+          ...prev,
+          [reservation._id]: (prev[reservation._id] ?? 0) + 1,
+        }));
+        try {
+          const cityParams = new URLSearchParams({
+            propertyId: String(buyInPropertyId),
+            checkIn: ci,
+            checkOut: co,
+          });
+          const cityData = await apiGetJson<CityVrboInventoryResponse>(
+            `/api/operations/city-vrbo-inventory?${cityParams.toString()}`,
+          );
+          for (const slot of stillEmptyAfterResort) {
+            const rows = (cityData.byBedroom?.[slot.bedrooms] ?? [])
+              .filter((row) => (Number(row.totalPrice) || 0) > 0)
+              .sort((a, b) => (Number(a.totalPrice) || Infinity) - (Number(b.totalPrice) || Infinity));
+            // Record the city scan in the audit panel even when nothing matches.
+            searchAudits.set(slot.bedrooms, {
+              bedrooms: slot.bedrooms,
+              generatedAt: new Date().toISOString(),
+              counts: cityInventorySearchSummary(cityData, slot.bedrooms),
+              candidates: rows.slice(0, 20).map((row) => ({
+                source: "vrbo" as const,
+                sourceLabel: row.sourceLabel ?? "Vrbo",
+                title: row.title,
+                url: row.url,
+                totalPrice: row.totalPrice ?? 0,
+                nightlyPrice: row.nightlyPrice ?? 0,
+                bedrooms: row.bedrooms ?? slot.bedrooms,
+                verified: "yes" as const,
+              })),
+              diagnostics: {
+                severity: "ok",
+                title: "City-wide VRBO map inventory",
+                summary: `${cityData.listings.length} exported · single-unit fallback`,
+                generatedAt: new Date().toISOString(),
+                request: { propertyId: buyInPropertyId, bedrooms: slot.bedrooms, checkIn: ci, checkOut: co },
+                sources: [],
+                issues: [],
+                report: `City search: ${cityData.citySearchTerm}`,
+              },
+            });
+            // pickedIdentities is the shared dedupe set; skip rows already
+            // attached to another slot in this run.
+            const rowPick = rows.find((row) => !hasUsedListingIdentity(pickedIdentities, {
+              url: row.url,
+              title: row.title,
+              sourceLabel: row.sourceLabel,
+            }));
+            if (!rowPick) continue;
+            const livePick = liveCandidateFromCityComboPick(
+              {
+                bedrooms: slot.bedrooms,
+                source: "vrbo",
+                sourceLabel: rowPick.sourceLabel ?? "Vrbo",
+                title: rowPick.title,
+                totalPrice: Number(rowPick.totalPrice) || 0,
+                nightlyPrice: rowPick.nightlyPrice,
+                url: rowPick.url,
+                image: rowPick.image ?? undefined,
+                images: Array.isArray(rowPick.images) && rowPick.images.length
+                  ? rowPick.images
+                  : (rowPick.image ? [rowPick.image] : undefined),
+                verified: "yes",
+                verifiedReason: "City VRBO map inventory (single-unit fallback)",
+              },
+              slot.bedrooms,
+              reservationNights,
+            );
+            const cityResult = await createAndAttachPick(
+              slot,
+              livePick,
+              slot.bedrooms,
+              cityInventorySearchSummary(cityData, slot.bedrooms),
+              `City VRBO ${rowPick.sourceLabel ?? "unit"}`,
+              "city-vrbo",
+            );
+            const targetIndex = results.findIndex((row) => !row.picked && row.slot.unitId === slot.unitId);
+            if (targetIndex >= 0) results[targetIndex] = cityResult;
+            else results.push(cityResult);
+          }
+        } catch (cityError: any) {
+          console.warn("[auto-fill] single-unit city VRBO fallback failed:", cityError?.message ?? cityError);
+        }
+      }
+
       const attachedComparisonOptions = await evaluateAttachedComparisonCombos(results);
       return {
         reservation,
