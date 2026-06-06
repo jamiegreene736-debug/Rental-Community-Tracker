@@ -3407,7 +3407,8 @@ assert.ok(
     bookingsSource.includes("originalCommunity") &&
     bookingsSource.includes("alternativeCommunity") &&
     bookingsSource.includes("getUnitBuilderByPropertyId") &&
-    bookingsSource.includes("driveMinutes"),
+    bookingsSource.includes("unitWalkMinutes") &&
+    bookingsSource.includes("walkMinutes"),
   "buy-in Guest Page action should submit the full attached combo, saved listing photos, and community proximity context",
 );
 assert.ok(
@@ -3430,9 +3431,12 @@ assert.ok(
     routesSource.includes("data-carousel-next") &&
     routesSource.includes("carousel-track") &&
     routesSource.includes("Unit ${index + 1}") &&
-    routesSource.includes("We have availability in ${escapeHtml(alternativeCommunity)}. This community is in ${escapeHtml(areaName)}") &&
+    routesSource.includes("We have availability in ${escapeHtml(alternativeCommunityDisplay)}. This community is in ${escapeHtml(areaNameDisplay)}") &&
     routesSource.includes("communityDriveMinutes") &&
+    routesSource.includes("unitWalkMinutes") &&
     routesSource.includes("overviewDetails") &&
+    routesSource.includes("Community & Amenity Preview") &&
+    routesSource.includes("vacation-rental-expertz-horizontal-transparent.png") &&
     !routesSource.includes("Instead of ${escapeHtml(originalCommunity)}"),
   "guest-facing alternatives page should render scraped listing photos as a carousel with unit labels, details, and community drive copy",
 );
@@ -3441,15 +3445,21 @@ assert.ok(
     routesSource.includes("sleeps") &&
     routesSource.includes("basicDetails") &&
     routesSource.includes("extractAlternativeFactsFromText") &&
+    routesSource.includes("formatAlternativeDisplayDate") &&
+    routesSource.includes("${totalBedrooms} Bedroom Total") &&
+    routesSource.includes("Bed Types") &&
+    routesSource.includes("Unit Features") &&
+    routesSource.includes("Do not mention photo counts") &&
     routesSource.includes("This is property-detail copy for a review page") &&
     routesSource.includes("usableCommunityContext") &&
     routesSource.includes("communityFromAlternativeTitle") &&
+    !routesSource.includes("photoCount: Array.isArray(item.photos)") &&
     !routesSource.includes("guestName: normalizeAlternativeText(stay.guestName"),
   "guest-facing alternatives page should include unit detail facts and keep AI descriptions from addressing the guest by name",
 );
 assert.ok(
   routesSource.indexOf("${carousel}") >= 0 &&
-    routesSource.indexOf("${item.description ? `<p class=\"description\"") > routesSource.indexOf("${carousel}"),
+    routesSource.indexOf("${description ? `<p class=\"description\"") > routesSource.indexOf("${carousel}"),
   "guest-facing alternatives page should place each AI unit description below that unit's photo carousel",
 );
 assert.ok(

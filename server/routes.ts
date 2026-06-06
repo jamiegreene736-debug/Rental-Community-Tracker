@@ -7542,6 +7542,103 @@ export async function registerRoutes(
     return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, "");
   };
 
+  const displayAlternativeLabel = (value: unknown, max = 120): string => {
+    const text = normalizeAlternativeText(value, max);
+    if (!text) return "";
+    const smallWords = new Set(["and", "at", "by", "for", "from", "in", "of", "on", "the", "to"]);
+    let wordIndex = 0;
+    return text
+      .split(/(\s+)/)
+      .map((part) => {
+        if (!/[A-Za-z]/.test(part)) return part;
+        const lower = part.toLowerCase();
+        const isSmallWord = wordIndex > 0 && smallWords.has(lower);
+        wordIndex += 1;
+        if (isSmallWord) return lower;
+        if (/^(?:AC|BBQ|HI|TV|VRBO|Wi-?Fi)$/i.test(part)) {
+          return part.toUpperCase().replace("WI-FI", "Wi-Fi").replace("WIFI", "Wi-Fi");
+        }
+        return lower.replace(/(^|[-'(/])([a-z])/g, (_match, prefix: string, letter: string) => `${prefix}${letter.toUpperCase()}`);
+      })
+      .join("");
+  };
+
+  const alternativeOrdinalSuffix = (day: number): string => {
+    if (day >= 11 && day <= 13) return "th";
+    switch (day % 10) {
+      case 1: return "st";
+      case 2: return "nd";
+      case 3: return "rd";
+      default: return "th";
+    }
+  };
+
+  const formatAlternativeDisplayDate = (value: unknown): string => {
+    const raw = normalizeAlternativeText(value, 40);
+    if (!raw) return "";
+    const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const date = iso
+      ? new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])))
+      : new Date(raw);
+    if (Number.isNaN(date.getTime())) return raw;
+    const day = iso ? Number(iso[3]) : date.getUTCDate();
+    const year = iso ? Number(iso[1]) : date.getUTCFullYear();
+    const monthIndex = iso ? Number(iso[2]) - 1 : date.getUTCMonth();
+    const month = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December",
+    ][monthIndex] ?? "";
+    return `${month} ${day}${alternativeOrdinalSuffix(day)}, ${year}`;
+  };
+
+  const alternativeSearchText = (item: Record<string, any>): string => [
+    item.title,
+    item.community,
+    item.description,
+    item.notes,
+    item.address,
+    ...(Array.isArray(item.basicDetails) ? item.basicDetails : []),
+  ].map((part) => normalizeAlternativeText(part, 1000)).filter(Boolean).join(" ");
+
+  const extractAlternativeBedTypes = (value: unknown): string[] => {
+    const text = normalizeAlternativeText(value, 3000);
+    const matches: Array<{ label: string; re: RegExp }> = [
+      { label: "King Bed", re: /\bking(?:\s+bed)?s?\b/i },
+      { label: "Queen Bed", re: /\bqueen(?:\s+bed)?s?\b/i },
+      { label: "Twin Beds", re: /\btwin(?:\s+bed)?s?\b/i },
+      { label: "Full Bed", re: /\bfull(?:\s+bed)?s?\b/i },
+      { label: "Bunk Beds", re: /\bbunk(?:\s+bed)?s?\b/i },
+      { label: "Sleeper Sofa", re: /\b(?:sleeper\s+sofa|sofa\s+sleeper|pull[-\s]?out|hide[-\s]?a[-\s]?bed)\b/i },
+    ];
+    return matches.filter((match) => match.re.test(text)).map((match) => match.label);
+  };
+
+  const extractAlternativeAmenityTags = (value: unknown): string[] => {
+    const text = normalizeAlternativeText(value, 4000);
+    const matches: Array<{ label: string; re: RegExp }> = [
+      { label: "Full Kitchen", re: /\b(?:full\s+)?kitchen|stainless|appliance|cooktop|oven|refrigerator\b/i },
+      { label: "Pool", re: /\bpool\b/i },
+      { label: "Hot Tub", re: /\bhot\s*tub|spa\b/i },
+      { label: "Lanai", re: /\blanai|balcony|patio|terrace\b/i },
+      { label: "Air Conditioning", re: /\bair\s*conditioning|\bAC\b/i },
+      { label: "Wi-Fi", re: /\bwi[-\s]?fi|internet\b/i },
+      { label: "Parking", re: /\bparking|garage\b/i },
+      { label: "Washer/Dryer", re: /\bwasher|dryer|laundry\b/i },
+      { label: "BBQ Area", re: /\bBBQ|barbecue|grill\b/i },
+      { label: "Views", re: /\bview|ocean|mountain|garden\b/i },
+      { label: "Dining Area", re: /\bdining\b/i },
+      { label: "Tropical Grounds", re: /\btropical|grounds|landscap/i },
+    ];
+    return matches.filter((match) => match.re.test(text)).map((match) => match.label);
+  };
+
+  const cleanAlternativeGuestDescription = (value: unknown): string =>
+    normalizeAlternativeText(value, 1800)
+      .replace(/\b(?:with|there are|there is)\s+\d+\s+photos?\s+available[^.]*\.\s*/gi, "")
+      .replace(/\bphotos?\s+(?:are|were)\s+(?:available|provided)[^.]*\.\s*/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
   const extractAlternativeFactsFromText = (value: unknown): {
     bedrooms: number | null;
     bathrooms: number | null;
@@ -7714,8 +7811,8 @@ export async function registerRoutes(
   };
 
   const alternativeGuestDescriptionFallback = (item: Record<string, any>, stay: { checkIn?: string; checkOut?: string }): string => {
-    const title = normalizeAlternativeText(item.title || item.community || "this alternative option", 120);
-    const community = normalizeAlternativeText(item.community, 100);
+    const title = normalizeAlternativeText(item.unitLabel || item.community || "this alternative option", 120);
+    const community = displayAlternativeLabel(item.community, 100);
     const bedrooms = Number(item.bedrooms);
     const bathrooms = Number(item.bathrooms);
     const sleeps = Number(item.sleeps);
@@ -7726,7 +7823,7 @@ export async function registerRoutes(
     const detailText = [bedroomText, bathroomText, sleepsText].filter(Boolean).join(", ");
     return [
       `${title} is a comparable vacation rental${community ? ` in ${community}` : ""}.`,
-      `It offers ${detailText || bedroomText}, with the photos on this page available for review.`,
+      `It offers ${detailText || bedroomText}.`,
       address ? `The saved location detail is ${address}.` : "",
     ].filter(Boolean).join(" ");
   };
@@ -7749,7 +7846,6 @@ export async function registerRoutes(
       address: normalizeAlternativeText(item.address, 220),
       basicDetails: Array.isArray(item.basicDetails) ? item.basicDetails.slice(0, 8) : [],
       operatorNotes: normalizeAlternativeText(item.notes, 900),
-      photoCount: Array.isArray(item.photos) ? item.photos.length : 0,
     };
 
     try {
@@ -7778,7 +7874,8 @@ Requirements:
 - Do not mention buy-in, cost paid, internal operations, arbitrage, owner, supplier, confidence, or verification.
 - Do not mention VRBO, third-party marketplaces, source listings, or where the option came from.
 - Do not promise amenities not in the facts.
-- Focus on concrete property details: bedroom count, bathroom count, sleeps count, community, layout, address/location detail, and photos when available.
+- Do not mention photo counts, photos available, or that photos can be reviewed.
+- Focus on concrete property details: bedroom count, bathroom count, sleeps count, community, layout, address/location detail, bed types, and amenities that appear in the facts.
 - Return only the copy.`,
           }],
         }),
@@ -7787,12 +7884,27 @@ Requirements:
       if (!response.ok) {
         throw new Error(data?.error?.message ?? `HTTP ${response.status}`);
       }
-      const text = String(data?.content?.[0]?.text ?? "").trim();
+      const text = cleanAlternativeGuestDescription(data?.content?.[0]?.text);
       if (!text) throw new Error("empty AI response");
       return { description: text.slice(0, 1800), generatedBy: "ai" };
     } catch (error: any) {
       return { description: fallback, generatedBy: "fallback", warning: error?.message ?? String(error) };
     }
+  };
+
+  const alternativeIconSvg = (name: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "sleep" | "walk"): string => {
+    const paths: Record<string, string> = {
+      amenity: '<path d="M12 3l2.3 4.7 5.2.8-3.8 3.7.9 5.2L12 15l-4.6 2.4.9-5.2-3.8-3.7 5.2-.8L12 3z"/>',
+      bath: '<path d="M5 10V5a3 3 0 0 1 6 0v1"/><path d="M3 11h18v2a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5v-2z"/><path d="M7 21v-3"/><path d="M17 21v-3"/>',
+      bed: '<path d="M3 7v11"/><path d="M21 11v7"/><path d="M3 13h18"/><path d="M7 13V9a2 2 0 0 1 2-2h4a4 4 0 0 1 4 4v2"/>',
+      calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><path d="M3 9h18"/><rect x="3" y="4" width="18" height="18" rx="2"/>',
+      car: '<path d="M5 17h14"/><path d="M7 17l1-6h8l1 6"/><circle cx="8" cy="17" r="2"/><circle cx="16" cy="17" r="2"/><path d="M9 11l1-3h4l1 3"/>',
+      community: '<path d="M4 20V9l8-6 8 6v11"/><path d="M9 20v-6h6v6"/><path d="M4 12h16"/>',
+      home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/>',
+      sleep: '<path d="M3 8h12a4 4 0 0 1 4 4v5"/><path d="M3 5v14"/><path d="M3 17h18"/><path d="M7 8v9"/>',
+      walk: '<path d="M13 4a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/><path d="M9 21l2-6-2-4-3 3"/><path d="M12 9l3 3 3 1"/><path d="M11 15l5 6"/>',
+    };
+    return `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${paths[name]}</svg>`;
   };
 
   const firstNameForGuestMessage = (name: unknown): string => {
@@ -7950,33 +8062,80 @@ Requirements:
         usableCommunityContext(alternatives.find((item: any) => usableCommunityContext(item?.community))?.community) ||
         communityFromAlternativeTitle(alternatives.find((item: any) => communityFromAlternativeTitle(item?.title))?.title);
       const areaName = normalizeCommunityContext(payload.areaName) || originalCommunity || alternativeCommunity;
-      const communityDriveMinutes = Number(payload.communityDriveMinutes ?? payload.driveMinutes);
+      const originalCommunityDisplay = displayAlternativeLabel(originalCommunity);
+      const alternativeCommunityDisplay = displayAlternativeLabel(alternativeCommunity);
+      const areaNameDisplay = displayAlternativeLabel(areaName);
+      const communityDriveMinutes = Number(payload.communityDriveMinutes);
+      const unitWalkMinutes = Number(payload.unitWalkMinutes ?? payload.walkMinutes ?? payload.driveMinutes);
+      const stayDateText = [formatAlternativeDisplayDate(payload.checkIn), formatAlternativeDisplayDate(payload.checkOut)]
+        .filter(Boolean)
+        .join(" to ");
       const availabilityContext = originalCommunity && alternativeCommunity && !sameCommunityContext(originalCommunity, alternativeCommunity)
         ? Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0
-          ? `We have availability in ${escapeHtml(alternativeCommunity)}. This community is in ${escapeHtml(areaName)}, like your original community of ${escapeHtml(originalCommunity)}, and the two communities are only a short ${Math.round(communityDriveMinutes)}-minute drive from each other.`
-          : `We have availability in ${escapeHtml(alternativeCommunity)}. This community is in ${escapeHtml(areaName)}, like your original community of ${escapeHtml(originalCommunity)}, and the two communities are only a short drive from each other.`
+          ? `We have availability in ${escapeHtml(alternativeCommunityDisplay)}. This community is in ${escapeHtml(areaNameDisplay)}, like your original community of ${escapeHtml(originalCommunityDisplay)}, and the two communities are only a short ${Math.round(communityDriveMinutes)}-minute drive from each other.`
+          : `We have availability in ${escapeHtml(alternativeCommunityDisplay)}. This community is in ${escapeHtml(areaNameDisplay)}, like your original community of ${escapeHtml(originalCommunityDisplay)}, and the two communities are only a short drive from each other.`
         : alternativeCommunity
-          ? `We have availability in ${escapeHtml(alternativeCommunity)} for this stay.`
+          ? `We have availability in ${escapeHtml(alternativeCommunityDisplay)} for this stay.`
           : `We prepared ${alternatives.length === 1 ? "this unit" : "these units"} so you can review a comparable stay in the same general area.`;
       const totalBedrooms = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.bedrooms) > 0 ? Math.round(Number(item.bedrooms)) : 0), 0);
       const totalBathrooms = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.bathrooms) > 0 ? Number(item.bathrooms) : 0), 0);
       const totalSleeps = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.sleeps) > 0 ? Math.round(Number(item.sleeps)) : 0), 0);
+      const bedroomCounts = new Map<number, number>();
+      for (const item of alternatives) {
+        const bedrooms = Number(item?.bedrooms);
+        if (Number.isFinite(bedrooms) && bedrooms > 0) {
+          const rounded = Math.round(bedrooms);
+          bedroomCounts.set(rounded, (bedroomCounts.get(rounded) ?? 0) + 1);
+        }
+      }
+      const unitBedroomSummary = Array.from(bedroomCounts.entries())
+        .sort((a, b) => b[0] - a[0])
+        .map(([bedrooms, count]) => `${count}x ${bedrooms} Bedroom`)
+        .join(" + ");
       const overviewDetails = [
-        alternatives.length > 0 ? `${alternatives.length} unit${alternatives.length === 1 ? "" : "s"}` : "",
-        totalBedrooms > 0 ? `${totalBedrooms} bedroom${totalBedrooms === 1 ? "" : "s"} total` : "",
-        totalBathrooms > 0 ? `${formatAlternativeNumber(totalBathrooms)} bathroom${totalBathrooms === 1 ? "" : "s"} total` : "",
-        totalSleeps > 0 ? `sleeps up to ${totalSleeps}` : "",
-        alternativeCommunity ? `community: ${escapeHtml(alternativeCommunity)}` : "",
-        areaName ? `area: ${escapeHtml(areaName)}` : "",
-      ].filter(Boolean);
+        alternatives.length > 0 ? { icon: "home" as const, label: `${alternatives.length} Unit${alternatives.length === 1 ? "" : "s"}${unitBedroomSummary ? `: ${unitBedroomSummary}` : ""}` } : null,
+        totalBedrooms > 0 ? { icon: "bed" as const, label: `${totalBedrooms} Bedroom Total` } : null,
+        totalBathrooms > 0 ? { icon: "bath" as const, label: `${formatAlternativeNumber(totalBathrooms)} Bathroom Total` } : null,
+        totalSleeps > 0 ? { icon: "sleep" as const, label: `Sleeps ${totalSleeps}` } : null,
+        alternativeCommunityDisplay ? { icon: "community" as const, label: `Community: ${alternativeCommunityDisplay}` } : null,
+        Number.isFinite(unitWalkMinutes) && unitWalkMinutes > 0 ? { icon: "walk" as const, label: `Unit Walking Distance: ${Math.round(unitWalkMinutes)} Minute Walk` } : null,
+        Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "car" as const, label: `Community Drive: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
+      ].filter(Boolean) as Array<{ icon: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "sleep" | "walk"; label: string }>;
       const overviewBlock = overviewDetails.length
-        ? `<div class="overview">${overviewDetails.map((detail) => `<span>${detail}</span>`).join("")}</div>`
+        ? `<div class="overview">${overviewDetails.map((detail) => `<span class="overview-chip">${alternativeIconSvg(detail.icon)}${escapeHtml(detail.label)}</span>`).join("")}</div>`
+        : "";
+      const safeGuestPhotoUrl = (value: unknown): string => {
+        const url = String(value ?? "").trim().slice(0, 1400);
+        return /^(?:https?:\/\/|\/)/i.test(url) ? url : "";
+      };
+      const communityPhotoUrls = Array.from(new Set(alternatives.flatMap((item: any) =>
+        Array.isArray(item?.communityPhotos) ? item.communityPhotos.map(safeGuestPhotoUrl).filter(Boolean) : [],
+      ))).slice(0, 6);
+      const attachedPhotoUrls = Array.from(new Set(alternatives.flatMap((item: any) => [
+        safeGuestPhotoUrl(item?.image),
+        ...(Array.isArray(item?.photos) ? item.photos.map(safeGuestPhotoUrl) : []),
+      ].filter(Boolean)))).slice(0, 6);
+      const topCommunityPhotos = (communityPhotoUrls.length > 0 ? communityPhotoUrls : attachedPhotoUrls).slice(0, 6);
+      const topAmenities = Array.from(new Map(alternatives
+        .flatMap((item: any) => extractAlternativeAmenityTags(alternativeSearchText(item)))
+        .map((label) => [label.toLowerCase(), label] as const)).values()).slice(0, 10);
+      const topCommunityBlock = topCommunityPhotos.length || topAmenities.length
+        ? `<section class="community-preview">
+            <div class="section-heading">
+              <p class="eyebrow">${escapeHtml(alternativeCommunityDisplay || areaNameDisplay || "Community")}</p>
+              <h2>Community & Amenity Preview</h2>
+            </div>
+            ${topCommunityPhotos.length ? `<div class="community-gallery">${topCommunityPhotos.map((url, index) => `
+              <figure>
+                <img src="${escapeHtml(url)}" alt="${escapeHtml(alternativeCommunityDisplay || areaNameDisplay || "Community")} photo ${index + 1}" loading="${index === 0 ? "eager" : "lazy"}" />
+              </figure>`).join("")}</div>` : ""}
+            ${topAmenities.length ? `<div class="amenities">${topAmenities.map((tag) => `<span>${alternativeIconSvg("amenity")}${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+          </section>`
         : "";
       const photoBlocks = alternatives.map((item: any, index: number) => {
         const photos = Array.from(new Set([
-          item.image,
-          ...(Array.isArray(item.photos) ? item.photos : []),
-          ...(Array.isArray(item.communityPhotos) ? item.communityPhotos : []),
+          safeGuestPhotoUrl(item.image),
+          ...(Array.isArray(item.photos) ? item.photos.map(safeGuestPhotoUrl) : []),
         ].filter(Boolean)))
           .slice(0, 10);
         const carousel = photos.length > 0
@@ -7991,29 +8150,48 @@ Requirements:
               ${photos.length > 1 ? `
                 <div class="carousel-nav">
                   <button type="button" data-carousel-prev aria-label="Previous photo">Previous</button>
-                  <span>${photos.length} photos</span>
+                  <span>${index + 1} / ${alternatives.length}</span>
                   <button type="button" data-carousel-next aria-label="Next photo">Next</button>
                 </div>` : ""}
             </div>`
           : `<div class="empty-photos">Photos are still being gathered for this option.</div>`;
+        const unitCommunityDisplay = displayAlternativeLabel(item.community || alternativeCommunityDisplay, 100);
+        const unitBedrooms = Number(item.bedrooms);
+        const unitBathrooms = Number(item.bathrooms);
+        const unitSleeps = Number(item.sleeps);
+        const bedroomLabel = Number.isFinite(unitBedrooms) && unitBedrooms > 0 ? `${Math.round(unitBedrooms)} Bedroom` : "";
+        const bathroomLabel = Number.isFinite(unitBathrooms) && unitBathrooms > 0 ? `${formatAlternativeNumber(unitBathrooms)} Bathroom` : "";
+        const sleepLabel = Number.isFinite(unitSleeps) && unitSleeps > 0 ? `Sleeps ${Math.round(unitSleeps)}` : "";
+        const unitText = alternativeSearchText(item);
+        const bedTypes = extractAlternativeBedTypes(unitText);
+        const featureTags = extractAlternativeAmenityTags(unitText).slice(0, 8);
+        const bedTypeText = bedTypes.length
+          ? bedTypes.join(", ")
+          : [bedroomLabel, sleepLabel].filter(Boolean).join(" - ");
+        const description = cleanAlternativeGuestDescription(item.description);
         const details = [
-          item.bedrooms ? `${escapeHtml(item.bedrooms)} bedroom${Number(item.bedrooms) === 1 ? "" : "s"}` : "",
-          item.bathrooms ? `${escapeHtml(formatAlternativeNumber(item.bathrooms))} bathroom${Number(item.bathrooms) === 1 ? "" : "s"}` : "",
-          item.sleeps ? `sleeps ${escapeHtml(item.sleeps)}` : "",
+          bedroomLabel,
+          bathroomLabel,
+          sleepLabel,
           item.unitLabel ? escapeHtml(item.unitLabel) : "",
-          ...(Array.isArray(item.basicDetails) ? item.basicDetails.slice(0, 4).map((detail: string) => escapeHtml(detail)) : []),
           item.address ? escapeHtml(item.address) : "",
         ].filter(Boolean);
+        const unitDescriptor = [bedroomLabel, normalizeAlternativeText(item.unitLabel, 80)].filter(Boolean).join(" - ");
+        const unitSubtitle = [unitDescriptor, unitCommunityDisplay ? `at ${unitCommunityDisplay}` : ""].filter(Boolean).join(" ");
         return `
           <section class="option">
             <div class="option-copy">
               <p class="eyebrow">Unit ${index + 1}</p>
-              <h2>${escapeHtml(item.title || item.community || "Alternative stay")}</h2>
-              ${item.community ? `<p class="community">${escapeHtml(item.community)}</p>` : ""}
+              <h2>Unit ${index + 1}</h2>
+              <p class="community">${escapeHtml(unitSubtitle || "Alternative stay")}</p>
               ${details.length ? `<div class="details">${details.map((detail) => `<span>${detail}</span>`).join("")}</div>` : ""}
             </div>
             ${carousel}
-            ${item.description ? `<p class="description">${escapeHtml(item.description)}</p>` : ""}
+            ${(bedTypeText || featureTags.length) ? `<div class="unit-facts">
+              ${bedTypeText ? `<div><p class="fact-label">Bed Types</p><p>${escapeHtml(bedTypeText)}</p></div>` : ""}
+              ${featureTags.length ? `<div><p class="fact-label">Unit Features</p><div class="feature-tags">${featureTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div></div>` : ""}
+            </div>` : ""}
+            ${description ? `<p class="description">${escapeHtml(description)}</p>` : ""}
             ${item.showSourceLink && item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
           </section>`;
       }).join("");
@@ -8022,39 +8200,83 @@ Requirements:
         <html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
         <title>Alternative Stay Options</title>
         <style>
-          body{font-family:Inter,Arial,sans-serif;margin:0;background:#f6f8fb;color:#172033;line-height:1.55}
-          header{padding:34px 20px;background:#0f766e;color:white}
-          header div{max-width:1040px;margin:0 auto}
-          main{max-width:1040px;margin:0 auto;padding:24px 16px 52px}
-          .intro{font-size:16px;color:#45556b;margin:0 0 18px}
-          .overview{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}
-          .overview span{border:1px solid #0f766e33;border-radius:999px;background:#ecfdf5;color:#115e59;padding:6px 11px;font-size:13px;font-weight:700}
-          .option{background:white;border:1px solid #dbe4ea;border-radius:10px;padding:18px;margin:0 0 18px;box-shadow:0 8px 20px rgba(15,23,42,.06)}
-          .option-copy{max-width:860px}
-          .eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;margin:0 0 4px}
-          .community{color:#475569;margin:.2rem 0 .8rem}
-          h1,h2{margin:.2rem 0;line-height:1.15}
-          h1{font-size:clamp(28px,5vw,46px)}
-          h2{font-size:clamp(22px,3.4vw,32px)}
+          *{box-sizing:border-box}
+          body{font-family:Inter,Arial,sans-serif;margin:0;background:#f4f7f2;color:#172033;line-height:1.55}
+          .hero{background:linear-gradient(135deg,#0b5f5a 0%,#14867c 58%,#e6bd6b 100%);color:white;padding:28px 20px 76px}
+          .hero-inner{max-width:1120px;margin:0 auto;display:grid;gap:28px}
+          .brand-logo{width:min(300px,74vw);height:auto;filter:drop-shadow(0 10px 18px rgba(0,0,0,.16))}
+          .hero-copy{max-width:760px}
+          .eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:800;margin:0 0 6px;color:#2f5f68}
+          .hero .eyebrow{color:#dff8ee}
+          h1,h2,h3{margin:.2rem 0;line-height:1.12}
+          h1{font-size:clamp(34px,5vw,58px);max-width:760px}
+          h2{font-size:clamp(24px,3vw,34px)}
+          h3{font-size:17px}
+          .stay-line{display:inline-flex;align-items:center;gap:8px;margin:10px 0 0;color:#f9fffb;font-size:18px;font-weight:700}
+          .stay-line svg{width:19px;height:19px;flex:0 0 19px}
+          main{max-width:1120px;margin:-46px auto 0;padding:0 16px 56px}
+          .intro-panel,.community-preview,.option{background:rgba(255,255,255,.97);border:1px solid rgba(20,86,82,.14);border-radius:8px;box-shadow:0 18px 42px rgba(29,62,72,.11)}
+          .intro-panel{padding:24px;margin:0 0 18px}
+          .intro{font-size:18px;color:#35465a;margin:0 0 18px}
+          .overview{display:flex;flex-wrap:wrap;gap:10px;margin:0}
+          .overview-chip{display:inline-flex;align-items:center;gap:8px;border:1px solid #bae6d7;border-radius:999px;background:#f0fdf7;color:#125c56;padding:8px 12px;font-size:14px;font-weight:800}
+          .overview-chip svg{width:17px;height:17px;flex:0 0 17px}
+          .community-preview{padding:20px;margin:0 0 18px}
+          .section-heading{display:flex;align-items:end;justify-content:space-between;gap:14px;margin:0 0 14px}
+          .community-gallery{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;margin:0 0 14px}
+          .community-gallery figure{margin:0;min-height:130px}
+          .community-gallery figure:first-child{grid-row:span 2}
+          .community-gallery img{width:100%;height:100%;min-height:130px;object-fit:cover;border-radius:8px;display:block;background:#e6edf0}
+          .amenities,.feature-tags{display:flex;flex-wrap:wrap;gap:8px}
+          .amenities span,.feature-tags span{display:inline-flex;align-items:center;gap:6px;border:1px solid #d5e5dd;background:#fbf8ef;color:#49513c;border-radius:999px;padding:7px 10px;font-size:13px;font-weight:700}
+          .amenities svg{width:15px;height:15px;flex:0 0 15px;color:#0f766e}
+          .option{padding:22px;margin:0 0 20px}
+          .option-copy{max-width:900px}
+          .community{color:#526176;margin:.3rem 0 .8rem;font-weight:700}
           .details{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
-          .details span{border:1px solid #d7e1e8;border-radius:999px;padding:5px 10px;background:#f8fafc;font-size:13px;color:#334155}
-          .description{white-space:pre-line;font-size:15px;color:#263446;margin:14px 0}
-          .carousel{margin-top:16px}
-          .carousel-track{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;padding:0 0 8px;-webkit-overflow-scrolling:touch}
-          .slide{flex:0 0 min(82vw,520px);margin:0;scroll-snap-align:start}
-          .slide img{width:100%;height:300px;object-fit:cover;border-radius:8px;background:#eef2f7;display:block}
+          .details span{border:1px solid #d8e3e8;border-radius:999px;padding:6px 10px;background:#f8fbfc;font-size:13px;color:#334155;font-weight:700}
+          .carousel{margin-top:18px}
+          .carousel-track{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;padding:0 0 10px;-webkit-overflow-scrolling:touch}
+          .slide{flex:0 0 min(84vw,520px);margin:0;scroll-snap-align:start}
+          .slide img{width:100%;height:310px;object-fit:cover;border-radius:8px;background:#eef2f7;display:block}
           figcaption{font-size:12px;color:#64748b;margin-top:5px}
           .carousel-nav{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:6px;color:#64748b;font-size:13px}
-          .carousel-nav button{border:1px solid #cbd5e1;background:#fff;color:#0f766e;border-radius:8px;padding:6px 10px;font-weight:700;cursor:pointer}
-          .carousel-nav button:hover{background:#ecfdf5}
-          .empty-photos{margin-top:16px;border:1px dashed #cbd5e1;border-radius:8px;background:#f8fafc;color:#64748b;padding:18px;font-size:14px}
-          a{color:#0f766e;font-weight:700}
-          footer{margin-top:28px;color:#64748b;font-size:13px}
+          .carousel-nav button{border:1px solid #bdd6d1;background:#fff;color:#0f766e;border-radius:8px;padding:7px 11px;font-weight:800;cursor:pointer}
+          .carousel-nav button:hover{background:#eefbf5}
+          .unit-facts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:16px;margin:16px 0 0;padding:16px;border:1px solid #e2ebe7;border-radius:8px;background:#fbfdfb}
+          .unit-facts p{margin:.2rem 0;color:#36465a}
+          .fact-label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#607082!important;font-weight:900}
+          .description{white-space:pre-line;font-size:15px;color:#263446;margin:16px 0 0}
+          .empty-photos{margin-top:16px;border:1px dashed #bdd0d6;border-radius:8px;background:#f8fafc;color:#64748b;padding:18px;font-size:14px}
+          a{color:#0f766e;font-weight:800}
+          footer{margin-top:28px;color:#64748b;font-size:13px;text-align:center}
+          @media (max-width:760px){
+            .hero{padding:22px 16px 66px}
+            main{margin-top:-38px;padding-inline:12px}
+            .intro-panel,.community-preview,.option{padding:16px}
+            .community-gallery{grid-template-columns:1fr 1fr}
+            .community-gallery figure:first-child{grid-column:span 2;grid-row:auto}
+            .unit-facts{grid-template-columns:1fr}
+            .slide img{height:260px}
+            .section-heading{display:block}
+          }
         </style></head><body>
-        <header><div><h1>Alternative stay options</h1><p>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(payload.checkIn || "")} to ${escapeHtml(payload.checkOut || "")}</p></div></header>
+        <header class="hero">
+          <div class="hero-inner">
+            <img class="brand-logo" src="/brand/vacation-rental-expertz-horizontal-transparent.png" alt="VacationRentalExpertz" />
+            <div class="hero-copy">
+              <p class="eyebrow">VacationRentalExpertz</p>
+              <h1>Alternative Stay Options</h1>
+              <p class="stay-line">${alternativeIconSvg("calendar")}<span>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(stayDateText || "Dates to be confirmed")}</span></p>
+            </div>
+          </div>
+        </header>
         <main>
-          <p class="intro">${availabilityContext}</p>
-          ${overviewBlock}
+          <section class="intro-panel">
+            <p class="intro">${availabilityContext}</p>
+            ${overviewBlock}
+          </section>
+          ${topCommunityBlock}
           ${photoBlocks || "<p>No alternative options were attached to this page yet.</p>"}
           <footer>Photos and details are provided for review and may be finalized before arrival details are sent.</footer>
         </main>
@@ -8178,13 +8400,17 @@ Requirements:
         usableCommunityContext(hydratedAlternatives.find((item) => usableCommunityContext(item.community))?.community) ||
         communityFromAlternativeTitle(hydratedAlternatives.find((item) => communityFromAlternativeTitle(item.title))?.title);
       const explicitCommunityDriveMinutes = Number(req.body?.communityDriveMinutes);
-      const fallbackDriveMinutes = Number(req.body?.driveMinutes ?? req.body?.walkMinutes);
+      const fallbackDriveMinutes = Number(req.body?.driveMinutes);
+      const explicitUnitWalkMinutes = Number(req.body?.unitWalkMinutes ?? req.body?.walkMinutes);
       const estimatedCommunityDriveMinutes = await estimateCommunityDriveMinutes(originalCommunity, alternativeCommunity, areaName);
       const communityDriveMinutes = Number.isFinite(explicitCommunityDriveMinutes) && explicitCommunityDriveMinutes > 0
         ? Math.round(explicitCommunityDriveMinutes)
         : estimatedCommunityDriveMinutes ?? (Number.isFinite(fallbackDriveMinutes) && fallbackDriveMinutes > 0
           ? Math.round(fallbackDriveMinutes)
           : null);
+      const unitWalkMinutes = Number.isFinite(explicitUnitWalkMinutes) && explicitUnitWalkMinutes > 0
+        ? Math.round(explicitUnitWalkMinutes)
+        : null;
       const payload = {
         reservationId,
         guestName: stay.guestName || "Guest",
@@ -8194,6 +8420,7 @@ Requirements:
         areaName,
         alternativeCommunity,
         communityDriveMinutes,
+        unitWalkMinutes,
         alternatives: hydratedAlternatives,
         createdAt: new Date().toISOString(),
         expiresAt,
@@ -8211,7 +8438,7 @@ Requirements:
         expiresAt: new Date(expiresAt),
       }).catch((e) => console.error("[booking-alternatives] DB save failed:", e?.message ?? e));
       const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
-      const walkMinutes = Number(req.body?.walkMinutes) || null;
+      const walkMinutes = unitWalkMinutes;
       const rawLabel = normalizeAlternativeText(req.body?.propertyLabel, 120)
         || hydratedAlternatives[0]?.community
         || "";

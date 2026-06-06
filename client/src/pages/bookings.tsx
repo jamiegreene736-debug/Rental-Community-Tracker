@@ -4723,7 +4723,8 @@ export default function Bookings() {
         originalCommunity: originalCommunityName || originalCommunity,
         areaName: originalArea || originalCommunity,
         alternativeCommunity: primaryAlternativeCommunity,
-        driveMinutes: readyProximity?.walk?.minutes ?? null,
+        unitWalkMinutes: readyProximity?.walk?.minutes ?? null,
+        walkMinutes: readyProximity?.walk?.minutes ?? null,
         alternatives,
       }).then((r) => r.json());
       if (!response?.url) throw new Error(response?.message || response?.error || "Alternative page create failed");
