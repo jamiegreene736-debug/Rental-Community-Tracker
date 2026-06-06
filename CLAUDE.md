@@ -43,6 +43,37 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-06 (AI Draft voice → expert reservationist, PR #551):
+  Operator asked to make the guest-inbox AI drafts "much better… think like an
+  expert vacation rental booker," still signed John Carpenter. Both draft prompts
+  were almost entirely DEFENSIVE (long "don't say X" + AI-tell lists) with no
+  positive guidance on how an expert reservationist actually replies → safe but
+  flat. Added an **EXPERT JUDGMENT** layer to BOTH prompts:
+  `SYSTEM_PROMPT` in `server/auto-reply.ts` (the AI Draft Approval queue) and the
+  `HUMAN_VOICE_RULES` block in `server/routes.ts` `POST /api/inbox/ai-draft`
+  (the manual compose-box draft). The layer = read the question behind the
+  question; be decisive/confident (state fetched facts plainly, drop hedging
+  words); set expectations honestly (confirmed-now vs assigned-later, never
+  over-promise the unit assignment); offer at MOST ONE fact-based anticipatory
+  detail tied to the guest's stated need (explicit "skip if nothing fits" guard
+  so it can't become amenity spam); calibrate warmth to the guest's tone.
+  **Load-bearing / DON'T REVERT to defensive-only:** the expert layer is
+  intentional and is designed to work WITH `humanize-reply.ts` (which deletes
+  closers/warm-ups/em-dashes) — that's why "momentum" is reframed as confidence +
+  clarity, NOT a closing line. The full AGENTS.md #24 safety stack
+  (flag categories + the never-commit list + RISK_KEYWORDS + OUTPUT_RISK_PATTERNS)
+  and the EXACT `John Carpenter / Reservationist / Magical Island Rentals`
+  sign-off (matched by `ensureSignoff` + humanize `SIGNATURE_MARKERS`) are
+  preserved verbatim-equivalent. Deliberately did NOT add any line that commits to
+  an ADA/mobility accommodation — that stays a flag case (a candidate rewrite that
+  did was rejected in review). Built via a 9-agent design workflow (4 expert
+  lenses → adversarial critique → synthesis). Verified: `npm run check` adds no
+  new errors in the two touched files, `npm run build` passes; Railway deploy
+  `eacc7c38` SUCCESS + healthy (base 302→/login, gated API 401). Could not
+  behaviorally smoke the drafting endpoint live — the `ADMIN_SECRET` portal gate
+  is now active on this deploy and no secret was available; confirm via "Redo AI
+  Draft" or the next auto-reply tick.
+
 - 2026-06-06 (photos tab: "Check photo community" QA button):
   Operator asked for a button on the photos tab that confirms (1) the community
   name of the photos in the community folder, (2) that ALL community photos are
