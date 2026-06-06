@@ -96,7 +96,7 @@ import {
 import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts } from "./auto-reply";
-import { loopbackRequestHeaders } from "./auth";
+import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
@@ -7833,6 +7833,61 @@ Requirements:
     ].join("\n");
   };
 
+  // Make a message body safe to send through Booking.com's guest messaging,
+  // which strips rich text and rejects/garbles non-ASCII. Plain ASCII only,
+  // straight quotes, hyphens for dashes, single blank lines between paragraphs.
+  const sanitizeForBookingChannel = (text: string): string =>
+    String(text ?? "")
+      .normalize("NFKD")
+      .replace(/[‘’‛]/g, "'")
+      .replace(/[“”]/g, '"')
+      .replace(/[–—]/g, "-")
+      .replace(/[…]/g, "...")
+      .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+
+  // Guest-facing apology/relocation message: we had to move the guest to a
+  // comparable property and the new option (with photos + details) lives on the
+  // tokenized guest page. Channel-aware formatting — for Booking.com the body
+  // is ASCII-sanitized and the URL sits on its own line so the channel renders
+  // it cleanly once the property allowlists the link in the extranet.
+  const buildRelocationGuestMessage = (args: {
+    guestName?: string;
+    channel?: string | null;
+    alternativeUrl: string;
+    walkMinutes?: number | null;
+    propertyLabel?: string | null;
+  }): string => {
+    const firstName = firstNameForGuestMessage(args.guestName);
+    const greeting = firstName ? `Hi ${firstName},` : "Hi,";
+    const channel = String(args.channel ?? "").toLowerCase();
+    const walkMinutes = Number(args.walkMinutes);
+    const walkLine = Number.isFinite(walkMinutes) && walkMinutes > 0
+      ? `The units in this option are about a ${Math.round(walkMinutes)}-minute walk from each other.`
+      : "";
+    const place = String(args.propertyLabel ?? "").trim() || "a comparable nearby community";
+    const lines = [
+      greeting,
+      "",
+      `I am very sorry, but we have had an unexpected issue with the unit you originally booked and it is no longer available for your dates. To make sure your trip is not disrupted, I have arranged a comparable stay for you at ${place}.`,
+      "",
+      "You can see photos and full details of the replacement on this page:",
+      args.alternativeUrl,
+      "",
+      ...(walkLine ? [walkLine, ""] : []),
+      "Please take a look and let me know if this works for you. If it does, I will send your full arrival details within 24 to 48 hours. If you would prefer not to move, I completely understand and will issue a full refund right away.",
+      "",
+      "Again, I am sorry for the inconvenience and I truly appreciate your understanding.",
+      "",
+      "Mahalo,",
+      "John Carpenter",
+    ];
+    const body = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    return channel.includes("booking") ? sanitizeForBookingChannel(body) : body;
+  };
+
   const cleanGuestyConversationModule = (mod: any): Record<string, unknown> => {
     const clean: Record<string, unknown> = {};
     if (mod && typeof mod === "object") {
@@ -7858,12 +7913,34 @@ Requirements:
     try {
       const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
       if (!token) return res.status(404).send("Not found");
-      const file = path.join(process.cwd(), "tmp", "booking-alternatives", `${token}.json`);
-      const raw = await fs.promises.readFile(file, "utf8").catch(() => null);
-      if (!raw) return res.status(404).send("Alternative page not found");
-      const payload = JSON.parse(raw);
-      if (payload.expiresAt && Date.parse(payload.expiresAt) < Date.now()) {
-        return res.status(410).send("This alternative page has expired.");
+      // Durable DB store first (survives deploys); fall back to the legacy
+      // ephemeral tmp file for pages created before the DB store existed.
+      const dbPage = await storage.getBookingAlternativePage(token).catch(() => null);
+      let payload: any = null;
+      if (dbPage) {
+        if (dbPage.expiresAt && dbPage.expiresAt.getTime() < Date.now()) {
+          return res.status(410).send("This alternative page has expired.");
+        }
+        payload = dbPage.payload;
+      } else {
+        const file = path.join(process.cwd(), "tmp", "booking-alternatives", `${token}.json`);
+        const raw = await fs.promises.readFile(file, "utf8").catch(() => null);
+        if (!raw) return res.status(404).send("Alternative page not found");
+        payload = JSON.parse(raw);
+        if (payload.expiresAt && Date.parse(payload.expiresAt) < Date.now()) {
+          return res.status(410).send("This alternative page has expired.");
+        }
+      }
+      // Open tracking: count only genuine guest opens. Operator previews carry
+      // the admin session (cookie/header) and an explicit ?preview=1 is also
+      // excluded, so the "did the guest open it" signal stays clean.
+      if (dbPage) {
+        const adminSecret = process.env.ADMIN_SECRET ?? "";
+        const isOperator = adminSecret ? !!resolvePortalSession(req, adminSecret) : false;
+        const isPreview = String(req.query.preview ?? "") === "1";
+        if (!isOperator && !isPreview) {
+          void storage.recordBookingAlternativePageOpen(token).catch(() => {});
+        }
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
       const originalCommunity = normalizeCommunityContext(payload.originalCommunity);
@@ -8093,6 +8170,8 @@ Requirements:
           descriptionWarning: drafted.warning ?? null,
         };
       }));
+      const reservationId = String(req.body?.reservationId ?? "");
+      const channel = normalizeAlternativeText(req.body?.channel, 40) || null;
       const alternativeCommunity =
         usableCommunityContext(req.body?.alternativeCommunity) ||
         usableCommunityContext(hydratedAlternatives.find((item) => usableCommunityContext(item.alternativeCommunity))?.alternativeCommunity) ||
@@ -8107,7 +8186,7 @@ Requirements:
           ? Math.round(fallbackDriveMinutes)
           : null);
       const payload = {
-        reservationId: String(req.body?.reservationId ?? ""),
+        reservationId,
         guestName: stay.guestName || "Guest",
         checkIn: stay.checkIn,
         checkOut: stay.checkOut,
@@ -8120,15 +8199,42 @@ Requirements:
         expiresAt,
       };
       await fs.promises.writeFile(path.join(dir, `${token}.json`), JSON.stringify(payload, null, 2));
+      // Durable copy for link survival + open tracking (best-effort).
+      await storage.saveBookingAlternativePage({
+        token,
+        reservationId: reservationId || null,
+        channel,
+        guestName: stay.guestName || "Guest",
+        checkIn: stay.checkIn || null,
+        checkOut: stay.checkOut || null,
+        payload,
+        expiresAt: new Date(expiresAt),
+      }).catch((e) => console.error("[booking-alternatives] DB save failed:", e?.message ?? e));
       const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
+      const walkMinutes = Number(req.body?.walkMinutes) || null;
+      const rawLabel = normalizeAlternativeText(req.body?.propertyLabel, 120)
+        || hydratedAlternatives[0]?.community
+        || "";
+      // Keep the lead segment so a raw listing title ("Princeville - 5BR Condos
+      // - Sleeps 14") reads as just the community in the apology copy.
+      const propertyLabel = rawLabel ? (rawLabel.split(/\s+[-–—|]\s+/)[0].trim() || rawLabel) : null;
       return res.json({
         url,
+        token,
+        channel,
         expiresAt,
         alternatives: hydratedAlternatives,
         guestMessage: buildAlternativeGuestInboxMessage({
           guestName: stay.guestName,
           alternativeUrl: url,
-          walkMinutes: Number(req.body?.walkMinutes) || null,
+          walkMinutes,
+        }),
+        relocationMessage: buildRelocationGuestMessage({
+          guestName: stay.guestName,
+          channel,
+          alternativeUrl: url,
+          walkMinutes,
+          propertyLabel,
         }),
       });
     } catch (err: any) {
@@ -8195,14 +8301,38 @@ Requirements:
         expiresAt,
       };
       await fs.promises.writeFile(path.join(dir, `${token}.json`), JSON.stringify(payload, null, 2));
+      const channel = normalizeAlternativeText(req.body?.channel, 40) || null;
+      await storage.saveBookingAlternativePage({
+        token,
+        reservationId: payload.reservationId || null,
+        channel,
+        guestName: stay.guestName || "Guest",
+        checkIn: stay.checkIn || null,
+        checkOut: stay.checkOut || null,
+        payload,
+        expiresAt: new Date(expiresAt),
+      }).catch((e) => console.error("[booking-alternatives/from-vrbo] DB save failed:", e?.message ?? e));
       const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
+      const walkMinutes = Number(req.body?.walkMinutes) || null;
+      const propertyLabel = normalizeAlternativeText(req.body?.propertyName || req.body?.community, 120)
+        || hydratedAlternatives[0]?.community
+        || null;
       return res.json({
         url,
+        token,
+        channel,
         expiresAt,
         guestMessage: buildAlternativeGuestInboxMessage({
           guestName: stay.guestName,
           alternativeUrl: url,
-          walkMinutes: Number(req.body?.walkMinutes) || null,
+          walkMinutes,
+        }),
+        relocationMessage: buildRelocationGuestMessage({
+          guestName: stay.guestName,
+          channel,
+          alternativeUrl: url,
+          walkMinutes,
+          propertyLabel,
         }),
         alternatives: hydratedAlternatives.map((item, index) => ({
           title: item.title,
@@ -8219,6 +8349,8 @@ Requirements:
   app.post("/api/booking-alternatives/send-guest-message", async (req, res) => {
     try {
       const reservationId = normalizeAlternativeText(req.body?.reservationId, 120);
+      const token = String(req.body?.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+      const channel = normalizeAlternativeText(req.body?.channel, 40) || null;
       const body = sanitizeForChatText(String(req.body?.body ?? ""), { maxLength: 4_000 }).trim();
       if (!reservationId) return res.status(400).json({ error: "reservationId required" });
       if (!body) return res.status(400).json({ error: "message body required" });
@@ -8226,13 +8358,44 @@ Requirements:
       const conversation = await findGuestyConversationForReservation(reservationId);
       if (!conversation) return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
 
+      // The conversation's module carries the channel the guest booked through,
+      // so Guesty routes this to VRBO/Booking.com/Airbnb accordingly.
       await guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversation.id)}/send-message`, {
         body,
         module: conversation.module,
       });
+      if (token) {
+        await storage.markBookingAlternativePageSent(token, channel).catch((e) =>
+          console.error("[booking-alternatives] mark-sent failed:", e?.message ?? e));
+      }
       return res.json({ ok: true, conversationId: conversation.id });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to send guest message", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Open-tracking status for a guest alternative page (operator-only; under /api
+  // so the admin auth gate applies). `opened` flips true once a non-operator
+  // GET of /alternatives/:token is recorded.
+  app.get("/api/booking-alternatives/:token/tracking", async (req, res) => {
+    try {
+      const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+      if (!token) return res.status(400).json({ error: "token required" });
+      const page = await storage.getBookingAlternativePage(token);
+      if (!page) return res.status(404).json({ error: "alternative page not found" });
+      return res.json({
+        token,
+        channel: page.channel,
+        messageSentAt: page.messageSentAt,
+        messageChannel: page.messageChannel,
+        opened: !!page.firstOpenedAt,
+        firstOpenedAt: page.firstOpenedAt,
+        lastOpenedAt: page.lastOpenedAt,
+        openCount: page.openCount,
+        expiresAt: page.expiresAt,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to read tracking", message: err?.message ?? String(err) });
     }
   });
 
