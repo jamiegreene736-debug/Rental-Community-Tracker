@@ -43,6 +43,39 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-06 (relocation: row "messaged" badge + city-scan auto-attach/override):
+  THREE bookings-page changes (`client/src/pages/bookings.tsx` + one new server
+  endpoint in `server/routes.ts`).
+  1. **Persistent "Guest messaged ✓" badge.** `markBookingAlternativePageSent`
+     already stamps `messageSentAt` per token, but each `RelocateGuestDialog`
+     open mints a NEW token, so per-token tracking can't drive a row badge. New
+     batch endpoint `POST /api/booking-alternatives/sent-status` takes
+     `{reservationIds}` and returns, per reservation, the most recent SENT page
+     (newest-first via `getBookingAlternativePagesByReservation`, first with
+     `messageSentAt`) + its open-tracking. The bookings list queries it for the
+     visible rows and renders an emerald "Guest messaged <date> · opened ✓"
+     badge once per reservation (on the first filled slot, next to "Message
+     guest"). The dialog's send-success invalidates `["/api/booking-alternatives/
+     sent-status"]` so the badge appears immediately.
+  2. **City VRBO scan auto-attaches the cheapest same-community pair.**
+     `CityVrboInventoryPanel` previously required clicking "Attach matched
+     combo". Now, on an OPERATOR-initiated "Scan city VRBO", if a `suggestedPair`
+     comes back (server's `suggestCityVrboComboPair` = cheapest walkable pair
+     sharing a resort phrase) AND the booking's slots are still empty, it calls
+     `onAttachCombo` automatically + toasts. No pair → a "No matching pair"
+     toast (the requested pop-up). **Load-bearing:** auto-attach is gated to
+     manual scans via `manualScanRef` — `autoScanTrigger` (Auto-fill-cheapest)
+     scans do NOT auto-attach here, because that flow does its OWN city attach
+     (routes ~5854) and racing it would double-attach the empty slots. Also
+     gated to `slotsAllEmpty` so we never clobber already-attached units.
+  3. **Manual per-unit override.** The panel renders one `<select>` per unit
+     slot (filtered to that slot's bedroom count, cheapest-first, dupes
+     disabled), seeded from the suggested pair. "Attach selected units" builds
+     an `AutoFillComboOption` (picks in slot order, so `attachComboMutation`'s
+     `picks[index]→slots[index]` mapping holds) and attaches the custom pair.
+  Verified: `npm run build` passes; typecheck adds no new errors in the touched
+  regions (repo-wide pre-existing errors remain).
+
 - 2026-06-06 (relocation message to guest via booking channel + open tracking, PR #532):
   New reservation-row button "Message guest about move" (`RelocateGuestDialog`
   in `bookings.tsx`, shown once buy-ins are attached on a non-manual booking).

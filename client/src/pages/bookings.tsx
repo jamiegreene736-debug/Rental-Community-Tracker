@@ -273,6 +273,18 @@ type AutoFillSearchSummary = {
   groundFloorOnly: boolean;
 };
 
+// Persistent "did we already message this guest about the move?" record, keyed
+// by reservation. Drives the "Guest messaged ✓" badge on the bookings row.
+type RelocationSentStatus = {
+  token: string;
+  messageSentAt: string | null;
+  messageChannel: string | null;
+  opened: boolean;
+  firstOpenedAt: string | null;
+  lastOpenedAt: string | null;
+  openCount: number;
+};
+
 type BuyInCancellationTier = "do_not_cancel" | "watch" | "consider_cancel" | "strong_cancel" | "cancel";
 
 type BuyInCancellationAdvice = {
@@ -1321,6 +1333,17 @@ function CityVrboInventoryPanel({
   /** Bumped by Auto-fill cheapest when resort search fails so the panel runs without a manual click. */
   autoScanTrigger?: number;
 }) {
+  const { toast } = useToast();
+  // One auto-action per scan result: auto-attach the cheapest same-community
+  // pair, or pop a "no matches" toast. Refs keep it from re-firing each render.
+  const autoAttachSigRef = useRef<string>("");
+  const noMatchSigRef = useRef<string>("");
+  // Only the operator-initiated "Scan city VRBO" button auto-attaches/pops the
+  // toast. Auto-fill-cheapest-triggered scans (autoScanTrigger) are left alone:
+  // that flow does its OWN city attach, so racing it here would double-attach.
+  const manualScanRef = useRef(false);
+  // Operator override: chosen listing URL per unit slot (unitId -> url).
+  const [manualPicks, setManualPicks] = useState<Record<string, string>>({});
   const toDateOnly = (s: string | undefined): string => {
     if (!s) return "";
     return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
@@ -1330,7 +1353,10 @@ function CityVrboInventoryPanel({
   const [scanNonce, setScanNonce] = useState(0);
   const effectiveScanNonce = Math.max(scanNonce, autoScanTrigger);
   useEffect(() => {
-    if (autoScanTrigger > scanNonce) setScanNonce(autoScanTrigger);
+    if (autoScanTrigger > scanNonce) {
+      manualScanRef.current = false;
+      setScanNonce(autoScanTrigger);
+    }
   }, [autoScanTrigger, scanNonce]);
   const { data, isFetching, isError, error } = useQuery<CityVrboInventoryResponse>({
     queryKey: ["/api/operations/city-vrbo-inventory", propertyId, checkIn, checkOut, effectiveScanNonce],
@@ -1345,7 +1371,7 @@ function CityVrboInventoryPanel({
     enabled: effectiveScanNonce > 0 && !!checkIn && !!checkOut,
     staleTime: 0,
   });
-  const comboOption = data ? cityComboOptionFromInventory(data) : null;
+  const comboOption = useMemo(() => (data ? cityComboOptionFromInventory(data) : null), [data]);
   const bedroomGroups = data
     ? Object.entries(data.byBedroom).sort(([a], [b]) => Number(b) - Number(a))
     : [];
@@ -1361,6 +1387,104 @@ function CityVrboInventoryPanel({
     return `/api/operations/city-vrbo-inventory?${params.toString()}`;
   }, [propertyId, checkIn, checkOut]);
   const rawExportCount = data?.rawListings?.length ?? data?.sidecar?.rawCount ?? 0;
+
+  // Feature: when a scan completes, automatically attach the two cheapest
+  // same-community units IF the slots are still empty (so we never silently
+  // clobber units the operator/auto-fill already attached). If no pair is
+  // found, pop a "no matches" toast. The operator can still override below.
+  useEffect(() => {
+    if (!data || !manualScanRef.current) return;
+    const sig = String(effectiveScanNonce);
+    if (comboOption && comboOption.totalCost != null && comboOption.picks.length === reservation.slots.length) {
+      // Auto-attach only when the booking's units are still empty, so we never
+      // silently clobber units the operator already attached. Override below.
+      const slotsAllEmpty = reservation.slots.every((s) => !s.buyIn);
+      if (slotsAllEmpty && autoAttachSigRef.current !== sig) {
+        autoAttachSigRef.current = sig;
+        onAttachCombo(comboOption);
+        toast({
+          title: "Attached the two cheapest units",
+          description: `${comboOption.label} · ${fmtMoney(comboOption.totalCost)} — both in the same community.`,
+        });
+      }
+    } else if (!comboOption) {
+      if (noMatchSigRef.current !== sig) {
+        noMatchSigRef.current = sig;
+        toast({
+          title: "No matching pair found",
+          description: `No ${bedroomPlan.map((b) => `${b}BR`).join(" + ")} pair in the same community for these dates. Pick units manually below or try other dates.`,
+          variant: "destructive",
+        });
+      }
+    }
+  }, [data, comboOption, effectiveScanNonce, reservation.slots, onAttachCombo, toast, bedroomPlan]);
+
+  // Seed the manual-override selectors from the suggested pair (then cheapest
+  // available) whenever a fresh scan result arrives. Operator edits stick until
+  // the next scan replaces `data`.
+  useEffect(() => {
+    if (!data) return;
+    const defaults: Record<string, string> = {};
+    const used = new Set<string>();
+    for (const slot of reservation.slots) {
+      const rows = (data.byBedroom[slot.bedrooms] ?? []).filter((row) => !used.has(row.url));
+      const suggestedUrl = comboOption?.picks.find((p, i) =>
+        comboOption.bedrooms[i] === slot.bedrooms && !used.has(p.url))?.url;
+      const chosen = (suggestedUrl && rows.find((row) => row.url === suggestedUrl)) ?? rows[0];
+      if (chosen) {
+        defaults[slot.unitId] = chosen.url;
+        used.add(chosen.url);
+      }
+    }
+    setManualPicks(defaults);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  // Build an attachable combo from the operator's manual per-unit selection.
+  // Returns null until every slot has a distinct, priced pick.
+  const manualOption = useMemo<AutoFillComboOption | null>(() => {
+    if (!data) return null;
+    const nights = Math.max(1, Number(data.nights) || 1);
+    const picks: AutoFillComboOption["picks"] = [];
+    const seen = new Set<string>();
+    for (const slot of reservation.slots) {
+      const url = manualPicks[slot.unitId];
+      if (!url || seen.has(url)) return null;
+      seen.add(url);
+      const row = (data.byBedroom[slot.bedrooms] ?? []).find((r) => r.url === url);
+      if (!row) return null;
+      const total = Number(row.totalPrice) > 0
+        ? Math.round(Number(row.totalPrice))
+        : Number(row.nightlyPrice) > 0
+          ? Math.round(Number(row.nightlyPrice) * nights)
+          : 0;
+      if (!(total > 0)) return null;
+      picks.push({
+        bedrooms: slot.bedrooms,
+        source: "vrbo",
+        sourceLabel: row.sourceLabel ?? "Vrbo",
+        title: row.title,
+        totalPrice: total,
+        nightlyPrice: row.nightlyPrice ?? Math.round(total / nights),
+        url: row.url,
+        image: row.image ?? undefined,
+        images: Array.isArray(row.images) && row.images.length ? row.images : (row.image ? [row.image] : undefined),
+        verified: "yes",
+        verifiedReason: "Operator manually selected from city VRBO inventory",
+      });
+    }
+    if (picks.length !== reservation.slots.length) return null;
+    const totalCost = picks.reduce((sum, p) => sum + p.totalPrice, 0);
+    return {
+      label: `${reservation.slots.map((s) => `${s.bedrooms}BR`).join(" + ")} · manual pick`,
+      bedrooms: reservation.slots.map((s) => s.bedrooms),
+      totalCost,
+      selected: true,
+      note: "Manually selected city VRBO units",
+      picks,
+    };
+  }, [data, manualPicks, reservation.slots]);
+
   return (
     <div className="rounded border border-violet-200 bg-violet-50/40 px-3 py-2 text-[11px]">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1374,7 +1498,7 @@ function CityVrboInventoryPanel({
           size="sm"
           className="h-7"
           disabled={isFetching || !checkIn || !checkOut}
-          onClick={() => setScanNonce((n) => n + 1)}
+          onClick={() => { manualScanRef.current = true; setScanNonce((n) => Math.max(n, autoScanTrigger) + 1); }}
         >
           {isFetching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1 h-3.5 w-3.5" />}
           {isFetching ? "Scanning city VRBO…" : effectiveScanNonce > 0 ? "Re-scan city VRBO" : "Scan city VRBO"}
@@ -1406,8 +1530,14 @@ function CityVrboInventoryPanel({
             {harvest && typeof harvest.mergedCount === "number" ? ` · merged ${harvest.mergedCount}` : ""}
             {harvest && typeof harvest.graphqlPaginationStop === "string" ? ` · stop ${harvest.graphqlPaginationStop}` : ""}
           </p>
-          {comboOption && (
-            <div className="mt-1">
+          {comboOption ? (
+            <div className="mt-1 space-y-1">
+              <p className="font-medium text-emerald-900">
+                Cheapest same-community pair: {comboOption.label} · {fmtMoney(comboOption.totalCost)}
+              </p>
+              <p className="text-[10px] text-muted-foreground">
+                Auto-attached when this booking's units were empty. Re-attach the cheapest pair, or override per unit below.
+              </p>
               <Button
                 size="sm"
                 className="h-7"
@@ -1415,16 +1545,67 @@ function CityVrboInventoryPanel({
                 onClick={() => onAttachCombo(comboOption)}
               >
                 {attaching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Zap className="mr-1 h-3.5 w-3.5" />}
-                Attach matched combo
+                Re-attach cheapest pair
               </Button>
             </div>
-          )}
-          {comboOption ? (
-            <p className="mt-1 font-medium text-emerald-900">
-              Suggested pair: {comboOption.label} · {fmtMoney(comboOption.totalCost)}
-            </p>
           ) : (
-            <p className="mt-1 text-amber-900">No walkable {bedroomPlan.map((b) => `${b}BR`).join(" + ")} pair with a shared resort title yet.</p>
+            <p className="mt-1 text-amber-900">No walkable {bedroomPlan.map((b) => `${b}BR`).join(" + ")} pair with a shared resort title for these dates.</p>
+          )}
+          {/* Manual override — operator picks the specific listing for each unit
+              slot (e.g. the 3BR and the 2BR), then attaches that custom pair. */}
+          {data.listings.length > 0 && reservation.slots.length >= 2 && (
+            <div className="mt-2 rounded border border-violet-200 bg-white/70 p-2">
+              <p className="text-[10px] font-semibold text-violet-950">Override — pick a unit for each slot</p>
+              <div className="mt-1 space-y-1.5">
+                {reservation.slots.map((slot) => {
+                  const rows = data.byBedroom[slot.bedrooms] ?? [];
+                  const chosenElsewhere = new Set(
+                    reservation.slots
+                      .filter((s) => s.unitId !== slot.unitId)
+                      .map((s) => manualPicks[s.unitId])
+                      .filter(Boolean),
+                  );
+                  return (
+                    <div key={slot.unitId} className="flex items-center gap-2">
+                      <span className="w-24 shrink-0 text-[10px] font-medium text-slate-700">
+                        {slot.unitLabel} · {slot.bedrooms}BR
+                      </span>
+                      <select
+                        className="h-7 min-w-0 flex-1 rounded border border-slate-300 bg-white px-1 text-[11px]"
+                        value={manualPicks[slot.unitId] ?? ""}
+                        onChange={(e) => setManualPicks((prev) => ({ ...prev, [slot.unitId]: e.target.value }))}
+                        data-testid={`select-city-override-${reservation._id}-${slot.unitId}`}
+                      >
+                        <option value="">— choose a {slot.bedrooms}BR unit ({rows.length}) —</option>
+                        {rows.map((row) => (
+                          <option key={row.url} value={row.url} disabled={chosenElsewhere.has(row.url)}>
+                            {fmtMoney(row.totalPrice || row.nightlyPrice)} · {row.title}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-1.5 flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  disabled={!manualOption || attaching}
+                  onClick={() => manualOption && onAttachCombo(manualOption)}
+                  data-testid={`button-attach-city-override-${reservation._id}`}
+                >
+                  {attaching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Zap className="mr-1 h-3.5 w-3.5" />}
+                  Attach selected units
+                </Button>
+                {manualOption ? (
+                  <span className="text-[10px] text-emerald-900">{fmtMoney(manualOption.totalCost)} total</span>
+                ) : (
+                  <span className="text-[10px] text-amber-800">Choose a different unit for each slot.</span>
+                )}
+              </div>
+            </div>
           )}
           {bedroomGroups.length > 0 && (
             <div className="mt-1 max-h-32 space-y-1 overflow-y-auto">
@@ -4583,6 +4764,23 @@ export default function Bookings() {
     });
     return list;
   }, [rawReservations, reservationPropertyMeta, sortBy, sortDir]);
+
+  // Persistent "guest already messaged about the move" status for the visible
+  // rows, so the booking row shows a durable "Guest messaged ✓" badge (the
+  // send dialog's own "Sent" state is per-token and vanishes once it closes).
+  const visibleReservationIds = useMemo(() => reservations.map((r) => r._id), [reservations]);
+  const relocationSentStatusQuery = useQuery<{ statuses: Record<string, RelocationSentStatus | null> }>({
+    queryKey: ["/api/booking-alternatives/sent-status", visibleReservationIds],
+    queryFn: async () => {
+      const resp = await apiRequest("POST", "/api/booking-alternatives/sent-status", {
+        reservationIds: visibleReservationIds,
+      });
+      return resp.json();
+    },
+    enabled: visibleReservationIds.length > 0,
+    staleTime: 30_000,
+  });
+  const relocationSentStatus = relocationSentStatusQuery.data?.statuses ?? {};
 
   useEffect(() => {
     if (!focusedReservationId) return;
@@ -8211,6 +8409,24 @@ export default function Bookings() {
                                       Message guest
                                     </Button>
                                   )}
+                                  {/* Persistent confirmation that the relocation message was already
+                                      sent for this reservation (rendered once, on the first filled
+                                      slot). Survives closing the dialog + reloads. */}
+                                  {slot.unitId === (r.slots.find((s) => s.buyIn)?.unitId ?? null)
+                                    && relocationSentStatus[r._id]?.messageSentAt && (() => {
+                                    const st = relocationSentStatus[r._id]!;
+                                    return (
+                                      <span
+                                        className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+                                        title={`Relocation message sent${st.messageChannel ? ` via ${st.messageChannel}` : ""} on ${fmtDate(st.messageSentAt)}${st.opened ? ` · guest opened the link${st.openCount ? ` ${st.openCount}×` : ""}${st.lastOpenedAt ? ` (last ${fmtDate(st.lastOpenedAt)})` : ""}` : " · not opened yet"}`}
+                                        data-testid={`badge-guest-messaged-${r._id}`}
+                                      >
+                                        <CheckCircle2 className="h-3.5 w-3.5" />
+                                        Guest messaged {fmtDate(st.messageSentAt)}
+                                        {st.opened ? " · opened ✓" : ""}
+                                      </span>
+                                    );
+                                  })()}
                                   <Button
                                     size="sm"
                                     variant="ghost"
@@ -13100,7 +13316,10 @@ function RelocateGuestDialog({
     },
     onSuccess: () => {
       setSent(true);
-      toast({ title: `Message sent through ${channelLabel}`, description: "Tracking whether the guest opens the link." });
+      // Refresh the bookings-row "Guest messaged ✓" badge immediately so the
+      // operator sees the recorded confirmation without reopening anything.
+      queryClient.invalidateQueries({ queryKey: ["/api/booking-alternatives/sent-status"] });
+      toast({ title: `Message sent through ${channelLabel}`, description: "Recorded — tracking whether the guest opens the link." });
     },
     onError: (e: any) => toast({ title: "Message send failed", description: e?.message ?? String(e), variant: "destructive" }),
   });
