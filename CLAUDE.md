@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-06 (VRBO sidecar: stop Chrome stealing macOS foreground focus):
+  Operator: when a sidecar job ran, Google Chrome popped to the foreground and
+  knocked Safari/Claude out of focus — and even after it minimized, macOS didn't
+  hand focus back, forcing a Dock re-click. Diagnosed: the LIVE env had
+  `SIDECAR_CHROME_VISIBLE="1"` (visible/on-screen, direct binary spawn = focus
+  steal, no minimize). Empirically proved on the operator's Mac (lsappinfo poll):
+  the hidden background launch (`open -g -j -n` + `--no-startup-window` +
+  off-screen) does NOT steal focus, but the **CDP page-create** does, and
+  `open -b <bundleid>` reliably returns focus. Fix (two parts):
+  (1) flipped the live env script + the installer default to
+  `SIDECAR_CHROME_VISIBLE="0"` (hidden/off-screen + background launch — both
+  `worker.mjs` and `chrome-sidecar-manager.mjs` honor it);
+  (2) added a **macOS focus-guard** to `daemon/vrbo-sidecar/worker.mjs`
+  (`captureFrontmostUserApp` via `lsappinfo` + `scheduleReturnFocus` via
+  `open -b`, gated `SIDECAR_RETURN_FOCUS`, default on, no-op in visible mode /
+  off macOS). It captures the operator's frontmost app before
+  `chromeSidecarManager.acquire()` and re-activates it at 100/350/750/1400 ms
+  after acquire + in `scheduleSidecarMinimize`. Uses `lsappinfo`/`open` (NO
+  Accessibility/Automation TCC permission — works from the launchd daemon).
+  CAPTCHA surfacing still works (`SIDECAR_CAPTCHA_SURFACE_WINDOW=1`). Verified
+  end-to-end: restarted `com.vrbosidecar.worker`, killed the old visible Chromes
+  (only the `VrboSidecar-Chrome`/`rct-sidecar-chrome` data-dirs — personal Chrome
+  untouched), drove a real `pm_url_check` job → all 8 instances relaunched with
+  `--start-minimized --no-startup-window` and Safari stayed frontmost 40/40
+  poll ticks. Live worker is `~/.vrbo-sidecar-daemon/worker.mjs` (mirror of the
+  repo copy; backed up to `worker.mjs.bak-focusguard-*`). **Don't revert the env
+  to visible without operator ask.**
+
 - 2026-06-06 (AI Draft voice → expert reservationist, PR #551):
   Operator asked to make the guest-inbox AI drafts "much better… think like an
   expert vacation rental booker," still signed John Carpenter. Both draft prompts
