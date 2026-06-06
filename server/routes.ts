@@ -29151,12 +29151,23 @@ Return ONLY compact JSON with this exact shape:
       const draftId = -propertyId;
       const draft = await storage.getCommunityDraft(draftId);
       if (draft) {
-        const update: Record<string, string> = {};
+        const update: Record<string, string | number> = {};
         for (const swap of swaps) {
           const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
           const slot = swap.oldUnitId.match(/-unit-([ab])$/i)?.[1]?.toLowerCase();
-          if (slot === "a") update.unit1PhotoFolder = folder;
-          else if (slot === "b") update.unit2PhotoFolder = folder;
+          if (slot !== "a" && slot !== "b") continue;
+          const n = slot === "a" ? "1" : "2";
+          update[`unit${n}PhotoFolder`] = folder;
+          // Propagate the swapped unit's IDENTITY onto the draft so its stored
+          // fields match what the preflight overlay displays. Without this the
+          // draft keeps the ORIGINAL unit's URL/address (e.g. the wrong
+          // bulk-combo research pick), and downstream publish / photo / scanner
+          // steps that read the draft's base fields would use the stale unit.
+          if (swap.newSourceUrl) update[`unit${n}Url`] = swap.newSourceUrl;
+          if (swap.newAddress) update[`unit${n}Address`] = swap.newAddress;
+          if (typeof swap.newBedrooms === "number" && swap.newBedrooms > 0) {
+            update[`unit${n}Bedrooms`] = swap.newBedrooms;
+          }
         }
         if (Object.keys(update).length > 0) {
           await storage.updateCommunityDraft(draftId, update as any);
