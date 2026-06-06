@@ -172,6 +172,39 @@ established it so you can read the rationale in the commit message.
    Booking.com 30. Update these numbers when the platforms publish
    new limits. Do not make them dynamic / DB-driven.
 
+45. **Photo Community Check is CLIENT-DRIVEN and property-agnostic — the
+    endpoint does NOT look up `unitBuilderData` by propertyId.** The photos
+    tab button (`runCommunityCheck` in `GuestyListingBuilder/index.tsx`)
+    derives the request groups from the *rendered* `photos` array: it parses
+    each photo's folder/filename from its `/photos/<folder>/<file>` URL and its
+    role/label from the photo's `source` string (`"Community — {complex}"` →
+    community + `expectedCommunity`; `"Unit A (3BR)"` → unit). It POSTs those
+    groups to `POST /api/builder/photo-community-check`, which reads the bytes
+    off the Railway photo volume and runs the check. This is deliberate so the
+    check works for static props AND negative-id drafts AND single listings
+    (none of which can be assumed present in `unitBuilderData`). **Do NOT
+    "simplify" the endpoint to take just a propertyId and look up static
+    data — that silently breaks drafts/single-listings**, which are exactly the
+    things being QA'd before first publish. Engine lives in
+    `server/photo-community-check.ts`.
+    - **Sonnet (`claude-sonnet-4-6`), not Haiku, on purpose.** This is
+      cross-folder visual reasoning + named-resort world knowledge, not the
+      short noun-phrase labeling `photo-labeler.ts` does. Haiku over-flags.
+    - **ONE vision call with every sampled photo inlined**, delimited by text
+      markers (`--- GROUP: … · photo C1 · caption … ---`), so the model judges
+      community ↔ unit-A ↔ unit-B consistency holistically. Per-folder sample
+      caps (community 10, unit 6, total 24) bound cost/latency (~$0.10, 20-40s).
+    - **The prompt reserves a cross-community "no" for POSITIVE
+      contradictions** (different named resort on signage, wrong climate,
+      incompatible building type/view, distinct architecture); generic-but-
+      plausible photos are "uncertain", never "no". This is the anti-false-
+      alarm guard — don't loosen it to "flag anything that looks different",
+      because unit interiors *always* look different from community amenities.
+    - **Cross-folder duplicate detection is deterministic (dHash), not the
+      model's job.** The same image filed in two folders is the strongest
+      "mixed-up" signal and is computed via `photo-hashing.ts` regardless of
+      whether the vision call succeeds (it still runs with no `ANTHROPIC_API_KEY`).
+
 ### Availability & pricing
 
 10. **Auto-scan scheduler flips ON when the tab loads for any
