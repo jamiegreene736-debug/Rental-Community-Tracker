@@ -44,6 +44,7 @@ import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log"
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
+import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1058,11 +1059,66 @@ function candidatesShareStrongResortPhrase(
 
 function titleFromBuyInNotes(notes: string | null | undefined): string {
   const raw = String(notes ?? "");
+  const manualCombo = raw.match(/Manually attached from combo\s+.+?\s+—\s+\d+\s*BR\s+[^—]+—\s*([^·]+)/i);
+  if (manualCombo?.[1]) return manualCombo[1].trim();
+  const autoFilled = raw.match(/(?:Auto-filled from|Bought via)\s+[^—-]+[—-]\s*([^·]+)/i);
+  if (autoFilled?.[1]) return autoFilled[1].trim();
   const firstClause = raw.split(" · ")[0] ?? raw;
   const dash = firstClause.indexOf(" — ");
   if (dash >= 0) return firstClause.slice(dash + 3).trim();
-  const bought = firstClause.match(/^Bought via .+? — (.+)$/i);
-  return bought?.[1]?.trim() ?? "";
+  return "";
+}
+
+function cleanGuestAlternativeLabel(value: string | null | undefined): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s·\-–—|,:;]+|[\s·\-–—|,:;]+$/g, "")
+    .trim();
+}
+
+function usableGuestAlternativeCommunity(value: string | null | undefined): string {
+  const label = cleanGuestAlternativeLabel(value);
+  if (!label || label.length < 4) return "";
+  if (/manually attached from combo|auto-filled from|selected from saved|manual photo urls/i.test(label)) return "";
+  if (/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(label)) return "";
+  return label;
+}
+
+function alternativeCommunityFromBuyInNotes(notes: string | null | undefined, listingTitle: string): string {
+  const raw = String(notes ?? "");
+  const comboLabel = cleanGuestAlternativeLabel(
+    raw.match(/Manually attached from combo\s+(.+?)\s+—\s+\d+\s*BR\s+[^—·]+—/i)?.[1],
+  );
+  const comboCommunity = usableGuestAlternativeCommunity(comboLabel.split(/\s*·\s*/).pop());
+  if (comboCommunity) return comboCommunity;
+  const titleLead = usableGuestAlternativeCommunity(listingTitle.split(/\s+[-–—|]\s+/)[0]);
+  if (
+    titleLead &&
+    !/^(?:gorgeous|beautiful|stunning|luxury|spacious|updated|renovated|private|oceanfront|beachfront|sleeps?|bedrooms?|condos?|villas?|homes?|townhomes?|units?|studio)\b/i.test(titleLead)
+  ) {
+    return titleLead;
+  }
+  return "";
+}
+
+function originalCommunityForAlternativePage(reservation: GuestyReservation, slots: Array<SlotInfo & { buyIn: BuyIn }>): string {
+  const propertyId = Number(slots[0]?.buyIn?.propertyId);
+  const builder = Number.isFinite(propertyId) ? getUnitBuilderByPropertyId(propertyId) : undefined;
+  return cleanGuestAlternativeLabel(
+    builder?.complexName ??
+      (Number.isFinite(propertyId) ? PROPERTY_UNIT_CONFIGS[propertyId]?.community : undefined) ??
+      reservation.slots.find((slot) => slot.community)?.community ??
+      slots[0]?.buyIn?.propertyName,
+  );
+}
+
+function originalAreaForAlternativePage(reservation: GuestyReservation, slots: Array<SlotInfo & { buyIn: BuyIn }>): string {
+  const propertyId = Number(slots[0]?.buyIn?.propertyId);
+  return cleanGuestAlternativeLabel(
+    (Number.isFinite(propertyId) ? PROPERTY_UNIT_CONFIGS[propertyId]?.community : undefined) ??
+      reservation.slots.find((slot) => slot.community)?.community ??
+      "",
+  );
 }
 
 function listingIdentityKeys(item: {
@@ -4621,13 +4677,30 @@ export default function Bookings() {
       const slotsForPage = attachedSlots.length
         ? attachedSlots
         : [{ ...slot, buyIn }];
+      const proximity = attachedSlots.length >= 2
+        ? await apiGetJson<UnitProximityResponse>(
+            `/api/bookings/${encodeURIComponent(reservation._id)}/unit-proximity`,
+          ).catch(() => null)
+        : null;
+      const readyProximity = proximity?.status === "ready" ? proximity : null;
+      const originalCommunity = cleanGuestAlternativeLabel(
+        readyProximity?.community ?? originalCommunityForAlternativePage(reservation, slotsForPage),
+      );
+      const originalCommunityName = originalCommunityForAlternativePage(reservation, slotsForPage);
+      const originalArea = originalAreaForAlternativePage(reservation, slotsForPage);
+      const sharedAlternativeCommunity = usableGuestAlternativeCommunity(readyProximity?.resortName);
       const alternatives = slotsForPage.map((s) => {
         const b = s.buyIn;
         const photoUrls = manualBuyInPhotoUrlsFromNotes(b.notes);
         const listingTitle = titleFromBuyInNotes(b.notes);
+        const alternativeCommunity = alternativeCommunityFromBuyInNotes(b.notes, listingTitle)
+          || sharedAlternativeCommunity
+          || cleanGuestAlternativeLabel(b.propertyName);
         return {
-          title: listingTitle || `${b.propertyName} - ${b.unitLabel}`,
-          community: b.propertyName,
+          title: listingTitle,
+          community: alternativeCommunity,
+          originalCommunity: originalCommunityName || originalCommunity,
+          alternativeCommunity,
           url: b.airbnbListingUrl,
           image: photoUrls[0] ?? "",
           photos: photoUrls,
@@ -4638,11 +4711,19 @@ export default function Bookings() {
           notes: b.notes,
         };
       });
+      const primaryAlternativeCommunity = alternatives.find((item) => {
+        const label = usableGuestAlternativeCommunity(item.alternativeCommunity);
+        return label && label !== originalArea && label !== originalCommunityName;
+      })?.alternativeCommunity || alternatives[0]?.alternativeCommunity || sharedAlternativeCommunity || "";
       const response = await apiRequest("POST", "/api/booking-alternatives", {
         reservationId: reservation._id,
         guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
         checkIn: checkInOf(reservation),
         checkOut: checkOutOf(reservation),
+        originalCommunity: originalCommunityName || originalCommunity,
+        areaName: originalArea || originalCommunity,
+        alternativeCommunity: primaryAlternativeCommunity,
+        driveMinutes: readyProximity?.walk?.minutes ?? null,
         alternatives,
       }).then((r) => r.json());
       if (!response?.url) throw new Error(response?.message || response?.error || "Alternative page create failed");

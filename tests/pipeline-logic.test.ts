@@ -3400,6 +3400,59 @@ assert.ok(
 	  "city VRBO inventory route should return JSON plus a CSV download of the raw export rows",
 	);
 assert.ok(
+  bookingsSource.includes("guestAlternativePageMutation") &&
+    bookingsSource.includes("slotsForPage") &&
+    bookingsSource.includes("manualBuyInPhotoUrlsFromNotes") &&
+    bookingsSource.includes("/unit-proximity") &&
+    bookingsSource.includes("originalCommunity") &&
+    bookingsSource.includes("alternativeCommunity") &&
+    bookingsSource.includes("getUnitBuilderByPropertyId") &&
+    bookingsSource.includes("driveMinutes"),
+  "buy-in Guest Page action should submit the full attached combo, saved listing photos, and community proximity context",
+);
+assert.ok(
+  bookingsSource.includes("Manually attached from combo\\s+(.+?)\\s+—\\s+\\d+\\s*BR") &&
+    bookingsSource.includes("usableGuestAlternativeCommunity") &&
+    bookingsSource.includes("comboLabel.split"),
+  "buy-in Guest Page action should parse combo community names from the saved label without using the operational note prefix",
+);
+assert.ok(
+  routesSource.includes("MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS = 10") &&
+    routesSource.includes("isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS") &&
+    routesSource.includes("scrapeVrboAlternativeDetails(sourceUrl)") &&
+    routesSource.includes("photoSource") &&
+    routesSource.includes("photoScrapeReason"),
+  "booking alternatives route should scrape attached VRBO URLs when buy-in notes do not already carry a gallery",
+);
+assert.ok(
+  routesSource.includes('class="carousel" data-carousel') &&
+    routesSource.includes("data-carousel-prev") &&
+    routesSource.includes("data-carousel-next") &&
+    routesSource.includes("carousel-track") &&
+    routesSource.includes("Unit ${index + 1}") &&
+    routesSource.includes("We have availability in ${escapeHtml(alternativeCommunity)}. This community is in ${escapeHtml(areaName)}") &&
+    routesSource.includes("communityDriveMinutes") &&
+    routesSource.includes("overviewDetails") &&
+    !routesSource.includes("Instead of ${escapeHtml(originalCommunity)}"),
+  "guest-facing alternatives page should render scraped listing photos as a carousel with unit labels, details, and community drive copy",
+);
+assert.ok(
+  routesSource.includes("bathrooms") &&
+    routesSource.includes("sleeps") &&
+    routesSource.includes("basicDetails") &&
+    routesSource.includes("extractAlternativeFactsFromText") &&
+    routesSource.includes("This is property-detail copy for a review page") &&
+    routesSource.includes("usableCommunityContext") &&
+    routesSource.includes("communityFromAlternativeTitle") &&
+    !routesSource.includes("guestName: normalizeAlternativeText(stay.guestName"),
+  "guest-facing alternatives page should include unit detail facts and keep AI descriptions from addressing the guest by name",
+);
+assert.ok(
+  routesSource.indexOf("${carousel}") >= 0 &&
+    routesSource.indexOf("${item.description ? `<p class=\"description\"") > routesSource.indexOf("${carousel}"),
+  "guest-facing alternatives page should place each AI unit description below that unit's photo carousel",
+);
+assert.ok(
   vrboWorkerSource.includes("deepHarvest") && vrboWorkerSource.includes("deepMapHarvest"),
   "VRBO sidecar worker should still support map_bounds deep harvest for legacy callers only",
 );
