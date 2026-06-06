@@ -24,7 +24,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
+import { spawn, execFile } from "child_process";
 import { ChromeSidecarManager } from "./chrome-sidecar-manager.mjs";
 import { resolveChromeProxyConfig, runChromeProxyStartupPreflight } from "./proxy-config.mjs";
 
@@ -83,6 +83,75 @@ const VISIBLE_WINDOW_SIZE = (() => {
     height: Number.isFinite(heightRaw) && heightRaw > 0 ? Math.round(heightRaw) : VIEWPORT.height + 80,
   };
 })();
+
+// ── macOS focus guard ────────────────────────────────────────────────────
+// In hidden/offscreen mode Chrome still momentarily ACTIVATES when macOS first
+// creates its window (launch + first page), which knocks the operator's
+// foreground app (Safari, Claude, …) out of focus — and macOS does NOT hand
+// focus back, so they have to re-click the app in the Dock. We capture the
+// operator's frontmost app right before we risk launching/activating Chrome,
+// then re-activate it immediately afterward so they never lose their place.
+// `lsappinfo` (read) + `open -b` (activate) need NO Accessibility/Automation
+// (TCC) permission — essential for a launchd background daemon. No-op in visible
+// mode (operator wants to see it) and off macOS. Gated by SIDECAR_RETURN_FOCUS
+// (default on) so it can be disabled without a code change.
+const SIDECAR_RETURN_FOCUS = process.env.SIDECAR_RETURN_FOCUS !== "0";
+const FOCUS_GUARD_CHROME_BUNDLE_IDS = new Set([
+  "com.google.Chrome",
+  "com.google.Chrome.canary",
+  "com.google.Chrome.beta",
+  "com.google.Chrome.dev",
+  "org.chromium.Chromium",
+]);
+let lastUserAppBundleId = null;
+function focusGuardActive() {
+  return process.platform === "darwin" && SIDECAR_RETURN_FOCUS && !SIDE_CAR_CHROME_VISIBLE;
+}
+function execFileCapture(cmd, args, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    try {
+      execFile(cmd, args, { timeout: timeoutMs }, (err, stdout) => resolve(err ? "" : String(stdout ?? "")));
+    } catch {
+      resolve("");
+    }
+  });
+}
+async function captureFrontmostUserApp() {
+  if (!focusGuardActive()) return;
+  try {
+    const asn = (await execFileCapture("lsappinfo", ["front"])).trim();
+    if (!asn) return;
+    const out = await execFileCapture("lsappinfo", ["info", "-only", "bundleid", asn]);
+    const m = out.match(/"CFBundleIdentifier"\s*=\s*"([^"]+)"/) || out.match(/=\s*"([^"]+)"/);
+    const bid = m ? m[1].trim() : "";
+    // Keep the last NON-Chrome app even when Chrome is frontmost now, so a prior
+    // sidecar job can't erase the operator's real app.
+    if (bid && !FOCUS_GUARD_CHROME_BUNDLE_IDS.has(bid)) lastUserAppBundleId = bid;
+  } catch {
+    // best effort
+  }
+}
+function returnFocusToUserApp() {
+  if (!focusGuardActive()) return;
+  const bid = lastUserAppBundleId;
+  if (!bid || FOCUS_GUARD_CHROME_BUNDLE_IDS.has(bid)) return;
+  try {
+    const p = spawn("open", ["-b", bid], { stdio: "ignore", detached: true });
+    p.on("error", () => {});
+    p.unref?.();
+  } catch {
+    // best effort
+  }
+}
+function scheduleReturnFocus() {
+  if (!focusGuardActive()) return;
+  // Re-fire across a short window because the activation can land at slightly
+  // different moments (launch vs. first CDP page create vs. window restore).
+  for (const delay of [100, 350, 750, 1400]) {
+    const t = setTimeout(returnFocusToUserApp, delay);
+    t.unref?.();
+  }
+}
 
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
@@ -862,6 +931,9 @@ async function minimizeSidecarWindow(targetPage = page) {
 function scheduleSidecarMinimize(targetPage = page) {
   if (usingHeadlessRuntime()) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
+  // Hand focus back to the operator's app alongside the off-screen minimize —
+  // the page-create that precedes this is one of the moments Chrome activates.
+  scheduleReturnFocus();
   for (const delay of [0, 150, 500, 1500]) {
     const timer = setTimeout(() => {
       void minimizeSidecarWindow(targetPage);
@@ -1637,6 +1709,9 @@ async function acquireChromeForRequest(request = {}) {
   } else if (activeChromeAllocation) {
     return activeChromeAllocation;
   }
+  // Capture the operator's foreground app BEFORE the manager may launch/activate
+  // Chrome, so we can hand focus back to them right after (see scheduleReturnFocus).
+  await captureFrontmostUserApp();
   try {
     activeChromeAllocation = await chromeSidecarManager.acquire(request);
   } catch (e) {
@@ -1675,6 +1750,9 @@ async function acquireChromeForRequest(request = {}) {
   if (activeChromeAllocation.noVncUrl && request.id) {
     await sendHeartbeat(`server Chrome live view ${activeChromeAllocation.noVncUrl}`, true, request.id).catch(() => {});
   }
+  // A local Chrome instance was just acquired (possibly freshly launched) —
+  // return focus to the operator's app in case Chrome stole it.
+  if (activeChromeAllocation.cdpUrl) scheduleReturnFocus();
   return activeChromeAllocation;
 }
 
