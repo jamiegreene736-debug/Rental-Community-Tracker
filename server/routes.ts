@@ -8075,7 +8075,13 @@ Requirements:
       const alternativeCommunityDisplay = displayAlternativeLabel(alternativeCommunity);
       const areaNameDisplay = displayAlternativeLabel(areaName);
       const communityDriveMinutes = Number(payload.communityDriveMinutes);
-      const unitWalkMinutes = Number(payload.unitWalkMinutes ?? payload.walkMinutes ?? payload.driveMinutes ?? (alternatives.length > 1 ? payload.communityDriveMinutes : null));
+      const explicitUnitWalkMinutes = Number(payload.unitWalkMinutes ?? payload.walkMinutes);
+      const fallbackUnitWalkMinutes = alternatives.length > 1
+        ? fallbackWalkForResort(String(alternativeCommunity || alternatives[0]?.community || "")).minutes
+        : null;
+      const unitWalkMinutes = Number.isFinite(explicitUnitWalkMinutes) && explicitUnitWalkMinutes > 0
+        ? explicitUnitWalkMinutes
+        : fallbackUnitWalkMinutes;
       const stayDateText = [formatAlternativeDisplayDate(payload.checkIn), formatAlternativeDisplayDate(payload.checkOut)]
         .filter(Boolean)
         .join(" to ");

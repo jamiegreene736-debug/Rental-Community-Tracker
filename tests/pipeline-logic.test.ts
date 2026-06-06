@@ -3440,6 +3440,7 @@ assert.ok(
     routesSource.includes("amenity-showcase") &&
     routesSource.includes("vacation-rental-expertz-mark.png") &&
     routesSource.includes("communityAmenityFallbackTags") &&
+    routesSource.includes("fallbackWalkForResort(String(alternativeCommunity") &&
     routesSource.includes("const topCommunityPhotos = communityPhotoUrls.slice(0, 6)") &&
     !routesSource.includes("attachedPhotoUrls") &&
     !routesSource.includes("vacation-rental-expertz-horizontal-transparent.png") &&
