@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-06 ("missing" Makahuena booking in global summary = canceled; added Include-canceled toggle):
+  Operator reported a Makahuena at Poipu booking (made today, Booking.com) not
+  showing in the Operations "All properties · global summary" view. Investigated
+  live: the global endpoint `/api/bookings/guesty-all` is ALREADY fully account-
+  wide (pulls every Guesty listing via `fetchOperationsGuestyListings` + all
+  account reservations, NO hardcoded property list — `operationsListingTargetFor`
+  always returns a target, even ad-hoc for unmapped listings, so new properties
+  auto-appear). The booking was hidden purely because its Guesty `status` is
+  **`canceled`** (reservation `6a240f0640199c00133967ab`, guest Nili Zur) and
+  `isCommittedGuestyReservation` filters `cancel|declin|inquir|request|expired|
+  closed|draft`. So it was NOT a coverage bug. Fix per operator choice: added an
+  **"Include canceled"** checkbox (next to "Include past stays") that passes
+  `includeCanceled=true` to BOTH `/api/bookings/guesty-all` and
+  `/api/bookings/listing/:listingId`. Server now gates the status filter on that
+  flag (`isRenderableGuestyReservation` = id+checkIn still required; committed-
+  status gate skipped when including), and the row renders a red/amber status
+  badge for non-committed reservations. Default stays committed-only (clean).
+  Diagnosis tip: Guesty token lives in PG `guesty_token_cache` but `DATABASE_URL`
+  is the Railway-internal host (unreachable from a local `railway run`); fetch a
+  fresh client-credentials token instead (one-off, doesn't touch the app's cache).
+
 - 2026-06-06 (relocation: row "messaged" badge + city-scan auto-attach/override):
   THREE bookings-page changes (`client/src/pages/bookings.tsx` + one new server
   endpoint in `server/routes.ts`).

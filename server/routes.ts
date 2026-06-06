@@ -4729,6 +4729,14 @@ function isCommittedGuestyReservation(reservation: any): boolean {
   return !!(reservation?._id ?? reservation?.id) && !!(reservation?.checkIn ?? reservation?.checkInDateLocalized);
 }
 
+// Minimum to place a reservation on a row (id + a check-in date). Used when the
+// operator opts into "Include canceled": we still need these two fields, but we
+// skip the committed-status gate so canceled/declined/inquiry rows come through
+// (the client badges them). Keeps the committed-only path the default.
+function isRenderableGuestyReservation(reservation: any): boolean {
+  return !!(reservation?._id ?? reservation?.id) && !!(reservation?.checkIn ?? reservation?.checkInDateLocalized);
+}
+
 function virtualPropertyIdForGuestyListingId(listingId: string): number {
   let hash = 0;
   for (const ch of listingId) {
@@ -17412,6 +17420,7 @@ Requirements:
   app.get("/api/bookings/guesty-all", async (req, res) => {
     try {
       const includePast = req.query.includePast === "true";
+      const includeCanceled = req.query.includeCanceled === "true";
       const today = new Date().toISOString().slice(0, 10);
       const listingRows = await fetchOperationsGuestyListings();
       const listingById = new Map<string, any>();
@@ -17445,7 +17454,10 @@ Requirements:
         const data = await guestyRequest("GET", `/reservations?${filterQuery}limit=${limit}&skip=${skip}&sort=checkIn&fields=${fields}`) as any;
         const rows = unwrapGuestyListResponse(data);
         for (const row of rows) {
-          if (!isCommittedGuestyReservation(row)) continue;
+          if (!isRenderableGuestyReservation(row)) continue;
+          // Committed-only by default; "Include canceled" lets canceled/
+          // declined/inquiry/expired rows through (client badges them).
+          if (!includeCanceled && !isCommittedGuestyReservation(row)) continue;
           const id = String(row?._id ?? row?.id ?? "").trim();
           if (id) seenReservations.set(id, row);
         }
@@ -17500,6 +17512,7 @@ Requirements:
       const propertyId = Number.isFinite(propertyIdRaw) && propertyIdRaw !== 0 ? propertyIdRaw : null;
       const effectivePropertyId = propertyId ?? virtualPropertyIdForGuestyListingId(listingId);
       const includePast = req.query.includePast === "true";
+      const includeCanceled = req.query.includeCanceled === "true";
       const limit = Math.min(parseInt((req.query.limit as string) ?? "100", 10) || 100, 100);
       const maxRows = Math.min(Math.max(parseInt((req.query.maxRows as string) ?? "1000", 10) || 1000, 100), 5000);
 
@@ -17539,7 +17552,10 @@ Requirements:
         const data = await guestyRequest("GET", url) as any;
         const rows = unwrapGuestyListResponse(data);
         for (const row of rows) {
-          if (!isCommittedGuestyReservation(row)) continue;
+          if (!isRenderableGuestyReservation(row)) continue;
+          // Committed-only by default; "Include canceled" lets canceled/
+          // declined/inquiry/expired rows through (client badges them).
+          if (!includeCanceled && !isCommittedGuestyReservation(row)) continue;
           const id = String(row?._id ?? row?.id ?? "").trim();
           if (id) seenReservations.set(id, row);
         }
