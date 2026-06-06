@@ -2249,6 +2249,189 @@ function resortLabelForAttachedUnits(
   return configuredResort ?? unitsResort ?? undefined;
 }
 
+// Derive the NEW community/resort to NAME in a relocation message from the
+// attached buy-in units' titles + notes. The community is usually NOT the title
+// prefix (titles lead with marketing: "Tropical End Unit...", "Island Living
+// at...") and can sit mid-title (".. Villas of Kamalii 30"), so a common-PREFIX
+// match misses it. The strongest signal is the longest common CONTIGUOUS token
+// phrase shared across the units' titles ("Villas of Kamalii"); the city-combo
+// note's resort phrase ("· villas of kamalii —") is the fallback, title-cased
+// (casing borrowed from a title when the phrase appears there). NEVER returns
+// the guest's original community, and returns null when nothing confident
+// resolves so the message falls back to neutral copy. Built + executably
+// verified via a design workflow (3 strategies, full battery incl. real data).
+function extractNewCommunityFromUnits(
+  unitTitles: Array<string | null | undefined>,
+  unitNotes: Array<string | null | undefined>,
+  originalCommunity: string | null | undefined,
+): string | null {
+  const SMALL_WORDS_LIST = ["of", "at", "the", "and", "in", "on", "by", "to", "a", "an", "for"];
+  const CATEGORY_LIST = ["condo", "condos", "villa", "villas", "home", "homes", "townhome", "townhomes", "townhouse", "townhouses", "studio", "studios", "resort", "resorts", "plantation", "bay", "cove", "club", "estates", "estate", "gardens", "garden", "point", "ridge", "shores", "sands"];
+  const HARD_STRIP_LIST = ["gorgeous", "beautiful", "stunning", "luxury", "luxurious", "spacious", "oceanfront", "beachfront", "ocean", "beach", "sleeps", "sleep", "bedroom", "bedrooms", "bed", "beds", "unit", "units", "view", "views", "tropical", "island", "living", "lovely", "sunny", "hideaway", "retreat", "escape", "getaway", "end", "cozy", "charming", "modern", "private", "with", "near", "steps", "walk", "your", "our", "best", "great"];
+  const SMALL_WORDS = new Set(SMALL_WORDS_LIST);
+  const CATEGORY_TOKENS = new Set(CATEGORY_LIST);
+  // Spread of plain ARRAYS (not Sets) — avoids the repo's ES5 downlevelIteration rule.
+  const GENERIC_TOKENS = new Set([...SMALL_WORDS_LIST, ...CATEGORY_LIST, ...HARD_STRIP_LIST]);
+
+  const normToken = (tok: string): string => String(tok ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const isSizeToken = (tok: string): boolean => {
+    const t = normToken(tok);
+    if (/^\d+$/.test(t)) return true;
+    if (/^\d+br$/.test(t) || /^\d+bd$/.test(t) || /^\d+bdr$/.test(t)) return true;
+    if (/^\d+bedroom[s]?$/.test(t)) return true;
+    return false;
+  };
+  const isDistinctiveToken = (tok: string): boolean => {
+    const t = normToken(tok);
+    if (!t) return false;
+    if (isSizeToken(t)) return false;
+    if (SMALL_WORDS.has(t)) return false;
+    if (GENERIC_TOKENS.has(t)) return false;
+    if (!/[a-z]/.test(t)) return false;
+    return true;
+  };
+  const tokenize = (str: string | null | undefined): string[] => {
+    if (!str) return [];
+    return String(str).replace(/[^A-Za-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+  };
+  const normalizePhrase = (str: string | null | undefined): string => {
+    if (str == null) return "";
+    return String(str).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+  };
+  const titleCasePhrase = (phrase: string): string =>
+    String(phrase ?? "").split(/\s+/).filter(Boolean)
+      .map((w, i) => {
+        const lower = w.toLowerCase();
+        if (i !== 0 && SMALL_WORDS.has(lower)) return lower;
+        return lower.charAt(0).toUpperCase() + lower.slice(1);
+      })
+      .join(" ");
+  const phraseHasDistinctive = (phrase: string): boolean => tokenize(phrase).some(isDistinctiveToken);
+  const trimGenericEdges = (tokens: string[]): string[] => {
+    if (!tokens || tokens.length === 0) return [];
+    let firstD = -1;
+    let lastD = -1;
+    for (let i = 0; i < tokens.length; i++) {
+      if (isDistinctiveToken(tokens[i])) {
+        if (firstD === -1) firstD = i;
+        lastD = i;
+      }
+    }
+    if (firstD === -1) return [];
+    const extendable = (tok: string): boolean => {
+      const t = normToken(tok);
+      if (!t) return false;
+      if (SMALL_WORDS.has(t)) return true;
+      if (CATEGORY_TOKENS.has(t)) return true;
+      return false;
+    };
+    let start = firstD;
+    while (start - 1 >= 0 && extendable(tokens[start - 1])) start--;
+    let end = lastD + 1;
+    while (end < tokens.length && extendable(tokens[end])) end++;
+    while (start < end && SMALL_WORDS.has(normToken(tokens[start]))) start++;
+    while (end > start && SMALL_WORDS.has(normToken(tokens[end - 1]))) end--;
+    return tokens.slice(start, end);
+  };
+  const containsSubsequenceContiguous = (haystack: string[], needle: string[]): boolean => {
+    if (needle.length === 0) return false;
+    for (let i = 0; i + needle.length <= haystack.length; i++) {
+      let ok = true;
+      for (let k = 0; k < needle.length; k++) {
+        if (haystack[i + k] !== needle[k]) { ok = false; break; }
+      }
+      if (ok) return true;
+    }
+    return false;
+  };
+  const longestCommonContiguousPhrase = (titles: string[]): string[] => {
+    const tokenLists = titles.map(tokenize);
+    if (tokenLists.length === 0) return [];
+    if (tokenLists.some((tl) => tl.length === 0)) return [];
+    const base = tokenLists[0];
+    const baseLower = base.map(normToken);
+    const spans: Array<[number, number]> = [];
+    for (let i = 0; i < base.length; i++) {
+      for (let j = i + 1; j <= base.length; j++) spans.push([i, j]);
+    }
+    spans.sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]));
+    for (const span of spans) {
+      const i = span[0];
+      const j = span[1];
+      const subLower = baseLower.slice(i, j).filter((t) => t.length > 0);
+      if (subLower.length === 0) continue;
+      const presentInAll = tokenLists.slice(1).every((tl) => {
+        const tlLower = tl.map(normToken).filter((t) => t.length > 0);
+        return containsSubsequenceContiguous(tlLower, subLower);
+      });
+      if (presentInAll) return base.slice(i, j);
+    }
+    return [];
+  };
+  const parseNoteResortPhrase = (note: string | null | undefined): string | null => {
+    if (!note) return null;
+    const m = String(note).match(/combo\s+(.+?)\s+—\s+\d+\s*BR\b/i);
+    if (!m) return null;
+    const parts = m[1].split("·");
+    const seg = parts[parts.length - 1].trim();
+    return seg || null;
+  };
+  const casingFromTitles = (phrase: string, titles: string[]): string | null => {
+    const phraseNorm = normalizePhrase(phrase);
+    if (!phraseNorm) return null;
+    const phraseTokens = phraseNorm.split(" ");
+    for (const title of titles) {
+      const toks = tokenize(title);
+      const toksLower = toks.map(normToken);
+      for (let i = 0; i + phraseTokens.length <= toks.length; i++) {
+        let ok = true;
+        for (let k = 0; k < phraseTokens.length; k++) {
+          if (toksLower[i + k] !== phraseTokens[k]) { ok = false; break; }
+        }
+        if (ok) return toks.slice(i, i + phraseTokens.length).join(" ");
+      }
+    }
+    return null;
+  };
+  const sameCommunity = (a: string | null | undefined, b: string | null | undefined): boolean => {
+    const na = normalizePhrase(a);
+    const nb = normalizePhrase(b);
+    return na !== "" && na === nb;
+  };
+  const isValidCommunity = (phrase: string, original: string | null | undefined): boolean => {
+    if (!phrase) return false;
+    if (!phraseHasDistinctive(phrase)) return false;
+    if (sameCommunity(phrase, original)) return false;
+    return true;
+  };
+
+  const titles = (Array.isArray(unitTitles) ? unitTitles : [])
+    .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+    .map((t) => t.trim());
+  const notes = (Array.isArray(unitNotes) ? unitNotes : []).map((n) => (n == null ? "" : String(n)));
+  if (titles.length === 0) return null;
+
+  const candidates: string[] = [];
+  // Preferred: longest common contiguous title phrase across 2+ units.
+  if (titles.length >= 2) {
+    const phraseTokens = trimGenericEdges(longestCommonContiguousPhrase(titles));
+    if (phraseTokens.length) candidates.push(phraseTokens.join(" "));
+  }
+  // Fallback: the city-combo note's resort phrase, upgraded to title casing.
+  for (const note of notes) {
+    const raw = parseNoteResortPhrase(note);
+    if (!raw) continue;
+    const fromTitle = casingFromTitles(raw, titles);
+    const phrase = fromTitle || titleCasePhrase(normalizePhrase(raw));
+    const trimmed = trimGenericEdges(tokenize(phrase));
+    if (trimmed.length) candidates.push(trimmed.join(" "));
+  }
+  for (const cand of candidates) {
+    if (isValidCommunity(cand, originalCommunity)) return cand;
+  }
+  return null;
+}
+
 function extractUnitTokenFromText(value: string): string | null {
   const text = String(value ?? "");
   const explicit =
@@ -8727,31 +8910,21 @@ Requirements:
       }).catch((e) => console.error("[booking-alternatives] DB save failed:", e?.message ?? e));
       const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
       const walkMinutes = unitWalkMinutes;
-      // Name the resort the ATTACHED units actually belong to — derive it from
-      // the units' OWN listing titles (PR #530's commonResortNameFromTitles),
-      // NOT from req.body.propertyLabel / a.community, which carry the guest's
-      // ORIGINAL/configured community. City-wide buy-ins are usually a DIFFERENT
-      // resort, and req.body.propertyLabel is prox.resortName, which falls back
-      // to the configured community when the units' titles can't be resolved —
-      // so the old "propertyLabel first" path told the guest we moved them to
-      // the very place they're being moved away from (Decision Log 2026-06-06).
-      const attachedUnitTitles = hydratedAlternatives
-        .map((a) => String(a.title ?? "").trim())
-        .filter(Boolean);
-      const derivedPlace = usableCommunityContext(
-        attachedUnitTitles.length >= 2
-          ? (commonResortNameFromTitles(attachedUnitTitles) ?? "")
-          : communityFromAlternativeTitle(attachedUnitTitles[0] ?? ""),
+      // Name the resort the ATTACHED units actually belong to. Derive it from
+      // the units' OWN titles + notes — the community is usually NOT the title
+      // prefix and can sit mid-title (".. Villas of Kamalii 30"), so a common-
+      // prefix match misses it; extractNewCommunityFromUnits finds the longest
+      // common contiguous title phrase (with the city-combo note phrase as a
+      // fallback). It NEVER returns the guest's ORIGINAL community (req.body
+      // .originalCommunity = prox.community) — the relocation moves them AWAY
+      // from it — and returns null so the message uses neutral "in the same
+      // area" copy when nothing confident resolves (Decision Log 2026-06-06).
+      const derivedNewCommunity = extractNewCommunityFromUnits(
+        hydratedAlternatives.map((a) => a.title),
+        hydratedAlternatives.map((a) => a.notes),
+        req.body?.originalCommunity,
       );
-      // Never name the guest's ORIGINAL community as the new place — the
-      // relocation moves them AWAY from it. If the only label we can derive is
-      // the original (e.g. buy-ins lacking a real listing title fell back to the
-      // configured property name), drop to neutral "in the same area" copy.
-      const originalCommunityLabel = usableCommunityContext(req.body?.originalCommunity);
-      const propertyLabel =
-        derivedPlace && !(originalCommunityLabel && sameCommunityContext(derivedPlace, originalCommunityLabel))
-          ? derivedPlace
-          : null;
+      const propertyLabel = usableCommunityContext(derivedNewCommunity ?? "") || null;
       // Total capacity across the attached units for the friendly pitch line.
       const totalSleeps = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : 0), 0) || null;
       const totalBedrooms = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : 0), 0) || null;
