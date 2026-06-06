@@ -8058,7 +8058,7 @@ Requirements:
       args.alternativeUrl,
       "",
       ...(walkLine ? [walkLine, ""] : []),
-      "Please take a look and let me know if this works for you. If it does, I will send your full arrival details within 24 to 48 hours. If you would prefer not to move, I completely understand and will issue a full refund right away.",
+      "Please take a look and let me know if this works for you. If it does, I will send your full arrival details within 24 to 48 hours. If you would prefer not to move, I completely understand and will issue a full refund right away - the entire amount back, with no cancellation fees or penalties of any kind.",
       "",
       "Again, I am sorry for the inconvenience and I truly appreciate your understanding.",
       "",
