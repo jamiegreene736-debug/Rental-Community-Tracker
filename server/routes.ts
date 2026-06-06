@@ -8029,6 +8029,10 @@ Requirements:
       "",
       arrangeLine,
       "",
+      // Always reassure the guest there is no cost change. Plain ASCII so it
+      // survives the Booking.com sanitizer.
+      "There is no price difference and no increase at all to you - the replacement is at the exact same price as your original booking, fully covered on our end.",
+      "",
       "You can see photos and full details of the replacement on this page:",
       args.alternativeUrl,
       "",
