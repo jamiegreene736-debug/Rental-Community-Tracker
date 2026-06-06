@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-06 (relocation message to guest via booking channel + open tracking, PR #532):
+  New reservation-row button "Message guest about move" (`RelocateGuestDialog`
+  in `bookings.tsx`, shown once buy-ins are attached on a non-manual booking).
+  One click: builds the `/alternatives/:token` guest page from the attached
+  units (photos + AI copy), drafts an apology that we moved the guest to a
+  comparable community + the page URL, and sends it through the Guesty
+  conversation — which routes to the channel the guest booked with (VRBO→VRBO,
+  Booking.com→Booking.com, Airbnb→Airbnb) via the conversation `module`. Verified
+  live end-to-end.
+  - **Booking.com formatting (load-bearing):** `buildRelocationGuestMessage` +
+    `sanitizeForBookingChannel` in `routes.ts` emit ASCII-only plain text
+    (straight quotes, hyphens for dashes, no rich text/emoji) with the listing
+    URL on its OWN line. Booking.com only delivers the link if the property
+    allowlists guest-message links in the extranet security settings (operator
+    toggles that). Don't reintroduce smart quotes/markdown/emoji into this path.
+  - **Durable pages + open tracking (load-bearing):** alternative pages are now
+    persisted in Postgres (`booking_alternative_pages`, created on boot via
+    `db:push`) in ADDITION to the legacy ephemeral `tmp/booking-alternatives`
+    file, so guest links survive deploys. `GET /alternatives/:token` reads DB
+    first (tmp fallback) and records an open ONLY for UNAUTHENTICATED requests —
+    operator previews carry the admin session (or `?preview=1`) and are NOT
+    counted (`resolvePortalSession` check). This is what keeps "did the guest
+    open it" honest; don't count authed opens. `GET
+    /api/booking-alternatives/:token/tracking` returns opened/openCount/
+    firstOpenedAt/lastOpenedAt; the dialog polls it after send. `send-guest-message`
+    takes the `token` and stamps `messageSentAt`. Verified: guest open → count++,
+    operator/preview open → no count, count is durable in PG.
+
 - 2026-06-05 (guest alternatives page: VRBO photos + AI copy + correct walk resort, PR #530):
   e2e-fixed the city-wide buy-in → "Guest page" flow (`/alternatives/:token`).
   THREE things, verified live on prod:
