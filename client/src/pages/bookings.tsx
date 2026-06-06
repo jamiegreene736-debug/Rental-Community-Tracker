@@ -34,7 +34,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick, Download,
-  ShieldCheck, Paperclip, X, Minimize2, Plus,
+  ShieldCheck, Paperclip, X, Minimize2, Plus, Send,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -4133,6 +4133,10 @@ export default function Bookings() {
     | { reservation: GuestyReservation; propertyName: string }
     | null
   >(null);
+  const [relocateGuestTarget, setRelocateGuestTarget] = useState<
+    | { reservation: GuestyReservation }
+    | null
+  >(null);
   const [cancellationRange, setCancellationRange] = useState<"all" | "365" | "90">("all");
   const [verifyTarget, setVerifyTarget] = useState<
     | { buyIn: BuyIn; reservation: GuestyReservation }
@@ -7806,7 +7810,23 @@ export default function Bookings() {
                         )}
                         {manualReservation && <ManualReservationContactPanel reservation={r} />}
                         {!manualReservation && <ReservationCancellationPolicyNotice reservation={r} />}
-                        <div className="flex justify-end">
+                        <div className="flex flex-wrap justify-end gap-2">
+                          {!manualReservation && r.slotsFilled >= 1 && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="h-8 px-2 text-xs"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRelocateGuestTarget({ reservation: r });
+                              }}
+                              data-testid={`button-relocate-guest-${r._id}`}
+                              title={`Draft and send an apology + relocation message to the guest through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "the booking channel"}, with the new listing's guest page link and open tracking`}
+                            >
+                              <Send className="mr-1 h-3.5 w-3.5" />
+                              Message guest about move
+                            </Button>
+                          )}
                           <Button
                             type="button"
                             size="sm"
@@ -8886,6 +8906,12 @@ export default function Bookings() {
           reservation={vrboGuestPageTarget.reservation}
           propertyName={vrboGuestPageTarget.propertyName}
           onClose={() => setVrboGuestPageTarget(null)}
+        />
+      )}
+      {relocateGuestTarget && (
+        <RelocateGuestDialog
+          reservation={relocateGuestTarget.reservation}
+          onClose={() => setRelocateGuestTarget(null)}
         />
       )}
 
@@ -12873,6 +12899,227 @@ function VrboGuestPageDialog({
                 <ExternalLink className="mr-1 h-3.5 w-3.5" />
                 Create custom URL
               </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Dialog: draft + send the apology/relocation message to the guest through the
+// channel they booked with (VRBO -> VRBO, Booking.com -> Booking.com, etc.).
+// On open it builds the guest "alternatives" page from the attached buy-in units
+// (photos + AI copy), drafts a channel-clean apology message containing that
+// page's URL, sends it through the Guesty conversation (which routes to the
+// booking channel), and then tracks whether the guest opened the link.
+function RelocateGuestDialog({
+  reservation,
+  onClose,
+}: {
+  reservation: GuestyReservation;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const channel = channelKindOf(reservation);
+  const channelLabel =
+    channel === "booking" ? "Booking.com"
+      : channel === "vrbo" ? "VRBO"
+      : channel === "airbnb" ? "Airbnb"
+      : "the booking channel";
+  const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+  const attachedSlots = reservation.slots.filter((s): s is SlotInfo & { buyIn: BuyIn } => !!s.buyIn);
+  const [createdPage, setCreatedPage] = useState<{ url: string; token: string } | null>(null);
+  const [message, setMessage] = useState("");
+  const [sent, setSent] = useState(false);
+  const startedRef = useRef(false);
+
+  const createPage = useMutation({
+    mutationFn: async () => {
+      if (attachedSlots.length === 0) throw new Error("Attach at least one buy-in unit before messaging the guest.");
+      // Best-effort: pull the walk minutes + the units' real resort name so the
+      // message can name the community and the walking distance.
+      let walkMinutes: number | null = null;
+      let propertyLabel: string | null = null;
+      try {
+        const prox = await apiGetJson<UnitProximityResponse>(
+          `/api/bookings/${encodeURIComponent(reservation._id)}/unit-proximity`,
+        );
+        if (prox?.status === "ready") {
+          walkMinutes = prox.walk?.minutes ?? null;
+          propertyLabel = prox.resortName ?? prox.community ?? null;
+        }
+      } catch { /* non-fatal — message still drafts without the walk line */ }
+      const alternatives = attachedSlots.map((s) => {
+        const b = s.buyIn;
+        const photoUrls = manualBuyInPhotoUrlsFromNotes(b.notes);
+        const listingTitle = titleFromBuyInNotes(b.notes);
+        return {
+          title: listingTitle || `${b.propertyName} - ${b.unitLabel}`,
+          community: b.propertyName,
+          url: b.airbnbListingUrl,
+          image: photoUrls[0] ?? "",
+          photos: photoUrls,
+          bedrooms: s.bedrooms,
+          unitLabel: b.unitLabel,
+          address: b.unitAddress,
+          sourceLabel: sourceLabelForUrl(b.airbnbListingUrl),
+          notes: b.notes,
+        };
+      });
+      const resp = await apiRequest("POST", "/api/booking-alternatives", {
+        reservationId: reservation._id,
+        guestName,
+        checkIn: checkInOf(reservation),
+        checkOut: checkOutOf(reservation),
+        channel,
+        walkMinutes,
+        propertyLabel,
+        alternatives,
+      }).then((r) => r.json());
+      if (!resp?.url || !resp?.token) throw new Error(resp?.message || resp?.error || "Guest page create failed");
+      return resp as { url: string; token: string; relocationMessage?: string };
+    },
+    onSuccess: (data) => {
+      setCreatedPage({ url: data.url, token: data.token });
+      setMessage(data.relocationMessage || "");
+    },
+    onError: (e: any) => toast({ title: "Could not prepare message", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    createPage.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const sendMessage = useMutation({
+    mutationFn: async () => {
+      if (!createdPage?.token) throw new Error("Prepare the guest page first.");
+      if (!message.trim()) throw new Error("The message is empty.");
+      const response = await apiRequest("POST", "/api/booking-alternatives/send-guest-message", {
+        reservationId: reservation._id,
+        body: message,
+        token: createdPage.token,
+        channel,
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body?.ok !== true) {
+        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${response.status}`);
+      }
+      return body as { ok: true; conversationId: string };
+    },
+    onSuccess: () => {
+      setSent(true);
+      toast({ title: `Message sent through ${channelLabel}`, description: "Tracking whether the guest opens the link." });
+    },
+    onError: (e: any) => toast({ title: "Message send failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
+  const tracking = useQuery<{
+    opened: boolean;
+    openCount: number;
+    firstOpenedAt: string | null;
+    lastOpenedAt: string | null;
+    messageSentAt: string | null;
+  }>({
+    queryKey: ["/api/booking-alternatives", createdPage?.token, "tracking"],
+    queryFn: ({ signal }) => apiGetJson(`/api/booking-alternatives/${createdPage!.token}/tracking`, signal),
+    enabled: !!createdPage?.token && sent,
+    refetchInterval: sent ? 12_000 : false,
+  });
+
+  const copyMessage = async () => {
+    if (!message.trim()) return;
+    try { await navigator.clipboard?.writeText(message); toast({ title: "Message copied" }); }
+    catch { toast({ title: "Copy failed", variant: "destructive" }); }
+  };
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Message guest about the move</DialogTitle>
+          <DialogDescription>
+            Drafts an apology that we've moved {guestName.split(/\s+/)[0] || "the guest"} to a comparable
+            property, includes the new listing's guest page link, and sends it through {channelLabel} (the
+            channel they booked with). You can edit the text before sending.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="rounded border bg-muted/30 p-3 text-xs">
+            <p className="font-medium">{guestName} · <span className="text-muted-foreground">{channelLabel}</span></p>
+            <p className="text-muted-foreground">{fmtDate(checkInOf(reservation))} → {fmtDate(checkOutOf(reservation))} · {attachedSlots.length} unit{attachedSlots.length === 1 ? "" : "s"} attached</p>
+          </div>
+
+          {channel === "booking" && (
+            <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+              Booking.com only delivers the link if the property allows guest-message links in the extranet
+              security settings. The message below is plain-text formatted so Booking.com renders it cleanly.
+            </div>
+          )}
+
+          {createPage.isPending ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground py-6 justify-center">
+              <Loader2 className="h-4 w-4 animate-spin" /> Building guest page + drafting message…
+            </div>
+          ) : createdPage ? (
+            <>
+              <div className="text-[11px] text-muted-foreground">
+                Guest page:{" "}
+                <a className="underline" href={`${createdPage.url}?preview=1`} target="_blank" rel="noreferrer">
+                  {createdPage.url}
+                </a>{" "}
+                <span className="opacity-70">(your preview open isn't counted in tracking)</span>
+              </div>
+              <div>
+                <Label htmlFor="relocateMessage" className="text-xs">Message to guest</Label>
+                <Textarea
+                  id="relocateMessage"
+                  rows={12}
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  className="text-sm font-mono"
+                  data-testid="input-relocate-message"
+                />
+              </div>
+              {sent && (
+                <div className="rounded border border-sky-200 bg-sky-50/70 px-3 py-2 text-xs text-sky-950">
+                  <p className="font-medium">Sent through {channelLabel}.</p>
+                  <p className="mt-0.5">
+                    {tracking.data?.opened
+                      ? `Guest opened the link${tracking.data.openCount ? ` ${tracking.data.openCount} time${tracking.data.openCount === 1 ? "" : "s"}` : ""}${tracking.data.lastOpenedAt ? ` · last ${fmtDate(tracking.data.lastOpenedAt)}` : ""}. ✓`
+                      : "Not opened yet — this updates automatically when the guest opens the link."}
+                    {" "}
+                    <button type="button" className="underline" onClick={() => tracking.refetch()}>refresh</button>
+                  </p>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-sm text-destructive py-4">
+              Couldn't prepare the message. <button type="button" className="underline" onClick={() => createPage.mutate()}>Try again</button>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <Button type="button" variant="outline" onClick={copyMessage} disabled={!message.trim()}>
+            <Copy className="mr-1 h-3.5 w-3.5" /> Copy
+          </Button>
+          <Button
+            type="button"
+            onClick={() => sendMessage.mutate()}
+            disabled={!createdPage || !message.trim() || sendMessage.isPending || sent}
+            data-testid="button-send-relocate-message"
+          >
+            {sendMessage.isPending ? (
+              <><Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> Sending…</>
+            ) : sent ? (
+              <><CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Sent</>
+            ) : (
+              <><Send className="mr-1 h-3.5 w-3.5" /> Send through {channelLabel}</>
             )}
           </Button>
         </DialogFooter>

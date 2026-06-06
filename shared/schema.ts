@@ -950,6 +950,31 @@ export const insertBookingConfirmationSchema = createInsertSchema(bookingConfirm
 export type InsertBookingConfirmation = z.infer<typeof insertBookingConfirmationSchema>;
 export type BookingConfirmation = typeof bookingConfirmations.$inferSelect;
 
+// ── Guest-facing "alternative stay" / relocation pages ──
+// Durable store for the tokenized /alternatives/:token pages so the guest links
+// survive deploys (the legacy tmp/booking-alternatives copy is ephemeral on
+// Railway's filesystem) AND so we can track whether the guest opened the link.
+// openCount/firstOpenedAt/lastOpenedAt are incremented only for unauthenticated
+// (guest) GETs of the page — operator previews carry the admin session and are
+// not counted (see GET /alternatives/:token).
+export const bookingAlternativePages = pgTable("booking_alternative_pages", {
+  token: varchar("token", { length: 64 }).primaryKey(),
+  reservationId: text("reservation_id"),
+  channel: text("channel"),                  // booking channel: airbnb | booking | vrbo | manual | other
+  guestName: text("guest_name"),
+  checkIn: text("check_in"),
+  checkOut: text("check_out"),
+  payload: jsonb("payload").notNull(),       // full render payload (same shape as the legacy tmp JSON)
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at"),
+  messageSentAt: timestamp("message_sent_at"),
+  messageChannel: text("message_channel"),
+  firstOpenedAt: timestamp("first_opened_at"),
+  lastOpenedAt: timestamp("last_opened_at"),
+  openCount: integer("open_count").default(0).notNull(),
+});
+export type BookingAlternativePage = typeof bookingAlternativePages.$inferSelect;
+
 // ── Quo / OpenPhone SMS messages mirrored into the Guesty inbox ──
 // Guesty remains the reservation + conversation source of truth. These rows
 // store SMS messages sent/received through the 808 Quo number and attach them

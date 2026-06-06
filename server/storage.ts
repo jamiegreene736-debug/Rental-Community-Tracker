@@ -15,6 +15,7 @@ import {
   type AutoReplyLog, type InsertAutoReplyLog,
   type AutoReplyStyleExample, type InsertAutoReplyStyleExample,
   type BookingConfirmation, type InsertBookingConfirmation,
+  type BookingAlternativePage, bookingAlternativePages,
   type QuoSmsMessage, type InsertQuoSmsMessage,
   type QuoCallEvent, type InsertQuoCallEvent,
   type GuestInboxInternalNote, type InsertGuestInboxInternalNote,
@@ -235,6 +236,22 @@ export interface IStorage {
   createBookingConfirmation(b: InsertBookingConfirmation): Promise<BookingConfirmation>;
   getBookingConfirmationByReservationId(reservationId: string): Promise<BookingConfirmation | undefined>;
   getRecentBookingConfirmations(limit?: number): Promise<BookingConfirmation[]>;
+
+  // Guest-facing alternative/relocation pages (durable store + open tracking).
+  saveBookingAlternativePage(row: {
+    token: string;
+    reservationId?: string | null;
+    channel?: string | null;
+    guestName?: string | null;
+    checkIn?: string | null;
+    checkOut?: string | null;
+    payload: unknown;
+    expiresAt?: Date | null;
+  }): Promise<void>;
+  getBookingAlternativePage(token: string): Promise<BookingAlternativePage | undefined>;
+  recordBookingAlternativePageOpen(token: string): Promise<void>;
+  markBookingAlternativePageSent(token: string, channel: string | null): Promise<void>;
+  getBookingAlternativePagesByReservation(reservationId: string): Promise<BookingAlternativePage[]>;
 
   createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
   getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
@@ -1002,6 +1019,67 @@ export class DatabaseStorage implements IStorage {
 
   async getRecentBookingConfirmations(limit = 100): Promise<BookingConfirmation[]> {
     return db.select().from(bookingConfirmations).orderBy(desc(bookingConfirmations.sentAt)).limit(limit);
+  }
+
+  // ── Guest-facing alternative/relocation pages ──
+  async saveBookingAlternativePage(row: {
+    token: string;
+    reservationId?: string | null;
+    channel?: string | null;
+    guestName?: string | null;
+    checkIn?: string | null;
+    checkOut?: string | null;
+    payload: unknown;
+    expiresAt?: Date | null;
+  }): Promise<void> {
+    const values = {
+      token: row.token,
+      reservationId: row.reservationId ?? null,
+      channel: row.channel ?? null,
+      guestName: row.guestName ?? null,
+      checkIn: row.checkIn ?? null,
+      checkOut: row.checkOut ?? null,
+      payload: row.payload as any,
+      expiresAt: row.expiresAt ?? null,
+    };
+    await db.insert(bookingAlternativePages).values(values).onConflictDoUpdate({
+      target: bookingAlternativePages.token,
+      set: {
+        reservationId: values.reservationId,
+        channel: values.channel,
+        guestName: values.guestName,
+        checkIn: values.checkIn,
+        checkOut: values.checkOut,
+        payload: values.payload,
+        expiresAt: values.expiresAt,
+      },
+    });
+  }
+
+  async getBookingAlternativePage(token: string): Promise<BookingAlternativePage | undefined> {
+    const [row] = await db.select().from(bookingAlternativePages).where(eq(bookingAlternativePages.token, token)).limit(1);
+    return row;
+  }
+
+  async recordBookingAlternativePageOpen(token: string): Promise<void> {
+    await db.update(bookingAlternativePages).set({
+      openCount: sql`${bookingAlternativePages.openCount} + 1`,
+      lastOpenedAt: new Date(),
+      firstOpenedAt: sql`COALESCE(${bookingAlternativePages.firstOpenedAt}, NOW())`,
+    }).where(eq(bookingAlternativePages.token, token));
+  }
+
+  async markBookingAlternativePageSent(token: string, channel: string | null): Promise<void> {
+    await db.update(bookingAlternativePages).set({
+      messageSentAt: new Date(),
+      messageChannel: channel ?? null,
+    }).where(eq(bookingAlternativePages.token, token));
+  }
+
+  async getBookingAlternativePagesByReservation(reservationId: string): Promise<BookingAlternativePage[]> {
+    return db.select().from(bookingAlternativePages)
+      .where(eq(bookingAlternativePages.reservationId, reservationId))
+      .orderBy(desc(bookingAlternativePages.createdAt));
   }
 
   // ── Quo SMS mirror ──
