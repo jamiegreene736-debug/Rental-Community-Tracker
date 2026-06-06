@@ -8727,16 +8727,31 @@ Requirements:
       }).catch((e) => console.error("[booking-alternatives] DB save failed:", e?.message ?? e));
       const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
       const walkMinutes = unitWalkMinutes;
-      // Prefer a real, resolved community for the apology copy; every candidate
-      // is filtered (usableCommunityContext / communityFromAlternativeTitle) so
-      // listing-title cruft or internal notes never reach the guest. The message
-      // builder cleans it again as a final guard.
+      // Name the resort the ATTACHED units actually belong to — derive it from
+      // the units' OWN listing titles (PR #530's commonResortNameFromTitles),
+      // NOT from req.body.propertyLabel / a.community, which carry the guest's
+      // ORIGINAL/configured community. City-wide buy-ins are usually a DIFFERENT
+      // resort, and req.body.propertyLabel is prox.resortName, which falls back
+      // to the configured community when the units' titles can't be resolved —
+      // so the old "propertyLabel first" path told the guest we moved them to
+      // the very place they're being moved away from (Decision Log 2026-06-06).
+      const attachedUnitTitles = hydratedAlternatives
+        .map((a) => String(a.title ?? "").trim())
+        .filter(Boolean);
+      const derivedPlace = usableCommunityContext(
+        attachedUnitTitles.length >= 2
+          ? (commonResortNameFromTitles(attachedUnitTitles) ?? "")
+          : communityFromAlternativeTitle(attachedUnitTitles[0] ?? ""),
+      );
+      // Never name the guest's ORIGINAL community as the new place — the
+      // relocation moves them AWAY from it. If the only label we can derive is
+      // the original (e.g. buy-ins lacking a real listing title fell back to the
+      // configured property name), drop to neutral "in the same area" copy.
+      const originalCommunityLabel = usableCommunityContext(req.body?.originalCommunity);
       const propertyLabel =
-        usableCommunityContext(req.body?.propertyLabel)
-        || hydratedAlternatives.map((a) => a.alternativeCommunity).find((c) => usableCommunityContext(c))
-        || hydratedAlternatives.map((a) => a.community).find((c) => usableCommunityContext(c))
-        || communityFromAlternativeTitle(hydratedAlternatives[0]?.title)
-        || null;
+        derivedPlace && !(originalCommunityLabel && sameCommunityContext(derivedPlace, originalCommunityLabel))
+          ? derivedPlace
+          : null;
       // Total capacity across the attached units for the friendly pitch line.
       const totalSleeps = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : 0), 0) || null;
       const totalBedrooms = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : 0), 0) || null;
