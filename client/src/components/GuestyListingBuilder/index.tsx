@@ -1,4 +1,4 @@
-import { Component, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
+import { Component, useState, useEffect, useCallback, useMemo, useRef, type ReactNode, type CSSProperties } from "react";
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { guestyService } from "@/services/guestyService";
@@ -879,6 +879,49 @@ function GuestyRatePushCard({
   );
 }
 
+// Shape of POST /api/builder/photo-community-check's JSON response. Mirrors
+// the server's PhotoCommunityCheckResult (server/photo-community-check.ts) —
+// kept as a local type so the client bundle doesn't import server code.
+type CommunityCheckFlag = { id: string; caption?: string; reason: string };
+type CommunityCheckGroup = {
+  role: "community" | "unit";
+  label: string;
+  folder: string;
+  photosChecked: number;
+  photosTotal: number;
+  identifiedCommunity: string;
+  matchesExpected?: "yes" | "no" | "uncertain";
+  matchReason?: string;
+  sameAsCommunity?: "yes" | "no" | "uncertain";
+  reason?: string;
+  allSameCommunity?: boolean;
+  allSameUnit?: boolean;
+  outliers: CommunityCheckFlag[];
+  junk: CommunityCheckFlag[];
+  confidence: number;
+};
+type CommunityCheckDuplicate = {
+  scope: "cross-folder" | "within-folder";
+  a: { folder: string; filename: string; id: string };
+  b: { folder: string; filename: string; id: string };
+  distance: number;
+};
+type PhotoCommunityCheckResult = {
+  ok: boolean;
+  verdict: "pass" | "warn" | "fail";
+  expectedCommunity: string;
+  summary: string;
+  concerns: string[];
+  allSameCommunity: "yes" | "no" | "uncertain";
+  community: CommunityCheckGroup | null;
+  units: CommunityCheckGroup[];
+  duplicates: CommunityCheckDuplicate[];
+  model: string;
+  photosChecked: number;
+  elapsedMs: number;
+  warning?: string;
+};
+
 export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, isSingleListing = false, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1748,6 +1791,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [selectedId]);
 
   const stopNormalize = () => normalizeAbortRef.current?.abort();
+
+  // ── Photo Community Check ─────────────────────────────────────────────────
+  // Operator-clicked QA: confirms the community-folder photos match this
+  // property's community, that they're all of that one community, and that each
+  // unit's photos are the SAME community. Plus junk/mis-filed flags and
+  // cross-folder duplicate detection. The callback that builds the request is
+  // defined after `photos` (further down) because it reads that array.
+  type CommunityCheckPhase = "idle" | "running" | "done" | "error";
+  const [communityCheckPhase, setCommunityCheckPhase] = useState<CommunityCheckPhase>("idle");
+  const [communityCheckResult, setCommunityCheckResult] = useState<PhotoCommunityCheckResult | null>(null);
+  const [communityCheckError, setCommunityCheckError] = useState<string | null>(null);
 
   // Persisted last-push summary (survives refresh)
   type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number };
@@ -2970,6 +3024,71 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   const pillLabel = conn === "checking" ? "Checking connection…" : conn === "connected" ? "Guesty Connected" : conn === "rate-limited" ? "Rate Limited — retry later" : "Guesty Disconnected";
   const photos = propertyData?.photos || [];
+
+  // Build the photo-community-check request from the photos currently shown in
+  // the tab (the curated set the operator will actually push) and POST it. Each
+  // photo's `source` tells us its role/label: "Community — {complex}" vs.
+  // "Unit A (3BR)"; the folder + filename come from the /photos/<folder>/<file>
+  // URL. Works for static props, drafts, and single listings because it reads
+  // only from the rendered photo list — no dependence on static unit-builder
+  // data being present for this property.
+  const runCommunityCheck = useCallback(async () => {
+    setCommunityCheckPhase("running");
+    setCommunityCheckError(null);
+    setCommunityCheckResult(null);
+    try {
+      const parse = (url: string): { folder: string; filename: string } | null => {
+        try {
+          const p = url.startsWith("/") ? url : new URL(url, window.location.origin).pathname;
+          const m = p.match(/^\/photos\/([^/?#]+)\/([^/?#]+)$/);
+          return m ? { folder: m[1], filename: m[2] } : null;
+        } catch { return null; }
+      };
+      type ReqGroup = { role: "community" | "unit"; label: string; folder: string; filenames: string[]; captions: Record<string, string> };
+      const byFolder = new Map<string, ReqGroup>();
+      let expectedCommunity = "";
+      for (const p of photos) {
+        const parsed = parse(p.url);
+        if (!parsed) continue;
+        const src = String(p.source ?? "");
+        const role: "community" | "unit" = /^community\b/i.test(src) ? "community" : "unit";
+        if (role === "community" && !expectedCommunity) {
+          expectedCommunity = src.replace(/^community\s*[—–-]\s*/i, "").trim();
+        }
+        let g = byFolder.get(parsed.folder);
+        if (!g) {
+          g = { role, label: src || parsed.folder, folder: parsed.folder, filenames: [], captions: {} };
+          byFolder.set(parsed.folder, g);
+        }
+        if (!g.filenames.includes(parsed.filename)) g.filenames.push(parsed.filename);
+        if (p.caption) g.captions[parsed.filename] = p.caption;
+      }
+      const groups = Array.from(byFolder.values())
+        .sort((a, b) => (a.role === b.role ? a.label.localeCompare(b.label) : a.role === "community" ? -1 : 1));
+      if (groups.length === 0) {
+        setCommunityCheckError("No local photo folders found to check.");
+        setCommunityCheckPhase("error");
+        return;
+      }
+      const resp = await fetch("/api/builder/photo-community-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ propertyId, expectedCommunity, groups }),
+      });
+      const data = await resp.json().catch(() => null) as PhotoCommunityCheckResult | { error?: string } | null;
+      if (!resp.ok || !data) {
+        setCommunityCheckError((data as any)?.error || `HTTP ${resp.status}`);
+        setCommunityCheckPhase("error");
+        return;
+      }
+      setCommunityCheckResult(data as PhotoCommunityCheckResult);
+      setCommunityCheckPhase("done");
+    } catch (e: any) {
+      setCommunityCheckError(e?.message ?? String(e));
+      setCommunityCheckPhase("error");
+    }
+  }, [photos, propertyId]);
+
   const amenities = propertyData?.amenities || [];
   const descriptions = effectivePropertyData?.descriptions;
   const pricing = propertyData?.pricing;
@@ -6575,6 +6694,143 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   )}
                                 </div>
                               )}
+
+                              {/* ── Photo Community Check ─────────────────────
+                                  Operator QA: confirms the community folder +
+                                  every unit are the same community, and flags
+                                  junk / mis-filed photos + cross-folder dupes.
+                                  Local-photo check — no Guesty listing needed. */}
+                              <div style={{ marginBottom: 10, padding: 10, background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                  <button
+                                    className="glb-btn"
+                                    onClick={runCommunityCheck}
+                                    disabled={communityCheckPhase === "running"}
+                                    data-testid="btn-photo-community-check"
+                                    style={{ fontSize: 12, background: "#ecfeff", color: "#155e75", border: "1px solid #a5f3fc" }}
+                                  >
+                                    {communityCheckPhase === "running" ? "🔎 Checking photos…" : "🔎 Check photo community"}
+                                  </button>
+                                  <span style={{ fontSize: 11, color: "#64748b", flex: 1, minWidth: 220 }}>
+                                    AI-confirms the community folder and each unit are all the SAME community, and flags junk / mis-filed photos and the same photo appearing in two folders.
+                                  </span>
+                                </div>
+
+                                {communityCheckPhase === "running" && (
+                                  <div style={{ fontSize: 11, color: "#0e7490", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                                    <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#06b6d4", animation: "glb-blink 1s infinite" }} />
+                                    Analyzing photos with AI vision — usually 20-40 seconds…
+                                  </div>
+                                )}
+
+                                {communityCheckPhase === "error" && (
+                                  <div style={{ fontSize: 12, color: "#b91c1c", marginTop: 8 }}>✗ {communityCheckError}</div>
+                                )}
+
+                                {communityCheckPhase === "done" && communityCheckResult && (() => {
+                                  const r = communityCheckResult;
+                                  const vStyle = r.verdict === "pass"
+                                    ? { bg: "#dcfce7", fg: "#15803d", label: "✓ Pass" }
+                                    : r.verdict === "fail"
+                                    ? { bg: "#fee2e2", fg: "#b91c1c", label: "✗ Problem found" }
+                                    : { bg: "#fef9c3", fg: "#92400e", label: "⚠ Review needed" };
+                                  const tri = (s?: "yes" | "no" | "uncertain") =>
+                                    s === "yes" ? { bg: "#dcfce7", fg: "#15803d", label: "Yes" }
+                                    : s === "no" ? { bg: "#fee2e2", fg: "#b91c1c", label: "No" }
+                                    : { bg: "#f1f5f9", fg: "#475569", label: "Uncertain" };
+                                  const badge = (c: { bg: string; fg: string }): CSSProperties => ({
+                                    display: "inline-block", fontSize: 10.5, fontWeight: 600, padding: "1px 7px",
+                                    borderRadius: 10, background: c.bg, color: c.fg,
+                                  });
+                                  const card: CSSProperties = { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 6, padding: "8px 10px", marginTop: 6 };
+                                  const rowS: CSSProperties = { fontSize: 11.5, color: "#334155", marginTop: 2 };
+                                  const muted: CSSProperties = { color: "#64748b" };
+                                  const flagList = (flags: CommunityCheckFlag[], heading: string, color: string) =>
+                                    flags.length > 0 ? (
+                                      <div style={{ marginTop: 3 }}>
+                                        <span style={{ fontSize: 11, fontWeight: 600, color }}>{heading}:</span>
+                                        <ul style={{ margin: "2px 0 0 0", paddingLeft: 18, fontSize: 11, color: "#475569" }}>
+                                          {flags.map((f, i) => (
+                                            <li key={i}><code style={{ color: "#0e7490" }}>{f.id}</code>{f.caption ? ` "${f.caption}"` : ""} — {f.reason}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    ) : null;
+                                  const crossDupes = r.duplicates.filter((d) => d.scope === "cross-folder");
+
+                                  return (
+                                    <div style={{ marginTop: 10 }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                        <span style={{ ...badge(vStyle), fontSize: 12, padding: "2px 10px" }}>{vStyle.label}</span>
+                                        <span style={{ fontSize: 12, color: "#334155", flex: 1, minWidth: 200 }}>{r.summary}</span>
+                                      </div>
+
+                                      {r.concerns.length > 0 && (
+                                        <ul style={{ margin: "6px 0 4px 0", paddingLeft: 18, fontSize: 11.5, color: r.verdict === "fail" ? "#b91c1c" : "#92400e" }}>
+                                          {r.concerns.map((c, i) => <li key={i}>{c}</li>)}
+                                        </ul>
+                                      )}
+
+                                      {r.community && (
+                                        <div style={card}>
+                                          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                                            <span style={{ fontWeight: 600, fontSize: 12, color: "#0f172a" }}>{r.community.label}</span>
+                                            <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>{r.community.photosChecked}/{r.community.photosTotal} checked</span>
+                                          </div>
+                                          <div style={rowS}>Identified as: <b>{r.community.identifiedCommunity}</b></div>
+                                          <div style={rowS}>
+                                            Matches expected{r.expectedCommunity ? ` ("${r.expectedCommunity}")` : ""}: <span style={badge(tri(r.community.matchesExpected))}>{tri(r.community.matchesExpected).label}</span>
+                                            {r.community.matchReason ? <span style={muted}> — {r.community.matchReason}</span> : null}
+                                          </div>
+                                          {!r.community.allSameCommunity && (
+                                            <div style={{ ...rowS, color: "#b45309" }}>⚠ Not all community photos look like the same place.</div>
+                                          )}
+                                          {flagList(r.community.outliers, "Possible different-community photos", "#b45309")}
+                                          {flagList(r.community.junk, "Junk / mis-filed", "#b45309")}
+                                        </div>
+                                      )}
+
+                                      {r.units.map((u, i) => {
+                                        const t = tri(u.sameAsCommunity);
+                                        return (
+                                          <div key={i} style={card}>
+                                            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                                              <span style={{ fontWeight: 600, fontSize: 12, color: "#0f172a" }}>{u.label}</span>
+                                              <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>{u.photosChecked}/{u.photosTotal} checked</span>
+                                            </div>
+                                            <div style={rowS}>Identified as: <b>{u.identifiedCommunity}</b></div>
+                                            <div style={rowS}>
+                                              Same community as community photos: <span style={badge(t)}>{t.label}</span>
+                                              {u.reason ? <span style={muted}> — {u.reason}</span> : null}
+                                            </div>
+                                            {u.allSameUnit === false && (
+                                              <div style={{ ...rowS, color: "#b45309" }}>⚠ Not all photos look like the same unit.</div>
+                                            )}
+                                            {flagList(u.outliers, "Possible odd-one-out photos", "#b45309")}
+                                            {flagList(u.junk, "Junk / mis-filed", "#b45309")}
+                                          </div>
+                                        );
+                                      })}
+
+                                      {crossDupes.length > 0 && (
+                                        <div style={{ ...card, background: "#fffbeb", borderColor: "#fde68a" }}>
+                                          <div style={{ fontWeight: 600, fontSize: 11.5, color: "#92400e", marginBottom: 3 }}>⚠ Same photo found in more than one folder</div>
+                                          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: "#92400e" }}>
+                                            {crossDupes.map((d, i) => (
+                                              <li key={i}><code>{d.a.folder}/{d.a.filename}</code> ↔ <code>{d.b.folder}/{d.b.filename}</code></li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      )}
+
+                                      <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 6 }}>
+                                        {r.photosChecked} photos analyzed · {(r.elapsedMs / 1000).toFixed(0)}s · {r.model}
+                                        {r.warning && r.ok ? ` · note: ${r.warning}` : ""}
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+                              </div>
 
                               {/* Cover collage lives inside PhotoCurator now —
                                   see the banner at the top of the tile grid. */}

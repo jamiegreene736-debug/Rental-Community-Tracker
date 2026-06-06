@@ -43,6 +43,46 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-06 (photos tab: "Check photo community" QA button):
+  Operator asked for a button on the photos tab that confirms (1) the community
+  name of the photos in the community folder, (2) that ALL community photos are
+  of that community, and (3) for each unit, what community it's in and whether
+  it's the SAME community as the community photos — plus "anything else useful."
+  Shipped end-to-end:
+  - **New module `server/photo-community-check.ts`** + endpoint
+    `POST /api/builder/photo-community-check`. ONE Claude vision call
+    (`claude-sonnet-4-6`) over a sampled set (community ≤10, each unit ≤6,
+    total ≤24) with every photo inlined and delimited by text markers so the
+    model judges community↔unitA↔unitB consistency holistically. Returns a
+    structured verdict (pass/warn/fail) with: identified community + matches-
+    expected (yes/no/uncertain) for the community folder, per-unit
+    same-as-community, within-folder consistency, junk/mis-filed flags
+    (floorplan/map/logo/screenshot/person/competitor watermark), and an overall
+    summary + concerns.
+  - **Extras added on top of the operator's 3 asks:** deterministic
+    cross-folder duplicate detection via dHash (`server/photo-hashing.ts`) —
+    the same image filed in two folders is the strongest "mixed-up" signal and
+    runs even with no `ANTHROPIC_API_KEY`; per-folder "X of Y checked" counts;
+    junk detection; competitor-watermark detection.
+  - **Load-bearing (see AGENTS #45):** the check is CLIENT-DRIVEN and
+    property-agnostic — `runCommunityCheck` in
+    `client/src/components/GuestyListingBuilder/index.tsx` builds the request
+    groups from the rendered `photos` array (folder+filename from the
+    `/photos/<folder>/<file>` URL, role+label+expectedCommunity from each
+    photo's `source` string), NOT from a `unitBuilderData` lookup. This is what
+    makes it work for negative-id drafts + single listings, which is exactly
+    when a pre-publish QA matters most. Don't refactor the endpoint to take just
+    a propertyId. Prompt reserves a cross-community "no" for POSITIVE
+    contradictions (different resort signage, wrong climate, incompatible
+    building/view) — unit interiors always look different from community
+    amenities, so "looks different" alone must stay "uncertain."
+  - Button sits in the photos-tab header (cyan "🔎 Check photo community"),
+    needs NO Guesty listing selected (it's a local-photo check). Verified:
+    `npm run check` adds no new errors in touched files, `npm run build` passes,
+    and a local harness exercised disk-read + sampling + dHash + the no-key bail
+    (18 photos sampled across community + 2 units, 0 false dupes). Full vision
+    leg verified live on Railway post-deploy.
+
 - 2026-06-06 ("missing" Makahuena booking in global summary = canceled; added Include-canceled toggle):
   Operator reported a Makahuena at Poipu booking (made today, Booking.com) not
   showing in the Operations "All properties · global summary" view. Investigated
