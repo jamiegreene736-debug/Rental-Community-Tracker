@@ -4342,6 +4342,9 @@ export default function Bookings() {
     launchParams.propertyId ? null : launchParams.listingId
   ));
   const [includePast, setIncludePast] = useState(() => launchParams.includePast);
+  // When on, the bookings queries also return canceled/declined/inquiry/expired
+  // reservations (badged in the UI) instead of the committed-only default.
+  const [includeCanceled, setIncludeCanceled] = useState(false);
   const [reportMonth, setReportMonth] = useState(() => monthInputValue(new Date()));
   const emptyManualReservationForm = (): ManualReservationFormState => ({
     propertyId: selectedPropertyId?.toString() ?? "",
@@ -4567,12 +4570,13 @@ export default function Bookings() {
     error: selectedBookingsErr,
     refetch: refetchBookings,
   } = useQuery<{ reservations: GuestyReservation[]; total: number; unitSlots: UnitConfig[] }>({
-    queryKey: ["/api/bookings/listing", selectedListingId, selectedQueryPropertyId, { includePast }],
+    queryKey: ["/api/bookings/listing", selectedListingId, selectedQueryPropertyId, { includePast, includeCanceled }],
     queryFn: () => {
       if (!selectedListingId) {
         return Promise.resolve({ reservations: [], total: 0, unitSlots: [] });
       }
       const params = new URLSearchParams({ includePast: String(includePast) });
+      if (includeCanceled) params.set("includeCanceled", "true");
       if (selectedQueryPropertyId) params.set("propertyId", String(selectedQueryPropertyId));
       const url = `/api/bookings/listing/${encodeURIComponent(selectedListingId)}?${params.toString()}`;
       return apiRequest("GET", url).then((r) => r.json());
@@ -4588,8 +4592,8 @@ export default function Bookings() {
     targetCount: number;
     missingListingIds?: string[];
   }>({
-    queryKey: ["/api/bookings/guesty-all", { includePast }],
-    queryFn: () => apiRequest("GET", `/api/bookings/guesty-all?includePast=${includePast}`).then((r) => r.json()),
+    queryKey: ["/api/bookings/guesty-all", { includePast, includeCanceled }],
+    queryFn: () => apiRequest("GET", `/api/bookings/guesty-all?includePast=${includePast}${includeCanceled ? "&includeCanceled=true" : ""}`).then((r) => r.json()),
     enabled: isGlobalView,
     staleTime: 60_000,
     refetchInterval: 120_000,
@@ -7034,6 +7038,17 @@ export default function Bookings() {
                 />
                 <Label htmlFor="include-past" className="text-sm cursor-pointer">Include past stays</Label>
               </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="include-canceled"
+                  checked={includeCanceled}
+                  onChange={(e) => setIncludeCanceled(e.target.checked)}
+                  className="rounded"
+                  data-testid="checkbox-include-canceled"
+                />
+                <Label htmlFor="include-canceled" className="text-sm cursor-pointer">Include canceled</Label>
+              </div>
               <Button
                 type="button"
                 variant="outline"
@@ -7989,6 +8004,25 @@ export default function Bookings() {
                                 </Link>
                               </Button>
                             )}
+                            {/* Non-committed status badge (only ever rendered when
+                                "Include canceled" surfaces these rows). */}
+                            {(() => {
+                              const status = String((r as any).status ?? "");
+                              if (!/(cancel|declin|inquir|request|expired|closed|draft)/i.test(status)) return null;
+                              const canceledLike = /(cancel|declin|expired|closed)/i.test(status);
+                              return (
+                                <Badge
+                                  variant="outline"
+                                  className={`h-6 text-[10px] capitalize ${canceledLike
+                                    ? "border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
+                                    : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"}`}
+                                  title={`Guesty status: ${status}`}
+                                  data-testid={`badge-reservation-status-${r._id}`}
+                                >
+                                  {status.replace(/_/g, " ")}
+                                </Badge>
+                              );
+                            })()}
                           </div>
                           {r.confirmationCode && (
                             <p className="text-[10px] text-muted-foreground font-mono">
