@@ -2499,7 +2499,7 @@ function AdminDashboard() {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 mb-6">
           <Card className="p-4">
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-start gap-2 mb-1 min-h-8">
               <Building2 className="h-4 w-4 text-muted-foreground" />
               <span className="text-xs text-muted-foreground font-medium">Total Properties</span>
             </div>
@@ -2507,7 +2507,7 @@ function AdminDashboard() {
             <p className="mt-1 text-xs text-muted-foreground">{propertyCountBreakdown}</p>
           </Card>
           <Card className="p-4 sm:col-span-2 lg:col-span-2">
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-start gap-2 mb-1 min-h-8">
               <DollarSign className="h-4 w-4 text-muted-foreground" />
               <span className="text-xs text-muted-foreground font-medium">Avg Low Price/Night + 30-day booking stats</span>
             </div>
@@ -2568,7 +2568,7 @@ function AdminDashboard() {
                 type="button"
                 className="shadcn-card rounded-xl border bg-card border-card-border p-4 text-left text-card-foreground shadow-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               >
-                <div className="flex items-center gap-2 mb-1">
+                <div className="flex items-start gap-2 mb-1 min-h-8">
                   <TrendingUp className="h-4 w-4 text-muted-foreground" />
                   <span className="text-xs text-muted-foreground font-medium">Funds collected, past 30 days</span>
                 </div>
@@ -2749,7 +2749,7 @@ function AdminDashboard() {
             </DialogContent>
           </Dialog>
           <Card className="p-4" data-testid="card-booking-revenue">
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-start gap-2 mb-1 min-h-8">
               <Wallet className="h-4 w-4 text-muted-foreground" />
               <span className="text-xs text-muted-foreground font-medium">Revenue, past 30 days</span>
             </div>
@@ -2771,7 +2771,7 @@ function AdminDashboard() {
                 className="shadcn-card rounded-xl border bg-card border-card-border p-4 text-left text-card-foreground shadow-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                 data-testid="button-cancelled-bookings"
               >
-                <div className="flex items-center gap-2 mb-1">
+                <div className="flex items-start gap-2 mb-1 min-h-8">
                   <Ban className={`h-4 w-4 ${cancellationSummary.reviewNeeded > 0 ? "text-red-600" : "text-muted-foreground"}`} />
                   <span className="text-xs text-muted-foreground font-medium">Cancelled bookings, past {cancellationWindowDays} days</span>
                 </div>
