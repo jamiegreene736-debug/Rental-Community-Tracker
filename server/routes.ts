@@ -8010,6 +8010,7 @@ Requirements:
     communityDriveMinutes?: number | null;
     sleeps?: number | null;
     bedrooms?: number | null;
+    units?: Array<{ bedrooms?: number | null; sleeps?: number | null }>;
   }): string => {
     const firstName = firstNameForGuestMessage(args.guestName);
     const greeting = firstName ? `Hi ${firstName},` : "Hi,";
@@ -8034,12 +8035,38 @@ Requirements:
       ? `, only about a ${Math.round(driveMin)}-minute drive from where you were originally going to stay`
       : "";
     const proximityLine = `It is in the same city as your original booking${drivePhrase}, so you will be right in the same area you planned for.`;
-    // Friendly "this is genuinely a great comparable unit" pitch.
+    // Friendly "this is genuinely a great comparable unit" pitch. When the
+    // replacement is a combination of units (e.g. a 3BR + a 2BR), spell out
+    // each unit's bedrooms AND sleeps capacity individually; otherwise fall
+    // back to the combined totals for a single unit. Plain ASCII so it
+    // survives the Booking.com sanitizer.
+    const describeUnitCapacity = (unit: { bedrooms?: number | null; sleeps?: number | null }): string => {
+      const unitBeds = Number(unit?.bedrooms);
+      const unitSleeps = Number(unit?.sleeps);
+      const hasBeds = Number.isFinite(unitBeds) && unitBeds > 0;
+      const hasSleeps = Number.isFinite(unitSleeps) && unitSleeps > 0;
+      if (hasBeds && hasSleeps) return `${Math.round(unitBeds)} bedrooms and sleeps up to ${Math.round(unitSleeps)} guests`;
+      if (hasBeds) return `${Math.round(unitBeds)} bedrooms`;
+      if (hasSleeps) return `sleeps up to ${Math.round(unitSleeps)} guests`;
+      return "";
+    };
+    const ordinalUnitLabels = ["the first unit", "the second unit", "the third unit", "the fourth unit"];
+    const namedUnits = (args.units ?? [])
+      .map((unit, index) => {
+        const desc = describeUnitCapacity(unit);
+        return desc ? `${ordinalUnitLabels[index] ?? `unit ${index + 1}`} has ${desc}` : "";
+      })
+      .filter(Boolean);
     const sleeps = Number(args.sleeps);
     const bedrooms = Number(args.bedrooms);
-    const sleepsClause = Number.isFinite(sleeps) && sleeps > 0
-      ? ` It comfortably sleeps up to ${Math.round(sleeps)} guests${Number.isFinite(bedrooms) && bedrooms > 0 ? ` across ${Math.round(bedrooms)} bedrooms` : ""}.`
-      : "";
+    let sleepsClause = "";
+    if (namedUnits.length >= 2) {
+      // "the first unit has X, and the second unit has Y" -> capitalize the lead.
+      const unitsSentence = `${namedUnits.slice(0, -1).join(", ")}, and ${namedUnits[namedUnits.length - 1]}`;
+      sleepsClause = ` ${unitsSentence.charAt(0).toUpperCase()}${unitsSentence.slice(1)}.`;
+    } else if (Number.isFinite(sleeps) && sleeps > 0) {
+      sleepsClause = ` It comfortably sleeps up to ${Math.round(sleeps)} guests${Number.isFinite(bedrooms) && bedrooms > 0 ? ` across ${Math.round(bedrooms)} bedrooms` : ""}.`;
+    }
     const pitchLine = `Honestly, this is a really nice, well-kept place and a great comparable to the unit you booked.${sleepsClause} I think you and your group will really enjoy it.`;
     const lines = [
       greeting,
@@ -8621,6 +8648,12 @@ Requirements:
           communityDriveMinutes,
           sleeps: totalSleeps,
           bedrooms: totalBedrooms,
+          // Per-unit breakdown so a combo spells out bedrooms + sleeps for
+          // each unit (hydratedAlternatives is one entry per attached unit).
+          units: hydratedAlternatives.map((a) => ({
+            bedrooms: Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : null,
+            sleeps: Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : null,
+          })),
         }),
       });
     } catch (err: any) {
@@ -8727,6 +8760,12 @@ Requirements:
           communityDriveMinutes: driveMinutes,
           sleeps: totalSleeps,
           bedrooms: totalBedrooms,
+          // Per-unit breakdown so a combo spells out bedrooms + sleeps for
+          // each unit (hydratedAlternatives is one entry per attached unit).
+          units: hydratedAlternatives.map((a) => ({
+            bedrooms: Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : null,
+            sleeps: Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : null,
+          })),
         }),
         alternatives: hydratedAlternatives.map((item, index) => ({
           title: item.title,
