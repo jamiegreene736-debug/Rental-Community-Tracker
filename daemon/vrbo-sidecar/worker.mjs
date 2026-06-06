@@ -7880,8 +7880,31 @@ async function processVrboPhotoScrape(id, params) {
     return out.slice(0, Math.max(1, Math.min(100, Number(maxPhotos) || 50)));
   }, { maxPhotos });
 
-  log(`vrbo_photo_scrape ${id}: ${photos.length} photos`);
-  await postResult(id, { photos });
+  // While we're on the listing page (real browser, no bot wall), harvest the
+  // sleeping-arrangements / bed text so the guest alternative page can show
+  // real bed types. The server parses distinct types (King/Queen/Twin/Sofa)
+  // out of this; we just return the short bed-mentioning segments.
+  const bedText = await page.evaluate(() => {
+    const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
+    const body = clean(document.body && document.body.innerText);
+    const bedRe = /\b(?:king|queen|twin|full|double|bunk|sofa\s*bed|sleeper\s*sofa|pull[-\s]?out|murphy|day\s*bed|trundle|crib)\b/i;
+    const segs = body.split(/(?:[.!?]\s+)|·|•|\||\n|;|,/).map((s) => clean(s)).filter(Boolean);
+    const seen = new Set();
+    const lines = [];
+    for (const s of segs) {
+      if (s.length < 3 || s.length > 120) continue;
+      if (!bedRe.test(s)) continue;
+      const key = s.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(s);
+      if (lines.length >= 40) break;
+    }
+    return lines.join(" · ").slice(0, 2000);
+  }).catch(() => "");
+
+  log(`vrbo_photo_scrape ${id}: ${photos.length} photos, bedText=${bedText ? bedText.length + "c" : "none"}`);
+  await postResult(id, { photos, bedText });
 }
 
 // ─────────────────────── Booking.com search ─────────────────────────

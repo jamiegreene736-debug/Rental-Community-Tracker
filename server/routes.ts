@@ -7478,6 +7478,9 @@ export async function registerRoutes(
   const isVrboAlternativeUrl = (url: string): boolean =>
     /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
   const MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS = 10;
+  // Upper bound on photos kept/rendered per unit on the guest alternative page.
+  // Raised so the page shows the full VRBO gallery, not a short preview.
+  const GUEST_ALTERNATIVE_GALLERY_MAX = 40;
 
   const normalizeCommunityContext = (value: unknown, max = 120): string =>
     normalizeAlternativeText(value, max).replace(/^[\s·\-–—|,:;]+|[\s·\-–—|,:;]+$/g, "");
@@ -7597,6 +7600,7 @@ export async function registerRoutes(
     item.description,
     item.notes,
     item.address,
+    item.bedText,
     ...(Array.isArray(item.basicDetails) ? item.basicDetails : []),
   ].map((part) => normalizeAlternativeText(part, 1000)).filter(Boolean).join(" ");
 
@@ -7774,22 +7778,25 @@ export async function registerRoutes(
     bathrooms: number | null;
     sleeps: number | null;
     basicDetails: string[];
+    bedText: string;
     photoSource: "sidecar" | "html" | "none";
     scrapeReason: string;
   }> => {
     const fallbackPromise = extractVrboMetadataFallback(url);
     let sidecarPhotos: string[] = [];
     let sidecarReason = "";
+    let sidecarBedText = "";
     try {
       const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
       const result = await scrapeVrboPhotosViaSidecar({
         url,
-        maxPhotos: 24,
+        maxPhotos: GUEST_ALTERNATIVE_GALLERY_MAX,
         walletBudgetMs: 75_000,
         pollIntervalMs: 1200,
       });
       sidecarPhotos = result.photos;
       sidecarReason = result.reason;
+      sidecarBedText = String((result as { bedText?: string }).bedText ?? "");
     } catch (error: any) {
       sidecarReason = error?.message ?? String(error);
     }
@@ -7797,14 +7804,19 @@ export async function registerRoutes(
     const photos = Array.from(new Set([
       ...sidecarPhotos,
       ...fallback.photos,
-    ])).slice(0, 24);
+    ])).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
     return {
       title: fallback.title,
       photos,
       bedrooms: fallback.bedrooms,
       bathrooms: fallback.bathrooms,
       sleeps: fallback.sleeps,
-      basicDetails: fallback.basicDetails,
+      basicDetails: fallback.basicDetails ?? [],
+      // The sidecar (real browser, no bot wall) is the only reliable source of
+      // the listing's sleeping arrangements on Railway. Kept SEPARATE from
+      // basicDetails (which is 90-char-capped per entry downstream) so the full
+      // bed text reaches extractAlternativeBedTypes() via alternativeSearchText.
+      bedText: sidecarBedText,
       photoSource: sidecarPhotos.length > 0 ? "sidecar" : fallback.photos.length > 0 ? "html" : "none",
       scrapeReason: sidecarReason,
     };
@@ -8125,8 +8137,8 @@ Requirements:
       };
       const communityPhotoUrls = Array.from(new Set(alternatives.flatMap((item: any) =>
         Array.isArray(item?.communityPhotos) ? item.communityPhotos.map(safeGuestPhotoUrl).filter(Boolean) : [],
-      ))).slice(0, 6);
-      const topCommunityPhotos = communityPhotoUrls.slice(0, 6);
+      ))).slice(0, 8);
+      const topCommunityPhotos = communityPhotoUrls.slice(0, 8);
       const topAmenities = Array.from(new Map(alternatives
         .flatMap((item: any) => [
           ...communityAmenityFallbackTags(item?.community || alternativeCommunity),
@@ -8154,7 +8166,7 @@ Requirements:
           safeGuestPhotoUrl(item.image),
           ...(Array.isArray(item.photos) ? item.photos.map(safeGuestPhotoUrl) : []),
         ].filter(Boolean)))
-          .slice(0, 10);
+          .slice(0, 40);
         const carousel = photos.length > 0
           ? `<div class="carousel" data-carousel>
               <div class="carousel-track">
@@ -8364,16 +8376,35 @@ Requirements:
       await fs.promises.mkdir(dir, { recursive: true });
       const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
       const publicBase = publicPhotoBaseUrl(req);
-      const communityPhotosFor = async (community: string): Promise<string[]> => {
-        const match = Object.entries(COMMUNITY_FOLDER_TO_NAME)
-          .find(([, name]) => name.toLowerCase() === community.toLowerCase() || community.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(community.toLowerCase()));
-        if (!match) return [];
-        const folder = match[0];
+      // Resolve the alternative's community to a local shared-amenity photo
+      // folder. Tries several candidate names (resolved community, raw label,
+      // original/area) and scores matches so a clean resort name wins over a
+      // loose substring; returns up to 8 community photos for the page's
+      // "Community & Amenity Preview" gallery.
+      const communityPhotosFor = async (...candidates: Array<string | null | undefined>): Promise<string[]> => {
+        const norm = (value: unknown) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+        const cands = Array.from(new Set(candidates.map(norm).filter((c) => c.length >= 4)));
+        if (cands.length === 0) return [];
+        let best: { folder: string; score: number } | null = null;
+        for (const [folder, rawName] of Object.entries(COMMUNITY_FOLDER_TO_NAME)) {
+          const name = norm(rawName);
+          if (name.length < 4) continue;
+          for (const cand of cands) {
+            let score = 0;
+            if (cand === name) score = 1000;
+            else if (cand.includes(name)) score = 600 + name.length;       // candidate contains the folder name
+            else if (name.includes(cand)) score = 400 + cand.length;       // folder name contains the candidate
+            if (score > (best?.score ?? 0)) best = { folder, score };
+          }
+        }
+        if (!best) return [];
+        const folder = best.folder;
         const dirPath = path.join(process.cwd(), "client", "public", "photos", folder);
         const files = await fs.promises.readdir(dirPath).catch(() => []);
         return files
           .filter((file) => /\.(?:jpe?g|png|webp)$/i.test(file))
-          .slice(0, 4)
+          .sort()
+          .slice(0, 8)
           .map((file) => `${publicBase}/photos/${folder}/${encodeURIComponent(file)}`);
       };
       const stay = {
@@ -8388,14 +8419,19 @@ Requirements:
         const initialPhotos = Array.from(new Set([
           normalizeAlternativeUrl(item?.image),
           ...(Array.isArray(item?.photos) ? item.photos.map((url: unknown) => normalizeAlternativeUrl(url)) : []),
-        ].filter(Boolean))).slice(0, 24);
-        const vrboDetails = isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS
-          ? await scrapeVrboAlternativeDetails(sourceUrl)
+        ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
+        // Always scrape the full VRBO listing gallery (+ bed/room text) for VRBO
+        // URLs so the guest page shows ALL the listing's photos and real bed
+        // types — not just the ~12 thumbnails captured on the SRP card at attach
+        // time. The scraped photos are MERGED with the stored ones, so a sidecar
+        // miss degrades gracefully to whatever was already on the buy-in.
+        const vrboDetails = isVrboAlternativeUrl(sourceUrl)
+          ? await scrapeVrboAlternativeDetails(sourceUrl).catch(() => null)
           : null;
         const photos = Array.from(new Set([
           ...initialPhotos,
           ...(vrboDetails?.photos ?? []),
-        ].filter(Boolean))).slice(0, 24);
+        ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
         const title = normalizeAlternativeText(
           item?.title || vrboDetails?.title || item?.community || "Alternative stay",
           160,
@@ -8432,12 +8468,20 @@ Requirements:
           bathrooms,
           sleeps,
           basicDetails,
+          // Sleeping-arrangements text from the VRBO listing (sidecar) so the
+          // renderer's extractAlternativeBedTypes can list real bed types.
+          bedText: normalizeAlternativeText(vrboDetails?.bedText, 2000),
           unitLabel: normalizeAlternativeText(item?.unitLabel, 80),
           address: normalizeAlternativeText(item?.address, 220),
           sourceLabel: normalizeAlternativeText(item?.sourceLabel, 80),
           notes: normalizeAlternativeText(item?.notes, 1000),
           showSourceLink: item?.showSourceLink === true,
-          communityPhotos: await communityPhotosFor(String(item?.community ?? "")),
+          communityPhotos: await communityPhotosFor(
+            alternativeCommunity,
+            item?.community,
+            item?.alternativeCommunity,
+            originalCommunity,
+          ),
           photoSource: vrboDetails?.photoSource ?? (initialPhotos.length > 0 ? "provided" : "none"),
           photoScrapeReason: vrboDetails?.scrapeReason ?? "",
         };
