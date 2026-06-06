@@ -8832,6 +8832,53 @@ Requirements:
     }
   });
 
+  // Batch "has the guest been messaged?" status for the bookings list. Given a
+  // set of reservation IDs, returns the most recent SENT alternative page per
+  // reservation (plus its open-tracking) so the row can show a persistent
+  // "Guest messaged ✓" badge that survives closing the dialog (each dialog open
+  // mints a new token, so per-token tracking alone can't drive a row badge).
+  app.post("/api/booking-alternatives/sent-status", async (req, res) => {
+    try {
+      const raw = Array.isArray(req.body?.reservationIds) ? req.body.reservationIds : [];
+      const reservationIds = Array.from(new Set(
+        raw.map((id: unknown) => normalizeAlternativeText(id, 120)).filter(Boolean),
+      )).slice(0, 300);
+      const statuses: Record<string, {
+        token: string;
+        messageSentAt: Date | null;
+        messageChannel: string | null;
+        opened: boolean;
+        firstOpenedAt: Date | null;
+        lastOpenedAt: Date | null;
+        openCount: number;
+      } | null> = {};
+      await Promise.all(reservationIds.map(async (id) => {
+        try {
+          // Pages come back newest-first; the most recent one actually sent is
+          // the canonical "messaged" record for this reservation.
+          const pages = await storage.getBookingAlternativePagesByReservation(id);
+          const sent = pages.find((p) => !!p.messageSentAt) ?? null;
+          statuses[id] = sent
+            ? {
+                token: sent.token,
+                messageSentAt: sent.messageSentAt,
+                messageChannel: sent.messageChannel ?? null,
+                opened: !!sent.firstOpenedAt,
+                firstOpenedAt: sent.firstOpenedAt,
+                lastOpenedAt: sent.lastOpenedAt,
+                openCount: sent.openCount ?? 0,
+              }
+            : null;
+        } catch {
+          statuses[id] = null;
+        }
+      }));
+      return res.json({ statuses });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to read sent status", message: err?.message ?? String(err) });
+    }
+  });
+
   function twoUnitReplacementPlans(preferredBedrooms: number[]): number[][] {
     const total = preferredBedrooms.reduce((sum, n) => sum + (Number.isFinite(n) ? n : 0), 0);
     if (total <= 0) return [];
