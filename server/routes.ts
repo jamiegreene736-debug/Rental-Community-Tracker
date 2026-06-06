@@ -8314,12 +8314,17 @@ Requirements:
     const walkLine = Number.isFinite(walkMinutes) && walkMinutes > 0
       ? `The units in this option are about a ${Math.round(walkMinutes)}-minute walk from each other.`
       : "";
-    // Only name a place when it's a real community — communityFromAlternativeTitle
-    // strips listing-title cruft and rejects internal notes ("Manually attached
-    // from combo 3BR + 2BR"), bedroom-size tokens, and marketing adjectives. If
-    // nothing clean survives, fall back to neutral verbiage instead of echoing
-    // operator notes into the guest message.
-    const place = communityFromAlternativeTitle(args.propertyLabel);
+    // Only name a place when it's a real community. The caller already resolves
+    // propertyLabel to a validated community (extractNewCommunityFromUnits at the
+    // /api/booking-alternatives call site; operator-supplied name at /from-vrbo),
+    // so here we apply only the LIGHT guard (usableCommunityContext: rejects
+    // internal notes + bedroom-size leads, keeps everything else). Do NOT re-run
+    // communityFromAlternativeTitle here — its title-lead marketing reject regex
+    // discards legitimate multi-word resort names that START with a category word
+    // (e.g. "Villas of Kamalii", "Villas at ...", "Gardens at ..."), which is
+    // exactly the new-community name we want to surface. Falls back to neutral
+    // verbiage when nothing usable survives.
+    const place = usableCommunityContext(args.propertyLabel);
     const arrangeLine = place
       ? `I am very sorry, but we have had an unexpected issue with the unit you originally booked and it is no longer available for your dates. To make sure your trip is not disrupted, I have arranged a comparable stay for you at ${place}.`
       : `I am very sorry, but we have had an unexpected issue with the unit you originally booked and it is no longer available for your dates. To make sure your trip is not disrupted, I have arranged a comparable replacement stay for you in the same area.`;
