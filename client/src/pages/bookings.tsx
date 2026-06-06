@@ -7893,22 +7893,6 @@ export default function Bookings() {
                         {manualReservation && <ManualReservationContactPanel reservation={r} />}
                         {!manualReservation && <ReservationCancellationPolicyNotice reservation={r} />}
                         <div className="flex flex-wrap justify-end gap-2">
-                          {!manualReservation && r.slotsFilled >= 1 && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              className="h-8 px-2 text-xs"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setRelocateGuestTarget({ reservation: r });
-                              }}
-                              data-testid={`button-relocate-guest-${r._id}`}
-                              title={`Draft and send an apology + relocation message to the guest through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "the booking channel"}, with the new listing's guest page link and open tracking`}
-                            >
-                              <Send className="mr-1 h-3.5 w-3.5" />
-                              Message guest about move
-                            </Button>
-                          )}
                           <Button
                             type="button"
                             size="sm"
@@ -8216,6 +8200,17 @@ export default function Bookings() {
                                       : <ExternalLink className="h-3.5 w-3.5 mr-1" />}
                                     Guest page
                                   </Button>
+                                  {!isManualReservation(r) && (
+                                    <Button
+                                      size="sm"
+                                      onClick={(e) => { e.stopPropagation(); setRelocateGuestTarget({ reservation: r }); }}
+                                      data-testid={`button-relocate-guest-${r._id}-${slot.unitId}`}
+                                      title={`Draft + send the guest an apology with the alternative Guest Page link, through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "their booking channel"} (the channel they booked with), and track whether they open it`}
+                                    >
+                                      <Send className="h-3.5 w-3.5 mr-1" />
+                                      Message guest
+                                    </Button>
+                                  )}
                                   <Button
                                     size="sm"
                                     variant="ghost"
