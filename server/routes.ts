@@ -2159,10 +2159,20 @@ const listingAddressCache = new Map<string, ListingAddressGuess | null>();
 
 function titleFromBuyInNoteText(notes: string | null | undefined): string {
   const raw = String(notes ?? "").replace(/\s+/g, " ").trim();
+  // Combo attach: "Manually attached from combo <label> — <NBR> <source> — <TITLE> · ..."
+  // The real listing title is after the SECOND dash, NOT the "Manually attached
+  // from combo <label>" prefix (which would otherwise leak into the guest page
+  // + relocation message as the community).
+  const combo = raw.match(/Manually attached from combo\b[^—–-]*[—–-][^—–-]*[—–-]\s*([^·]+)/i);
+  if (combo?.[1]?.trim()) return combo[1].trim();
   const m =
-    raw.match(/(?:Auto-filled from|Bought via)\s+[^—-]+[—-]\s*([^·]+)/i) ||
+    raw.match(/(?:Auto-filled from|Bought via)\s+[^—–-]+[—–-]\s*([^·]+)/i) ||
     raw.match(/^(?:Auto-filled from|Bought via)\s+([^·]+)/i);
-  return (m?.[1] ?? raw.split(" · ")[0] ?? "").trim();
+  if (m?.[1]?.trim()) return m[1].trim();
+  // Last resort: the first segment, but never the bare combo-notes prefix.
+  const lead = (raw.split(" · ")[0] ?? "").trim();
+  if (/^Manually attached from combo\b/i.test(lead)) return "";
+  return lead;
 }
 
 function normalizeResortText(value: string | null | undefined): string {
@@ -8005,11 +8015,19 @@ Requirements:
     const walkLine = Number.isFinite(walkMinutes) && walkMinutes > 0
       ? `The units in this option are about a ${Math.round(walkMinutes)}-minute walk from each other.`
       : "";
-    const place = String(args.propertyLabel ?? "").trim() || "a comparable nearby community";
+    // Only name a place when it's a real community — communityFromAlternativeTitle
+    // strips listing-title cruft and rejects internal notes ("Manually attached
+    // from combo 3BR + 2BR"), bedroom-size tokens, and marketing adjectives. If
+    // nothing clean survives, fall back to neutral verbiage instead of echoing
+    // operator notes into the guest message.
+    const place = communityFromAlternativeTitle(args.propertyLabel);
+    const arrangeLine = place
+      ? `I am very sorry, but we have had an unexpected issue with the unit you originally booked and it is no longer available for your dates. To make sure your trip is not disrupted, I have arranged a comparable stay for you at ${place}.`
+      : `I am very sorry, but we have had an unexpected issue with the unit you originally booked and it is no longer available for your dates. To make sure your trip is not disrupted, I have arranged a comparable replacement stay for you in the same area.`;
     const lines = [
       greeting,
       "",
-      `I am very sorry, but we have had an unexpected issue with the unit you originally booked and it is no longer available for your dates. To make sure your trip is not disrupted, I have arranged a comparable stay for you at ${place}.`,
+      arrangeLine,
       "",
       "You can see photos and full details of the replacement on this page:",
       args.alternativeUrl,
@@ -8545,12 +8563,16 @@ Requirements:
       }).catch((e) => console.error("[booking-alternatives] DB save failed:", e?.message ?? e));
       const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
       const walkMinutes = unitWalkMinutes;
-      const rawLabel = normalizeAlternativeText(req.body?.propertyLabel, 120)
-        || hydratedAlternatives[0]?.community
-        || "";
-      // Keep the lead segment so a raw listing title ("Princeville - 5BR Condos
-      // - Sleeps 14") reads as just the community in the apology copy.
-      const propertyLabel = rawLabel ? (rawLabel.split(/\s+[-–—|]\s+/)[0].trim() || rawLabel) : null;
+      // Prefer a real, resolved community for the apology copy; every candidate
+      // is filtered (usableCommunityContext / communityFromAlternativeTitle) so
+      // listing-title cruft or internal notes never reach the guest. The message
+      // builder cleans it again as a final guard.
+      const propertyLabel =
+        usableCommunityContext(req.body?.propertyLabel)
+        || hydratedAlternatives.map((a) => a.alternativeCommunity).find((c) => usableCommunityContext(c))
+        || hydratedAlternatives.map((a) => a.community).find((c) => usableCommunityContext(c))
+        || communityFromAlternativeTitle(hydratedAlternatives[0]?.title)
+        || null;
       return res.json({
         url,
         token,
@@ -8647,8 +8669,11 @@ Requirements:
       }).catch((e) => console.error("[booking-alternatives/from-vrbo] DB save failed:", e?.message ?? e));
       const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
       const walkMinutes = Number(req.body?.walkMinutes) || null;
-      const propertyLabel = normalizeAlternativeText(req.body?.propertyName || req.body?.community, 120)
-        || hydratedAlternatives[0]?.community
+      const propertyLabel =
+        usableCommunityContext(req.body?.propertyName || req.body?.community)
+        || hydratedAlternatives.map((a) => a.alternativeCommunity).find((c) => usableCommunityContext(c))
+        || hydratedAlternatives.map((a) => a.community).find((c) => usableCommunityContext(c))
+        || communityFromAlternativeTitle(hydratedAlternatives[0]?.title)
         || null;
       return res.json({
         url,
