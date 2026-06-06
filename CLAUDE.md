@@ -60,6 +60,16 @@ Before making any changes:
   flag (`isRenderableGuestyReservation` = id+checkIn still required; committed-
   status gate skipped when including), and the row renders a red/amber status
   badge for non-committed reservations. Default stays committed-only (clean).
+  **Load-bearing Guesty quirk:** the ACCOUNT-WIDE `/reservations` list (no
+  listingId filter) silently OMITS canceled/declined/inquiry/expired rows unless
+  an explicit `status $in [...]` filter asks for them — a listingId-filtered
+  query (the per-listing endpoint) DOES return them, but the global query does
+  NOT. So `/api/bookings/guesty-all`, when `includeCanceled`, runs a SECOND
+  paginated pass with `filters=[...checkOut?, {status $in [canceled,cancelled,
+  declined,expired,inquiry,closed,draft]}]` and merges by `_id` (adds only,
+  never drops a committed row). Verified live: the client filter change alone
+  fixed the per-listing view, but the global view ALSO needed the second query —
+  don't delete it thinking the `isCommitted` bypass is sufficient.
   Diagnosis tip: Guesty token lives in PG `guesty_token_cache` but `DATABASE_URL`
   is the Railway-internal host (unreachable from a local `railway run`); fetch a
   fresh client-credentials token instead (one-off, doesn't touch the app's cache).

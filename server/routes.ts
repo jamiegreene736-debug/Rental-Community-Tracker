@@ -17465,6 +17465,31 @@ Requirements:
         if (rows.length < limit || (total && skip + rows.length >= total)) break;
       }
 
+      // Guesty's account-wide /reservations list omits canceled/declined/
+      // inquiry/expired reservations UNLESS an explicit status filter asks for
+      // them (a listingId-filtered query returns them, but the account-wide
+      // default does not). So when "Include canceled" is on, run a second pass
+      // that explicitly pulls the non-committed statuses and merge — this only
+      // ever ADDS rows, never drops a committed one.
+      if (includeCanceled) {
+        const canceledStatusFilter = [
+          ...filterArr,
+          { field: "status", operator: "$in", value: ["canceled", "cancelled", "declined", "expired", "inquiry", "closed", "draft"] },
+        ];
+        const canceledQuery = `filters=${encodeURIComponent(JSON.stringify(canceledStatusFilter))}&`;
+        for (let skip = 0; skip < maxRows; skip += limit) {
+          const data = await guestyRequest("GET", `/reservations?${canceledQuery}limit=${limit}&skip=${skip}&sort=checkIn&fields=${fields}`) as any;
+          const rows = unwrapGuestyListResponse(data);
+          for (const row of rows) {
+            if (!isRenderableGuestyReservation(row)) continue;
+            const id = String(row?._id ?? row?.id ?? "").trim();
+            if (id) seenReservations.set(id, row);
+          }
+          const total = guestyListTotal(data);
+          if (rows.length < limit || (total && skip + rows.length >= total)) break;
+        }
+      }
+
       const missingListingIds = new Set<string>();
       const enrichmentPromises = Array.from(seenReservations.values()).map(async (reservation) => {
         let listingId = guestyListingIdFromReservation(reservation);
