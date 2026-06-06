@@ -3449,6 +3449,11 @@ assert.ok(
     routesSource.includes("${totalBedrooms} Bedroom Total") &&
     routesSource.includes("Bed Types") &&
     routesSource.includes("Unit Features") &&
+    routesSource.includes("@media (max-width:480px)") &&
+    routesSource.includes("chip-label") &&
+    routesSource.includes("overflow-wrap:anywhere") &&
+    routesSource.includes("html,body{max-width:100%;overflow-x:hidden}") &&
+    !routesSource.includes("font-size:clamp(") &&
     routesSource.includes("Do not mention photo counts") &&
     routesSource.includes("This is property-detail copy for a review page") &&
     routesSource.includes("usableCommunityContext") &&

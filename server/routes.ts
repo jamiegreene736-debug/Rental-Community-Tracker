@@ -8102,7 +8102,7 @@ Requirements:
         Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "car" as const, label: `Community Drive: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
       ].filter(Boolean) as Array<{ icon: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "sleep" | "walk"; label: string }>;
       const overviewBlock = overviewDetails.length
-        ? `<div class="overview">${overviewDetails.map((detail) => `<span class="overview-chip">${alternativeIconSvg(detail.icon)}${escapeHtml(detail.label)}</span>`).join("")}</div>`
+        ? `<div class="overview">${overviewDetails.map((detail) => `<span class="overview-chip">${alternativeIconSvg(detail.icon)}<span class="chip-label">${escapeHtml(detail.label)}</span></span>`).join("")}</div>`
         : "";
       const safeGuestPhotoUrl = (value: unknown): string => {
         const url = String(value ?? "").trim().slice(0, 1400);
@@ -8201,26 +8201,29 @@ Requirements:
         <title>Alternative Stay Options</title>
         <style>
           *{box-sizing:border-box}
+          html,body{max-width:100%;overflow-x:hidden}
           body{font-family:Inter,Arial,sans-serif;margin:0;background:#f4f7f2;color:#172033;line-height:1.55}
           .hero{background:linear-gradient(135deg,#0b5f5a 0%,#14867c 58%,#e6bd6b 100%);color:white;padding:28px 20px 76px}
           .hero-inner{max-width:1120px;margin:0 auto;display:grid;gap:28px}
           .brand-logo{width:min(300px,74vw);height:auto;filter:drop-shadow(0 10px 18px rgba(0,0,0,.16))}
           .hero-copy{max-width:760px}
-          .eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:800;margin:0 0 6px;color:#2f5f68}
+          .eyebrow{font-size:12px;letter-spacing:0;text-transform:uppercase;font-weight:800;margin:0 0 6px;color:#2f5f68}
           .hero .eyebrow{color:#dff8ee}
           h1,h2,h3{margin:.2rem 0;line-height:1.12}
-          h1{font-size:clamp(34px,5vw,58px);max-width:760px}
-          h2{font-size:clamp(24px,3vw,34px)}
+          h1{font-size:52px;max-width:760px}
+          h2{font-size:32px}
           h3{font-size:17px}
-          .stay-line{display:inline-flex;align-items:center;gap:8px;margin:10px 0 0;color:#f9fffb;font-size:18px;font-weight:700}
+          .stay-line{display:flex;align-items:flex-start;gap:8px;margin:10px 0 0;color:#f9fffb;font-size:18px;font-weight:700;max-width:100%}
           .stay-line svg{width:19px;height:19px;flex:0 0 19px}
+          .stay-line span{min-width:0;overflow-wrap:anywhere}
           main{max-width:1120px;margin:-46px auto 0;padding:0 16px 56px}
           .intro-panel,.community-preview,.option{background:rgba(255,255,255,.97);border:1px solid rgba(20,86,82,.14);border-radius:8px;box-shadow:0 18px 42px rgba(29,62,72,.11)}
           .intro-panel{padding:24px;margin:0 0 18px}
           .intro{font-size:18px;color:#35465a;margin:0 0 18px}
           .overview{display:flex;flex-wrap:wrap;gap:10px;margin:0}
-          .overview-chip{display:inline-flex;align-items:center;gap:8px;border:1px solid #bae6d7;border-radius:999px;background:#f0fdf7;color:#125c56;padding:8px 12px;font-size:14px;font-weight:800}
+          .overview-chip{display:inline-flex;align-items:flex-start;gap:8px;max-width:100%;border:1px solid #bae6d7;border-radius:999px;background:#f0fdf7;color:#125c56;padding:8px 12px;font-size:14px;font-weight:800}
           .overview-chip svg{width:17px;height:17px;flex:0 0 17px}
+          .chip-label{min-width:0;overflow-wrap:anywhere}
           .community-preview{padding:20px;margin:0 0 18px}
           .section-heading{display:flex;align-items:end;justify-content:space-between;gap:14px;margin:0 0 14px}
           .community-gallery{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;margin:0 0 14px}
@@ -8232,9 +8235,9 @@ Requirements:
           .amenities svg{width:15px;height:15px;flex:0 0 15px;color:#0f766e}
           .option{padding:22px;margin:0 0 20px}
           .option-copy{max-width:900px}
-          .community{color:#526176;margin:.3rem 0 .8rem;font-weight:700}
+          .community{color:#526176;margin:.3rem 0 .8rem;font-weight:700;overflow-wrap:anywhere}
           .details{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
-          .details span{border:1px solid #d8e3e8;border-radius:999px;padding:6px 10px;background:#f8fbfc;font-size:13px;color:#334155;font-weight:700}
+          .details span{display:inline-block;max-width:100%;border:1px solid #d8e3e8;border-radius:999px;padding:6px 10px;background:#f8fbfc;font-size:13px;color:#334155;font-weight:700;overflow-wrap:anywhere}
           .carousel{margin-top:18px}
           .carousel-track{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;padding:0 0 10px;-webkit-overflow-scrolling:touch}
           .slide{flex:0 0 min(84vw,520px);margin:0;scroll-snap-align:start}
@@ -8244,21 +8247,44 @@ Requirements:
           .carousel-nav button{border:1px solid #bdd6d1;background:#fff;color:#0f766e;border-radius:8px;padding:7px 11px;font-weight:800;cursor:pointer}
           .carousel-nav button:hover{background:#eefbf5}
           .unit-facts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:16px;margin:16px 0 0;padding:16px;border:1px solid #e2ebe7;border-radius:8px;background:#fbfdfb}
-          .unit-facts p{margin:.2rem 0;color:#36465a}
-          .fact-label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#607082!important;font-weight:900}
-          .description{white-space:pre-line;font-size:15px;color:#263446;margin:16px 0 0}
+          .unit-facts p{margin:.2rem 0;color:#36465a;overflow-wrap:anywhere}
+          .fact-label{font-size:12px;text-transform:uppercase;letter-spacing:0;color:#607082!important;font-weight:900}
+          .description{white-space:pre-line;font-size:15px;color:#263446;margin:16px 0 0;overflow-wrap:anywhere}
           .empty-photos{margin-top:16px;border:1px dashed #bdd0d6;border-radius:8px;background:#f8fafc;color:#64748b;padding:18px;font-size:14px}
           a{color:#0f766e;font-weight:800}
           footer{margin-top:28px;color:#64748b;font-size:13px;text-align:center}
           @media (max-width:760px){
             .hero{padding:22px 16px 66px}
+            h1{font-size:36px}
+            h2{font-size:26px}
             main{margin-top:-38px;padding-inline:12px}
             .intro-panel,.community-preview,.option{padding:16px}
+            .intro{font-size:16px}
             .community-gallery{grid-template-columns:1fr 1fr}
             .community-gallery figure:first-child{grid-column:span 2;grid-row:auto}
             .unit-facts{grid-template-columns:1fr}
             .slide img{height:260px}
             .section-heading{display:block}
+          }
+          @media (max-width:480px){
+            .hero{padding:18px 12px 54px}
+            .hero-inner{gap:18px}
+            .brand-logo{width:min(240px,80vw)}
+            h1{font-size:30px}
+            h2{font-size:22px}
+            .stay-line{font-size:15px}
+            main{margin-top:-30px;padding-inline:8px;padding-bottom:42px}
+            .intro-panel,.community-preview,.option{padding:14px}
+            .overview{gap:8px}
+            .overview-chip{width:100%;border-radius:8px;padding:8px 10px}
+            .community-gallery{grid-template-columns:1fr}
+            .community-gallery figure:first-child{grid-column:auto}
+            .community-gallery img{min-height:170px}
+            .amenities span,.feature-tags span{border-radius:8px}
+            .slide{flex-basis:100%}
+            .slide img{height:230px}
+            .carousel-nav{gap:8px}
+            .carousel-nav button{padding:7px 9px}
           }
         </style></head><body>
         <header class="hero">
