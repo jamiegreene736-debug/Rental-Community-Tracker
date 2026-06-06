@@ -7606,13 +7606,18 @@ export async function registerRoutes(
 
   const extractAlternativeBedTypes = (value: unknown): string[] => {
     const text = normalizeAlternativeText(value, 3000);
+    // Precision over recall: "king"/"queen"/"twin"/"full"/"double" appear in
+    // plenty of non-bed contexts (full kitchen, double vanity, King Kamehameha
+    // Hwy), so each size term must sit next to "bed". sofa/sleeper/bunk/murphy
+    // are self-evident bed terms and don't need the "bed" anchor.
     const matches: Array<{ label: string; re: RegExp }> = [
-      { label: "King Bed", re: /\bking(?:\s+bed)?s?\b/i },
-      { label: "Queen Bed", re: /\bqueen(?:\s+bed)?s?\b/i },
-      { label: "Twin Beds", re: /\btwin(?:\s+bed)?s?\b/i },
-      { label: "Full Bed", re: /\bfull(?:\s+bed)?s?\b/i },
-      { label: "Bunk Beds", re: /\bbunk(?:\s+bed)?s?\b/i },
-      { label: "Sleeper Sofa", re: /\b(?:sleeper\s+sofa|sofa\s+sleeper|pull[-\s]?out|hide[-\s]?a[-\s]?bed)\b/i },
+      { label: "King Bed", re: /\bking(?:[-\s]?size[d]?)?\s+beds?\b/i },
+      { label: "Queen Bed", re: /\bqueen(?:[-\s]?size[d]?)?\s+beds?\b/i },
+      { label: "Twin Beds", re: /\btwin\s+beds?\b/i },
+      { label: "Full Bed", re: /\bfull(?:[-\s]?size[d]?)?\s+beds?\b/i },
+      { label: "Double Bed", re: /\bdouble\s+beds?\b/i },
+      { label: "Bunk Beds", re: /\bbunk\s*beds?\b/i },
+      { label: "Sleeper Sofa", re: /\b(?:sleeper\s+sofa|sofa\s+sleeper|sofa\s+bed|pull[-\s]?out\s+(?:sofa|couch|bed)|hide[-\s]?a[-\s]?bed|murphy\s+bed)\b/i },
     ];
     return matches.filter((match) => match.re.test(text)).map((match) => match.label);
   };
