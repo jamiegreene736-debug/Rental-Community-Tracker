@@ -400,6 +400,10 @@ export type SidecarSerpHit = {
 
 export type SidecarVrboPhotoScrapeResult = {
   photos: string[];
+  // Listing sleeping-arrangements / "Rooms & beds" text harvested by the
+  // sidecar (real browser, no bot wall) so the guest page can surface real
+  // bed types. Optional — older workers don't return it.
+  bedText?: string;
 };
 
 export type SidecarPmUrlCheckResult = {
@@ -2444,6 +2448,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   stopGeneration?: number;
 }): Promise<{
   photos: string[];
+  bedText: string;
   workerOnline: boolean;
   durationMs: number;
   reason: string;
@@ -2451,6 +2456,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   if (!opts.url || !/^https?:\/\//.test(opts.url)) {
     return {
       photos: [],
+      bedText: "",
       workerOnline: false,
       durationMs: 0,
       reason: "valid url required",
@@ -2468,6 +2474,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   });
   return {
     photos: ((r.results as SidecarVrboPhotoScrapeResult | undefined)?.photos ?? []),
+    bedText: ((r.results as SidecarVrboPhotoScrapeResult | undefined)?.bedText ?? ""),
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
