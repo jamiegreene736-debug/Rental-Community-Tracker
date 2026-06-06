@@ -7887,13 +7887,18 @@ async function processVrboPhotoScrape(id, params) {
   const bedText = await page.evaluate(() => {
     const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
     const body = clean(document.body && document.body.innerText);
-    const bedRe = /\b(?:king|queen|twin|full|double|bunk|sofa\s*bed|sleeper\s*sofa|pull[-\s]?out|murphy|day\s*bed|trundle|crib)\b/i;
+    // Keep a segment only if a size term sits with an explicit "bed" (so
+    // "full kitchen" / "double vanity" are excluded), or it's a self-evident
+    // bed term. This keeps the harvested text to real sleeping arrangements.
+    const sizeRe = /\b(?:king|queen|twin|full|double|bunk|murphy|trundle|day\s*bed)\b/i;
+    const hasBed = /\bbeds?\b/i;
+    const selfEvident = /\b(?:sleeper\s*sofa|sofa\s*bed|bunk\s*beds?|murphy\s*bed|pull[-\s]?out\s*(?:sofa|couch|bed))\b/i;
     const segs = body.split(/(?:[.!?]\s+)|·|•|\||\n|;|,/).map((s) => clean(s)).filter(Boolean);
     const seen = new Set();
     const lines = [];
     for (const s of segs) {
       if (s.length < 3 || s.length > 120) continue;
-      if (!bedRe.test(s)) continue;
+      if (!((sizeRe.test(s) && hasBed.test(s)) || selfEvident.test(s))) continue;
       const key = s.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
