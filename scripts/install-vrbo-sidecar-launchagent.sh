@@ -139,12 +139,17 @@ SIDECAR_HEADLESS_FALLBACK_ENABLED="${SIDECAR_HEADLESS_FALLBACK_ENABLED:-0}"
 # accuracy. Slots intentionally overlap at one on-screen origin so every
 # worker gets a large desktop viewport without pushing windows off-display.
 SIDECAR_VIEWPORT_SIZE="${SIDECAR_VIEWPORT_SIZE:-1600,1000}"
-# Default hidden/off-screen so the sidecar Chrome never steals foreground focus
-# from the operator's apps (Safari, Claude, …). The worker's macOS focus-guard
-# (SIDECAR_RETURN_FOCUS) hands focus back if Chrome momentarily activates on
-# page-create. Set SIDECAR_CHROME_VISIBLE=1 to show the grid of windows again.
+# Default hidden/off-screen so the sidecar Chrome launches without a visible
+# grid of windows. Set SIDECAR_CHROME_VISIBLE=1 to show the grid again.
 SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE:-0}"
-SIDECAR_RETURN_FOCUS="${SIDECAR_RETURN_FOCUS:-1}"
+# 2026-06-07: the macOS focus-guard (SIDECAR_RETURN_FOCUS) + auto-minimize
+# (SIDECAR_AUTO_MINIMIZE) defaulted ON, but the CDP page-create activating Chrome
+# fighting the minimize/return-focus made Chrome visibly flap open/closed in a
+# loop on every acquire. Per operator request both now default OFF: Chrome may
+# take focus once when it activates and the operator clicks their app back — no
+# flapping loop. Set either to 1 to re-enable the foreground management.
+SIDECAR_RETURN_FOCUS="${SIDECAR_RETURN_FOCUS:-0}"
+SIDECAR_AUTO_MINIMIZE="${SIDECAR_AUTO_MINIMIZE:-0}"
 SIDECAR_CHROME_VISIBLE_GRID_ORIGIN="${SIDECAR_CHROME_VISIBLE_GRID_ORIGIN:-1440,60}"
 SIDECAR_CHROME_VISIBLE_SIZE="${SIDECAR_CHROME_VISIBLE_SIZE:-1600,1080}"
 SIDECAR_CHROME_VISIBLE_GRID_COLUMNS="${SIDECAR_CHROME_VISIBLE_GRID_COLUMNS:-2}"
@@ -300,6 +305,7 @@ export SIDECAR_HEADLESS_FALLBACK_ENABLED="${SIDECAR_HEADLESS_FALLBACK_ENABLED}"
 export SIDECAR_VIEWPORT_SIZE="${SIDECAR_VIEWPORT_SIZE}"
 export SIDECAR_CHROME_VISIBLE="${SIDECAR_CHROME_VISIBLE}"
 export SIDECAR_RETURN_FOCUS="${SIDECAR_RETURN_FOCUS}"
+export SIDECAR_AUTO_MINIMIZE="${SIDECAR_AUTO_MINIMIZE}"
 export SIDECAR_CHROME_VISIBLE_SIZE="${SIDECAR_CHROME_VISIBLE_SIZE}"
 export SIDECAR_CHROME_VISIBLE_POSITIONS="${SIDECAR_CHROME_VISIBLE_POSITIONS}"
 export SIDECAR_CHROME_VISIBLE_GRID_ORIGIN="${SIDECAR_CHROME_VISIBLE_GRID_ORIGIN}"
