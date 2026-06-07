@@ -8268,6 +8268,73 @@ Requirements:
     }
   };
 
+  // Short, guest-facing blurb about the COMMUNITY itself (e.g. "Villas of
+  // Kamalii"), rendered directly below the community photo gallery on
+  // /alternatives/:token. Deliberately conservative: it names NO specific
+  // amenities, landmarks, or distances we can't confirm — only the resolved
+  // community name + area (city/state). Mirrors the unit-description safety
+  // stack so the community line can't leak listing names/numbers or invent
+  // amenities. Deterministic fallback when no AI key (and reused by the GET
+  // renderer for pages built before this field existed).
+  const alternativeCommunityDescriptionFallback = (community: unknown, area: unknown): string => {
+    const name = normalizeAlternativeText(community, 120);
+    const areaName = normalizeAlternativeText(area, 120);
+    const lead = name || "This community";
+    if (areaName && (!name || normalizeResortText(name) !== normalizeResortText(areaName))) {
+      return `${lead} is a comparable vacation community located in ${areaName}, offering a relaxed island setting for your stay.`;
+    }
+    return `${lead} is a comparable vacation community offering a relaxed island setting for your stay.`;
+  };
+
+  const draftAlternativeCommunityDescription = async (
+    community: unknown,
+    area: unknown,
+  ): Promise<{ description: string; generatedBy: "ai" | "fallback"; warning?: string }> => {
+    const fallback = alternativeCommunityDescriptionFallback(community, area);
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const communityName = normalizeAlternativeText(community, 120);
+    if (!anthropicKey || !communityName) {
+      return { description: fallback, generatedBy: "fallback", warning: anthropicKey ? "no community name" : "ANTHROPIC_API_KEY not configured" };
+    }
+    const facts = { community: communityName, area: normalizeAlternativeText(area, 120) || null };
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 220,
+          messages: [{
+            role: "user",
+            content: `Write a short guest-facing blurb describing a vacation rental COMMUNITY (the shared resort/neighborhood, not a single unit).
+
+Facts:
+${JSON.stringify(facts, null, 2)}
+
+Requirements:
+- 1 to 2 sentences, warm and professional. Plain text only. No markdown, bullets, headings, emojis, or sales hype.
+- This describes the community itself for a review page. Do NOT address any guest by name.
+- You may use ONLY the community name and the area in the facts. Do NOT invent specific amenities (pools, hot tubs, beaches), named landmarks, distances, drive/walk times, star ratings, unit names, unit numbers, or addresses.
+- Do NOT mention buy-in, cost, internal operations, the guest's original community, VRBO, third-party marketplaces, source listings, or where the option came from.
+- Do NOT mention photos or that photos can be reviewed.
+- Return only the blurb.`,
+          }],
+        }),
+      });
+      const data = await response.json().catch(() => null) as any;
+      if (!response.ok) throw new Error(data?.error?.message ?? `HTTP ${response.status}`);
+      const text = cleanAlternativeGuestDescription(data?.content?.[0]?.text);
+      if (!text) throw new Error("empty AI response");
+      return { description: text.slice(0, 600), generatedBy: "ai" };
+    } catch (error: any) {
+      return { description: fallback, generatedBy: "fallback", warning: error?.message ?? String(error) };
+    }
+  };
+
   const alternativeIconSvg = (name: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "route" | "sleep" | "walk"): string => {
     const paths: Record<string, string> = {
       amenity: '<path d="M12 3l2.3 4.7 5.2.8-3.8 3.7.9 5.2L12 15l-4.6 2.4.9-5.2-3.8-3.7 5.2-.8L12 3z"/>',
@@ -8592,7 +8659,13 @@ Requirements:
       const topCommunityPhotos = communityPhotoUrls.slice(0, 8);
       // Community amenity tags were scraped unreliably from listing text, so they
       // are no longer shown. Only the community PHOTOS (accurate) remain, under a
-      // plain "Community Preview" heading.
+      // plain "Community Preview" heading, with a short community blurb below the
+      // gallery. The blurb is generated + persisted at page-build time
+      // (payload.communityDescription); pages built before that field existed
+      // fall back to the deterministic, amenity-free sentence so the line still
+      // renders. Sanitized through the same cleaner as unit copy + escaped.
+      const communityDescription = cleanAlternativeGuestDescription(payload.communityDescription)
+        || alternativeCommunityDescriptionFallback(alternativeCommunityDisplay || areaNameDisplay, areaNameDisplay);
       const topCommunityBlock = topCommunityPhotos.length
         ? `<section class="community-preview">
             <div class="section-heading">
@@ -8603,6 +8676,7 @@ Requirements:
               <figure>
                 <img src="${escapeHtml(url)}" alt="${escapeHtml(alternativeCommunityDisplay || areaNameDisplay || "Community")} photo ${index + 1}" loading="${index === 0 ? "eager" : "lazy"}" />
               </figure>`).join("")}</div>
+            ${communityDescription ? `<p class="community-description">${escapeHtml(communityDescription)}</p>` : ""}
           </section>`
         : "";
       const photoBlocks = alternatives.map((item: any, index: number) => {
@@ -8697,6 +8771,7 @@ Requirements:
           .community-gallery figure{margin:0;min-height:130px}
           .community-gallery figure:first-child{grid-row:span 2}
           .community-gallery img{width:100%;height:100%;min-height:130px;object-fit:cover;border-radius:8px;display:block;background:#e6edf0}
+          .community-description{white-space:pre-line;font-size:15px;color:#35465a;margin:0;overflow-wrap:anywhere}
           .amenity-showcase{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0 0 14px}
           .amenity-card{min-height:96px;border:1px solid #d5e5dd;border-radius:8px;background:#f6fbf7;color:#125c56;padding:14px;display:flex;align-items:center;gap:10px;font-size:15px;font-weight:900}
           .amenity-card svg{width:24px;height:24px;flex:0 0 24px;color:#0f766e}
@@ -8979,6 +9054,13 @@ Requirements:
       const unitWalkMinutes = Number.isFinite(explicitUnitWalkMinutes) && explicitUnitWalkMinutes > 0
         ? Math.round(explicitUnitWalkMinutes)
         : null;
+      // Short community blurb shown under the community photo gallery. Built
+      // from the resolved (unit-derived) community + area, never a raw listing
+      // title; persisted so the GET renderer needs no per-load AI call.
+      const communityDescriptionDraft = await draftAlternativeCommunityDescription(
+        alternativeCommunity,
+        areaName || alternativeCommunity,
+      );
       const payload = {
         reservationId,
         guestName: stay.guestName || "Guest",
@@ -8987,6 +9069,7 @@ Requirements:
         originalCommunity,
         areaName,
         alternativeCommunity,
+        communityDescription: communityDescriptionDraft.description,
         communityDriveMinutes,
         unitWalkMinutes,
         alternatives: hydratedAlternatives,
@@ -9114,11 +9197,23 @@ Requirements:
           descriptionWarning: drafted.warning ?? null,
         };
       }));
+      // Short community blurb under the community photo gallery (see the main
+      // /api/booking-alternatives path). This manual path has no area context,
+      // so pass the community for both args; the helper degrades gracefully.
+      // propertyName is operator free text — sanitize it through
+      // usableCommunityContext (same cleaner this route uses for propertyLabel)
+      // so a pasted listing title with a bedroom-count/marker lead can't leak
+      // into guest copy; an unusable value falls back to a generic blurb.
+      const communityDescriptionDraft = await draftAlternativeCommunityDescription(
+        cleanNewCommunity || usableCommunityContext(propertyName),
+        null,
+      );
       const payload = {
         reservationId: normalizeAlternativeText(req.body?.reservationId, 120),
         guestName: stay.guestName || "Guest",
         checkIn: stay.checkIn,
         checkOut: stay.checkOut,
+        communityDescription: communityDescriptionDraft.description,
         alternatives: hydratedAlternatives,
         createdAt: new Date().toISOString(),
         expiresAt,
