@@ -46,6 +46,7 @@ import { findAvailableGatherVacationsUnits } from "./pm-scraper-gather-vacations
 import { findAvailableStreamlineUnits, STREAMLINE_SITES } from "./pm-scraper-streamline";
 import { fetchGoogleHotelsBuyInCandidates, type GoogleHotelsBuyInCandidate } from "./google-hotels-buy-in";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, usableLicenseValue } from "@shared/license-compliance";
+import { sanitizeForChatText } from "@shared/safe-log";
 // VRBO scraping providers were collapsed to sidecar + Google site:search
 // in PR #275 — these helpers are still used by the admin debug routes
 // below (`/api/admin/vrbo/*-debug`) but no longer by find-buy-in.
@@ -8538,12 +8539,33 @@ Requirements:
   };
 
   const findGuestyConversationForReservation = async (reservationId: string): Promise<{ id: string; module: Record<string, unknown> } | null> => {
-    const data = await guestyRequest("GET", `/communication/conversations?reservationId=${encodeURIComponent(reservationId)}&limit=1&fields=`) as any;
-    const rows = unwrapGuestyList(data, ["conversations", "results", "data"]);
-    const conversation = rows[0];
-    const id = conversation?._id ?? conversation?.id;
+    // Guesty's Open API does NOT accept `?reservationId=` on
+    // /communication/conversations — it 400s with VALIDATION_ERROR
+    // ("reservationId" is not allowed), which threw and surfaced to the
+    // operator as a 500 "Failed to send guest message". The reservation
+    // document itself carries the conversationId, and its integration.platform
+    // is the channel to reply through. (Verified live 2026-06-07.)
+    const reservation = await guestyRequest(
+      "GET",
+      `/reservations/${encodeURIComponent(reservationId)}?fields=${encodeURIComponent("conversationId integration source")}`,
+    ) as any;
+    const id = reservation?.conversationId
+      ?? reservation?.conversation?._id
+      ?? reservation?.conversation?.id;
     if (!id) return null;
-    const module = cleanGuestyConversationModule(conversation?.module ?? conversation?.lastPost?.module ?? conversation?.meta?.lastPost?.module);
+    // Reply on the channel the guest booked with (Booking.com → bookingCom,
+    // Airbnb → airbnb2, Vrbo → homeaway). Guesty's send-message `module.type`
+    // expects this platform string. Prefer the integration's platform; fall
+    // back to mapping the reservation source so routing still works when the
+    // integration object isn't expanded. cleanGuestyConversationModule
+    // whitelists the safe fields and defaults to type "email" when unknown.
+    const sourceText = normalizeAlternativeText(reservation?.source, 60);
+    const platformFromSource =
+      /booking\.?com/i.test(sourceText) ? "bookingCom"
+      : /airbnb/i.test(sourceText) ? "airbnb2"
+      : /vrbo|homeaway|expedia/i.test(sourceText) ? "homeaway"
+      : "";
+    const module = cleanGuestyConversationModule({ type: reservation?.integration?.platform || platformFromSource });
     return { id: String(id), module };
   };
 
@@ -9308,11 +9330,21 @@ Requirements:
       if (!conversation) return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
 
       // The conversation's module carries the channel the guest booked through,
-      // so Guesty routes this to VRBO/Booking.com/Airbnb accordingly.
-      await guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversation.id)}/send-message`, {
-        body,
-        module: conversation.module,
-      });
+      // so Guesty routes this to VRBO/Booking.com/Airbnb accordingly. If the
+      // channel-typed send is rejected, retry once over email so the message
+      // still reaches the guest instead of hard-failing.
+      const sendGuestMessage = (mod: Record<string, unknown>) =>
+        guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversation.id)}/send-message`, {
+          body,
+          module: mod,
+        });
+      try {
+        await sendGuestMessage(conversation.module);
+      } catch (sendErr: any) {
+        if ((conversation.module?.type ?? "email") === "email") throw sendErr;
+        console.error("[booking-alternatives] channel send failed, retrying over email:", sendErr?.message ?? sendErr);
+        await sendGuestMessage({ type: "email" });
+      }
       if (token) {
         await storage.markBookingAlternativePageSent(token, channel).catch((e) =>
           console.error("[booking-alternatives] mark-sent failed:", e?.message ?? e));
