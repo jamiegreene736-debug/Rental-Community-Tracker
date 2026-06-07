@@ -8668,15 +8668,21 @@ Requirements:
       // are no longer shown. Only the community PHOTOS (accurate) remain, under a
       // plain "Community Preview" heading, with a community blurb below the
       // gallery. Priority: (1) our researched, fact-checked description for this
-      // community (so old pages — persisted before that data existed — and new
-      // pages both get the rich, amenity-aware blurb); (2) the blurb persisted at
-      // page-build time (payload.communityDescription); (3) the deterministic,
-      // amenity-free sentence so the line always renders. Sanitized through the
-      // same cleaner as unit copy + escaped.
+      // community (so old + new pages both get the rich, amenity-aware blurb);
+      // (2) the blurb persisted at page-build time, but ONLY when it actually
+      // refers to this community — a stale AREA blurb (e.g. "Princeville is…")
+      // persisted for a distinct community like "Villas of Kamali'i" must not
+      // stand in, or the copy would describe the city, not the community in the
+      // header; (3) the deterministic, community-NAMED sentence so the line
+      // always renders and always leads with the community. Sanitized + escaped.
+      const communityLabelForCopy = alternativeCommunityDisplay || areaNameDisplay;
+      const persistedCommunityDescription = cleanAlternativeGuestDescription(payload.communityDescription);
+      const persistedFitsCommunity = !!persistedCommunityDescription && !!communityLabelForCopy
+        && normalizeResortText(persistedCommunityDescription).includes(normalizeResortText(communityLabelForCopy));
       const communityDescription =
-        resolveCuratedCommunityDescription(alternativeCommunityDisplay || areaNameDisplay, areaNameDisplay)
-        || cleanAlternativeGuestDescription(payload.communityDescription)
-        || alternativeCommunityDescriptionFallback(alternativeCommunityDisplay || areaNameDisplay, areaNameDisplay);
+        resolveCuratedCommunityDescription(communityLabelForCopy, areaNameDisplay)
+        || (persistedFitsCommunity ? persistedCommunityDescription : "")
+        || alternativeCommunityDescriptionFallback(communityLabelForCopy, areaNameDisplay);
       const topCommunityBlock = topCommunityPhotos.length
         ? `<section class="community-preview">
             <div class="section-heading">

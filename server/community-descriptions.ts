@@ -92,6 +92,12 @@ export const CURATED_COMMUNITY_DESCRIPTIONS: CuratedCommunityDescription[] = [
       "Kaiulani of Princeville is one of the area's newer luxury communities, a collection of well-designed two-story townhomes set across roughly seventeen lushly landscaped acres along the edge of Princeville's golf course. Its resort-style amenities are a highlight: three heated swimming pools, covered entertaining pavilions with barbecue grills, and a lava-rock spa. A scenic, lighted walking path winds through the grounds past tropical plantings and water features, giving the community a serene, secluded atmosphere. It stays close to Princeville's shops, dining, and grocery, with the north shore's celebrated beaches just minutes away.",
   },
   {
+    name: "Villas of Kamali'i",
+    aliases: ["Villas of Kamali'i", "Villas of Kamalii", "Kamalii"],
+    description:
+      "Villas of Kamali'i is an upscale, gated townhome-style community tucked along a quiet private roadway in the heart of Princeville, on Kauai's lush north shore. Built as a collection of spacious two-story residences, it is set among manicured garden walkways and green space, with controlled gate entry and on-site security that lend a calm, private feel. The shared recreation area centers on a heated pool, a hot tub, and barbecue grills, making it an easy place to settle in for a relaxed island stay. The community borders the Robert Trent Jones II-designed Makai Golf Course and sits within an easy walk of the clubhouse, with Princeville's shops, restaurants, and farmers markets roughly a mile away. The celebrated beaches of Kauai's north shore, including Hanalei Bay and Anini Beach, are a short drive down the road.",
+  },
+  {
     name: "Princeville",
     aliases: ["Princeville"],
     description:
@@ -208,13 +214,22 @@ const matchCuratedDescription = (value: unknown): string | null => {
 
 /**
  * Resolve a curated, fact-checked community description for the guest page.
- * Tries the specific community label first (unit-derived resort name), then the
- * broader area. Returns null when we have no researched entry for either — the
- * caller then falls back to the conservative AI/deterministic blurb.
+ * Tries the specific community label first (the unit-derived resort name). Only
+ * when there is NO distinct community name does it consult the broader area.
+ *
+ * This ordering matters: an unknown community (e.g. "Villas of Kamali'i", which
+ * we don't curate) must NOT inherit its area's blurb — otherwise the guest page
+ * header would read "Villas of Kamali'i" while the description describes the
+ * city ("Princeville is…"). When the specific community is unknown we return
+ * null so the caller falls back to a community-NAMED blurb instead. The area is
+ * used only when the community slot is empty (or is itself the area name).
  */
 export function resolveCuratedCommunityDescription(
   community: unknown,
   area?: unknown,
 ): string | null {
-  return matchCuratedDescription(community) ?? matchCuratedDescription(area);
+  const byCommunity = matchCuratedDescription(community);
+  if (byCommunity) return byCommunity;
+  if (norm(community)) return null;
+  return matchCuratedDescription(area);
 }
