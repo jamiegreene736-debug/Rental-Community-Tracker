@@ -12,13 +12,31 @@
 // and if it would gut a gallery it no-ops so the coarse last-5 tail trim in the
 // guest-page renderer still applies as a backstop.
 
-const MODEL = "claude-haiku-4-5-20251001";
+// Sonnet, not Haiku, on purpose. Haiku was empirically inconsistent on this task
+// (e.g. flagged [3,4] one run, [3,4,25] the next, and false-positived an interior
+// bedroom) and missed the building-number exterior/entrance shots, so the leak
+// photos survived. Sonnet returns the identifying shots reliably with no false
+// positives. This is leak prevention, so reliability beats Haiku's speed.
+const MODEL = "claude-sonnet-4-6";
+// Bump this when the screening logic/model changes so already-built pages get
+// re-screened on next render (see the lazy migration in routes.ts).
+export const UNIT_PHOTO_VISION_VERSION = 2;
 // Bound work so a huge gallery can't blow up latency/cost. Galleries are already
 // capped at 40 upstream; this is a hard ceiling for the vision request.
 const MAX_PHOTOS_TO_SCREEN = 45;
 // Never let the screen leave a gallery emptier than this — if it would, treat it
 // as over-flagging and no-op (the renderer's tail trim still runs).
 const MIN_PHOTOS_AFTER_SCREEN = 4;
+
+// A legible resolution is required to read a building/unit number off a sign — a
+// thumbnail (e.g. VRBO's rw=297) makes the number unreadable and the screen
+// misses it. VRBO/Expedia media URLs accept a resize policy, so normalize to a
+// readable width for the vision request ONLY (the stored/displayed URLs are
+// untouched). Non-VRBO hosts are sent as-is.
+const sizeImageUrlForVision = (url: string): string =>
+  /(?:vrbo|expedia|trvl-media|homeaway)\.com/i.test(url)
+    ? `${url.split("?")[0]}?impolicy=resizecrop&rw=1200&ra=fit`
+    : url;
 
 export interface UnitPhotoFilterResult {
   /** URLs to keep, in original order. */
@@ -72,7 +90,7 @@ export async function filterNonRentalUnitPhotos(
   const content: any[] = [];
   candidates.forEach((url, i) => {
     content.push({ type: "text", text: `Photo ${i}:` });
-    content.push({ type: "image", source: { type: "url", url } });
+    content.push({ type: "image", source: { type: "url", url: sizeImageUrlForVision(url) } });
   });
   content.push({
     type: "text",

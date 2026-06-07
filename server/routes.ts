@@ -102,7 +102,7 @@ import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
-import { filterNonRentalUnitPhotos } from "./unit-photo-vision";
+import { filterNonRentalUnitPhotos, UNIT_PHOTO_VISION_VERSION } from "./unit-photo-vision";
 import {
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
@@ -8570,6 +8570,58 @@ Requirements:
     return { id: String(id), module };
   };
 
+  // ── Lazy photo re-screen for already-built guest pages ──────────────────
+  // The vision screen runs at build time, but pages built before it existed (or
+  // by an older/weaker pass) keep their identifying photos. These helpers
+  // re-screen such a page on render and persist the cleaned result, so old links
+  // self-heal without a manual regenerate. Guarded so one page migrates once.
+  const migratingAlternativeTokens = new Set<string>();
+  const alternativePageNeedsPhotoMigration = (payload: any): boolean => {
+    const alts = Array.isArray(payload?.alternatives) ? payload.alternatives : [];
+    return alts.some((a: any) =>
+      Array.isArray(a?.photos) && a.photos.length > 0 &&
+      (a?.photosVisionFiltered !== true || Number(a?.photosVisionVersion) !== UNIT_PHOTO_VISION_VERSION),
+    );
+  };
+  const migrateAlternativePagePhotos = async (token: string, payload: any, dbPage: any): Promise<any> => {
+    if (migratingAlternativeTokens.has(token)) return payload;
+    migratingAlternativeTokens.add(token);
+    try {
+      const alts = Array.isArray(payload?.alternatives) ? payload.alternatives : [];
+      let changed = false;
+      const migrated = await Promise.all(alts.map(async (a: any) => {
+        const photos = Array.isArray(a?.photos) ? a.photos.filter(Boolean) : [];
+        if (photos.length === 0) return a;
+        if (a?.photosVisionFiltered === true && Number(a?.photosVisionVersion) === UNIT_PHOTO_VISION_VERSION) return a;
+        const filter = await filterNonRentalUnitPhotos(photos);
+        if (!filter.filtered) return a; // no key / error — leave as-is, retry next load
+        changed = true;
+        return {
+          ...a,
+          photos: filter.kept,
+          image: filter.kept[0] ?? a?.image ?? "",
+          photosVisionFiltered: true,
+          photosVisionVersion: UNIT_PHOTO_VISION_VERSION,
+        };
+      }));
+      if (!changed) return payload;
+      const nextPayload = { ...payload, alternatives: migrated };
+      await storage.saveBookingAlternativePage({
+        token,
+        reservationId: dbPage?.reservationId ?? payload?.reservationId ?? null,
+        channel: dbPage?.channel ?? null,
+        guestName: dbPage?.guestName ?? payload?.guestName ?? null,
+        checkIn: dbPage?.checkIn ?? payload?.checkIn ?? null,
+        checkOut: dbPage?.checkOut ?? payload?.checkOut ?? null,
+        payload: nextPayload,
+        expiresAt: dbPage?.expiresAt ?? (payload?.expiresAt ? new Date(payload.expiresAt) : null),
+      }).catch((e: any) => console.error("[alternatives] photo migration persist failed:", e?.message ?? e));
+      return nextPayload;
+    } finally {
+      migratingAlternativeTokens.delete(token);
+    }
+  };
+
   app.get("/alternatives/:token", async (req, res) => {
     try {
       const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -8592,15 +8644,25 @@ Requirements:
           return res.status(410).send("This alternative page has expired.");
         }
       }
-      // Open tracking: count only genuine guest opens. Operator previews carry
-      // the admin session (cookie/header) and an explicit ?preview=1 is also
-      // excluded, so the "did the guest open it" signal stays clean.
-      if (dbPage) {
-        const adminSecret = process.env.ADMIN_SECRET ?? "";
-        const isOperator = adminSecret ? !!resolvePortalSession(req, adminSecret) : false;
-        const isPreview = String(req.query.preview ?? "") === "1";
-        if (!isOperator && !isPreview) {
-          void storage.recordBookingAlternativePageOpen(token).catch(() => {});
+      // Operator previews carry the admin session (cookie/header) or ?preview=1.
+      const adminSecret = process.env.ADMIN_SECRET ?? "";
+      const isOperator = adminSecret ? !!resolvePortalSession(req, adminSecret) : false;
+      const isPreview = String(req.query.preview ?? "") === "1";
+      // Open tracking: count only genuine guest opens.
+      if (dbPage && !isOperator && !isPreview) {
+        void storage.recordBookingAlternativePageOpen(token).catch(() => {});
+      }
+      // Self-heal pages whose photos were never screened or screened by an older
+      // pass. Block for operator/preview loads (with a cap) so the fix shows on
+      // reload; run in the background for guests so they take no latency.
+      if (alternativePageNeedsPhotoMigration(payload)) {
+        if (isOperator || isPreview) {
+          payload = await Promise.race([
+            migrateAlternativePagePhotos(token, payload, dbPage).catch(() => payload),
+            new Promise((resolve) => setTimeout(() => resolve(payload), 25_000)),
+          ]) as any;
+        } else {
+          void migrateAlternativePagePhotos(token, payload, dbPage).catch(() => {});
         }
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
@@ -8736,7 +8798,12 @@ Requirements:
           ...(Array.isArray(item.photos) ? item.photos.map(safeGuestPhotoUrl) : []),
         ].filter(Boolean)))
           .slice(0, 40);
-        const photos = item?.photosVisionFiltered === true
+        // Trust the precise vision screen only when it's the CURRENT version;
+        // otherwise apply the coarse tail trim as a partial backstop until the
+        // lazy re-screen above persists (mid-gallery leaks clear on next load).
+        const visionTrusted = item?.photosVisionFiltered === true
+          && Number(item?.photosVisionVersion) === UNIT_PHOTO_VISION_VERSION;
+        const photos = visionTrusted
           ? galleryPhotos
           : galleryPhotos.length > GUEST_GALLERY_TAIL_DROP
             ? galleryPhotos.slice(0, Math.max(GUEST_GALLERY_MIN_KEEP, galleryPhotos.length - GUEST_GALLERY_TAIL_DROP))
@@ -9031,6 +9098,7 @@ Requirements:
         const photoFilter = await filterNonRentalUnitPhotos(mergedPhotos);
         const photos = photoFilter.kept;
         const photosVisionFiltered = photoFilter.filtered;
+        const photosVisionVersion = photoFilter.filtered ? UNIT_PHOTO_VISION_VERSION : 0;
         const title = normalizeAlternativeText(
           item?.title || vrboDetails?.title || item?.community || "Alternative stay",
           160,
@@ -9064,6 +9132,7 @@ Requirements:
           image: photos[0] ?? "",
           photos,
           photosVisionFiltered,
+          photosVisionVersion,
           bedrooms,
           bathrooms,
           sleeps,
@@ -9214,6 +9283,7 @@ Requirements:
         image: photoFilter.kept[0] ?? "",
         photos: photoFilter.kept,
         photosVisionFiltered: photoFilter.filtered,
+        photosVisionVersion: photoFilter.filtered ? UNIT_PHOTO_VISION_VERSION : 0,
         bedrooms: detail.bedrooms,
         bathrooms: detail.bathrooms,
         sleeps: detail.sleeps,
