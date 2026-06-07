@@ -8752,6 +8752,10 @@ Requirements:
             .carousel-nav{gap:8px}
             .carousel-nav button{padding:7px 9px}
           }
+          /* Deter casual image saving on this page: block drag-to-save, the iOS
+             long-press "Save Image" callout, and selection on images. Paired with
+             the contextmenu/dragstart blockers below. Deterrent only, not DRM. */
+          img{-webkit-user-drag:none;-khtml-user-drag:none;-moz-user-drag:none;user-drag:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
         </style></head><body>
         <header class="hero">
           <div class="hero-inner">
@@ -8786,6 +8790,18 @@ Requirements:
             carousel.querySelector("[data-carousel-prev]")?.addEventListener("click", () => scrollOne(-1));
             carousel.querySelector("[data-carousel-next]")?.addEventListener("click", () => scrollOne(1));
           });
+          // Deter casual photo saving: block the right-click menu ("Save Image
+          // As" / "Copy Image" / "Copy Image URL") and drag-to-save over any
+          // photo. Capture phase so it can't be cancelled downstream. This is a
+          // deterrent, NOT DRM — DevTools / the network tab can still reach URLs.
+          var blockImageSave = function (e) {
+            var t = e.target;
+            if (t && (t.tagName === "IMG" || (t.closest && t.closest("img, figure, .carousel, .community-gallery")))) {
+              e.preventDefault();
+            }
+          };
+          document.addEventListener("contextmenu", blockImageSave, true);
+          document.addEventListener("dragstart", blockImageSave, true);
         </script>
         </body></html>`);
     } catch (err: any) {
