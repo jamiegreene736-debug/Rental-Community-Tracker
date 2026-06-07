@@ -102,6 +102,7 @@ import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
+import { filterNonRentalUnitPhotos } from "./unit-photo-vision";
 import {
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
@@ -8721,9 +8722,12 @@ Requirements:
       // Trailing photos in a scraped VRBO gallery are typically NOT unit
       // interiors — they're the property-manager logo and a shot of the unit
       // number on the building, which the operator confirmed consistently land
-      // in the last slots. Drop the last 5 from each unit gallery before
-      // rendering, with a floor so a small gallery isn't gutted. Done at render
-      // time (not build time) so already-built pages are cleaned on next load.
+      // in the last slots. As a coarse backstop, drop the last 5 from each unit
+      // gallery before rendering (with a floor so a small gallery isn't gutted).
+      // This is SKIPPED for pages whose photos were already vision-screened at
+      // build time (item.photosVisionFiltered) — there we trust the precise
+      // screen and keep the good tail photos. Done at render time so
+      // already-built (pre-vision) pages are still cleaned on next load.
       const GUEST_GALLERY_TAIL_DROP = 5;
       const GUEST_GALLERY_MIN_KEEP = 5;
       const photoBlocks = alternatives.map((item: any, index: number) => {
@@ -8732,9 +8736,11 @@ Requirements:
           ...(Array.isArray(item.photos) ? item.photos.map(safeGuestPhotoUrl) : []),
         ].filter(Boolean)))
           .slice(0, 40);
-        const photos = galleryPhotos.length > GUEST_GALLERY_TAIL_DROP
-          ? galleryPhotos.slice(0, Math.max(GUEST_GALLERY_MIN_KEEP, galleryPhotos.length - GUEST_GALLERY_TAIL_DROP))
-          : galleryPhotos;
+        const photos = item?.photosVisionFiltered === true
+          ? galleryPhotos
+          : galleryPhotos.length > GUEST_GALLERY_TAIL_DROP
+            ? galleryPhotos.slice(0, Math.max(GUEST_GALLERY_MIN_KEEP, galleryPhotos.length - GUEST_GALLERY_TAIL_DROP))
+            : galleryPhotos;
         const carousel = photos.length > 0
           ? `<div class="carousel" data-carousel>
               <div class="carousel-track">
@@ -9012,10 +9018,19 @@ Requirements:
         const vrboDetails = isVrboAlternativeUrl(sourceUrl)
           ? await scrapeVrboAlternativeDetails(sourceUrl).catch(() => null)
           : null;
-        const photos = Array.from(new Set([
+        const mergedPhotos = Array.from(new Set([
           ...initialPhotos,
           ...(vrboDetails?.photos ?? []),
         ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
+        // Vision screen: drop photos that would let the guest identify the exact
+        // listing (legible building/unit number, address, or PM logo) or that are
+        // maps/screenshots/docs. Runs once here (build time), per unit, and the
+        // per-unit calls run in parallel via the outer Promise.all. On no key /
+        // error it keeps everything and the renderer's tail trim remains the
+        // backstop; `photoFilter.filtered` tells the renderer to skip that trim.
+        const photoFilter = await filterNonRentalUnitPhotos(mergedPhotos);
+        const photos = photoFilter.kept;
+        const photosVisionFiltered = photoFilter.filtered;
         const title = normalizeAlternativeText(
           item?.title || vrboDetails?.title || item?.community || "Alternative stay",
           160,
@@ -9048,6 +9063,7 @@ Requirements:
           url: sourceUrl,
           image: photos[0] ?? "",
           photos,
+          photosVisionFiltered,
           bedrooms,
           bathrooms,
           sleeps,
@@ -9187,12 +9203,17 @@ Requirements:
       if (urls.length === 0) return res.status(400).json({ error: "At least one VRBO URL is required" });
       const propertyName = normalizeAlternativeText(req.body?.propertyName || req.body?.community || "Vacation rental", 120);
       const details = await Promise.all(urls.map((url) => scrapeVrboAlternativeDetails(url)));
-      const alternatives = details.map((detail, index) => ({
+      const alternatives = await Promise.all(details.map(async (detail, index) => {
+        // Same vision screen as the main flow: drop identifying photos
+        // (building/unit number, address, PM logo) and non-photos.
+        const photoFilter = await filterNonRentalUnitPhotos(detail.photos);
+        return {
         title: detail.title || `${propertyName} option ${index + 1}`,
         community: propertyName,
         url: urls[index],
-        image: detail.photos[0] ?? "",
-        photos: detail.photos,
+        image: photoFilter.kept[0] ?? "",
+        photos: photoFilter.kept,
+        photosVisionFiltered: photoFilter.filtered,
         bedrooms: detail.bedrooms,
         bathrooms: detail.bathrooms,
         sleeps: detail.sleeps,
@@ -9209,6 +9230,7 @@ Requirements:
           normalizeAlternativeText(req.body?.notes, 500),
         ].filter(Boolean).join(" "),
         showSourceLink: false,
+        };
       }));
       req.body = {
         ...req.body,

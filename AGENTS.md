@@ -1229,6 +1229,30 @@ established it so you can read the rationale in the commit message.
     own name a guest will see, its specific entry (e.g. "Villas of Kamali'i")
     rather than relying on the area.
 
+47. **Unit galleries on `/alternatives/:token` are screened so a guest can't
+    identify the exact listing.** Scraped VRBO photos arrive as bare URLs with
+    no captions/tags (the sidecar grabs only `img.src`/`srcset`), so there is
+    nothing to filter on cheaply — screening needs vision. Two layers, by
+    design:
+    - **Build-time vision screen** (`server/unit-photo-vision.ts`
+      `filterNonRentalUnitPhotos`, called per unit in the `/api/booking-alternatives`
+      and `/from-vrbo` hydration). ONE Haiku call per unit, images sent BY URL
+      (no download), per-unit calls run in parallel. It removes photos a guest
+      could identify the property from — a legible building/unit number, address,
+      or property-manager logo — plus maps/floor plans/screenshots/documents.
+      Conservative: unsure → KEEP; if it would leave < 4 photos it no-ops. On no
+      `ANTHROPIC_API_KEY` / error it keeps everything (`filtered: false`). The
+      result is persisted on the item as `photosVisionFiltered`.
+    - **Render-time tail trim** (the GET renderer): drops the last 5 photos of
+      each unit gallery (with a floor), because the PM logo / unit-number-on-
+      building shots reliably cluster at the end. This is the backstop for pages
+      built before the vision screen existed and for no-key/error builds. It is
+      **SKIPPED when `item.photosVisionFiltered === true`** — there we trust the
+      precise screen and keep the good tail photos. Don't make the renderer trim
+      unconditionally (it would re-trim already-cleaned galleries) and don't
+      drop the trim (old pages rely on it). Haiku is intentional (speed); the
+      screen is bounded to 45 images.
+
 ### Portal authentication
 
 35. **Portal-wide auth gate is a single shared password keyed by
