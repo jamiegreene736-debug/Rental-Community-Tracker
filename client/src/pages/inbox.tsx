@@ -37,6 +37,7 @@ import type { MessageTemplate } from "@shared/schema";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
+import { resolveIslandRegion } from "@shared/area-identity";
 import { usePortalSession } from "@/lib/auth";
 
 type ArrivalUnitDetail = {
@@ -182,6 +183,11 @@ async function buildPropertyContextForDraft(
     const parts: string[] = [];
     parts.push(`PROPERTY: ${prop.propertyName} at ${prop.complexName}`);
     parts.push(`Address: ${prop.address}`);
+    // AREA anchor for local-area / recommendation answers (see the EXPERT LOCAL
+    // KNOWLEDGE guardrails in the system prompt). Island/region is resolved
+    // deterministically from the address so the AI never gives a wrong-island answer.
+    const island = resolveIslandRegion(prop.address);
+    if (island) parts.push(`AREA: ${prop.complexName} — ${island}`);
     if (prop.propertyType) {
       // propertyType is load-bearing for accessibility questions —
       // a Townhouse is multi-story, while a Condominium is usually
@@ -203,6 +209,11 @@ async function buildPropertyContextForDraft(
     if (prop.accessibilityNote) {
       parts.push(`\nFLOOR PLAN / ACCESSIBILITY: ${prop.accessibilityNote}`);
     }
+    // Surrounding-area facts so the AI can ground local-area answers (beaches,
+    // dining, getting around) instead of inventing them. Previously omitted —
+    // the auto-reply tool already exposed these, so this closes that gap.
+    if (prop.neighborhood) parts.push(`\nNEIGHBORHOOD: ${prop.neighborhood}`);
+    if (prop.transit) parts.push(`\nGETTING AROUND: ${prop.transit}`);
     parts.push(`\nDESCRIPTION: ${prop.combinedDescription.slice(0, 600)}${prop.combinedDescription.length > 600 ? "…" : ""}`);
 
     // Hawaii detection by state code / name in the address string.

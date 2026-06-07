@@ -7,6 +7,7 @@ import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { fallbackWalkForResort } from "../shared/walking-distance";
+import { resolveIslandRegion } from "../shared/area-identity";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import type { AutoReplyLog, InsertAutoReplyLog } from "@shared/schema";
 
@@ -124,6 +125,16 @@ const OUTPUT_RISK_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bextend(?:ed|ing)?\s+your stay\b/i, reason: "discussed stay extension" },
   { pattern: /\b(?:lockbox|access)\s+code\s+(?:is|will be)\b/i, reason: "shared access code in chat" },
   { pattern: /\b\d{4,6}\b.*\b(?:lockbox|door code|gate code|access code)\b/i, reason: "shared access code in chat" },
+  // --- Local-knowledge anti-hallucination backstop --------------------------
+  // World-knowledge area answers must never assert a verifiable specific about
+  // an outside business/attraction (a phone number, current hours, or a price).
+  // If a draft slips one through, hold it for human review rather than send it.
+  { pattern: /\b\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/, reason: "draft contains a phone number" },
+  { pattern: /\b(?:open|opens|closes|closed)\s+(?:now|today|until|at)\b/i, reason: "draft claims current hours / open status" },
+  { pattern: /\b(?:24\/7|24-7|24 hours a day|open 24)\b/i, reason: "draft claims 24-hour hours" },
+  { pattern: /\b(?:open|closes?)\b[^.]{0,25}\b\d{1,2}\s*(?:am|pm|a\.m\.|p\.m\.)\b/i, reason: "draft claims specific business hours" },
+  { pattern: /\b(?:admission|entry|ticket|tour|meal|dinner|lunch|breakfast|entree|cover charge)\b[^.]{0,40}\$\s?\d/i, reason: "draft quotes an external business price" },
+  { pattern: /\$\s?\d[\d,]*(?:\.\d{2})?[^.]{0,40}\b(?:admission|entry|ticket|tour|per person|each|meal|dinner|lunch)\b/i, reason: "draft quotes an external business price" },
 ];
 
 function classifyOutput(text: string): { risky: boolean; reason: string | null } {
@@ -511,7 +522,7 @@ const TOOLS = [
   },
   {
     name: "get_local_property_facts",
-    description: "Fetch the rich per-unit layout for this listing — bed types in each bedroom, square footage, sleeps count, full layout description, property type (Townhouse / Condominium / etc., load-bearing for accessibility / stairs questions), and walking distance between units. Use this whenever the guest asks about beds, bedding, room layouts, distance between units, accessibility, ground-floor sleeping, stairs, or 'how does it sleep'.",
+    description: "Fetch the rich per-unit layout for this listing — bed types in each bedroom, square footage, sleeps count, full layout description, property type (Townhouse / Condominium / etc., load-bearing for accessibility / stairs questions), and walking distance between units. ALSO returns the property's area identity (island, town, neighborhood, transit) — use this to anchor ANY local-area / recommendations / beaches / dining / getting-around answer to the correct island and town. Call this whenever the guest asks about beds, bedding, room layouts, distance between units, accessibility, ground-floor sleeping, stairs, 'how does it sleep', OR anything about the surrounding area, things to do, beaches, restaurants, getting around, or the weather.",
     input_schema: {
       type: "object",
       properties: { listingId: { type: "string", description: "Guesty listing _id" } },
@@ -592,6 +603,15 @@ async function runTool(name: string, input: any): Promise<unknown> {
         distanceBetweenUnits: walk ? `${walk.description} (~${walk.minutes}-min walk)` : null,
         neighborhood: prop.neighborhood ?? null,
         transit: prop.transit ?? null,
+        // Area identity for anchoring local-area / recommendation answers to the
+        // correct island/region (see EXPERT LOCAL KNOWLEDGE in the system prompt).
+        // `town` is parsed from the address (street, town, ST zip).
+        island: resolveIslandRegion(prop.address),
+        town: (() => {
+          const segs = String(prop.address ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+          return segs.length >= 2 ? segs[segs.length - 2].replace(/\s+[A-Z]{2}\s+\d{5}.*$/, "").trim() : (segs[0] ?? null);
+        })(),
+        areaIdentity: [prop.complexName, resolveIslandRegion(prop.address)].filter(Boolean).join(", "),
       };
     } catch (err) {
       return { error: (err as Error).message };
@@ -623,7 +643,7 @@ INFORMATION GATHERING
 - Always use the tools available to fetch listing details or reservation details BEFORE answering questions about the property, dates, or amenities. Never guess facts.
 - For per-unit bedding plans, layouts, bed types (King / Queen / Twin / sleeper sofa), bathroom counts per unit, square footage, distance between units, property type (Townhouse vs Condominium — relevant for stairs/accessibility), and ground-floor questions, ALWAYS call get_local_property_facts. The Guesty listing alone (get_listing_details) only has aggregate totals — it does NOT have per-unit bedding.
 - When a guest asks multiple specific questions in one message (e.g. bedding + distance + accessibility + check-in time), call get_local_property_facts and answer EVERY one of them. Do not flag for human just because the message is long — flag only when something falls outside the data we fetched OR the FLAG categories below.
-- If the guest's question cannot be answered confidently from the fetched context, call flag_for_human with a reason and stop. "Confidently" means the fact is in the data we fetched — not vibes or generic Hawaii knowledge.
+- If a question about THE PROPERTY ITSELF (beds, layout, bathrooms, amenities, square footage, policies, dates, prices) cannot be answered confidently from the fetched context, call flag_for_human with a reason and stop. "Confidently" means that specific PROPERTY fact is in the data we fetched — not a guess. (Questions about the surrounding AREA — beaches, dining, activities, getting around, weather — are different: you may answer those from your own local knowledge under the EXPERT LOCAL KNOWLEDGE guardrails below.)
 
 DO NOT ASK FOR FACTS THE GUEST OR THE BOOKING ALREADY SUPPLIED:
 - Inquiries / requests / bookings carry the dates and guest count on the reservation. Call get_reservation to read them — never ask the guest "what dates are you thinking?" or "how many guests?" when the reservation already answers it.
@@ -654,9 +674,19 @@ WHAT YOU MAY NEVER COMMIT TO IN A REPLY (even if the guest asks nicely):
 
 WHAT YOU MAY ANSWER ON YOUR OWN
 - Already-confirmed facts about the property pulled via tools (bedrooms, bathrooms, amenities, location, parking, AC, WiFi presence, pool, BBQ, etc.).
-- General "what's it like nearby" questions when the listing description covers it.
-- Travel logistics (driving distance, airport proximity) when the listing description includes it.
+- Area orientation and recommendations for THIS property's specific community, town, and island — beaches, dining, activities/things to do, getting around, seasonal/weather — as a knowledgeable local host, under the EXPERT LOCAL KNOWLEDGE guardrails below.
+- Travel logistics (airport proximity, getting around, parking) — quote the fetched neighborhood/transit facts when they cover it, otherwise give hedged general guidance under those same guardrails.
 - Reassurance and warm acknowledgment of the question.
+
+EXPERT LOCAL KNOWLEDGE (area orientation — beaches, dining, activities, getting around, weather):
+You are a longtime local host. You MAY answer general "what's the area like / what should we do / where should we eat / how do we get around / what's the weather like" questions from your own knowledge of the SPECIFIC place this property is in. This is the ONE place you may go beyond the fetched facts — but ONLY for area orientation, and ONLY under these guardrails:
+- ANCHOR every area answer to this property's exact community, town, and island. First call get_local_property_facts and read island, town/address, neighborhood, and transit. Speak only to THAT island and town — never another island, never a generic "Hawaii". If you can't tie an answer to this specific area, say you can only speak to this area and offer what you do know here.
+- Prefer the fetched neighborhood / transit facts over your own memory whenever they cover the question — quote those.
+- NEVER state exact prices, exact hours, "open now / today / this week", phone numbers, or a business's street address. You do not have current data for any of those.
+- NEVER give a precise distance or drive time you can't be sure of. Hedge: "a short drive", "about 10-15 minutes", "a local favorite", "worth a look".
+- For anything time-sensitive — hours, seasonal closures, reservations, surf/ocean/weather conditions, tour availability — tell the guest to check the current details directly before relying on it.
+- When you're not certain a specific place exists or is still operating, describe the TYPE of thing ("there are a few well-regarded poke spots in town") rather than naming a business you're unsure about.
+- This is orientation and suggestion only. Never commit us to anything ("we'll arrange", "we'll book it", "we can get you a discount"). It never overrides the FLAG categories above — a complaint about a local business, or a medical/transport emergency, still flags.
 
 EXPERT JUDGMENT (what separates a real reservationist from a chatbot):
 - Read the question behind the question. Infer trip type and who's traveling from what they wrote — family with young kids, a couple's getaway, a reunion, a multi-generational group — and answer the real concern, not just the literal words. "How far apart are the units?" usually means "can we stay together easily?" — so answer the distance AND whether it's easy to move between them. A long stay with kids who asks about the kitchen is really asking "can we cook and eat as a family here?"
