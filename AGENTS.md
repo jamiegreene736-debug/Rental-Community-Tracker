@@ -151,6 +151,23 @@ page. Three constraints make it actually reach the full count — don't
    detail-page enrichment (a later phase), not the card hero. The `photoHashes`
    field + dHash hook (`server/photo-hashing.ts`) are wired for that. Don't
    re-add SRP-hero hashing expecting matching gains.
+8. **Per-listing coordinates are NOT available cheaply for the city export; the
+   map-view harvest was tried and abandoned, 2026-06-07.** Geo-clustering needs
+   per-listing lat/lng, but the city-wide SRP list view exposes NONE: not on the
+   DOM cards (`data-stid` only), not in GraphQL (list view fires
+   `CollectionCarouselQuery`, `network=0`), not in `window.__APOLLO_STATE__` (3
+   entries, only `ROOT_QUERY` — no `Listing` nodes), not in the HTML
+   (`geoCode` count 0). A "Path A" map-view harvest WAS implemented and tested
+   (open the map after the walk → let `networkCapture` absorb the map's GraphQL →
+   merge coords by listing id): the map opened but yielded **`coordIds=0`** (its
+   markers are tiles/clusters, not per-pin geoCode the parser can read) AND it
+   added ~3 min (a 267s run — near Railway's ~5-min edge timeout). It was
+   reverted. Conclusion: geo coordinates must come from **detail-page
+   enrichment** (open each candidate's listing page — that page reliably has
+   coords + the gallery + the exact complex/PM). Don't re-attempt SRP/map-view
+   coordinate capture. The matcher (`pairIsWalkable`, `walkMinutesBetween`)
+   already consumes `lat`/`lng` when present, so detail-page enrichment only has
+   to populate them.
 
 `exhaustiveCityHarvestAllSorts` (multi-sort union) remains a fallback for when
 the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so
