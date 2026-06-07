@@ -199,6 +199,18 @@ page. Three constraints make it actually reach the full count — don't
      Couldn't fully diagnose the per-source coord (JSON-LD vs `__APOLLO_STATE__`)
      because VRBO was rate-limiting (scrapes degraded to 1 listing) — revisit when
      it cools. Do NOT trust enriched coords without re-confirming they're distinct.
+   - **GEOCODING-THE-ADDRESS FALLBACK IS ALSO DEAD (probed 2026-06-07).** The
+     proposed next step was: geocode a per-listing street address from the detail
+     page. Probed 3 distinct complexes (Point at Poipu / Sunset Kahili / Kiahuna)
+     and the detail pages exposed NO usable per-listing location at all: no
+     JSON-LD `address`, no JSON-LD `geo`, no street address, no "located in"
+     neighborhood text, no per-listing lat/lng in the HTML — only the same shared
+     centroid coord again. VRBO obscures exact location END-TO-END (SRP, map, AND
+     detail page). **Conclusion: geo-clustering is NOT achievable from VRBO's
+     public data. Don't re-attempt SRP/map/detail coord capture OR address
+     geocoding for VRBO.** The geo-cluster + enrichment plumbing stays (harmless,
+     centroid-guarded, and ready if a non-VRBO coord source is ever wired). Text
+     signals (#6) are the ceiling for VRBO same-community matching.
 
 `exhaustiveCityHarvestAllSorts` (multi-sort union) remains a fallback for when
 the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so
