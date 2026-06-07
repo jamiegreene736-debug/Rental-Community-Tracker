@@ -1317,6 +1317,143 @@ function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFill
   };
 }
 
+// ── Nearby-city combo expansion (background job + polling) ──────────────────
+// Mirrors the serialized shape returned by GET /api/operations/city-vrbo-
+// inventory/expand/:jobId (server/city-vrbo-expansion.ts serializeExpansionJob).
+// `combo` is the same payload shape as the city-vrbo-inventory GET response, so
+// cityComboOptionFromInventory(combo) works unchanged when status === "found".
+type CityExpansionCityResult = {
+  citySearchTerm: string;
+  placeName: string;
+  driveMinutes: number;
+  tier: 1 | 2;
+  status: "pending" | "scanning" | "no-pair" | "pair" | "skipped" | "scan-error";
+  listingsExported?: number;
+  suggestedPair: boolean;
+  workerOnline?: boolean;
+  reason?: string;
+  durationMs?: number;
+};
+
+type CityExpansionJobStatus = {
+  jobId: string;
+  status: "pending" | "running" | "found" | "exhausted" | "worker_offline" | "error";
+  done: boolean;
+  community: string;
+  checkIn: string;
+  checkOut: string;
+  phase: { tier: 0 | 1 | 2; label: string };
+  tier: number | null;
+  currentCity: string | null;
+  citiesSearched: string[];
+  scannedCount: number;
+  totalCount: number;
+  cityResults: CityExpansionCityResult[];
+  workerOnline: boolean;
+  error: string | null;
+  combo: CityVrboInventoryResponse | null;
+  comboSourceCity: string | null;
+  driveMinutes: number | null;
+  timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
+};
+
+// Poll an expansion job to a terminal state (bulk path runs this inline inside
+// autoFillMutation; each GET is a short request, so no edge-timeout risk).
+// Returns the terminal status, or null if the job was lost (404 / server
+// restart) or the safety cap elapsed.
+async function pollExpansionToTerminal(
+  jobId: string,
+  opts?: { maxMs?: number; intervalMs?: number },
+): Promise<CityExpansionJobStatus | null> {
+  const maxMs = opts?.maxMs ?? 35 * 60_000;
+  const intervalMs = opts?.intervalMs ?? 3000;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxMs) {
+    try {
+      const data = await apiGetJson<CityExpansionJobStatus>(
+        `/api/operations/city-vrbo-inventory/expand/${jobId}`,
+      );
+      if (data.done) return data;
+    } catch (e: any) {
+      // 404 → job lost (server restart): terminal, give up.
+      if (/\b404\b/.test(String(e?.message ?? ""))) return null;
+      // transient error → keep polling
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return null;
+}
+
+// Headless poller for the interactive path: polls every 3s, pushes live state to
+// the row's progress UI, and fires onResolved exactly once when the job reaches a
+// terminal state (or is lost). Version-agnostic setInterval style so it doesn't
+// depend on react-query refetchInterval semantics.
+function CityExpansionJobPoller({
+  jobId,
+  onState,
+  onResolved,
+}: {
+  jobId: string;
+  onState: (status: CityExpansionJobStatus) => void;
+  onResolved: (status: CityExpansionJobStatus | null) => void;
+}) {
+  const resolvedRef = useRef(false);
+  useEffect(() => {
+    resolvedRef.current = false;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // Overall cap > the server's worst case (30-min budget + one ~8-min scan), so
+    // a job whose final scan overruns isn't stranded, and a persistent error
+    // (e.g. 401 after session expiry) can't loop the row "Searching…" forever.
+    const startedAt = Date.now();
+    const overallCapMs = 45 * 60_000;
+    const tick = async () => {
+      if (cancelled || resolvedRef.current) return;
+      if (Date.now() - startedAt > overallCapMs) {
+        resolvedRef.current = true;
+        if (!cancelled) onResolved(null);
+        return;
+      }
+      try {
+        const data = await apiGetJson<CityExpansionJobStatus>(
+          `/api/operations/city-vrbo-inventory/expand/${jobId}`,
+        );
+        if (cancelled || resolvedRef.current) return;
+        onState(data);
+        if (data.done) {
+          resolvedRef.current = true;
+          onResolved(data);
+          return;
+        }
+      } catch (e: any) {
+        const msg = String(e?.message ?? "");
+        // 404 (job lost / server restart) and 401/403 (portal session lost — this
+        // local apiGetJson doesn't do apiRequest's login redirect) are terminal.
+        if (/\b(404|401|403)\b/.test(msg)) {
+          resolvedRef.current = true;
+          if (!cancelled) onResolved(null);
+          return;
+        }
+        // other transient errors: keep polling (bounded by overallCapMs)
+      }
+      if (!cancelled && !resolvedRef.current) timer = setTimeout(tick, 3000);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      // If the row/poller unmounts before the job resolved (operator navigated
+      // away), best-effort cancel so the server stops driving the sidecar instead
+      // of running the full budget with no consumer.
+      if (!resolvedRef.current) {
+        apiRequest("POST", `/api/operations/city-vrbo-inventory/expand/${jobId}/cancel`).catch(() => {});
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId]);
+  return null;
+}
+
 function CityVrboInventoryPanel({
   propertyId,
   reservation,
@@ -5081,6 +5218,13 @@ export default function Bookings() {
       });
     },
     onError: (e: any) => toast({ title: "Combo attach failed", description: e.message, variant: "destructive" }),
+    onSettled: (_data, _err, variables) => {
+      // Keep the row in the "searching/attaching" state until the detach+recreate
+      // settles, so the nearby-city expansion's auto-attach doesn't re-enable the
+      // Auto-fill button mid-flight (a no-op for the manual panel attach paths,
+      // whose reservations aren't tracked). See handleExpansionResolved.
+      if (variables?.reservation?._id) stopTrackingAutoFill(variables.reservation._id);
+    },
   });
 
   const saveArrivalDetails = useMutation({
@@ -5105,6 +5249,41 @@ export default function Bookings() {
   const [autoFillConfirmationDiagnostics, setAutoFillConfirmationDiagnostics] = useState<FindBuyInDiagnostics | null>(null);
   const [autoFillConfirmationDiagnosticsOpen, setAutoFillConfirmationDiagnosticsOpen] = useState(false);
   const autoFillRunRef = useRef<Set<string>>(new Set());
+
+  // ── Nearby-city combo expansion (background job) per-reservation state ──────
+  type ExpansionJobState = {
+    jobId: string;
+    status: "running" | "found" | "not_found" | "error" | "worker_offline";
+    tier: number | null;
+    currentCity: string | null;
+    citiesSearched: string[];
+    scannedCount: number;
+    totalCount: number;
+    message?: string;
+  };
+  const [expansionJobs, setExpansionJobs] = useState<Record<string, ExpansionJobState>>({});
+  // Carries the originating mutate() variables (+ the reservation) so the poller
+  // resolver can attach the found combo or re-invoke the per-slot safety net with
+  // the same property/listing/silent context the original auto-fill used.
+  const expansionJobMetaRef = useRef<
+    Record<string, { reservation: GuestyReservation; propertyId?: number | null; listingId?: string | null; silent?: boolean }>
+  >({});
+  // Latest reservations snapshot, so the resolver can re-check slot state against
+  // fresh data (no-clobber guard) without a stale render closure.
+  const reservationsRef = useRef<GuestyReservation[]>([]);
+  useEffect(() => {
+    reservationsRef.current = reservations;
+  }, [reservations]);
+  const clearExpansionJob = (reservationId: string) => {
+    setExpansionJobs((prev) => {
+      if (!(reservationId in prev)) return prev;
+      const next = { ...prev };
+      delete next[reservationId];
+      return next;
+    });
+    delete expansionJobMetaRef.current[reservationId];
+  };
+
   const clearAutoFillDiagnostics = (reservationId: string) => {
     setLastAutoFillCombos((prev) => {
       if (!(reservationId in prev)) return prev;
@@ -5141,11 +5320,21 @@ export default function Bookings() {
       reservation,
       propertyId,
       listingId,
+      skipExpansion = false,
+      awaitExpansionInline = false,
     }: {
       reservation: GuestyReservation;
       propertyId?: number | null;
       listingId?: string | null;
       silent?: boolean;
+      // skipExpansion: re-invocation after a nearby-city expansion ended with no
+      //   combo — run the per-slot + single-unit safety net WITHOUT starting
+      //   another expansion job (prevents a loop).
+      // awaitExpansionInline: bulk-queue path — poll the expansion job to
+      //   terminal inside this mutation so result.results stays correct for the
+      //   bulk pass/fail reporting (interactive path hands the job off instead).
+      skipExpansion?: boolean;
+      awaitExpansionInline?: boolean;
     }) => {
       const buyInPropertyId = propertyId ?? selectedBuyInPropertyId;
       const buyInListingId = listingId ?? selectedListingId;
@@ -6061,8 +6250,89 @@ export default function Bookings() {
         }
       }
 
+      // Attach a city-VRBO suggested combo (home-city OR a nearby-city expansion
+      // result) to the given empty slots, recording per-bedroom audits. Returns
+      // true iff every target slot received a pick. Shared by the home-city
+      // fallback and the nearby-city expansion (bulk-inline) so the two attach
+      // identically.
+      const applyCityComboFallback = async (
+        cityCombo: AutoFillComboOption,
+        cityData: CityVrboInventoryResponse,
+        targetSlots: typeof emptySlots,
+      ): Promise<boolean> => {
+        if (!(cityCombo.totalCost != null && cityCombo.picks.length >= targetSlots.length)) return false;
+        const pickByBedroom = new Map<number, AutoFillComboOption["picks"][number]>();
+        cityCombo.bedrooms.forEach((bedrooms, index) => {
+          if (!pickByBedroom.has(bedrooms)) pickByBedroom.set(bedrooms, cityCombo.picks[index]);
+        });
+        const cityResults: AutoFillResult[] = [];
+        const comboLabel = `City VRBO ${cityCombo.label}`;
+        let cityAttached = true;
+        for (const slot of targetSlots) {
+          const rawPick = pickByBedroom.get(slot.bedrooms);
+          if (!rawPick) {
+            cityAttached = false;
+            cityResults.push({
+              slot,
+              picked: null,
+              created: null,
+              skippedReasons: [`${slot.unitLabel}: no ${slot.bedrooms}BR row in city suggested pair`],
+              airbnbPick: false,
+              searchSummary: cityInventorySearchSummary(cityData, slot.bedrooms),
+            });
+            continue;
+          }
+          const livePick = liveCandidateFromCityComboPick(rawPick, slot.bedrooms, reservationNights);
+          cityResults.push(await createAndAttachPick(
+            slot,
+            livePick,
+            slot.bedrooms,
+            cityInventorySearchSummary(cityData, slot.bedrooms),
+            comboLabel,
+            "city-vrbo",
+          ));
+        }
+        for (const bedrooms of cityCombo.bedrooms) {
+          const rows = cityData.byBedroom[bedrooms] ?? [];
+          searchAudits.set(bedrooms, {
+            bedrooms,
+            generatedAt: new Date().toISOString(),
+            counts: cityInventorySearchSummary(cityData, bedrooms),
+            candidates: rows.slice(0, 20).map((row) => ({
+              source: "vrbo" as const,
+              sourceLabel: row.sourceLabel ?? "Vrbo",
+              title: row.title,
+              url: row.url,
+              totalPrice: row.totalPrice ?? 0,
+              nightlyPrice: row.nightlyPrice ?? 0,
+              bedrooms: row.bedrooms ?? bedrooms,
+              verified: "yes" as const,
+            })),
+            diagnostics: {
+              severity: "ok",
+              title: "City-wide VRBO map inventory",
+              summary: `${cityData.listings.length} exported · pair=${cityData.suggestedPair?.resortPhrase ?? "none"}`,
+              generatedAt: new Date().toISOString(),
+              request: { propertyId: buyInPropertyId, bedrooms, checkIn: ci, checkOut: co },
+              sources: [],
+              issues: [],
+              report: `City search: ${cityData.citySearchTerm}`,
+            },
+          });
+        }
+        results.push(...cityResults);
+        return cityAttached && cityResults.every((row) => row.picked);
+      };
+
       const slotsForCityFallback = remainingEmptySlots();
-      if (slotsForCityFallback.length >= 2 && staticUnitConfig && staticUnitConfig.units.length >= 2) {
+      // Home-city VRBO scan result, captured so the nearby-city expansion below
+      // can (a) confirm the worker was online and (b) confirm the home city
+      // produced NO same-community pair before widening the search by drive-time.
+      let cityHomeScanData: CityVrboInventoryResponse | null = null;
+      // On a skipExpansion re-invocation (after a nearby-city search came up
+      // empty) we already know the home city has no pair, so skip this combo scan
+      // and let the single-unit city fallback below reuse the warm scrape cache.
+      if (!skipExpansion && slotsForCityFallback.length >= 2 && staticUnitConfig && staticUnitConfig.units.length >= 2) {
         setCityInventoryScanTrigger((prev) => ({
           ...prev,
           [reservation._id]: (prev[reservation._id] ?? 0) + 1,
@@ -6076,69 +6346,11 @@ export default function Bookings() {
           const cityData = await apiGetJson<CityVrboInventoryResponse>(
             `/api/operations/city-vrbo-inventory?${cityParams.toString()}`,
           );
+          cityHomeScanData = cityData;
           const cityCombo = cityComboOptionFromInventory(cityData);
-          if (cityCombo?.totalCost && cityCombo.picks.length >= slotsForCityFallback.length) {
-            const pickByBedroom = new Map<number, AutoFillComboOption["picks"][number]>();
-            cityCombo.bedrooms.forEach((bedrooms, index) => {
-              if (!pickByBedroom.has(bedrooms)) pickByBedroom.set(bedrooms, cityCombo.picks[index]);
-            });
-            const cityResults: AutoFillResult[] = [];
-            const comboLabel = `City VRBO ${cityCombo.label}`;
-            let cityAttached = true;
-            for (const slot of slotsForCityFallback) {
-              const rawPick = pickByBedroom.get(slot.bedrooms);
-              if (!rawPick) {
-                cityAttached = false;
-                cityResults.push({
-                  slot,
-                  picked: null,
-                  created: null,
-                  skippedReasons: [`${slot.unitLabel}: no ${slot.bedrooms}BR row in city suggested pair`],
-                  airbnbPick: false,
-                  searchSummary: cityInventorySearchSummary(cityData, slot.bedrooms),
-                });
-                continue;
-              }
-              const livePick = liveCandidateFromCityComboPick(rawPick, slot.bedrooms, reservationNights);
-              cityResults.push(await createAndAttachPick(
-                slot,
-                livePick,
-                slot.bedrooms,
-                cityInventorySearchSummary(cityData, slot.bedrooms),
-                comboLabel,
-                "city-vrbo",
-              ));
-            }
-            for (const bedrooms of cityCombo.bedrooms) {
-              const rows = cityData.byBedroom[bedrooms] ?? [];
-              searchAudits.set(bedrooms, {
-                bedrooms,
-                generatedAt: new Date().toISOString(),
-                counts: cityInventorySearchSummary(cityData, bedrooms),
-                candidates: rows.slice(0, 20).map((row) => ({
-                  source: "vrbo" as const,
-                  sourceLabel: row.sourceLabel ?? "Vrbo",
-                  title: row.title,
-                  url: row.url,
-                  totalPrice: row.totalPrice ?? 0,
-                  nightlyPrice: row.nightlyPrice ?? 0,
-                  bedrooms: row.bedrooms ?? bedrooms,
-                  verified: "yes" as const,
-                })),
-                diagnostics: {
-                  severity: "ok",
-                  title: "City-wide VRBO map inventory",
-                  summary: `${cityData.listings.length} exported · pair=${cityData.suggestedPair?.resortPhrase ?? "none"}`,
-                  generatedAt: new Date().toISOString(),
-                  request: { propertyId: buyInPropertyId, bedrooms, checkIn: ci, checkOut: co },
-                  sources: [],
-                  issues: [],
-                  report: `City search: ${cityData.citySearchTerm}`,
-                },
-              });
-            }
-            results.push(...cityResults);
-            if (cityAttached && cityResults.every((row) => row.picked)) {
+          if (cityCombo) {
+            const allAttached = await applyCityComboFallback(cityCombo, cityData, slotsForCityFallback);
+            if (allAttached) {
               return {
                 reservation,
                 results,
@@ -6150,6 +6362,73 @@ export default function Bookings() {
           }
         } catch (cityError: any) {
           console.warn("[auto-fill] city VRBO inventory fallback failed:", cityError?.message ?? cityError);
+        }
+      }
+
+      // ── Nearby-city combo expansion (cities within 20 min, then 45 min) ──
+      // When the home-city scan ran with the sidecar ONLINE but found no same-
+      // community pair, widen the search by drive-time. This is a background job
+      // (each nearby-city scan drives the sidecar for minutes); the interactive
+      // path hands the job off to a poller and the row shows progress, while the
+      // bulk path polls it inline so its pass/fail reporting stays correct.
+      // Combo-only and gated on worker-online (an offline worker would leave each
+      // city scan PENDING for ~5 min — see server/city-vrbo-expansion.ts).
+      const wantExpansion =
+        !skipExpansion &&
+        remainingEmptySlots().length >= 2 &&
+        !!staticUnitConfig && staticUnitConfig.units.length >= 2 &&
+        cityHomeScanData != null &&
+        cityHomeScanData.sidecar?.workerOnline === true &&
+        cityComboOptionFromInventory(cityHomeScanData) == null;
+      if (wantExpansion) {
+        try {
+          const startResp = await apiRequest("POST", "/api/operations/city-vrbo-inventory/expand", {
+            propertyId: buyInPropertyId,
+            checkIn: ci,
+            checkOut: co,
+          }).then((r) => r.json());
+          if (startResp?.jobId) {
+            if (awaitExpansionInline) {
+              // Bulk path: poll to terminal here so result.results reflects reality.
+              const outcome = await pollExpansionToTerminal(startResp.jobId);
+              if (outcome?.status === "found" && outcome.combo) {
+                const expansionCombo = cityComboOptionFromInventory(outcome.combo);
+                if (expansionCombo) {
+                  const allAttached = await applyCityComboFallback(
+                    expansionCombo,
+                    outcome.combo,
+                    remainingEmptySlots(),
+                  );
+                  if (allAttached) {
+                    return {
+                      reservation,
+                      results,
+                      comboOptions: [expansionCombo, ...comboEvaluation.options],
+                      searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
+                      cityInventory: outcome.combo,
+                    };
+                  }
+                }
+              }
+              // No nearby combo (or not attachable) → fall through to the per-slot
+              // + single-unit safety net below.
+            } else {
+              // Interactive path: hand the job to the row poller and return now,
+              // so the per-slot + single-unit fallbacks DON'T attach mismatched
+              // single units while the combo job is still running. If the job
+              // ends with no combo, the poller re-invokes auto-fill with
+              // skipExpansion:true to run that safety net.
+              return {
+                reservation,
+                results,
+                comboOptions: comboEvaluation.options,
+                searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
+                expansionJob: { jobId: startResp.jobId, reservationId: reservation._id },
+              };
+            }
+          }
+        } catch (expansionError: any) {
+          console.warn("[auto-fill] nearby-city expansion failed:", expansionError?.message ?? expansionError);
         }
       }
 
@@ -6301,7 +6580,37 @@ export default function Bookings() {
         searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
       };
     },
-    onSuccess: ({ reservation, results, comboOptions, searchAudits }, variables) => {
+    onSuccess: (payload, variables) => {
+      const { reservation, results, comboOptions, searchAudits } = payload;
+      const expansionJob = "expansionJob" in payload ? payload.expansionJob : null;
+      // Interactive nearby-city expansion handoff: the mutation returned early
+      // with a background job handle. Register it so the row mounts the poller +
+      // progress UI, and DO NOT stopTrackingAutoFill (keeps the row "searching"
+      // and the button disabled until the job resolves). The poller's resolver
+      // attaches the found combo or re-invokes the per-slot safety net.
+      if (expansionJob) {
+        expansionJobMetaRef.current[reservation._id] = {
+          reservation,
+          propertyId: variables?.propertyId ?? null,
+          listingId: variables?.listingId ?? null,
+          silent: variables?.silent ?? false,
+        };
+        setExpansionJobs((prev) => ({
+          ...prev,
+          [reservation._id]: {
+            jobId: expansionJob.jobId,
+            status: "running",
+            tier: 20,
+            currentCity: null,
+            citiesSearched: [],
+            scannedCount: 0,
+            totalCount: 0,
+          },
+        }));
+        if (comboOptions.length > 0) setLastAutoFillCombos((prev) => ({ ...prev, [reservation._id]: comboOptions }));
+        if (searchAudits.length > 0) setLastAutoFillAudits((prev) => ({ ...prev, [reservation._id]: searchAudits }));
+        return;
+      }
       stopTrackingAutoFill(reservation._id);
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", variables?.listingId ?? selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
@@ -6472,6 +6781,102 @@ export default function Bookings() {
     },
   });
 
+  // Live progress tick from CityExpansionJobPoller (interactive path).
+  const updateExpansionJobState = (reservationId: string, s: CityExpansionJobStatus) => {
+    setExpansionJobs((prev) => {
+      if (!(reservationId in prev)) return prev; // already resolved/cleared
+      return {
+        ...prev,
+        [reservationId]: {
+          jobId: s.jobId,
+          status: "running",
+          tier: s.tier,
+          currentCity: s.currentCity,
+          citiesSearched: s.citiesSearched,
+          scannedCount: s.scannedCount,
+          totalCount: s.totalCount,
+        },
+      };
+    });
+  };
+
+  // Terminal handler for the interactive expansion job. On a found pair, attach
+  // it (no-clobber: only if the booking's slots are still all empty). Otherwise
+  // run the per-slot + single-unit safety net via a skipExpansion re-invocation.
+  const handleExpansionResolved = (reservationId: string, status: CityExpansionJobStatus | null) => {
+    const meta = expansionJobMetaRef.current[reservationId];
+    const silent = meta?.silent ?? false;
+    const fresh = reservationsRef.current.find((x) => x._id === reservationId) ?? meta?.reservation ?? null;
+    clearExpansionJob(reservationId);
+
+    // FOUND + auto-attachable: attach the nearby-city pair. Keep the row TRACKED
+    // here — attachComboMutation.onSettled clears tracking once the detach+
+    // recreate finishes, so the Auto-fill button can't be re-clicked mid-attach.
+    if (status?.status === "found" && status.combo) {
+      const option = cityComboOptionFromInventory(status.combo);
+      if (option && fresh) {
+        const slotsAllEmpty = fresh.slots.every((slot) => !slot.buyIn);
+        const matchesSlots = option.picks.length === fresh.slots.length;
+        if (slotsAllEmpty && matchesSlots) {
+          attachComboMutation.mutate({ reservation: fresh, option });
+          if (!silent) {
+            toast({
+              title: "Found a same-community pair nearby",
+              description: `${option.label}${status.comboSourceCity ? ` · ${status.comboSourceCity}` : ""}`
+                + `${status.driveMinutes != null ? ` (~${status.driveMinutes} min away)` : ""} — attaching.`,
+            });
+          }
+          return;
+        }
+        // Found, but the booking changed during the multi-minute search (a slot
+        // got filled, or the pair no longer fits). Don't clobber the operator's
+        // picks — fall through to fill any STILL-empty slots with the per-slot
+        // safety net.
+        if (!silent) {
+          toast({
+            title: "Nearby pair found, but the booking changed",
+            description: `${option.label}${status.comboSourceCity ? ` · ${status.comboSourceCity}` : ""}. `
+              + "Filling any remaining empty slots individually instead.",
+          });
+        }
+      }
+    } else if (!silent) {
+      if (status?.status === "worker_offline") {
+        toast({
+          title: "Nearby-city search unavailable",
+          description: "The local Chrome sidecar is offline or VRBO is temporarily blocking. Retry shortly, or fill slots manually. Filling any open slots individually for now…",
+          variant: "destructive",
+        });
+      } else {
+        const searched = status?.citiesSearched?.length ?? 0;
+        toast({
+          title: "No nearby-city combo found",
+          description: searched > 0
+            ? `Searched ${searched} ${searched === 1 ? "city" : "cities"} within 45 min — no same-community pair. Filling slots individually…`
+            : "No nearby cities yielded a same-community pair. Filling slots individually…",
+        });
+      }
+    }
+
+    // SAFETY NET (reached for: not-found, worker-offline, error, lost job, AND
+    // found-but-not-attachable). Run the per-slot + single-unit fill for any
+    // still-empty slots. skipExpansion ⇒ the re-invocation won't start another
+    // expansion job (no loop). Don't clearAutoFillDiagnostics — the re-invoke's
+    // onSuccess refreshes combos/audits anyway.
+    stopTrackingAutoFill(reservationId);
+    if (!fresh) return;
+    if (fresh.slots.every((slot) => !!slot.buyIn)) return; // operator already filled everything
+    autoFillRunRef.current.add(reservationId);
+    setAutoFillStartedByReservation((prev) => ({ ...prev, [reservationId]: Date.now() }));
+    autoFillMutation.mutate({
+      reservation: fresh,
+      propertyId: meta?.propertyId ?? undefined,
+      listingId: meta?.listingId ?? undefined,
+      silent,
+      skipExpansion: true,
+    });
+  };
+
   const activeAutoFillStartedAt = Object.values(autoFillStartedByReservation);
   const activeAutoFillCount = activeAutoFillStartedAt.length;
   const earliestAutoFillStartedAtMs = activeAutoFillStartedAt.length > 0
@@ -6620,6 +7025,10 @@ export default function Bookings() {
           propertyId: item.propertyId,
           listingId: item.listingId,
           silent: true,
+          // Bulk runs sequentially and is already long-running, so it polls the
+          // nearby-city expansion inline (rather than handing off to the row
+          // poller) — keeps result.results correct for the pass/fail report below.
+          awaitExpansionInline: true,
         });
         const filled = result.results.filter((row) => row.picked).length;
         const total = result.results.length;
@@ -8306,6 +8715,35 @@ export default function Bookings() {
                               />
                             )}
                           </div>
+                        )}
+                        {expansionJobs[r._id] && (
+                          <>
+                            <CityExpansionJobPoller
+                              jobId={expansionJobs[r._id].jobId}
+                              onState={(s) => updateExpansionJobState(r._id, s)}
+                              onResolved={(s) => handleExpansionResolved(r._id, s)}
+                            />
+                            <div className="rounded border border-cyan-200 bg-cyan-50/60 px-3 py-2 text-[11px] text-cyan-900">
+                              <div className="flex items-center gap-2 font-semibold">
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                Searching nearby cities for a same-community pair…
+                              </div>
+                              <div className="mt-0.5 text-[10px] text-cyan-800">
+                                {(() => {
+                                  const j = expansionJobs[r._id];
+                                  const within = j.tier ? `within ${j.tier} min` : "nearby";
+                                  const prog = j.totalCount > 0 ? ` · ${j.scannedCount}/${j.totalCount}` : "";
+                                  const cur = j.currentCity ? ` · scanning ${j.currentCity}` : "";
+                                  return `Resort + home city had no pair — widening ${within}${prog}${cur}.`;
+                                })()}
+                              </div>
+                              {expansionJobs[r._id].citiesSearched.length > 0 && (
+                                <div className="mt-0.5 text-[10px] text-cyan-700">
+                                  Searched: {expansionJobs[r._id].citiesSearched.join(", ")}
+                                </div>
+                              )}
+                            </div>
+                          </>
                         )}
                         {(searchAudits.length > 0 || comboOptions.length > 0) && (
                           <div className="flex justify-end">

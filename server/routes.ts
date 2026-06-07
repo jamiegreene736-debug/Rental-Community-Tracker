@@ -12725,6 +12725,56 @@ Requirements:
     }
   });
 
+  // ── Nearby-city combo expansion (background job + polling) ────────────────
+  // When a >=2-unit combo booking's resort + home-city VRBO scans both fail to
+  // surface a same-community pair, the client starts this job, which widens the
+  // search by drive-time (cities within 20 min, then 45 min, excluding any
+  // already searched) until a town yields a walkable same-resort pair. Each city
+  // scan drives the VRBO sidecar for minutes, so it runs async and the client
+  // polls. Combo-only is enforced in startExpansionJob (the GET city-vrbo
+  // endpoint above intentionally allows single-unit; these gates differ).
+  app.post("/api/operations/city-vrbo-inventory/expand", async (req: Request, res: Response) => {
+    try {
+      const { startExpansionJob } = await import("./city-vrbo-expansion");
+      const started = startExpansionJob({
+        propertyId: parseInt(String(req.body?.propertyId), 10),
+        checkIn: String(req.body?.checkIn ?? ""),
+        checkOut: String(req.body?.checkOut ?? ""),
+      });
+      return res.status(202).json(started);
+    } catch (e: any) {
+      const { CityExpansionValidationError } = await import("./city-vrbo-expansion");
+      if (e instanceof CityExpansionValidationError) {
+        return res.status(400).json({ error: e.message });
+      }
+      console.error("[city-vrbo-expansion] start error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/operations/city-vrbo-inventory/expand/:jobId", async (req: Request, res: Response) => {
+    try {
+      const { getExpansionJob, serializeExpansionJob } = await import("./city-vrbo-expansion");
+      const job = getExpansionJob(String(req.params.jobId));
+      if (!job) return res.status(404).json({ error: "expansion job not found or expired" });
+      return res.json(serializeExpansionJob(job));
+    } catch (e: any) {
+      console.error("[city-vrbo-expansion] poll error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.post("/api/operations/city-vrbo-inventory/expand/:jobId/cancel", async (req: Request, res: Response) => {
+    try {
+      const { cancelExpansionJob } = await import("./city-vrbo-expansion");
+      const ok = cancelExpansionJob(String(req.params.jobId));
+      if (!ok) return res.status(404).json({ error: "expansion job not found or expired" });
+      return res.json({ ok: true });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
