@@ -136,6 +136,21 @@ page. Three constraints make it actually reach the full count — don't
    Property-manager is the lowest-confidence signal and yields a pair only when
    walkability is independently confirmed (never PM-alone — one PM spans the
    whole town). Coordinates, when present, gate walkability via `pairIsWalkable`.
+7. **The SRP harvest captures each card's hero image; SRP-level image matching is
+   inert by design, 2026-06-07.** `harvestVrboMapResultCards` /
+   `extractVisibleVrboCards` now grab the card `<img>` (VRBO CDN hosts only) so
+   `image`/`images` flow through `normalizeSidecarCandidates` to the listing —
+   this populates the relocation guest page (previously 0 photos for
+   city-attached units). The matcher (`imageSignatureKeys` → `imgurl:` photo
+   buckets, with a `looksLikeSameUnit` guard so a relisted unit isn't paired with
+   itself) clusters listings that share a hero photo. Empirical finding: VRBO SRP
+   card heroes are UNIT-specific (each unit's own interior), so listings
+   essentially never share a hero — image clustering surfaces no new pairs at the
+   SRP level. The shared amenity/exterior photos that actually identify a complex
+   live in the DETAIL-page galleries; real image matching belongs with
+   detail-page enrichment (a later phase), not the card hero. The `photoHashes`
+   field + dHash hook (`server/photo-hashing.ts`) are wired for that. Don't
+   re-add SRP-hero hashing expecting matching gains.
 
 `exhaustiveCityHarvestAllSorts` (multi-sort union) remains a fallback for when
 the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so

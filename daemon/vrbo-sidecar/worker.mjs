@@ -6930,6 +6930,16 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
   const result = await page.evaluate((args) => {
     const { expectedNights, mapMinBedrooms } = args;
 
+    function cardImageUrl(card) {
+      const imgs = card.querySelectorAll?.("img") || [];
+      for (const img of imgs) {
+        const src = img.currentSrc || img.src || img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || "";
+        if (/^https?:/i.test(src) && /(?:trvl-media|mediaim\.expedia|odis\.homeaway|vrbo\.com|homeaway\.com)/i.test(src)) {
+          return src;
+        }
+      }
+      return "";
+    }
     function cardRowFromElement(card) {
       const titleEl = card.querySelector?.("h3");
       const link = card.querySelector?.("a[href]");
@@ -6937,6 +6947,7 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
         title: titleEl ? titleEl.textContent.trim().replace(/^Photo gallery for\s*/i, "") : "",
         fullText: (card.textContent || "").replace(/\s+/g, " "),
         href: link?.getAttribute("href") || "",
+        image: cardImageUrl(card),
       };
     }
 
@@ -6972,6 +6983,7 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
         title: String(row?.title || ""),
         fullText: String(row?.fullText || ""),
         href: String(row?.href || ""),
+        image: String(row?.image || ""),
       })),
     ].filter((row) => {
       const key = `${row.href}|${row.title}|${row.fullText.slice(0, 160)}`;
@@ -6983,6 +6995,7 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
     for (const row of rows) {
       const title = row.title;
       const fullText = row.fullText;
+      const image = row.image && /^https?:/i.test(row.image) ? row.image : undefined;
       const bdMatch = fullText.match(/(\d+)\s*bedrooms?/i);
       const bathMatch = fullText.match(/\b(\d+(?:\.\d+)?)\s*(?:ba|bath|baths|bathrooms?)\b/i);
       const sleepMatch = fullText.match(/\bsleeps?\s*(\d{1,2})\b/i) || fullText.match(/\b(\d{1,2})\s*guests?\b/i);
@@ -7043,6 +7056,8 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
         const candidate = {
           url: "https://www.vrbo.com" + propertyPath,
           title: title.slice(0, 80),
+          image,
+          images: image ? [image] : undefined,
 	          totalPrice: 0,
 	          nightlyPrice: 0,
 	          bedrooms: bedroomsExtracted,
@@ -7070,6 +7085,8 @@ async function extractVisibleVrboCards(id, params, expectedNights, variantLabel,
       const candidate = {
         url: "https://www.vrbo.com" + propertyPath,
         title: title.slice(0, 80),
+        image,
+        images: image ? [image] : undefined,
 	        totalPrice,
 	        nightlyPrice: Math.round(totalPrice / totalNights),
 	        bedrooms: bedroomsExtracted,
@@ -7169,6 +7186,16 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 10, options = 
           function normalizeText(value) {
             return String(value || "").replace(/\s+/g, " ").trim();
           }
+          function firstCardImage(card) {
+            const imgs = card.querySelectorAll?.("img") || [];
+            for (const img of imgs) {
+              const src = img.currentSrc || img.src || img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || "";
+              if (/^https?:/i.test(src) && /(?:trvl-media|mediaim\.expedia|odis\.homeaway|vrbo\.com|homeaway\.com)/i.test(src)) {
+                return src;
+              }
+            }
+            return "";
+          }
           function harvestRowFromElement(card) {
             const titleEl = card.querySelector?.("h3");
             const link = card.querySelector?.("a[href]");
@@ -7178,7 +7205,7 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 10, options = 
             const propertyPath = href.replace(/^https?:\/\/[^\/]+/, "").split("?")[0];
             if (!/^\/\d+/.test(propertyPath)) return null;
             if (!fullText) return null;
-            return { href, title, fullText };
+            return { href, title, fullText, image: firstCardImage(card) };
           }
           const cards = Array.from(document.querySelectorAll('[data-stid="lodging-card-responsive"]'));
           const currentRows = cards.map(harvestRowFromElement).filter(Boolean);
@@ -7195,9 +7222,16 @@ async function harvestVrboMapResultCards(targetPage, id, passes = 10, options = 
             if (existing == null) {
               seen[idKey] = window.__vrboHarvestCards.length;
               window.__vrboHarvestCards.push(row);
-            } else if (row.fullText.length > (window.__vrboHarvestCards[existing]?.fullText?.length || 0)) {
-              // Keep the richest snapshot of a card (priced text beats placeholder).
-              window.__vrboHarvestCards[existing] = row;
+            } else {
+              const prev = window.__vrboHarvestCards[existing];
+              if (row.fullText.length > (prev?.fullText?.length || 0)) {
+                // Keep the richest snapshot of a card (priced text beats placeholder),
+                // but don't lose a previously-captured image if this pass lacks one.
+                if (!row.image && prev?.image) row.image = prev.image;
+                window.__vrboHarvestCards[existing] = row;
+              } else if (!prev?.image && row.image) {
+                prev.image = row.image;
+              }
             }
           }
           function looksLikeMapPane(rect) {
