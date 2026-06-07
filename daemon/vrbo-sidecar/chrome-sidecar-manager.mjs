@@ -1254,11 +1254,51 @@ export class ChromeSidecarManager {
     }
   }
 
+  async createLocalPageTarget(cdpUrl) {
+    // Create a fresh about:blank page target. Prefer the CDP Target.createTarget
+    // command over the browser websocket; fall back to the /json/new HTTP
+    // endpoint (PUT on modern Chrome, GET on older builds).
+    try {
+      const created = await sendBrowserCdpCommand(cdpUrl, "Target.createTarget", { url: "about:blank" }, 3_000);
+      if (created?.targetId) return true;
+    } catch {
+      /* fall through to the HTTP endpoint */
+    }
+    const base = trimTrailingSlash(cdpUrl);
+    for (const init of [
+      () => fetch(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(3_000) }),
+      () => fetch(`${base}/json/new`, { signal: AbortSignal.timeout(3_000) }),
+    ]) {
+      try {
+        const resp = await init();
+        if (resp.ok) return true;
+      } catch {
+        /* try next */
+      }
+    }
+    return false;
+  }
+
   async recoverDeadLocalCdp(cdpUrl) {
     const instance = this.localInstances.find((row) => row.cdpUrl === cdpUrl);
     if (!instance) return false;
     if (await this.localCdpHasPageTargets(cdpUrl)) return true;
-    this.log(`${instance.label} CDP has no page targets; relaunching Chrome…`);
+    // A browser launched with --no-startup-window (the focus-preserving launch
+    // mode from 2026-06-06) legitimately has ZERO page targets until a tab is
+    // created. If the CDP endpoint is still reachable, the browser is ALIVE, not
+    // dead — create a page target instead of closing + relaunching it. The old
+    // close+relaunch is exactly what made the sidecar Chrome visibly flap
+    // open/minimize/open (often 2-3x) on every acquire, because BOTH the
+    // manager's acquire path AND the worker's pre-connect call land here. Only a
+    // genuinely UNREACHABLE endpoint (or a failed page-target create) falls
+    // through to a real relaunch below.
+    if (await this.isCdpReady(cdpUrl)) {
+      if (await this.createLocalPageTarget(cdpUrl)) {
+        await this.enforceLocalWindowMode(instance);
+        return true;
+      }
+    }
+    this.log(`${instance.label} CDP unreachable or page-target create failed; relaunching Chrome…`);
     await sendBrowserCdpCommand(cdpUrl, "Browser.close", {}, 2_000).catch(() => {});
     const closeStartedAt = Date.now();
     while (Date.now() - closeStartedAt < 5_000 && (await this.isCdpReady(cdpUrl))) {
@@ -1273,7 +1313,9 @@ export class ChromeSidecarManager {
     const ready = await this.waitForCdp(cdpUrl, 20_000);
     if (!ready) return false;
     await this.enforceLocalWindowMode(instance);
-    return this.localCdpHasPageTargets(cdpUrl);
+    if (await this.localCdpHasPageTargets(cdpUrl)) return true;
+    // Even after a clean relaunch the browser may be windowless; ensure a tab.
+    return this.createLocalPageTarget(cdpUrl);
   }
 
   async isCdpReady(cdpUrl) {
