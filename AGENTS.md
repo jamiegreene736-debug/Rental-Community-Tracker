@@ -1192,6 +1192,22 @@ established it so you can read the rationale in the commit message.
     also add an output pattern in `OUTPUT_RISK_PATTERNS`. See PR
     that added this entry.
 
+48. **The Inbox header badge counts pending AI-draft approvals + missed
+    calls — NOT unread messages — and stale drafts are auto-swept.**
+    `AppHeader.tsx` `inboxAlertCount = pendingDraftCount + missedCallCount`;
+    `pendingDraftCount` is auto-reply logs with status drafted/flagged/error,
+    not sent, not dismissed. Reading a conversation does NOT clear it — a draft
+    clears only when sent or dismissed. To stop the badge inflating with stale
+    drafts, `dismissHandledAutoReplyDrafts` (run on every `/api/inbox/auto-reply/logs`
+    fetch) dismisses a pending draft when ANY of: (a) the host already replied
+    after the trigger, (b) it is **superseded** — an older pending draft for a
+    conversation that has a newer pending draft (newest-per-conversation wins),
+    or (c) the reservation was **canceled/declined/expired** (a system
+    cancellation log at/after the trigger). Don't revert to host-reply-only
+    dismissal — superseded duplicates and canceled-reservation drafts were
+    inflating the count. Genuinely-pending drafts (guest's last message
+    unanswered, reservation live) intentionally remain until sent/dismissed.
+
 ### Guest alternatives page
 
 46. **The community blurb on `/alternatives/:token` is CURATED-FIRST, not
