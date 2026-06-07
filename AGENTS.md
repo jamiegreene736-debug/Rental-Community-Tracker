@@ -188,6 +188,17 @@ page. Three constraints make it actually reach the full count — don't
      `CITY_VRBO_DETAIL_ENRICH` (default on), bounded (`CITY_VRBO_ENRICH_MAX`=8,
      budget 75s, concurrency 4), best-effort (a blocked/slow VRBO yields no coords
      → same as before, no throw). Don't make enrichment run on every scan.
+   - **KNOWN LIMITATION (verified live 2026-06-07):** VRBO's Koloa detail pages
+     returned a SHARED region centroid (`21.906666,-159.469162`) for ALL 5
+     enriched listings — NOT per-listing coords. That would manufacture false
+     "co-located" geo pairs, so a **region-centroid guard** strips the coords when
+     the enriched set resolves to ≤1 distinct location (`distinctCoords <= 1` →
+     null them, return 0). Net effect: geo-clustering is effectively a no-op on
+     VRBO until a real per-listing coord source is found (VRBO appears to obscure
+     exact location). The text signals (#6) remain the only reliable matcher.
+     Couldn't fully diagnose the per-source coord (JSON-LD vs `__APOLLO_STATE__`)
+     because VRBO was rate-limiting (scrapes degraded to 1 listing) — revisit when
+     it cools. Do NOT trust enriched coords without re-confirming they're distinct.
 
 `exhaustiveCityHarvestAllSorts` (multi-sort union) remains a fallback for when
 the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so
