@@ -547,6 +547,19 @@ function hasManualHostReplyAfterTrigger(log: AutoReplyLog, posts: GuestyPost[]):
   return conversational.some((p) => isHostPost(p) && postTimestampMs(p) > triggerTime);
 }
 
+// A system "status changed to canceled / declined / expired" log in the thread
+// (at or after the draft's trigger) means the reservation is dead — the pending
+// draft is moot and should be cleared from the approval queue/badge.
+function reservationCanceledInThread(log: AutoReplyLog, posts: GuestyPost[]): boolean {
+  const triggerPost = posts.find((p) => p._id === log.triggerPostId);
+  const triggerTime = triggerPost ? postTimestampMs(triggerPost) : logCreatedAtMs(log);
+  return posts.some((p) =>
+    isSystemPost(p) &&
+    /\b(cancell?ed|cancell?ation|declined|expired)\b/i.test(String(p.body ?? p.text ?? (p as any).message ?? "")) &&
+    postTimestampMs(p) >= triggerTime,
+  );
+}
+
 async function dismissHandledDraftsForConversation(
   conversationId: string,
   posts: GuestyPost[],
@@ -554,9 +567,18 @@ async function dismissHandledDraftsForConversation(
 ): Promise<number> {
   const candidates = (logs ?? await storage.getAutoReplyLogs(200))
     .filter((log) => log.conversationId === conversationId && isPendingApprovalLog(log));
+  if (candidates.length === 0) return 0;
+  // Newest pending draft is the live one for this thread; any OLDER pending
+  // draft for the same conversation is superseded (the thread moved on) and
+  // would otherwise double-count one thread in the badge + approval queue.
+  candidates.sort((a, b) => logCreatedAtMs(b) - logCreatedAtMs(a));
   let dismissed = 0;
-  for (const log of candidates) {
-    if (!hasManualHostReplyAfterTrigger(log, posts)) continue;
+  for (let i = 0; i < candidates.length; i++) {
+    const log = candidates[i];
+    const superseded = i > 0;
+    const hostReplied = posts.length > 0 && hasManualHostReplyAfterTrigger(log, posts);
+    const canceled = posts.length > 0 && reservationCanceledInThread(log, posts);
+    if (!superseded && !hostReplied && !canceled) continue;
     await storage.updateAutoReplyLog(log.id, {
       status: "dismissed",
       errorMessage: null,
@@ -577,12 +599,14 @@ export async function dismissHandledAutoReplyDrafts(limit = 200): Promise<number
 
   let dismissed = 0;
   for (const [conversationId, conversationLogs] of Array.from(byConversation.entries())) {
-    const posts = await fetchConversationPosts(conversationId);
-    if (posts.length === 0) continue;
+    // Fetch posts for host-reply / cancellation signals; even on an empty/failed
+    // fetch we still run the per-conversation pass so superseded duplicates are
+    // de-duped (that check needs no posts).
+    const posts = await fetchConversationPosts(conversationId).catch(() => [] as GuestyPost[]);
     dismissed += await dismissHandledDraftsForConversation(conversationId, posts, conversationLogs);
   }
   if (dismissed > 0) {
-    console.log(`[auto-reply] Dismissed ${dismissed} stale approval draft(s) after manual host replies`);
+    console.log(`[auto-reply] Dismissed ${dismissed} stale approval draft(s) (host replied, superseded, or reservation canceled)`);
   }
   return dismissed;
 }
