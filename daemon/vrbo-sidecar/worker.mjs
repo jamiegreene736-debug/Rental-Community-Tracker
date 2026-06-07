@@ -7958,32 +7958,64 @@ async function processVrboPhotoScrape(id, params) {
     return out.slice(0, Math.max(1, Math.min(100, Number(maxPhotos) || 50)));
   }, { maxPhotos });
 
+  // Try to expand a collapsed "Sleeping arrangements" / "Rooms & beds" section
+  // so its bed text is present in innerText before we harvest it.
+  await page
+    .click('button:has-text("Show all rooms"), button:has-text("Sleeping arrangements"), [data-stid*="sleeping" i] button, button:has-text("Rooms & beds")', { timeout: 1500 })
+    .catch(() => {});
+  // Give a lazy/animated section time to render before we harvest its text.
+  await page.waitForTimeout(900);
+
   // While we're on the listing page (real browser, no bot wall), harvest the
   // sleeping-arrangements / bed text so the guest alternative page can show
-  // real bed types. The server parses distinct types (King/Queen/Twin/Sofa)
-  // out of this; we just return the short bed-mentioning segments.
+  // real bed types. The server parses distinct types + counts (King/Queen/
+  // Twin/Sofa) out of this; we just return the short bed-mentioning segments.
+  // We PREFER a dedicated "Sleeping arrangements / Rooms & beds" section
+  // (highest signal, e.g. "Bedroom 1 · 1 King Bed") and fall back to the full
+  // body so a missing section still degrades to whatever beds are mentioned.
   const bedText = await page.evaluate(() => {
     const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
-    const body = clean(document.body && document.body.innerText);
     // Keep a segment only if a size term sits with an explicit "bed" (so
     // "full kitchen" / "double vanity" are excluded), or it's a self-evident
     // bed term. This keeps the harvested text to real sleeping arrangements.
-    const sizeRe = /\b(?:king|queen|twin|full|double|bunk|murphy|trundle|day\s*bed)\b/i;
+    const sizeRe = /\b(?:california\s+king|king|queen|twin|full|double|bunk|murphy|trundle)\b/i;
     const hasBed = /\bbeds?\b/i;
-    const selfEvident = /\b(?:sleeper\s*sofa|sofa\s*bed|bunk\s*beds?|murphy\s*bed|pull[-\s]?out\s*(?:sofa|couch|bed))\b/i;
-    const segs = body.split(/(?:[.!?]\s+)|·|•|\||\n|;|,/).map((s) => clean(s)).filter(Boolean);
+    const selfEvident = /\b(?:sleeper\s*sofa|sofa\s*bed|bunk\s*beds?|murphy\s*bed|pull[-\s]?out\s*(?:sofa|couch|bed)|day\s*bed)\b/i;
+    const collect = (raw) => {
+      const segs = clean(raw).split(/(?:[.!?]\s+)|·|•|\||\n|;|,/).map((s) => clean(s)).filter(Boolean);
+      const out = [];
+      const seen = new Set();
+      for (const s of segs) {
+        if (s.length < 3 || s.length > 120) continue;
+        if (!((sizeRe.test(s) && hasBed.test(s)) || selfEvident.test(s))) continue;
+        const key = s.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(s);
+        if (out.length >= 40) break;
+      }
+      return out;
+    };
+    // Locate a dedicated sleeping-arrangements section by its heading text.
+    let sectionText = "";
+    const heads = Array.from(document.querySelectorAll("h1,h2,h3,h4,[role='heading']"));
+    for (const h of heads) {
+      if (/\b(?:sleeping\s+arrangements|rooms?\s*(?:&|and)\s*beds|bedrooms?\s*(?:&|and)\s*beds)\b/i.test(clean(h.textContent))) {
+        const container = h.closest("section,div") || h.parentElement;
+        sectionText = clean(container ? container.innerText : h.textContent);
+        break;
+      }
+    }
+    const merged = [];
     const seen = new Set();
-    const lines = [];
-    for (const s of segs) {
-      if (s.length < 3 || s.length > 120) continue;
-      if (!((sizeRe.test(s) && hasBed.test(s)) || selfEvident.test(s))) continue;
+    for (const s of [...collect(sectionText), ...collect(document.body && document.body.innerText)]) {
       const key = s.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      lines.push(s);
-      if (lines.length >= 40) break;
+      merged.push(s);
+      if (merged.length >= 40) break;
     }
-    return lines.join(" · ").slice(0, 2000);
+    return merged.join(" · ").slice(0, 2000);
   }).catch(() => "");
 
   log(`vrbo_photo_scrape ${id}: ${photos.length} photos, bedText=${bedText ? bedText.length + "c" : "none"}`);
