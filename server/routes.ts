@@ -7871,6 +7871,24 @@ export async function registerRoutes(
       .join("");
   };
 
+  // Operator slot labels ("Townhome B", "Condo A", "Property 2", a bare "B") are
+  // internal bookkeeping — show the guest a clean "Unit X" instead. A genuinely
+  // descriptive label (e.g. "Oceanfront Penthouse") passes through unchanged;
+  // an empty label falls back to the positional "Unit N".
+  const guestFacingUnitLabel = (raw: unknown, index: number): string => {
+    const text = normalizeAlternativeText(raw, 80);
+    // Internal slot descriptors, with or without a trailing period ("Apt.", "Bldg.").
+    const descriptor = "town\\s?home|town\\s?house|condo|villa|home|house|apartment|apt\\.?|unit|suite|property|building|bldg\\.?";
+    const slot = text.match(new RegExp(`^(?:${descriptor})\\s*(?:no\\.?|number|#|-)?\\s*([A-Za-z]|\\d{1,3})$`, "i"));
+    if (slot) return `Unit ${slot[1].toUpperCase()}`;
+    const bare = text.match(/^([A-Za-z]|\d{1,3})$/);
+    if (bare) return `Unit ${bare[1].toUpperCase()}`;
+    // A bare descriptor with no designator ("Property", "Townhome") is still an
+    // internal placeholder — fall back to the positional unit number.
+    if (new RegExp(`^(?:${descriptor})$`, "i").test(text)) return `Unit ${index + 1}`;
+    return text || `Unit ${index + 1}`;
+  };
+
   const alternativeOrdinalSuffix = (day: number): string => {
     if (day >= 11 && day <= 13) return "th";
     switch (day % 10) {
@@ -7914,32 +7932,64 @@ export async function registerRoutes(
     // Precision over recall: "king"/"queen"/"twin"/"full"/"double" appear in
     // plenty of non-bed contexts (full kitchen, double vanity, King Kamehameha
     // Hwy), so each size term must sit next to "bed". sofa/sleeper/bunk/murphy
-    // are self-evident bed terms and don't need the "bed" anchor.
-    const matches: Array<{ label: string; re: RegExp }> = [
-      { label: "King Bed", re: /\bking(?:[-\s]?size[d]?)?\s+beds?\b/i },
-      { label: "Queen Bed", re: /\bqueen(?:[-\s]?size[d]?)?\s+beds?\b/i },
-      { label: "Twin Beds", re: /\btwin\s+beds?\b/i },
-      { label: "Full Bed", re: /\bfull(?:[-\s]?size[d]?)?\s+beds?\b/i },
-      { label: "Double Bed", re: /\bdouble\s+beds?\b/i },
-      { label: "Bunk Beds", re: /\bbunk\s*beds?\b/i },
-      { label: "Sleeper Sofa", re: /\b(?:sleeper\s+sofa|sofa\s+sleeper|sofa\s+bed|pull[-\s]?out\s+(?:sofa|couch|bed)|hide[-\s]?a[-\s]?bed|murphy\s+bed)\b/i },
+    // are self-evident bed terms and don't need the "bed" anchor. A leading
+    // count ("2 Queen Beds") is captured when present so the guest sees the
+    // real sleeping arrangement, not just the bed types.
+    const specs: Array<{ label: string; plural: string; re: RegExp }> = [
+      { label: "King Bed", plural: "King Beds", re: /\b(?:(\d{1,2})\s+)?(?:california\s+)?king(?:[-\s]?size[d]?)?\s+beds?\b/gi },
+      { label: "Queen Bed", plural: "Queen Beds", re: /\b(?:(\d{1,2})\s+)?queen(?:[-\s]?size[d]?)?\s+beds?\b/gi },
+      { label: "Twin Bed", plural: "Twin Beds", re: /\b(?:(\d{1,2})\s+)?twin(?:[-\s]?size[d]?)?\s+beds?\b/gi },
+      { label: "Full Bed", plural: "Full Beds", re: /\b(?:(\d{1,2})\s+)?full(?:[-\s]?size[d]?)?\s+beds?\b/gi },
+      { label: "Double Bed", plural: "Double Beds", re: /\b(?:(\d{1,2})\s+)?double\s+beds?\b/gi },
+      { label: "Bunk Bed", plural: "Bunk Beds", re: /\b(?:(\d{1,2})\s+)?bunk\s*beds?\b/gi },
+      { label: "Day Bed", plural: "Day Beds", re: /\b(?:(\d{1,2})\s+)?day\s*beds?\b/gi },
+      { label: "Trundle Bed", plural: "Trundle Beds", re: /\b(?:(\d{1,2})\s+)?trundle\s*(?:beds?)?\b/gi },
+      { label: "Sleeper Sofa", plural: "Sleeper Sofas", re: /\b(?:(\d{1,2})\s+)?(?:sleeper\s+sofa|sofa\s+sleeper|sofa\s+beds?|pull[-\s]?out\s+(?:sofa|couch|beds?)|hide[-\s]?a[-\s]?beds?|murphy\s+beds?)\b/gi },
     ];
-    return matches.filter((match) => match.re.test(text)).map((match) => match.label);
+    const out: string[] = [];
+    for (const spec of specs) {
+      spec.re.lastIndex = 0;
+      let found = false;
+      let maxCount = 0;
+      let match: RegExpExecArray | null;
+      while ((match = spec.re.exec(text)) !== null) {
+        found = true;
+        const n = Number(match[1]);
+        if (Number.isFinite(n) && n > maxCount) maxCount = n;
+        if (match.index === spec.re.lastIndex) spec.re.lastIndex += 1; // guard against zero-width loops
+      }
+      if (!found) continue;
+      if (maxCount >= 2) out.push(`${maxCount} ${spec.plural}`);
+      else if (maxCount === 1) out.push(`1 ${spec.label}`);
+      else out.push(spec.label);
+    }
+    return out;
   };
 
   const extractAlternativeAmenityTags = (value: unknown): string[] => {
     const text = normalizeAlternativeText(value, 4000);
     const matches: Array<{ label: string; re: RegExp }> = [
       { label: "Full Kitchen", re: /\b(?:full\s+)?kitchen|stainless|appliance|cooktop|oven|refrigerator\b/i },
+      { label: "Dishwasher", re: /\bdishwasher\b/i },
+      { label: "Coffee Maker", re: /\b(?:coffee\s*maker|keurig|nespresso|espresso)\b/i },
       { label: "Pool", re: /\bpool\b/i },
-      { label: "Hot Tub", re: /\bhot\s*tub|spa\b/i },
-      { label: "Lanai", re: /\blanai|balcony|patio|terrace\b/i },
-      { label: "Air Conditioning", re: /\bair\s*conditioning|\bAC\b/i },
-      { label: "Wi-Fi", re: /\bwi[-\s]?fi|internet\b/i },
-      { label: "Parking", re: /\bparking|garage\b/i },
+      { label: "Hot Tub", re: /\bhot\s*tub|jacuzzi|\bspa\b/i },
+      { label: "Lanai", re: /\blanai|balcony|patio|terrace|deck\b/i },
+      { label: "Ocean View", re: /\bocean\s*(?:view|front)|sea\s*view|beach\s*(?:view|front)\b/i },
+      { label: "Beach Access", re: /\bbeach\s*access|steps\s+to\s+(?:the\s+)?beach|walk\s+to\s+(?:the\s+)?beach\b/i },
+      { label: "Air Conditioning", re: /\bair\s*conditioning\b|\bA\/?C\b(?![\w-])|central\s+air\b/i },
+      { label: "Ceiling Fans", re: /\bceiling\s*fans?\b/i },
+      { label: "Wi-Fi", re: /\bwi[-\s]?fi|wireless\s+internet|high[-\s]?speed\s+internet|internet\b/i },
+      { label: "TV", re: /\bsmart\s*tvs?\b|\bcable\s*tvs?\b|\bflat[-\s]?screen\b|\broku\b|\bnetflix\b|\btelevisions?\b|\bapple\s*tv\b|\bhd\s*tvs?\b/i },
+      { label: "Parking", re: /\bparking|garage|carport\b/i },
+      { label: "EV Charger", re: /\bEV\s*charg|electric\s+vehicle\s+charg|tesla\s+charg\b/i },
       { label: "Washer/Dryer", re: /\bwasher|dryer|laundry\b/i },
-      { label: "BBQ Area", re: /\bBBQ|barbecue|grill\b/i },
-      { label: "Views", re: /\bview|ocean|mountain|garden\b/i },
+      { label: "BBQ Area", re: /\bBBQ|barbecue|barbeque|grill\b/i },
+      { label: "Elevator", re: /\belevator|lift\b/i },
+      { label: "Gym Access", re: /\b(?:fitness\s*(?:center|centre|room)|\bgym\b|exercise\s+room|workout\s+(?:room|area|equipment|facility))/i },
+      { label: "Workspace", re: /\b(?:work\s*space|workspace|desk|home\s+office)\b/i },
+      { label: "Crib Available", re: /\b(?:crib|pack\s*'?\s*n\s*play|pack-n-play|travel\s+cot)\b/i },
+      { label: "Mountain View", re: /\bmountain\s*view|garden\s*view\b/i },
       { label: "Dining Area", re: /\bdining\b/i },
       { label: "Tropical Grounds", re: /\btropical|grounds|landscap/i },
     ];
@@ -8214,7 +8264,7 @@ Requirements:
     }
   };
 
-  const alternativeIconSvg = (name: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "sleep" | "walk"): string => {
+  const alternativeIconSvg = (name: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "route" | "sleep" | "walk"): string => {
     const paths: Record<string, string> = {
       amenity: '<path d="M12 3l2.3 4.7 5.2.8-3.8 3.7.9 5.2L12 15l-4.6 2.4.9-5.2-3.8-3.7 5.2-.8L12 3z"/>',
       bath: '<path d="M5 10V5a3 3 0 0 1 6 0v1"/><path d="M3 11h18v2a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5v-2z"/><path d="M7 21v-3"/><path d="M17 21v-3"/>',
@@ -8223,6 +8273,8 @@ Requirements:
       car: '<path d="M5 17h14"/><path d="M7 17l1-6h8l1 6"/><circle cx="8" cy="17" r="2"/><circle cx="16" cy="17" r="2"/><path d="M9 11l1-3h4l1 3"/>',
       community: '<path d="M4 20V9l8-6 8 6v11"/><path d="M9 20v-6h6v6"/><path d="M4 12h16"/>',
       home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/>',
+      // Route icon (two endpoints joined by an S-curve) for "distance between communities".
+      route: '<circle cx="6" cy="19" r="2.4"/><circle cx="18" cy="5" r="2.4"/><path d="M8.4 19H15a3.5 3.5 0 0 0 0-7H9a3.5 3.5 0 0 1 0-7h6.6"/>',
       sleep: '<path d="M3 8h12a4 4 0 0 1 4 4v5"/><path d="M3 5v14"/><path d="M3 17h18"/><path d="M7 8v9"/>',
       walk: '<path d="M13 4a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/><path d="M9 21l2-6-2-4-3 3"/><path d="M12 9l3 3 3 1"/><path d="M11 15l5 6"/>',
     };
@@ -8501,8 +8553,8 @@ Requirements:
         totalSleeps > 0 ? { icon: "sleep" as const, label: `Sleeps ${totalSleeps}` } : null,
         alternativeCommunityDisplay ? { icon: "community" as const, label: `Community: ${alternativeCommunityDisplay}` } : null,
         Number.isFinite(unitWalkMinutes) && unitWalkMinutes > 0 ? { icon: "walk" as const, label: `Unit A/B Walk: ${Math.round(unitWalkMinutes)} Minute Walk` } : null,
-        Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "car" as const, label: `Community Drive: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
-      ].filter(Boolean) as Array<{ icon: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "sleep" | "walk"; label: string }>;
+        Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "route" as const, label: `Distance From Old Community: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
+      ].filter(Boolean) as Array<{ icon: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "route" | "sleep" | "walk"; label: string }>;
       const overviewBlock = overviewDetails.length
         ? `<div class="overview">${overviewDetails.map((detail) => `<span class="overview-chip">${alternativeIconSvg(detail.icon)}<span class="chip-label">${escapeHtml(detail.label)}</span></span>`).join("")}</div>`
         : "";
@@ -8559,7 +8611,11 @@ Requirements:
                 </div>` : ""}
             </div>`
           : `<div class="empty-photos">Photos are still being gathered for this option.</div>`;
-        const unitCommunityDisplay = displayAlternativeLabel(item.community || alternativeCommunityDisplay, 100);
+        // Show the clean, resolved community (e.g. "Mauna Kai Princeville") in the
+        // unit title — NOT the raw VRBO listing title, which carries marketing
+        // cruft like "Princeville - 5br Condos - Sleeps 14".
+        const unitCommunityDisplay = alternativeCommunityDisplay
+          || displayAlternativeLabel(communityFromAlternativeTitle(item.community) || item.community, 100);
         const unitBedrooms = Number(item.bedrooms);
         const unitBathrooms = Number(item.bathrooms);
         const unitSleeps = Number(item.sleeps);
@@ -8567,8 +8623,15 @@ Requirements:
         const bathroomLabel = Number.isFinite(unitBathrooms) && unitBathrooms > 0 ? `${formatAlternativeNumber(unitBathrooms)} Bathroom` : "";
         const sleepLabel = Number.isFinite(unitSleeps) && unitSleeps > 0 ? `Sleeps ${Math.round(unitSleeps)}` : "";
         const unitText = alternativeSearchText(item);
+        const guestUnitLabel = guestFacingUnitLabel(item.unitLabel, index);
         const bedTypes = extractAlternativeBedTypes(unitText);
-        const featureTags = extractAlternativeAmenityTags(unitText).slice(0, 8);
+        // Pull as many real unit features as we can find, then top up with the
+        // community's known amenities so each unit shows a useful feature set
+        // even when the scraped listing text is thin.
+        const featureTags = Array.from(new Set([
+          ...extractAlternativeAmenityTags(unitText),
+          ...communityAmenityFallbackTags(item.community || alternativeCommunity),
+        ])).slice(0, 12);
         const bedTypeText = bedTypes.length
           ? bedTypes.join(", ")
           : [bedroomLabel, sleepLabel].filter(Boolean).join(" - ");
@@ -8577,17 +8640,18 @@ Requirements:
           bedroomLabel,
           bathroomLabel,
           sleepLabel,
-          item.unitLabel ? escapeHtml(item.unitLabel) : "",
+          guestUnitLabel ? escapeHtml(guestUnitLabel) : "",
           item.address ? escapeHtml(item.address) : "",
         ].filter(Boolean);
-        const unitDescriptor = [bedroomLabel, normalizeAlternativeText(item.unitLabel, 80)].filter(Boolean).join(" - ");
+        // Guest-facing title: "2 Bedroom Unit B at Mauna Kai Princeville" — clean
+        // unit label, clean community, no "Sleeps"/"5br Condos" marketing cruft.
+        const unitDescriptor = [bedroomLabel, guestUnitLabel].filter(Boolean).join(" ");
         const unitSubtitle = [unitDescriptor, unitCommunityDisplay ? `at ${unitCommunityDisplay}` : ""].filter(Boolean).join(" ");
         return `
           <section class="option">
             <div class="option-copy">
               <p class="eyebrow">Unit ${index + 1}</p>
-              <h2>Unit ${index + 1}</h2>
-              <p class="community">${escapeHtml(unitSubtitle || "Alternative stay")}</p>
+              <h2>${escapeHtml(unitSubtitle || `Unit ${index + 1}`)}</h2>
               ${details.length ? `<div class="details">${details.map((detail) => `<span>${detail}</span>`).join("")}</div>` : ""}
             </div>
             ${carousel}
@@ -8982,6 +9046,9 @@ Requirements:
         bathrooms: detail.bathrooms,
         sleeps: detail.sleeps,
         basicDetails: detail.basicDetails,
+        // Sleeping-arrangements text from the sidecar so the renderer's
+        // extractAlternativeBedTypes can list real bed types on this path too.
+        bedText: detail.bedText,
         unitLabel: urls.length > 1 ? `Property ${index + 1}` : "Property",
         sourceLabel: "",
         notes: [
