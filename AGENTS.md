@@ -1192,6 +1192,37 @@ established it so you can read the rationale in the commit message.
     also add an output pattern in `OUTPUT_RISK_PATTERNS`. See PR
     that added this entry.
 
+### Guest alternatives page
+
+46. **The community blurb on `/alternatives/:token` is CURATED-FIRST, not
+    AI-first.** The runtime drafter `draftAlternativeCommunityDescription`
+    (`server/routes.ts`) is deliberately forbidden from naming amenities it
+    can't confirm (it would hallucinate pools/beaches/golf — see PR #563/#564),
+    so for every community we actually operate in we keep an accurate, web-
+    researched, fact-checked blurb in `server/community-descriptions.ts`
+    (`CURATED_COMMUNITY_DESCRIPTIONS` + `resolveCuratedCommunityDescription`).
+    Both the build-time drafter AND the GET renderer call the resolver FIRST:
+    - **Drafter:** curated match → return it (`generatedBy: "curated"`),
+      otherwise fall through to the existing AI / deterministic-fallback path.
+    - **Renderer:** curated match → render it, EVEN IF `payload.communityDescription`
+      is already populated. This is intentional: it upgrades pages that were
+      persisted before a community was researched (or with the old amenity-free
+      AI sentence) to the rich blurb without a rebuild. Don't "fix" the renderer
+      to trust the persisted field first — curated is the source of truth.
+
+    Resolution is community-label-first, then area (`areaName` /
+    BUY_IN_MARKETS key), so an unknown city-wide resort in a known area
+    (e.g. a random Princeville resort) gracefully gets the AREA description
+    rather than nothing; a truly unknown input returns null and the AI/
+    deterministic path runs. Each entry's descriptions are amenity-rich on
+    PURPOSE (the operator asked for in-depth community copy) but stay within
+    the guest-copy safety stack: no prices, owners, booking platforms,
+    unit/building numbers, or addresses. **Only add an amenity to an entry if
+    it's confirmed across credible sources** — a guest must never be told a
+    community has something it lacks. Aliases must include the short form
+    (e.g. "Kaha Lani" as well as "Kaha Lani Resort") and the relevant area key
+    so both the unit-derived label and the configured area match.
+
 ### Portal authentication
 
 35. **Portal-wide auth gate is a single shared password keyed by

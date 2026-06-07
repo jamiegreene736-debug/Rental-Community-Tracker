@@ -100,6 +100,7 @@ import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
+import { resolveCuratedCommunityDescription } from "./community-descriptions";
 import {
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
@@ -8289,7 +8290,13 @@ Requirements:
   const draftAlternativeCommunityDescription = async (
     community: unknown,
     area: unknown,
-  ): Promise<{ description: string; generatedBy: "ai" | "fallback"; warning?: string }> => {
+  ): Promise<{ description: string; generatedBy: "ai" | "fallback" | "curated"; warning?: string }> => {
+    // Prefer our researched, fact-checked blurb when this is a community we
+    // actually operate in. It can safely name real amenities (pools, beaches,
+    // golf) the runtime AI drafter below is forbidden from inventing. Falls
+    // through to the AI/deterministic path for any unknown city-wide resort.
+    const curated = resolveCuratedCommunityDescription(community, area);
+    if (curated) return { description: curated, generatedBy: "curated" };
     const fallback = alternativeCommunityDescriptionFallback(community, area);
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const communityName = normalizeAlternativeText(community, 120);
@@ -8659,12 +8666,16 @@ Requirements:
       const topCommunityPhotos = communityPhotoUrls.slice(0, 8);
       // Community amenity tags were scraped unreliably from listing text, so they
       // are no longer shown. Only the community PHOTOS (accurate) remain, under a
-      // plain "Community Preview" heading, with a short community blurb below the
-      // gallery. The blurb is generated + persisted at page-build time
-      // (payload.communityDescription); pages built before that field existed
-      // fall back to the deterministic, amenity-free sentence so the line still
-      // renders. Sanitized through the same cleaner as unit copy + escaped.
-      const communityDescription = cleanAlternativeGuestDescription(payload.communityDescription)
+      // plain "Community Preview" heading, with a community blurb below the
+      // gallery. Priority: (1) our researched, fact-checked description for this
+      // community (so old pages — persisted before that data existed — and new
+      // pages both get the rich, amenity-aware blurb); (2) the blurb persisted at
+      // page-build time (payload.communityDescription); (3) the deterministic,
+      // amenity-free sentence so the line always renders. Sanitized through the
+      // same cleaner as unit copy + escaped.
+      const communityDescription =
+        resolveCuratedCommunityDescription(alternativeCommunityDisplay || areaNameDisplay, areaNameDisplay)
+        || cleanAlternativeGuestDescription(payload.communityDescription)
         || alternativeCommunityDescriptionFallback(alternativeCommunityDisplay || areaNameDisplay, areaNameDisplay);
       const topCommunityBlock = topCommunityPhotos.length
         ? `<section class="community-preview">
