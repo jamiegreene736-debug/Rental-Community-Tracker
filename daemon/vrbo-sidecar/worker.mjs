@@ -96,6 +96,13 @@ const VISIBLE_WINDOW_SIZE = (() => {
 // mode (operator wants to see it) and off macOS. Gated by SIDECAR_RETURN_FOCUS
 // (default on) so it can be disabled without a code change.
 const SIDECAR_RETURN_FOCUS = process.env.SIDECAR_RETURN_FOCUS !== "0";
+// Auto-minimize / push-offscreen the sidecar Chrome window after each CDP
+// page-create. On some macOS setups the page-create (which activates Chrome)
+// fighting with this minimize makes Chrome visibly flap open/closed in a loop.
+// Set SIDECAR_AUTO_MINIMIZE=0 to turn it off entirely — Chrome then just takes
+// focus once and stays put (operator clicks their app back). No-op in visible
+// mode and off macOS regardless.
+const SIDECAR_AUTO_MINIMIZE = process.env.SIDECAR_AUTO_MINIMIZE !== "0";
 const FOCUS_GUARD_CHROME_BUNDLE_IDS = new Set([
   "com.google.Chrome",
   "com.google.Chrome.canary",
@@ -891,6 +898,7 @@ function shouldBlockNavigation(rawUrl) {
 }
 
 async function minimizeSidecarWindow(targetPage = page) {
+  if (!SIDECAR_AUTO_MINIMIZE) return;
   if (usingHeadlessRuntime()) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
   if (!context || !targetPage || targetPage.isClosed?.()) return;
@@ -929,6 +937,7 @@ async function minimizeSidecarWindow(targetPage = page) {
 }
 
 function scheduleSidecarMinimize(targetPage = page) {
+  if (!SIDECAR_AUTO_MINIMIZE) return;
   if (usingHeadlessRuntime()) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
   // Hand focus back to the operator's app alongside the off-screen minimize —
