@@ -407,6 +407,12 @@ export type SidecarVrboPhotoScrapeResult = {
   // Guest capacity ("Sleeps N") harvested from the listing summary — reliable,
   // used for the combined-sleeps figure on the guest page. Optional.
   sleeps?: number | null;
+  // Phase 4 detail enrichment: per-listing coordinates + complex/address from the
+  // listing DETAIL page (the SRP/map don't expose them — AGENTS city-inventory #8).
+  lat?: number | null;
+  lng?: number | null;
+  complexName?: string | null;
+  streetAddress?: string | null;
 };
 
 export type SidecarPmUrlCheckResult = {
@@ -2453,6 +2459,10 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   photos: string[];
   bedText: string;
   sleeps: number | null;
+  lat: number | null;
+  lng: number | null;
+  complexName: string | null;
+  streetAddress: string | null;
   workerOnline: boolean;
   durationMs: number;
   reason: string;
@@ -2462,6 +2472,10 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
       photos: [],
       bedText: "",
       sleeps: null,
+      lat: null,
+      lng: null,
+      complexName: null,
+      streetAddress: null,
       workerOnline: false,
       durationMs: 0,
       reason: "valid url required",
@@ -2479,10 +2493,16 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   });
   const scraped = r.results as SidecarVrboPhotoScrapeResult | undefined;
   const sleeps = Number(scraped?.sleeps);
+  const lat = Number(scraped?.lat);
+  const lng = Number(scraped?.lng);
   return {
     photos: (scraped?.photos ?? []),
     bedText: (scraped?.bedText ?? ""),
     sleeps: Number.isFinite(sleeps) && sleeps > 0 ? sleeps : null,
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+    complexName: scraped?.complexName ?? null,
+    streetAddress: scraped?.streetAddress ?? null,
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,

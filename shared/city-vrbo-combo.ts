@@ -362,6 +362,30 @@ function pickCheapestPlan(bucket: ScoredRow[], plan: number[]): CityVrboListing[
   return picks;
 }
 
+/**
+ * Walkability decision for a pair, aware of WHICH signal clustered it:
+ *  - geo / property-manager clusters REQUIRE coordinate-confirmed walkability
+ *    (geo IS the coords; PM alone spans the whole town, so it must be confirmed).
+ *  - dictionary / complex / phrase / photo clusters are authoritative on their
+ *    own — coordinates only ANNOTATE (near → upgrade the label). Enrichment
+ *    coords can be stale/shared/parse-errored, so they must NOT *reject* a real
+ *    text/photo pair (that was a Phase-4 regression: a good "Point at Poipu 721"
+ *    + "Point at Poipu 812" pair getting dropped on slightly-off coords).
+ */
+function pairWalkability(
+  picks: CityVrboListing[],
+  source: CommunityMatchSource,
+): { ok: boolean; walkMinutes: number | null; walkSource: CityVrboComboPair["walkSource"] } {
+  if (picks.length < 2) return { ok: true, walkMinutes: null, walkSource: "unknown" };
+  const minutes = walkMinutesBetween(picks[0], picks[1]); // null when coords absent
+  const coordsNear = minutes !== null && minutes <= MAX_BUY_IN_WALK_MINUTES;
+  if (source === "coords" || source === "property-manager") {
+    return { ok: coordsNear, walkMinutes: minutes, walkSource: "coords" };
+  }
+  const fallback: CityVrboComboPair["walkSource"] = source === "photo" ? "photo" : "shared-phrase";
+  return { ok: true, walkMinutes: minutes, walkSource: coordsNear ? "coords" : fallback };
+}
+
 function confidenceFor(source: CommunityMatchSource): "high" | "medium" | "low" {
   switch (source) {
     case "coords":
@@ -374,6 +398,52 @@ function confidenceFor(source: CommunityMatchSource): "high" | "medium" | "low" 
     default:
       return "low";
   }
+}
+
+/**
+ * Geo-proximity clusters via union-find: any two listings within
+ * MAX_BUY_IN_WALK_MINUTES of each other (by coords) join the same cluster, so a
+ * connected run of nearby units becomes one "community". Only listings carrying
+ * lat/lng participate — coordinates are populated by detail-page enrichment
+ * (Phase 4), since the VRBO SRP/map don't expose them. O(n^2) over the priced
+ * pool (~140), which is trivial at this scale.
+ */
+function buildGeoClusters(rows: ScoredRow[]): Map<string, ScoredRow[]> {
+  // NOTE: must check `!= null` BEFORE Number() — Number(null) === 0 passes
+  // Number.isFinite, which would smear coordless listings to (0,0) and cluster
+  // them together with bogus distances. (Caught in Phase 4 review.)
+  const pts = rows.filter(
+    (r) =>
+      r.listing.lat != null &&
+      r.listing.lng != null &&
+      Number.isFinite(Number(r.listing.lat)) &&
+      Number.isFinite(Number(r.listing.lng)),
+  );
+  const n = pts.length;
+  const parent = pts.map((_, i) => i);
+  const find = (x: number): number => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  for (let i = 0; i < n; i += 1) {
+    for (let j = i + 1; j < n; j += 1) {
+      const a = pts[i].listing;
+      const b = pts[j].listing;
+      const feet = haversineFeet(Number(a.lat), Number(a.lng), Number(b.lat), Number(b.lng));
+      if (walkMinutesFromFeet(feet) <= MAX_BUY_IN_WALK_MINUTES) parent[find(i)] = find(j);
+    }
+  }
+  const clusters = new Map<string, ScoredRow[]>();
+  for (let i = 0; i < n; i += 1) {
+    const key = `geo:${find(i)}`;
+    const bucket = clusters.get(key) ?? [];
+    bucket.push(pts[i]);
+    clusters.set(key, bucket);
+  }
+  return clusters;
 }
 
 function matchSourceForKey(key: string): CommunityMatchSource {
@@ -457,10 +527,10 @@ export function suggestCityVrboComboPair(
       // Photo/URL clusters can group the SAME physical unit relisted (same hero
       // photo, near-identical title). Those can't be two halves of one combo.
       if (opts.guardSameUnit && picks.some((p, i) => picks.some((q, j) => j > i && looksLikeSameUnit(p, q)))) continue;
-      const walk = pairIsWalkable(picks);
+      const source = matchSourceForKey(key);
+      const walk = pairWalkability(picks, source);
       if (!walk.ok) continue;
       const totalCost = picks.reduce((sum, pick) => sum + listingTotalPrice(pick, nights), 0);
-      const source = matchSourceForKey(key);
       if (!best || totalCost < best.totalCost) {
         best = {
           resortPhrase: communityKeyLabel(key),
@@ -482,20 +552,21 @@ export function suggestCityVrboComboPair(
   // so it is the lowest-confidence suggestion and is flagged as such).
   const strongPair = evaluate(strongBuckets);
   const photoPair = evaluate(photoBuckets, { guardSameUnit: true });
-  const candidates = [strongPair, photoPair].filter((p): p is CityVrboComboPair => !!p);
+  // Geo clusters (Phase 4): listings within walking distance of each other form
+  // a community even when titles/photos give nothing. High confidence — coords
+  // directly prove walkability. guardSameUnit drops a relisted-unit pairing.
+  const geoPair = evaluate(buildGeoClusters(priced), { guardSameUnit: true });
+  const candidates = [strongPair, photoPair, geoPair].filter((p): p is CityVrboComboPair => !!p);
   if (candidates.length) {
     candidates.sort((a, b) => a.totalCost - b.totalCost);
     return candidates[0];
   }
-  // PM fallback — but only accept it when coordinates confirm walkability (so we
-  // never suggest two same-PM units that are miles apart). Without coords it
-  // stays unflagged-low and is returned only if the operator has no better lead.
+  // PM fallback — pairWalkability requires coordinate-confirmed walkability for
+  // PM clusters (one PM spans the whole town), so a PM pair only survives when
+  // coords place the two units within walking distance. Medium confidence.
   const pmPair = evaluate(pmBuckets);
   if (pmPair) {
-    if (pmPair.walkSource === "coords") {
-      return { ...pmPair, matchSource: "property-manager", matchConfidence: "medium" };
-    }
-    return { ...pmPair, matchSource: "property-manager", matchConfidence: "low" };
+    return { ...pmPair, matchSource: "property-manager", matchConfidence: "medium" };
   }
   return null;
 }
