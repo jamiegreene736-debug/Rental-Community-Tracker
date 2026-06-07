@@ -8774,7 +8774,6 @@ Requirements:
               <span class="brand-name">VacationRentalExpertz</span>
             </div>
             <div class="hero-copy">
-              <p class="eyebrow">VacationRentalExpertz</p>
               <h1>Alternative Stay Options</h1>
               <p class="stay-line">${alternativeIconSvg("calendar")}<span>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(stayDateText || "Dates to be confirmed")}</span></p>
             </div>
