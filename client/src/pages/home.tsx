@@ -1728,6 +1728,53 @@ function AdminDashboard() {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
+  // Card payments captured through Guesty settle into the bank ~5 business days
+  // after capture, so each collected payment is projected forward to its
+  // expected deposit date. This surfaces the next bank deposit (amount + date)
+  // plus a per-day schedule for the next 5 calendar days, computed client-side
+  // from the same `payments` list the funds-collected tile already loads.
+  const DEPOSIT_SETTLEMENT_BUSINESS_DAYS = 5;
+  const addBusinessDays = (start: Date, businessDays: number) => {
+    const result = new Date(start);
+    let added = 0;
+    while (added < businessDays) {
+      result.setDate(result.getDate() + 1);
+      const day = result.getDay();
+      if (day !== 0 && day !== 6) added += 1; // skip Sat/Sun
+    }
+    return result;
+  };
+  const depositProjection = useMemo(() => {
+    const payments = revenueSummary?.payments ?? [];
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    // Bucket expected deposits by local calendar day; drop deposits that would
+    // already have landed (deposit date before today).
+    const byDay = new Map<string, { date: Date; amount: number; count: number }>();
+    for (const payment of payments) {
+      const paidAt = new Date(payment.paidAt);
+      if (Number.isNaN(paidAt.getTime())) continue;
+      const depositDate = addBusinessDays(paidAt, DEPOSIT_SETTLEMENT_BUSINESS_DAYS);
+      depositDate.setHours(0, 0, 0, 0);
+      if (depositDate < todayStart) continue;
+      const key = dayKey(depositDate);
+      const entry = byDay.get(key) ?? { date: depositDate, amount: 0, count: 0 };
+      entry.amount += payment.amount;
+      entry.count += 1;
+      byDay.set(key, entry);
+    }
+    const nextDeposit =
+      Array.from(byDay.values()).sort((a, b) => a.date.getTime() - b.date.getTime())[0] ?? null;
+    const next5Days = Array.from({ length: 5 }, (_, i) => {
+      const date = new Date(todayStart);
+      date.setDate(date.getDate() + i);
+      const entry = byDay.get(dayKey(date));
+      return { date, amount: entry?.amount ?? 0, count: entry?.count ?? 0 };
+    });
+    const next5DaysTotal = next5Days.reduce((sum, d) => sum + d.amount, 0);
+    return { nextDeposit, next5Days, next5DaysTotal };
+  }, [revenueSummary?.payments]);
   const propertyNameById = useMemo(() => {
     const map = new Map<number, string>();
     for (const property of allProperties) map.set(property.id, property.name);
@@ -2605,6 +2652,21 @@ function AdminDashboard() {
                   12-mo forecast: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollectedAnnualProjection ?? 0)}
                   <span className="font-normal text-muted-foreground"> · 3-day avg {formatCurrency(Math.round(revenueSummary?.fundsCollectedDailyAvg3Days ?? 0))}/day</span>
                 </p>
+                <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-next-deposit">
+                  Next deposit:{" "}
+                  {revenueSummaryLoading
+                    ? "..."
+                    : depositProjection.nextDeposit
+                      ? `${formatCurrency(depositProjection.nextDeposit.amount)} · ${formatShortDate(depositProjection.nextDeposit.date)}`
+                      : "None expected"}
+                  {!revenueSummaryLoading && depositProjection.nextDeposit ? (
+                    <span className="font-normal text-muted-foreground"> · {depositProjection.nextDeposit.count} payment{depositProjection.nextDeposit.count === 1 ? "" : "s"}</span>
+                  ) : null}
+                </p>
+                <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-next-deposits-5-days">
+                  Next 5 days: {revenueSummaryLoading ? "..." : formatCurrency(depositProjection.next5DaysTotal)} expected
+                  <span className="font-normal"> · 5 business days after card payment</span>
+                </p>
                 {revenueSummary && (revenueSummary.refunds30Days ?? 0) > 0 && (
                   <p className="mt-0.5 text-xs leading-snug text-rose-600 dark:text-rose-400">
                     − {formatCurrency(revenueSummary.refunds30Days ?? 0)} refunded · net {formatCurrency(revenueSummary.netCollected30Days ?? ((revenueSummary.fundsCollected30Days ?? 0) - (revenueSummary.refunds30Days ?? 0)))}
@@ -2652,6 +2714,30 @@ function AdminDashboard() {
                     <p className="text-xs font-medium text-muted-foreground">Collection basis</p>
                     <p className="mt-1 text-sm font-semibold">Guesty paid records, net of refunds</p>
                     <p className="text-xs text-muted-foreground">Collected excludes scheduled/pending/failed/voided; refunds shown separately</p>
+                  </div>
+                </div>
+                <div className="rounded-md border bg-muted/30 p-3" data-testid="block-expected-deposits">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-muted-foreground">Expected bank deposits</p>
+                    <p className="text-xs text-muted-foreground">Card payments settle ~5 business days after capture</p>
+                  </div>
+                  <p className="mt-1 text-sm font-semibold">
+                    {depositProjection.nextDeposit
+                      ? `Next deposit: ${formatCurrency(depositProjection.nextDeposit.amount)} on ${formatShortDate(depositProjection.nextDeposit.date)} · ${depositProjection.nextDeposit.count} payment${depositProjection.nextDeposit.count === 1 ? "" : "s"}`
+                      : "No deposits expected from recent payments"}
+                  </p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-5">
+                    {depositProjection.next5Days.map((day) => (
+                      <div key={day.date.toISOString()} className="rounded-md border bg-background p-2">
+                        <p className="text-xs text-muted-foreground">
+                          {day.date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                        </p>
+                        <p className="mt-0.5 text-sm font-semibold">{day.amount > 0 ? formatCurrency(day.amount) : "—"}</p>
+                        {day.count > 0 ? (
+                          <p className="text-xs text-muted-foreground">{day.count} payment{day.count === 1 ? "" : "s"}</p>
+                        ) : null}
+                      </div>
+                    ))}
                   </div>
                 </div>
                 {revenueSummaryLoading ? (
