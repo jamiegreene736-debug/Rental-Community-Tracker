@@ -283,6 +283,45 @@ function sharedPhotoHash(a: CityVrboListing, b: CityVrboListing): boolean {
   return bHashes.some((h) => set.has(h));
 }
 
+/**
+ * Stable signature of a VRBO image URL: drop the query string and CDN size
+ * segments so the same underlying photo file matches across listings even when
+ * served at different sizes. Two listings reusing the same hero/amenity photo
+ * are almost always the same complex (a PM reusing the building/pool shot) — or
+ * the same unit relisted, which the same-unit guard below filters out of pairs.
+ */
+function imageSignature(url: string | undefined | null): string | null {
+  const raw = String(url ?? "").trim();
+  if (!raw || !/^https?:/i.test(raw)) return null;
+  let path = raw.split("?")[0].toLowerCase();
+  path = path.replace(/^https?:\/\/[^/]+/, "");           // drop host
+  path = path.replace(/\.(?:jpg|jpeg|png|webp|avif)$/i, ""); // drop extension
+  // Drop a leading size/policy segment some CDNs prepend (e.g. /b_1280x720/).
+  path = path.replace(/\/[a-z]_\d+x\d+\//, "/");
+  return path.length >= 12 ? `imgurl:${path}` : null;
+}
+
+function imageSignatureKeys(listing: CityVrboListing): string[] {
+  const urls = [listing.image, ...(listing.images ?? [])].filter(Boolean) as string[];
+  const keys = new Set<string>();
+  for (const u of urls) {
+    const sig = imageSignature(u);
+    if (sig) keys.add(sig);
+  }
+  return Array.from(keys);
+}
+
+/** Same physical unit relisted (so it can't be one half of a 2-unit combo). */
+function looksLikeSameUnit(a: CityVrboListing, b: CityVrboListing): boolean {
+  const ta = normalizedIdentityText(a.title);
+  const tb = normalizedIdentityText(b.title);
+  if (!ta || !tb) return false;
+  if (ta === tb) return true;
+  const short = ta.length <= tb.length ? ta : tb;
+  const long = ta.length <= tb.length ? tb : ta;
+  return short.length >= 16 && long.startsWith(short);
+}
+
 export function pairIsWalkable(picks: CityVrboListing[]): {
   ok: boolean;
   walkMinutes: number | null;
@@ -342,7 +381,7 @@ function matchSourceForKey(key: string): CommunityMatchSource {
   if (key.startsWith("complex:")) return "complex-name";
   if (key.startsWith("phrase:")) return "shared-phrase";
   if (key.startsWith("geo:")) return "coords";
-  if (key.startsWith("img:")) return "photo";
+  if (key.startsWith("img:") || key.startsWith("imgurl:")) return "photo";
   if (key.startsWith("pm:")) return "property-manager";
   return "unknown";
 }
@@ -396,6 +435,11 @@ export function suggestCityVrboComboPair(
       bucket.push(row);
       photoBuckets.set(key, bucket);
     }
+    for (const key of imageSignatureKeys(row.listing)) {
+      const bucket = photoBuckets.get(key) ?? [];
+      bucket.push(row);
+      photoBuckets.set(key, bucket);
+    }
     const pm = propertyManagerKey(row.listing);
     if (pm) {
       const bucket = pmBuckets.get(pm) ?? [];
@@ -404,12 +448,15 @@ export function suggestCityVrboComboPair(
     }
   }
 
-  const evaluate = (buckets: Map<string, ScoredRow[]>): CityVrboComboPair | null => {
+  const evaluate = (buckets: Map<string, ScoredRow[]>, opts: { guardSameUnit?: boolean } = {}): CityVrboComboPair | null => {
     let best: CityVrboComboPair | null = null;
     for (const [key, bucket] of buckets) {
       if (bucket.length < plan.length) continue;
       const picks = pickCheapestPlan(bucket, plan);
       if (!picks) continue;
+      // Photo/URL clusters can group the SAME physical unit relisted (same hero
+      // photo, near-identical title). Those can't be two halves of one combo.
+      if (opts.guardSameUnit && picks.some((p, i) => picks.some((q, j) => j > i && looksLikeSameUnit(p, q)))) continue;
       const walk = pairIsWalkable(picks);
       if (!walk.ok) continue;
       const totalCost = picks.reduce((sum, pick) => sum + listingTotalPrice(pick, nights), 0);
@@ -434,7 +481,7 @@ export function suggestCityVrboComboPair(
   // clusters only when nothing stronger pairs (PM alone can span the whole town,
   // so it is the lowest-confidence suggestion and is flagged as such).
   const strongPair = evaluate(strongBuckets);
-  const photoPair = evaluate(photoBuckets);
+  const photoPair = evaluate(photoBuckets, { guardSameUnit: true });
   const candidates = [strongPair, photoPair].filter((p): p is CityVrboComboPair => !!p);
   if (candidates.length) {
     candidates.sort((a, b) => a.totalCost - b.totalCost);
