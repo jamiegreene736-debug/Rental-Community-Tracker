@@ -1236,22 +1236,37 @@ established it so you can read the rationale in the commit message.
     design:
     - **Build-time vision screen** (`server/unit-photo-vision.ts`
       `filterNonRentalUnitPhotos`, called per unit in the `/api/booking-alternatives`
-      and `/from-vrbo` hydration). ONE Haiku call per unit, images sent BY URL
-      (no download), per-unit calls run in parallel. It removes photos a guest
-      could identify the property from — a legible building/unit number, address,
-      or property-manager logo — plus maps/floor plans/screenshots/documents.
+      and `/from-vrbo` hydration). ONE **Sonnet** call per unit, images sent BY
+      URL (no download), per-unit calls run in parallel. It removes photos a
+      guest could identify the property from — a legible building/unit number,
+      address, or property-manager logo — plus maps/floor plans/screenshots/docs.
+      **Sonnet, NOT Haiku, on purpose:** Haiku was empirically inconsistent here
+      (flagged `[3,4]` one run, `[3,4,25]` the next, false-positived an interior
+      bedroom) and MISSED the building-number exterior/entrance shots, so the leak
+      photos survived — the exact bug the operator reported. Sonnet returns the
+      identifying shots reliably with no false positives. This is leak
+      prevention; reliability beats Haiku's speed. **Images are normalized to a
+      legible width** (`rw=1200` on VRBO/Expedia media URLs) for the request only
+      — a thumbnail makes the number unreadable and the screen misses it.
       Conservative: unsure → KEEP; if it would leave < 4 photos it no-ops. On no
-      `ANTHROPIC_API_KEY` / error it keeps everything (`filtered: false`). The
-      result is persisted on the item as `photosVisionFiltered`.
+      `ANTHROPIC_API_KEY` / error it keeps everything (`filtered: false`).
+      Persisted on the item as `photosVisionFiltered` + `photosVisionVersion`
+      (= `UNIT_PHOTO_VISION_VERSION`; bump it when the model/logic changes).
+    - **Lazy re-screen on render**: a page whose units aren't at the current
+      `photosVisionVersion` (built pre-screen, by an older pass, or under a
+      no-key build) is re-screened on render and the cleaned result persisted via
+      `saveBookingAlternativePage`, so old links self-heal without a regenerate.
+      BLOCKING (≤25s cap) for operator/preview loads so the tester sees the fix
+      on reload; BACKGROUND for guest loads so they take no latency. An
+      in-memory token guard prevents duplicate concurrent migrations.
     - **Render-time tail trim** (the GET renderer): drops the last 5 photos of
       each unit gallery (with a floor), because the PM logo / unit-number-on-
-      building shots reliably cluster at the end. This is the backstop for pages
-      built before the vision screen existed and for no-key/error builds. It is
-      **SKIPPED when `item.photosVisionFiltered === true`** — there we trust the
-      precise screen and keep the good tail photos. Don't make the renderer trim
-      unconditionally (it would re-trim already-cleaned galleries) and don't
-      drop the trim (old pages rely on it). Haiku is intentional (speed); the
-      screen is bounded to 45 images.
+      building shots also cluster at the end. It is **SKIPPED only when the unit
+      is screened AT THE CURRENT VERSION** (`photosVisionFiltered === true &&
+      photosVisionVersion === UNIT_PHOTO_VISION_VERSION`); otherwise it runs as a
+      partial backstop until the lazy re-screen persists. Don't make the trim
+      unconditional (it would re-trim cleaned galleries) and don't drop it (old
+      pages rely on it). The screen is bounded to 45 images.
 
 ### Portal authentication
 
