@@ -8027,8 +8027,24 @@ async function processVrboPhotoScrape(id, params) {
     return merged.join(" · ").slice(0, 2000);
   }).catch(() => "");
 
-  log(`vrbo_photo_scrape ${id}: ${photos.length} photos, bedText=${bedText ? bedText.length + "c" : "none"}`);
-  await postResult(id, { photos, bedText });
+  // Guest capacity ("Sleeps N" / "N guests") — VRBO shows it in the property
+  // summary near the top of the listing. This is reliable (always present),
+  // unlike the rooms&beds section, so the guest page can show the combined
+  // sleeps across the attached units.
+  const sleeps = await page.evaluate(() => {
+    const full = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
+    // "Sleeps N" is VRBO's specific capacity label — trust the FIRST occurrence
+    // (the property summary sits above the reviews in the DOM, so the first match
+    // is the real capacity, not a number mentioned in a review).
+    let m = full.match(/\bsleeps?\s*(\d{1,2})\b/i);
+    // Fallback "N guests" ONLY within the top summary region, so a guest count
+    // quoted in review text further down the page can't be mistaken for capacity.
+    if (!m) m = full.slice(0, 2500).match(/\b(\d{1,2})\s+guests?\b/i);
+    return m ? Number.parseInt(m[1], 10) : null;
+  }).catch(() => null);
+
+  log(`vrbo_photo_scrape ${id}: ${photos.length} photos, bedText=${bedText ? bedText.length + "c" : "none"}, sleeps=${sleeps ?? "none"}`);
+  await postResult(id, { photos, bedText, sleeps });
 }
 
 // ─────────────────────── Booking.com search ─────────────────────────

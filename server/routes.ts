@@ -8146,6 +8146,7 @@ export async function registerRoutes(
     let sidecarPhotos: string[] = [];
     let sidecarReason = "";
     let sidecarBedText = "";
+    let sidecarSleeps: number | null = null;
     try {
       const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
       const result = await scrapeVrboPhotosViaSidecar({
@@ -8157,6 +8158,8 @@ export async function registerRoutes(
       sidecarPhotos = result.photos;
       sidecarReason = result.reason;
       sidecarBedText = String((result as { bedText?: string }).bedText ?? "");
+      const s = Number((result as { sleeps?: number | null }).sleeps);
+      sidecarSleeps = Number.isFinite(s) && s > 0 ? Math.round(s) : null;
     } catch (error: any) {
       sidecarReason = error?.message ?? String(error);
     }
@@ -8170,7 +8173,9 @@ export async function registerRoutes(
       photos,
       bedrooms: fallback.bedrooms,
       bathrooms: fallback.bathrooms,
-      sleeps: fallback.sleeps,
+      // Prefer the sidecar's "Sleeps N" (real browser, no bot wall) over the
+      // HTML meta fallback, which Railway usually can't read past VRBO's bot wall.
+      sleeps: sidecarSleeps ?? fallback.sleeps,
       basicDetails: fallback.basicDetails ?? [],
       // The sidecar (real browser, no bot wall) is the only reliable source of
       // the listing's sleeping arrangements on Railway. Kept SEPARATE from
@@ -8183,7 +8188,8 @@ export async function registerRoutes(
   };
 
   const alternativeGuestDescriptionFallback = (item: Record<string, any>, stay: { checkIn?: string; checkOut?: string }): string => {
-    const title = normalizeAlternativeText(item.unitLabel || item.community || "this alternative option", 120);
+    // Guest-facing label only ("Unit A/B") — never the raw listing name/number.
+    const title = normalizeAlternativeText(item.guestUnitLabel, 40) || "This unit";
     const community = displayAlternativeLabel(item.community, 100);
     const bedrooms = Number(item.bedrooms);
     const bathrooms = Number(item.bathrooms);
@@ -8191,12 +8197,10 @@ export async function registerRoutes(
     const bedroomText = Number.isFinite(bedrooms) && bedrooms > 0 ? `${Math.round(bedrooms)} bedroom${Math.round(bedrooms) === 1 ? "" : "s"}` : "comfortable sleeping space";
     const bathroomText = Number.isFinite(bathrooms) && bathrooms > 0 ? `${formatAlternativeNumber(bathrooms)} bathroom${bathrooms === 1 ? "" : "s"}` : "";
     const sleepsText = Number.isFinite(sleeps) && sleeps > 0 ? `sleeping up to ${Math.round(sleeps)}` : "";
-    const address = normalizeAlternativeText(item.address, 180);
     const detailText = [bedroomText, bathroomText, sleepsText].filter(Boolean).join(", ");
     return [
       `${title} is a comparable vacation rental${community ? ` in ${community}` : ""}.`,
       `It offers ${detailText || bedroomText}.`,
-      address ? `The saved location detail is ${address}.` : "",
     ].filter(Boolean).join(" ");
   };
 
@@ -8208,16 +8212,15 @@ export async function registerRoutes(
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return { description: fallback, generatedBy: "fallback", warning: "ANTHROPIC_API_KEY not configured" };
 
+    // NOTE: deliberately NO raw listing `title`, unit number, or address here.
+    // The title carries the specific listing name/number ("Villas of Kamalii 39,
+    // Townhome B") which must NOT leak to the guest — they see "Unit A/B" only.
     const facts = {
-      title: normalizeAlternativeText(item.title, 160),
+      unitName: normalizeAlternativeText(item.guestUnitLabel, 40) || "this unit",
       community: normalizeAlternativeText(item.community, 120),
       bedrooms: Number(item.bedrooms) || null,
       bathrooms: Number(item.bathrooms) || null,
       sleeps: Number(item.sleeps) || null,
-      unitLabel: normalizeAlternativeText(item.unitLabel, 80),
-      address: normalizeAlternativeText(item.address, 220),
-      basicDetails: Array.isArray(item.basicDetails) ? item.basicDetails.slice(0, 8) : [],
-      operatorNotes: normalizeAlternativeText(item.notes, 900),
     };
 
     try {
@@ -8243,11 +8246,12 @@ Requirements:
 - Plain text only. No markdown, bullets, headings, emojis, or sales hype.
 - This is property-detail copy for a review page, not a direct message. Do not address the guest by name.
 - Do not use the guest's name, even if it appears in surrounding context.
+- Refer to the property ONLY as "${facts.unitName}" (e.g. "Unit A" / "Unit B"). NEVER state a specific listing name, unit number, building number, street address, or property title — only the generic unit label and the community name are allowed.
 - Do not mention buy-in, cost paid, internal operations, arbitrage, owner, supplier, confidence, or verification.
 - Do not mention VRBO, third-party marketplaces, source listings, or where the option came from.
-- Do not promise amenities not in the facts.
+- Do not promise amenities, bathroom counts, or sleep capacities that are not in the facts (some may be null — if so, do not invent them or say they are "being confirmed").
 - Do not mention photo counts, photos available, or that photos can be reviewed.
-- Focus on concrete property details: bedroom count, bathroom count, sleeps count, community, layout, address/location detail, bed types, and amenities that appear in the facts.
+- Focus only on the concrete details present in the facts: the unit label, bedroom count, bathroom/sleeps count when present, and the community.
 - Return only the copy.`,
           }],
         }),
@@ -8504,7 +8508,17 @@ Requirements:
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
       const originalCommunity = normalizeCommunityContext(payload.originalCommunity);
+      // Derive the alternative community from the ATTACHED units' own titles/notes
+      // (e.g. "Villas of Kamalii"), NOT the client-sent label, which is often the
+      // ORIGINAL/configured resort ("Mauna Kai Princeville"). Same resolver the
+      // relocation message uses; never returns the guest's original community.
+      const derivedAlternativeCommunity = extractNewCommunityFromUnits(
+        alternatives.map((item: any) => item?.title),
+        alternatives.map((item: any) => item?.notes),
+        payload.originalCommunity,
+      );
       const alternativeCommunity =
+        usableCommunityContext(derivedAlternativeCommunity ?? "") ||
         usableCommunityContext(payload.alternativeCommunity) ||
         usableCommunityContext(alternatives.find((item: any) => usableCommunityContext(item?.alternativeCommunity))?.alternativeCommunity) ||
         usableCommunityContext(alternatives.find((item: any) => usableCommunityContext(item?.community))?.community) ||
@@ -8566,26 +8580,19 @@ Requirements:
         Array.isArray(item?.communityPhotos) ? item.communityPhotos.map(safeGuestPhotoUrl).filter(Boolean) : [],
       ))).slice(0, 8);
       const topCommunityPhotos = communityPhotoUrls.slice(0, 8);
-      const topAmenities = Array.from(new Map(alternatives
-        .flatMap((item: any) => [
-          ...communityAmenityFallbackTags(item?.community || alternativeCommunity),
-          ...extractAlternativeAmenityTags(alternativeSearchText(item)),
-        ])
-        .map((label) => [label.toLowerCase(), label] as const)).values()).slice(0, 10);
-      const amenityCards = topAmenities.slice(0, 6).map((tag) => `<article class="amenity-card">${alternativeIconSvg("amenity")}<span>${escapeHtml(tag)}</span></article>`).join("");
-      const communityPreviewTitle = topCommunityPhotos.length ? "Community & Amenity Preview" : "Community Amenities";
-      const topCommunityBlock = topCommunityPhotos.length || topAmenities.length
+      // Community amenity tags were scraped unreliably from listing text, so they
+      // are no longer shown. Only the community PHOTOS (accurate) remain, under a
+      // plain "Community Preview" heading.
+      const topCommunityBlock = topCommunityPhotos.length
         ? `<section class="community-preview">
             <div class="section-heading">
               <p class="eyebrow">${escapeHtml(alternativeCommunityDisplay || areaNameDisplay || "Community")}</p>
-              <h2>${communityPreviewTitle}</h2>
+              <h2>Community Preview</h2>
             </div>
-            ${topCommunityPhotos.length ? `<div class="community-gallery">${topCommunityPhotos.map((url, index) => `
+            <div class="community-gallery">${topCommunityPhotos.map((url, index) => `
               <figure>
                 <img src="${escapeHtml(url)}" alt="${escapeHtml(alternativeCommunityDisplay || areaNameDisplay || "Community")} photo ${index + 1}" loading="${index === 0 ? "eager" : "lazy"}" />
-              </figure>`).join("")}</div>` : ""}
-            ${!topCommunityPhotos.length && amenityCards ? `<div class="amenity-showcase">${amenityCards}</div>` : ""}
-            ${topAmenities.length ? `<div class="amenities">${topAmenities.map((tag) => `<span>${alternativeIconSvg("amenity")}${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+              </figure>`).join("")}</div>
           </section>`
         : "";
       const photoBlocks = alternatives.map((item: any, index: number) => {
@@ -8611,54 +8618,34 @@ Requirements:
                 </div>` : ""}
             </div>`
           : `<div class="empty-photos">Photos are still being gathered for this option.</div>`;
-        // Show the clean, resolved community (e.g. "Mauna Kai Princeville") in the
-        // unit title — NOT the raw VRBO listing title, which carries marketing
-        // cruft like "Princeville - 5br Condos - Sleeps 14".
+        // Show the clean, resolved community (e.g. "Villas of Kamalii") in the
+        // unit title — NOT the raw VRBO listing title, which carries the unit
+        // number + marketing cruft ("Villas of Kamalii 39 - Sleeps 14").
         const unitCommunityDisplay = alternativeCommunityDisplay
           || displayAlternativeLabel(communityFromAlternativeTitle(item.community) || item.community, 100);
         const unitBedrooms = Number(item.bedrooms);
         const unitBathrooms = Number(item.bathrooms);
-        const unitSleeps = Number(item.sleeps);
         const bedroomLabel = Number.isFinite(unitBedrooms) && unitBedrooms > 0 ? `${Math.round(unitBedrooms)} Bedroom` : "";
         const bathroomLabel = Number.isFinite(unitBathrooms) && unitBathrooms > 0 ? `${formatAlternativeNumber(unitBathrooms)} Bathroom` : "";
-        const sleepLabel = Number.isFinite(unitSleeps) && unitSleeps > 0 ? `Sleeps ${Math.round(unitSleeps)}` : "";
-        const unitText = alternativeSearchText(item);
+        // Guests see units as "Unit A" / "Unit B" — never the raw listing name/number.
         const guestUnitLabel = guestFacingUnitLabel(item.unitLabel, index);
-        const bedTypes = extractAlternativeBedTypes(unitText);
-        // Pull as many real unit features as we can find, then top up with the
-        // community's known amenities so each unit shows a useful feature set
-        // even when the scraped listing text is thin.
-        const featureTags = Array.from(new Set([
-          ...extractAlternativeAmenityTags(unitText),
-          ...communityAmenityFallbackTags(item.community || alternativeCommunity),
-        ])).slice(0, 12);
-        const bedTypeText = bedTypes.length
-          ? bedTypes.join(", ")
-          : [bedroomLabel, sleepLabel].filter(Boolean).join(" - ");
         const description = cleanAlternativeGuestDescription(item.description);
+        // Bed Types + Unit Features sections were removed — they were scraped
+        // unreliably from listing text. Only show facts we're confident in.
         const details = [
-          bedroomLabel,
           bathroomLabel,
-          sleepLabel,
-          guestUnitLabel ? escapeHtml(guestUnitLabel) : "",
           item.address ? escapeHtml(item.address) : "",
         ].filter(Boolean);
-        // Guest-facing title: "2 Bedroom Unit B at Mauna Kai Princeville" — clean
-        // unit label, clean community, no "Sleeps"/"5br Condos" marketing cruft.
-        const unitDescriptor = [bedroomLabel, guestUnitLabel].filter(Boolean).join(" ");
-        const unitSubtitle = [unitDescriptor, unitCommunityDisplay ? `at ${unitCommunityDisplay}` : ""].filter(Boolean).join(" ");
+        // Title: "Unit A" kicker + "3 Bedroom at Villas of Kamalii" heading.
+        const unitTitle = [bedroomLabel, unitCommunityDisplay ? `at ${unitCommunityDisplay}` : ""].filter(Boolean).join(" ") || guestUnitLabel;
         return `
           <section class="option">
             <div class="option-copy">
-              <p class="eyebrow">Unit ${index + 1}</p>
-              <h2>${escapeHtml(unitSubtitle || `Unit ${index + 1}`)}</h2>
+              <p class="eyebrow">${escapeHtml(guestUnitLabel)}</p>
+              <h2>${escapeHtml(unitTitle)}</h2>
               ${details.length ? `<div class="details">${details.map((detail) => `<span>${detail}</span>`).join("")}</div>` : ""}
             </div>
             ${carousel}
-            ${(bedTypeText || featureTags.length) ? `<div class="unit-facts">
-              ${bedTypeText ? `<div><p class="fact-label">Bed Types</p><p>${escapeHtml(bedTypeText)}</p></div>` : ""}
-              ${featureTags.length ? `<div><p class="fact-label">Unit Features</p><div class="feature-tags">${featureTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div></div>` : ""}
-            </div>` : ""}
             ${description ? `<p class="description">${escapeHtml(description)}</p>` : ""}
             ${item.showSourceLink && item.url ? `<p><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">View listing details</a></p>` : ""}
           </section>`;
@@ -8853,7 +8840,16 @@ Requirements:
       };
       const originalCommunity = normalizeCommunityContext(req.body?.originalCommunity);
       const areaName = normalizeCommunityContext(req.body?.areaName);
-      const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any) => {
+      // Resolve the NEW community from the attached units' own titles/notes
+      // ("Villas of Kamalii"), never the client-sent or original label. Drives the
+      // persisted community label, the relocation message, AND the guest-facing AI
+      // descriptions. Never returns the guest's original community.
+      const cleanNewCommunity = usableCommunityContext(extractNewCommunityFromUnits(
+        alternatives.map((a: any) => a?.title),
+        alternatives.map((a: any) => a?.notes),
+        req.body?.originalCommunity,
+      ) ?? "") || "";
+      const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any, index: number) => {
         const sourceUrl = normalizeAlternativeUrl(item?.url);
         const initialPhotos = Array.from(new Set([
           normalizeAlternativeUrl(item?.image),
@@ -8907,8 +8903,9 @@ Requirements:
           bathrooms,
           sleeps,
           basicDetails,
-          // Sleeping-arrangements text from the VRBO listing (sidecar) so the
-          // renderer's extractAlternativeBedTypes can list real bed types.
+          // Sleeping-arrangements text from the VRBO listing (sidecar). Captured
+          // + persisted but NOT rendered anymore — the Bed Types section was
+          // removed because the scrape was unreliable. Kept for possible reuse.
           bedText: normalizeAlternativeText(vrboDetails?.bedText, 2000),
           unitLabel: normalizeAlternativeText(item?.unitLabel, 80),
           address: normalizeAlternativeText(item?.address, 220),
@@ -8924,7 +8921,13 @@ Requirements:
           photoSource: vrboDetails?.photoSource ?? (initialPhotos.length > 0 ? "provided" : "none"),
           photoScrapeReason: vrboDetails?.scrapeReason ?? "",
         };
-        const drafted = await draftAlternativeGuestDescription(base, stay);
+        // Guest copy refers to the unit as "Unit A/B" and the clean community —
+        // never the raw listing name/number (e.g. "Villas of Kamalii 39").
+        const guestUnitLabel = guestFacingUnitLabel(item?.unitLabel, index);
+        const drafted = await draftAlternativeGuestDescription(
+          { ...base, guestUnitLabel, community: cleanNewCommunity || base.community },
+          stay,
+        );
         return {
           ...base,
           description: drafted.description,
@@ -8935,6 +8938,7 @@ Requirements:
       const reservationId = String(req.body?.reservationId ?? "");
       const channel = normalizeAlternativeText(req.body?.channel, 40) || null;
       const alternativeCommunity =
+        cleanNewCommunity ||
         usableCommunityContext(req.body?.alternativeCommunity) ||
         usableCommunityContext(hydratedAlternatives.find((item) => usableCommunityContext(item.alternativeCommunity))?.alternativeCommunity) ||
         usableCommunityContext(hydratedAlternatives.find((item) => usableCommunityContext(item.community))?.community) ||
@@ -8979,21 +8983,11 @@ Requirements:
       }).catch((e) => console.error("[booking-alternatives] DB save failed:", e?.message ?? e));
       const url = `${agreementBaseUrl(req)}/alternatives/${token}`;
       const walkMinutes = unitWalkMinutes;
-      // Name the resort the ATTACHED units actually belong to. Derive it from
-      // the units' OWN titles + notes — the community is usually NOT the title
-      // prefix and can sit mid-title (".. Villas of Kamalii 30"), so a common-
-      // prefix match misses it; extractNewCommunityFromUnits finds the longest
-      // common contiguous title phrase (with the city-combo note phrase as a
-      // fallback). It NEVER returns the guest's ORIGINAL community (req.body
-      // .originalCommunity = prox.community) — the relocation moves them AWAY
-      // from it — and returns null so the message uses neutral "in the same
-      // area" copy when nothing confident resolves (Decision Log 2026-06-06).
-      const derivedNewCommunity = extractNewCommunityFromUnits(
-        hydratedAlternatives.map((a) => a.title),
-        hydratedAlternatives.map((a) => a.notes),
-        req.body?.originalCommunity,
-      );
-      const propertyLabel = usableCommunityContext(derivedNewCommunity ?? "") || null;
+      // The relocation message names the resort the ATTACHED units belong to —
+      // the same unit-derived community resolved above from the units' own
+      // titles/notes (Decision Log 2026-06-06). Null → neutral "in the same area"
+      // copy when nothing confident resolves; never the guest's original community.
+      const propertyLabel = cleanNewCommunity || null;
       // Total capacity across the attached units for the friendly pitch line.
       const totalSleeps = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : 0), 0) || null;
       const totalBedrooms = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : 0), 0) || null;
@@ -9046,8 +9040,8 @@ Requirements:
         bathrooms: detail.bathrooms,
         sleeps: detail.sleeps,
         basicDetails: detail.basicDetails,
-        // Sleeping-arrangements text from the sidecar so the renderer's
-        // extractAlternativeBedTypes can list real bed types on this path too.
+        // Sleeping-arrangements text from the sidecar — captured but no longer
+        // rendered (Bed Types section removed; scrape was unreliable).
         bedText: detail.bedText,
         unitLabel: urls.length > 1 ? `Property ${index + 1}` : "Property",
         sourceLabel: "",
@@ -9073,8 +9067,22 @@ Requirements:
         checkIn: normalizeAlternativeText(req.body?.checkIn, 20),
         checkOut: normalizeAlternativeText(req.body?.checkOut, 20),
       };
-      const hydratedAlternatives = await Promise.all(alternatives.map(async (item) => {
-        const drafted = await draftAlternativeGuestDescription(item, stay);
+      // Same unit-derived clean community + "Unit A/B" labels as the main builder,
+      // so this path's AI descriptions never leak the raw listing name/number.
+      const cleanNewCommunity = usableCommunityContext(extractNewCommunityFromUnits(
+        alternatives.map((a: any) => a?.title),
+        alternatives.map((a: any) => a?.notes),
+        // No "move away from original" semantics on this manual path — the 3rd arg
+        // is the community to EXCLUDE, so leave it empty (don't pass propertyName,
+        // which IS the community we want to keep).
+        req.body?.originalCommunity,
+      ) ?? "") || "";
+      const hydratedAlternatives = await Promise.all(alternatives.map(async (item, index) => {
+        const guestUnitLabel = guestFacingUnitLabel(item?.unitLabel, index);
+        const drafted = await draftAlternativeGuestDescription(
+          { ...item, guestUnitLabel, community: cleanNewCommunity || item.community },
+          stay,
+        );
         return {
           ...item,
           description: drafted.description,
