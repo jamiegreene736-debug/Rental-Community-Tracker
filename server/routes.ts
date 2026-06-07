@@ -8524,7 +8524,17 @@ Requirements:
         usableCommunityContext(alternatives.find((item: any) => usableCommunityContext(item?.community))?.community) ||
         communityFromAlternativeTitle(alternatives.find((item: any) => communityFromAlternativeTitle(item?.title))?.title);
       const areaName = normalizeCommunityContext(payload.areaName) || originalCommunity || alternativeCommunity;
-      const originalCommunityDisplay = displayAlternativeLabel(originalCommunity);
+      // The guest's ORIGINAL community is often stored as the bare market key /
+      // city ("Princeville"). Show the configured resort NAME for that market
+      // ("Mauna Kai Princeville") instead, so the line reads "your original
+      // community of <name>", not the city. Specific names (not a market key)
+      // pass through unchanged. The area label (below) stays the city.
+      const originalResortName = (() => {
+        const loc: any = (COMMUNITY_LOCATION_BY_KEY as any)[originalCommunity] ?? BUY_IN_MARKET_LOCATIONS[originalCommunity];
+        const resort = normalizeCommunityContext(loc?.searchName);
+        return resort && resort.length >= 4 ? resort : originalCommunity;
+      })();
+      const originalCommunityDisplay = displayAlternativeLabel(originalResortName);
       const alternativeCommunityDisplay = displayAlternativeLabel(alternativeCommunity);
       const areaNameDisplay = displayAlternativeLabel(areaName);
       const communityDriveMinutes = Number(payload.communityDriveMinutes);
@@ -8777,7 +8787,6 @@ Requirements:
           </section>
           ${topCommunityBlock}
           ${photoBlocks || "<p>No alternative options were attached to this page yet.</p>"}
-          <footer>Photos and details are provided for review and may be finalized before arrival details are sent.</footer>
         </main>
         <script>
           document.querySelectorAll("[data-carousel]").forEach((carousel) => {
