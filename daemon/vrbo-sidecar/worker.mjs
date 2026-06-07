@@ -5959,6 +5959,8 @@ async function walkVrboResultsUiPages(targetPage, id, options = {}) {
   let stopReason = "ui-next-unavailable";
   const pageRanges = [];
   let prevStart = null;
+  let prevHarvestTotal = 0;
+  let noGrowthStreak = 0;
 
   for (let pageIdx = 0; pageIdx < maxPages; pageIdx += 1) {
     // Scroll the pagination footer into view: this drags the full 50-card page
@@ -5984,12 +5986,10 @@ async function walkVrboResultsUiPages(targetPage, id, options = {}) {
     );
 
     // Reached and harvested the final page (e.g. "201-210 of 210") — stop clean.
+    // This is the AUTHORITATIVE end signal: it reads the visible "X-Y of T"
+    // results range, not the (frequently under-counted) targetTotal hint.
     if (rangeHint?.total && rangeHint?.end && rangeHint.end >= rangeHint.total) {
       stopReason = "range-end-reached";
-      break;
-    }
-    if (targetTotal && harvestTotal >= targetTotal - 2) {
-      stopReason = "target-reached";
       break;
     }
 
@@ -6000,10 +6000,34 @@ async function walkVrboResultsUiPages(targetPage, id, options = {}) {
       await boundedPageDelay(targetPage, 1_000);
       nextAvail = await isVrboResultsNextPageAvailable(targetPage);
     }
+
+    // The targetTotal hint (from readVrboResultsTotalHint) is only honored as a
+    // stop signal when the blue Next button is GENUINELY unavailable. VRBO often
+    // hasn't rendered the "N-M of T" results-count text when the hint is first
+    // read, so its fallback can grab a stray small number (e.g. "25") that, if
+    // trusted, short-circuits the walk on page 1 — the "145 results but only 48
+    // exported" bug. While Next is still clickable there ARE more pages,
+    // regardless of the hint. See AGENTS.md "VRBO city inventory export".
     if (!nextAvail) {
-      stopReason = pageIdx === 0 ? "ui-next-unavailable" : "ui-next-end";
+      if (targetTotal && harvestTotal >= targetTotal - 2) stopReason = "target-reached";
+      else stopReason = pageIdx === 0 ? "ui-next-unavailable" : "ui-next-end";
       break;
     }
+
+    // Guard against a non-advancing SRP: when the range text is absent (so
+    // range-end-reached can't fire) but two consecutive pages add no new cards,
+    // stop instead of clicking Next up to maxPages. A real new page adds ~50;
+    // a stuck/duplicate page adds ~0.
+    if (harvestTotal <= prevHarvestTotal + 2) {
+      noGrowthStreak += 1;
+      if (noGrowthStreak >= 2) {
+        stopReason = "harvest-plateau";
+        break;
+      }
+    } else {
+      noGrowthStreak = 0;
+    }
+    prevHarvestTotal = harvestTotal;
 
     const clicked = await clickVrboResultsNextPage(targetPage, id);
     if (!clicked) {
@@ -6713,7 +6737,17 @@ async function clickVrboListViewControl(targetPage, label, id) {
         text: (el.textContent || "").replace(/\s+/g, " ").trim(),
         aria: el.getAttribute("aria-label") || "",
       }));
-    const listButton = controls.find((c) => /\b(view\s+)?list(\s+view)?\b|show\s+list|view\s+as\s+list/i.test(`${c.text} ${c.aria}`));
+    const listButton = controls.find((c) => {
+      const hay = `${c.text} ${c.aria}`;
+      // Exclude VRBO's host CTAs ("List your property", "List your home") — the
+      // old `\blist\b` test matched those and clicked them, opening a stray tab.
+      if (/\blist\s+(?:your|a|my)\s+(?:property|home|place|space)\b|become\s+a\s+host/i.test(hay)) return false;
+      // Only a genuine list/map VIEW toggle: an explicit "list view" phrase or a
+      // control whose entire label is just "List".
+      return /\b(?:view\s+as\s+list|list\s+view|show\s+(?:results\s+)?list|view\s+list)\b/i.test(hay)
+        || /^\s*list\s*$/i.test(c.text)
+        || /^\s*(?:show|view)\s+list\s*$/i.test(c.aria);
+    });
     if (listButton) {
       listButton.el.scrollIntoView({ block: "center", inline: "center" });
       listButton.el.click();
@@ -6732,25 +6766,36 @@ async function clickVrboListViewControl(targetPage, label, id) {
 async function readVrboResultsTotalHint(targetPage) {
   return targetPage.evaluate(() => {
     const text = String(document.body?.innerText || "").replace(/\s+/g, " ");
+    // Hard floor: the hint must never report fewer than the property cards that
+    // are actually rendered right now. This kills the "stray small number"
+    // misparse (e.g. a nearby-area module's "25 rentals") that would otherwise
+    // short-circuit the city-wide page walk below its own first page.
+    const renderedCards = document.querySelectorAll('[data-stid="lodging-card-responsive"]').length;
     const rangeMatch = text.match(/\b(\d{1,4})\s*[-–]\s*(\d{1,4})\s+of\s+(\d{1,4})\b/i);
     if (rangeMatch) {
       return {
         visible: Number(rangeMatch[2]) - Number(rangeMatch[1]) + 1,
-        total: Number(rangeMatch[3]),
+        total: Math.max(Number(rangeMatch[3]), renderedCards),
         range: `${rangeMatch[1]}-${rangeMatch[2]} of ${rangeMatch[3]}`,
       };
     }
-    const patterns = [
-      /(\d{1,4})\s+(?:stays?|properties|results?|rentals?)\b/i,
+    // Explicit "showing/viewing N of M" or "N of M stays/properties" carry a real
+    // total (capture group 2) — trust those.
+    const explicitOfTotal = [
       /\b(?:showing|viewing)\s+(\d{1,4})\s+of\s+(\d{1,4})\b/i,
-      /\b(\d{1,4})\s+of\s+(\d{1,4})\s+(?:stays?|properties|results?)\b/i,
+      /\b(\d{1,4})\s+of\s+(\d{1,4})\s+(?:stays?|properties|results?|rentals?|homes?)\b/i,
     ];
-    for (const re of patterns) {
+    for (const re of explicitOfTotal) {
       const m = text.match(re);
-      if (!m) continue;
-      if (m[2]) return { visible: Number(m[1]), total: Number(m[2]) };
-      return { visible: null, total: Number(m[1]) };
+      if (m && m[2]) return { visible: Number(m[1]), total: Math.max(Number(m[2]), renderedCards) };
     }
+    // Bare "N properties/stays/results/rentals" — unreliable (it appears in
+    // related-search and card-snippet text too), so floor it by the rendered
+    // card count rather than trusting it outright.
+    const bare = text.match(/\b(\d{1,4})\s+(?:stays?|properties|results?|rentals?|vacation\s+rentals?|homes?)\b/i);
+    const bareTotal = bare ? Number(bare[1]) : 0;
+    const total = Math.max(bareTotal, renderedCards);
+    if (total > 0) return { visible: null, total };
     return null;
   }).catch(() => null);
 }
@@ -7735,7 +7780,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   }
   // Let the first propertySearchListings GraphQL batch land before pagination replay.
   await networkCapture.settle("post-submit", 12_000);
-  const resultsTotalHint = await readVrboResultsTotalHint(page);
+  let resultsTotalHint = await readVrboResultsTotalHint(page);
   if (resultsTotalHint?.total) {
     log(
       `vrbo_search ${id}: VRBO results page reports total=${resultsTotalHint.total}` +
@@ -7747,6 +7792,23 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     // City-wide inventory must scroll the results list, not the map pane.
     await clickVrboListViewControl(page, "vrbo_search", id).catch(() => false);
     log(`vrbo_search ${id}: city-wide export staying on list view for scroll + GraphQL pagination`);
+    // Re-read the total now that the list view + results-count header are
+    // rendered. The pre-list-view reading above is unreliable: VRBO frequently
+    // hasn't painted the "N-M of T" range yet, so the fallback under-counts and
+    // an under-counted total would cap estimatedPages + trip the walk's
+    // target-reached stop. Take the larger of the two readings.
+    await scrollVrboResultsPaginationIntoView(page).catch(() => {});
+    await boundedPageDelay(page, 700);
+    const settledHint = await readVrboResultsTotalHint(page);
+    if (settledHint?.total && (!resultsTotalHint?.total || settledHint.total > resultsTotalHint.total)) {
+      resultsTotalHint = settledHint;
+      log(
+        `vrbo_search ${id}: refreshed city-wide total after list view total=${settledHint.total}` +
+        `${settledHint.range ? ` range=${settledHint.range}` : ""}`,
+      );
+    }
+    // Scroll back to the top so the page walk harvests page 1 from the start.
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" })).catch(() => {});
   } else if (!networkCapture.getRequestTemplate()) {
     // Bootstrap GraphQL request capture via map view when the first page did not expose a replay template.
     openedMapView = await clickVrboMapControl(page, "vrbo_search", id).catch(() => false);
@@ -7779,9 +7841,15 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
   const graphqlPrefillCount = networkCapture.candidates().length;
   let uiPageWalkStats = null;
   if (exhaustiveCityExport) {
-    const estimatedPages = resultsTotalHint?.total
-      ? Math.ceil(resultsTotalHint.total / 50) + 1
-      : 8;
+    // Floor at 8 pages (≈400 listings): the total hint can read low when VRBO
+    // hasn't painted its results-count text, and a low cap would starve the walk
+    // before it reaches the real end. The walk stops early on its own authoritative
+    // signals (range-end-reached / Next-unavailable / harvest-plateau), and is
+    // hard-capped at 14 pages internally, so a generous floor is safe.
+    const estimatedPages = Math.max(
+      8,
+      resultsTotalHint?.total ? Math.ceil(resultsTotalHint.total / 50) + 2 : 8,
+    );
     uiPageWalkStats = await walkVrboResultsUiPages(page, id, {
       maxPages: estimatedPages,
       targetTotal: resultsTotalHint?.total,

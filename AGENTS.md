@@ -94,6 +94,30 @@ page. Three constraints make it actually reach the full count — don't
    of the two visible months a "20" belongs to (strict metadata → month-grid
    container → left→right column → offset slice). A number-only match clicks the
    current month's cell and the homepage form-guard then rejects the search.
+4. **The city-wide destination is the TOWN, not the resort
+   (`cityWideSearch` in `shared/buy-in-market.ts`, 2026-06-07).** VRBO's
+   autocomplete resolves a resort name like `"Poipu Kai Resort, Koloa, Kauai,
+   Hawaii"` to a tiny landmark region (`regionId 553248635976421921` ≈ 25
+   listings, single page, no Next control) — NOT the town. The operator's
+   reference search is `"Koloa, Hawaii"` (≈145). So `runCityVrboInventoryScan`
+   uses `cityWideSearchLocationForBuyInMarket(community)`, which returns the
+   per-market `cityWideSearch` override (Poipu Kai → `"Koloa, Hawaii"`) and
+   falls back to `searchLocation` for markets that are already town-scoped
+   (Princeville, Keauhou). The resort `searchLocation` is still correct for
+   find-buy-in / replacement flows — don't repoint those at the town. Cache key
+   is `city-vrbo-dropdown-v3` (bumped so v2 resort-scoped pools aren't reused).
+5. **The page walk's `target-reached` stop is subordinate to the Next button,
+   2026-06-07.** `walkVrboResultsUiPages` only honors the `targetTotal` hint as
+   a stop reason when `isVrboResultsNextPageAvailable` is false. The total hint
+   (`readVrboResultsTotalHint`) frequently mis-reads a stray small number (e.g.
+   "25") before VRBO paints its "N-M of T" text, and trusting it short-circuited
+   the walk on page 1 ("145 results, only 48 exported"). While the blue Next
+   control is still clickable there ARE more pages. `range-end-reached` (visible
+   "N-M of T") is authoritative; a `harvest-plateau` guard (2 consecutive pages
+   adding ≤2 cards) backstops the case where the range text never renders and
+   Next never disables. `readVrboResultsTotalHint` is also floored by the
+   rendered lodging-card count so it can never under-count below what's on the
+   page. Don't reinstate an unconditional `target-reached` break.
 
 `exhaustiveCityHarvestAllSorts` (multi-sort union) remains a fallback for when
 the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so

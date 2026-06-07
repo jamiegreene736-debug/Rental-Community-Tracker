@@ -6,7 +6,7 @@ import {
   type CityVrboComboPair,
   type CityVrboListing,
 } from "@shared/city-vrbo-combo";
-import { searchLocationForBuyInMarket } from "@shared/buy-in-market";
+import { cityWideSearchLocationForBuyInMarket } from "@shared/buy-in-market";
 
 export type CityVrboFilterPipeline = {
   rawSidecar: number;
@@ -76,7 +76,10 @@ const CITY_VRBO_QUEUE_BUDGET_MS = Math.max(
 const cityVrboScrapeCache = new Map<string, CityVrboScrapeCacheEntry>();
 
 function cacheKeyForScrape(community: string, checkIn: string, checkOut: string): string {
-  return `${community.toLowerCase()}|${checkIn}|${checkOut}|city-vrbo-dropdown-v2`;
+  // v3: bumped when the city-wide destination switched from the resort
+  // searchLocation to the town-level cityWideSearch (Poipu Kai → "Koloa, Hawaii"),
+  // so stale narrow pools from v2 aren't re-served.
+  return `${community.toLowerCase()}|${checkIn}|${checkOut}|city-vrbo-dropdown-v3`;
 }
 
 function rawCandidateBedroomSignal(candidate: SidecarVrboCandidate): number | null {
@@ -239,7 +242,7 @@ async function scrapeCityVrboPool(args: {
   checkOut: string;
   bedroomPlan: number[];
 }): Promise<CityVrboScrapeCacheEntry | null> {
-  const citySearchTerm = searchLocationForBuyInMarket(args.community)
+  const citySearchTerm = cityWideSearchLocationForBuyInMarket(args.community)
     ?? `${args.community}, Hawaii`;
   const nights = Math.max(
     1,
@@ -321,7 +324,7 @@ export async function runCityVrboInventoryScan(args: {
     mapHarvest: Record<string, unknown> | null;
   };
 }> {
-  const citySearchTerm = searchLocationForBuyInMarket(args.community)
+  const citySearchTerm = cityWideSearchLocationForBuyInMarket(args.community)
     ?? `${args.community}, Hawaii`;
   const nights = Math.max(
     1,

@@ -1366,6 +1366,12 @@ function CityVrboInventoryPanel({
         checkIn,
         checkOut,
       });
+      // A manual "Re-scan city VRBO" click forces a fresh sidecar export. Without
+      // this the server's 20-min city-pool cache re-serves the prior result, so an
+      // operator who sees a short/stale export ("cached pool · N exported") and
+      // clicks Re-scan would keep getting the same cached count. Auto-fill-driven
+      // scans (manualScanRef false) still use the cache to avoid burning a scrape.
+      if (manualScanRef.current) params.set("nocache", "1");
       return apiGetJson<CityVrboInventoryResponse>(`/api/operations/city-vrbo-inventory?${params.toString()}`, signal);
     },
     enabled: effectiveScanNonce > 0 && !!checkIn && !!checkOut,
