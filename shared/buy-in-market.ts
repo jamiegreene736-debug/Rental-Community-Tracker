@@ -25,6 +25,16 @@ export type BuyInMarket = {
   key: string;
   aliases: RegExp[];
   searchLocation: string;
+  // Destination to use for the city-wide VRBO inventory export
+  // (/api/operations/city-vrbo-inventory). `searchLocation` is resort/landmark
+  // scoped on purpose for find-buy-in / replacement flows, but VRBO resolves a
+  // resort name (e.g. "Poipu Kai Resort, …") to a small landmark region (~25
+  // listings) — far narrower than the town the operator expects (Koloa ≈ 145).
+  // The city-wide export is town-scoped by design ("export a city's entire VRBO
+  // inventory, then match by shared title"), so it uses this town-level override
+  // when set. Defaults to `searchLocation` when absent, so town-level markets
+  // (Princeville, Keauhou) are unaffected.
+  cityWideSearch?: string;
   platformSearch?: BuyInPlatformSearchTerms;
   location?: BuyInMarketLocation;
   bounds?: BuyInMarketBounds;
@@ -35,6 +45,10 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Poipu Kai",
     aliases: [/\b(?:poipu(?:\s+kai)?|regency\s+at\s+poipu|villas\s+at\s+poipu\s+kai)\b/i],
     searchLocation: "Poipu Kai Resort, Koloa, Kauai, Hawaii",
+    // VRBO resolves "Poipu Kai Resort" to a ~25-listing landmark region; the
+    // town (Koloa) is what the operator sees (~145) and what the city-wide
+    // export is meant to sweep. See cityWideSearch on the type above.
+    cityWideSearch: "Koloa, Hawaii",
     platformSearch: {
       airbnb: "Poipu Kai Resort, Koloa, HI",
       booking: "Poipu Kai Resort, Koloa, HI",
@@ -177,6 +191,10 @@ export const BUY_IN_MARKET_SEARCH_LOCATIONS: Record<string, string> = Object.fro
   Object.values(BUY_IN_MARKETS).map((market) => [market.key, market.searchLocation]),
 );
 
+export const BUY_IN_MARKET_CITY_WIDE_SEARCH_LOCATIONS: Record<string, string> = Object.fromEntries(
+  Object.values(BUY_IN_MARKETS).map((market) => [market.key, market.cityWideSearch ?? market.searchLocation]),
+);
+
 // Nearby substitute markets for guest-save workflows. These are intentionally
 // curated by market cluster rather than inferred from broad city search:
 // an alternative buy-in should be plausibly explainable to a guest as the
@@ -254,6 +272,16 @@ export function resolveBuyInMarket(input: {
 
 export function searchLocationForBuyInMarket(marketKey: string): string | null {
   return BUY_IN_MARKET_SEARCH_LOCATIONS[marketKey] || null;
+}
+
+/**
+ * Town-level destination for the city-wide VRBO inventory export. Falls back to
+ * the resort/landmark `searchLocation` when a market has no town override, so
+ * markets whose `searchLocation` is already town-scoped (Princeville, Keauhou)
+ * keep their verified behaviour.
+ */
+export function cityWideSearchLocationForBuyInMarket(marketKey: string): string | null {
+  return BUY_IN_MARKET_CITY_WIDE_SEARCH_LOCATIONS[marketKey] || searchLocationForBuyInMarket(marketKey);
 }
 
 /** Map scout rows like "Princeville, Hawaii" to configured market keys (e.g. Princeville). */
