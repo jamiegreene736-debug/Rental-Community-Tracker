@@ -1672,6 +1672,19 @@ function AdminDashboard() {
     netCollected48Hours?: number;
     revenue48Hours?: number;
     bookingCount48Hours?: number;
+    // Past-5-day slice + 3-day-average 12-month forecast.
+    fundsCollected5Days?: number;
+    paymentsTaken5Days?: number;
+    refunds5Days?: number;
+    netCollected5Days?: number;
+    revenue5Days?: number;
+    bookingCount5Days?: number;
+    fundsCollected3Days?: number;
+    revenue3Days?: number;
+    fundsCollectedDailyAvg3Days?: number;
+    revenueDailyAvg3Days?: number;
+    fundsCollectedAnnualProjection?: number;
+    revenueAnnualProjection?: number;
     bookingCount: number;
     refunds?: Array<{
       id: string;
@@ -2584,6 +2597,14 @@ function AdminDashboard() {
                   48 hours: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollected48Hours ?? 0)}
                   {revenueSummary ? ` · ${revenueSummary.paymentsTaken48Hours ?? 0} payment${(revenueSummary.paymentsTaken48Hours ?? 0) === 1 ? "" : "s"}` : ""}
                 </p>
+                <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
+                  Past 5 days: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollected5Days ?? 0)}
+                  {revenueSummary ? ` · ${revenueSummary.paymentsTaken5Days ?? 0} payment${(revenueSummary.paymentsTaken5Days ?? 0) === 1 ? "" : "s"}` : ""}
+                </p>
+                <p className="mt-1 text-xs font-medium leading-snug text-foreground">
+                  12-mo forecast: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollectedAnnualProjection ?? 0)}
+                  <span className="font-normal text-muted-foreground"> · 3-day avg {formatCurrency(Math.round(revenueSummary?.fundsCollectedDailyAvg3Days ?? 0))}/day</span>
+                </p>
                 {revenueSummary && (revenueSummary.refunds30Days ?? 0) > 0 && (
                   <p className="mt-0.5 text-xs leading-snug text-rose-600 dark:text-rose-400">
                     − {formatCurrency(revenueSummary.refunds30Days ?? 0)} refunded · net {formatCurrency(revenueSummary.netCollected30Days ?? ((revenueSummary.fundsCollected30Days ?? 0) - (revenueSummary.refunds30Days ?? 0)))}
@@ -2762,6 +2783,14 @@ function AdminDashboard() {
             <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-booking-revenue-48">
               48 hours: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue48Hours ?? 0)}
               {revenueSummary ? ` · ${revenueSummary.bookingCount48Hours ?? 0} booking${(revenueSummary.bookingCount48Hours ?? 0) === 1 ? "" : "s"}` : ""}
+            </p>
+            <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-booking-revenue-5d">
+              Past 5 days: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue5Days ?? 0)}
+              {revenueSummary ? ` · ${revenueSummary.bookingCount5Days ?? 0} booking${(revenueSummary.bookingCount5Days ?? 0) === 1 ? "" : "s"}` : ""}
+            </p>
+            <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-booking-revenue-forecast">
+              12-mo forecast: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenueAnnualProjection ?? 0)}
+              <span className="font-normal text-muted-foreground"> · 3-day avg {formatCurrency(Math.round(revenueSummary?.revenueDailyAvg3Days ?? 0))}/day</span>
             </p>
           </Card>
           <Dialog>
