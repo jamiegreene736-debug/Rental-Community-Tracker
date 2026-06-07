@@ -95,7 +95,7 @@ import {
 } from "./sidecar-lane";
 import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
-import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts } from "./auto-reply";
+import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
@@ -41025,6 +41025,42 @@ CONSTRAINTS
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "AI draft approval run failed", message: err.message });
+    }
+  });
+
+  // ── Auto-send (Part B) ──
+  // Master toggle for auto-sending clean drafts, the review-window length, and a
+  // manual "send due queued now" trigger. Separate from the draft-generation
+  // toggle above. Default OFF + persisted, so a deploy never silently auto-sends.
+  app.post("/api/inbox/auto-reply/auto-send/toggle", async (req, res) => {
+    try {
+      const { enabled } = req.body as { enabled?: boolean };
+      await setAutoSendConfig({ enabled: !!enabled });
+      res.json(getAutoReplyStatus());
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to toggle auto-send", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/auto-reply/auto-send/config", async (req, res) => {
+    try {
+      const body = req.body as { reviewWindowSeconds?: number; holdRecommendations?: boolean };
+      const cfg: { reviewWindowSeconds?: number; holdRecommendations?: boolean } = {};
+      if (typeof body.reviewWindowSeconds === "number") cfg.reviewWindowSeconds = body.reviewWindowSeconds;
+      if (typeof body.holdRecommendations === "boolean") cfg.holdRecommendations = body.holdRecommendations;
+      await setAutoSendConfig(cfg);
+      res.json(getAutoReplyStatus());
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to update auto-send config", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/auto-reply/auto-send/run", async (_req, res) => {
+    try {
+      const result = await runAutoSendQueue();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Auto-send run failed", message: err.message });
     }
   });
 
