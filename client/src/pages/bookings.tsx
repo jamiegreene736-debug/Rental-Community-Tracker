@@ -1227,6 +1227,8 @@ type CityVrboInventoryResponse = {
     totalCost: number;
     walkMinutes: number | null;
     walkSource: string;
+    matchSource?: string;
+    matchConfidence?: "high" | "medium" | "low";
   } | null;
   sidecar: {
     workerOnline: boolean;
@@ -1541,6 +1543,21 @@ function CityVrboInventoryPanel({
               <p className="font-medium text-emerald-900">
                 Cheapest same-community pair: {comboOption.label} · {fmtMoney(comboOption.totalCost)}
               </p>
+              {data.suggestedPair && (
+                <p className="text-[10px] text-muted-foreground">
+                  Matched via {{
+                    coords: "map distance",
+                    dictionary: "known complex name",
+                    "complex-name": "complex name + unit number",
+                    "shared-phrase": "shared resort phrase",
+                    photo: "shared listing photo",
+                    "property-manager": "same property manager",
+                    unknown: "title match",
+                  }[(data.suggestedPair.matchSource ?? data.suggestedPair.walkSource) as string] ?? "title match"}
+                  {data.suggestedPair.matchConfidence ? ` · ${data.suggestedPair.matchConfidence} confidence` : ""}
+                  {typeof data.suggestedPair.walkMinutes === "number" ? ` · ~${data.suggestedPair.walkMinutes} min walk` : ""}
+                </p>
+              )}
               <p className="text-[10px] text-muted-foreground">
                 Auto-attached when this booking's units were empty. Re-attach the cheapest pair, or override per unit below.
               </p>

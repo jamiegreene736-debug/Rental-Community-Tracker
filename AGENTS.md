@@ -118,6 +118,24 @@ page. Three constraints make it actually reach the full count — don't
    Next never disables. `readVrboResultsTotalHint` is also floored by the
    rendered lodging-card count so it can never under-count below what's on the
    page. Don't reinstate an unconditional `target-reached` break.
+6. **Same-community pairing is cluster-first + multi-signal, not title-substring,
+   2026-06-07 (`shared/city-vrbo-combo.ts`).** `suggestCityVrboComboPair`
+   clusters the city pool by ANY same-community signal — a curated Kauai complex
+   DICTIONARY (`KAUAI_COMPLEX_DICTIONARY`), the classic "X resort/villas/
+   plantation" phrases, a complex-name-before-unit-number heuristic run over the
+   TITLE ONLY (card snippets are full of price/booking boilerplate that pollutes
+   it), plus photo-hash + property-manager hooks for later phases — then picks
+   the cheapest pair matching the bedroom plan WITHIN one cluster. Keep the three
+   precision guards: `STRUCTURAL_STOPWORDS` (bedroom/sleeps/price/photo…),
+   `PLACE_STOPWORDS` (koloa/poipu/kauai alone), and the place+`TYPE_WORDS` reject
+   ("kauai resort" out, "sheraton kauai resort" in). Dictionary regexes MUST be
+   anchored — a greedy `kahala.*poipu` or bare `the cliffs` over-clusters
+   unrelated listings (caught in review). `pickCheapestPlan` dedups by url so a
+   SAME-bedroom plan (3BR+3BR) picks two DISTINCT units; the old
+   `uniquePlan.length < 2` guard wrongly rejected same-bedroom plans entirely.
+   Property-manager is the lowest-confidence signal and yields a pair only when
+   walkability is independently confirmed (never PM-alone — one PM spans the
+   whole town). Coordinates, when present, gate walkability via `pairIsWalkable`.
 
 `exhaustiveCityHarvestAllSorts` (multi-sort union) remains a fallback for when
 the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so
