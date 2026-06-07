@@ -7159,7 +7159,19 @@ export async function registerRoutes(
       // the 30-day equivalents are `revenue` / `bookingCount` below.
       let revenue48Hours = 0;
       let bookingCount48Hours = 0;
+      // Past-5-day slice (collected + revenue) and past-3-day slice used only as
+      // the basis for the 12-month forecast (365 x the 3-day daily average).
+      let fundsCollected5Days = 0;
+      let paymentsTaken5Days = 0;
+      let refunds5Days = 0;
+      let revenue5Days = 0;
+      let bookingCount5Days = 0;
+      let fundsCollected3Days = 0;
+      let refunds3Days = 0;
+      let revenue3Days = 0;
       const fortyEightHourStart = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+      const fiveDayStart = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+      const threeDayStart = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
       const seenPayments = new Set<string>();
       const seenRefunds = new Set<string>();
       const listingRevenue = new Map<string, {
@@ -7253,6 +7265,13 @@ export async function registerRoutes(
             fundsCollected48Hours += amount;
             paymentsTaken48Hours += 1;
           }
+          if (paidAt >= fiveDayStart) {
+            fundsCollected5Days += amount;
+            paymentsTaken5Days += 1;
+          }
+          if (paidAt >= threeDayStart) {
+            fundsCollected3Days += amount;
+          }
         }
 
         for (const refund of reservationRefundItems(reservation)) {
@@ -7287,6 +7306,8 @@ export async function registerRoutes(
             refunds48Hours += amount;
             refundCount48Hours += 1;
           }
+          if (refundedAt >= fiveDayStart) refunds5Days += amount;
+          if (refundedAt >= threeDayStart) refunds3Days += amount;
         }
 
         const madeAt = bookingActivityAt(reservation);
@@ -7304,6 +7325,13 @@ export async function registerRoutes(
               if (madeAt >= fortyEightHourStart) {
                 fundsCollected48Hours += retroactiveCollected;
                 paymentsTaken48Hours += 1;
+              }
+              if (madeAt >= fiveDayStart) {
+                fundsCollected5Days += retroactiveCollected;
+                paymentsTaken5Days += 1;
+              }
+              if (madeAt >= threeDayStart) {
+                fundsCollected3Days += retroactiveCollected;
               }
               payments.push({
                 id: key,
@@ -7331,6 +7359,13 @@ export async function registerRoutes(
         if (madeAt >= fortyEightHourStart) {
           revenue48Hours += amount;
           bookingCount48Hours += 1;
+        }
+        if (madeAt >= fiveDayStart) {
+          revenue5Days += amount;
+          bookingCount5Days += 1;
+        }
+        if (madeAt >= threeDayStart) {
+          revenue3Days += amount;
         }
         const listingKey = reservationListingId || String(listing?.nickname ?? listing?.title ?? "Listing");
         const existingListing = listingRevenue.get(listingKey) ?? {
@@ -7370,6 +7405,14 @@ export async function registerRoutes(
       const highestListingEarner = Array.from(listingRevenue.values())
         .sort((a, b) => b.revenue - a.revenue)[0] ?? null;
 
+      // 12-month forecast = 365 x the past-3-day daily average (operator's
+      // requested basis). Funds uses gross collected (matches the tile headline);
+      // revenue uses booking revenue made.
+      const fundsCollectedDailyAvg3Days = fundsCollected3Days / 3;
+      const revenueDailyAvg3Days = revenue3Days / 3;
+      const fundsCollectedAnnualProjection = Math.round(fundsCollectedDailyAvg3Days * 365);
+      const revenueAnnualProjection = Math.round(revenueDailyAvg3Days * 365);
+
       res.json({
         windowDays,
         revenue,
@@ -7377,6 +7420,20 @@ export async function registerRoutes(
         paymentsTaken30Days,
         fundsCollected48Hours,
         paymentsTaken48Hours,
+        // Past-5-day slice + 3-day-average 12-month forecast for both funds and
+        // booking revenue.
+        fundsCollected5Days,
+        paymentsTaken5Days,
+        refunds5Days,
+        netCollected5Days: fundsCollected5Days - refunds5Days,
+        revenue5Days,
+        bookingCount5Days,
+        fundsCollected3Days,
+        revenue3Days,
+        fundsCollectedDailyAvg3Days,
+        revenueDailyAvg3Days,
+        fundsCollectedAnnualProjection,
+        revenueAnnualProjection,
         // Refunds issued in-window + net-of-refunds collected, so the
         // "payments taken" tile reflects money actually kept.
         refunds30Days,
