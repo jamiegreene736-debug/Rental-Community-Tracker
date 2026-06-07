@@ -168,6 +168,26 @@ page. Three constraints make it actually reach the full count — don't
    coordinate capture. The matcher (`pairIsWalkable`, `walkMinutesBetween`)
    already consumes `lat`/`lng` when present, so detail-page enrichment only has
    to populate them.
+9. **Detail-page enrichment populates coords + galleries on a no-pair result,
+   2026-06-07 (Phase 4).** When `suggestCityVrboComboPair` finds NO same-community
+   pair, `runCityScanCore` opens the top-K cheapest plan-matching candidates'
+   DETAIL pages via the existing `vrbo_photo_scrape` sidecar job (extended to also
+   return `lat`/`lng`/`complexName`/`streetAddress` from JSON-LD → meta →
+   `__APOLLO_STATE__`), attaches coords + gallery photos to the cached listings,
+   and re-runs the matcher. The matcher geo-clusters via `buildGeoClusters`
+   (union-find, ≤`MAX_BUY_IN_WALK_MINUTES`). Load-bearing details:
+   - **Coords are authoritative ONLY for geo + property-manager clusters**
+     (`pairWalkability`). For dictionary/complex/phrase/photo clusters the text/
+     photo key is authoritative and noisy enrichment coords may only *annotate*,
+     never *reject* the pair — otherwise a real "Point at Poipu 721/812" pair gets
+     dropped on slightly-off coords (regression caught in review).
+   - **Null-coord guard:** filters that test coordinates MUST check `!= null`
+     before `Number()` — `Number(null) === 0` passes `isFinite` and would smear
+     coordless listings to (0,0) (false clusters / zero enrichment targets).
+   - Gated: only on no-pair, only if `!detailEnriched` (cached per pool), behind
+     `CITY_VRBO_DETAIL_ENRICH` (default on), bounded (`CITY_VRBO_ENRICH_MAX`=8,
+     budget 75s, concurrency 4), best-effort (a blocked/slow VRBO yields no coords
+     → same as before, no throw). Don't make enrichment run on every scan.
 
 `exhaustiveCityHarvestAllSorts` (multi-sort union) remains a fallback for when
 the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so

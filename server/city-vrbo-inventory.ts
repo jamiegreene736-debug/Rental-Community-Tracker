@@ -59,6 +59,8 @@ type CityVrboScrapeCacheEntry = {
     mapHarvest: Record<string, unknown> | null;
   };
   normalizePipeline: Omit<CityVrboFilterPipeline, "phraseFilter" | "afterPhraseFilter" | "phraseBuckets" | "suggestedPair">;
+  /** Phase 4: set once detail-page coord/gallery enrichment has run for this pool. */
+  detailEnriched?: boolean;
 };
 
 const CITY_VRBO_CACHE_TTL_MS = Math.max(
@@ -74,6 +76,91 @@ const CITY_VRBO_QUEUE_BUDGET_MS = Math.max(
   Number(process.env.CITY_VRBO_INVENTORY_QUEUE_BUDGET_MS ?? 10 * 60_000),
 );
 const cityVrboScrapeCache = new Map<string, CityVrboScrapeCacheEntry>();
+
+// Phase 4 — detail-page enrichment. Coordinates aren't on the VRBO SRP/map
+// (AGENTS city-inventory #8), so when the cheap text/photo signals fail to find
+// a same-community pair we open the listing DETAIL pages of the top few
+// candidates (which DO carry coords + a gallery) and attach lat/lng + gallery
+// photos. The matcher then geo-clusters by walk distance. Only runs on a no-pair
+// result (rare), is bounded + budgeted, and degrades gracefully (a blocked/slow
+// VRBO just yields no coords → same as before). Disable with CITY_VRBO_DETAIL_ENRICH=0.
+const CITY_VRBO_DETAIL_ENRICH = (process.env.CITY_VRBO_DETAIL_ENRICH ?? "1") !== "0";
+const CITY_VRBO_ENRICH_MAX = Math.max(2, Number(process.env.CITY_VRBO_ENRICH_MAX ?? 8));
+// Keep this well under Railway's HTTP edge timeout once added to the main scrape
+// (~60-90s) so the whole request stays comfortably bounded. 75s default.
+const CITY_VRBO_ENRICH_BUDGET_MS = Math.max(20_000, Number(process.env.CITY_VRBO_ENRICH_BUDGET_MS ?? 75_000));
+
+/**
+ * Open the listing detail pages of the top-K cheapest plan-matching candidates
+ * that still lack coordinates, and attach lat/lng + gallery photos in place
+ * (mutating the cached pool so re-scans keep them). Returns how many got coords.
+ * Best-effort: any per-listing failure is swallowed.
+ */
+async function enrichCityListingsWithDetail(
+  entry: CityVrboScrapeCacheEntry,
+  bedroomPlan: number[],
+): Promise<number> {
+  const plan = Array.from(new Set(bedroomPlan.filter((b) => Number.isFinite(b) && b > 0)));
+  if (!plan.length) return 0;
+  // `!= null` BEFORE Number() — Number(null) === 0 passes isFinite, which would
+  // make every coordless listing look already-enriched and select ZERO targets.
+  const hasCoords = (l: CityVrboListing) =>
+    l.lat != null && l.lng != null && Number.isFinite(Number(l.lat)) && Number.isFinite(Number(l.lng));
+  const perBr = Math.max(2, Math.floor(CITY_VRBO_ENRICH_MAX / plan.length));
+  const targets: CityVrboListing[] = [];
+  for (const br of plan) {
+    const rows = entry.listings
+      .filter((l) => Math.round(Number(l.bedrooms)) === br && !hasCoords(l))
+      .sort((a, b) => (a.totalPrice ?? Number.POSITIVE_INFINITY) - (b.totalPrice ?? Number.POSITIVE_INFINITY))
+      .slice(0, perBr);
+    targets.push(...rows);
+  }
+  if (!targets.length) return 0;
+
+  const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
+  const deadline = Date.now() + CITY_VRBO_ENRICH_BUDGET_MS;
+  const queue = [...targets];
+  let enriched = 0;
+  const runOne = async (): Promise<void> => {
+    while (queue.length > 0 && Date.now() < deadline) {
+      const listing = queue.shift();
+      if (!listing) break;
+      try {
+        const remaining = deadline - Date.now();
+        if (remaining < 8_000) break; // not enough time to start another fetch
+        const res = await scrapeVrboPhotosViaSidecar({
+          url: listing.url,
+          maxPhotos: 12,
+          walletBudgetMs: Math.max(15_000, Math.min(60_000, remaining)),
+        });
+        if (Number.isFinite(Number(res.lat)) && Number.isFinite(Number(res.lng))) {
+          listing.lat = res.lat;
+          listing.lng = res.lng;
+          enriched += 1;
+        }
+        if (res.complexName) listing.complexName = res.complexName;
+        if (Array.isArray(res.photos) && res.photos.length) {
+          listing.images = Array.from(new Set([...(listing.images ?? []), ...res.photos])).slice(0, 12);
+        }
+      } catch {
+        // best-effort; a blocked/slow detail page just leaves this listing coordless
+      }
+    }
+  };
+  const concurrency = Math.min(4, targets.length);
+  await Promise.all(Array.from({ length: concurrency }, () => runOne()));
+  // Surface data quality: distinct coords should ≈ enriched count. A low distinct
+  // count vs enriched is a red flag (shared/placeholder coords) worth noticing.
+  const distinctCoords = new Set(
+    targets
+      .filter((l) => l.lat != null && l.lng != null)
+      .map((l) => `${Number(l.lat).toFixed(4)},${Number(l.lng).toFixed(4)}`),
+  ).size;
+  console.log(
+    `[city-vrbo-inventory] detail enrichment: ${enriched}/${targets.length} got coords, ${distinctCoords} distinct location(s)`,
+  );
+  return enriched;
+}
 
 function cacheKeyForScrape(community: string, checkIn: string, checkOut: string): string {
   // v3: bumped when the city-wide destination switched from the resort
@@ -428,13 +515,42 @@ async function runCityScanCore(args: {
     };
   }
 
-  const filtered = applyFiltersToPool(
+  let filtered = applyFiltersToPool(
     scrapeEntry.listings,
     scrapeEntry.normalizePipeline,
     args.bedroomPlan,
     scrapeEntry.nights,
     args.filterPhrase,
   );
+
+  // Phase 4: if the cheap text/photo signals found no same-community pair, open
+  // the top candidates' detail pages to harvest coordinates (+ galleries) and
+  // re-run the matcher — coords let it geo-cluster nearby units the SRP can't.
+  if (
+    CITY_VRBO_DETAIL_ENRICH &&
+    !filtered.suggestedPair &&
+    !scrapeEntry.detailEnriched &&
+    scrapeEntry.listings.length > 0
+  ) {
+    try {
+      const enriched = await enrichCityListingsWithDetail(scrapeEntry, args.bedroomPlan);
+      scrapeEntry.detailEnriched = true;
+      if (enriched > 0) {
+        console.log(
+          `[city-vrbo-inventory] detail-enriched ${enriched} listing(s) with coords; re-running matcher`,
+        );
+        filtered = applyFiltersToPool(
+          scrapeEntry.listings,
+          scrapeEntry.normalizePipeline,
+          args.bedroomPlan,
+          scrapeEntry.nights,
+          args.filterPhrase,
+        );
+      }
+    } catch (e: any) {
+      console.error("[city-vrbo-inventory] detail enrichment failed:", e?.message ?? e);
+    }
+  }
   logFilterPipeline(args.logLabel, args.checkIn, args.checkOut, filtered.filterPipeline, fromCache);
 
   return {

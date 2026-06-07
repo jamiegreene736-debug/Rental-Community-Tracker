@@ -8145,8 +8145,62 @@ async function processVrboPhotoScrape(id, params) {
     return m ? Number.parseInt(m[1], 10) : null;
   }).catch(() => null);
 
-  log(`vrbo_photo_scrape ${id}: ${photos.length} photos, bedText=${bedText ? bedText.length + "c" : "none"}, sleeps=${sleeps ?? "none"}`);
-  await postResult(id, { photos, bedText, sleeps });
+  // Phase 4 (detail enrichment): the listing DETAIL page reliably carries
+  // coordinates (unlike the SRP/map — see AGENTS.md city-inventory #8), so pull
+  // lat/lng + a complex/street identifier here. Multi-source + best-effort:
+  // JSON-LD geo/address → meta tags → __APOLLO_STATE__/embedded-JSON regex.
+  const geo = await page.evaluate(() => {
+    const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : null; };
+    let lat = null, lng = null, complexName = null, streetAddress = null;
+    // 1) JSON-LD structured data
+    for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const data = JSON.parse(s.textContent || "{}");
+        const arr = Array.isArray(data) ? data : [data];
+        for (const obj of arr) {
+          const nodes = [obj, ...(Array.isArray(obj && obj["@graph"]) ? obj["@graph"] : [])];
+          for (const node of nodes) {
+            if (!node || typeof node !== "object") continue;
+            if (lat == null && node.geo) {
+              const la = num(node.geo.latitude), ln = num(node.geo.longitude);
+              if (la != null && ln != null) { lat = la; lng = ln; }
+            }
+            if (!streetAddress && node.address && typeof node.address === "object") {
+              const a = node.address;
+              streetAddress = [a.streetAddress, a.addressLocality].filter(Boolean).join(", ") || null;
+            }
+            if (!complexName && typeof node.name === "string" && node.name.trim()) complexName = node.name.trim().slice(0, 120);
+          }
+        }
+      } catch {}
+    }
+    // 2) Meta tags (place:location:latitude / og:latitude / geo.position "lat;lng")
+    if (lat == null) {
+      const mLat = document.querySelector('meta[property="place:location:latitude"], meta[property="og:latitude"]');
+      const mLng = document.querySelector('meta[property="place:location:longitude"], meta[property="og:longitude"]');
+      if (mLat && mLng) { lat = num(mLat.getAttribute("content")); lng = num(mLng.getAttribute("content")); }
+      if (lat == null) {
+        const gp = document.querySelector('meta[name="geo.position"]')?.getAttribute("content") || "";
+        const m = gp.match(/(-?\d+\.\d+)[;, ]\s*(-?\d+\.\d+)/);
+        if (m) { lat = num(m[1]); lng = num(m[2]); }
+      }
+    }
+    // 3) __APOLLO_STATE__ / embedded-JSON regex
+    if (lat == null) {
+      let txt = "";
+      try { txt = JSON.stringify(window.__APOLLO_STATE__ || {}); } catch {}
+      let m = txt.match(/"latitude"\s*:\s*"?(-?\d+\.\d+)"?\s*,\s*"longitude"\s*:\s*"?(-?\d+\.\d+)"?/);
+      if (!m) m = document.documentElement.outerHTML.match(/"latitude"\s*:\s*"?(-?\d+\.\d+)"?\s*,\s*"longitude"\s*:\s*"?(-?\d+\.\d+)"?/);
+      if (m) { lat = num(m[1]); lng = num(m[2]); }
+    }
+    // Sanity: reject obviously bogus coords (0,0 / out of range).
+    if (lat != null && lng != null && (Math.abs(lat) < 0.01 && Math.abs(lng) < 0.01)) { lat = null; lng = null; }
+    if (lat != null && (lat < -90 || lat > 90 || lng < -180 || lng > 180)) { lat = null; lng = null; }
+    return { lat, lng, complexName, streetAddress };
+  }).catch(() => ({ lat: null, lng: null, complexName: null, streetAddress: null }));
+
+  log(`vrbo_photo_scrape ${id}: ${photos.length} photos, bedText=${bedText ? bedText.length + "c" : "none"}, sleeps=${sleeps ?? "none"}, geo=${geo.lat != null ? `${geo.lat},${geo.lng}` : "none"}${geo.streetAddress ? ` addr="${geo.streetAddress.slice(0, 40)}"` : ""}`);
+  await postResult(id, { photos, bedText, sleeps, lat: geo.lat, lng: geo.lng, complexName: geo.complexName, streetAddress: geo.streetAddress });
 }
 
 // ─────────────────────── Booking.com search ─────────────────────────
