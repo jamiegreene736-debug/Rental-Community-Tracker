@@ -11,20 +11,107 @@ import { resolveIslandRegion } from "../shared/area-identity";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import type { AutoReplyLog, InsertAutoReplyLog } from "@shared/schema";
 
-type AutoReplyStatus = "sent" | "drafted" | "flagged" | "dismissed" | "error";
+type AutoReplyStatus = "sent" | "queued" | "drafted" | "flagged" | "dismissed" | "error";
 
 let _enabled = true;
 let _isRunning = false;
 let _lastRunAt: Date | null = null;
-let _lastRunResult: { processed: number; sent: number; drafted: number; flagged: number; errors: number; message: string } | null = null;
+let _lastRunResult: { processed: number; sent: number; drafted: number; flagged: number; queued: number; errors: number; message: string } | null = null;
+
+// ── Auto-send (Part B) ─────────────────────────────────────────────────────
+// Whether clean drafts (status "drafted") get auto-sent. ORTHOGONAL to _enabled
+// (which controls whether drafts are GENERATED at all). Default OFF. Persisted in
+// app_settings so a Railway restart can't silently flip it on/off. A clean draft
+// is QUEUED with a sendAfter deadline (the review window) and a separate send
+// pass (runAutoSendQueue) sends it only if it's still uncontested at that point.
+const SETTING_AUTOSEND_ENABLED = "auto_send.master_enabled";
+const SETTING_REVIEW_WINDOW = "auto_send.review_window_seconds";
+const SETTING_HOLD_RECOMMENDATIONS = "auto_send.hold_recommendations";
+let _autoSendEnabled = false;
+let _reviewWindowSeconds = 90;
+let _holdRecommendations = true; // week-1 training wheels: keep area-recommendation drafts in the human queue
+let _autoSendConfigLoaded = false;
+let _isAutoSendRunning = false;
+let _lastAutoSendAt: Date | null = null;
+let _lastAutoSendResult: { due: number; sent: number; intercepted: number; skipped: number; errors: number; message: string } | null = null;
 
 export function getAutoReplyStatus() {
-  return { enabled: _enabled, running: _isRunning, lastRunAt: _lastRunAt, lastRunResult: _lastRunResult };
+  return {
+    enabled: _enabled,
+    running: _isRunning,
+    lastRunAt: _lastRunAt,
+    lastRunResult: _lastRunResult,
+    autoSendEnabled: _autoSendEnabled,
+    reviewWindowSeconds: _reviewWindowSeconds,
+    holdRecommendations: _holdRecommendations,
+    lastAutoSendAt: _lastAutoSendAt,
+    lastAutoSendResult: _lastAutoSendResult,
+  };
 }
 
 export function setAutoReplyEnabled(enabled: boolean) {
   _enabled = enabled;
   console.log(`[auto-reply] ${enabled ? "Enabled" : "Disabled"}`);
+}
+
+export async function loadAutoSendConfig(): Promise<void> {
+  try {
+    const [enabled, window, hold] = await Promise.all([
+      storage.getSetting(SETTING_AUTOSEND_ENABLED),
+      storage.getSetting(SETTING_REVIEW_WINDOW),
+      storage.getSetting(SETTING_HOLD_RECOMMENDATIONS),
+    ]);
+    if (enabled != null) _autoSendEnabled = enabled === "true";
+    if (window != null) {
+      const n = Number(window);
+      if (Number.isFinite(n) && n >= 0) _reviewWindowSeconds = Math.min(Math.round(n), 3600);
+    }
+    if (hold != null) _holdRecommendations = hold !== "false";
+    _autoSendConfigLoaded = true;
+    console.log(`[auto-reply] auto-send config: enabled=${_autoSendEnabled} window=${_reviewWindowSeconds}s holdRecommendations=${_holdRecommendations}`);
+  } catch (err) {
+    // Fail safe: leave auto-send OFF if the settings table isn't ready yet.
+    console.warn(`[auto-reply] could not load auto-send config (staying OFF): ${(err as Error).message}`);
+  }
+}
+
+export function getAutoSendConfig() {
+  return { autoSendEnabled: _autoSendEnabled, reviewWindowSeconds: _reviewWindowSeconds, holdRecommendations: _holdRecommendations };
+}
+
+export async function setAutoSendConfig(cfg: { enabled?: boolean; reviewWindowSeconds?: number; holdRecommendations?: boolean }): Promise<void> {
+  if (typeof cfg.enabled === "boolean") {
+    _autoSendEnabled = cfg.enabled;
+    await storage.setSetting(SETTING_AUTOSEND_ENABLED, cfg.enabled ? "true" : "false");
+    // Kill switch: when turned OFF, revert any still-queued drafts back to the
+    // human approval queue so they show as normal pending drafts, not pending sends.
+    if (!cfg.enabled) {
+      try {
+        const queued = (await storage.getAutoReplyLogs(300)).filter((l) => l.status === "queued" && !l.replySent);
+        for (const l of queued) await storage.updateAutoReplyLog(l.id, { status: "drafted", sendAfter: null });
+        if (queued.length) console.log(`[auto-reply] auto-send disabled — reverted ${queued.length} queued draft(s) to manual review`);
+      } catch (e) {
+        console.warn(`[auto-reply] failed to revert queued drafts on disable: ${(e as Error).message}`);
+      }
+    }
+    console.log(`[auto-reply] auto-send ${cfg.enabled ? "ENABLED" : "DISABLED"}`);
+  }
+  if (typeof cfg.reviewWindowSeconds === "number" && Number.isFinite(cfg.reviewWindowSeconds) && cfg.reviewWindowSeconds >= 0) {
+    _reviewWindowSeconds = Math.min(Math.round(cfg.reviewWindowSeconds), 3600);
+    await storage.setSetting(SETTING_REVIEW_WINDOW, String(_reviewWindowSeconds));
+  }
+  if (typeof cfg.holdRecommendations === "boolean") {
+    _holdRecommendations = cfg.holdRecommendations;
+    await storage.setSetting(SETTING_HOLD_RECOMMENDATIONS, cfg.holdRecommendations ? "true" : "false");
+  }
+  _autoSendConfigLoaded = true;
+}
+
+// Heuristic: does the guest message look like an area/recommendation ask? Used by
+// the `holdRecommendations` training-wheel to keep world-knowledge area answers in
+// the human queue (they're the least verifiable, riskiest-to-auto-send category).
+function looksLikeAreaQuestion(text: string): boolean {
+  return /\b(restaurant|restaurants|eat|eating|dining|dinner|lunch|breakfast|food|beach|beaches|snorkel|surf|hike|hiking|things to do|activities|activity|attraction|recommend|recommendation|nearby|near (?:by|here|us)|around here|get(?:ting)? around|rental car|grocery|groceries|shopping|luau|tour|tours|sightseeing|what to do|where (?:to|should)|weather)\b/i.test(text);
 }
 
 // --- Safety classifier (input side) ---------------------------------------
@@ -941,18 +1028,18 @@ export async function generateAutoReplyDraft(params: {
 
 export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>> {
   if (!_enabled) {
-    const r = { processed: 0, sent: 0, drafted: 0, flagged: 0, errors: 0, message: "AI draft scheduling is paused" };
+    const r = { processed: 0, sent: 0, drafted: 0, flagged: 0, queued: 0, errors: 0, message: "AI draft scheduling is paused" };
     _lastRunAt = new Date();
     _lastRunResult = r;
     return r;
   }
   if (_isRunning) {
-    return _lastRunResult ?? { processed: 0, sent: 0, drafted: 0, flagged: 0, errors: 0, message: "AI draft scheduler is already running" };
+    return _lastRunResult ?? { processed: 0, sent: 0, drafted: 0, flagged: 0, queued: 0, errors: 0, message: "AI draft scheduler is already running" };
   }
 
   _isRunning = true;
   console.log("[auto-reply] Polling Guesty inbox for open conversations awaiting a host reply...");
-  let processed = 0, sent = 0, drafted = 0, flagged = 0, errors = 0;
+  let processed = 0, sent = 0, drafted = 0, flagged = 0, queued = 0, errors = 0;
 
   try {
     const open = await fetchOpenConversations(100);
@@ -1016,6 +1103,7 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
         let flagReason: string | null = null;
         let errorMessage: string | null = null;
         let replySent = false;
+        let sendAfter: Date | null = null;
         let toolsUsedJson: string | null = null;
 
         if (safety.risky) {
@@ -1064,8 +1152,24 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
               flagged++;
               console.warn(`[auto-reply] output blocked for conversation ${conv._id}: ${outputSafety.reason}`);
             } else {
-              status = "drafted";
-              drafted++;
+              // Clean draft. Auto-send (Part B): when the master toggle is ON,
+              // QUEUE it with a review-window deadline instead of holding for
+              // approval — UNLESS a hard exclusion applies. The send pass
+              // (runAutoSendQueue) sends due queued rows that are still
+              // uncontested. When the toggle is OFF this is identical to before.
+              const isAreaAsk = looksLikeAreaQuestion(guestMessage);
+              const canAutoSend =
+                _autoSendEnabled &&
+                !!listingId &&                             // unmapped/blind → never auto-send
+                !(_holdRecommendations && isAreaAsk);      // training wheels: hold area answers
+              if (canAutoSend) {
+                status = "queued";
+                sendAfter = new Date(Date.now() + _reviewWindowSeconds * 1000);
+                queued++;
+              } else {
+                status = "drafted";
+                drafted++;
+              }
             }
           } else {
             status = "error";
@@ -1089,6 +1193,8 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
           flagReason,
           errorMessage,
           toolsUsed: toolsUsedJson,
+          autoSent: false,
+          sendAfter,
         };
         await storage.createAutoReplyLog(logEntry);
       } catch (err) {
@@ -1103,8 +1209,8 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
 
   _lastRunAt = new Date();
   _lastRunResult = {
-    processed, sent, drafted, flagged, errors,
-    message: `Processed ${processed} — drafted ${drafted}, flagged ${flagged}, errors ${errors}`,
+    processed, sent, drafted, flagged, queued, errors,
+    message: `Processed ${processed} — drafted ${drafted}, queued ${queued}, flagged ${flagged}, errors ${errors}`,
   };
   console.log(`[auto-reply] ${_lastRunResult.message}`);
   _isRunning = false;
@@ -1168,11 +1274,15 @@ export async function saveDraftedReply(logId: number, replyDraft: string): Promi
   const draft = replyDraft.trim();
   if (!draft) return { ok: false, error: "Draft cannot be blank" };
 
+  // Editing a queued (about-to-auto-send) draft cancels the pending send and
+  // returns it to the human queue. An error draft also reverts to drafted.
+  const revertToDrafted = log.status === "error" || log.status === "queued";
   await storage.updateAutoReplyLog(logId, {
     replyDraft: draft,
     replySent: false,
-    status: log.status === "error" ? "drafted" : log.status,
+    status: revertToDrafted ? "drafted" : log.status,
     errorMessage: null,
+    ...(log.status === "queued" ? { sendAfter: null } : {}),
   });
   return { ok: true };
 }
@@ -1193,8 +1303,9 @@ export async function analyzeAndSaveDraftedReply(logId: number, replyDraft: stri
   await storage.updateAutoReplyLog(logId, {
     replyDraft: draft,
     replySent: false,
-    status: log.status === "error" ? "drafted" : log.status,
+    status: (log.status === "error" || log.status === "queued") ? "drafted" : log.status,
     errorMessage: null,
+    ...(log.status === "queued" ? { sendAfter: null } : {}),
   });
   await storage.createAutoReplyStyleExample({
     autoReplyLogId: logId,
@@ -1228,14 +1339,95 @@ export async function sendDraftedReply(logId: number, replyDraft?: string): Prom
 export async function dismissReply(logId: number): Promise<{ ok: boolean; error?: string }> {
   const log = await storage.getAutoReplyLog(logId);
   if (!log) return { ok: false, error: "Log not found" };
-  await storage.updateAutoReplyLog(logId, { status: "dismissed" });
+  await storage.updateAutoReplyLog(logId, { status: "dismissed", sendAfter: null });
   return { ok: true };
 }
 
+// Auto-send pass (Part B). Sends "queued" drafts whose review window has elapsed,
+// re-validating each immediately before send so the operator (or a guest's own
+// host reply) always wins. No-op when auto-send is OFF.
+export async function runAutoSendQueue(): Promise<{ due: number; sent: number; intercepted: number; skipped: number; errors: number; message: string }> {
+  if (!_autoSendEnabled) {
+    _lastAutoSendResult = { due: 0, sent: 0, intercepted: 0, skipped: 0, errors: 0, message: "auto-send off" };
+    return _lastAutoSendResult;
+  }
+  if (_isAutoSendRunning) {
+    return _lastAutoSendResult ?? { due: 0, sent: 0, intercepted: 0, skipped: 0, errors: 0, message: "already running" };
+  }
+  _isAutoSendRunning = true;
+  let due = 0, sent = 0, intercepted = 0, skipped = 0, errors = 0;
+  try {
+    const candidates = await storage.getDueQueuedAutoReplyLogs(new Date(), 100);
+    due = candidates.length;
+    const byConversation = new Map<string, AutoReplyLog[]>();
+    for (const log of candidates) {
+      const list = byConversation.get(log.conversationId) ?? [];
+      list.push(log);
+      byConversation.set(log.conversationId, list);
+    }
+    for (const [conversationId, logs] of Array.from(byConversation.entries())) {
+      if (!_autoSendEnabled) { skipped += logs.length; continue; } // kill switch mid-pass
+      let posts: GuestyPost[] = [];
+      try { posts = await fetchConversationPosts(conversationId); } catch { posts = []; }
+      for (const queuedLog of logs) {
+        try {
+          // Re-fetch: the operator may have edited / declined / sent it, or a
+          // kill-switch may have already reverted it.
+          const fresh = await storage.getAutoReplyLog(queuedLog.id);
+          if (!fresh || fresh.replySent || fresh.status !== "queued") { intercepted++; continue; }
+          const draft = (fresh.replyDraft ?? "").trim();
+          if (!draft) { await storage.updateAutoReplyLog(fresh.id, { status: "drafted", sendAfter: null }); skipped++; continue; }
+          // A human already replied after the trigger → don't send.
+          if (posts.length > 0 && hasManualHostReplyAfterTrigger(fresh, posts)) {
+            await storage.updateAutoReplyLog(fresh.id, { status: "dismissed", sendAfter: null });
+            intercepted++;
+            continue;
+          }
+          // Final output re-scan (catches an edited-but-still-queued draft).
+          const outputSafety = classifyOutput(draft);
+          if (outputSafety.risky) {
+            await storage.updateAutoReplyLog(fresh.id, { status: "flagged", flagReason: `Output filter: ${outputSafety.reason}`, sendAfter: null });
+            intercepted++;
+            continue;
+          }
+          await sendReply(fresh.conversationId, draft, fresh.channel ? { type: fresh.channel } : undefined);
+          await storage.updateAutoReplyLog(fresh.id, { replyDraft: draft, replySent: true, status: "sent", autoSent: true, errorMessage: null, sendAfter: null });
+          sent++;
+          console.log(`[auto-reply] AUTO-SENT draft ${fresh.id} (conversation ${fresh.conversationId})`);
+        } catch (err) {
+          errors++;
+          await storage.updateAutoReplyLog(queuedLog.id, { status: "flagged", flagReason: `Auto-send failed: ${(err as Error).message}`, sendAfter: null }).catch(() => {});
+          console.error(`[auto-reply] auto-send error for log ${queuedLog.id}: ${(err as Error).message}`);
+        }
+      }
+    }
+  } catch (err) {
+    errors++;
+    console.error(`[auto-reply] runAutoSendQueue top-level error: ${(err as Error).message}`);
+  }
+  _lastAutoSendAt = new Date();
+  _lastAutoSendResult = {
+    due, sent, intercepted, skipped, errors,
+    message: `Auto-send: ${sent} sent, ${intercepted} intercepted, ${skipped} skipped, ${errors} errors (of ${due} due)`,
+  };
+  if (sent > 0 || intercepted > 0 || errors > 0) console.log(`[auto-reply] ${_lastAutoSendResult.message}`);
+  _isAutoSendRunning = false;
+  return _lastAutoSendResult;
+}
+
 export function startAutoReplyScheduler() {
+  // Load the persisted auto-send config before anything sends (defaults keep it
+  // OFF until this resolves, so a cold boot never auto-sends unexpectedly).
+  loadAutoSendConfig().catch(() => {});
+
   // Run immediately on boot so the current unread/open Guesty backlog gets
   // drafts after deploy, then keep polling for new arrivals.
   runAutoReply().catch(() => {});
+
+  // Separate send pass (honors the review window with ~20s granularity).
+  setInterval(() => {
+    runAutoSendQueue().catch(() => {});
+  }, 20 * 1000);
 
   const INTERVAL_MS = 30 * 1000; // near-real-time polling without webhooks
   setInterval(() => {

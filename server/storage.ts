@@ -29,7 +29,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
+  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, appSettings, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
   type PropertyMarketRate, type InsertPropertyMarketRate,
   type PricingUpdateLog, type InsertPricingUpdateLog,
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
@@ -230,6 +230,9 @@ export interface IStorage {
   getAutoReplyLog(id: number): Promise<AutoReplyLog | undefined>;
   updateAutoReplyLog(id: number, data: Partial<InsertAutoReplyLog>): Promise<AutoReplyLog | undefined>;
   getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined>;
+  getDueQueuedAutoReplyLogs(now: Date, limit?: number): Promise<AutoReplyLog[]>;
+  getSetting(key: string): Promise<string | undefined>;
+  setSetting(key: string, value: string): Promise<void>;
   createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample>;
   getRecentAutoReplyStyleExamples(limit?: number): Promise<AutoReplyStyleExample[]>;
 
@@ -990,6 +993,28 @@ export class DatabaseStorage implements IStorage {
   async getAutoReplyLogByTriggerPostId(postId: string): Promise<AutoReplyLog | undefined> {
     const [row] = await db.select().from(autoReplyLog).where(eq(autoReplyLog.triggerPostId, postId)).limit(1);
     return row;
+  }
+
+  async getDueQueuedAutoReplyLogs(now: Date, limit = 200): Promise<AutoReplyLog[]> {
+    // Auto-send candidates: queued, not yet sent, and past their review window.
+    return db.select().from(autoReplyLog)
+      .where(and(
+        eq(autoReplyLog.status, "queued"),
+        eq(autoReplyLog.replySent, false),
+        lte(autoReplyLog.sendAfter, now),
+      ))
+      .orderBy(autoReplyLog.sendAfter)
+      .limit(limit);
+  }
+
+  async getSetting(key: string): Promise<string | undefined> {
+    const [row] = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
+    return row?.value;
+  }
+
+  async setSetting(key: string, value: string): Promise<void> {
+    await db.insert(appSettings).values({ key, value, updatedAt: new Date() })
+      .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: new Date() } });
   }
 
   async createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample> {

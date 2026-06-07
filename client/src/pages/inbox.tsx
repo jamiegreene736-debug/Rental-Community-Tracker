@@ -3308,16 +3308,43 @@ export default function InboxPage() {
   });
   const [editedAutoReplyDrafts, setEditedAutoReplyDrafts] = useState<Record<number, string>>({});
   const pendingAutoReplyLogs = autoReplyLogs.filter((log: any) =>
-    !log.replySent && log.status !== "dismissed" && (log.status === "drafted" || log.status === "flagged" || log.status === "error")
+    !log.replySent && log.status !== "dismissed" && (log.status === "queued" || log.status === "drafted" || log.status === "flagged" || log.status === "error")
   );
   const autoReplyDraftValue = (log: any) =>
     Object.prototype.hasOwnProperty.call(editedAutoReplyDrafts, log.id)
       ? editedAutoReplyDrafts[log.id]
       : (log.replyDraft ?? "");
 
+  // Live 1s countdown for queued (auto-sending) drafts — only ticks while at
+  // least one queued draft is on screen.
+  const hasQueuedDrafts = pendingAutoReplyLogs.some((l: any) => l.status === "queued");
+  const [autoSendNowMs, setAutoSendNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasQueuedDrafts) return;
+    const t = setInterval(() => setAutoSendNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [hasQueuedDrafts]);
+
   const toggleAutoReply = useMutation({
     mutationFn: (enabled: boolean) =>
       apiRequest("POST", "/api/inbox/auto-reply/toggle", { enabled }).then(r => r.json()),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] }),
+  });
+
+  const toggleAutoSend = useMutation({
+    mutationFn: (enabled: boolean) =>
+      apiRequest("POST", "/api/inbox/auto-reply/auto-send/toggle", { enabled }).then(r => r.json()),
+    onSuccess: (_d, enabled) => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] });
+      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
+      toast({ title: enabled ? "Auto-send ON" : "Auto-send OFF", description: enabled ? "Clean drafts will send themselves after the review window." : "Queued drafts moved back to manual review." });
+    },
+    onError: (e: any) => toast({ title: "Failed to toggle auto-send", description: e.message, variant: "destructive" }),
+  });
+
+  const setAutoSendWindow = useMutation({
+    mutationFn: (reviewWindowSeconds: number) =>
+      apiRequest("POST", "/api/inbox/auto-reply/auto-send/config", { reviewWindowSeconds }).then(r => r.json()),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] }),
   });
 
@@ -5201,7 +5228,10 @@ export default function InboxPage() {
                       <Bot className="h-5 w-5" /> AI Draft Approval
                     </CardTitle>
                     <CardDescription className="mt-1">
-                      Checks Guesty every 30 seconds and prepares John Carpenter drafts with the standard signature. Nothing is sent until you approve it.
+                      Checks Guesty every 30 seconds and prepares John Carpenter drafts with the standard signature.
+                      {autoReplyStatus?.autoSendEnabled
+                        ? " Clean drafts auto-send after the review window; flagged/errored/unmapped drafts always wait for you."
+                        : " Nothing is sent until you approve it."}
                     </CardDescription>
                   </div>
                 </div>
@@ -5236,6 +5266,44 @@ export default function InboxPage() {
                     </span>
                   )}
                 </div>
+
+                {/* Auto-send (Part B): sends clean drafts automatically after the review window. */}
+                <div className="mt-4 pt-3 border-t flex items-center gap-4 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="auto-send-toggle"
+                      checked={!!autoReplyStatus?.autoSendEnabled}
+                      onCheckedChange={(v) => toggleAutoSend.mutate(v)}
+                      className="data-[state=checked]:bg-amber-600"
+                      data-testid="switch-auto-send"
+                    />
+                    <Label htmlFor="auto-send-toggle" className="text-sm cursor-pointer font-medium">
+                      {autoReplyStatus?.autoSendEnabled ? "Auto-sending clean drafts" : "Auto-send off"}
+                    </Label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-xs text-muted-foreground">Review window</Label>
+                    <select
+                      className="h-8 rounded-md border bg-background px-2 text-sm"
+                      value={String(autoReplyStatus?.reviewWindowSeconds ?? 90)}
+                      onChange={(e) => setAutoSendWindow.mutate(Number(e.target.value))}
+                      data-testid="select-auto-send-window"
+                    >
+                      <option value="0">Send immediately</option>
+                      <option value="60">1 minute</option>
+                      <option value="90">90 seconds</option>
+                      <option value="180">3 minutes</option>
+                      <option value="300">5 minutes</option>
+                      <option value="600">10 minutes</option>
+                    </select>
+                  </div>
+                </div>
+                {autoReplyStatus?.autoSendEnabled && (
+                  <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                    Drafts that pass every safety check send automatically after the review window. Flagged, errored, and unmapped-listing drafts are never auto-sent — and you can <strong>Hold</strong> any pending one before it goes.
+                    {autoReplyStatus?.holdRecommendations && " Area-recommendation answers are held for your review."}
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -5264,9 +5332,17 @@ export default function InboxPage() {
                             )}
                             {log.status === "sent" && (
                               <Badge className="bg-green-600 text-white text-[10px]">
-                                <CheckCircle className="h-2.5 w-2.5 mr-1" /> Approved
+                                <CheckCircle className="h-2.5 w-2.5 mr-1" /> {log.autoSent ? "Auto-sent" : "Approved"}
                               </Badge>
                             )}
+                            {log.status === "queued" && (() => {
+                              const remaining = log.sendAfter ? Math.max(0, Math.round((new Date(log.sendAfter).getTime() - autoSendNowMs) / 1000)) : 0;
+                              return (
+                                <Badge className="bg-amber-600 text-white text-[10px]" data-testid={`badge-queued-${log.id}`}>
+                                  <Clock className="h-2.5 w-2.5 mr-1" /> {remaining > 0 ? `Auto-sending in ${remaining}s` : "Auto-sending…"}
+                                </Badge>
+                              );
+                            })()}
                             {log.status === "drafted" && (
                               <Badge className="bg-blue-600 text-white text-[10px]">
                                 <Pencil className="h-2.5 w-2.5 mr-1" /> Needs Approval
@@ -5329,6 +5405,18 @@ export default function InboxPage() {
 
                       {!log.replySent && log.status !== "dismissed" && (
                         <div className="flex gap-2 mt-3 pt-3 border-t flex-wrap">
+                          {log.status === "queued" && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-amber-400 text-amber-700 hover:bg-amber-50 dark:text-amber-300"
+                              onClick={() => saveDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
+                              disabled={saveDraftReply.isPending || !autoReplyDraftValue(log).trim()}
+                              data-testid={`button-hold-draft-${log.id}`}
+                            >
+                              <Clock className="h-3.5 w-3.5 mr-1.5" /> Hold
+                            </Button>
+                          )}
                           {log.replyDraft && (
                             <>
                               <Button

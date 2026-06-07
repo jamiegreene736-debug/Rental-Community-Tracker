@@ -870,7 +870,9 @@ export type InsertGuestyPropertyMap = z.infer<typeof insertGuestyPropertyMapSche
 export type GuestyPropertyMap = typeof guestyPropertyMap.$inferSelect;
 
 // Audit log of every auto-reply attempt. One row per guest post the agent evaluates.
-// status: "sent" (auto-sent to guest), "drafted" (draft saved, awaiting human review),
+// status: "sent" (sent to guest — human-clicked OR auto-sent, see autoSent),
+//         "queued" (clean draft waiting out the auto-send review window),
+//         "drafted" (draft saved, awaiting human review),
 //         "flagged" (risky content — human must handle), "dismissed", "error"
 export const autoReplyLog = pgTable("auto_reply_log", {
   id: serial("id").primaryKey(),
@@ -884,10 +886,15 @@ export const autoReplyLog = pgTable("auto_reply_log", {
   guestMessage: text("guest_message").notNull(),
   replyDraft: text("reply_draft"),     // what Claude generated (null on error)
   replySent: boolean("reply_sent").notNull().default(false),
-  status: text("status").notNull(),    // sent | drafted | flagged | dismissed | error
+  status: text("status").notNull(),    // sent | queued | drafted | flagged | dismissed | error
   flagReason: text("flag_reason"),
   errorMessage: text("error_message"),
   toolsUsed: text("tools_used"),       // JSON-encoded list of { name, args } for audit
+  // Auto-send (Part B). autoSent distinguishes a machine send from a human
+  // "Send" click; sendAfter is the review-window deadline for a "queued" row —
+  // the send pass only sends rows whose sendAfter <= now (and still uncontested).
+  autoSent: boolean("auto_sent").notNull().default(false),
+  sendAfter: timestamp("send_after"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -917,6 +924,16 @@ export type InsertAutoReplyLog = z.infer<typeof insertAutoReplyLogSchema>;
 export type AutoReplyLog = typeof autoReplyLog.$inferSelect;
 export type InsertAutoReplyStyleExample = z.infer<typeof insertAutoReplyStyleExampleSchema>;
 export type AutoReplyStyleExample = typeof autoReplyStyleExamples.$inferSelect;
+
+// Tiny persisted key-value store for operator-controlled toggles that must
+// survive restarts (the auto-send master toggle / review window). Value is a
+// JSON-encoded string. Read via storage.getSetting / written via setSetting.
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type AppSetting = typeof appSettings.$inferSelect;
 
 // ── Booking-confirmation auto-send dedup ──
 // One row per reservation we've sent the auto-confirmation message to.
