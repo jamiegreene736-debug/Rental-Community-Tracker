@@ -102,6 +102,14 @@ import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
+import {
+  buildCommunityKnowledge,
+  getCommunityKnowledgeBySlug,
+  renderCommunityKnowledgeHtml,
+  renderCommunityKnowledgeIndexHtml,
+  renderCommunityMarkdown,
+  renderAllCommunitiesMarkdown,
+} from "./community-knowledge";
 import { filterNonRentalUnitPhotos, UNIT_PHOTO_VISION_VERSION } from "./unit-photo-vision";
 import {
   researchCommunitiesForCity,
@@ -8678,6 +8686,51 @@ Requirements:
       migratingAlternativeTokens.delete(token);
     }
   };
+
+  // ── Community knowledge pages (public, crawlable) ─────────────────────────
+  // Feed the Quo (formerly OpenPhone) Sona AI voice agent's knowledge base.
+  // These are guest-safe, login-free reference pages (see community-knowledge.ts
+  // for the data + the safety stack, and server/auth.ts for the /community-info
+  // allowlist entry). Point Sona's website crawler at /community-info, or
+  // download the Markdown bundle to upload/paste as knowledge pages.
+  app.get("/community-info", (_req, res) => {
+    res.set("Content-Type", "text/html; charset=utf-8");
+    res.send(renderCommunityKnowledgeIndexHtml());
+  });
+
+  app.get("/community-info.md", (_req, res) => {
+    res.set("Content-Type", "text/markdown; charset=utf-8");
+    res.set("Content-Disposition", 'inline; filename="community-knowledge.md"');
+    res.send(renderAllCommunitiesMarkdown());
+  });
+
+  // JSON export of the aggregated records (handy for our own tooling). This sits
+  // under /community-info (public) on purpose so the operator can grab it without
+  // the portal cookie; it carries only the same guest-safe fields the HTML shows.
+  app.get("/community-info.json", (_req, res) => {
+    res.json({ communities: buildCommunityKnowledge() });
+  });
+
+  // One handler serves both the HTML page and the `.md` download for a
+  // community — the `.md` suffix is detected in-handler so we don't rely on
+  // Express's param-with-extension parsing.
+  app.get("/community-info/:slug", (req, res) => {
+    const raw = String(req.params.slug ?? "");
+    const wantsMarkdown = raw.toLowerCase().endsWith(".md");
+    const rec = getCommunityKnowledgeBySlug(wantsMarkdown ? raw.slice(0, -3) : raw);
+    if (!rec) {
+      return wantsMarkdown
+        ? res.status(404).type("text/plain").send("Community not found")
+        : res.status(404).type("text/html").send("<h1>Community not found</h1>");
+    }
+    if (wantsMarkdown) {
+      res.set("Content-Type", "text/markdown; charset=utf-8");
+      res.set("Content-Disposition", `inline; filename="${rec.slug}.md"`);
+      return res.send(renderCommunityMarkdown(rec));
+    }
+    res.set("Content-Type", "text/html; charset=utf-8");
+    res.send(renderCommunityKnowledgeHtml(rec));
+  });
 
   app.get("/alternatives/:token", async (req, res) => {
     try {

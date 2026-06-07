@@ -43,6 +43,13 @@
 //   - /alternatives/* — tokenized guest-facing alternative-stay photo pages.
 //     Creation/drafting APIs stay protected; only the random-token rendered
 //     page is public so it can be sent to a guest.
+//   - /community-info* — guest-safe, login-free community reference pages that
+//     feed the Quo (formerly OpenPhone) Sona AI voice agent's knowledge base.
+//     Sona's website crawler cannot carry the portal cookie, so these MUST be
+//     public for it to ingest them. They expose ONLY guest-facing facts (curated
+//     community blurbs, unit-type counts, neighborhood/transit) — see
+//     server/community-knowledge.ts for the safety stack: no licenses/TMK, no
+//     cost basis/pricing, no exact unit numbers, no owner info.
 //   - /api/buy-in-emails/inbound — server-to-server email webhook only
 //     when BUY_IN_EMAIL_WEBHOOK_SECRET matches. This records PM/vendor
 //     replies from alias email threads without giving guests/vendors the
@@ -78,6 +85,7 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/quo/webhooks/",
   "/agreement/",
   "/alternatives/",
+  "/community-info/",
   "/admin/agreement/",
   "/api/rental-agreements/",
 ];
@@ -87,6 +95,9 @@ const PUBLIC_PATH_EXACT = new Set<string>([
   "/logout",
   "/agreement",
   "/admin/agreement",
+  "/community-info",
+  "/community-info.md",
+  "/community-info.json",
   "/favicon.ico",
   "/favicon.png",
   "/favicon-16x16.png",
