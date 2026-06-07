@@ -404,6 +404,9 @@ export type SidecarVrboPhotoScrapeResult = {
   // sidecar (real browser, no bot wall) so the guest page can surface real
   // bed types. Optional — older workers don't return it.
   bedText?: string;
+  // Guest capacity ("Sleeps N") harvested from the listing summary — reliable,
+  // used for the combined-sleeps figure on the guest page. Optional.
+  sleeps?: number | null;
 };
 
 export type SidecarPmUrlCheckResult = {
@@ -2449,6 +2452,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
 }): Promise<{
   photos: string[];
   bedText: string;
+  sleeps: number | null;
   workerOnline: boolean;
   durationMs: number;
   reason: string;
@@ -2457,6 +2461,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
     return {
       photos: [],
       bedText: "",
+      sleeps: null,
       workerOnline: false,
       durationMs: 0,
       reason: "valid url required",
@@ -2472,9 +2477,12 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
     signal: opts.signal,
     stopGeneration: opts.stopGeneration,
   });
+  const scraped = r.results as SidecarVrboPhotoScrapeResult | undefined;
+  const sleeps = Number(scraped?.sleeps);
   return {
-    photos: ((r.results as SidecarVrboPhotoScrapeResult | undefined)?.photos ?? []),
-    bedText: ((r.results as SidecarVrboPhotoScrapeResult | undefined)?.bedText ?? ""),
+    photos: (scraped?.photos ?? []),
+    bedText: (scraped?.bedText ?? ""),
+    sleeps: Number.isFinite(sleeps) && sleeps > 0 ? sleeps : null,
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
