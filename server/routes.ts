@@ -8718,12 +8718,23 @@ Requirements:
             ${communityDescription ? `<p class="community-description">${escapeHtml(communityDescription)}</p>` : ""}
           </section>`
         : "";
+      // Trailing photos in a scraped VRBO gallery are typically NOT unit
+      // interiors — they're the property-manager logo and a shot of the unit
+      // number on the building, which the operator confirmed consistently land
+      // in the last slots. Drop the last 5 from each unit gallery before
+      // rendering, with a floor so a small gallery isn't gutted. Done at render
+      // time (not build time) so already-built pages are cleaned on next load.
+      const GUEST_GALLERY_TAIL_DROP = 5;
+      const GUEST_GALLERY_MIN_KEEP = 5;
       const photoBlocks = alternatives.map((item: any, index: number) => {
-        const photos = Array.from(new Set([
+        const galleryPhotos = Array.from(new Set([
           safeGuestPhotoUrl(item.image),
           ...(Array.isArray(item.photos) ? item.photos.map(safeGuestPhotoUrl) : []),
         ].filter(Boolean)))
           .slice(0, 40);
+        const photos = galleryPhotos.length > GUEST_GALLERY_TAIL_DROP
+          ? galleryPhotos.slice(0, Math.max(GUEST_GALLERY_MIN_KEEP, galleryPhotos.length - GUEST_GALLERY_TAIL_DROP))
+          : galleryPhotos;
         const carousel = photos.length > 0
           ? `<div class="carousel" data-carousel>
               <div class="carousel-track">
