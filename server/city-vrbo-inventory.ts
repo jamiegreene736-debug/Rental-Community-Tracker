@@ -149,13 +149,25 @@ async function enrichCityListingsWithDetail(
   };
   const concurrency = Math.min(4, targets.length);
   await Promise.all(Array.from({ length: concurrency }, () => runOne()));
-  // Surface data quality: distinct coords should ≈ enriched count. A low distinct
-  // count vs enriched is a red flag (shared/placeholder coords) worth noticing.
-  const distinctCoords = new Set(
-    targets
-      .filter((l) => l.lat != null && l.lng != null)
-      .map((l) => `${Number(l.lat).toFixed(4)},${Number(l.lng).toFixed(4)}`),
-  ).size;
+  // DATA-QUALITY GUARD: VRBO detail pages can return a single shared region/
+  // centroid coordinate for every listing (observed: all candidates →
+  // 21.9067,-159.4692). That collapses every unit to one point and would
+  // manufacture FALSE "co-located" geo pairs. If the enriched coords don't
+  // resolve to multiple distinct locations, they're not per-listing — strip them
+  // so geo-clustering can't fire on garbage. (Real per-building coords differ
+  // across a diverse top-K set.)
+  const coordKey = (l: CityVrboListing) =>
+    l.lat != null && l.lng != null ? `${Number(l.lat).toFixed(4)},${Number(l.lng).toFixed(4)}` : null;
+  const enrichedRows = targets.filter((l) => coordKey(l) != null);
+  const distinctCoords = new Set(enrichedRows.map((l) => coordKey(l))).size;
+  if (enrichedRows.length >= 2 && distinctCoords <= 1) {
+    for (const l of enrichedRows) { l.lat = null; l.lng = null; }
+    console.warn(
+      `[city-vrbo-inventory] detail enrichment: ${enrichedRows.length} listings all share one coordinate ` +
+      `(region centroid, not per-listing) — stripping coords to avoid false geo pairs`,
+    );
+    return 0;
+  }
   console.log(
     `[city-vrbo-inventory] detail enrichment: ${enriched}/${targets.length} got coords, ${distinctCoords} distinct location(s)`,
   );
