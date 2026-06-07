@@ -1205,23 +1205,29 @@ established it so you can read the rationale in the commit message.
     - **Drafter:** curated match → return it (`generatedBy: "curated"`),
       otherwise fall through to the existing AI / deterministic-fallback path.
     - **Renderer:** curated match → render it, EVEN IF `payload.communityDescription`
-      is already populated. This is intentional: it upgrades pages that were
-      persisted before a community was researched (or with the old amenity-free
-      AI sentence) to the rich blurb without a rebuild. Don't "fix" the renderer
-      to trust the persisted field first — curated is the source of truth.
+      is already populated (upgrades old pages to the rich blurb without a
+      rebuild). Otherwise the persisted blurb is reused ONLY when it actually
+      refers to this community (`normalizeResortText(persisted).includes(
+      normalizeResortText(label))`); a persisted blurb that doesn't fit is
+      dropped in favor of the community-NAMED deterministic fallback. Don't
+      "fix" the renderer to trust the persisted field unconditionally.
 
-    Resolution is community-label-first, then area (`areaName` /
-    BUY_IN_MARKETS key), so an unknown city-wide resort in a known area
-    (e.g. a random Princeville resort) gracefully gets the AREA description
-    rather than nothing; a truly unknown input returns null and the AI/
-    deterministic path runs. Each entry's descriptions are amenity-rich on
-    PURPOSE (the operator asked for in-depth community copy) but stay within
-    the guest-copy safety stack: no prices, owners, booking platforms,
-    unit/building numbers, or addresses. **Only add an amenity to an entry if
-    it's confirmed across credible sources** — a guest must never be told a
-    community has something it lacks. Aliases must include the short form
-    (e.g. "Kaha Lani" as well as "Kaha Lani Resort") and the relevant area key
-    so both the unit-derived label and the configured area match.
+    **Resolution is community-FIRST; the area is consulted ONLY when the
+    community slot is empty (or is itself the area name).** This is the fix for
+    the "header says the community, body describes the city" bug: an unknown
+    community we don't curate (e.g. "Villas of Kamali'i") must return `null`
+    so the caller renders a community-NAMED blurb — it must NOT inherit its
+    area's city blurb ("Princeville is…"). Do NOT re-add a blanket
+    community-then-area fallback (`matchCommunity(community) ?? matchArea(area)`),
+    which is exactly what caused the regression. Each entry's descriptions are
+    amenity-rich on PURPOSE (the operator asked for in-depth community copy) but
+    stay within the guest-copy safety stack: no prices, owners, booking
+    platforms, unit/building numbers, or addresses. **Only add an amenity to an
+    entry if it's confirmed across credible sources** — a guest must never be
+    told a community has something it lacks. Aliases must include the short form
+    (e.g. "Kaha Lani" as well as "Kaha Lani Resort") and, for a community whose
+    own name a guest will see, its specific entry (e.g. "Villas of Kamali'i")
+    rather than relying on the area.
 
 ### Portal authentication
 
