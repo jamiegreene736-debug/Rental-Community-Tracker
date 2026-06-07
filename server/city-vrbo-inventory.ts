@@ -82,6 +82,18 @@ function cacheKeyForScrape(community: string, checkIn: string, checkOut: string)
   return `${community.toLowerCase()}|${checkIn}|${checkOut}|city-vrbo-dropdown-v3`;
 }
 
+// Term-keyed cache namespace for the nearby-city combo expansion
+// (server/city-vrbo-expansion.ts). DELIBERATELY DISJOINT from
+// cacheKeyForScrape's community-keyed namespace: a nearby town's pool must NEVER
+// be served for the home community (or vice-versa). Both live in the same
+// cityVrboScrapeCache Map but can never collide because of the distinct
+// `term:`/`city-vrbo-term-v1` shape. See AGENTS.md city-inventory notes + the
+// expansion design (cache-key isolation guard).
+function cacheKeyForCityTerm(citySearchTerm: string, checkIn: string, checkOut: string): string {
+  const normalized = citySearchTerm.toLowerCase().replace(/\s+/g, " ").trim();
+  return `term:${normalized}|${checkIn}|${checkOut}|city-vrbo-term-v1`;
+}
+
 function rawCandidateBedroomSignal(candidate: SidecarVrboCandidate): number | null {
   if (typeof candidate.bedrooms === "number" && Number.isFinite(candidate.bedrooms) && candidate.bedrooms > 0) {
     return Math.round(candidate.bedrooms);
@@ -236,14 +248,28 @@ function applyFiltersToPool(
   return { listings: filtered, byBedroom, suggestedPair, filterPipeline };
 }
 
+// Resolve the VRBO destination string for a scan. The community-keyed flow
+// (find-buy-in / replacement / manual panel) derives the town from the market
+// registry; the nearby-city expansion passes an explicit `citySearchTerm`
+// ("Lihue, Hawaii"). Either way the value is a plain "City, State" string typed
+// into VRBO's visible destination dropdown — NEVER a vrbo.com/search URL (VRBO
+// sight+click policy, AGENTS.md Load-Bearing).
+function resolveCityVrboSearchTerm(args: { community?: string; citySearchTerm?: string }): string {
+  const explicit = args.citySearchTerm?.trim();
+  if (explicit) return explicit;
+  if (args.community) return cityWideSearchLocationForBuyInMarket(args.community) ?? `${args.community}, Hawaii`;
+  return "Hawaii, United States";
+}
+
 async function scrapeCityVrboPool(args: {
-  community: string;
+  community?: string;
+  citySearchTerm?: string;
   checkIn: string;
   checkOut: string;
   bedroomPlan: number[];
+  walletBudgetMs?: number;
 }): Promise<CityVrboScrapeCacheEntry | null> {
-  const citySearchTerm = cityWideSearchLocationForBuyInMarket(args.community)
-    ?? `${args.community}, Hawaii`;
+  const citySearchTerm = resolveCityVrboSearchTerm(args);
   const nights = Math.max(
     1,
     Math.round(
@@ -251,8 +277,9 @@ async function scrapeCityVrboPool(args: {
     ),
   );
   const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
+  const scanLabel = args.community ? `city-vrbo-inventory:${args.community}` : `city-vrbo-expansion:${citySearchTerm}`;
   console.log(
-    `[city-vrbo-inventory] vrbo sidecar start community="${args.community}" ` +
+    `[city-vrbo-inventory] vrbo sidecar start label="${args.community ?? citySearchTerm}" ` +
     `search="${citySearchTerm}" mode=destination-dropdown-export-all`,
   );
   const r = await searchVrboViaSidecar({
@@ -263,17 +290,17 @@ async function scrapeCityVrboPool(args: {
     bedrooms: 1,
     searchMode: "destination_dropdown",
     cityWideInventory: true,
-    walletBudgetMs: CITY_VRBO_WALLET_BUDGET_MS,
+    walletBudgetMs: args.walletBudgetMs ?? CITY_VRBO_WALLET_BUDGET_MS,
     queueBudgetMs: CITY_VRBO_QUEUE_BUDGET_MS,
     queueContext: {
-      scanLabel: `city-vrbo-inventory:${args.community}`,
+      scanLabel,
       dateLabel: `${args.checkIn}→${args.checkOut}`,
       skipResultCache: true,
     },
   });
   if (r) {
     console.log(
-      `[city-vrbo-inventory] vrbo sidecar finish community="${args.community}" ` +
+      `[city-vrbo-inventory] vrbo sidecar finish label="${args.community ?? citySearchTerm}" ` +
       `exported=${r.candidates?.length ?? 0} reason="${r.reason ?? ""}"`,
     );
   }
@@ -300,14 +327,7 @@ async function scrapeCityVrboPool(args: {
   };
 }
 
-export async function runCityVrboInventoryScan(args: {
-  community: string;
-  checkIn: string;
-  checkOut: string;
-  bedroomPlan: number[];
-  filterPhrase?: string;
-  skipCache?: boolean;
-}): Promise<{
+export type CityVrboScanResult = {
   citySearchTerm: string;
   nights: number;
   rawListings: CityVrboListing[];
@@ -323,16 +343,34 @@ export async function runCityVrboInventoryScan(args: {
     rawCount: number;
     mapHarvest: Record<string, unknown> | null;
   };
-}> {
-  const citySearchTerm = cityWideSearchLocationForBuyInMarket(args.community)
-    ?? `${args.community}, Hawaii`;
+};
+
+// Shared body for both the community-keyed scan (runCityVrboInventoryScan) and
+// the explicit-town scan (runCityVrboInventoryScanForCity). The ONLY differences
+// between the two callers are the cache key (disjoint namespaces — see
+// cacheKeyForCityTerm), the destination term, and the log label; everything else
+// (scrape → normalize → phrase/bedroom filter → suggestCityVrboComboPair) is
+// identical, so it lives here once.
+async function runCityScanCore(args: {
+  cacheKey: string;
+  logLabel: string;
+  community?: string;
+  citySearchTerm?: string;
+  checkIn: string;
+  checkOut: string;
+  bedroomPlan: number[];
+  filterPhrase?: string;
+  skipCache?: boolean;
+  walletBudgetMs?: number;
+}): Promise<CityVrboScanResult> {
+  const citySearchTerm = resolveCityVrboSearchTerm(args);
   const nights = Math.max(
     1,
     Math.round(
       (new Date(`${args.checkOut}T12:00:00`).getTime() - new Date(`${args.checkIn}T12:00:00`).getTime()) / 86_400_000,
     ),
   );
-  const cacheKey = cacheKeyForScrape(args.community, args.checkIn, args.checkOut);
+  const cacheKey = args.cacheKey;
   let fromCache = false;
   let scrapeEntry: CityVrboScrapeCacheEntry | null = null;
 
@@ -345,7 +383,14 @@ export async function runCityVrboInventoryScan(args: {
   }
 
   if (!scrapeEntry) {
-    scrapeEntry = await scrapeCityVrboPool(args);
+    scrapeEntry = await scrapeCityVrboPool({
+      community: args.community,
+      citySearchTerm: args.citySearchTerm,
+      checkIn: args.checkIn,
+      checkOut: args.checkOut,
+      bedroomPlan: args.bedroomPlan,
+      walletBudgetMs: args.walletBudgetMs,
+    });
     if (scrapeEntry) {
       cityVrboScrapeCache.set(cacheKey, scrapeEntry);
     }
@@ -363,7 +408,7 @@ export async function runCityVrboInventoryScan(args: {
       phraseBuckets: 0,
       suggestedPair: false,
     };
-    logFilterPipeline(args.community, args.checkIn, args.checkOut, emptyPipeline, false);
+    logFilterPipeline(args.logLabel, args.checkIn, args.checkOut, emptyPipeline, false);
     return {
       citySearchTerm,
       nights,
@@ -390,7 +435,7 @@ export async function runCityVrboInventoryScan(args: {
     scrapeEntry.nights,
     args.filterPhrase,
   );
-  logFilterPipeline(args.community, args.checkIn, args.checkOut, filtered.filterPipeline, fromCache);
+  logFilterPipeline(args.logLabel, args.checkIn, args.checkOut, filtered.filterPipeline, fromCache);
 
   return {
     citySearchTerm: scrapeEntry.citySearchTerm,
@@ -405,13 +450,67 @@ export async function runCityVrboInventoryScan(args: {
   };
 }
 
+export async function runCityVrboInventoryScan(args: {
+  community: string;
+  checkIn: string;
+  checkOut: string;
+  bedroomPlan: number[];
+  filterPhrase?: string;
+  skipCache?: boolean;
+}): Promise<CityVrboScanResult> {
+  return runCityScanCore({
+    cacheKey: cacheKeyForScrape(args.community, args.checkIn, args.checkOut),
+    logLabel: args.community,
+    community: args.community,
+    checkIn: args.checkIn,
+    checkOut: args.checkOut,
+    bedroomPlan: args.bedroomPlan,
+    filterPhrase: args.filterPhrase,
+    skipCache: args.skipCache,
+  });
+}
+
+/**
+ * Scan an arbitrary town's full VRBO inventory by an explicit "City, State"
+ * destination term (the nearby-city combo expansion). Uses the disjoint
+ * term-keyed cache namespace so a nearby town's pool can never be served for the
+ * home community. The destination is typed into VRBO's visible dropdown via the
+ * sidecar — no injected search URLs (VRBO sight+click policy).
+ */
+export async function runCityVrboInventoryScanForCity(args: {
+  citySearchTerm: string;
+  checkIn: string;
+  checkOut: string;
+  bedroomPlan: number[];
+  filterPhrase?: string;
+  skipCache?: boolean;
+  walletBudgetMs?: number;
+}): Promise<CityVrboScanResult> {
+  return runCityScanCore({
+    cacheKey: cacheKeyForCityTerm(args.citySearchTerm, args.checkIn, args.checkOut),
+    logLabel: args.citySearchTerm,
+    citySearchTerm: args.citySearchTerm,
+    checkIn: args.checkIn,
+    checkOut: args.checkOut,
+    bedroomPlan: args.bedroomPlan,
+    filterPhrase: args.filterPhrase,
+    skipCache: args.skipCache,
+    walletBudgetMs: args.walletBudgetMs,
+  });
+}
+
 /** Evict cached city pools (tests or admin). */
 export function clearCityVrboInventoryCache(community?: string): number {
   if (!community) {
+    // Wipes both the community-keyed (`<community>|…|city-vrbo-dropdown-v3`) and
+    // the expansion term-keyed (`term:…|city-vrbo-term-v1`) entries — same Map.
     const size = cityVrboScrapeCache.size;
     cityVrboScrapeCache.clear();
     return size;
   }
+  // Community-scoped purge only matches the community-keyed namespace; `term:`
+  // expansion entries are town-scoped (not tied to a community) and are left
+  // alone here — clear them with the no-arg form.
   let removed = 0;
   for (const key of cityVrboScrapeCache.keys()) {
     if (key.startsWith(`${community.toLowerCase()}|`)) {

@@ -157,6 +157,68 @@ the walk still falls short, but it re-navigates `/search?...&sort=` URLs and so
 is in tension with the zero-tolerance rule above — it should only fire rarely
 and is a candidate to migrate onto the sight+click walk.
 
+### Drive-time nearby-city combo expansion (Load-Bearing, 2026-06-07)
+
+`server/city-vrbo-expansion.ts` adds a fourth rung to the buy-in combo ladder for
+`>=2`-unit bookings: **resort search → home-city VRBO → cities within a 20-min
+drive → cities within a 45-min drive**. It only fires after the home-city scan
+runs with the sidecar ONLINE and finds NO same-community `suggestedPair`. It's a
+background job the client (`autoFillMutation` in `client/src/pages/bookings.tsx`)
+starts (`POST /api/operations/city-vrbo-inventory/expand`) and polls
+(`GET …/expand/:jobId`); each nearby-city scan drives the sidecar for minutes, so
+a synchronous request would blow Railway's edge timeout. Load-bearing choices —
+don't "simplify" them away:
+
+1. **Nearby cities are discovered by DRIVE TIME from the community's coordinates,
+   not from the curated market list.** `nearbyTownsForCoords` reuses the proven
+   Photon `/reverse` + `driveMinutesBetweenCoords` pattern from
+   `/api/community/nearby-cities`, anchored on `BUY_IN_MARKET_LOCATIONS[community]`
+   (so NO initial geocode). Tier 1 = ≤20 min, tier 2 = ≤45 min, nearest-first,
+   per-tier caps (env `CITY_VRBO_EXPANSION_TIER{1,2}_*`). `nearbyBuyInMarketsForScoutDetailed`
+   (curated markets only) is deliberately NOT used — the operator wants arbitrary
+   real towns. Coordinates are used ONLY for discovery + drive math; the VRBO
+   destination is always a plain `"City, State"` string (sight+click policy).
+2. **Combo-only, gated in `startExpansionJob` (`units.length >= 2`).** This is
+   STRICTER than the GET `/api/operations/city-vrbo-inventory` endpoint, which
+   intentionally allows `>= 1` for the single-unit home-city fallback. The two
+   gates differ on purpose — don't align them.
+3. **Worker-offline must bail FAST.** An offline worker leaves each sidecar scan
+   PENDING until the queue TTL (~5 min/city). So: the client only starts the job
+   when the home scan reported `sidecar.workerOnline === true`; the worker checks
+   `getHeartbeat().isOnline` BEFORE the loop and before EVERY city; and a scan
+   returning `sidecar.workerOnline === false` ends the ladder — BUT only as
+   genuinely-offline when the live heartbeat is also offline (a per-search wallet
+   timeout on a HEALTHY worker returns `workerOnline:false` too, and must be
+   treated as a transient skip, not a fatal bail). A VRBO provider cooldown
+   (`workerOnline:true` + 0 listings + "cooling down/block/proxy" reason) also
+   short-circuits the ladder so the operator is told "blocked, retry", not "no
+   pair anywhere".
+4. **The home town is excluded by BOTH coordinates and normalized name.** The
+   community KEY ("Kapaa Beachfront") is not a town name, so name-only exclusion
+   misses it — the worker seeds the exclusion set with the home `cityWideSearch`
+   term AND `"<loc.city>, <loc.state>"`, and additionally drops any discovered
+   town within `CITY_VRBO_EXPANSION_HOME_RADIUS_KM` of the community center. Tier 2
+   excludes every tier-1 town already scanned.
+5. **The expansion uses a DISJOINT cache namespace.** Per-town scans go through
+   `runCityVrboInventoryScanForCity` → `cacheKeyForCityTerm`
+   (`term:…|city-vrbo-term-v1`), which can never collide with the community-keyed
+   `cacheKeyForScrape` (`…|city-vrbo-dropdown-v3`) in the same `cityVrboScrapeCache`
+   Map, so a nearby town's pool is never served for the home community or
+   vice-versa. `clearCityVrboInventoryCache(community)` intentionally does NOT
+   purge `term:` entries (they're town-scoped, not community-scoped) — use the
+   no-arg form to clear them.
+6. **Single-flight + in-memory job store.** `activeJobByKey` (`propertyId|checkIn|
+   checkOut`) returns the live job instead of starting a second; jobs are
+   in-memory (lost on redeploy — the poller treats 404/401/403 + a 45-min cap as
+   terminal and falls back to the per-slot net). Interactive resolution attaches
+   the found combo via `attachComboMutation` ONLY if the booking's slots are still
+   all empty (no-clobber); otherwise / on no-combo it re-invokes auto-fill with
+   `skipExpansion:true` to run the per-slot + single-unit safety net (the
+   `skipExpansion` flag also skips the redundant home-city scan and prevents an
+   expansion loop). The bulk queue polls the SAME job inline (`awaitExpansionInline`)
+   so its pass/fail report stays correct. Deterministic smoke:
+   `tests/city-vrbo-expansion.smoke.ts`.
+
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
   wrong because…"* rather than *"this code has a bug"*.
@@ -1462,6 +1524,7 @@ Examples:
 2026-06-07 · Jamie reported the sidecar Chrome "pops up and closes over and over in a loop" on guest-page creation and said "if you can't fix it, just remove the feature... I don't mind clicking Safari again when Chrome pops up and takes focus" · ACCEPTED, REVERSES the 2026-06-06 focus-guard default · Two causes: (1) `recoverDeadLocalCdp` treated a `--no-startup-window` browser's empty page-target list as DEAD and close+relaunched it (fixed in PR #557 — reachable-but-tabless is alive, create a tab via `Target.createTarget`); (2) the macOS foreground management (`scheduleReturnFocus` via `open -b` at 100/350/750/1400ms + `scheduleSidecarMinimize`/`minimizeSidecarWindow`) fighting the CDP page-create's activation made Chrome visibly flap. Per operator request both are now DISABLED: new `SIDECAR_AUTO_MINIMIZE` env (default still ON in code via `!== "0"`, gates `scheduleSidecarMinimize`+`minimizeSidecarWindow`) and the existing `SIDECAR_RETURN_FOCUS` are BOTH set to `0` in the live run script AND defaulted to `0` in `scripts/install-vrbo-sidecar-launchagent.sh`. Net: Chrome may take focus once when it activates; the operator clicks their app back; NO flapping loop. CAPTCHA window surfacing (`SIDECAR_CAPTCHA_SURFACE_WINDOW=1`) is untouched. Verified live: a real `vrbo_photo_scrape` acquire now logs ONE spawn, no "relaunching", no "minimiz", and `open -b` fired 0 times across the whole job. Supersedes the 2026-06-06 CLAUDE.md focus-guard note's "default on" stance — to re-enable, set `SIDECAR_RETURN_FOCUS=1` / `SIDECAR_AUTO_MINIMIZE=1`.
 2026-06-07 · Jamie asked to make the guest-inbox AI draft "an expert on every community and its surrounding areas" using Claude's OWN world knowledge + guardrails (NOT a curated KB) · ACCEPTED (Part A of the local-expert + auto-send plan) · This deliberately RELAXES Load-Bearing #24's "draft only from fetched context, not generic knowledge" posture — but ONLY for AREA/orientation questions (beaches, dining, activities, getting around, weather), never for property facts (beds/layout/amenities/policies stay fetch-or-flag) and never for the money/policy FLAG categories. Both draft surfaces got an "EXPERT LOCAL KNOWLEDGE" prompt block (`server/auto-reply.ts` SYSTEM_PROMPT + a `LOCAL_KNOWLEDGE_RULES` const in `server/routes.ts` ai-draft) with hard anti-hallucination guardrails: anchor to the property's exact island/town (new `shared/area-identity.ts` `resolveIslandRegion(address)`, surfaced via `get_local_property_facts` `island`/`town`/`areaIdentity` + the client `buildPropertyContextForDraft` AREA line + now also neighborhood/transit which the manual path previously omitted); NEVER state exact prices/hours/"open now"/phone numbers/addresses; hedge distances; tell guests to verify time-sensitive specifics; describe the TYPE not an uncertain named business. Deterministic backstop: new `OUTPUT_RISK_PATTERNS` (phone numbers, current-hours claims, external prices) auto-FLAG any draft that slips a verifiable specific, so it's held from the (future) auto-send. Don't widen world-knowledge to property facts or policies. Part B (aggressive auto-send) is a separate follow-up; until it ships nothing changes about send behavior (all drafts still wait for approval).
 2026-06-07 · Jamie said "build part B now" (the aggressive auto-send engine) · ACCEPTED · Ships with the master toggle DEFAULT OFF (persisted), so deploying changes nothing until the operator flips it on. New `app_settings` kv table (`getSetting`/`setSetting`) holds `auto_send.master_enabled` (false), `auto_send.review_window_seconds` (90), `auto_send.hold_recommendations` (true). New `auto_reply_log` columns `autoSent` + `sendAfter`, new `"queued"` status. When the toggle is ON, `runAutoReply` sets a clean `drafted` result to `queued` with a `sendAfter` deadline; a SEPARATE pass `runAutoSendQueue()` (own 20s interval, started in `startAutoReplyScheduler`) sends due queued rows. HARD EXCLUSIONS that never auto-send: anything `flagged`/`error` (the full 3-layer stack still gates everything), unmapped listing (`!listingId`), empty draft, and — while `hold_recommendations` is on — drafts whose guest message looks like an area/recommendation ask (`looksLikeAreaQuestion`). Before each send the pass RE-VALIDATES: re-checks the toggle (kill switch), re-fetches the row (operator edits/declines win — editing a `queued` draft reverts it to `drafted` via `saveDraftedReply`), re-runs `hasManualHostReplyAfterTrigger` (a human reply → `dismissed`), and re-runs `classifyOutput`. Toggling OFF reverts all `queued` rows back to `drafted`. Endpoints: `POST /api/inbox/auto-reply/auto-send/{toggle,config,run}`; `getAutoReplyStatus()` now carries the auto-send config. UI: amber "Auto-send clean drafts" switch + review-window select + banner in the AI Draft Approval card; per-draft "Auto-sending in Xs" countdown badge + a Hold button + an "Auto-sent" badge. **Do NOT enable auto-send against the live inbox without a dry-run to a test conversation first.** Recommended rollout (from the approved plan): soak Part A in the approval queue ~1-2 weeks, then enable with hold_recommendations=true + a non-zero window, then relax.
+2026-06-07 · Jamie asked the buy-in tool to add a fourth fallback rung: after resort search → city-wide VRBO finds no combo, auto-research the cities within a 20-min drive and city-scan each; if still none, expand to 45 min, scanning all cities not already searched · ACCEPTED, background-job + polling, combo-only (Jamie's choices via AskUserQuestion) · New `server/city-vrbo-expansion.ts` (in-memory job store + worker + Photon `/reverse` drive-time town discovery anchored on `BUY_IN_MARKET_LOCATIONS` coords) + 3 endpoints under `POST/GET /api/operations/city-vrbo-inventory/expand[/:jobId[/cancel]]`. `runCityVrboInventoryScan` was generalized (extracted `runCityScanCore`; added exported `runCityVrboInventoryScanForCity` with a DISJOINT `term:…|city-vrbo-term-v1` cache namespace). Client `autoFillMutation` starts the job when the home-city scan ran worker-online with no pair, hands it to a row poller (`CityExpansionJobPoller`) that attaches the found combo (no-clobber) or re-invokes auto-fill `skipExpansion:true` for the per-slot net; bulk queue polls inline (`awaitExpansionInline`). Built via a 4-agent design workflow + a 23-agent adversarial review (10 findings confirmed + fixed: healthy-worker wallet-timeout vs offline reconciliation, provider-cooldown short-circuit, attach-button mid-attach race, found-but-not-attachable safety-net fall-through, poller 401/deadline terminal, unmount-cancel, skipExpansion home-scan skip). See the "Drive-time nearby-city combo expansion" Load-Bearing subsection above for the 6 load-bearing constraints. Verified: `npm run build` clean, `tests/city-vrbo-expansion.smoke.ts` 8/8 (combo-only gate, single-flight, offline fast-bail), Photon discovery returns a sane Kauai ladder for Poipu Kai. Live VRBO leg verified on Railway post-deploy.
 ```
 
 (Populate on first dispute.)
