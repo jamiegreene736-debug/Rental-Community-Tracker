@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-08 (guest inbox: FULLY AUTOMATED auto-reply + attention banner):
+  Operator asked to make the inbox responder fully automatic, with a top-of-inbox
+  notice that surfaces the messages he should check (not-100%-confident or
+  super-urgent), and to remove the "AI Draft Approval" tab. The Part B auto-send
+  engine already existed (queue → review window → `runAutoSendQueue` re-validation,
+  3-layer safety stack) but defaulted OFF. This change: (1) flips it ON via a
+  one-time persisted rollout flag `auto_send.full_auto_rollout_v1` in
+  `loadAutoSendConfig` (forces master_enabled=true + hold_recommendations=false at
+  first boot regardless of stale state; a later operator OFF still sticks); (2)
+  sharpens the HOLD rails — a SYSTEM_PROMPT "AUTO-SEND MODE" confidence gate, new
+  urgency keywords in `RISK_KEYWORDS`, and `forceDraftForReview:true` on the clean
+  path so held items keep a conservative reviewable draft; (3) removes the tab and
+  moves review into a TOP ATTENTION BANNER (`client/src/pages/inbox.tsx`, above the
+  now-controlled `<Tabs>`): status row (auto-send toggle / window / Check-now) +
+  a red/amber "N messages need your review" list of HELD items (drafted/flagged/
+  error, urgent-first), each Send/Save/Save&learn/Redo/Open-thread/Decline; clean
+  replies auto-send silently. No schema change (urgency is client-side display via
+  `AUTO_REPLY_URGENT_RE`; the server RISK_KEYWORDS hold is authoritative). The
+  single OFF switch is the banner toggle. Full rationale in AGENTS.md
+  ("Auto-reply is FULLY AUTOMATED" under #24 + Decision Log 2026-06-08).
+
 - 2026-06-08 (sidecar CDP-wedge auto-heal, PR #595): diagnosed a live outage where
   EVERY VRBO scan exported 0 listings (`raw=0`, `connectOverCDP: Timeout 30000ms
   exceeded`) → no matches anywhere. Root cause: the sidecar's local Chrome
