@@ -3,6 +3,7 @@ import {
   filterCityVrboListingsByPhrase,
   groupCityVrboByBedroom,
   suggestCityVrboComboPair,
+  summarizeCityVrboMatching,
   type CityVrboComboPair,
   type CityVrboListing,
 } from "@shared/city-vrbo-combo";
@@ -91,6 +92,12 @@ const CITY_VRBO_DETAIL_ENRICH = (process.env.CITY_VRBO_DETAIL_ENRICH ?? "1") !==
 // recovery step that names generically-titled / misspelled / unknown-complex
 // listings so they can cluster. Gated; needs ANTHROPIC_API_KEY. Default on.
 const CITY_VRBO_LLM_COMMUNITY = (process.env.CITY_VRBO_LLM_COMMUNITY ?? "1") !== "0";
+// Per-scan match diagnostics: logs how many priced listings got a community
+// signal (and which kind), pairable clusters, and a sample of listings that
+// matched NOTHING — to measure whether more matching machinery is worth it and
+// to surface the property-manager / boilerplate over-cluster trap. Read-only;
+// disable with CITY_VRBO_MATCH_DIAG=0.
+const CITY_VRBO_MATCH_DIAG = (process.env.CITY_VRBO_MATCH_DIAG ?? "1") !== "0";
 const CITY_VRBO_ENRICH_MAX = Math.max(2, Number(process.env.CITY_VRBO_ENRICH_MAX ?? 8));
 // Keep this well under Railway's HTTP edge timeout once added to the main scrape
 // (~60-90s) so the whole request stays comfortably bounded. 75s default.
@@ -604,6 +611,32 @@ async function runCityScanCore(args: {
     }
   }
   logFilterPipeline(args.logLabel, args.checkIn, args.checkOut, filtered.filterPipeline, fromCache);
+
+  if (CITY_VRBO_MATCH_DIAG) {
+    try {
+      const diag = summarizeCityVrboMatching(filtered.listings, args.bedroomPlan, scrapeEntry.nights);
+      const s = diag.bySignal;
+      console.log(
+        `[city-vrbo-match-diag] "${args.logLabel}" ${args.checkIn}→${args.checkOut} ` +
+        `priced=${diag.pricedTotal} matched=${diag.matched} unmatched=${diag.unmatched} ` +
+        `(dict=${s.dictionary} complex=${s.complex} phrase=${s.phrase} photo=${s.photo} pm=${s.propertyManager} none=${s.none}) ` +
+        `pairableClusters=${diag.pairableClusters} pair=${filtered.suggestedPair ? "yes" : "no"}` +
+        (diag.topClusters.length
+          ? ` top=[${diag.topClusters.map((c) => `${c.label}(${String(c.source)[0]})x${c.size}`).join(", ")}]`
+          : ""),
+      );
+      if (diag.unmatchedSample.length) {
+        console.log(
+          `[city-vrbo-match-diag] unmatched (no community signal): ` +
+          diag.unmatchedSample
+            .map((u) => `"${u.title.slice(0, 60)}"${u.bedrooms ? ` (${u.bedrooms}BR)` : ""}`)
+            .join(" | "),
+        );
+      }
+    } catch (e: any) {
+      console.error("[city-vrbo-match-diag] failed:", e?.message ?? e);
+    }
+  }
 
   return {
     citySearchTerm: scrapeEntry.citySearchTerm,
