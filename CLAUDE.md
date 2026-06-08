@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-08 (Auto-fill cheapest → server-side background job, PR #590):
+  Operator asked that clicking "Auto-fill cheapest" on the bookings page keep
+  running even after leaving the page / not being on the tab. Root cause: the
+  whole escalation ladder AND the buy-in attach lived in the client
+  `autoFillMutation` (`client/src/pages/bookings.tsx`); the heavy search
+  primitives were already server-side but the orchestration + the
+  `POST /api/buy-ins` → `attach-buy-in` calls were client-driven, so unmounting
+  the page abandoned everything not-yet-attached (PR #588's resume only re-fired
+  on tab *return while still mounted*). Fix: new `server/auto-fill-job.ts`
+  fire-and-forget job (modeled on `preflight-background-jobs.ts` +
+  `city-vrbo-expansion.ts`) runs the full ladder (resort find-buy-in → home-city
+  VRBO → nearby expansion → per-slot fallback) + attaches server-side via
+  in-process LOOPBACK self-calls to the EXISTING endpoints (no re-implementation
+  of the 4k-line find-buy-in handler; 127.0.0.1 bypasses ADMIN_SECRET). The
+  button now just starts the job + hands off to `AutoFillJobPoller`; on
+  mount/return the client rediscovers live jobs via
+  `GET /api/operations/auto-fill/active` so it survives a full reload/navigation,
+  and picks persist to Postgres as they attach. Full load-bearing rationale in
+  AGENTS.md ("Auto-fill cheapest is a SERVER-SIDE background job"). Verified:
+  `npm run check` (no new TS errors in touched files) + `npm run build` pass;
+  Railway deploy live + smoked — `POST /api/operations/auto-fill` validates
+  (400 on bad body), a job runs queued→running→completed with the correct
+  serialize payload, and `GET …/active` returns `{jobs:{}}` (non-destructive
+  smoke against an unknown property: find-buy-in 404s early, no sidecar driven,
+  attached=0). The old client `CityExpansionJobPoller`/`expansionJobs` flow is
+  now dead (expansion runs inside the server job) but left in place — don't wire
+  it back to the button.
+
 - 2026-06-06 (VRBO sidecar: stop Chrome stealing macOS foreground focus):
   Operator: when a sidecar job ran, Google Chrome popped to the foreground and
   knocked Safari/Claude out of focus — and even after it minimized, macOS didn't
