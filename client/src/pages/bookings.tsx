@@ -1454,6 +1454,147 @@ function CityExpansionJobPoller({
   return null;
 }
 
+// ── Buy-in search-escalation tracker ────────────────────────────────────────
+// Visualizes the 4-stage ladder the buy-in auto-fill walks:
+//   1 Resort search → 2 Home city → 3 Cities within 20 min → 4 Cities within 45 min.
+// Stages 1-2 come from the auto-fill mutation; stages 3-4 from the expansion job
+// (server/city-vrbo-expansion.ts tier 1 = 20 min, tier 2 = 45 min).
+type EscalationStageStatus = "idle" | "searching" | "found" | "no-pair" | "skipped";
+type BuyInEscalation = {
+  resort: EscalationStageStatus;
+  resortLabel?: string;
+  homeCity: EscalationStageStatus;
+  homeCityTerm?: string;
+  homeCityListings?: number;
+  foundAt?: "resort" | "home-city" | "nearby" | null;
+  // Snapshot of the nearby-city expansion captured when its job resolves, so the
+  // tracker keeps showing the searched-cities ladder after the job is cleared
+  // (the "we searched 20 towns and found nothing" view).
+  tierResults?: CityExpansionCityResult[];
+  nearbyStatus?: "searching" | "found" | "exhausted" | "worker_offline" | "error";
+  startedAt: number;
+};
+
+function escalationStageBadge(status: EscalationStageStatus): { label: string; cls: string; spin?: boolean } {
+  switch (status) {
+    case "searching": return { label: "Searching", cls: "bg-amber-100 text-amber-800 border-amber-300", spin: true };
+    case "found": return { label: "Pair found", cls: "bg-emerald-100 text-emerald-800 border-emerald-300" };
+    case "no-pair": return { label: "No pair", cls: "bg-slate-100 text-slate-600 border-slate-300" };
+    case "skipped": return { label: "Skipped", cls: "bg-slate-50 text-slate-400 border-slate-200" };
+    default: return { label: "Not run", cls: "bg-slate-50 text-slate-400 border-slate-200" };
+  }
+}
+
+function BuyInEscalationStages({
+  escalation,
+  expansion,
+}: {
+  escalation: BuyInEscalation;
+  expansion?: {
+    status: "pending" | "running" | "found" | "exhausted" | "worker_offline" | "error";
+    tier: number | null;
+    currentCity: string | null;
+    scannedCount: number;
+    totalCount: number;
+    cityResults: CityExpansionCityResult[];
+  } | null;
+}) {
+  // Live results come from the running expansion job; once it resolves the row is
+  // cleared, so fall back to the snapshot stored on the escalation state.
+  const allCityResults = expansion?.cityResults ?? escalation.tierResults ?? [];
+  const tier1 = allCityResults.filter((c) => c.tier === 1);
+  const tier2 = allCityResults.filter((c) => c.tier === 2);
+  const expRunning = expansion?.status === "running" || expansion?.status === "pending" || escalation.nearbyStatus === "searching";
+  const workerOffline = expansion?.status === "worker_offline" || escalation.nearbyStatus === "worker_offline";
+  const foundEarly = escalation.foundAt === "resort" || escalation.foundAt === "home-city";
+
+  const tierStatus = (rows: CityExpansionCityResult[], tierNum: 1 | 2): EscalationStageStatus => {
+    if (rows.some((r) => r.status === "pair")) return "found";
+    if (foundEarly) return "skipped";
+    if (rows.some((r) => r.status === "scanning")) return "searching";
+    if (expRunning && rows.some((r) => r.status === "pending")) return "searching";
+    if (rows.length > 0 && rows.every((r) => ["no-pair", "scan-error", "skipped"].includes(r.status))) return "no-pair";
+    if (expRunning && tierNum === 1 && rows.length === 0) return "searching";
+    return "idle";
+  };
+
+  const cityChip = (c: CityExpansionCityResult) => {
+    const sym = c.status === "pair" ? "✓"
+      : c.status === "scanning" ? "…"
+      : c.status === "no-pair" ? "✗"
+      : c.status === "scan-error" ? "!"
+      : c.status === "skipped" ? "–"
+      : "·";
+    const cls = c.status === "pair" ? "bg-emerald-100 text-emerald-800 border-emerald-300"
+      : c.status === "scanning" ? "bg-amber-100 text-amber-800 border-amber-300"
+      : c.status === "no-pair" ? "bg-slate-100 text-slate-600 border-slate-200"
+      : c.status === "pending" ? "bg-slate-50 text-slate-400 border-slate-200"
+      : "bg-rose-50 text-rose-700 border-rose-200";
+    return (
+      <span key={`${c.tier}-${c.citySearchTerm}`} className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 ${cls}`}>
+        <span className="font-bold">{sym}</span>
+        {c.placeName || c.citySearchTerm}{typeof c.driveMinutes === "number" ? ` · ${c.driveMinutes}m` : ""}
+      </span>
+    );
+  };
+
+  const StageRow = ({ n, title, sub, status }: { n: number; title: string; sub?: string; status: EscalationStageStatus }) => {
+    const b = escalationStageBadge(status);
+    return (
+      <div className="flex items-center gap-2">
+        <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-bold ${
+          status === "found" ? "border-emerald-500 bg-emerald-500 text-white"
+          : status === "searching" ? "border-amber-400 bg-amber-400 text-white"
+          : status === "no-pair" ? "border-slate-300 bg-slate-300 text-white"
+          : "border-slate-300 bg-white text-slate-400"
+        }`}>{n}</span>
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-slate-800">{title}</div>
+          {sub ? <div className="truncate text-[10px] text-slate-500">{sub}</div> : null}
+        </div>
+        <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${b.cls}`}>
+          {b.spin ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}{b.label}
+        </span>
+      </div>
+    );
+  };
+
+  const t1Status = tierStatus(tier1, 1);
+  const t2Status = tierStatus(tier2, 2);
+  const subForTier = (rows: CityExpansionCityResult[]): string | undefined =>
+    rows.length ? undefined : (foundEarly ? "skipped — pair found earlier" : undefined);
+
+  return (
+    <div className="space-y-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-[11px] shadow-sm">
+      <div className="flex items-center justify-between">
+        <span className="font-semibold text-slate-700">Buy-in search escalation</span>
+        {workerOffline ? <span className="text-[10px] font-medium text-rose-600">sidecar offline</span> : null}
+      </div>
+      <StageRow n={1} title="Resort search" sub={escalation.resortLabel} status={escalation.resort} />
+      <StageRow
+        n={2}
+        title="Home city"
+        sub={escalation.homeCityTerm ? `${escalation.homeCityTerm}${escalation.homeCityListings ? ` · ${escalation.homeCityListings} listings` : ""}` : undefined}
+        status={escalation.homeCity}
+      />
+      <div>
+        <StageRow n={3} title="Cities within 20 min" sub={subForTier(tier1)} status={t1Status} />
+        {tier1.length > 0 ? <div className="ml-7 mt-1 flex flex-wrap gap-1">{tier1.map(cityChip)}</div> : null}
+      </div>
+      <div>
+        <StageRow n={4} title="Cities within 45 min" sub={subForTier(tier2)} status={t2Status} />
+        {tier2.length > 0 ? <div className="ml-7 mt-1 flex flex-wrap gap-1">{tier2.map(cityChip)}</div> : null}
+      </div>
+      {expRunning && expansion?.currentCity ? (
+        <div className="text-[10px] text-slate-500">
+          Scanning {expansion.currentCity}
+          {expansion.totalCount > 0 ? ` · ${expansion.scannedCount}/${expansion.totalCount}` : ""}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function CityVrboInventoryPanel({
   propertyId,
   reservation,
@@ -5253,15 +5394,49 @@ export default function Bookings() {
   // ── Nearby-city combo expansion (background job) per-reservation state ──────
   type ExpansionJobState = {
     jobId: string;
-    status: "running" | "found" | "not_found" | "error" | "worker_offline";
+    // Matches the server's CityExpansionJobStatus.status. While the job is in
+    // expansionJobs it's pending/running (terminal states are handled by
+    // handleExpansionResolved, which snapshots + clears the row).
+    status: "pending" | "running" | "found" | "exhausted" | "worker_offline" | "error";
     tier: number | null;
     currentCity: string | null;
     citiesSearched: string[];
     scannedCount: number;
     totalCount: number;
     message?: string;
+    // Per-city, per-tier results (tier 1 = within 20 min, tier 2 = within 45 min)
+    // so the escalation tracker can show each nearby city's pass/fail live.
+    cityResults: CityExpansionCityResult[];
   };
   const [expansionJobs, setExpansionJobs] = useState<Record<string, ExpansionJobState>>({});
+
+  // ── Buy-in search-escalation tracker (the 4-stage ladder the operator sees) ──
+  // resort search → home city → cities within 20 min → cities within 45 min.
+  // Stages 1-2 are recorded live by the auto-fill mutation; stages 3-4 derive
+  // from the expansion job above. Types + UI live at module scope
+  // (BuyInEscalation / BuyInEscalationStages). Keyed by reservation id.
+  const [escalationByReservation, setEscalationByReservation] = useState<Record<string, BuyInEscalation>>({});
+  const setEscalation = (reservationId: string, patch: Partial<BuyInEscalation>) => {
+    setEscalationByReservation((prev) => ({
+      ...prev,
+      [reservationId]: {
+        resort: "idle",
+        homeCity: "idle",
+        foundAt: null,
+        startedAt: Date.now(),
+        ...(prev[reservationId] ?? {}),
+        ...patch,
+      },
+    }));
+  };
+  const clearEscalation = (reservationId: string) => {
+    setEscalationByReservation((prev) => {
+      if (!(reservationId in prev)) return prev;
+      const next = { ...prev };
+      delete next[reservationId];
+      return next;
+    });
+  };
   // Carries the originating mutate() variables (+ the reservation) so the poller
   // resolver can attach the found combo or re-invoke the per-slot safety net with
   // the same property/listing/silent context the original auto-fill used.
@@ -5297,6 +5472,7 @@ export default function Bookings() {
       delete next[reservationId];
       return next;
     });
+    clearEscalation(reservationId);
   };
   const stopTrackingAutoFill = (reservationId?: string) => {
     if (!reservationId) {
@@ -6217,6 +6393,9 @@ export default function Bookings() {
       };
 
       const results: AutoFillResult[] = [];
+      // Stage 1 — resort search (find-buy-in / multichannel). Seed the escalation
+      // tracker so the operator sees the ladder progress live.
+      setEscalation(reservation._id, { resort: "searching", homeCity: "idle", foundAt: null, startedAt: Date.now() });
       const comboEvaluation = await evaluateTwoUnitCombos();
       const comboCommunity = staticUnitConfig?.community ?? emptySlots.find((slot) => slot.community)?.community ?? "";
       const comboTargetResort = directBookingTargetResortName(comboCommunity);
@@ -6225,6 +6404,11 @@ export default function Bookings() {
       const resortComboComplete = resortOption
         ? comboOptionIsComplete(resortOption, comboTargetResort, comboCommunity)
         : false;
+      setEscalation(reservation._id, {
+        resort: resortComboComplete ? "found" : "no-pair",
+        resortLabel: comboTargetResort || comboCommunity || undefined,
+        ...(resortComboComplete ? { foundAt: "resort" as const } : {}),
+      });
 
       const remainingEmptySlots = () => emptySlots.filter((slot) => !results.some((row) => row.picked && row.slot.unitId === slot.unitId));
 
@@ -6337,6 +6521,8 @@ export default function Bookings() {
           ...prev,
           [reservation._id]: (prev[reservation._id] ?? 0) + 1,
         }));
+        // Stage 2 — home-city VRBO search (e.g. "Koloa, Hawaii").
+        setEscalation(reservation._id, { homeCity: "searching" });
         try {
           const cityParams = new URLSearchParams({
             propertyId: String(buyInPropertyId),
@@ -6348,6 +6534,12 @@ export default function Bookings() {
           );
           cityHomeScanData = cityData;
           const cityCombo = cityComboOptionFromInventory(cityData);
+          setEscalation(reservation._id, {
+            homeCity: cityCombo ? "found" : "no-pair",
+            homeCityTerm: cityData.citySearchTerm,
+            homeCityListings: cityData.listings?.length ?? 0,
+            ...(cityCombo ? { foundAt: "home-city" as const } : {}),
+          });
           if (cityCombo) {
             const allAttached = await applyCityComboFallback(cityCombo, cityData, slotsForCityFallback);
             if (allAttached) {
@@ -6362,6 +6554,7 @@ export default function Bookings() {
           }
         } catch (cityError: any) {
           console.warn("[auto-fill] city VRBO inventory fallback failed:", cityError?.message ?? cityError);
+          setEscalation(reservation._id, { homeCity: "skipped" });
         }
       }
 
@@ -6605,8 +6798,12 @@ export default function Bookings() {
             citiesSearched: [],
             scannedCount: 0,
             totalCount: 0,
+            cityResults: [],
           },
         }));
+        // Resort + home city already came up empty (that's why we widened) —
+        // reflect that in the escalation tracker; the poller drives the tiers.
+        setEscalation(reservation._id, { resort: "no-pair", homeCity: "no-pair" });
         if (comboOptions.length > 0) setLastAutoFillCombos((prev) => ({ ...prev, [reservation._id]: comboOptions }));
         if (searchAudits.length > 0) setLastAutoFillAudits((prev) => ({ ...prev, [reservation._id]: searchAudits }));
         return;
@@ -6789,12 +6986,13 @@ export default function Bookings() {
         ...prev,
         [reservationId]: {
           jobId: s.jobId,
-          status: "running",
+          status: s.status, // pending/running while polling; terminal handled by resolver
           tier: s.tier,
           currentCity: s.currentCity,
           citiesSearched: s.citiesSearched,
           scannedCount: s.scannedCount,
           totalCount: s.totalCount,
+          cityResults: s.cityResults ?? [],
         },
       };
     });
@@ -6807,6 +7005,23 @@ export default function Bookings() {
     const meta = expansionJobMetaRef.current[reservationId];
     const silent = meta?.silent ?? false;
     const fresh = reservationsRef.current.find((x) => x._id === reservationId) ?? meta?.reservation ?? null;
+    // Snapshot the final nearby-city ladder onto the escalation tracker BEFORE
+    // clearing the job row, so the operator keeps seeing which towns were searched
+    // (and where the pair was found) after the job is gone.
+    if (status) {
+      const nearbyStatus =
+        status.status === "found" ? "found" as const
+        : status.status === "worker_offline" ? "worker_offline" as const
+        : status.status === "error" ? "error" as const
+        : "exhausted" as const;
+      setEscalation(reservationId, {
+        resort: "no-pair",
+        homeCity: "no-pair",
+        tierResults: status.cityResults ?? [],
+        nearbyStatus,
+        ...(status.status === "found" ? { foundAt: "nearby" as const } : {}),
+      });
+    }
     clearExpansionJob(reservationId);
 
     // FOUND + auto-attachable: attach the nearby-city pair. Keep the row TRACKED
@@ -8717,33 +8932,24 @@ export default function Bookings() {
                           </div>
                         )}
                         {expansionJobs[r._id] && (
-                          <>
-                            <CityExpansionJobPoller
-                              jobId={expansionJobs[r._id].jobId}
-                              onState={(s) => updateExpansionJobState(r._id, s)}
-                              onResolved={(s) => handleExpansionResolved(r._id, s)}
-                            />
-                            <div className="rounded border border-cyan-200 bg-cyan-50/60 px-3 py-2 text-[11px] text-cyan-900">
-                              <div className="flex items-center gap-2 font-semibold">
-                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                                Searching nearby cities for a same-community pair…
-                              </div>
-                              <div className="mt-0.5 text-[10px] text-cyan-800">
-                                {(() => {
-                                  const j = expansionJobs[r._id];
-                                  const within = j.tier ? `within ${j.tier} min` : "nearby";
-                                  const prog = j.totalCount > 0 ? ` · ${j.scannedCount}/${j.totalCount}` : "";
-                                  const cur = j.currentCity ? ` · scanning ${j.currentCity}` : "";
-                                  return `Resort + home city had no pair — widening ${within}${prog}${cur}.`;
-                                })()}
-                              </div>
-                              {expansionJobs[r._id].citiesSearched.length > 0 && (
-                                <div className="mt-0.5 text-[10px] text-cyan-700">
-                                  Searched: {expansionJobs[r._id].citiesSearched.join(", ")}
-                                </div>
-                              )}
-                            </div>
-                          </>
+                          <CityExpansionJobPoller
+                            jobId={expansionJobs[r._id].jobId}
+                            onState={(s) => updateExpansionJobState(r._id, s)}
+                            onResolved={(s) => handleExpansionResolved(r._id, s)}
+                          />
+                        )}
+                        {(escalationByReservation[r._id] || expansionJobs[r._id]) && (
+                          <BuyInEscalationStages
+                            escalation={
+                              escalationByReservation[r._id] ?? {
+                                resort: "no-pair",
+                                homeCity: "no-pair",
+                                foundAt: null,
+                                startedAt: 0,
+                              }
+                            }
+                            expansion={expansionJobs[r._id] ?? null}
+                          />
                         )}
                         {(searchAudits.length > 0 || comboOptions.length > 0) && (
                           <div className="flex justify-end">
