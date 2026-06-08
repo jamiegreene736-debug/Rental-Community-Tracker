@@ -12785,6 +12785,76 @@ Requirements:
     }
   });
 
+  // ── Auto-fill cheapest (server-side background job) ───────────────────────
+  // Runs the WHOLE buy-in escalation ladder (resort find-buy-in → home-city
+  // VRBO → nearby-city expansion → per-slot single-unit fallback) AND the
+  // attach server-side, so it survives the operator leaving the bookings page.
+  // The client starts it and polls; attaches persist to Postgres regardless of
+  // the browser tab. See server/auto-fill-job.ts for the full rationale.
+  app.post("/api/operations/auto-fill", async (req: Request, res: Response) => {
+    try {
+      const { startAutoFillJob } = await import("./auto-fill-job");
+      const started = startAutoFillJob({
+        reservationId: String(req.body?.reservationId ?? ""),
+        propertyId: Number(req.body?.propertyId),
+        listingId: req.body?.listingId ?? null,
+        propertyName: String(req.body?.propertyName ?? ""),
+        community: req.body?.community ?? null,
+        checkIn: String(req.body?.checkIn ?? ""),
+        checkOut: String(req.body?.checkOut ?? ""),
+        slots: Array.isArray(req.body?.slots) ? req.body.slots : [],
+        groundFloorBedrooms: Array.isArray(req.body?.groundFloorBedrooms) ? req.body.groundFloorBedrooms : [],
+        silent: req.body?.silent === true,
+      });
+      return res.status(202).json(started);
+    } catch (e: any) {
+      const { AutoFillValidationError } = await import("./auto-fill-job");
+      if (e instanceof AutoFillValidationError) return res.status(400).json({ error: e.message });
+      console.error("[auto-fill] start error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // active MUST be registered before :jobId so "active" isn't matched as a jobId.
+  app.get("/api/operations/auto-fill/active", async (req: Request, res: Response) => {
+    try {
+      const { getActiveAutoFillJobForReservation, serializeAutoFillJob } = await import("./auto-fill-job");
+      const ids = String(req.query.reservationIds ?? req.query.reservationId ?? "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const out: Record<string, any> = {};
+      for (const id of ids) {
+        const job = getActiveAutoFillJobForReservation(id);
+        if (job) out[id] = serializeAutoFillJob(job);
+      }
+      return res.json({ jobs: out });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/operations/auto-fill/:jobId", async (req: Request, res: Response) => {
+    try {
+      const { getAutoFillJob, serializeAutoFillJob } = await import("./auto-fill-job");
+      const job = getAutoFillJob(String(req.params.jobId));
+      if (!job) return res.status(404).json({ error: "auto-fill job not found or expired" });
+      return res.json(serializeAutoFillJob(job));
+    } catch (e: any) {
+      console.error("[auto-fill] poll error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.post("/api/operations/auto-fill/:jobId/cancel", async (req: Request, res: Response) => {
+    try {
+      const { cancelAutoFillJob } = await import("./auto-fill-job");
+      const ok = cancelAutoFillJob(String(req.params.jobId));
+      if (!ok) return res.status(404).json({ error: "auto-fill job not found or expired" });
+      return res.json({ ok: true });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   app.get("/api/operations/find-buy-in", async (req: Request, res: Response) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
