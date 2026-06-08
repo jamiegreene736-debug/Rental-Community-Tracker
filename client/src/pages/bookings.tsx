@@ -6651,20 +6651,58 @@ export default function Bookings() {
           ? { ...reservation, fullyLinked: false, slots: reservation.slots.map((s) => ({ ...s, buyIn: null })) }
           : reservation;
 
-        const result = await autoFillMutation.mutateAsync({
-          reservation: freshReservation,
-          propertyId: item.propertyId,
-          listingId: item.listingId,
-          silent: true,
-          // Bulk runs sequentially and is already long-running, so it polls the
-          // nearby-city expansion inline (rather than handing off to the row
-          // poller) — keeps result.results correct for the pass/fail report below.
-          awaitExpansionInline: true,
-          // Supersede any in-flight job for this reservation (e.g. a manual
-          // "Auto-fill cheapest" still running) so the just-detached fresh search
-          // isn't dropped onto a stale reused job.
-          forceRestart: true,
-        });
+        // The SAME server-side auto-fill, but RESILIENT to a transient server
+        // restart. Auto-fill jobs are in-memory, so a Railway redeploy mid-run
+        // wipes them and the poll comes back "Auto-fill job was lost (server
+        // restart)". Picks persist to Postgres as they attach, so a re-POST
+        // (forceRestart) resumes/redoes the search. Retry a bounded number of
+        // times — covering a redeploy window — before letting the item fail.
+        const MAX_JOB_LOST_RETRIES = 3;
+        const JOB_LOST_RETRY_DELAY_MS = 15_000;
+        const wasJobLost = (r: AutoFillMutationResult): boolean =>
+          r.results.length > 0
+          && r.results.every((row) => !row.picked)
+          && r.results.some((row) => row.skippedReasons.some((reason) => /job was lost|server restart/i.test(reason)));
+        let result: AutoFillMutationResult | null = null;
+        for (let attempt = 0; attempt <= MAX_JOB_LOST_RETRIES; attempt += 1) {
+          if (bulkBuyInCancelRef.current) break;
+          if (attempt > 0) {
+            setBulkQueueItem(item.reservationId, {
+              message: `Search interrupted (server restart) — retrying ${attempt}/${MAX_JOB_LOST_RETRIES}…`,
+            });
+            await logBulkBuyInQueueEvent({ ...item, status: "running" }, "warn",
+              `Auto-fill job lost to a server restart — retry ${attempt}/${MAX_JOB_LOST_RETRIES}`);
+            await new Promise((r) => setTimeout(r, JOB_LOST_RETRY_DELAY_MS));
+          }
+          try {
+            result = await autoFillMutation.mutateAsync({
+              reservation: freshReservation,
+              propertyId: item.propertyId,
+              listingId: item.listingId,
+              silent: true,
+              // Bulk runs sequentially and is already long-running, so it polls the
+              // nearby-city expansion inline (rather than handing off to the row
+              // poller) — keeps result.results correct for the pass/fail report below.
+              awaitExpansionInline: true,
+              // Supersede any in-flight job for this reservation (e.g. a manual
+              // "Auto-fill cheapest" still running) so the just-detached fresh
+              // search isn't dropped onto a stale reused job.
+              forceRestart: true,
+            });
+          } catch (e: any) {
+            // A throw during the restart window (network / 502 / interrupted) is
+            // also a transient symptom — retry until the budget is exhausted.
+            if (attempt >= MAX_JOB_LOST_RETRIES || bulkBuyInCancelRef.current) throw e;
+            result = null;
+            continue;
+          }
+          if (!wasJobLost(result)) break; // a real terminal result (filled OR genuine no-pair)
+        }
+        if (!result) {
+          throw new Error(bulkBuyInCancelRef.current
+            ? "Cancelled during a server-restart retry"
+            : "Auto-fill failed after retrying a server restart");
+        }
         const filled = result.results.filter((row) => row.picked).length;
         const total = result.results.length;
         const failedReasons = result.results
