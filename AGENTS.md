@@ -463,11 +463,17 @@ runs inside the server job) but left in place; don't wire it back to the button.
 ### Auto-fill is PROFITABILITY-GATED (Load-Bearing, 2026-06-08)
 
 Auto-fill no longer attaches the cheapest combo regardless of margin. A combo is
-attached only if the booking stays profitable/break-even:
+attached only if the booking's projected loss stays within a HARD limit:
 `profit = expectedRevenue - existingAttachedCost - comboCost >= -tolerance`,
-`tolerance = max($50, 2%·revenue)` (env `AUTOFILL_PROFIT_MIN_FLAT` / `_PCT`). The
-pure math is `shared/buy-in-profit.ts` (`evaluateComboProfit`), unit-tested in
-`tests/buy-in-profit.test.ts`. Load-bearing choices:
+`tolerance = max($100, 0%·revenue) = $100` flat (operator, 2026-06-08: "as long
+as I don't lose more than $100"). It's `max(FLAT, PCT·revenue)` with `FLAT=$100`,
+`PCT=0` (env `AUTOFILL_PROFIT_MIN_FLAT` / `_PCT`), so the cap is UNIFORM across
+stay sizes — a $9.9k booking and a $600 booking both reject the moment the loss
+exceeds $100. **Do NOT reintroduce a revenue-percentage tolerance** (the old
+`max($50, 2%)` let a $9.9k stay lose ~$198, which is exactly what the $100 cap
+replaced). The pure math is `shared/buy-in-profit.ts` (`evaluateComboProfit`),
+unit-tested in `tests/buy-in-profit.test.ts` (incl. the $9,919 stay: −$100 matches,
+−$101 rejected). Load-bearing choices:
 - **`expectedRevenue` is the CLIENT's `getNetRevenue(reservation)`** (hostPayout →
   netIncome → fareAccommodation → totalPaid), passed in the start POST, so the
   gate's profit EQUALS the bookings-page profit number — don't invent a server
