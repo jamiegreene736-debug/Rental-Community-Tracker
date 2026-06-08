@@ -1318,6 +1318,64 @@ export class ChromeSidecarManager {
     return this.createLocalPageTarget(cdpUrl);
   }
 
+  // Hard-relaunch a LOCAL Chrome instance whose CDP websocket protocol is WEDGED
+  // — the browser is alive on HTTP (/json/version → 200) but Playwright's
+  // connectOverCDP handshake hangs and times out. recoverDeadLocalCdp can't fix
+  // this: its checks are all HTTP (they pass), and Browser.close won't reach a
+  // wedged protocol. So kill the OS process by its unique remote-debugging-port
+  // and relaunch a fresh Chrome. Returns true once the new instance's CDP is
+  // reachable with a page target. (Auto-heal for the "every scan exports 0 /
+  // connectOverCDP Timeout 30000ms" failure.)
+  async forceRelaunchLocalCdp(cdpUrl, reason = "cdp wedged") {
+    const instance = this.localInstances.find((row) => row.cdpUrl === cdpUrl);
+    if (!instance) return false;
+    this.log(`${instance.label} CDP WEDGED (${reason}) — hard-killing + relaunching Chrome (port ${instance.cdpPort})…`);
+    await this.killLocalChromeProcess(instance);
+    try {
+      await this.launchLocalChrome(instance);
+    } catch (e) {
+      this.log(`${instance.label} wedge-relaunch failed: ${e?.message ?? e}`);
+      return false;
+    }
+    const ready = await this.waitForCdp(cdpUrl, 20_000);
+    if (!ready) {
+      this.log(`${instance.label} wedge-relaunch: CDP did not come back within 20s`);
+      return false;
+    }
+    await this.enforceLocalWindowMode(instance);
+    if (await this.localCdpHasPageTargets(cdpUrl)) {
+      this.log(`${instance.label} wedge-relaunch: fresh Chrome ready`);
+      return true;
+    }
+    return this.createLocalPageTarget(cdpUrl);
+  }
+
+  // Kill the local Chrome process for an instance by its UNIQUE debugging port.
+  // Each instance owns a distinct --remote-debugging-port (9222+index), so this
+  // pattern can never match the operator's personal Chrome (which has none) or a
+  // sibling sidecar instance (different port). Then wait for the port to free so
+  // a relaunch can rebind it.
+  async killLocalChromeProcess(instance) {
+    const port = instance?.cdpPort;
+    if (!port) return;
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      try {
+        const proc = spawn("pkill", ["-f", `remote-debugging-port=${port} `], { stdio: "ignore" });
+        proc.on("exit", finish);
+        proc.on("error", finish);
+      } catch {
+        finish();
+      }
+      setTimeout(finish, 4_000).unref?.();
+    });
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 6_000 && (await this.isCdpReady(instance.cdpUrl))) {
+      await sleep(250);
+    }
+  }
+
   async isCdpReady(cdpUrl) {
     return isHttpReady(`${trimTrailingSlash(cdpUrl)}/json/version`);
   }

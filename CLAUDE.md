@@ -43,6 +43,29 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-08 (sidecar CDP-wedge auto-heal, PR #595): diagnosed a live outage where
+  EVERY VRBO scan exported 0 listings (`raw=0`, `connectOverCDP: Timeout 30000ms
+  exceeded`) → no matches anywhere. Root cause: the sidecar's local Chrome
+  instances were CDP-WEDGED — alive on HTTP (`/json/version` → 200) but the
+  websocket DevTools protocol hung, so Playwright's `connectOverCDP` handshake
+  timed out. `chrome-sidecar-manager.mjs recoverDeadLocalCdp` couldn't fix it (its
+  health checks are all HTTP, which pass; `Browser.close` can't reach a wedged
+  protocol), and the worker just reconnected to the same wedged Chrome on every
+  retry. Immediate fix was manual: `pkill -f VrboSidecar-Chrome` (kills ONLY
+  sidecar Chromes — they carry `--user-data-dir=.../VrboSidecar-Chrome*`; personal
+  Chrome has none) + `launchctl kickstart -k gui/$(id -u)/com.vrbosidecar.worker`,
+  then a fresh scan returned 290 listings. Permanent self-heal: added
+  `forceRelaunchLocalCdp(cdpUrl, reason)` + `killLocalChromeProcess(instance)` to
+  `chrome-sidecar-manager.mjs` (hard-kills by the instance's UNIQUE
+  `--remote-debugging-port=<9222+index>` — safe, can't hit personal Chrome — then
+  relaunches + `waitForCdp`), and `worker.mjs ensureBrowser` now detects a
+  `connectOverCDP` timeout and calls it (bounded, `cdpRecoverAttempt < 2`) instead
+  of throwing. Live worker is `~/.vrbo-sidecar-daemon/worker.mjs` +
+  `chrome-sidecar-manager.mjs` (mirror of the repo daemon copies); after editing,
+  `cp` BOTH to `~/.vrbo-sidecar-daemon/` then kickstart. Railway runs the server,
+  NOT the daemon — a deploy doesn't ship this; the local cp+kickstart is what
+  activates it.
+
 - 2026-06-08 (Auto-fill cheapest → server-side background job, PR #590):
   Operator asked that clicking "Auto-fill cheapest" on the bookings page keep
   running even after leaving the page / not being on the tab. Root cause: the

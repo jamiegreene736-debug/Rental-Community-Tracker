@@ -2257,6 +2257,27 @@ async function ensureBrowser(cdpRecoverAttempt = 0) {
     const closedCount = await closeExtraTabs("startup tab cleanup", page);
     log(`opened fresh daemon-owned tab; closed ${closedCount} stale tab(s)`);
   } catch (e) {
+    const errMsg = String(e?.message ?? e);
+    // CDP WEDGE auto-heal: connectOverCDP hangs/times out even though Chrome's
+    // HTTP endpoint is alive (so recoverDeadLocalCdp's HTTP checks won't relaunch
+    // it). Hard-kill + relaunch the instance and retry, bounded. Without this the
+    // worker just reconnects to the SAME wedged Chrome on every retry → every
+    // scan exports 0 (the 2026-06-08 outage). connectOverCDP's default 30s
+    // timeout is what surfaces the wedge.
+    const isCdpConnectTimeout =
+      /connectOverCDP/i.test(errMsg) && /Timeout\s+\d+\s*ms exceeded/i.test(errMsg);
+    if (isCdpConnectTimeout && allocation.cdpUrl && cdpRecoverAttempt < 2) {
+      log(`${allocation.label}: connectOverCDP timed out (Chrome CDP wedged); hard-relaunching + retrying (wedge attempt ${cdpRecoverAttempt + 1}/2)`);
+      const relaunched = await chromeSidecarManager
+        .forceRelaunchLocalCdp(allocation.cdpUrl, "connectOverCDP timeout")
+        .catch(() => false);
+      await teardownBrowser("CDP wedge relaunch");
+      browser = null;
+      context = null;
+      page = null;
+      if (relaunched) return ensureBrowser(cdpRecoverAttempt + 1);
+      log(`${allocation.label}: wedge-relaunch did not restore CDP; surfacing error`);
+    }
     if (isCdpContextManagementError(e) && allocation.cdpUrl && cdpRecoverAttempt < 1) {
       const recovered = await chromeSidecarManager.recoverDeadLocalCdp(allocation.cdpUrl).catch(() => false);
       if (recovered) {
