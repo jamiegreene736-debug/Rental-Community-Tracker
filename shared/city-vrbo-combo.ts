@@ -723,7 +723,57 @@ function evaluateAdjacencyClusters(priced: ScoredRow[], plan: number[], nights: 
  * This replaces the old "title-phrase bucket only" gate, which left genuine
  * same-complex units (different/generic titles) unpaired.
  */
+const MIN_COMBO_UNIT_BEDROOMS = 2; // the city scan drops <2BR, so splits use >=2
+
+/**
+ * For a 2-UNIT booking, enumerate the valid ways to split the TOTAL bedrooms
+ * across two units (each >= MIN). e.g. a 6BR booking can be 3+3 OR 4+2 — both
+ * give the guest 6BR in 2 walkable units, so both are valid combos. The
+ * CONFIGURED plan is returned FIRST so it wins ties. Plans that aren't exactly
+ * two units are returned unchanged (no alternative-split logic). 5BR (3+2) and
+ * 4BR (2+2) have no alternative; alternatives only exist for total >= 6.
+ */
+export function comboSplitsForPlan(plan: number[]): number[][] {
+  if (plan.length !== 2) return [plan];
+  const total = (plan[0] || 0) + (plan[1] || 0);
+  if (!Number.isFinite(total) || total < 2 * MIN_COMBO_UNIT_BEDROOMS) return [plan];
+  const configured = [plan[0], plan[1]];
+  const splits: number[][] = [configured];
+  const seen = new Set<string>([configured.slice().sort((a, b) => b - a).join("x")]);
+  for (let big = total - MIN_COMBO_UNIT_BEDROOMS; big >= Math.ceil(total / 2); big -= 1) {
+    const small = total - big;
+    if (small < MIN_COMBO_UNIT_BEDROOMS) continue;
+    const key = `${big}x${small}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    splits.push([big, small]);
+  }
+  return splits;
+}
+
+/**
+ * Cheapest same-community pair, considering ALL valid 2-unit bedroom splits of
+ * the total (3+3 AND 4+2 for a 6BR booking) — not just the configured split.
+ * Each split is matched independently over the same city pool; the cheapest pair
+ * across splits wins (configured split preferred on ties). The winning split is
+ * reported in the returned pair's `bedrooms`.
+ */
 export function suggestCityVrboComboPair(
+  listings: CityVrboListing[],
+  bedroomPlan: number[],
+  nights: number,
+): CityVrboComboPair | null {
+  const splits = comboSplitsForPlan(bedroomPlan.filter((br) => Number.isFinite(br) && br > 0));
+  let best: CityVrboComboPair | null = null;
+  for (const split of splits) {
+    const pair = suggestPairForExactPlan(listings, split, nights);
+    // Strictly cheaper wins; ties keep the earlier split (configured first).
+    if (pair && (!best || pair.totalCost < best.totalCost)) best = pair;
+  }
+  return best;
+}
+
+function suggestPairForExactPlan(
   listings: CityVrboListing[],
   bedroomPlan: number[],
   nights: number,

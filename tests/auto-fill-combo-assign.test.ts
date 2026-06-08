@@ -47,6 +47,13 @@ console.log("auto-fill combo-assign: each pick consumed once");
   const a = assignComboPicksToSlots([3, 4], [{ bedrooms: 3 }, { bedrooms: 3 }]);
   check("[3,4] picks fill [3,3] slots (bigger unit allowed), distinct", a.length === 2 && distinct(a), a);
 }
+// MULTI-SPLIT: a 4+2 combo fills a [3,3] booking (total 6BR delivered across the
+// two 3-slots; the 2BR pick legitimately lands in a 3-slot). Largest pick (4BR)
+// -> a slot, smallest pick (2BR) -> the other slot; both slots filled, distinct.
+{
+  const a = assignComboPicksToSlots([4, 2], [{ bedrooms: 3 }, { bedrooms: 3 }]);
+  check("[4,2] picks fill [3,3] slots (multi-split combo), 2 distinct", a.length === 2 && distinct(a), a);
+}
 // not enough picks: 1 pick, 2 slots -> only 1 assignment (never double-uses a pick).
 {
   const a = assignComboPicksToSlots([3], [{ bedrooms: 3 }, { bedrooms: 3 }]);

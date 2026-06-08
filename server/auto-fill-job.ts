@@ -1005,33 +1005,30 @@ function doneMessage(job: AutoFillJob): string {
 }
 
 // Assign each combo pick to a DISTINCT slot, consuming each pick exactly once.
-// Exported for testing. A bedroom->single-pick MAP collapses a same-bedroom pair
-// (e.g. Poipu Kai [3,3] = two distinct 3BR picks) into ONE entry, so the second
-// slot would receive the first pick and dedup-skip it — attaching only the first
-// unit (the 2026-06-08 "only attached the first unit" bug). Match each slot to an
-// unused pick whose plan-bedroom equals it, then >= as a fallback (bigger unit
-// fills a smaller slot). `pickBedrooms[i]` is the plan bedroom for pick i.
+// Exported for testing. LARGEST-pick-to-LARGEST-slot bijection: this fills every
+// slot when counts match AND supports alternative bedroom SPLITS — a 6BR booking
+// configured [3,3] can be satisfied by a 4BR+2BR combo, where the 2BR must land
+// in a "3BR" slot (per-slot >= matching would leave it unfilled). The combo was
+// already chosen to satisfy the TOTAL, so any bijection is valid; biggest-to-
+// biggest keeps over/under-fills sensible. For the configured split (picks
+// multiset == slots multiset, e.g. [3,3] or [3,2]) this is identical to an
+// exact-bedroom match. Also fixes the earlier "only attached the first unit" bug
+// (a same-bedroom pair never collapses to one pick here).
 export function assignComboPicksToSlots(
   pickBedrooms: number[],
   slots: Array<{ bedrooms: number }>,
 ): Array<{ slotIndex: number; pickIndex: number }> {
+  const picksDesc = pickBedrooms
+    .map((br, pickIndex) => ({ pickIndex, br: Number(br) || 0 }))
+    .sort((a, b) => b.br - a.br);
+  const slotsDesc = slots
+    .map((slot, slotIndex) => ({ slotIndex, br: Number(slot.bedrooms) || 0 }))
+    .sort((a, b) => b.br - a.br);
   const out: Array<{ slotIndex: number; pickIndex: number }> = [];
-  const usedPick = new Set<number>();
-  const pickFor = (slotBr: number, exact: boolean): number => {
-    for (let i = 0; i < pickBedrooms.length; i += 1) {
-      if (usedPick.has(i)) continue;
-      const br = Number(pickBedrooms[i]);
-      if (exact ? br === slotBr : Number.isFinite(br) && br >= slotBr) return i;
-    }
-    return -1;
-  };
-  slots.forEach((slot, slotIndex) => {
-    let chosen = pickFor(slot.bedrooms, true);
-    if (chosen < 0) chosen = pickFor(slot.bedrooms, false);
-    if (chosen < 0) return;
-    usedPick.add(chosen);
-    out.push({ slotIndex, pickIndex: chosen });
-  });
+  const n = Math.min(picksDesc.length, slotsDesc.length);
+  for (let i = 0; i < n; i += 1) {
+    out.push({ slotIndex: slotsDesc[i].slotIndex, pickIndex: picksDesc[i].pickIndex });
+  }
   return out;
 }
 
