@@ -9,9 +9,9 @@ const check = (name: string, ok: boolean, extra?: unknown) => {
 
 console.log("buy-in-profit: profitability gate");
 
-// tolerance = max($50, 2% * revenue)
-check("tolerance: floor $50 on small revenue", profitToleranceUsd(600) === 50);
-check("tolerance: 2% on large revenue", profitToleranceUsd(9000) === 180);
+// HARD max-loss limit of $100 (flat — same cap for every stay size).
+check("tolerance: flat $100 on small revenue", profitToleranceUsd(600) === 100);
+check("tolerance: flat $100 on large revenue (NOT 2% = $180)", profitToleranceUsd(9000) === 100);
 check("tolerance: 0 when revenue unknown", profitToleranceUsd(0) === 0 && profitToleranceUsd(-5) === 0);
 
 // clearly profitable
@@ -38,16 +38,25 @@ check("tolerance: 0 when revenue unknown", profitToleranceUsd(0) === 0 && profit
   const v = evaluateComboProfit({ expectedRevenue: 5000, existingCost: 2000, comboCost: 3200 }); // -200, tol=100
   check("existingCost subtracted: -$200 REJECTED", !v.acceptable && v.profit === -200, v);
 }
-// small stay: $50 floor governs
+// HARD $100 limit, flat across stay sizes:
+// small stay can lose up to $100 too (no $50 floor anymore)
 {
-  const ok = evaluateComboProfit({ expectedRevenue: 600, existingCost: 0, comboCost: 645 });   // -45, tol 50
-  const no = evaluateComboProfit({ expectedRevenue: 600, existingCost: 0, comboCost: 660 });   // -60, tol 50
-  check("small stay: -$45 acceptable, -$60 rejected (floor $50)", ok.acceptable && !no.acceptable, [ok, no]);
+  const ok = evaluateComboProfit({ expectedRevenue: 600, existingCost: 0, comboCost: 695 });   // -95, within $100
+  const no = evaluateComboProfit({ expectedRevenue: 600, existingCost: 0, comboCost: 720 });   // -120, beyond $100
+  check("small stay: -$95 acceptable, -$120 rejected (flat $100 limit)", ok.acceptable && !no.acceptable, [ok, no]);
 }
-// big stay: 2% governs
+// big stay capped at $100 (NOT 2% = $180): -$100 matches, -$101 does not.
 {
-  const v = evaluateComboProfit({ expectedRevenue: 9000, existingCost: 0, comboCost: 9100 });  // -100, tol 180
-  check("big stay: -$100 acceptable (tol $180)", v.acceptable && v.profit === -100, v);
+  const at = evaluateComboProfit({ expectedRevenue: 9000, existingCost: 0, comboCost: 9100 });   // -100, exactly the limit
+  const beyond = evaluateComboProfit({ expectedRevenue: 9000, existingCost: 0, comboCost: 9101 }); // -101, $1 past the limit
+  check("big stay: -$100 matches, -$101 rejected (flat $100 cap, NOT 2% = $180)",
+    at.acceptable && at.profit === -100 && !beyond.acceptable && beyond.profit === -101, [at, beyond]);
+}
+// the operator's case: a $9,919 booking that would lose >$100 is rejected
+{
+  const at = evaluateComboProfit({ expectedRevenue: 9919, existingCost: 0, comboCost: 10019 });   // -100 → match
+  const beyond = evaluateComboProfit({ expectedRevenue: 9919, existingCost: 0, comboCost: 10119 }); // -200 → reject
+  check("$9,919 stay: -$100 matches, -$200 rejected", at.acceptable && !beyond.acceptable, [at, beyond]);
 }
 // DEGRADE SAFE: revenue unknown -> gate off -> always acceptable
 {

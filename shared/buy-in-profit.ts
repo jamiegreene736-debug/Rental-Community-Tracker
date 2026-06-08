@@ -5,15 +5,20 @@
 // where expectedRevenue is the CLIENT's getNetRevenue(reservation)
 // (hostPayout -> netIncome -> fareAccommodation -> totalPaid) passed through.
 //
-// "Profitable and/or roughly break even" => accept when profit >= -tolerance,
-// tolerance = max(flat, pct * revenue) so a tiny loss on a big stay is noise but
-// a real loss on a small stay is rejected.
+// Accept when profit >= -tolerance. The operator set a HARD MAX-LOSS LIMIT of
+// $100 (2026-06-08): a combo is matched as long as it loses no more than $100,
+// and rejected the moment the projected loss exceeds $100 — regardless of stay
+// size. That's a FLAT tolerance: flat = $100, pct = 0 (so max(flat, pct*revenue)
+// == 100 for any known revenue). The pct knob is kept (env-overridable) but off
+// by default; do NOT reintroduce a revenue-percentage tolerance without an
+// operator ask — it let a big stay lose ~2% (≈$198 on a $9.9k booking), which is
+// exactly what the $100 cap replaced.
 //
 // DEGRADE SAFE: revenue <= 0 / unknown (manual reservations, inquiries) disables
 // the gate (attach as before) — refusing there would silently break those flows.
 
-export const DEFAULT_PROFIT_MIN_FLAT_USD = 50;
-export const DEFAULT_PROFIT_MIN_PCT = 0.02;
+export const DEFAULT_PROFIT_MIN_FLAT_USD = 100;
+export const DEFAULT_PROFIT_MIN_PCT = 0;
 
 export function profitToleranceUsd(
   revenue: number,

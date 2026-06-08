@@ -499,7 +499,7 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
             comboCost,
             expectedProfit: profit,
             accepted: false,
-            reason: `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(profit).toLocaleString()} (below break-even); searched on`,
+            reason: `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(profit).toLocaleString()} (worse than the $${Math.abs(Math.round(job.minProfit)).toLocaleString()} max-loss limit); searched on`,
           });
           touch(job);
           continue;

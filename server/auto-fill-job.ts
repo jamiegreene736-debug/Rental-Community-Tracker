@@ -54,9 +54,11 @@ const JOB_TTL_MS = 2 * 60 * 60 * 1000;
 const EXPANSION_POLL_INTERVAL_MS = 3_000;
 const EXPANSION_POLL_CAP_MS = 40 * 60_000;
 // Profit-gate tuning (env-overridable): accept a combo when
-// profit >= -max(FLAT, PCT * revenue). Default $50 floor / 2% of revenue.
-const PROFIT_MIN_FLAT_USD = Number(process.env.AUTOFILL_PROFIT_MIN_FLAT ?? 50) || 0;
-const PROFIT_MIN_PCT = Number(process.env.AUTOFILL_PROFIT_MIN_PCT ?? 0.02) || 0;
+// profit >= -max(FLAT, PCT * revenue). HARD max-loss limit of $100 (operator,
+// 2026-06-08): match a combo as long as it loses <= $100, reject beyond. Flat
+// (pct 0) so the cap is uniform across stay sizes — see shared/buy-in-profit.ts.
+const PROFIT_MIN_FLAT_USD = Number(process.env.AUTOFILL_PROFIT_MIN_FLAT ?? 100) || 0;
+const PROFIT_MIN_PCT = Number(process.env.AUTOFILL_PROFIT_MIN_PCT ?? 0) || 0;
 
 // ── types ────────────────────────────────────────────────────────────────────
 type JobStatus = "queued" | "running" | "completed" | "failed";
@@ -856,7 +858,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           }
         } else {
           recordEconomics("resort", `Resort ${job.community ?? ""}`.trim() || "Resort", comboCost, v.profit, false,
-            `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (below break-even); searched on`);
+            `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searched on`);
         }
       }
     }
@@ -911,7 +913,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
             // other home-city combo would be better).
             setEscalation(job, { homeCity: "no-pair" });
             recordEconomics("home-city", payload?.citySearchTerm ?? "home city", comboCost, v.profit, false,
-              `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (below break-even); searching nearby cities`);
+              `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searching nearby cities`);
           }
         } else {
           setEscalation(job, { homeCity: "no-pair" });
@@ -956,7 +958,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           const v = gate(cost);
           if (!v.acceptable) {
             recordEconomics("single-unit-city", `${payload?.citySearchTerm ?? "city"} ${slot.unitLabel}`.trim(), cost, v.profit, false,
-              `adding ${slot.unitLabel} ($${Math.round(cost).toLocaleString()}) → est. profit $${Math.round(v.profit).toLocaleString()} (below break-even); left empty`);
+              `adding ${slot.unitLabel} ($${Math.round(cost).toLocaleString()}) → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); left empty`);
             break; // further units only deepen the loss
           }
           await attachPick({
