@@ -45,6 +45,7 @@ import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-f
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
+import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1501,6 +1502,7 @@ type AutoFillJobEscalation = {
   homeCity: EscalationStageStatus;
   homeCityTerm?: string;
   homeCityListings?: number;
+  homeCityCoverage?: CityVrboCoverage;
   foundAt?: "resort" | "home-city" | "nearby" | null;
   nearbyStatus?: "searching" | "found" | "exhausted" | "worker_offline" | "error";
   tierResults?: CityExpansionCityResult[];
@@ -1716,6 +1718,7 @@ type BuyInEscalation = {
   homeCity: EscalationStageStatus;
   homeCityTerm?: string;
   homeCityListings?: number;
+  homeCityCoverage?: CityVrboCoverage;
   foundAt?: "resort" | "home-city" | "nearby" | null;
   // Snapshot of the nearby-city expansion captured when its job resolves, so the
   // tracker keeps showing the searched-cities ladder after the job is cleared
@@ -1842,6 +1845,24 @@ function BuyInEscalationStages({
   const subForTier = (rows: CityExpansionCityResult[]): string | undefined =>
     rows.length ? undefined : (foundEarly ? "skipped — pair found earlier" : undefined);
 
+  // Home-city coverage: show found-vs-usable-vs-VRBO-total so the (correct)
+  // >=2BR-filtered "usable" count never reads as missing inventory. VRBO's
+  // destination count includes studios/1BR a buy-in combo can't use.
+  const homeCov = escalation.homeCityCoverage;
+  const homeCovRan = !!homeCov && homeCov.rawHarvested > 0;
+  const homeCitySub = (() => {
+    const term = escalation.homeCityTerm;
+    if (!term) return undefined;
+    if (homeCovRan) {
+      const found = homeCov!.vrboReportedTotal
+        ? `${homeCov!.rawHarvested} of ${homeCov!.vrboReportedTotal} on VRBO`
+        : `${homeCov!.rawHarvested} found`;
+      return `${term} · ${found} · ${homeCov!.usable} usable (≥2BR)`;
+    }
+    return escalation.homeCityListings ? `${term} · ${escalation.homeCityListings} listings` : term;
+  })();
+  const homeCovExcluded = homeCovRan ? homeCov!.droppedBelowMinBedrooms + homeCov!.droppedNoPrice : 0;
+
   return (
     <div className="space-y-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-[11px] shadow-sm">
       <div className="flex items-center justify-between">
@@ -1856,12 +1877,22 @@ function BuyInEscalationStages({
         </div>
       ) : null}
       <StageRow n={1} title="Resort search" sub={escalation.resortLabel} status={escalation.resort} />
-      <StageRow
-        n={2}
-        title="Home city"
-        sub={escalation.homeCityTerm ? `${escalation.homeCityTerm}${escalation.homeCityListings ? ` · ${escalation.homeCityListings} listings` : ""}` : undefined}
-        status={escalation.homeCity}
-      />
+      <div>
+        <StageRow n={2} title="Home city" sub={homeCitySub} status={escalation.homeCity} />
+        {homeCovExcluded > 0 ? (
+          <div className="ml-7 text-[10px] text-slate-400">
+            {homeCov!.droppedBelowMinBedrooms > 0 ? `${homeCov!.droppedBelowMinBedrooms} studio/1BR` : ""}
+            {homeCov!.droppedBelowMinBedrooms > 0 && homeCov!.droppedNoPrice > 0 ? " + " : ""}
+            {homeCov!.droppedNoPrice > 0 ? `${homeCov!.droppedNoPrice} unpriced` : ""}
+            {" "}excluded — buy-in combos need ≥2BR
+          </div>
+        ) : null}
+        {homeCovRan && !homeCov!.looksComplete ? (
+          <div className="ml-7 text-[10px] font-medium text-amber-700">
+            ⚠ Scan may be incomplete — harvested {homeCov!.rawHarvested} of {homeCov!.vrboReportedTotal} on VRBO. Try Refresh.
+          </div>
+        ) : null}
+      </div>
       <div>
         <StageRow n={3} title="Cities within 20 min" sub={subForTier(tier1)} status={t1Status} />
         {tier1.length > 0 ? <div className="ml-7 mt-1 flex flex-wrap gap-1">{tier1.map(cityChip)}</div> : null}
@@ -6238,6 +6269,7 @@ export default function Bookings() {
       homeCity: s.escalation.homeCity,
       homeCityTerm: s.escalation.homeCityTerm,
       homeCityListings: s.escalation.homeCityListings,
+      homeCityCoverage: s.escalation.homeCityCoverage,
       foundAt: s.escalation.foundAt ?? null,
       nearbyStatus: s.escalation.nearbyStatus,
       tierResults: s.escalation.tierResults,

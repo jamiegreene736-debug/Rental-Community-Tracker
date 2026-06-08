@@ -118,6 +118,26 @@ page. Three constraints make it actually reach the full count — don't
    Next never disables. `readVrboResultsTotalHint` is also floored by the
    rendered lodging-card count so it can never under-count below what's on the
    page. Don't reinstate an unconditional `target-reached` break.
+   **Coverage transparency: "82 listings" is the >=2BR USABLE count, not the
+   harvest (2026-06-08, `shared/city-vrbo-coverage.ts`).** An operator compared
+   VRBO's own destination count (Koloa = 144, ALL bedroom counts) against the
+   tracker's "82 listings" and read it as the tool missing 62. It wasn't: the
+   sidecar harvested 142 of 144 (`rawListings`/`mergedCount`=142,
+   `mapHarvest.graphqlTotalCount`=144), and the normalize pipeline correctly
+   DROPS <2BR (studios/1BR can't be a buy-in combo unit — `MIN_COMBO_UNIT_BEDROOMS`)
+   + unpriced rows: `142 − 55 below-2BR − 5 unpriced = 82 usable`. So the gap was
+   a TRANSPARENCY gap, not an under-harvest. `runCityScanCore` now returns a
+   `coverage` object (`CityVrboCoverage`: vrboReportedTotal / rawHarvested / usable
+   / droppedBelowMinBedrooms / droppedNoPrice / looksComplete) built by the pure
+   zero-dep `shared/city-vrbo-coverage.ts`; the home-city escalation carries it
+   (`homeCityCoverage`) and the tracker shows "Koloa, Hawaii · 142 of 144 on VRBO ·
+   82 usable (>=2BR)" + an "N studio/1BR + M unpriced excluded" note. `looksComplete`
+   = `vrboReportedTotal == null || rawHarvested >= floor(0.9 * vrboReportedTotal)`;
+   when it's false (a GENUINE pagination shortfall) the server `console.warn`s and
+   the tracker shows an amber "scan may be incomplete — try Refresh" line. **Don't
+   "fix" the 144→82 gap by removing the <2BR filter** — a 1BR/studio can never be
+   a combo unit; the fix is showing the breakdown, not widening the pool. Locked
+   by `tests/city-vrbo-coverage.test.ts`.
 6. **Same-community pairing is cluster-first + multi-signal, not title-substring,
    2026-06-07 (`shared/city-vrbo-combo.ts`).** `suggestCityVrboComboPair`
    clusters the city pool by ANY same-community signal — a curated Kauai complex

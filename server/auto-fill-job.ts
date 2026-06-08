@@ -30,6 +30,7 @@ import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { evaluateComboProfit, profitToleranceUsd } from "@shared/buy-in-profit";
+import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import {
   getExpansionJob,
   serializeExpansionJob,
@@ -125,6 +126,10 @@ type AutoFillEscalation = {
   homeCity: AutoFillStageStatus;
   homeCityTerm?: string;
   homeCityListings?: number;
+  // Found-vs-usable-vs-VRBO-total breakdown for the home-city scan, so the
+  // tracker shows the tool captured ~all inventory and the lower "usable" count
+  // is the (correct) >=2BR filter — not missing listings.
+  homeCityCoverage?: CityVrboCoverage;
   foundAt?: "resort" | "home-city" | "nearby" | null;
   nearbyStatus?: "searching" | "found" | "exhausted" | "worker_offline" | "error";
   tierResults?: ExpansionCityResult[];
@@ -886,7 +891,11 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       setEscalation(job, { homeCity: "searching" });
       try {
         const payload = await fetchCity();
-        setEscalation(job, { homeCityTerm: payload?.citySearchTerm, homeCityListings: payload?.listings?.length ?? 0 });
+        setEscalation(job, {
+          homeCityTerm: payload?.citySearchTerm,
+          homeCityListings: payload?.listings?.length ?? 0,
+          homeCityCoverage: payload?.coverage as CityVrboCoverage | undefined,
+        });
         const pair = payload?.suggestedPair;
         const hasPair = !!pair && Array.isArray(pair.picks) && pair.picks.length >= 2;
         if (hasPair) {
