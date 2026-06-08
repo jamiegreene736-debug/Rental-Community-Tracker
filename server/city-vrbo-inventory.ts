@@ -8,6 +8,11 @@ import {
   type CityVrboListing,
 } from "@shared/city-vrbo-combo";
 import { cityWideSearchLocationForBuyInMarket } from "@shared/buy-in-market";
+import {
+  buildCityScanCoverage,
+  vrboReportedTotalFromMapHarvest,
+  type CityVrboCoverage,
+} from "@shared/city-vrbo-coverage";
 
 export type CityVrboFilterPipeline = {
   rawSidecar: number;
@@ -448,6 +453,9 @@ export type CityVrboScanResult = {
   suggestedPair: CityVrboComboPair | null;
   filterPipeline: CityVrboFilterPipeline;
   fromCache: boolean;
+  // Found-vs-usable-vs-VRBO-total breakdown so the tracker doesn't read the
+  // (correctly) >=2BR-filtered count as missing inventory. See city-vrbo-coverage.
+  coverage: CityVrboCoverage;
   sidecar: {
     workerOnline: boolean;
     durationMs: number;
@@ -530,6 +538,13 @@ async function runCityScanCore(args: {
       suggestedPair: null,
       filterPipeline: emptyPipeline,
       fromCache: false,
+      coverage: buildCityScanCoverage({
+        rawHarvested: 0,
+        usable: 0,
+        droppedBelowMinBedrooms: 0,
+        droppedNoPrice: 0,
+        vrboReportedTotal: null,
+      }),
       sidecar: {
         workerOnline: false,
         durationMs: 0,
@@ -638,6 +653,28 @@ async function runCityScanCore(args: {
     }
   }
 
+  // rawHarvested = every deduped listing the sidecar saw (all bedroom counts);
+  // usable = the priced, >=2BR pool the matcher works from (afterNormalize, the
+  // pre-phrase-filter count — phrase filters narrow per-search but the city's
+  // usable inventory is the >=2BR total). vrboReportedTotal is VRBO's own count.
+  const coverage = buildCityScanCoverage({
+    rawHarvested: scrapeEntry.rawListings.length,
+    usable: filtered.filterPipeline.afterNormalize,
+    droppedBelowMinBedrooms: filtered.filterPipeline.droppedBelowMinBedrooms,
+    droppedNoPrice: filtered.filterPipeline.droppedNoPrice,
+    vrboReportedTotal: vrboReportedTotalFromMapHarvest(scrapeEntry.sidecar.mapHarvest),
+  });
+  // Observability for a GENUINE under-harvest (vs the >=2BR filter): if we
+  // captured well under VRBO's own reported total, warn so it's greppable and
+  // the tracker can surface it. The expected case (filtered <2BR) does NOT warn.
+  if (!coverage.looksComplete && coverage.vrboReportedTotal) {
+    console.warn(
+      `[city-vrbo-inventory] INCOMPLETE harvest "${args.logLabel}" ${args.checkIn}→${args.checkOut}: ` +
+      `rawHarvested=${coverage.rawHarvested} of VRBO total ${coverage.vrboReportedTotal} ` +
+      `(usable >=2BR=${coverage.usable}); scan may have missed pages`,
+    );
+  }
+
   return {
     citySearchTerm: scrapeEntry.citySearchTerm,
     nights: scrapeEntry.nights,
@@ -647,6 +684,7 @@ async function runCityScanCore(args: {
     suggestedPair: filtered.suggestedPair,
     filterPipeline: filtered.filterPipeline,
     fromCache,
+    coverage,
     sidecar: scrapeEntry.sidecar,
   };
 }
