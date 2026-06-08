@@ -530,6 +530,21 @@ established it so you can read the rationale in the commit message.
     and writes only weeks that actually failed. Do NOT reintroduce
     baseline-to-52-weeks fanout. See PR #38.
 
+34. **The unattended WEEKLY availability scan is OPT-IN (default OFF),
+    2026-06-08.** `startWeeklyScheduler` (`server/availability-scanner.ts`) used
+    to run `runAvailabilityScan(52)` every Monday 3am UTC. That scan's inventory
+    step (`searchCommunityBedroom` → `fetchMultiChannelBuyInByBR`) drives the
+    operator's LOCAL Chrome sidecar through hundreds of Booking.com/VRBO searches
+    across every property/bedroom/window and runs for HOURS — the operator saw it
+    as "rogue" Chrome activity they never initiated (caught mid-sweep ~10h into the
+    Monday-3am run). It now only runs when `WEEKLY_AVAILABILITY_SCAN=1`; otherwise
+    the weekly tick logs a skip and only does the (API-only, no-Chrome)
+    `syncAllPropertiesToGuesty`. Operators run availability scans ON DEMAND via the
+    dashboard / availability-scanner "Run bulk scan" button (`startBulkAvailabilityQueue`).
+    Don't re-enable the unattended weekly OTA sweep by default. NOTE: the DAILY
+    `availability-scheduler` and the top-market cache refresh are SearchAPI/DB-only
+    (no local Chrome), so they are NOT rogue-Chrome sources — leave them as is.
+
 ### Browser automation against Guesty admin
 
 25. **Vanilla rebrowser-playwright for STEADY-STATE Guesty admin

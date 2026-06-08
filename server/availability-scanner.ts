@@ -1036,10 +1036,26 @@ export function startWeeklyScheduler() {
     log(`Next scan scheduled for ${next.toISOString()} (in ${Math.round(msUntilNext / 3600000)}h)`, "scanner");
 
     setTimeout(async () => {
-      try {
-        await runAvailabilityScan(52);
-      } catch (err: any) {
-        log(`Scheduled scan error: ${err.message}`, "scanner");
+      // The unattended weekly portfolio availability scan is OPT-IN (default OFF).
+      // runAvailabilityScan(52) drives the operator's LOCAL Chrome sidecar through
+      // hundreds of Booking.com/VRBO searches across every property/bedroom/window
+      // and runs for HOURS — which surfaced as "rogue" Chrome activity the operator
+      // didn't initiate (2026-06-08: caught mid-sweep ~10h into the Monday-3am run).
+      // Run availability scans ON DEMAND from the dashboard / availability-scanner
+      // "Run bulk scan" button instead. Re-enable the unattended weekly OTA sweep
+      // with WEEKLY_AVAILABILITY_SCAN=1.
+      if (process.env.WEEKLY_AVAILABILITY_SCAN === "1") {
+        try {
+          await runAvailabilityScan(52);
+        } catch (err: any) {
+          log(`Scheduled scan error: ${err.message}`, "scanner");
+        }
+      } else {
+        log(
+          "Weekly availability OTA scan SKIPPED (WEEKLY_AVAILABILITY_SCAN not set) — " +
+          "run on demand from the dashboard to avoid unattended local-Chrome sweeps",
+          "scanner",
+        );
       }
       try {
         await syncAllPropertiesToGuesty();
@@ -1051,5 +1067,10 @@ export function startWeeklyScheduler() {
   }
 
   scheduleNext();
-  log("Weekly availability scanner scheduler started (every Monday 3am)", "scanner");
+  log(
+    `Weekly availability scheduler started (Monday 3am): OTA sidecar scan ${
+      process.env.WEEKLY_AVAILABILITY_SCAN === "1" ? "ENABLED" : "OFF (opt-in via WEEKLY_AVAILABILITY_SCAN=1)"
+    }; Guesty sync always on`,
+    "scanner",
+  );
 }
