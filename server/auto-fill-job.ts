@@ -867,24 +867,62 @@ function doneMessage(job: AutoFillJob): string {
   return `Attached ${filled}/${total} unit${total === 1 ? "" : "s"}${cost}`;
 }
 
-// Attach a city suggestedPair's picks to the remaining slots (by bedroom),
-// mirroring the client applyCityComboFallback.
-async function attachCityCombo(job: AutoFillJob, base: string, payload: any, used: Set<string>): Promise<void> {
-  const pair = payload?.suggestedPair;
-  if (!pair) return;
-  const pickByBedroom = new Map<number, any>();
-  (pair.bedrooms ?? []).forEach((bedrooms: number, index: number) => {
-    if (!pickByBedroom.has(bedrooms)) pickByBedroom.set(bedrooms, pair.picks[index]);
+// Assign each combo pick to a DISTINCT slot, consuming each pick exactly once.
+// Exported for testing. A bedroom->single-pick MAP collapses a same-bedroom pair
+// (e.g. Poipu Kai [3,3] = two distinct 3BR picks) into ONE entry, so the second
+// slot would receive the first pick and dedup-skip it — attaching only the first
+// unit (the 2026-06-08 "only attached the first unit" bug). Match each slot to an
+// unused pick whose plan-bedroom equals it, then >= as a fallback (bigger unit
+// fills a smaller slot). `pickBedrooms[i]` is the plan bedroom for pick i.
+export function assignComboPicksToSlots(
+  pickBedrooms: number[],
+  slots: Array<{ bedrooms: number }>,
+): Array<{ slotIndex: number; pickIndex: number }> {
+  const out: Array<{ slotIndex: number; pickIndex: number }> = [];
+  const usedPick = new Set<number>();
+  const pickFor = (slotBr: number, exact: boolean): number => {
+    for (let i = 0; i < pickBedrooms.length; i += 1) {
+      if (usedPick.has(i)) continue;
+      const br = Number(pickBedrooms[i]);
+      if (exact ? br === slotBr : Number.isFinite(br) && br >= slotBr) return i;
+    }
+    return -1;
+  };
+  slots.forEach((slot, slotIndex) => {
+    let chosen = pickFor(slot.bedrooms, true);
+    if (chosen < 0) chosen = pickFor(slot.bedrooms, false);
+    if (chosen < 0) return;
+    usedPick.add(chosen);
+    out.push({ slotIndex, pickIndex: chosen });
   });
-  for (const slot of job.slots.filter((s) => !job.attached.some((a) => a.unitId === s.unitId))) {
+  return out;
+}
+
+// Attach a city suggestedPair's picks to the remaining slots, consuming each pick
+// once (see assignComboPicksToSlots). Shared by the home-city and nearby-expansion
+// combo paths — pass the right `stage` so the attached record is labeled correctly.
+async function attachCityCombo(
+  job: AutoFillJob,
+  base: string,
+  payload: any,
+  used: Set<string>,
+  stage: AttachStage = "home-city",
+): Promise<void> {
+  const pair = payload?.suggestedPair;
+  if (!pair || !Array.isArray(pair.picks) || pair.picks.length === 0) return;
+  const remainingSlots = job.slots.filter((s) => !job.attached.some((a) => a.unitId === s.unitId));
+  const pickBedrooms: number[] = pair.picks.map((p: any, i: number) =>
+    Number(pair.bedrooms?.[i] ?? p?.bedrooms ?? 0),
+  );
+  const assignments = assignComboPicksToSlots(pickBedrooms, remainingSlots);
+  for (const { slotIndex, pickIndex } of assignments) {
     if (job.canceled) break;
-    const row = pickByBedroom.get(slot.bedrooms);
-    if (!row) continue;
+    const slot = remainingSlots[slotIndex];
     await attachPick({
       job, base, slot,
-      pick: liveCandidateFromCityRow(row, slot.bedrooms, job.nights),
+      pick: liveCandidateFromCityRow(pair.picks[pickIndex], slot.bedrooms, job.nights),
       searchedBedrooms: slot.bedrooms,
-      used, stage: "home-city",
+      used, stage,
       comboLabel: `City VRBO ${pair.resortPhrase ?? "pair"}`,
     });
   }
@@ -922,7 +960,7 @@ async function runExpansion(job: AutoFillJob, base: string, used: Set<string>): 
   }
   if (terminal?.status === "found" && terminal.combo) {
     setEscalation(job, { foundAt: "nearby" });
-    await attachCityCombo(job, base, terminal.combo, used);
+    await attachCityCombo(job, base, terminal.combo, used, "nearby");
     for (const b of terminal.combo.suggestedPair?.bedrooms ?? []) setAudit(job, auditFromCity(b, terminal.combo));
   }
 }
