@@ -1485,6 +1485,210 @@ function CityExpansionJobPoller({
   return null;
 }
 
+// ── Auto-fill server job (mirror of server/auto-fill-job.ts serialize) ──────
+// The full buy-in escalation ladder + the buy-in attach now run server-side as
+// a fire-and-forget job, so "Auto-fill cheapest" keeps running AND keeps
+// attaching even after the operator leaves the bookings page / backgrounds the
+// tab. These poll/resolve helpers mirror the expansion poller above.
+type AutoFillJobEscalation = {
+  resort: EscalationStageStatus;
+  resortLabel?: string;
+  homeCity: EscalationStageStatus;
+  homeCityTerm?: string;
+  homeCityListings?: number;
+  foundAt?: "resort" | "home-city" | "nearby" | null;
+  nearbyStatus?: "searching" | "found" | "exhausted" | "worker_offline" | "error";
+  tierResults?: CityExpansionCityResult[];
+};
+type AutoFillJobAttached = {
+  unitId: string;
+  unitLabel: string;
+  bedrooms: number;
+  buyInId: number | null;
+  title: string;
+  sourceLabel: string;
+  url: string;
+  totalPrice: number;
+  airbnbPick: boolean;
+  stage: "resort" | "home-city" | "nearby" | "single-unit-city";
+};
+type AutoFillJobStatus = {
+  jobId: string;
+  status: "queued" | "running" | "completed" | "failed";
+  done: boolean;
+  phase: string;
+  message: string;
+  progress: number;
+  reservationId: string;
+  escalation: AutoFillJobEscalation;
+  attached: AutoFillJobAttached[];
+  skipped: Array<{ unitId: string; unitLabel: string; reason: string }>;
+  searchAudits: AutoFillSearchAudit[];
+  comboOptions: AutoFillComboOption[];
+  slotsTotal: number;
+  slotsFilled: number;
+  totalCost: number | null;
+  error: string | null;
+};
+
+// The shape the auto-fill mutation returns / the bulk queue report consumes.
+type AutoFillResultRow = {
+  slot: { unitId: string; unitLabel: string; bedrooms: number };
+  picked: { totalPrice: number; url: string; title: string; sourceLabel: string } | null;
+  airbnbPick: boolean;
+  skippedReasons: string[];
+  searchSummary: AutoFillSearchSummary;
+};
+type AutoFillMutationResult = {
+  reservation: GuestyReservation;
+  results: AutoFillResultRow[];
+  comboOptions: AutoFillComboOption[];
+  searchAudits: AutoFillSearchAudit[];
+  autoFillJob?: { jobId: string; reservationId: string };
+};
+
+// Poll an auto-fill job to terminal (the bulk path runs this inline so its
+// pass/fail report reflects what actually attached).
+async function pollAutoFillToTerminal(
+  jobId: string,
+  opts?: { maxMs?: number; intervalMs?: number },
+): Promise<AutoFillJobStatus | null> {
+  const maxMs = opts?.maxMs ?? 50 * 60_000;
+  const intervalMs = opts?.intervalMs ?? 3000;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxMs) {
+    try {
+      const data = await apiGetJson<AutoFillJobStatus>(`/api/operations/auto-fill/${jobId}`);
+      if (data.done) return data;
+    } catch (e: any) {
+      if (/\b(404|401|403)\b/.test(String(e?.message ?? ""))) return null;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return null;
+}
+
+// Build the legacy {results, searchAudits, comboOptions} shape the bulk-queue
+// reporting consumes, from a terminal auto-fill job payload.
+function autoFillResultFromJob(
+  reservation: GuestyReservation,
+  terminal: AutoFillJobStatus | null,
+): AutoFillMutationResult {
+  const attachedByUnit = new Map((terminal?.attached ?? []).map((a) => [a.unitId, a] as const));
+  const emptySlots = (reservation.slots ?? []).filter((s) => !s.buyIn);
+  const results: AutoFillResultRow[] = emptySlots.map((slot) => {
+    const summary: AutoFillSearchSummary = {
+      bedrooms: slot.bedrooms,
+      scanned: 0,
+      priced: 0,
+      sourceCounts: { airbnb: 0, vrbo: 0, booking: 0, pm: 0 },
+      kept: 0,
+      targetFiltered: 0,
+      groundFloorOnly: false,
+    };
+    const a = attachedByUnit.get(slot.unitId);
+    if (a) {
+      return {
+        slot: { unitId: slot.unitId, unitLabel: slot.unitLabel, bedrooms: slot.bedrooms },
+        picked: { totalPrice: a.totalPrice, url: a.url, title: a.title, sourceLabel: a.sourceLabel },
+        airbnbPick: a.airbnbPick,
+        skippedReasons: [],
+        searchSummary: summary,
+      };
+    }
+    const skips = (terminal?.skipped ?? []).filter((s) => s.unitId === slot.unitId).map((s) => s.reason);
+    return {
+      slot: { unitId: slot.unitId, unitLabel: slot.unitLabel, bedrooms: slot.bedrooms },
+      picked: null,
+      airbnbPick: false,
+      skippedReasons: skips.length ? skips : [terminal ? "No verified priced candidate attached" : "Auto-fill job was lost (server restart)"],
+      searchSummary: summary,
+    };
+  });
+  return {
+    reservation,
+    results,
+    comboOptions: terminal?.comboOptions ?? [],
+    searchAudits: terminal?.searchAudits ?? [],
+  };
+}
+
+// Headless poller for the interactive path — mirrors CityExpansionJobPoller.
+// Polls every 3s, pushes live state, fires onResolved once terminal/lost.
+// Active-time budget (not wall-clock) so a backgrounded tab doesn't strand a
+// job the server is still running.
+function AutoFillJobPoller({
+  jobId,
+  onState,
+  onResolved,
+}: {
+  jobId: string;
+  onState: (status: AutoFillJobStatus) => void;
+  onResolved: (status: AutoFillJobStatus | null) => void;
+}) {
+  const resolvedRef = useRef(false);
+  useEffect(() => {
+    resolvedRef.current = false;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const overallActiveCapMs = 55 * 60_000;
+    const SUSPEND_GAP_MS = 30_000;
+    let activeElapsedMs = 0;
+    let lastTickAt = Date.now();
+    const tick = async () => {
+      if (cancelled || resolvedRef.current) return;
+      const now = Date.now();
+      const sinceLast = now - lastTickAt;
+      lastTickAt = now;
+      if (sinceLast > 0 && sinceLast <= SUSPEND_GAP_MS) activeElapsedMs += sinceLast;
+      if (activeElapsedMs > overallActiveCapMs) {
+        resolvedRef.current = true;
+        if (!cancelled) onResolved(null);
+        return;
+      }
+      try {
+        const data = await apiGetJson<AutoFillJobStatus>(`/api/operations/auto-fill/${jobId}`);
+        if (cancelled || resolvedRef.current) return;
+        onState(data);
+        if (data.done) {
+          resolvedRef.current = true;
+          onResolved(data);
+          return;
+        }
+      } catch (e: any) {
+        // 404 (job lost / server restart) + 401/403 (portal session lost) are terminal.
+        if (/\b(404|401|403)\b/.test(String(e?.message ?? ""))) {
+          resolvedRef.current = true;
+          if (!cancelled) onResolved(null);
+          return;
+        }
+      }
+      if (!cancelled && !resolvedRef.current) timer = setTimeout(tick, 3000);
+    };
+    const resumeTick = () => {
+      if (cancelled || resolvedRef.current) return;
+      if (document.visibilityState !== "visible") return;
+      if (timer) { clearTimeout(timer); timer = null; }
+      lastTickAt = Date.now();
+      void tick();
+    };
+    window.addEventListener("focus", resumeTick);
+    document.addEventListener("visibilitychange", resumeTick);
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      window.removeEventListener("focus", resumeTick);
+      document.removeEventListener("visibilitychange", resumeTick);
+      // NEVER cancel the server job on unmount — the whole point is that it keeps
+      // running when the operator leaves the page. The job finishes under its own
+      // server-side budget; the row re-discovers it on return via the active-jobs query.
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId]);
+  return null;
+}
+
 // ── Buy-in search-escalation tracker ────────────────────────────────────────
 // Visualizes the 4-stage ladder the buy-in auto-fill walks:
 //   1 Resort search → 2 Home city → 3 Cities within 20 min → 4 Cities within 45 min.
@@ -5447,6 +5651,13 @@ export default function Bookings() {
     cityResults: CityExpansionCityResult[];
   };
   const [expansionJobs, setExpansionJobs] = useState<Record<string, ExpansionJobState>>({});
+  // Server-side auto-fill jobs keyed by reservation id (one live job per row).
+  // The job owns the whole escalation ladder + the attach; this map just tells
+  // the row which job to mount AutoFillJobPoller for.
+  const [autoFillJobs, setAutoFillJobs] = useState<Record<string, { jobId: string; reservationId: string }>>({});
+  const autoFillJobMetaRef = useRef<
+    Record<string, { reservation: GuestyReservation; propertyId?: number | null; listingId?: string | null; silent?: boolean }>
+  >({});
 
   // ── Buy-in search-escalation tracker (the 4-stage ladder the operator sees) ──
   // resort search → home city → cities within 20 min → cities within 45 min.
@@ -5605,1254 +5816,80 @@ export default function Bookings() {
         return requiredGroundFloorUnits >= emptySlots.length && emptySlots.length > 0;
       };
 
-      // Deduplicate find-buy-in calls. When a reservation has multiple
-      // empty slots with the SAME bedrooms (Amy Vanbuskirk's 2x 3BR
-      // case), each slot was previously firing its own find-buy-in
-      // call in parallel. Two simultaneous SearchAPI/Google scrape
-      // calls with identical params occasionally return different
-      // result sets (Google rate-limits, transient timeouts in upstream
-      // services) — the slot whose call returned a thinner response
-      // got `picked: null` because its unpricedFallback was empty.
-      // Symptom: 1-of-2 slots filled even though both should have
-      // gotten the same Suite Paradise URL.
-      // Fix: one call per (bedrooms) group, shared across all slots
-      // with that bedroom count. Bonus: half the API spend for
-      // multi-unit reservations.
-      const findBuyInCache = new Map<string, Promise<FindBuyInResponse>>();
-      const getFindBuyInForBedrooms = (
-        bedrooms: number,
-        opts: { includePm?: boolean } = {},
-      ): Promise<FindBuyInResponse> => {
-        const includePm = opts.includePm !== false;
-        const requireGroundFloor = requiresGroundFloorForBedrooms(bedrooms);
-        const key = `${bedrooms}|${includePm ? "pm" : "ota"}|${requireGroundFloor ? "ground" : "any-floor"}`;
-        const existing = findBuyInCache.get(key);
-        if (existing) return existing;
-        const params = new URLSearchParams({
-          propertyId: String(buyInPropertyId),
-          bedrooms: String(bedrooms),
-          checkIn: ci,
-          checkOut: co,
-        });
-        if (buyInListingId) params.set("listingId", buyInListingId);
-        const searchCommunity = staticUnitConfig?.community ?? emptySlots.find((slot) => slot.community)?.community ?? "";
-        if (searchCommunity) params.set("community", searchCommunity);
-        if (!includePm) params.set("includePm", "0");
-        if (requireGroundFloor) {
-          params.set("groundFloor", "required");
-        }
-        // Mobile resilience: Auto-fill is idempotent within the server's recovery
-        // window. If Safari backgrounds the tab and tears down this fetch, the
-        // retry ladder (or the visibility-resume re-fire) issues the SAME URL and
-        // the server serves the already-completed scan from its recovery cache
-        // (?recover=1) instead of restarting a full sidecar scan from zero.
-        params.set("recover", "1");
-        const url = `/api/operations/find-buy-in?${params.toString()}`;
-        const promise = fetchFindBuyInWithRetry(url);
-        findBuyInCache.set(key, promise);
-        return promise;
-      };
-
-      // Sequential picking with shared pickedUrls. Multi-unit reservations
-      // need DIFFERENT physical units attached to each slot — same URL on
-      // both Unit 721 and Unit 812 means we'd be paying for one listing
-      // twice and have nothing for the second guest's actual unit.
-      const pickedIdentities = new Set<string>();
-      for (const slot of reservation.slots) {
-        if (!slot.buyIn) continue;
-        addUsedListingIdentity(pickedIdentities, {
-          url: slot.buyIn.airbnbListingUrl,
-          title: titleFromBuyInNotes(slot.buyIn.notes),
-        });
-      }
-
-      type AutoFillResult = {
-        slot: typeof emptySlots[number];
-        picked: (LiveCandidate & { totalPrice: number }) | null;
-        created: any;
-        skippedReasons: string[];
-        airbnbPick: boolean;
-        searchSummary: AutoFillSearchSummary;
-      };
-
-      const searchSummaryFor = (data: FindBuyInResponse, searchedBedrooms: number): AutoFillSearchSummary => {
-        const rawCounts = data.debug?.rawCounts ?? {};
-        const rawSourceCounts = {
-          airbnb: Number(rawCounts.airbnbWebsiteSidecar ?? rawCounts.airbnb ?? 0) || 0,
-          vrbo: Number(rawCounts.vrbo ?? 0) || 0,
-          booking: 0,
-          pm: Number(rawCounts.pmFromWebsiteSidecar ?? rawCounts.pmWebsiteSidecarRaw ?? rawCounts.pm ?? 0) || 0,
-        };
-        const sourceCounts = {
-          airbnb: data.sources?.airbnb?.length ?? 0,
-          vrbo: data.sources?.vrboAll?.length ?? data.sources?.vrbo?.length ?? 0,
-          booking: 0,
-          pm: data.sources?.pm?.length ?? 0,
-        };
-        const allSourceCandidates = [
-          ...(data.sources?.airbnb ?? []),
-          ...(data.sources?.vrbo ?? []),
-          ...(data.sources?.pm ?? []),
-        ];
-        const targetFilter = data.debug?.dropped?.targetFilter ?? {};
-        const targetFiltered = Object.values(targetFilter).reduce((sum, value) => sum + (Number(value) || 0), 0);
-        const scannedSourceCounts = {
-          airbnb: Math.max(sourceCounts.airbnb, rawSourceCounts.airbnb),
-          vrbo: Math.max(sourceCounts.vrbo, rawSourceCounts.vrbo),
-          booking: 0,
-          pm: Math.max(sourceCounts.pm, rawSourceCounts.pm),
-        };
-        const scanned = Object.values(scannedSourceCounts).reduce((sum, value) => sum + value, 0);
-        return {
-          bedrooms: searchedBedrooms,
-          scanned: Math.max(scanned, allSourceCandidates.length),
-          priced: typeof data.totalPricedResults === "number"
-            ? data.totalPricedResults
-            : allSourceCandidates.filter((c) => c.totalPrice > 0).length,
-          sourceCounts: scannedSourceCounts,
-          kept: allSourceCandidates.length,
-          targetFiltered,
-          groundFloorOnly: !!data.groundFloorOnly,
-        };
-      };
-      const auditCandidateFrom = (candidate: LiveCandidate): AutoFillAuditCandidate => ({
-        source: candidate.source,
-        sourceLabel: candidate.sourceLabel,
-        title: candidate.title,
-        url: candidate.url,
-        originalSourceUrl: candidate.originalSourceUrl,
-        totalPrice: candidate.totalPrice,
-        nightlyPrice: candidate.nightlyPrice,
-        image: candidate.image,
-        verified: candidate.verified,
-        verifiedReason: candidate.verifiedReason,
-        groundFloorStatus: candidate.groundFloorStatus,
-        groundFloorEvidence: candidate.groundFloorEvidence,
-      });
-      const auditCandidatesFor = (data: FindBuyInResponse): AutoFillAuditCandidate[] => {
-        const flatCandidates = [
-          ...(data.sources?.airbnb ?? []),
-          ...(data.sources?.vrbo ?? []),
-          ...(data.sources?.pm ?? []),
-        ];
-        const groupedCandidates = (data.cheapestUnits ?? []).flatMap((unit) =>
-          (unit.listings ?? []).map((listing): AutoFillAuditCandidate => ({
-            source: listing.channel,
-            sourceLabel: listing.channelLabel,
-            title: unit.unitTitle,
-            url: listing.url,
-            originalSourceUrl: listing.originalSourceUrl,
-            totalPrice: listing.totalPrice,
-            nightlyPrice: listing.nightlyPrice,
-            image: unit.image,
-            verified: listing.verified,
-            verifiedReason: listing.verifiedReason,
-            groundFloorStatus: listing.groundFloorStatus ?? unit.groundFloorStatus,
-            groundFloorEvidence: listing.groundFloorEvidence ?? unit.groundFloorEvidence,
-          })),
-        );
-        const rows = groupedCandidates.length > 0 ? groupedCandidates : flatCandidates.map(auditCandidateFrom);
-        return Array.from(
-          new Map(
-            rows
-              .filter((row) => row.url)
-              .sort((a, b) => {
-                const ap = a.totalPrice > 0 ? a.totalPrice : Number.POSITIVE_INFINITY;
-                const bp = b.totalPrice > 0 ? b.totalPrice : Number.POSITIVE_INFINITY;
-                return ap - bp;
-              })
-              .map((row) => [listingUrlKey(row.url), row] as const),
-          ).values(),
-        );
-      };
-      const searchAudits = new Map<number, AutoFillSearchAudit>();
-
-      const bedroomFromCandidateText = (c: LiveCandidate): number | null => {
-        const text = `${c.title} ${c.snippet ?? ""} ${c.url}`.toLowerCase();
-        const direct = text.match(/(?:^|[\W_])(\d+)\s*(?:br|bd|bdr|bedrooms?)(?=$|[\W_])/);
-        if (direct) return parseInt(direct[1], 10);
-        const slash = text.match(/\b([1-9])\s*\/\s*(?:[1-9](?:\.5)?)\b/);
-        if (slash) return parseInt(slash[1], 10);
-        const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
-        for (const [word, count] of Object.entries(words)) {
-          if (new RegExp(`\\b${word}[\\s-]bedroom\\b`).test(text)) return count;
-        }
-        return null;
-      };
-      const candidateBedrooms = (c: LiveCandidate, fallbackBedrooms: number): number => {
-        const explicit = bedroomFromCandidateText(c);
-        if (explicit !== null) return explicit;
-        return typeof c.bedrooms === "number" && Number.isFinite(c.bedrooms)
-          ? c.bedrooms
-          : fallbackBedrooms;
-      };
-      const rankCandidates = (items: LiveCandidate[]): LiveCandidate[] =>
-        [...items].sort((a, b) => {
-          const aRank = a.verified === "yes" ? 0 : 1;
-          const bRank = b.verified === "yes" ? 0 : 1;
-          if (aRank !== bRank) return aRank - bRank;
-          return (a.totalPrice || 999999) - (b.totalPrice || 999999);
-        });
-      const rankComparisonCandidates = (items: LiveCandidate[]): LiveCandidate[] =>
-        [...items].sort((a, b) => {
-          const aSourceRank = a.source === "airbnb" ? 1 : 0;
-          const bSourceRank = b.source === "airbnb" ? 1 : 0;
-          if (aSourceRank !== bSourceRank) return aSourceRank - bSourceRank;
-          const aPrice = a.totalPrice > 0 ? a.totalPrice : Number.POSITIVE_INFINITY;
-          const bPrice = b.totalPrice > 0 ? b.totalPrice : Number.POSITIVE_INFINITY;
-          return aPrice - bPrice;
-      });
-      const hydrateCandidateIdentity = (candidate: LiveCandidate): LiveCandidate => ({
-        ...candidate,
-        identityKeys: candidate.identityKeys ?? listingIdentityKeys(candidate),
-      });
-      const autoDirectBookingCandidatesFor = async (
-        _items: LiveCandidate[],
-        _searchedBedrooms: number,
-      ): Promise<LiveCandidate[]> => {
-        return [];
-      };
-      const getCandidatePool = async (
-        searchedBedrooms: number,
-        exactBedroomForCombo: boolean,
-        includePm = false,
-      ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
-        const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm });
-        const searchSummary = searchSummaryFor(data, searchedBedrooms);
-        searchAudits.set(searchedBedrooms, {
-          bedrooms: searchedBedrooms,
-          generatedAt: data.diagnostics?.generatedAt ?? new Date().toISOString(),
-          counts: searchSummary,
-          candidates: auditCandidatesFor(data),
-          diagnostics: data.diagnostics,
-        });
-        const unitCandidates: LiveCandidate[] = (data.cheapestUnits ?? [])
-          .map((unit): LiveCandidate | null => {
-            const listing = [...(unit.listings ?? [])]
-              .filter((l) => l.totalPrice > 0)
-              .filter((l) => l.channel === "airbnb" || l.verified === "yes")
-              .sort((a, b) => {
-                const aRank = a.verified === "yes" ? 0 : 1;
-                const bRank = b.verified === "yes" ? 0 : 1;
-                if (aRank !== bRank) return aRank - bRank;
-                return (a.totalPrice || 999999) - (b.totalPrice || 999999);
-              })[0];
-            if (!listing) return null;
-            const alternateUrls = (unit.listings ?? []).map((l) => l.url).filter(Boolean);
-            const identityKeys = listingIdentityKeys({
-              url: listing.url,
-              sourceLabel: listing.channelLabel,
-              title: unit.unitTitle,
-              image: unit.image,
-              alternateUrls,
-            });
-            const listingFloorConfirmed = listing.groundFloorStatus === "confirmed";
-            return {
-              source: listing.channel,
-              sourceLabel: listing.channelLabel,
-              title: unit.unitTitle,
-              url: listing.url,
-              nightlyPrice: listing.nightlyPrice,
-              totalPrice: listing.totalPrice,
-              bedrooms: listing.bedrooms ?? unit.bedrooms,
-              image: unit.image,
-              lat: listing.lat ?? unit.lat,
-              lng: listing.lng ?? unit.lng,
-              alternateUrls,
-              identityKeys,
-              verified: listing.verified,
-              verifiedReason: listing.verifiedReason,
-              airbnbAnchorUrl: listing.airbnbAnchorUrl,
-              airbnbAnchorPrice: listing.airbnbAnchorPrice,
-              directBookingUrl: listing.directBookingUrl,
-              directBookingHost: listing.directBookingHost,
-              directBookingSource: listing.directBookingSource,
-              directBookingReason: listing.directBookingReason,
-              directProof: listing.directProof,
-              groundFloorStatus: listingFloorConfirmed ? listing.groundFloorStatus : (unit.groundFloorStatus ?? listing.groundFloorStatus),
-              groundFloorEvidence: listingFloorConfirmed ? listing.groundFloorEvidence : (unit.groundFloorEvidence ?? listing.groundFloorEvidence),
-            };
-          })
-          .filter((c): c is LiveCandidate => c !== null);
-        const sourceCandidates = unitCandidates.length > 0 ? unitCandidates : (data.cheapest ?? []);
-        const autoDirectCandidates = await autoDirectBookingCandidatesFor(sourceCandidates, searchedBedrooms);
-        const candidates = rankCandidates(
-          [
-            ...autoDirectCandidates,
-            ...sourceCandidates,
-          ]
-            .filter((c) => c.totalPrice > 0)
-            .filter((c) => c.source === "airbnb" || c.verified === "yes")
-            .filter((c) => {
-              const actualBedrooms = candidateBedrooms(c, searchedBedrooms);
-              return exactBedroomForCombo
-                ? actualBedrooms === searchedBedrooms
-                : actualBedrooms >= searchedBedrooms;
-            })
-            .map(hydrateCandidateIdentity),
-        );
-        const safeForAutoFill = data.autoFillSafe ?? data.diagnostics?.severity === "ok";
-        // Warning-level diagnostics should remain visible in the audit panel,
-        // but they must not zero out a verified cheapest pool. Kaha Lani scans
-        // can legitimately warn that many broad upstream rows were filtered
-        // while still returning date-specific direct/OTA prices for the target
-        // resort. Only block auto-fill when there is no verified pickable row.
-        if (!safeForAutoFill && candidates.length === 0) {
-          return { data, searchSummary, candidates: [] };
-        }
-        return { data, searchSummary, candidates };
-      };
-      const getComparisonCandidatePool = async (
-        searchedBedrooms: number,
-      ): Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }> => {
-        const data = await getFindBuyInForBedrooms(searchedBedrooms, { includePm: false });
-        const searchSummary = searchSummaryFor(data, searchedBedrooms);
-        searchAudits.set(searchedBedrooms, {
-          bedrooms: searchedBedrooms,
-          generatedAt: data.diagnostics?.generatedAt ?? new Date().toISOString(),
-          counts: searchSummary,
-          candidates: auditCandidatesFor(data),
-          diagnostics: data.diagnostics,
-        });
-        const comparisonSources = [
-          ...(data.comparisonSources?.pm ?? []),
-          ...(data.comparisonSources?.vrbo ?? []),
-          ...(data.comparisonSources?.airbnb ?? []),
-        ];
-        const sourceCandidates = comparisonSources.length > 0
-          ? comparisonSources
-          : [
-              ...(data.sources?.pm ?? []),
-              ...(data.sources?.vrbo ?? []),
-              ...(data.sources?.airbnb ?? []),
-            ];
-        const autoDirectCandidates = await autoDirectBookingCandidatesFor(sourceCandidates, searchedBedrooms);
-        const candidates = rankComparisonCandidates(
-          [
-            ...autoDirectCandidates,
-            ...sourceCandidates,
-          ]
-            .map((candidate) => ({
-              ...candidate,
-              totalPrice: candidate.totalPrice > 0
-                ? candidate.totalPrice
-                : candidate.nightlyPrice > 0
-                  ? candidate.nightlyPrice * (data.nights || 1)
-                  : 0,
-            }))
-            .filter((c) => c.totalPrice > 0)
-            .filter((c) => c.source === "airbnb" || c.verified === "yes")
-            .filter((c) => {
-              const actualBedrooms = candidateBedrooms(c, searchedBedrooms);
-              return actualBedrooms === searchedBedrooms;
-            })
-            .map(hydrateCandidateIdentity),
-        );
-        return { data, searchSummary, candidates };
-      };
-
-      const createAndAttachPick = async (
-        slot: typeof emptySlots[number],
-        pick: LiveCandidate,
-        searchedBedrooms: number,
-        searchSummary: AutoFillSearchSummary,
-        comboLabel?: string,
-        attachSource?: "resort" | "city-vrbo",
-      ): Promise<AutoFillResult> => {
-        const skippedReasons: string[] = [];
-        const finalCost = pick.totalPrice;
-        if (!Number.isFinite(finalCost) || finalCost <= 0) {
-          skippedReasons.push(`${slot.unitLabel}: skipped invalid price`);
-          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-        }
-        const actualBedrooms = candidateBedrooms(pick, searchedBedrooms);
-        const airbnbPick = pick.source === "airbnb";
-        if (actualBedrooms < searchedBedrooms) {
-          skippedReasons.push(`${slot.unitLabel}: skipped ${actualBedrooms}BR result for ${searchedBedrooms}BR search`);
-          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-        }
-        if (pick.source !== "airbnb" && pick.verified !== "yes") {
-          skippedReasons.push(`${slot.unitLabel}: skipped unverified ${pick.sourceLabel} result`);
-          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-        }
-        const community = selectedSearchCommunity;
-        const targetResortName = directBookingTargetResortName(community);
-        const targetRejectReason = attachSource === "city-vrbo"
-          ? null
-          : targetLocationRejectReason(targetResortName, community, pick);
-        if (targetRejectReason) {
-          skippedReasons.push(`${slot.unitLabel}: skipped ${targetRejectReason}`);
-          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-        }
-        const propertyName =
-          (buyInListingId && listingNameById.get(buyInListingId)) ||
-          selectedDisplayName ||
-          `Property ${buyInPropertyId}`;
-        if (hasUsedListingIdentity(pickedIdentities, pick)) {
-          skippedReasons.push(`${slot.unitLabel}: skipped duplicate physical listing`);
-          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-        }
-        addUsedListingIdentity(pickedIdentities, pick);
-        const verifySuffix = pick.verified === "yes"
-          ? attachSource === "city-vrbo"
-            ? ` · Matched from city-wide VRBO map for ${actualBedrooms}BR ${ci}→${co}`
-            : ` · Verified by find-buy-in for ${actualBedrooms}BR ${ci}→${co}`
-          : "";
-        const comboSuffix = comboLabel
-          ? ` · ${comboLabel}; selected ${actualBedrooms}BR for this slot`
-          : actualBedrooms > slot.bedrooms
-            ? ` · Selected ${actualBedrooms}BR for ${slot.bedrooms}BR slot because larger units can satisfy the bedroom requirement`
-            : "";
-        const tosSuffix = airbnbPick
-          ? ` · ⚠️ Airbnb pick — Airbnb TOS prohibits sublet. Operator should handle channel-specific compliance before booking.`
-          : "";
-        const anchorSuffix = pick.airbnbAnchorUrl && pick.airbnbAnchorPrice
-          ? ` · Airbnb anchor: $${pick.airbnbAnchorPrice.toLocaleString()} (${pick.airbnbAnchorUrl}).`
-          : "";
-        const directProofSuffix = pick.directProof
-          ? ` · Direct proof: ${pick.directProof.summary}`
-          : "";
-        const lensProvenanceSuffix = pick.directBookingSource === "airbnb_image_reverse_search" || pick.airbnbAnchorUrl
-          ? " · Found via Airbnb Google Lens search."
-          : "";
-        const groundFloorSuffix = pick.groundFloorStatus === "confirmed"
-          ? ` · Ground-floor: confirmed${pick.groundFloorEvidence ? ` (${pick.groundFloorEvidence})` : ""}`
-          : pick.groundFloorStatus
-            ? ` · Ground-floor: ${pick.groundFloorStatus.replace("_", " ")}${pick.groundFloorEvidence ? ` (${pick.groundFloorEvidence})` : ""}`
-            : "";
-        const sameUnitEvidenceUrls = Array.from(new Set([
-          ...(pick.alternateUrls ?? []),
-          pick.airbnbAnchorUrl,
-          ...(pick.photoMatches ?? []).map((m) => m.url),
-          pick.image,
-        ].filter((u): u is string => !!u && listingUrlKey(u) !== listingUrlKey(pick.url)))).slice(0, 8);
-        const identitySuffix = sameUnitEvidenceUrls.length > 0
-          ? ` · Same-unit evidence: ${sameUnitEvidenceUrls.join(" ")}`
-          : "";
-        try {
-          const created = await apiRequest("POST", "/api/buy-ins", {
-            propertyId: buyInPropertyId,
-            propertyName,
-            unitId: slot.unitId,
-            unitLabel: slot.unitLabel,
-            checkIn: ci,
-            checkOut: co,
-            costPaid: finalCost.toFixed(2),
-            airbnbConfirmation: null,
-            airbnbListingUrl: pick.url,
-            groundFloorStatus: pick.groundFloorStatus ?? "unknown",
-            groundFloorEvidence: pick.groundFloorEvidence ?? null,
-            notes: `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${anchorSuffix}${lensProvenanceSuffix}${directProofSuffix}${groundFloorSuffix}${identitySuffix}${buyInPhotoNotesSuffix([pick.image, ...(pick.images ?? [])])}`,
-            status: "active",
-            ...(typeof pick.unitTypeConfidence === "number" ? {
-              unitTypeConfidence: Math.round(pick.unitTypeConfidence),
-              unitTypeConfidenceBreakdown: pick.unitTypeConfidenceBreakdown ?? null,
-            } : {}),
-          }).then((r) => r.json());
-          if (!created?.id) throw new Error(`Create failed for ${slot.unitLabel}`);
-
-          await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
-            buyInId: created.id,
-          }).then((r) => r.json());
-
-          return { slot, picked: { ...pick, totalPrice: finalCost }, created, skippedReasons, airbnbPick, searchSummary };
-        } catch (e: any) {
-          skippedReasons.push(`${slot.unitLabel}: attach-error ${e?.message ?? ""}`.trim());
-          return { slot, picked: null, created: null, skippedReasons, airbnbPick: false, searchSummary };
-        }
-      };
-
-      const reservationNights = Math.max(
-        1,
-        Math.round((new Date(`${co}T12:00:00`).getTime() - new Date(`${ci}T12:00:00`).getTime()) / 86400000),
-      );
-      const attachedCandidateForSlot = (slot: typeof reservation.slots[number]): LiveCandidate | null => {
-        if (!slot.buyIn) return null;
-        const totalPrice = parseFloat(String(slot.buyIn.costPaid ?? 0));
-        if (!Number.isFinite(totalPrice) || totalPrice <= 0) return null;
-        return {
-          source: "pm",
-          sourceLabel: "Attached buy-in",
-          title: titleFromBuyInNotes(slot.buyIn.notes) || slot.unitLabel,
-          url: slot.buyIn.airbnbListingUrl || `attached-buy-in:${slot.buyIn.id}`,
-          nightlyPrice: totalPrice / reservationNights,
-          totalPrice,
+      // ── Server-side auto-fill job (survives leaving the page) ──────────
+      // The whole escalation ladder + the buy-in attach now run server-side
+      // (server/auto-fill-job.ts), so the search keeps going and slots keep
+      // filling even after the operator navigates away or backgrounds the tab.
+      // We only START the job + hand it to the row poller here. See AGENTS.md
+      // Load-Bearing "Auto-fill cheapest is a server-side background job".
+      const autoFillCommunity =
+        staticUnitConfig?.community
+        ?? emptySlots.find((slot) => slot.community)?.community
+        ?? "";
+      const autoFillPropertyName =
+        (buyInListingId ? listingNameById.get(buyInListingId) : undefined)
+        || selectedDisplayName
+        || `Property ${buyInPropertyId}`;
+      const startResp = await apiRequest("POST", "/api/operations/auto-fill", {
+        reservationId: reservation._id,
+        propertyId: buyInPropertyId,
+        listingId: buyInListingId ?? null,
+        propertyName: autoFillPropertyName,
+        community: autoFillCommunity || null,
+        checkIn: ci,
+        checkOut: co,
+        slots: emptySlots.map((slot) => ({
+          unitId: slot.unitId,
+          unitLabel: slot.unitLabel,
           bedrooms: slot.bedrooms,
-          identityKeys: listingIdentityKeys({
-            url: slot.buyIn.airbnbListingUrl || `attached-buy-in:${slot.buyIn.id}`,
-            title: titleFromBuyInNotes(slot.buyIn.notes) || slot.unitLabel,
-          }),
-          verified: "yes",
-          verifiedReason: "Already attached to this reservation",
-          groundFloorStatus: (slot.buyIn.groundFloorStatus as GroundFloorStatus | undefined) ?? "unknown",
-          groundFloorEvidence: slot.buyIn.groundFloorEvidence ?? null,
-        };
-      };
-
-      type EvaluatedCombo = {
-        combo: TwoUnitBedroomCombo;
-        picks: LiveCandidate[];
-        pools: Array<{
-          bedrooms: number;
-          candidates: LiveCandidate[];
-          unavailableReason?: string;
-          unavailableDetails?: string[];
-        }>;
-        summaries: AutoFillSearchSummary[];
-        totalCost: number | null;
-        unavailableReason?: string;
-        unavailableDetails?: string[];
-        note?: string;
-      };
-      const comboOptionFrom = (evaluated: EvaluatedCombo, selected = false): AutoFillComboOption => ({
-        label: evaluated.combo.bedrooms.map((b) => `${b}BR`).join(" + "),
-        bedrooms: evaluated.combo.bedrooms,
-        totalCost: evaluated.totalCost,
-        selected,
-        unavailableReason: evaluated.unavailableReason,
-        unavailableDetails: evaluated.unavailableDetails,
-        note: evaluated.note,
-        picks: evaluated.picks.map((pick, index) => ({
-          bedrooms: evaluated.combo.bedrooms[index],
-          source: pick.source,
-          sourceLabel: pick.sourceLabel,
-          title: pick.title,
-          totalPrice: pick.totalPrice,
-          nightlyPrice: pick.nightlyPrice,
-          url: pick.url,
-          originalSourceUrl: pick.originalSourceUrl,
-          image: pick.image,
-          airbnbAnchorUrl: pick.airbnbAnchorUrl,
-          airbnbAnchorPrice: pick.airbnbAnchorPrice,
-          directBookingUrl: pick.directBookingUrl,
-          directBookingHost: pick.directBookingHost,
-          directBookingSource: pick.directBookingSource,
-          directBookingReason: pick.directBookingReason,
-          alternateUrls: pick.alternateUrls,
-          photoMatches: pick.photoMatches,
-          identityKeys: pick.identityKeys,
-          verified: pick.verified,
-          verifiedReason: pick.verifiedReason,
-          groundFloorStatus: pick.groundFloorStatus,
-          groundFloorEvidence: pick.groundFloorEvidence,
+          community: slot.community ?? null,
         })),
-        pools: evaluated.pools.map((pool) => ({
-          bedrooms: pool.bedrooms,
-          unavailableReason: pool.unavailableReason,
-          unavailableDetails: pool.unavailableDetails,
-          candidates: pool.candidates.slice(0, 20).map((candidate) => ({
-            source: candidate.source,
-            sourceLabel: candidate.sourceLabel,
-            title: candidate.title,
-            totalPrice: candidate.totalPrice,
-            nightlyPrice: candidate.nightlyPrice,
-            bedrooms: candidate.bedrooms,
-            url: candidate.url,
-            originalSourceUrl: candidate.originalSourceUrl,
-            image: candidate.image,
-            airbnbAnchorUrl: candidate.airbnbAnchorUrl,
-            airbnbAnchorPrice: candidate.airbnbAnchorPrice,
-            directBookingUrl: candidate.directBookingUrl,
-            directBookingHost: candidate.directBookingHost,
-            directBookingSource: candidate.directBookingSource,
-            directBookingReason: candidate.directBookingReason,
-            alternateUrls: candidate.alternateUrls,
-            photoMatches: candidate.photoMatches,
-            identityKeys: candidate.identityKeys,
-            verified: candidate.verified,
-            verifiedReason: candidate.verifiedReason,
-            groundFloorStatus: candidate.groundFloorStatus,
-            groundFloorEvidence: candidate.groundFloorEvidence,
-          })),
-        })),
-      });
-      const distinctCandidateCount = (candidates: LiveCandidate[]): number => {
-        const seen = new Set<string>();
-        let count = 0;
-        for (const candidate of candidates) {
-          if (hasUsedListingIdentity(seen, candidate)) continue;
-          addUsedListingIdentity(seen, candidate);
-          count++;
-        }
-        return count;
-      };
-      const repeatedBedroomShortageReason = (
-        combo: TwoUnitBedroomCombo,
-        index: number,
-        pool: EvaluatedCombo["pools"][number] | undefined,
-        fallback: string,
-      ): string => {
-        const bedrooms = combo.bedrooms[index];
-        const needed = combo.bedrooms.filter((n) => n === bedrooms).length;
-        if (needed <= 1) return fallback;
-        const available = distinctCandidateCount(pool?.candidates ?? []);
-        return `Only ${available} distinct target-matching ${bedrooms}BR option${available === 1 ? "" : "s"} found; ${needed} distinct ${bedrooms}BR units are required for the ${combo.bedrooms.map((b) => `${b}BR`).join(" + ")} combo.`;
-      };
-      const evaluateTwoUnitCombos = async (): Promise<{
-        best: EvaluatedCombo | null;
-        options: AutoFillComboOption[];
-      }> => {
-        if (emptySlots.length !== 2) return { best: null, options: [] };
-        const totalNeeded = emptySlots.reduce((sum, s) => sum + s.bedrooms, 0);
-        const combos = twoUnitBedroomCombos(totalNeeded, emptySlots.map((s) => s.bedrooms));
-        if (combos.length === 0) return { best: null, options: [] };
-        const evaluateWithPool = async (
-          poolFor: (bedroomCount: number) => Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>,
-          missingLabel: string,
-        ): Promise<{ evaluatedCombos: EvaluatedCombo[]; best: EvaluatedCombo | null }> => {
-          const evaluatedCombos: EvaluatedCombo[] = [];
-          let best: EvaluatedCombo | null = null;
-          for (const combo of combos) {
-            const used = new Set(pickedIdentities);
-            const picks: LiveCandidate[] = [];
-            const pools: EvaluatedCombo["pools"] = [];
-            const summaries: AutoFillSearchSummary[] = [];
-            let unavailableReason = "";
-            let unavailableDetails: string[] = [];
-            for (const bedroomCount of combo.bedrooms) {
-              const pool = await poolFor(bedroomCount);
-              pools.push({
-                bedrooms: bedroomCount,
-                candidates: pool.candidates,
-                unavailableReason: buyInPoolUnavailableReason(pool.searchSummary, pool.data.diagnostics, bedroomCount),
-                unavailableDetails: buyInSearchAvailabilityDetails(pool.searchSummary, pool.data.diagnostics, bedroomCount),
-              });
-              summaries.push(pool.searchSummary);
-            }
-            const targetIndexes = requiredGroundFloorBedrooms.size > 0
-              ? new Set(combo.bedrooms.map((bedrooms, index) => requiredGroundFloorBedrooms.has(bedrooms) ? index : -1).filter((index) => index >= 0))
-              : undefined;
-            const requiredForCombo = targetIndexes?.size
-              ? Math.min(requiredGroundFloorUnits, targetIndexes.size)
-              : requiredGroundFloorUnits >= combo.bedrooms.length
-                ? combo.bedrooms.length
-                : requiredGroundFloorUnits > 0
-                  ? 1
-                  : 0;
-            const planned = pickCheapestSetWithGroundFloor(pools, requiredForCombo, used, targetIndexes);
-            if (planned.reason) {
-              unavailableReason = planned.reason;
-              unavailableDetails = pools.flatMap((pool) => [
-                `${pool.bedrooms}BR: ${pool.unavailableReason ?? "No provider option available"}`,
-                ...(pool.unavailableDetails ?? []).map((detail) => `${pool.bedrooms}BR ${detail}`),
-              ]);
-            }
-            for (let i = 0; i < planned.picks.length; i++) {
-              const pick = planned.picks[i];
-              if (!pick) {
-                const pool = pools[i];
-                const shortageReason = repeatedBedroomShortageReason(
-                  combo,
-                  i,
-                  pool,
-                  pool?.unavailableReason ?? `No unused ${missingLabel} ${combo.bedrooms[i]}BR option`,
-                );
-                unavailableReason ||= shortageReason;
-                unavailableDetails.push(
-                  `${combo.bedrooms[i]}BR: ${shortageReason}`,
-                  ...(pool?.unavailableDetails ?? []).map((detail) => `${combo.bedrooms[i]}BR ${detail}`),
-                );
-                break;
-              }
-              picks.push(pick);
-            }
-            const tooFarForBuyInPair = !planned.reason
-              && picks.length === combo.bedrooms.length
-              && !alternativePicksAreWalkable(picks);
-            if (tooFarForBuyInPair) {
-              unavailableReason = `Matched units are too far apart for a buy-in pair; units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking.`;
-              unavailableDetails.push(unavailableReason);
-            }
-            const totalCost = !planned.reason && !tooFarForBuyInPair && picks.length === combo.bedrooms.length
-              ? picks.reduce((sum, p) => sum + p.totalPrice, 0)
-              : null;
-            const evaluated: EvaluatedCombo = {
-              combo,
-              picks,
-              pools,
-              summaries,
-              totalCost,
-              unavailableReason: totalCost === null ? unavailableReason || `Not enough distinct ${missingLabel} options` : undefined,
-              unavailableDetails: totalCost === null ? Array.from(new Set(unavailableDetails)).slice(0, 10) : undefined,
-            };
-            evaluatedCombos.push(evaluated);
-            if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
-              best = evaluated;
-            }
-          }
-          return { evaluatedCombos, best };
-        };
-
-        const autoPoolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
-        const autoPoolFor = (bedroomCount: number) => {
-          const key = `${bedroomCount}|auto`;
-          const existing = autoPoolCache.get(key);
-          if (existing) return existing;
-          const promise = getCandidatePool(bedroomCount, true, true);
-          autoPoolCache.set(key, promise);
-          return promise;
-        };
-        const comparisonPoolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
-        const comparisonPoolFor = (bedroomCount: number) => {
-          const key = `${bedroomCount}|comparison`;
-          const existing = comparisonPoolCache.get(key);
-          if (existing) return existing;
-          const promise = getComparisonCandidatePool(bedroomCount);
-          comparisonPoolCache.set(key, promise);
-          return promise;
-        };
-
-        const [autoEvaluation, comparisonEvaluation] = await Promise.all([
-          evaluateWithPool(autoPoolFor, "verified"),
-          evaluateWithPool(comparisonPoolFor, "priced direct/Booking/VRBO/Airbnb fallback"),
-        ]);
-        const best = comparisonEvaluation.best ?? autoEvaluation.best;
-        const evaluatedCombos = comparisonEvaluation.evaluatedCombos.length > 0
-          ? comparisonEvaluation.evaluatedCombos
-          : autoEvaluation.evaluatedCombos;
-        const selected = comparisonEvaluation.best ?? autoEvaluation.best;
-        return {
-          best,
-          options: evaluatedCombos.map((option) => comboOptionFrom(option, option === selected)),
-        };
-      };
-      const evaluateAttachedComparisonCombos = async (
-        newlyFilled: AutoFillResult[],
-      ): Promise<AutoFillComboOption[]> => {
-        if (reservation.slots.length !== 2 || emptySlots.length !== 1) return [];
-        const attachedByUnit = new Map<string, LiveCandidate>();
-        for (const slot of reservation.slots) {
-          const attached = attachedCandidateForSlot(slot);
-          if (attached) attachedByUnit.set(slot.unitId, attached);
-        }
-        for (const result of newlyFilled) {
-          if (!result.picked) continue;
-          attachedByUnit.set(result.slot.unitId, {
-            ...result.picked,
-            bedrooms: candidateBedrooms(result.picked, result.slot.bedrooms),
-          });
-        }
-        if (attachedByUnit.size === 0) return [];
-
-        const totalNeeded = reservation.slots.reduce((sum, slot) => sum + slot.bedrooms, 0);
-        const currentBedroomPlan = reservation.slots.map((slot) => slot.bedrooms);
-        const currentKey = currentBedroomPlan.join("+");
-        const combos = twoUnitBedroomCombos(totalNeeded, currentBedroomPlan);
-        const attachedCandidates = reservation.slots
-          .map((slot) => ({ slot, candidate: attachedByUnit.get(slot.unitId) ?? null }))
-          .filter((item): item is { slot: typeof reservation.slots[number]; candidate: LiveCandidate } => !!item.candidate);
-        const poolCache = new Map<string, Promise<{ data: FindBuyInResponse; searchSummary: AutoFillSearchSummary; candidates: LiveCandidate[] }>>();
-        const poolFor = (bedroomCount: number) => {
-          const key = `${bedroomCount}|pm`;
-          const existing = poolCache.get(key);
-          if (existing) return existing;
-          const promise = getComparisonCandidatePool(bedroomCount);
-          poolCache.set(key, promise);
-          return promise;
-        };
-        const evaluatedCombos: EvaluatedCombo[] = [];
-        let best: EvaluatedCombo | null = null;
-        for (const combo of combos) {
-          const used = new Set<string>();
-          const pools: EvaluatedCombo["pools"] = [];
-          const summaries: AutoFillSearchSummary[] = [];
-          const picks: LiveCandidate[] = [];
-          const usedAttachedSlots = new Set<string>();
-          let unavailableReason = "";
-          let unavailableDetails: string[] = [];
-          for (const bedroomCount of combo.bedrooms) {
-            const attached = attachedCandidates.find((item) =>
-              item.slot.bedrooms === bedroomCount
-              && !usedAttachedSlots.has(item.slot.unitId)
-              && !hasUsedListingIdentity(used, item.candidate)
-            );
-            if (attached) {
-              usedAttachedSlots.add(attached.slot.unitId);
-              addUsedListingIdentity(used, attached.candidate);
-              picks.push(attached.candidate);
-              pools.push({ bedrooms: bedroomCount, candidates: [attached.candidate] });
-              summaries.push({
-                bedrooms: bedroomCount,
-                scanned: 1,
-                priced: 1,
-                sourceCounts: { airbnb: 0, vrbo: 0, booking: 0, pm: 1 },
-                kept: 1,
-                targetFiltered: 0,
-                groundFloorOnly: false,
-              });
-              continue;
-            }
-            const pool = await poolFor(bedroomCount);
-            pools.push({
-              bedrooms: bedroomCount,
-              candidates: pool.candidates,
-              unavailableReason: buyInPoolUnavailableReason(pool.searchSummary, pool.data.diagnostics, bedroomCount),
-              unavailableDetails: buyInSearchAvailabilityDetails(pool.searchSummary, pool.data.diagnostics, bedroomCount),
-            });
-            summaries.push(pool.searchSummary);
-            const pick = pool.candidates.find((candidate) => !hasUsedListingIdentity(used, candidate)) ?? null;
-            if (!pick) {
-              const lastPool = pools[pools.length - 1];
-              const shortageReason = repeatedBedroomShortageReason(
-                combo,
-                pools.length - 1,
-                lastPool,
-                lastPool?.unavailableReason ?? `No unused priced direct/Booking/VRBO ${bedroomCount}BR option or Airbnb fallback`,
-              );
-              unavailableReason ||= shortageReason;
-              unavailableDetails.push(
-                `${bedroomCount}BR: ${shortageReason}`,
-                ...(lastPool?.unavailableDetails ?? []).map((detail) => `${bedroomCount}BR ${detail}`),
-              );
-              continue;
-            }
-            addUsedListingIdentity(used, pick);
-            picks.push(pick);
-          }
-          const totalCost = picks.length === combo.bedrooms.length
-            ? picks.reduce((sum, pick) => sum + pick.totalPrice, 0)
-            : null;
-          const replacesCurrent = combo.bedrooms.join("+") !== currentKey;
-          const isCurrentPartial = combo.bedrooms.join("+") === currentKey && attachedByUnit.size < reservation.slots.length;
-          const evaluated: EvaluatedCombo = {
-            combo,
-            picks,
-            pools,
-            summaries,
-            totalCost,
-            unavailableReason: totalCost === null ? unavailableReason || "Not enough distinct priced direct/Booking/VRBO options or Airbnb fallback" : undefined,
-            unavailableDetails: totalCost === null ? Array.from(new Set(unavailableDetails)).slice(0, 10) : undefined,
-            note: isCurrentPartial
-              ? "Current partial plan; still needs a second verified buy-in."
-              : replacesCurrent
-              ? "Comparison only; would require replacing the already attached buy-in."
-              : "Current attached plan after auto-fill.",
-          };
-          evaluatedCombos.push(evaluated);
-          if (totalCost !== null && (!best || totalCost < (best.totalCost ?? Infinity))) {
-            best = evaluated;
-          }
-        }
-        return evaluatedCombos.map((option) => comboOptionFrom(option, option === best));
-      };
-
-      const results: AutoFillResult[] = [];
-      // Stage 1 — resort search (find-buy-in / multichannel). Seed the escalation
-      // tracker so the operator sees the ladder progress live.
-      setEscalation(reservation._id, { resort: "searching", homeCity: "idle", foundAt: null, startedAt: Date.now() });
-      const comboEvaluation = await evaluateTwoUnitCombos();
-      const comboCommunity = staticUnitConfig?.community ?? emptySlots.find((slot) => slot.community)?.community ?? "";
-      const comboTargetResort = directBookingTargetResortName(comboCommunity);
-      const resortBest = comboEvaluation.best;
-      const resortOption = resortBest ? comboOptionFrom(resortBest, true) : null;
-      const resortComboComplete = resortOption
-        ? comboOptionIsComplete(resortOption, comboTargetResort, comboCommunity)
-        : false;
-      setEscalation(reservation._id, {
-        resort: resortComboComplete ? "found" : "no-pair",
-        resortLabel: comboTargetResort || comboCommunity || undefined,
-        ...(resortComboComplete ? { foundAt: "resort" as const } : {}),
-      });
-
-      const remainingEmptySlots = () => emptySlots.filter((slot) => !results.some((row) => row.picked && row.slot.unitId === slot.unitId));
-
-      if (resortComboComplete && resortBest) {
-        const totalBedrooms = resortBest.combo.bedrooms.reduce((sum, n) => sum + n, 0);
-        const comboLabel = `Two-unit ${resortBest.combo.bedrooms.join("+")}BR combo for ${totalBedrooms}BR booking`;
-        for (let i = 0; i < emptySlots.length; i++) {
-          results.push(await createAndAttachPick(
-            emptySlots[i],
-            resortBest.picks[i],
-            resortBest.combo.bedrooms[i],
-            resortBest.summaries[i],
-            comboLabel,
-          ));
-        }
-        if (results.every((row) => row.picked)) {
-          return {
-            reservation,
-            results,
-            comboOptions: comboEvaluation.options,
-            searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
-          };
-        }
+        groundFloorBedrooms: Array.from(requiredGroundFloorBedrooms),
+      }).then((r) => r.json());
+      if (!startResp?.jobId) {
+        throw new Error(startResp?.error || "Could not start the auto-fill search.");
       }
-
-      // Attach a city-VRBO suggested combo (home-city OR a nearby-city expansion
-      // result) to the given empty slots, recording per-bedroom audits. Returns
-      // true iff every target slot received a pick. Shared by the home-city
-      // fallback and the nearby-city expansion (bulk-inline) so the two attach
-      // identically.
-      const applyCityComboFallback = async (
-        cityCombo: AutoFillComboOption,
-        cityData: CityVrboInventoryResponse,
-        targetSlots: typeof emptySlots,
-      ): Promise<boolean> => {
-        if (!(cityCombo.totalCost != null && cityCombo.picks.length >= targetSlots.length)) return false;
-        const pickByBedroom = new Map<number, AutoFillComboOption["picks"][number]>();
-        cityCombo.bedrooms.forEach((bedrooms, index) => {
-          if (!pickByBedroom.has(bedrooms)) pickByBedroom.set(bedrooms, cityCombo.picks[index]);
-        });
-        const cityResults: AutoFillResult[] = [];
-        const comboLabel = `City VRBO ${cityCombo.label}`;
-        let cityAttached = true;
-        for (const slot of targetSlots) {
-          const rawPick = pickByBedroom.get(slot.bedrooms);
-          if (!rawPick) {
-            cityAttached = false;
-            cityResults.push({
-              slot,
-              picked: null,
-              created: null,
-              skippedReasons: [`${slot.unitLabel}: no ${slot.bedrooms}BR row in city suggested pair`],
-              airbnbPick: false,
-              searchSummary: cityInventorySearchSummary(cityData, slot.bedrooms),
-            });
-            continue;
-          }
-          const livePick = liveCandidateFromCityComboPick(rawPick, slot.bedrooms, reservationNights);
-          cityResults.push(await createAndAttachPick(
-            slot,
-            livePick,
-            slot.bedrooms,
-            cityInventorySearchSummary(cityData, slot.bedrooms),
-            comboLabel,
-            "city-vrbo",
-          ));
-        }
-        for (const bedrooms of cityCombo.bedrooms) {
-          const rows = cityData.byBedroom[bedrooms] ?? [];
-          searchAudits.set(bedrooms, {
-            bedrooms,
-            generatedAt: new Date().toISOString(),
-            counts: cityInventorySearchSummary(cityData, bedrooms),
-            candidates: rows.slice(0, 20).map((row) => ({
-              source: "vrbo" as const,
-              sourceLabel: row.sourceLabel ?? "Vrbo",
-              title: row.title,
-              url: row.url,
-              totalPrice: row.totalPrice ?? 0,
-              nightlyPrice: row.nightlyPrice ?? 0,
-              bedrooms: row.bedrooms ?? bedrooms,
-              verified: "yes" as const,
-            })),
-            diagnostics: {
-              severity: "ok",
-              title: "City-wide VRBO map inventory",
-              summary: `${cityData.listings.length} exported · pair=${cityData.suggestedPair?.resortPhrase ?? "none"}`,
-              generatedAt: new Date().toISOString(),
-              request: { propertyId: buyInPropertyId, bedrooms, checkIn: ci, checkOut: co },
-              sources: [],
-              issues: [],
-              report: `City search: ${cityData.citySearchTerm}`,
-            },
-          });
-        }
-        results.push(...cityResults);
-        return cityAttached && cityResults.every((row) => row.picked);
-      };
-
-      const slotsForCityFallback = remainingEmptySlots();
-      // Home-city VRBO scan result, captured so the nearby-city expansion below
-      // can (a) confirm the worker was online and (b) confirm the home city
-      // produced NO same-community pair before widening the search by drive-time.
-      let cityHomeScanData: CityVrboInventoryResponse | null = null;
-      // On a skipExpansion re-invocation (after a nearby-city search came up
-      // empty) we already know the home city has no pair, so skip this combo scan
-      // and let the single-unit city fallback below reuse the warm scrape cache.
-      if (!skipExpansion && slotsForCityFallback.length >= 2 && staticUnitConfig && staticUnitConfig.units.length >= 2) {
-        setCityInventoryScanTrigger((prev) => ({
-          ...prev,
-          [reservation._id]: (prev[reservation._id] ?? 0) + 1,
-        }));
-        // Stage 2 — home-city VRBO search (e.g. "Koloa, Hawaii").
-        setEscalation(reservation._id, { homeCity: "searching" });
-        try {
-          const cityParams = new URLSearchParams({
-            propertyId: String(buyInPropertyId),
-            checkIn: ci,
-            checkOut: co,
-          });
-          const cityData = await apiGetJson<CityVrboInventoryResponse>(
-            `/api/operations/city-vrbo-inventory?${cityParams.toString()}`,
-          );
-          cityHomeScanData = cityData;
-          const cityCombo = cityComboOptionFromInventory(cityData);
-          setEscalation(reservation._id, {
-            homeCity: cityCombo ? "found" : "no-pair",
-            homeCityTerm: cityData.citySearchTerm,
-            homeCityListings: cityData.listings?.length ?? 0,
-            ...(cityCombo ? { foundAt: "home-city" as const } : {}),
-          });
-          if (cityCombo) {
-            const allAttached = await applyCityComboFallback(cityCombo, cityData, slotsForCityFallback);
-            if (allAttached) {
-              return {
-                reservation,
-                results,
-                comboOptions: [cityCombo, ...comboEvaluation.options],
-                searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
-                cityInventory: cityData,
-              };
-            }
-          }
-        } catch (cityError: any) {
-          console.warn("[auto-fill] city VRBO inventory fallback failed:", cityError?.message ?? cityError);
-          setEscalation(reservation._id, { homeCity: "skipped" });
-        }
+      if (awaitExpansionInline) {
+        // Bulk path: poll the job to terminal inline so the pass/fail report below
+        // (filled / skipped) reflects what actually attached server-side.
+        const terminal = await pollAutoFillToTerminal(startResp.jobId);
+        return autoFillResultFromJob(reservation, terminal);
       }
-
-      // ── Nearby-city combo expansion (cities within 20 min, then 45 min) ──
-      // When the home-city scan ran with the sidecar ONLINE but found no same-
-      // community pair, widen the search by drive-time. This is a background job
-      // (each nearby-city scan drives the sidecar for minutes); the interactive
-      // path hands the job off to a poller and the row shows progress, while the
-      // bulk path polls it inline so its pass/fail reporting stays correct.
-      // Combo-only and gated on worker-online (an offline worker would leave each
-      // city scan PENDING for ~5 min — see server/city-vrbo-expansion.ts).
-      const wantExpansion =
-        !skipExpansion &&
-        remainingEmptySlots().length >= 2 &&
-        !!staticUnitConfig && staticUnitConfig.units.length >= 2 &&
-        cityHomeScanData != null &&
-        cityHomeScanData.sidecar?.workerOnline === true &&
-        cityComboOptionFromInventory(cityHomeScanData) == null;
-      if (wantExpansion) {
-        try {
-          const startResp = await apiRequest("POST", "/api/operations/city-vrbo-inventory/expand", {
-            propertyId: buyInPropertyId,
-            checkIn: ci,
-            checkOut: co,
-          }).then((r) => r.json());
-          if (startResp?.jobId) {
-            if (awaitExpansionInline) {
-              // Bulk path: poll to terminal here so result.results reflects reality.
-              const outcome = await pollExpansionToTerminal(startResp.jobId);
-              if (outcome?.status === "found" && outcome.combo) {
-                const expansionCombo = cityComboOptionFromInventory(outcome.combo);
-                if (expansionCombo) {
-                  const allAttached = await applyCityComboFallback(
-                    expansionCombo,
-                    outcome.combo,
-                    remainingEmptySlots(),
-                  );
-                  if (allAttached) {
-                    return {
-                      reservation,
-                      results,
-                      comboOptions: [expansionCombo, ...comboEvaluation.options],
-                      searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
-                      cityInventory: outcome.combo,
-                    };
-                  }
-                }
-              }
-              // No nearby combo (or not attachable) → fall through to the per-slot
-              // + single-unit safety net below.
-            } else {
-              // Interactive path: hand the job to the row poller and return now,
-              // so the per-slot + single-unit fallbacks DON'T attach mismatched
-              // single units while the combo job is still running. If the job
-              // ends with no combo, the poller re-invokes auto-fill with
-              // skipExpansion:true to run that safety net.
-              return {
-                reservation,
-                results,
-                comboOptions: comboEvaluation.options,
-                searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
-                expansionJob: { jobId: startResp.jobId, reservationId: reservation._id },
-              };
-            }
-          }
-        } catch (expansionError: any) {
-          console.warn("[auto-fill] nearby-city expansion failed:", expansionError?.message ?? expansionError);
-        }
-      }
-
-      const plannedPicks: Array<{
-        slot: typeof emptySlots[number];
-        pick: LiveCandidate | null;
-        searchSummary: AutoFillSearchSummary;
-      }> = [];
-      const fallbackPools: Array<{
-        slot: typeof emptySlots[number];
-        bedrooms: number;
-        candidates: LiveCandidate[];
-        searchSummary: AutoFillSearchSummary;
-      }> = [];
-      for (const slot of remainingEmptySlots()) {
-        const pool = await getCandidatePool(slot.bedrooms, false);
-        fallbackPools.push({ slot, bedrooms: slot.bedrooms, candidates: pool.candidates, searchSummary: pool.searchSummary });
-      }
-      const fallbackTargetIndexes = requiredGroundFloorBedrooms.size > 0
-        ? new Set(fallbackPools.map((pool, index) => requiredGroundFloorBedrooms.has(pool.bedrooms) ? index : -1).filter((index) => index >= 0))
-        : undefined;
-      const fallbackRequiredCount = fallbackTargetIndexes?.size
-        ? Math.min(requiredGroundFloorUnits, fallbackTargetIndexes.size)
-        : requiredGroundFloorUnits;
-      const fallbackPlan = pickCheapestSetWithGroundFloor(fallbackPools, fallbackRequiredCount, pickedIdentities, fallbackTargetIndexes);
-      for (let i = 0; i < fallbackPools.length; i++) {
-        plannedPicks.push({
-          slot: fallbackPools[i].slot,
-          pick: fallbackPlan.reason ? null : fallbackPlan.picks[i],
-          searchSummary: fallbackPools[i].searchSummary,
-        });
-      }
-      for (const planned of plannedPicks) {
-        const slotResult = planned.pick
-          ? await createAndAttachPick(planned.slot, planned.pick, planned.slot.bedrooms, planned.searchSummary)
-          : {
-              slot: planned.slot,
-              picked: null,
-              created: null,
-              skippedReasons: [fallbackPlan.reason ?? "find-buy-in returned no unused cheapest candidates"],
-              airbnbPick: false,
-              searchSummary: planned.searchSummary,
-            };
-        results.push(slotResult);
-      }
-
-      // ── City-wide VRBO fallback for any slot the resort search left empty ──
-      // The two-unit combo path above already runs a city scan for >=2 empty
-      // slots. This catches the rest with the SAME "resort name first, then
-      // city-wide VRBO" methodology, applied per remaining slot: single-unit
-      // reservations (e.g. Keauhou) and the leftover slot of a partially-filled
-      // multi-unit booking. The server caches the city scrape by (community,
-      // checkIn, checkOut), so when both this and the combo path fire for one
-      // reservation the VRBO sidecar is only driven once.
-      const stillEmptyAfterResort = results.filter((row) => !row.picked).map((row) => row.slot);
-      if (stillEmptyAfterResort.length > 0 && staticUnitConfig) {
-        setCityInventoryScanTrigger((prev) => ({
-          ...prev,
-          [reservation._id]: (prev[reservation._id] ?? 0) + 1,
-        }));
-        try {
-          const cityParams = new URLSearchParams({
-            propertyId: String(buyInPropertyId),
-            checkIn: ci,
-            checkOut: co,
-          });
-          const cityData = await apiGetJson<CityVrboInventoryResponse>(
-            `/api/operations/city-vrbo-inventory?${cityParams.toString()}`,
-          );
-          for (const slot of stillEmptyAfterResort) {
-            const rows = (cityData.byBedroom?.[slot.bedrooms] ?? [])
-              .filter((row) => (Number(row.totalPrice) || 0) > 0)
-              .sort((a, b) => (Number(a.totalPrice) || Infinity) - (Number(b.totalPrice) || Infinity));
-            // Record the city scan in the audit panel even when nothing matches.
-            searchAudits.set(slot.bedrooms, {
-              bedrooms: slot.bedrooms,
-              generatedAt: new Date().toISOString(),
-              counts: cityInventorySearchSummary(cityData, slot.bedrooms),
-              candidates: rows.slice(0, 20).map((row) => ({
-                source: "vrbo" as const,
-                sourceLabel: row.sourceLabel ?? "Vrbo",
-                title: row.title,
-                url: row.url,
-                totalPrice: row.totalPrice ?? 0,
-                nightlyPrice: row.nightlyPrice ?? 0,
-                bedrooms: row.bedrooms ?? slot.bedrooms,
-                verified: "yes" as const,
-              })),
-              diagnostics: {
-                severity: "ok",
-                title: "City-wide VRBO map inventory",
-                summary: `${cityData.listings.length} exported · single-unit fallback`,
-                generatedAt: new Date().toISOString(),
-                request: { propertyId: buyInPropertyId, bedrooms: slot.bedrooms, checkIn: ci, checkOut: co },
-                sources: [],
-                issues: [],
-                report: `City search: ${cityData.citySearchTerm}`,
-              },
-            });
-            // pickedIdentities is the shared dedupe set; skip rows already
-            // attached to another slot in this run.
-            const rowPick = rows.find((row) => !hasUsedListingIdentity(pickedIdentities, {
-              url: row.url,
-              title: row.title,
-              sourceLabel: row.sourceLabel,
-            }));
-            if (!rowPick) continue;
-            const livePick = liveCandidateFromCityComboPick(
-              {
-                bedrooms: slot.bedrooms,
-                source: "vrbo",
-                sourceLabel: rowPick.sourceLabel ?? "Vrbo",
-                title: rowPick.title,
-                totalPrice: Number(rowPick.totalPrice) || 0,
-                nightlyPrice: rowPick.nightlyPrice,
-                url: rowPick.url,
-                image: rowPick.image ?? undefined,
-                images: Array.isArray(rowPick.images) && rowPick.images.length
-                  ? rowPick.images
-                  : (rowPick.image ? [rowPick.image] : undefined),
-                verified: "yes",
-                verifiedReason: "City VRBO map inventory (single-unit fallback)",
-              },
-              slot.bedrooms,
-              reservationNights,
-            );
-            const cityResult = await createAndAttachPick(
-              slot,
-              livePick,
-              slot.bedrooms,
-              cityInventorySearchSummary(cityData, slot.bedrooms),
-              `City VRBO ${rowPick.sourceLabel ?? "unit"}`,
-              "city-vrbo",
-            );
-            const targetIndex = results.findIndex((row) => !row.picked && row.slot.unitId === slot.unitId);
-            if (targetIndex >= 0) results[targetIndex] = cityResult;
-            else results.push(cityResult);
-          }
-        } catch (cityError: any) {
-          console.warn("[auto-fill] single-unit city VRBO fallback failed:", cityError?.message ?? cityError);
-        }
-      }
-
-      const attachedComparisonOptions = await evaluateAttachedComparisonCombos(results);
+      // Interactive path: hand the job to the row poller and return now. The
+      // poller mirrors job state into the escalation tracker + audits and
+      // refreshes the bookings list as slots attach server-side.
       return {
         reservation,
-        results,
-        comboOptions: attachedComparisonOptions.length > 0 ? attachedComparisonOptions : comboEvaluation.options,
-        searchAudits: Array.from(searchAudits.values()).sort((a, b) => b.bedrooms - a.bedrooms),
-      };
+        results: [],
+        comboOptions: [],
+        searchAudits: [],
+        autoFillJob: { jobId: String(startResp.jobId), reservationId: reservation._id },
+      } satisfies AutoFillMutationResult;
     },
     onSuccess: (payload, variables) => {
       const { reservation, results, comboOptions, searchAudits } = payload;
       // Completed cleanly (or handed off to the expansion poller) — drop any
       // pending mobile-resume entry so the visibility effect won't re-fire it.
       autoFillResumeRef.current.delete(reservation._id);
-      const expansionJob = "expansionJob" in payload ? payload.expansionJob : null;
-      // Interactive nearby-city expansion handoff: the mutation returned early
-      // with a background job handle. Register it so the row mounts the poller +
-      // progress UI, and DO NOT stopTrackingAutoFill (keeps the row "searching"
-      // and the button disabled until the job resolves). The poller's resolver
-      // attaches the found combo or re-invokes the per-slot safety net.
-      if (expansionJob) {
-        expansionJobMetaRef.current[reservation._id] = {
+      const autoFillJob = "autoFillJob" in payload ? payload.autoFillJob : null;
+      // Interactive handoff: the mutation started the server-side auto-fill job
+      // and returned its handle. Register it so the row mounts AutoFillJobPoller
+      // + progress UI, and DO NOT stopTrackingAutoFill (keeps the row "searching"
+      // and the button disabled until the job resolves). The poller mirrors the
+      // job's escalation/audits into the row and refreshes the bookings list as
+      // slots attach server-side — so the search continues even if the operator
+      // leaves this page entirely.
+      if (autoFillJob) {
+        autoFillJobMetaRef.current[reservation._id] = {
           reservation,
           propertyId: variables?.propertyId ?? null,
           listingId: variables?.listingId ?? null,
           silent: variables?.silent ?? false,
         };
-        setExpansionJobs((prev) => ({
+        setAutoFillJobs((prev) => ({
           ...prev,
-          [reservation._id]: {
-            jobId: expansionJob.jobId,
-            status: "running",
-            tier: 20,
-            currentCity: null,
-            citiesSearched: [],
-            scannedCount: 0,
-            totalCount: 0,
-            cityResults: [],
-          },
+          [reservation._id]: { jobId: autoFillJob.jobId, reservationId: reservation._id },
         }));
-        // Resort + home city already came up empty (that's why we widened) —
-        // reflect that in the escalation tracker; the poller drives the tiers.
-        setEscalation(reservation._id, { resort: "no-pair", homeCity: "no-pair" });
-        if (comboOptions.length > 0) setLastAutoFillCombos((prev) => ({ ...prev, [reservation._id]: comboOptions }));
-        if (searchAudits.length > 0) setLastAutoFillAudits((prev) => ({ ...prev, [reservation._id]: searchAudits }));
         return;
       }
       stopTrackingAutoFill(reservation._id);
@@ -7084,6 +6121,109 @@ export default function Bookings() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Rediscover server-side auto-fill jobs still running for the visible rows.
+  // THIS is what makes the search survive a full page reload / navigating away
+  // and back: the job keeps running on the server regardless of this tab, and
+  // on return we re-attach the row's progress poller (and the slots that already
+  // attached server-side are visible because the bookings list reflects the DB).
+  useEffect(() => {
+    let cancelled = false;
+    const rediscover = async () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      const ids = reservationsRef.current
+        .filter((r) => (r.slotsFilled ?? 0) < (r.slotsTotal ?? 0))
+        .map((r) => r._id)
+        .filter((id) => !(id in autoFillJobs));
+      if (ids.length === 0) return;
+      try {
+        const data = await apiGetJson<{ jobs: Record<string, AutoFillJobStatus> }>(
+          `/api/operations/auto-fill/active?reservationIds=${encodeURIComponent(ids.join(","))}`,
+        );
+        if (cancelled) return;
+        for (const [reservationId, status] of Object.entries(data?.jobs ?? {})) {
+          if (!status || status.done) continue;
+          const fresh = reservationsRef.current.find((x) => x._id === reservationId);
+          if (!fresh) continue;
+          autoFillRunRef.current.add(reservationId);
+          setAutoFillStartedByReservation((prev) => (reservationId in prev ? prev : { ...prev, [reservationId]: Date.now() }));
+          autoFillJobMetaRef.current[reservationId] = { reservation: fresh, silent: false };
+          setAutoFillJobs((prev) => (reservationId in prev ? prev : { ...prev, [reservationId]: { jobId: status.jobId, reservationId } }));
+          updateAutoFillJobState(reservationId, status);
+        }
+      } catch { /* best effort — a 401/404/network hiccup just means try again next tick */ }
+    };
+    void rediscover();
+    const onFocus = () => void rediscover();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reservations]);
+
+  // ── Server-side auto-fill job: poller wiring ──────────────────────────────
+  const clearAutoFillJob = (reservationId: string) => {
+    setAutoFillJobs((prev) => {
+      if (!(reservationId in prev)) return prev;
+      const next = { ...prev };
+      delete next[reservationId];
+      return next;
+    });
+    delete autoFillJobMetaRef.current[reservationId];
+  };
+  // Live progress tick from AutoFillJobPoller — mirror the server escalation +
+  // audits/combos into the row's existing tracker UI.
+  const updateAutoFillJobState = (reservationId: string, s: AutoFillJobStatus) => {
+    setEscalation(reservationId, {
+      resort: s.escalation.resort,
+      resortLabel: s.escalation.resortLabel,
+      homeCity: s.escalation.homeCity,
+      homeCityTerm: s.escalation.homeCityTerm,
+      homeCityListings: s.escalation.homeCityListings,
+      foundAt: s.escalation.foundAt ?? null,
+      nearbyStatus: s.escalation.nearbyStatus,
+      tierResults: s.escalation.tierResults,
+    });
+    if (s.searchAudits?.length) setLastAutoFillAudits((prev) => ({ ...prev, [reservationId]: s.searchAudits }));
+    if (s.comboOptions?.length) setLastAutoFillCombos((prev) => ({ ...prev, [reservationId]: s.comboOptions }));
+  };
+  // Terminal handler for the interactive auto-fill job. Slots are ALREADY
+  // attached server-side; here we just refresh the lists so they render, clear
+  // the row's running state, and toast the outcome.
+  const handleAutoFillResolved = (reservationId: string, status: AutoFillJobStatus | null) => {
+    const meta = autoFillJobMetaRef.current[reservationId];
+    const silent = meta?.silent ?? false;
+    if (status) updateAutoFillJobState(reservationId, status);
+    clearAutoFillJob(reservationId);
+    stopTrackingAutoFill(reservationId);
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", meta?.listingId ?? selectedListingId] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    if (silent) return;
+    if (!status) {
+      toast({
+        title: "Auto-fill search ended",
+        description: "The background search was lost (server restart). Click Auto-fill cheapest to retry — the scan cache is warm, so it's fast.",
+      });
+      return;
+    }
+    if (status.status === "failed") {
+      toast({ title: "Auto-fill failed", description: status.error || status.message, variant: "destructive" });
+      return;
+    }
+    if (status.slotsFilled === 0) {
+      toast({ title: "No verified priced candidates", description: status.message, variant: "destructive" });
+    } else {
+      toast({
+        title: `Filled ${status.slotsFilled} / ${status.slotsTotal} unit${status.slotsTotal === 1 ? "" : "s"}`,
+        description: status.message,
+      });
+    }
+  };
 
   // Live progress tick from CityExpansionJobPoller (interactive path).
   const updateExpansionJobState = (reservationId: string, s: CityExpansionJobStatus) => {
@@ -9045,7 +8185,14 @@ export default function Bookings() {
                             onResolved={(s) => handleExpansionResolved(r._id, s)}
                           />
                         )}
-                        {(escalationByReservation[r._id] || expansionJobs[r._id]) && (
+                        {autoFillJobs[r._id] && (
+                          <AutoFillJobPoller
+                            jobId={autoFillJobs[r._id].jobId}
+                            onState={(s) => updateAutoFillJobState(r._id, s)}
+                            onResolved={(s) => handleAutoFillResolved(r._id, s)}
+                          />
+                        )}
+                        {(escalationByReservation[r._id] || expansionJobs[r._id] || autoFillJobs[r._id]) && (
                           <BuyInEscalationStages
                             escalation={
                               escalationByReservation[r._id] ?? {

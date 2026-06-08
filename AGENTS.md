@@ -279,6 +279,71 @@ don't "simplify" them away:
    so its pass/fail report stays correct. Deterministic smoke:
    `tests/city-vrbo-expansion.smoke.ts`.
 
+### Auto-fill cheapest is a SERVER-SIDE background job (Load-Bearing, 2026-06-08)
+
+The bookings-page **"Auto-fill cheapest"** button no longer runs the escalation
+ladder client-side. The whole flow — Stage 1 resort `find-buy-in` → Stage 2
+home-city VRBO → Stage 3-4 nearby-city expansion → per-slot single-unit city
+fallback — AND the buy-in attach now run server-side in
+`server/auto-fill-job.ts` (a fire-and-forget job modeled on
+`server/preflight-background-jobs.ts` + `server/city-vrbo-expansion.ts`).
+
+**Why:** the old `autoFillMutation` (`client/src/pages/bookings.tsx`) was pure
+client orchestration. The heavy search primitives were already server-side, but
+the ladder + the `POST /api/buy-ins` → `POST .../attach-buy-in` calls lived in
+the React mutation, so leaving the bookings page (in-app navigation, tab close,
+mobile suspend) abandoned the promise chain and any not-yet-completed stage
+NEVER attached. The operator had to babysit the tab. (PR #588's resume only
+re-fired on tab *return while still mounted*.) Now the search keeps running and
+slots keep filling regardless of the browser tab.
+
+Load-bearing choices — don't "simplify" them away:
+
+1. **The worker drives the existing endpoints via in-process LOOPBACK self-calls**
+   (`http://127.0.0.1:${PORT}` + `loopbackRequestHeaders()`; 127.0.0.1 bypasses
+   the `ADMIN_SECRET` gate — same pattern as `preflight-background-jobs.ts`). It
+   does NOT re-implement the 4,000-line `find-buy-in` handler. It calls
+   `GET /api/operations/find-buy-in`, `GET /api/operations/city-vrbo-inventory`,
+   `POST /api/buy-ins`, `POST /api/bookings/:id/attach-buy-in`; and it starts/
+   polls the expansion job IN-PROCESS (`startExpansionJob`/`getExpansionJob`).
+   So auto-fill no longer double-calls `find-buy-in` from the client — there is
+   no sidecar-lane self-contention.
+2. **`find-buy-in` completeness gate.** A partial scan can return `autoFillSafe:
+   true` with 1 priced row while a source timed out. The worker only retries (a
+   fresh call, NOT `?recover=1` — recover just replays the recovery cache) when
+   the scan came back `scanComplete:false` AND empty; otherwise it uses whatever
+   `cheapest` returned. Don't trust `autoFillSafe` alone.
+3. **No double-attach.** Single-flight by `reservationId` (`activeJobByReservation`);
+   the worker re-reads `getBuyInsByReservation` and seeds a used-identity set +
+   filled-`unitId` set before each attach, and `storage.attachBuyIn`'s
+   same-`unitId` guard is the backstop. The client no longer attaches at all, so
+   there is no client/server attach race. The identity-dedup functions
+   (`listingIdentityKeys`/`listingUrlKey`/`normalizedIdentityText`/
+   `isGenericRentalTitle`) are ported VERBATIM from `bookings.tsx` so the
+   server's across-slot de-dup matches the client's exactly.
+4. **The "Manual photo URLs:" marker stays LAST in the buy-in notes** (see
+   Load-Bearing #1 / Decision Log 2026-06-05) — `attachPick` appends it via
+   `buyInPhotoNotesSuffix` after every other suffix.
+5. **Attach 409s (proximity / combo unit-type confidence) are recorded as
+   skips**, exactly the outcome the client got (it never force-overrode auto
+   picks). The worker does NOT pass `force:true`. Parity preserved.
+6. **Jobs are in-memory and lost on redeploy — that's fine** because every pick
+   is persisted to Postgres the instant it attaches. The client rediscovers a
+   live job on return via `GET /api/operations/auto-fill/active?reservationIds=…`
+   (the key to surviving a full reload/navigation), and treats a 404 (job lost)
+   as terminal, falling back to a re-click.
+7. **City stages are gated to configured `PROPERTY_UNIT_CONFIGS` properties**
+   (the `city-vrbo-inventory` endpoint requires a config); drafts (negative
+   propertyId) and Guesty-derived targets get Stage 1 only — exactly as the old
+   client gated `staticUnitConfig`.
+
+Endpoints: `POST /api/operations/auto-fill` (start, single-flight, returns
+`jobId`), `GET /api/operations/auto-fill/:jobId` (poll), `GET
+/api/operations/auto-fill/active` (rediscover), `POST .../:jobId/cancel` (unused
+by the client — the poller intentionally NEVER cancels on unmount). The client's
+old `CityExpansionJobPoller` / `expansionJobs` flow is now dead (the expansion
+runs inside the server job) but left in place; don't wire it back to the button.
+
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
   wrong because…"* rather than *"this code has a bug"*.
