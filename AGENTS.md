@@ -136,6 +136,35 @@ page. Three constraints make it actually reach the full count — don't
    Property-manager is the lowest-confidence signal and yields a pair only when
    walkability is independently confirmed (never PM-alone — one PM spans the
    whole town). Coordinates, when present, gate walkability via `pairIsWalkable`.
+   **Typo tolerance + LLM recovery (2026-06-08, `shared/city-vrbo-combo.ts` +
+   `server/city-vrbo-community-llm.ts`):** the dictionary now also matches via
+   (a) curated per-entry `aliases` (token-bounded exact — known misspellings /
+   abbreviations) and (b) FUZZY (Damerau-Levenshtein + Jaro-Winkler over
+   EQUAL-token windows) — but fuzzy is applied ONLY to `FUZZY_SAFE_CANONICALS`,
+   computed at load as the canonicals whose nearest same-token-count sibling is
+   `>= DL 4`. **6 canonicals are EXACT-ONLY-UNSAFE** (poipu kai, poipu kapili,
+   alii kai, alihi lani, pili mai, pono kai — each within DL 3 of a DIFFERENT
+   real complex), so a typo of them is genuinely ambiguous and MUST be caught by
+   the alias table, never fuzzy. The headline case **"Poipu Kie" → poipu kai
+   lives in `aliases`, NOT in the fuzzy matcher.** Fuzzy thresholds
+   (`FUZZY_JW_MIN=0.90`, `FUZZY_NDL_MAX=0.34`, `FUZZY_JW_MARGIN=0.06`) came from
+   an exhaustive single-edit-typo sweep — the best-vs-second-best JW MARGIN
+   (not the absolute thresholds) is the over-clustering guard; **do not drop the
+   margin below 0.06** (0.05 leaked poipu-kai typos into poipu sands). Precision
+   is locked by `tests/city-vrbo-combo.test.ts` (typo positives + cross-complex
+   non-collisions) — run it after any dictionary/threshold change.
+   `sharedResortPhraseKeys` now also consumes `CityVrboListing.complexName` (set
+   by detail enrichment AND the LLM classifier) → dict/complex key; this is what
+   finally makes the enrichment `complexName` (previously dead) cluster. The LLM
+   classifier (`runCityScanCore`, gated `CITY_VRBO_LLM_COMMUNITY` + needs
+   `ANTHROPIC_API_KEY`) runs ONLY as a NO-PAIR recovery step (never overrides a
+   deterministic pair): one conservative Claude pass names each listing's
+   specific complex (positive-ID only; "near X" != "in X"; generic → null; only
+   `confidence:"high"`, bare-place/generic labels rejected). It sets
+   `complexName`; **MUTUAL VALIDATION** (a label only pairs when >=2 listings
+   share it) is enforced FOR FREE by the existing bucket-size `>= bedroomPlan.length`
+   gate, so a single hallucinated label can never form a pair. Don't loosen the
+   confidence gate or remove the bucket-size mutual-validation guard.
 7. **The SRP harvest captures each card's hero image; SRP-level image matching is
    inert by design, 2026-06-07.** `harvestVrboMapResultCards` /
    `extractVisibleVrboCards` now grab the card `<img>` (VRBO CDN hosts only) so
