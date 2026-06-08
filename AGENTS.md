@@ -466,7 +466,13 @@ Load-bearing choices — don't "simplify" them away:
    clean → 0. A detach failure THROWS → the loop's catch marks the item failed
    (no half-detached partial search), and a `finally` calls
    `stopTrackingAutoFill` so a failed item never leaks `autoFillRunRef` (which
-   would block the row's later runs). **`forceRestart` (load-bearing):** the bulk
+   would block the row's later runs). **Server-restart resilience (2026-06-08):**
+   auto-fill jobs are in-memory, so a Railway redeploy mid-queue wipes them and the
+   poll returns "Auto-fill job was lost (server restart)". The bulk loop now RETRIES
+   such an item up to 3× (15s apart, also catching network throws during the
+   redeploy window) before failing — picks persist to Postgres as they attach, so
+   the re-POST (forceRestart) resumes. (Don't deploy while an operator is mid-bulk-
+   queue if avoidable — each deploy restarts the server.) **`forceRestart` (load-bearing):** the bulk
    POST sets `forceRestart:true`; `startAutoFillJob`'s single-flight guard then
    SUPERSEDES (cancels + finalizes) any in-flight job for that reservation instead
    of reusing it. Without this, an in-flight single-button job J (fire-and-forget,
