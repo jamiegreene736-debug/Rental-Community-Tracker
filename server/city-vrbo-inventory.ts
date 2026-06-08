@@ -61,6 +61,8 @@ type CityVrboScrapeCacheEntry = {
   normalizePipeline: Omit<CityVrboFilterPipeline, "phraseFilter" | "afterPhraseFilter" | "phraseBuckets" | "suggestedPair">;
   /** Phase 4: set once detail-page coord/gallery enrichment has run for this pool. */
   detailEnriched?: boolean;
+  /** Set once the conservative LLM community classifier has run for this pool. */
+  llmClassified?: boolean;
 };
 
 const CITY_VRBO_CACHE_TTL_MS = Math.max(
@@ -85,6 +87,10 @@ const cityVrboScrapeCache = new Map<string, CityVrboScrapeCacheEntry>();
 // result (rare), is bounded + budgeted, and degrades gracefully (a blocked/slow
 // VRBO just yields no coords → same as before). Disable with CITY_VRBO_DETAIL_ENRICH=0.
 const CITY_VRBO_DETAIL_ENRICH = (process.env.CITY_VRBO_DETAIL_ENRICH ?? "1") !== "0";
+// Conservative LLM community classifier (city-vrbo-community-llm.ts): a no-pair
+// recovery step that names generically-titled / misspelled / unknown-complex
+// listings so they can cluster. Gated; needs ANTHROPIC_API_KEY. Default on.
+const CITY_VRBO_LLM_COMMUNITY = (process.env.CITY_VRBO_LLM_COMMUNITY ?? "1") !== "0";
 const CITY_VRBO_ENRICH_MAX = Math.max(2, Number(process.env.CITY_VRBO_ENRICH_MAX ?? 8));
 // Keep this well under Railway's HTTP edge timeout once added to the main scrape
 // (~60-90s) so the whole request stays comfortably bounded. 75s default.
@@ -534,6 +540,40 @@ async function runCityScanCore(args: {
     scrapeEntry.nights,
     args.filterPhrase,
   );
+
+  // No-pair recovery (cheap, runs BEFORE the detail-page enrichment): a
+  // conservative LLM names each listing's specific complex so generically-titled
+  // / misspelled / unknown-complex units can cluster. Sets listing.complexName,
+  // which the matcher resolves through the dictionary (so "poipu kie" still
+  // normalizes to poipu kai) or keeps as a specific complex key. Mutual
+  // validation (>=2 listings sharing a community) is enforced by the matcher's
+  // bucket-size gate, so a singleton LLM label can never form a wrong pair.
+  if (
+    CITY_VRBO_LLM_COMMUNITY &&
+    !filtered.suggestedPair &&
+    !scrapeEntry.llmClassified &&
+    scrapeEntry.listings.length > 0
+  ) {
+    scrapeEntry.llmClassified = true;
+    try {
+      const { classifyCityListingCommunities } = await import("./city-vrbo-community-llm");
+      const labeled = await classifyCityListingCommunities(scrapeEntry.listings, {
+        targetCommunity: args.community ?? args.citySearchTerm ?? null,
+      });
+      if (labeled > 0) {
+        console.log(`[city-vrbo-inventory] LLM community classifier labeled ${labeled} listing(s); re-running matcher`);
+        filtered = applyFiltersToPool(
+          scrapeEntry.listings,
+          scrapeEntry.normalizePipeline,
+          args.bedroomPlan,
+          scrapeEntry.nights,
+          args.filterPhrase,
+        );
+      }
+    } catch (e: any) {
+      console.error("[city-vrbo-inventory] LLM community classify failed:", e?.message ?? e);
+    }
+  }
 
   // Phase 4: if the cheap text/photo signals found no same-community pair, open
   // the top candidates' detail pages to harvest coordinates (+ galleries) and

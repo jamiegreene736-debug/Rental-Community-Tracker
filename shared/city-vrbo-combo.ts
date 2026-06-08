@@ -104,43 +104,197 @@ const PLACE_STOPWORDS = new Set([
 // condo complexes. A dictionary hit is the strongest text signal. Extend as
 // new complexes appear. Each canonical maps to a matcher run over the full
 // title + snippet text (already normalized to lowercase alnum+spaces).
-const KAUAI_COMPLEX_DICTIONARY: Array<{ canonical: string; match: RegExp }> = [
-  { canonical: "poipu kai", match: /\bpoipu kai\b|\bregency at poipu\b|\bvillas at poipu kai\b/ },
-  { canonical: "poipu kapili", match: /\bpoipu kapili\b/ },
-  { canonical: "kiahuna plantation", match: /\bkiahuna\b/ },
-  { canonical: "nihi kai villas", match: /\bnihi kai\b/ },
+// `aliases` are EXACT (token-bounded) alternate spellings / known misspellings /
+// abbreviations. They are the ONLY safe way to catch a typo of an
+// "exact-only-unsafe" canonical (one whose name is within edit-distance 3 of a
+// DIFFERENT real complex — e.g. "poipu kai" vs "poipu kapili"/"pono kai"), where
+// fuzzy matching would risk pairing a guest across two communities. The headline
+// case "Poipu Kie" → poipu kai lives here, NOT in the fuzzy matcher. Extend as
+// production scrapes reveal new variants.
+const KAUAI_COMPLEX_DICTIONARY: Array<{ canonical: string; match: RegExp; aliases?: string[] }> = [
+  { canonical: "poipu kai", match: /\bpoipu kai\b|\bregency at poipu\b|\bvillas at poipu kai\b/,
+    aliases: ["poipu kie", "poipu kia", "poipu kay", "poipu key", "poepu kai", "poipu kai resort", "regency at poipu kai", "the regency at poipu"] },
+  { canonical: "poipu kapili", match: /\bpoipu kapili\b/, aliases: ["poipu kapilli", "poipu kapil", "poipukapili"] },
+  { canonical: "kiahuna plantation", match: /\bkiahuna\b/, aliases: ["kiahuna plantation", "kiahuna resort"] },
+  { canonical: "nihi kai villas", match: /\bnihi kai\b/, aliases: ["nihikai", "nihi kai villas"] },
   { canonical: "poipu sands", match: /\bpoipu sands\b/ },
-  { canonical: "poipu crater", match: /\bpoipu crater\b/ },
+  { canonical: "poipu crater", match: /\bpoipu crater\b/, aliases: ["poipu crater resort"] },
   { canonical: "poipu shores", match: /\bpoipu shores\b/ },
-  { canonical: "koloa landing", match: /\bkoloa landing\b/ },
-  { canonical: "sunset kahili", match: /\bsunset kahili\b/ },
+  { canonical: "koloa landing", match: /\bkoloa landing\b/, aliases: ["koloa landing resort"] },
+  { canonical: "sunset kahili", match: /\bsunset kahili\b/, aliases: ["sunset kahilli", "sunset kihili"] },
   { canonical: "kuhio shores", match: /\bkuhio shores\b/ },
-  { canonical: "makahuena", match: /\bmakahuena\b/ },
-  { canonical: "pili mai", match: /\bpili mai\b/ },
-  { canonical: "waikomo stream villas", match: /\bwaikomo\b/ },
+  { canonical: "makahuena", match: /\bmakahuena\b/, aliases: ["makahuena at poipu", "makaheuna", "makahuna"] },
+  { canonical: "pili mai", match: /\bpili mai\b/, aliases: ["pilimai", "pili mai at poipu", "pili mai resort"] },
+  { canonical: "waikomo stream villas", match: /\bwaikomo\b/, aliases: ["waikomo stream", "waikomo streams"] },
   { canonical: "whalers cove", match: /\bwhalers? cove\b/ },
-  { canonical: "point at poipu", match: /\bpoint at poipu\b/ },
-  { canonical: "lawai beach resort", match: /\blawai beach\b/ },
+  { canonical: "point at poipu", match: /\bpoint at poipu\b/, aliases: ["the point at poipu", "points at poipu"] },
+  { canonical: "lawai beach resort", match: /\blawai beach\b/, aliases: ["lawai beach resort"] },
   { canonical: "prince kuhio", match: /\bprince kuhio\b/ },
-  { canonical: "manualoha", match: /\bmanualoha\b/ },
-  { canonical: "alihi lani", match: /\balihi lani\b/ },
-  { canonical: "kahala at poipu", match: /\bkahala at poipu\b/ },
+  { canonical: "manualoha", match: /\bmanualoha\b/, aliases: ["manualoha at poipu", "manaloha"] },
+  { canonical: "alihi lani", match: /\balihi lani\b/, aliases: ["alihilani", "alihi lani poipu"] },
+  { canonical: "kahala at poipu", match: /\bkahala at poipu\b/, aliases: ["the kahala at poipu", "kahala poipu"] },
   // Princeville / north shore
-  { canonical: "hanalei bay resort", match: /\bhanalei bay resort\b/ },
-  { canonical: "puu poa", match: /\bpuu poa\b|\bpu'?u po'?a\b/ },
+  { canonical: "hanalei bay resort", match: /\bhanalei bay resort\b/, aliases: ["hanalei bay villas"] },
+  { canonical: "puu poa", match: /\bpuu poa\b|\bpu'?u po'?a\b/, aliases: ["puu poa", "puupoa"] },
   { canonical: "sealodge", match: /\bsealodge\b|\bsea lodge\b/ },
-  { canonical: "alii kai", match: /\balii kai\b|\bali'?i kai\b/ },
+  { canonical: "alii kai", match: /\balii kai\b|\bali'?i kai\b/, aliases: ["alii kai princeville"] },
   { canonical: "hanalei colony resort", match: /\bhanalei colony\b/ },
-  { canonical: "mauna kai", match: /\bmauna kai\b/ },
+  { canonical: "mauna kai", match: /\bmauna kai\b/, aliases: ["mauna kai princeville"] },
   { canonical: "the cliffs at princeville", match: /\bcliffs?\s+(?:at\s+|of\s+)?princeville\b|\bprinceville\s+cliffs?\b|\bcliffs?\s+club\b/ },
   // Kapaa / east side
-  { canonical: "kaha lani", match: /\bkaha lani\b/ },
-  { canonical: "lae nani", match: /\blae nani\b/ },
+  { canonical: "kaha lani", match: /\bkaha lani\b/, aliases: ["kahalani", "kaha lani resort"] },
+  { canonical: "lae nani", match: /\blae nani\b/, aliases: ["laenani"] },
   { canonical: "lanikai", match: /\blanikai\b/ },
-  { canonical: "kapaa shore", match: /\bkapaa shore\b/ },
-  { canonical: "pono kai", match: /\bpono kai\b/ },
+  { canonical: "kapaa shore", match: /\bkapaa shore\b/, aliases: ["kapaa shores", "kapaa sands"] },
+  { canonical: "pono kai", match: /\bpono kai\b/, aliases: ["ponokai", "pono kai resort"] },
   { canonical: "wailua bay view", match: /\bwailua bay view\b/ },
 ];
+
+// ── Typo-tolerant dictionary matching ────────────────────────────────────────
+// Two layers, both high-precision:
+//   1) EXACT regex + curated `aliases` (token-bounded substring) — always on.
+//   2) FUZZY match (Damerau-Levenshtein + Jaro-Winkler over equal-token windows)
+//      — applied ONLY to canonicals proven safe (nearest same-token-count sibling
+//      is >= EDIT distance 4 apart) so a typo can never be mistaken for a
+//      DIFFERENT real complex. The best canonical must also beat the second-best
+//      by a Jaro-Winkler margin. Thresholds were chosen via an exhaustive
+//      single-edit-typo sweep over the dictionary (0 cross-complex false accepts).
+const FUZZY_JW_MIN = 0.9;       // Jaro-Winkler floor for a candidate match
+const FUZZY_NDL_MAX = 0.34;     // normalized Damerau-Levenshtein ceiling
+const FUZZY_JW_MARGIN = 0.06;   // best canonical must beat 2nd-best by this JW gap
+const FUZZY_MIN_CANONICAL_LEN = 7; // shorter canonicals are too collision-prone
+
+function damerauLevenshtein(a: string, b: string): number {
+  const al = a.length;
+  const bl = b.length;
+  if (al === 0) return bl;
+  if (bl === 0) return al;
+  const d: number[][] = Array.from({ length: al + 1 }, () => new Array(bl + 1).fill(0));
+  for (let i = 0; i <= al; i += 1) d[i][0] = i;
+  for (let j = 0; j <= bl; j += 1) d[0][j] = j;
+  for (let i = 1; i <= al; i += 1) {
+    for (let j = 1; j <= bl; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return d[al][bl];
+}
+
+function jaroWinkler(a: string, b: string): number {
+  if (a === b) return 1;
+  const al = a.length;
+  const bl = b.length;
+  if (al === 0 || bl === 0) return 0;
+  const matchDist = Math.max(0, Math.floor(Math.max(al, bl) / 2) - 1);
+  const aMatch = new Array(al).fill(false);
+  const bMatch = new Array(bl).fill(false);
+  let matches = 0;
+  for (let i = 0; i < al; i += 1) {
+    const start = Math.max(0, i - matchDist);
+    const end = Math.min(i + matchDist + 1, bl);
+    for (let j = start; j < end; j += 1) {
+      if (bMatch[j] || a[i] !== b[j]) continue;
+      aMatch[i] = true;
+      bMatch[j] = true;
+      matches += 1;
+      break;
+    }
+  }
+  if (matches === 0) return 0;
+  let transpositions = 0;
+  let k = 0;
+  for (let i = 0; i < al; i += 1) {
+    if (!aMatch[i]) continue;
+    while (!bMatch[k]) k += 1;
+    if (a[i] !== b[k]) transpositions += 1;
+    k += 1;
+  }
+  transpositions /= 2;
+  const jaro = (matches / al + matches / bl + (matches - transpositions) / matches) / 3;
+  let prefix = 0;
+  const maxPrefix = Math.min(4, al, bl);
+  for (let i = 0; i < maxPrefix; i += 1) {
+    if (a[i] === b[i]) prefix += 1;
+    else break;
+  }
+  return jaro + prefix * 0.1 * (1 - jaro);
+}
+
+const DICT_ENTRIES = KAUAI_COMPLEX_DICTIONARY.map((e) => ({
+  canonical: e.canonical,
+  tokens: e.canonical.split(" "),
+  aliases: e.aliases ?? [],
+}));
+
+// A canonical is FUZZY-SAFE iff its nearest same-token-count sibling is at least
+// EDIT distance 4 away (so no single/double typo can blur it into another real
+// complex) and it is long enough to be distinctive. Computed once at load so the
+// set self-maintains as the dictionary grows.
+const FUZZY_SAFE_CANONICALS: Set<string> = (() => {
+  const safe = new Set<string>();
+  for (const e of DICT_ENTRIES) {
+    if (e.canonical.length < FUZZY_MIN_CANONICAL_LEN) continue;
+    let minSibling = Infinity;
+    for (const o of DICT_ENTRIES) {
+      if (o.canonical === e.canonical || o.tokens.length !== e.tokens.length) continue;
+      minSibling = Math.min(minSibling, damerauLevenshtein(e.canonical, o.canonical));
+    }
+    if (minSibling >= 4) safe.add(e.canonical);
+  }
+  return safe;
+})();
+
+/** True when `text` contains the alias as a whole-token run. */
+function textHasAlias(text: string, alias: string): boolean {
+  if (!alias) return false;
+  return ` ${text} `.includes(` ${alias} `);
+}
+
+/**
+ * Resolve a piece of text (a title, sourceLabel, or an enrichment/LLM-supplied
+ * complexName) to a dictionary canonical via exact regex → curated alias →
+ * fuzzy-safe match. Returns the canonical or null. Never returns an
+ * exact-only-unsafe canonical from a fuzzy guess.
+ */
+function dictionaryCanonicalForText(text: string): string | null {
+  const norm = normalizedIdentityText(text);
+  if (!norm) return null;
+  // 1) exact regex / curated alias (covers exact-only-unsafe canonicals).
+  for (const entry of KAUAI_COMPLEX_DICTIONARY) {
+    if (entry.match.test(norm)) return entry.canonical;
+    if ((entry.aliases ?? []).some((a) => textHasAlias(norm, a))) return entry.canonical;
+  }
+  // 2) fuzzy over equal-token windows, fuzzy-safe canonicals only, with a
+  //    best-vs-second-best Jaro-Winkler margin so an ambiguous typo is rejected.
+  const tokens = norm.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const bestJwPerCanonical = new Map<string, number>();
+  for (const e of DICT_ENTRIES) {
+    if (!FUZZY_SAFE_CANONICALS.has(e.canonical)) continue;
+    const n = e.tokens.length;
+    for (let i = 0; i + n <= tokens.length; i += 1) {
+      const window = tokens.slice(i, i + n).join(" ");
+      if (window.length < 6 || window === e.canonical) continue; // exact handled above
+      const dl = damerauLevenshtein(window, e.canonical);
+      const nd = dl / Math.max(window.length, e.canonical.length);
+      if (nd > FUZZY_NDL_MAX) continue;
+      const jw = jaroWinkler(window, e.canonical);
+      if (jw < FUZZY_JW_MIN) continue;
+      const prev = bestJwPerCanonical.get(e.canonical) ?? 0;
+      if (jw > prev) bestJwPerCanonical.set(e.canonical, jw);
+    }
+  }
+  if (bestJwPerCanonical.size === 0) return null;
+  const ranked = Array.from(bestJwPerCanonical.entries()).sort((a, b) => b[1] - a[1]);
+  const [bestCanonical, bestJw] = ranked[0];
+  const secondJw = ranked[1]?.[1] ?? 0;
+  if (ranked.length > 1 && bestJw - secondJw < FUZZY_JW_MARGIN) return null; // ambiguous
+  return bestCanonical;
+}
 
 function isGenericRentalTitle(value: string): boolean {
   const t = normalizedIdentityText(value);
@@ -179,22 +333,59 @@ function cleanComplexCandidate(phrase: string): string | null {
  * complex-name-before-unit-number heuristic. A listing can yield several.
  */
 export function sharedResortPhraseKeys(
-  candidate: Pick<CityVrboListing, "title" | "sourceLabel" | "snippet">,
+  candidate: Pick<CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName">,
 ): string[] {
   // Dictionary may scan the snippet too (its terms are specific multi-word
-  // complex names). The heuristic + classic-phrase scans use the TITLE only:
-  // VRBO card snippets are full of UI boilerplate ("current price is 450",
-  // "photo gallery for", "condo sleeps 8") that the unit-number heuristic would
-  // otherwise turn into junk clusters.
+  // complex names). The heuristic + classic-phrase + FUZZY scans use the TITLE
+  // only: VRBO card snippets are full of UI boilerplate ("current price is 450",
+  // "photo gallery for", "condo sleeps 8") that the unit-number heuristic / fuzzy
+  // matcher would otherwise turn into junk clusters.
   const titleText = normalizedIdentityText([candidate.title, candidate.sourceLabel].filter(Boolean).join(" "));
   const fullText = normalizedIdentityText([candidate.title, candidate.sourceLabel, candidate.snippet].filter(Boolean).join(" "));
-  if (!fullText) return [];
   const keys = new Set<string>();
 
-  // 1) Dictionary (highest precision) — title + snippet.
+  // 0) Structured community name from detail-page enrichment OR the conservative
+  //    LLM classifier (city-vrbo-community-llm.ts). Resolve it to a dictionary
+  //    canonical (exact/alias/fuzzy); otherwise keep it as a complex key if it's
+  //    a specific name (NOT a bare place/generic word). This is what lets a
+  //    GENERIC-titled listing ("Ocean view 3BR") cluster once a high-confidence
+  //    source has named its community.
+  if (candidate.complexName) {
+    const cn = normalizedIdentityText(candidate.complexName);
+    const canonical = dictionaryCanonicalForText(cn);
+    if (canonical) {
+      keys.add(`dict:${canonical}`);
+    } else {
+      const cleaned = cleanComplexCandidate(cn);
+      if (cleaned) {
+        keys.add(`complex:${cleaned}`);
+      } else {
+        // Allow a single SPECIFIC token (e.g. "kamalii", "manualoha") — vetted
+        // upstream (enrichment/high-confidence LLM), so a one-word name is OK
+        // here even though the title heuristic rejects single-word leads.
+        const toks = cn.split(/\s+/).filter(Boolean);
+        if (
+          toks.length === 1 && toks[0].length >= 6 &&
+          !PLACE_STOPWORDS.has(toks[0]) && !STRUCTURAL_STOPWORDS.has(toks[0]) &&
+          !isGenericRentalTitle(toks[0])
+        ) {
+          keys.add(`complex:${toks[0]}`);
+        }
+      }
+    }
+  }
+
+  if (!fullText) return Array.from(keys);
+
+  // 1) Dictionary (highest precision) — exact regex over title + snippet, PLUS a
+  //    typo-tolerant alias/fuzzy pass over the TITLE (not the snippet) so a
+  //    misspelled complex ("Poipu Kie" → poipu kai via alias; "Sunset Kahilli" →
+  //    sunset kahili via fuzzy) still clusters with the correctly-spelled ones.
   for (const entry of KAUAI_COMPLEX_DICTIONARY) {
     if (entry.match.test(fullText)) keys.add(`dict:${entry.canonical}`);
   }
+  const fuzzyCanonical = dictionaryCanonicalForText(titleText);
+  if (fuzzyCanonical) keys.add(`dict:${fuzzyCanonical}`);
 
   const text = titleText;
   if (!text) return Array.from(keys);
