@@ -44,6 +44,7 @@ import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log"
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
+import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1737,6 +1738,7 @@ function escalationStageBadge(status: EscalationStageStatus): { label: string; c
 function BuyInEscalationStages({
   escalation,
   expansion,
+  bedroomPlan,
 }: {
   escalation: BuyInEscalation;
   expansion?: {
@@ -1747,6 +1749,13 @@ function BuyInEscalationStages({
     totalCount: number;
     cityResults: CityExpansionCityResult[];
   } | null;
+  // The property's per-unit bedroom plan (e.g. [3,3]) so the tracker can label
+  // WHICH combo splits every phase searches. A 6BR combo is searched as BOTH
+  // 3BR+3BR AND 4BR+2BR; comboSplitLabels is the SAME source of truth the
+  // matcher uses (shared/combo-splits.ts), so the label can't drift from what's
+  // actually searched. Only 6BR+ has an alternative split (a combo is max 2
+  // units — never 2+2+2), so 5BR/4BR show a single combo.
+  bedroomPlan?: number[];
 }) {
   // Live results come from the running expansion job; once it resolves the row is
   // cleared, so fall back to the snapshot stored on the escalation state.
@@ -1756,6 +1765,15 @@ function BuyInEscalationStages({
   const expRunning = expansion?.status === "running" || expansion?.status === "pending" || escalation.nearbyStatus === "searching";
   const workerOffline = expansion?.status === "worker_offline" || escalation.nearbyStatus === "worker_offline";
   const foundEarly = escalation.foundAt === "resort" || escalation.foundAt === "home-city";
+
+  // The alternative combo splits EVERY phase below searches. We show this line
+  // ONLY when a genuine ALTERNATIVE split exists — i.e. a 6BR+ two-unit combo
+  // (3BR+3BR AND 4BR+2BR). hasAlternativeSplit is false for 5BR/4BR (one combo),
+  // for single-unit properties, AND for 3-unit configs like [3,2,2] (so the line
+  // can never misrepresent a non-2-unit property as a 2-unit combo). This is
+  // exactly the "new combo" the operator asked to SEE, which is 6BR-only.
+  const plan = bedroomPlan ?? [];
+  const comboLabels = hasAlternativeSplit(plan) ? comboSplitLabels(plan) : [];
 
   const tierStatus = (rows: CityExpansionCityResult[], tierNum: 1 | 2): EscalationStageStatus => {
     if (rows.some((r) => r.status === "pair")) return "found";
@@ -1830,6 +1848,13 @@ function BuyInEscalationStages({
         <span className="font-semibold text-slate-700">Buy-in search escalation</span>
         {workerOffline ? <span className="text-[10px] font-medium text-rose-600">sidecar offline</span> : null}
       </div>
+      {comboLabels.length > 0 ? (
+        <div className="-mt-1 text-[10px] text-slate-500">
+          Searching{" "}
+          <span className="font-medium text-slate-600">{comboLabels.join(" or ")}</span>
+          {" "}in each phase
+        </div>
+      ) : null}
       <StageRow n={1} title="Resort search" sub={escalation.resortLabel} status={escalation.resort} />
       <StageRow
         n={2}
@@ -8232,6 +8257,11 @@ export default function Bookings() {
                               }
                             }
                             expansion={expansionJobs[r._id] ?? null}
+                            bedroomPlan={
+                              selectedPropertyId
+                                ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.units.map((unit) => unit.bedrooms)
+                                : undefined
+                            }
                           />
                         )}
                         {(searchAudits.length > 0 || comboOptions.length > 0) && (

@@ -185,11 +185,16 @@ page. Three constraints make it actually reach the full count — don't
    - The diagnostic (`summarizeCityVrboMatching`) no longer counts a listing's own
      SINGLETON photo URL as "matched" (only photo keys SHARED by >=2 listings),
      so the `[city-vrbo-match-diag]` `matched`/`none` counts read true.
-   **Multiple bedroom SPLITS per combo (2026-06-08, `shared/city-vrbo-combo.ts`).**
+   **Multiple bedroom SPLITS per combo (2026-06-08, `shared/combo-splits.ts`).**
    A 2-unit combo can satisfy a booking's TOTAL bedrooms via more than one split:
    a 6BR booking is fillable as 3+3 OR 4+2, an 8BR as 4+4 / 5+3 / 6+2. A combo is
    NEVER more than two units, so alternative splits only exist for total >= 6BR.
-   `suggestCityVrboComboPair` is now a thin wrapper: `comboSplitsForPlan(plan)`
+   The split logic lives in the **zero-dep leaf `shared/combo-splits.ts`**
+   (`comboSplitsForPlan`, `comboSplitLabels`, `hasAlternativeSplit`) so the client
+   tracker UI can import it WITHOUT dragging `city-vrbo-combo.ts`'s top-level
+   computed state (`FUZZY_SAFE_CANONICALS`) into the browser bundle;
+   `city-vrbo-combo.ts` imports + re-exports `comboSplitsForPlan` for back-compat.
+   `suggestCityVrboComboPair` is a thin wrapper: `comboSplitsForPlan(plan)`
    enumerates every valid 2-unit split (each unit `>= MIN_COMBO_UNIT_BEDROOMS = 2`,
    the city-scan floor), **configured split FIRST so it wins ties**; the wrapper
    runs the (renamed, unchanged) internal `suggestPairForExactPlan` over the SAME
@@ -211,6 +216,22 @@ page. Three constraints make it actually reach the full count — don't
    cheapest-split-wins) and `tests/auto-fill-combo-assign.test.ts` ([4,2]→[3,3]).
    Don't revert `assignComboPicksToSlots` to per-slot `>=` matching — it leaves
    the small pick of a non-configured split unassigned.
+   **Tracker UI label (2026-06-08, `client/src/pages/bookings.tsx`
+   `BuyInEscalationStages`).** The 4-phase buy-in escalation tracker shows ONE
+   line under its header — "Searching 3BR + 3BR or 4BR + 2BR in each phase" —
+   computed via `comboSplitLabels(bedroomPlan)` from the SAME leaf the matcher
+   uses, so the label can't drift from what's actually searched (largest-first
+   normalization + configured-first order are guaranteed by the helper, never
+   hand-formatted). It is gated on `hasAlternativeSplit(plan)` so it renders ONLY
+   for a genuine 6BR+ TWO-unit combo: suppressed for 5BR/4BR (one combo), for
+   single-unit properties, AND for 3-unit configs like `[3,2,2]` (`hasAlternativeSplit`
+   is false there, so the line can never misrepresent a non-2-unit property as a
+   combo). Wording is "or … in each phase", NOT the operator's literal "then":
+   every phase tries ALL splits simultaneously and takes the cheapest pair — it is
+   NOT a sequential fallback, so "then" would misrepresent it. `bedroomPlan` is
+   passed from `PROPERTY_UNIT_CONFIGS[selectedPropertyId].units` (the same config
+   the server's city-vrbo-inventory endpoint derives its plan from → label matches
+   search by construction). Locked by `tests/combo-splits.test.ts`.
 7. **The SRP harvest captures each card's hero image; SRP-level image matching is
    inert by design, 2026-06-07.** `harvestVrboMapResultCards` /
    `extractVisibleVrboCards` now grab the card `<img>` (VRBO CDN hosts only) so
