@@ -20,16 +20,25 @@ let _lastRunResult: { processed: number; sent: number; drafted: number; flagged:
 
 // ── Auto-send (Part B) ─────────────────────────────────────────────────────
 // Whether clean drafts (status "drafted") get auto-sent. ORTHOGONAL to _enabled
-// (which controls whether drafts are GENERATED at all). Default OFF. Persisted in
-// app_settings so a Railway restart can't silently flip it on/off. A clean draft
-// is QUEUED with a sendAfter deadline (the review window) and a separate send
-// pass (runAutoSendQueue) sends it only if it's still uncontested at that point.
+// (which controls whether drafts are GENERATED at all). Persisted in app_settings
+// so a Railway restart can't silently flip it on/off. A clean draft is QUEUED with
+// a sendAfter deadline (the review window) and a separate send pass
+// (runAutoSendQueue) sends it only if it's still uncontested at that point.
+//
+// FULL-AUTO DEFAULT (2026-06-08, operator request "make it fully automated"):
+// auto-send now defaults ON and area answers are no longer held. The operator no
+// longer approves clean drafts — only the messages the model flags (uncertain /
+// urgent / out-of-scope) wait for a human, surfaced in the inbox attention banner.
+// The one-time SETTING_FULLAUTO_ROLLOUT flag below forces this on at boot
+// regardless of any stale persisted "false", while still letting a later operator
+// OFF toggle stick. See AGENTS.md "Auto-reply is FULLY AUTOMATED".
 const SETTING_AUTOSEND_ENABLED = "auto_send.master_enabled";
 const SETTING_REVIEW_WINDOW = "auto_send.review_window_seconds";
 const SETTING_HOLD_RECOMMENDATIONS = "auto_send.hold_recommendations";
-let _autoSendEnabled = false;
+const SETTING_FULLAUTO_ROLLOUT = "auto_send.full_auto_rollout_v1";
+let _autoSendEnabled = true;       // FULL-AUTO: clean drafts send themselves
 let _reviewWindowSeconds = 90;
-let _holdRecommendations = true; // week-1 training wheels: keep area-recommendation drafts in the human queue
+let _holdRecommendations = false;  // FULL-AUTO: area answers auto-send too (output filter is the backstop)
 let _autoSendConfigLoaded = false;
 let _isAutoSendRunning = false;
 let _lastAutoSendAt: Date | null = null;
@@ -56,6 +65,29 @@ export function setAutoReplyEnabled(enabled: boolean) {
 
 export async function loadAutoSendConfig(): Promise<void> {
   try {
+    // One-time full-automation rollout. If the flag is unset, this is the first
+    // boot after the "fully automated" change: FORCE auto-send ON + stop holding
+    // area answers, persist them (so an operator's later OFF toggle sticks), seed
+    // the review window if unset, and stamp the rollout flag so we only force once.
+    const rollout = await storage.getSetting(SETTING_FULLAUTO_ROLLOUT);
+    if (rollout == null) {
+      _autoSendEnabled = true;
+      _holdRecommendations = false;
+      await storage.setSetting(SETTING_AUTOSEND_ENABLED, "true");
+      await storage.setSetting(SETTING_HOLD_RECOMMENDATIONS, "false");
+      const existingWindow = await storage.getSetting(SETTING_REVIEW_WINDOW);
+      if (existingWindow == null) {
+        await storage.setSetting(SETTING_REVIEW_WINDOW, String(_reviewWindowSeconds));
+      } else {
+        const n = Number(existingWindow);
+        if (Number.isFinite(n) && n >= 0) _reviewWindowSeconds = Math.min(Math.round(n), 3600);
+      }
+      await storage.setSetting(SETTING_FULLAUTO_ROLLOUT, "1");
+      _autoSendConfigLoaded = true;
+      console.log(`[auto-reply] FULL-AUTO rollout applied: auto-send ON, holdRecommendations OFF, window=${_reviewWindowSeconds}s`);
+      return;
+    }
+
     const [enabled, window, hold] = await Promise.all([
       storage.getSetting(SETTING_AUTOSEND_ENABLED),
       storage.getSetting(SETTING_REVIEW_WINDOW),
@@ -70,8 +102,10 @@ export async function loadAutoSendConfig(): Promise<void> {
     _autoSendConfigLoaded = true;
     console.log(`[auto-reply] auto-send config: enabled=${_autoSendEnabled} window=${_reviewWindowSeconds}s holdRecommendations=${_holdRecommendations}`);
   } catch (err) {
-    // Fail safe: leave auto-send OFF if the settings table isn't ready yet.
-    console.warn(`[auto-reply] could not load auto-send config (staying OFF): ${(err as Error).message}`);
+    // Fail safe: if the settings table isn't ready yet, keep the in-memory
+    // full-auto defaults (ON). A storage outage also stalls draft generation /
+    // the send queue, so nothing actually sends until storage recovers.
+    console.warn(`[auto-reply] could not load auto-send config (using full-auto defaults): ${(err as Error).message}`);
   }
 }
 
@@ -167,6 +201,13 @@ const RISK_KEYWORDS = [
   "insurance", "claim", "liability", "waiver", "indemnify",
   // Weather / disaster (active conditions = host attention).
   "hurricane", "tsunami", "evacuation", "flood warning", "wildfire",
+  // Explicit urgency — a guest who says it's urgent gets a human, fast. These
+  // also drive the "URGENT" highlight in the inbox attention banner. Anything
+  // genuinely time-critical (lockout / no power / leak / medical) is already
+  // covered by the operational + health buckets above; these catch the cases
+  // where the guest signals urgency without naming the specific problem.
+  "urgent", "urgently", "asap", "a.s.a.p", "as soon as possible", "right away",
+  "right now", "immediately", "help me", "stuck", "stranded",
 ];
 
 function escapeRegExp(value: string): string {
@@ -746,7 +787,13 @@ async function runTool(name: string, input: any): Promise<unknown> {
 
 const SYSTEM_PROMPT = `You are John Carpenter, a Reservationist at Magical Island Rentals, a premium vacation rental management company in Hawaii.
 
-Your job: read a guest's incoming message and write a decisive, warm, concise reply in the voice of an expert host who knows this property inside and out and wants the guest to book with confidence. Replies you generate are saved as drafts for human approval before they are sent.
+Your job: read a guest's incoming message and write a decisive, warm, concise reply in the voice of an expert host who knows this property inside and out and wants the guest to book with confidence.
+
+AUTO-SEND MODE — READ THIS FIRST:
+Your clean, in-scope replies are SENT TO THE GUEST AUTOMATICALLY. No human reviews them first. A human ONLY sees the messages you flag. That changes the bar:
+- If you are NOT fully confident the reply is correct and complete from the facts you actually fetched, call flag_for_human (reason: the exact thing you are unsure about) instead of sending a guess. A message a human answers a few minutes later is far better than an auto-sent wrong answer. When you are even slightly unsure, flag — do not send.
+- If the guest's situation is urgent or time-critical — locked out, no power/water/AC, a leak or flood, anyone hurt or unwell, an emergency, or an arrival/access problem happening right now — call flag_for_human immediately. Do not try to resolve an emergency yourself.
+- Everything in the WHEN TO FLAG list below still flags. Flagging is the safe default; sending is only for messages you can answer correctly, completely, and within scope.
 
 RULES:
 
@@ -942,7 +989,7 @@ ${styleGuidance}
 
 Use tools to gather any needed context, then reply. Return only the guest-facing reply text.
 ${params.forceDraftForReview
-    ? "This is a manual Redo AI Draft request for a human approval queue. If the message is risky or ambiguous, keep the reply conservative and avoid commitments. You may call flag_for_human to record the review reason, but still write the safest useful guest-facing draft after that tool call unless no guest-facing response is possible."
+    ? "If the message is risky, ambiguous, urgent, out of scope, or you are not fully confident the answer is correct and complete, call flag_for_human with the reason — the message will then WAIT for a human and will NOT be auto-sent. After flagging, still write the safest useful conservative guest-facing draft (no refunds, discounts, exceptions, policy changes, access codes, or facts not in the fetched context) so the human has a starting point, unless no guest-facing response is possible."
     : "If unsafe or ambiguous, call flag_for_human and stop."}`;
 
   const messages: any[] = [{ role: "user", content: userPrompt }];
@@ -1151,6 +1198,11 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
             listingId: listingId ?? undefined, reservationId: reservationId ?? undefined,
             channel: channel ?? undefined,
             isInitialContact,
+            // FULL-AUTO: even on the clean path, force a conservative draft so a
+            // model self-flag (uncertain / out-of-scope) still leaves the operator
+            // a one-click reviewable draft in the inbox attention banner. A flag
+            // still sets status "flagged" → held, never auto-sent (see below).
+            forceDraftForReview: true,
           });
           replyDraft = result.draft;
           toolsUsedJson = JSON.stringify(result.toolsUsed);

@@ -1633,6 +1633,51 @@ established it so you can read the rationale in the commit message.
     also add an output pattern in `OUTPUT_RISK_PATTERNS`. See PR
     that added this entry.
 
+    **Auto-reply is FULLY AUTOMATED — auto-send default ON + inbox
+    attention banner (Load-Bearing, 2026-06-08; supersedes the
+    Decision-Log 2026-06-07 "Part B default OFF" rollout).** Operator
+    asked to make the guest responder fully automatic: clean, in-scope
+    replies SEND THEMSELVES; the human only sees the messages the model
+    held. Don't revert these without operator ask:
+    - `loadAutoSendConfig` runs a ONE-TIME rollout keyed on
+      `auto_send.full_auto_rollout_v1`: on the first boot after this
+      change it FORCES `auto_send.master_enabled=true` and
+      `auto_send.hold_recommendations=false` and persists them, so the
+      deploy turns auto-send on regardless of any stale persisted
+      "false" — while a LATER operator OFF toggle still sticks (the flag
+      is already stamped, so we never re-force). In-memory defaults also
+      flipped (`_autoSendEnabled=true`, `_holdRecommendations=false`).
+    - The 3-layer safety stack above is UNCHANGED and is what makes this
+      safe: a flagged / errored / urgent / unmapped-listing / area-
+      uncertain message is HELD, never queued. The clean path now drafts
+      with `forceDraftForReview:true` so a model self-flag still leaves a
+      conservative HELD draft for one-click review (a flag still sets
+      status "flagged" → never auto-sent).
+    - CONFIDENCE RAIL: the SYSTEM_PROMPT "AUTO-SEND MODE" block tells the
+      model its clean replies send with no human review → "if not FULLY
+      confident, flag" and "urgent/time-critical, flag immediately".
+      URGENCY RAIL: explicit urgency terms added to `RISK_KEYWORDS`
+      (urgent / asap / locked out / stranded / …) so those always hold.
+    - UI: the "AI Draft Approval" TAB is REMOVED. Its review surface
+      moved to a TOP ATTENTION BANNER in the Guest Inbox
+      (`client/src/pages/inbox.tsx`, above the Tabs, gated `isAdmin`): a
+      slim "AI auto-reply: On" status row with the auto-send toggle +
+      review-window + Check-now, and — when present — a red/amber
+      "N messages need your review" list of the HELD items (status
+      drafted/flagged/error), urgent-first, each with the guest message,
+      hold reason, editable draft, and Send / Save / Save&learn / Redo /
+      Open-thread / Decline. "queued" (clean, auto-sending) rows are NOT
+      in the banner — only a count. Urgency highlight is CLIENT-SIDE
+      display only (`AUTO_REPLY_URGENT_RE`); the server hold is the
+      authority (urgent ⊂ `RISK_KEYWORDS`). `<Tabs>` is now controlled so
+      the banner's "Open thread" jumps to Messages. The header badge (#48)
+      still counts the same held statuses — it complements the banner.
+    - NOTE: default-ON means the EXISTING open-conversation backlog gets
+      auto-replies on the first scheduler tick after deploy (only clean/
+      in-scope ones; everything risky holds). Intended (fast catch-up),
+      but is why the operator should glance at the banner right after the
+      deploy. A single OFF switch (the banner toggle) reverts to manual.
+
 48. **The Inbox header badge counts pending AI-draft approvals + missed
     calls — NOT unread messages — and stale drafts are auto-swept.**
     `AppHeader.tsx` `inboxAlertCount = pendingDraftCount + missedCallCount`;
@@ -1848,6 +1893,7 @@ Examples:
 2026-06-07 · Jamie said "build part B now" (the aggressive auto-send engine) · ACCEPTED · Ships with the master toggle DEFAULT OFF (persisted), so deploying changes nothing until the operator flips it on. New `app_settings` kv table (`getSetting`/`setSetting`) holds `auto_send.master_enabled` (false), `auto_send.review_window_seconds` (90), `auto_send.hold_recommendations` (true). New `auto_reply_log` columns `autoSent` + `sendAfter`, new `"queued"` status. When the toggle is ON, `runAutoReply` sets a clean `drafted` result to `queued` with a `sendAfter` deadline; a SEPARATE pass `runAutoSendQueue()` (own 20s interval, started in `startAutoReplyScheduler`) sends due queued rows. HARD EXCLUSIONS that never auto-send: anything `flagged`/`error` (the full 3-layer stack still gates everything), unmapped listing (`!listingId`), empty draft, and — while `hold_recommendations` is on — drafts whose guest message looks like an area/recommendation ask (`looksLikeAreaQuestion`). Before each send the pass RE-VALIDATES: re-checks the toggle (kill switch), re-fetches the row (operator edits/declines win — editing a `queued` draft reverts it to `drafted` via `saveDraftedReply`), re-runs `hasManualHostReplyAfterTrigger` (a human reply → `dismissed`), and re-runs `classifyOutput`. Toggling OFF reverts all `queued` rows back to `drafted`. Endpoints: `POST /api/inbox/auto-reply/auto-send/{toggle,config,run}`; `getAutoReplyStatus()` now carries the auto-send config. UI: amber "Auto-send clean drafts" switch + review-window select + banner in the AI Draft Approval card; per-draft "Auto-sending in Xs" countdown badge + a Hold button + an "Auto-sent" badge. **Do NOT enable auto-send against the live inbox without a dry-run to a test conversation first.** Recommended rollout (from the approved plan): soak Part A in the approval queue ~1-2 weeks, then enable with hold_recommendations=true + a non-zero window, then relax.
 2026-06-07 · Jamie asked the buy-in tool to add a fourth fallback rung: after resort search → city-wide VRBO finds no combo, auto-research the cities within a 20-min drive and city-scan each; if still none, expand to 45 min, scanning all cities not already searched · ACCEPTED, background-job + polling, combo-only (Jamie's choices via AskUserQuestion) · New `server/city-vrbo-expansion.ts` (in-memory job store + worker + Photon `/reverse` drive-time town discovery anchored on `BUY_IN_MARKET_LOCATIONS` coords) + 3 endpoints under `POST/GET /api/operations/city-vrbo-inventory/expand[/:jobId[/cancel]]`. `runCityVrboInventoryScan` was generalized (extracted `runCityScanCore`; added exported `runCityVrboInventoryScanForCity` with a DISJOINT `term:…|city-vrbo-term-v1` cache namespace). Client `autoFillMutation` starts the job when the home-city scan ran worker-online with no pair, hands it to a row poller (`CityExpansionJobPoller`) that attaches the found combo (no-clobber) or re-invokes auto-fill `skipExpansion:true` for the per-slot net; bulk queue polls inline (`awaitExpansionInline`). Built via a 4-agent design workflow + a 23-agent adversarial review (10 findings confirmed + fixed: healthy-worker wallet-timeout vs offline reconciliation, provider-cooldown short-circuit, attach-button mid-attach race, found-but-not-attachable safety-net fall-through, poller 401/deadline terminal, unmount-cancel, skipExpansion home-scan skip). See the "Drive-time nearby-city combo expansion" Load-Bearing subsection above for the 6 load-bearing constraints. Verified: `npm run build` clean, `tests/city-vrbo-expansion.smoke.ts` 8/8 (combo-only gate, single-flight, offline fast-bail), Photon discovery returns a sane Kauai ladder for Poipu Kai. Live VRBO leg verified on Railway post-deploy.
 2026-06-08 · Jamie reported that running "Auto-fill cheapest" from iPhone Safari, then leaving the app, made the search "basically pause" and produce nothing on return · ACCEPTED, PR #588 (`claude/mobile-buy-in-search-resilience`) · Root cause is a CLIENT mobile-resilience gap, NOT a server cancellation (the `booking_search`+`vrbo_search` "server cancelled request" churn in the sidecar log is the scheduled availability pass hitting its 90s per-op wallet budget under single-Chrome-lane contention — confirmed via a 4-agent trace; find-buy-in disables booking and continues detached on disconnect). iOS Safari suspends a backgrounded tab and tears down in-flight fetches (~30s) while freezing JS timers; the find-buy-in scan finishes server-side but `FIND_BUY_IN_TTL_MS=0` deletes the result, so the re-fire on return restarts from zero. **Two LOAD-BEARING decisions in this fix that look like bugs cold — don't "fix" them back:** (1) `server/routes.ts` find-buy-in now WRITES to `findBuyInCache` even though `FIND_BUY_IN_TTL_MS=0` — these are RECOVERY-only entries (trustworthy+priced+complete, 120s `FIND_BUY_IN_RECOVERY_TTL_MS`) read ONLY by a `?recover=1` re-fire (`allowRecoveryCache`), never by a normal interactive search, so the "buy-in scans always run live" invariant holds; the Auto-fill client (`getFindBuyInForBedrooms`) always sends `recover=1` so its retry/resume is idempotent within the window. (2) `CityExpansionJobPoller` (`client/src/pages/bookings.tsx`) no longer cancels the server job on a HIDDEN unmount — only on a DELIBERATE (tab-visible) unmount — because a backgrounded/discarded tab killing a live multi-minute sidecar job is exactly the reported bug; a hidden unmount leaves the job to finish under its own 30-min server budget. Also: the poller cap is now cumulative FOREGROUND/active polling time (suspended gaps not billed), not wall-clock-from-mount (which tripped instantly on resume and declared live jobs "lost"); added a foreground-resume tick; added an auto-fill visibility-resume effect that re-fires a transient-interrupted run with empty slots (guarded against re-running abandoned/already-filled searches). Known follow-up NOT in this PR: full iOS page-discard recovery for in-flight combos (persist expansion `jobId` to localStorage to re-attach after a hard reload) — only the suspend-and-return path is fixed. Verified: `npm run build` clean (client+server), `npm run check` adds zero new TS errors in both files (baseline-diffed), Railway deploy `38cdcc5` booted clean + healthy (base 302→/login, gated API 401).
+2026-06-08 · Jamie asked to make the guest-inbox responder FULLY AUTOMATED ("the automatic reply/responder… this will now be fully automated"), with a top-of-inbox notice that pops up the messages he should check (not-100%-confident or super-urgent), and to REMOVE the "AI Draft Approval" tab · ACCEPTED · This SUPERSEDES the 2026-06-07 "Part B default OFF" decision above — auto-send is now default ON. The Part B engine (queue → review window → `runAutoSendQueue` re-validation) was already built and correct; this change just (a) flips the default on via a one-time persisted rollout flag (`auto_send.full_auto_rollout_v1` forces master_enabled=true + hold_recommendations=false at first boot, regardless of stale state, while a later operator OFF still sticks), (b) sharpens the HOLD rails — a SYSTEM_PROMPT "AUTO-SEND MODE" confidence gate ("not fully confident → flag", "urgent → flag immediately"), explicit urgency keywords in `RISK_KEYWORDS`, and `forceDraftForReview:true` on the clean path so held items still carry a conservative reviewable draft — and (c) moves the review UI from the removed tab into a top ATTENTION BANNER (`client/src/pages/inbox.tsx`, above the now-controlled `<Tabs>`, isAdmin-gated): a slim status row with the auto-send toggle/window/Check-now + a red/amber "N messages need your review" list of HELD items (drafted/flagged/error, urgent-first via the client-side display-only `AUTO_REPLY_URGENT_RE`), each with Send/Save/Save&learn/Redo/Open-thread/Decline; clean "queued" rows auto-send silently and show only as a count. No schema change (urgency is display-only; the server hold via RISK_KEYWORDS is the authority). See the new "Auto-reply is FULLY AUTOMATED" Load-Bearing note under #24. Verified: `npm run build` clean (client+server), `npm run check` adds zero new TS errors in the two touched files; reviewed via a 3-dimension adversarial workflow (auto-send safety / client banner / cross-file integration). **The single OFF switch is the banner's Auto-send toggle** — it reverts to held-for-manual without redeploy.
 ```
 
 (Populate on first dispute.)
