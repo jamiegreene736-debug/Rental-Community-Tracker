@@ -12806,6 +12806,9 @@ Requirements:
         groundFloorBedrooms: Array.isArray(req.body?.groundFloorBedrooms) ? req.body.groundFloorBedrooms : [],
         expectedRevenue: Number(req.body?.expectedRevenue) || 0,
         silent: req.body?.silent === true,
+        // Bulk fresh re-run: supersede any in-flight job for this reservation
+        // (the client detached its units, so a reused job would be stale).
+        forceRestart: req.body?.forceRestart === true,
       });
       return res.status(202).json(started);
     } catch (e: any) {

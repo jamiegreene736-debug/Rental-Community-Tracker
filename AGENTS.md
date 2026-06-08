@@ -452,6 +452,34 @@ Load-bearing choices — don't "simplify" them away:
    (the `city-vrbo-inventory` endpoint requires a config); drafts (negative
    propertyId) and Guesty-derived targets get Stage 1 only — exactly as the old
    client gated `staticUnitConfig`.
+8. **The BULK queue OVERRIDES attached units with a fresh search (2026-06-08).**
+   `startBulkBuyInQueue` (`bookings.tsx`), before running a selected reservation,
+   DETACHES every already-attached buy-in (`POST /api/bookings/detach-buy-in/:id`
+   for each `slot.buyIn.id`), then calls the SAME `autoFillMutation` with a
+   `freshReservation` whose every slot is `buyIn:null` — so the queue re-searches
+   and re-fills ALL units from scratch, not just the open ones. This is the
+   EXACT same search as the single "Auto-fill cheapest" button (same mutation,
+   same `/api/operations/auto-fill` job, same ladder); the only deltas are
+   `awaitExpansionInline` (bulk polls the job inline) + `silent` + `forceRestart`.
+   The detach is awaited BEFORE the auto-fill POST, so when the job reads
+   `getBuyInsByReservation` (its `existingAttachedCost` baseline) the DB is
+   clean → 0. A detach failure THROWS → the loop's catch marks the item failed
+   (no half-detached partial search), and a `finally` calls
+   `stopTrackingAutoFill` so a failed item never leaks `autoFillRunRef` (which
+   would block the row's later runs). **`forceRestart` (load-bearing):** the bulk
+   POST sets `forceRestart:true`; `startAutoFillJob`'s single-flight guard then
+   SUPERSEDES (cancels + finalizes) any in-flight job for that reservation instead
+   of reusing it. Without this, an in-flight single-button job J (fire-and-forget,
+   non-terminal for tens of seconds) would be REUSED by the bulk POST — and J
+   carries a STALE pre-detach `existingAttachedCost` baseline AND its old (smaller)
+   slot set, so the detached slot would never refill and the gate would mis-reject.
+   The single "Auto-fill cheapest" button does NOT pass `forceRestart` (it still
+   reuses an in-flight job — interactive behavior unchanged). **Eligibility:** "Select open"
+   (`eligibleGlobalReservations`) still only auto-picks OPEN-slot bookings (no
+   footgun re-searching completed ones), but the per-row checkbox + the
+   actually-run set (`selectedBulkEligibleReservations`) include any buy-in-capable
+   reservation, so a fully-attached one can be MANUALLY selected and re-searched.
+   Don't make the single button auto-detach — that override is bulk-only by ask.
 
 Endpoints: `POST /api/operations/auto-fill` (start, single-flight, returns
 `jobId`), `GET /api/operations/auto-fill/:jobId` (poll), `GET
