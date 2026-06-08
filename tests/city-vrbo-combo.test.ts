@@ -3,6 +3,7 @@
 // real complex) are the guard against over-clustering — the failure mode that
 // would send a guest to two units in different communities.
 import {
+  comboSplitsForPlan,
   sharedResortPhraseKeys,
   suggestCityVrboComboPair,
   summarizeCityVrboMatching,
@@ -153,6 +154,48 @@ const singletonPool = [
 ];
 check("e2e: singleton complexName → NO pair (needs >=2 sharing the community)",
   suggestCityVrboComboPair(singletonPool, [3, 2], 7) === null);
+
+// ── 4e) MULTIPLE BEDROOM SPLITS: a 2-unit combo can satisfy the TOTAL via more
+// than one split (6BR = 3+3 OR 4+2). comboSplitsForPlan enumerates them, configured
+// first; suggestCityVrboComboPair tries every split and returns the cheapest. ──
+const splitKey = (splits: number[][]) => splits.map((s) => s.slice().sort((a, b) => b - a).join("+")).join(",");
+check("split: [3,3] → 3+3 (configured) then 4+2", splitKey(comboSplitsForPlan([3, 3])) === "3+3,4+2", comboSplitsForPlan([3, 3]));
+check("split: [4,2] → 4+2 (configured) then 3+3", splitKey(comboSplitsForPlan([4, 2])) === "4+2,3+3", comboSplitsForPlan([4, 2]));
+check("split: [4,4] (8BR) → 4+4, 6+2, 5+3", splitKey(comboSplitsForPlan([4, 4])) === "4+4,6+2,5+3", comboSplitsForPlan([4, 4]));
+check("split: [3,2] (5BR) has no alt (4+1 has a 1BR < min)", splitKey(comboSplitsForPlan([3, 2])) === "3+2", comboSplitsForPlan([3, 2]));
+check("split: [2,2] (4BR) has no alt", splitKey(comboSplitsForPlan([2, 2])) === "2+2", comboSplitsForPlan([2, 2]));
+check("split: non-2-unit plan returned unchanged ([3] / [3,3,2])",
+  splitKey(comboSplitsForPlan([3])) === "3" && splitKey(comboSplitsForPlan([3, 3, 2])) === "3+3+2",
+  [comboSplitsForPlan([3]), comboSplitsForPlan([3, 3, 2])]);
+
+// 4e-1) END-TO-END: a community has a 4BR + 2BR and NO two 3BR. A [3,3] booking
+// must still pair via the 4+2 split (same total 6BR, same community, walkable).
+const splitPool = [
+  L("https://vrbo.com/sp1", "Poipu Kai Resort 4BR Oceanfront", 4, 3800),
+  L("https://vrbo.com/sp2", "Poipu Kai Resort 2BR Garden", 2, 2100),
+  L("https://vrbo.com/sp3", "Kiahuna Plantation 3BR", 3, 9999), // distractor, wrong community + dear
+];
+const splitPair = suggestCityVrboComboPair(splitPool, [3, 3], 7);
+check("e2e: [3,3] booking fills via a same-community 4BR+2BR split",
+  !!splitPair && splitPair.picks.length === 2 && splitPair.resortPhrase === "poipu kai", splitPair);
+check("e2e: the 4+2 split picks the two Poipu Kai units (4BR + 2BR), not the Kiahuna distractor",
+  !!splitPair && new Set(splitPair.picks.map((p) => p.bedrooms)).has(4) && new Set(splitPair.picks.map((p) => p.bedrooms)).has(2)
+    && splitPair.picks.every((p) => p.url !== "https://vrbo.com/sp3"), splitPair?.picks?.map((p) => `${p.bedrooms}BR ${p.url}`));
+
+// 4e-2) CHEAPEST split wins: when BOTH 3+3 and 4+2 can form in one community, the
+// cheapest pair ACROSS splits is chosen. Cheapest 4+2 = 4BR(2800)+2BR(1900)=4700;
+// cheapest 3+3 = 4BR(2800)+3BR(3000)=5800 (the 4BR satisfies a 3-slot). 4+2 wins.
+const bothSplitsPool = [
+  L("https://vrbo.com/bs1", "Poipu Kai Resort 3BR A", 3, 3000),
+  L("https://vrbo.com/bs2", "Poipu Kai Resort 3BR B", 3, 3000),
+  L("https://vrbo.com/bs3", "Poipu Kai Resort 4BR", 4, 2800),
+  L("https://vrbo.com/bs4", "Poipu Kai Resort 2BR", 2, 1900),
+];
+const cheapestSplit = suggestCityVrboComboPair(bothSplitsPool, [3, 3], 7);
+check("e2e: cheapest split chosen across 3+3 vs 4+2 (4+2 @ 4700 wins)",
+  !!cheapestSplit && cheapestSplit.totalCost === 4700
+    && new Set(cheapestSplit.picks.map((p) => p.bedrooms)).has(4) && new Set(cheapestSplit.picks.map((p) => p.bedrooms)).has(2),
+  cheapestSplit);
 
 // ── 5) match diagnostics (read-only instrumentation) ─────────────────────────
 const diagPool = [
