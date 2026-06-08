@@ -1402,14 +1402,27 @@ function CityExpansionJobPoller({
     resolvedRef.current = false;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    // Overall cap > the server's worst case (30-min budget + one ~8-min scan), so
-    // a job whose final scan overruns isn't stranded, and a persistent error
-    // (e.g. 401 after session expiry) can't loop the row "Searching…" forever.
-    const startedAt = Date.now();
-    const overallCapMs = 45 * 60_000;
+    // Cap on cumulative FOREGROUND/active polling time — deliberately NOT
+    // wall-clock-from-mount. Mobile Safari suspends background tabs, so a
+    // wall-clock cap would trip purely because the operator stepped away,
+    // abandoning a job the server is still running (the "came back and it
+    // paused" bug). We bill only the gaps between ticks while the tab was
+    // visible, and never bill a suspended gap. Still > the server's worst case
+    // (30-min budget + one ~8-min scan) so a real overrun isn't stranded and a
+    // persistent error (e.g. 401 after session expiry) can't loop forever.
+    const overallActiveCapMs = 45 * 60_000;
+    // A gap larger than this between ticks means the tab was suspended
+    // (backgrounded) — don't count it against the active budget.
+    const SUSPEND_GAP_MS = 30_000;
+    let activeElapsedMs = 0;
+    let lastTickAt = Date.now();
     const tick = async () => {
       if (cancelled || resolvedRef.current) return;
-      if (Date.now() - startedAt > overallCapMs) {
+      const now = Date.now();
+      const sinceLast = now - lastTickAt;
+      lastTickAt = now;
+      if (sinceLast > 0 && sinceLast <= SUSPEND_GAP_MS) activeElapsedMs += sinceLast;
+      if (activeElapsedMs > overallActiveCapMs) {
         resolvedRef.current = true;
         if (!cancelled) onResolved(null);
         return;
@@ -1434,18 +1447,36 @@ function CityExpansionJobPoller({
           if (!cancelled) onResolved(null);
           return;
         }
-        // other transient errors: keep polling (bounded by overallCapMs)
+        // other transient errors: keep polling (bounded by overallActiveCapMs)
       }
       if (!cancelled && !resolvedRef.current) timer = setTimeout(tick, 3000);
     };
+    // On return-to-foreground, poll immediately so the row updates right away
+    // instead of waiting out a (possibly frozen) setTimeout cycle. Re-anchor
+    // lastTickAt first so the suspended gap isn't billed to the active budget.
+    const resumeTick = () => {
+      if (cancelled || resolvedRef.current) return;
+      if (document.visibilityState !== "visible") return;
+      if (timer) { clearTimeout(timer); timer = null; }
+      lastTickAt = Date.now();
+      void tick();
+    };
+    window.addEventListener("focus", resumeTick);
+    document.addEventListener("visibilitychange", resumeTick);
     void tick();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
-      // If the row/poller unmounts before the job resolved (operator navigated
-      // away), best-effort cancel so the server stops driving the sidecar instead
-      // of running the full budget with no consumer.
-      if (!resolvedRef.current) {
+      window.removeEventListener("focus", resumeTick);
+      document.removeEventListener("visibilitychange", resumeTick);
+      // Only cancel the server job on a DELIBERATE unmount — the tab is visible,
+      // so the operator navigated away / closed the row. When the tab is hidden
+      // the unmount is almost certainly iOS suspending or discarding the page;
+      // cancelling there would throw away live sidecar work the operator expects
+      // to keep running (the reported bug). A hidden unmount leaves the job to
+      // finish under its own server-side budget; the row re-attaches on return.
+      const tabVisible = typeof document === "undefined" || document.visibilityState === "visible";
+      if (!resolvedRef.current && tabVisible) {
         apiRequest("POST", `/api/operations/city-vrbo-inventory/expand/${jobId}/cancel`).catch(() => {});
       }
     };
@@ -5390,6 +5421,13 @@ export default function Bookings() {
   const [autoFillConfirmationDiagnostics, setAutoFillConfirmationDiagnostics] = useState<FindBuyInDiagnostics | null>(null);
   const [autoFillConfirmationDiagnosticsOpen, setAutoFillConfirmationDiagnosticsOpen] = useState(false);
   const autoFillRunRef = useRef<Set<string>>(new Set());
+  // Auto-fill runs that were interrupted by a transient/connection failure
+  // (the classic case: iOS Safari backgrounded the tab and tore down the
+  // in-flight fetch). Keyed by reservation id; the visibility-resume effect
+  // below re-fires these when the operator returns to the foreground so the
+  // search picks up where it left off (server recovery cache) instead of the
+  // operator finding it silently stalled. Cleared on clean success.
+  const autoFillResumeRef = useRef<Map<string, { reservation: GuestyReservation; propertyId?: number | null; listingId?: string | null }>>(new Map());
 
   // ── Nearby-city combo expansion (background job) per-reservation state ──────
   type ExpansionJobState = {
@@ -5603,6 +5641,12 @@ export default function Bookings() {
         if (requireGroundFloor) {
           params.set("groundFloor", "required");
         }
+        // Mobile resilience: Auto-fill is idempotent within the server's recovery
+        // window. If Safari backgrounds the tab and tears down this fetch, the
+        // retry ladder (or the visibility-resume re-fire) issues the SAME URL and
+        // the server serves the already-completed scan from its recovery cache
+        // (?recover=1) instead of restarting a full sidecar scan from zero.
+        params.set("recover", "1");
         const url = `/api/operations/find-buy-in?${params.toString()}`;
         const promise = fetchFindBuyInWithRetry(url);
         findBuyInCache.set(key, promise);
@@ -6775,6 +6819,9 @@ export default function Bookings() {
     },
     onSuccess: (payload, variables) => {
       const { reservation, results, comboOptions, searchAudits } = payload;
+      // Completed cleanly (or handed off to the expansion poller) — drop any
+      // pending mobile-resume entry so the visibility effect won't re-fire it.
+      autoFillResumeRef.current.delete(reservation._id);
       const expansionJob = "expansionJob" in payload ? payload.expansionJob : null;
       // Interactive nearby-city expansion handoff: the mutation returned early
       // with a background job handle. Register it so the row mounts the poller +
@@ -6968,15 +7015,75 @@ export default function Bookings() {
       // means several sources are simultaneously slow.
       const is502 = /\b502\b/.test(raw) && /Application failed to respond/.test(raw);
       const isTransient = isTransientAutoFillErrorMessage(raw);
+      // Transient/interrupted failures are the iOS-background signature: the
+      // tab was suspended and the in-flight fetch was torn down ("Load failed").
+      // If the reservation still has empty slots, remember it so the
+      // visibility-resume effect re-fires on return (server recovery cache makes
+      // it near-instant). When the tab is hidden right now, the operator can't
+      // see a toast anyway and we'll auto-resume — so skip the alarming toast.
+      const reservation = variables?.reservation;
+      const stillHasEmptySlots = !!reservation?.slots?.some((s) => !s.buyIn);
+      const willAutoResume = (is502 || isTransient) && !!reservation?._id && stillHasEmptySlots;
+      if (willAutoResume && reservation) {
+        autoFillResumeRef.current.set(reservation._id, {
+          reservation,
+          propertyId: variables?.propertyId ?? null,
+          listingId: variables?.listingId ?? null,
+        });
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+          return; // hidden tab — defer to the visibility-resume effect, no toast
+        }
+      }
       toast({
         title: is502 || isTransient ? "Search interrupted — retry in a moment" : "Auto-fill failed",
         description: is502 || isTransient
-          ? "The buy-in search was interrupted while the app or sidecar was reconnecting. Click Auto-fill cheapest again — the scan cache is likely warm now."
+          ? "The buy-in search was interrupted while the app or sidecar was reconnecting. It will resume automatically when you return to this tab — or click Auto-fill cheapest again (the scan cache is warm, so it's fast)."
           : raw,
         variant: "destructive",
       });
     },
   });
+  // Stable handle to the auto-fill mutation so the visibility-resume effect
+  // (registered once) can call the latest mutate without re-subscribing.
+  const autoFillMutationRef = useRef(autoFillMutation);
+  autoFillMutationRef.current = autoFillMutation;
+  // Mobile resilience: when the operator returns to this tab, re-fire any
+  // auto-fill run that was interrupted while backgrounded (iOS suspended the
+  // tab and dropped the in-flight fetch). The server keeps the completed scan
+  // in its recovery cache (?recover=1), so the re-fire is near-instant instead
+  // of restarting a full sidecar scan. Heavily guarded so it can never re-run a
+  // search the operator abandoned: only runs flagged in autoFillResumeRef (a
+  // transient error with empty slots remaining) are eligible, each entry is
+  // consumed exactly once, rows already (re)running are skipped, and a slot
+  // filled in the meantime cancels the resume.
+  useEffect(() => {
+    const resumeInterrupted = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      if (autoFillResumeRef.current.size === 0) return;
+      const pending = Array.from(autoFillResumeRef.current.entries());
+      for (const [reservationId, ctx] of pending) {
+        autoFillResumeRef.current.delete(reservationId);
+        if (autoFillRunRef.current.has(reservationId)) continue;
+        const fresh = reservationsRef.current.find((x) => x._id === reservationId) ?? ctx.reservation;
+        const stillHasEmptySlots = fresh.slots?.some((s) => !s.buyIn);
+        if (!stillHasEmptySlots) continue;
+        autoFillRunRef.current.add(reservationId);
+        setAutoFillStartedByReservation((prev) => ({ ...prev, [reservationId]: Date.now() }));
+        autoFillMutationRef.current.mutate({
+          reservation: fresh,
+          propertyId: ctx.propertyId,
+          listingId: ctx.listingId,
+        });
+      }
+    };
+    window.addEventListener("focus", resumeInterrupted);
+    document.addEventListener("visibilitychange", resumeInterrupted);
+    return () => {
+      window.removeEventListener("focus", resumeInterrupted);
+      document.removeEventListener("visibilitychange", resumeInterrupted);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Live progress tick from CityExpansionJobPoller (interactive path).
   const updateExpansionJobState = (reservationId: string, s: CityExpansionJobStatus) => {
