@@ -5042,6 +5042,39 @@ export default function Bookings() {
   const [bulkBuyInQueueRunning, setBulkBuyInQueueRunning] = useState(false);
   const bulkBuyInCancelRef = useRef(false);
 
+  // Keep the screen (and thus the Mac) awake while a bulk buy-in queue runs. The
+  // queue LOOP is client-driven and the local sidecar must keep polling, so if the
+  // Mac idle-sleeps the queue stalls. The Screen Wake Lock holds while this tab is
+  // visible; it auto-releases when the tab is hidden, so we re-acquire on return.
+  // The sidecar daemon's caffeinate is the deeper guard (works tab-hidden too) —
+  // this is the instant, in-browser layer. Best-effort: unsupported/denied is fine.
+  useEffect(() => {
+    if (!bulkBuyInQueueRunning) return;
+    let sentinel: any = null;
+    let cancelled = false;
+    const acquire = async () => {
+      try {
+        const wl = (navigator as any)?.wakeLock;
+        if (!wl?.request) return;
+        const s = await wl.request("screen");
+        // If the effect cleaned up while we were awaiting, release immediately.
+        if (cancelled) { try { s?.release?.(); } catch { /* ignore */ } return; }
+        sentinel = s;
+      } catch { /* not supported / denied — daemon caffeinate still guards it */ }
+    };
+    void acquire();
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && bulkBuyInQueueRunning && !sentinel) void acquire();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      try { sentinel?.release?.(); } catch { /* ignore */ }
+      sentinel = null;
+    };
+  }, [bulkBuyInQueueRunning]);
+
   // Sort controls: click a column header to sort by that field; click again
   // to toggle asc/desc. Default = check-in ascending (soonest first).
   type SortKey = "checkIn" | "guest" | "property" | "payout" | "buyIn" | "profit" | "status";

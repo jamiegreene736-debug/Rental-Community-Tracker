@@ -488,6 +488,22 @@ by the client — the poller intentionally NEVER cancels on unmount). The client
 old `CityExpansionJobPoller` / `expansionJobs` flow is now dead (the expansion
 runs inside the server job) but left in place; don't wire it back to the button.
 
+9. **Keep-the-Mac-awake while the sidecar has work (2026-06-08).** A bulk queue (or
+   any sidecar scan) stalls if the Mac idle-sleeps — macOS suspends the LaunchAgent,
+   the workers stop polling, and the server flips `getHeartbeat().isOnline` false
+   after 90s ("sidecar offline") even though the Mac is on the network. The
+   supervisor (`daemon/vrbo-sidecar/supervisor.mjs`) now polls the auth-excluded
+   `GET /api/admin/vrbo-sidecar/status` every 30s and holds ONE `caffeinate -i -m`
+   power assertion while `pending + inProgress > 0`, releasing it after a 5-min
+   grace window of no work. `-i` prevents IDLE SYSTEM sleep only (the display may
+   still sleep; the operator can still sleep manually / close the lid), so an idle
+   Mac sleeps normally. macOS-only, opt out with `SIDECAR_KEEP_MAC_AWAKE=0`
+   (grace via `SIDECAR_KEEP_MAC_AWAKE_GRACE_MS`). This is a DAEMON change — it ships
+   via `cp daemon/vrbo-sidecar/supervisor.mjs ~/.vrbo-sidecar-daemon/` + `launchctl
+   kickstart -k gui/$(id -u)/com.vrbosidecar.worker`, NOT a Railway deploy. The
+   client also takes a `navigator.wakeLock('screen')` while `bulkBuyInQueueRunning`
+   (instant, tab-visible-only layer; the caffeinate is the deeper guard).
+
 ### Auto-fill is PROFITABILITY-GATED (Load-Bearing, 2026-06-08)
 
 Auto-fill no longer attaches the cheapest combo regardless of margin. A combo is
