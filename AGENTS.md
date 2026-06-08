@@ -185,6 +185,32 @@ page. Three constraints make it actually reach the full count — don't
    - The diagnostic (`summarizeCityVrboMatching`) no longer counts a listing's own
      SINGLETON photo URL as "matched" (only photo keys SHARED by >=2 listings),
      so the `[city-vrbo-match-diag]` `matched`/`none` counts read true.
+   **Multiple bedroom SPLITS per combo (2026-06-08, `shared/city-vrbo-combo.ts`).**
+   A 2-unit combo can satisfy a booking's TOTAL bedrooms via more than one split:
+   a 6BR booking is fillable as 3+3 OR 4+2, an 8BR as 4+4 / 5+3 / 6+2. A combo is
+   NEVER more than two units, so alternative splits only exist for total >= 6BR.
+   `suggestCityVrboComboPair` is now a thin wrapper: `comboSplitsForPlan(plan)`
+   enumerates every valid 2-unit split (each unit `>= MIN_COMBO_UNIT_BEDROOMS = 2`,
+   the city-scan floor), **configured split FIRST so it wins ties**; the wrapper
+   runs the (renamed, unchanged) internal `suggestPairForExactPlan` over the SAME
+   city pool per split and returns the CHEAPEST pair across splits. All the #6
+   rules apply per split (clustering, walkability, `>=`-bedroom fill, adjacency
+   fallback); the winning split is reported in the pair's `bedrooms`. Because it's
+   plan-driven, BOTH the home-city scan and the nearby-expansion get it for free.
+   This is what makes a city with a 4BR+2BR (but no two 3BRs) in one community
+   FILL a [3,3] booking instead of returning "no pair". Paired server-side change:
+   **`assignComboPicksToSlots` (`server/auto-fill-job.ts`) is a largest-pick →
+   largest-slot bijection**, NOT per-slot exact/`>=` matching — a 4+2 pick set
+   must fill [3,3] slots (the 2BR pick legitimately lands in a "3BR" slot; the
+   combo already satisfies the TOTAL). For the configured split this is identical
+   to exact-bedroom matching and still fixes the same-bedroom "only attached the
+   first unit" collapse (#596). The call site derives `pickBedrooms` from
+   `pair.bedrooms[i]` (the split), which aligns with `pair.picks[i]` because
+   `pickCheapestPlan` writes `picksByIndex[slot.i]`. Locked by
+   `tests/city-vrbo-combo.test.ts` (split enumeration + 4+2-fills-[3,3] e2e +
+   cheapest-split-wins) and `tests/auto-fill-combo-assign.test.ts` ([4,2]→[3,3]).
+   Don't revert `assignComboPicksToSlots` to per-slot `>=` matching — it leaves
+   the small pick of a non-configured split unassigned.
 7. **The SRP harvest captures each card's hero image; SRP-level image matching is
    inert by design, 2026-06-07.** `harvestVrboMapResultCards` /
    `extractVisibleVrboCards` now grab the card `<img>` (VRBO CDN hosts only) so
