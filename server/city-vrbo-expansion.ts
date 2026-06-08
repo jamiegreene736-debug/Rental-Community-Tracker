@@ -63,6 +63,7 @@ export type ExpansionCityStatus =
   | "scanning"
   | "no-pair"
   | "pair"
+  | "unprofitable" // a same-community pair was found but it loses money — skipped, searched on
   | "skipped"
   | "scan-error";
 
@@ -77,6 +78,11 @@ export type ExpansionCityResult = {
   workerOnline?: boolean;
   reason?: string;
   durationMs?: number;
+  // Economics recorded when a pair is found (accepted OR rejected for profit), so
+  // the operator sees each city's combo cost + expected profit in the ladder.
+  comboCost?: number;
+  expectedProfit?: number;
+  accepted?: boolean;
 };
 
 // The inventory payload shape the client consumes — identical to the
@@ -100,6 +106,13 @@ type ExpansionJob = {
   bedroomPlan: number[];
   nights: number;
   homeCitySearchTerm: string;
+  // Profit gate (passed in pre-netted by the auto-fill job): a city's cheapest
+  // combo is accepted only if (revenueAvailable - comboCost) >= minProfit. When
+  // profitGateEnabled is false (revenue unknown), the first pair found wins (old
+  // behavior). Unprofitable cities are recorded and the walk continues.
+  revenueAvailable: number;
+  minProfit: number;
+  profitGateEnabled: boolean;
   phase: { tier: ExpansionTier | 0; label: string };
   progress: { citiesPlanned: number; citiesScanned: number; currentCity: string | null };
   citiesSearched: string[];
@@ -447,22 +460,49 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
 
         const exported = scan.listings.length;
         if (scan.suggestedPair) {
+          // Profit gate: the cheapest same-community pair IS the max-profit one in
+          // this city, so if it loses money no combo here is acceptable — record
+          // the economics and CONTINUE to the next city instead of stopping.
+          const comboCost = (scan.suggestedPair.picks ?? []).reduce(
+            (sum, pk) => sum + (Number(pk?.totalPrice) || 0),
+            0,
+          );
+          const profit = job.revenueAvailable - comboCost;
+          const accepted = !job.profitGateEnabled || profit >= job.minProfit;
+          if (accepted) {
+            setCityResult(job, p.term, {
+              status: "pair",
+              suggestedPair: true,
+              listingsExported: exported,
+              durationMs: scan.sidecar.durationMs,
+              comboCost,
+              expectedProfit: job.profitGateEnabled ? profit : undefined,
+              accepted: true,
+            });
+            job.result = {
+              comboSourceCity: p.term,
+              comboSourcePlaceName: p.placeName,
+              comboSourceTier: tier,
+              driveMinutes: p.driveMinutes,
+              inventory: toClientInventoryPayload(scan, job),
+            };
+            job.status = "found";
+            finalize(job);
+            return;
+          }
+          // Found a pair, but unprofitable → record + keep searching.
           setCityResult(job, p.term, {
-            status: "pair",
+            status: "unprofitable",
             suggestedPair: true,
             listingsExported: exported,
             durationMs: scan.sidecar.durationMs,
+            comboCost,
+            expectedProfit: profit,
+            accepted: false,
+            reason: `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(profit).toLocaleString()} (below break-even); searched on`,
           });
-          job.result = {
-            comboSourceCity: p.term,
-            comboSourcePlaceName: p.placeName,
-            comboSourceTier: tier,
-            driveMinutes: p.driveMinutes,
-            inventory: toClientInventoryPayload(scan, job),
-          };
-          job.status = "found";
-          finalize(job);
-          return;
+          touch(job);
+          continue;
         }
 
         setCityResult(job, p.term, {
@@ -497,6 +537,11 @@ export function startExpansionJob(args: {
   propertyId: number;
   checkIn: string;
   checkOut: string;
+  // Profit gate (pre-netted by the auto-fill job). When profitGateEnabled is
+  // omitted/false the expansion stops at the first pair (legacy behavior).
+  revenueAvailable?: number;
+  minProfit?: number;
+  profitGateEnabled?: boolean;
 }): { jobId: string; status: ExpansionJobStatus; community: string; citiesPlanned: number } {
   sweepExpansionJobs();
   const propertyId = Number(args.propertyId);
@@ -550,6 +595,9 @@ export function startExpansionJob(args: {
     bedroomPlan: unitConfig.units.map((u) => u.bedrooms),
     nights: nightsBetween(args.checkIn, args.checkOut),
     homeCitySearchTerm: cityWideSearchLocationForBuyInMarket(community) ?? `${community}, Hawaii`,
+    revenueAvailable: Number(args.revenueAvailable) || 0,
+    minProfit: Number.isFinite(args.minProfit as number) ? (args.minProfit as number) : -Infinity,
+    profitGateEnabled: args.profitGateEnabled === true,
     phase: { tier: 0, label: "Starting" },
     progress: { citiesPlanned: 0, citiesScanned: 0, currentCity: null },
     citiesSearched: [],

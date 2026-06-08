@@ -393,6 +393,38 @@ by the client — the poller intentionally NEVER cancels on unmount). The client
 old `CityExpansionJobPoller` / `expansionJobs` flow is now dead (the expansion
 runs inside the server job) but left in place; don't wire it back to the button.
 
+### Auto-fill is PROFITABILITY-GATED (Load-Bearing, 2026-06-08)
+
+Auto-fill no longer attaches the cheapest combo regardless of margin. A combo is
+attached only if the booking stays profitable/break-even:
+`profit = expectedRevenue - existingAttachedCost - comboCost >= -tolerance`,
+`tolerance = max($50, 2%·revenue)` (env `AUTOFILL_PROFIT_MIN_FLAT` / `_PCT`). The
+pure math is `shared/buy-in-profit.ts` (`evaluateComboProfit`), unit-tested in
+`tests/buy-in-profit.test.ts`. Load-bearing choices:
+- **`expectedRevenue` is the CLIENT's `getNetRevenue(reservation)`** (hostPayout →
+  netIncome → fareAccommodation → totalPaid), passed in the start POST, so the
+  gate's profit EQUALS the bookings-page profit number — don't invent a server
+  revenue formula or the operator sees a "profitable" row the gate refused.
+- **DEGRADE SAFE: revenue <= 0/unknown (manual reservations, inquiries) DISABLES
+  the gate** (attach as before) — refusing there would silently break those flows.
+- **The cheapest same-community combo IS the max-profit one in a city**, so the
+  gate doesn't enumerate alternatives: if the cheapest is unprofitable, the city
+  has none → record its economics and search the NEXT city. The expansion
+  (`city-vrbo-expansion.ts`) now CONTINUES past an unprofitable city (status
+  `"unprofitable"` + `comboCost`/`expectedProfit` on the city result) instead of
+  stopping at the first pair; it's handed pre-netted `revenueAvailable`/`minProfit`/
+  `profitGateEnabled` by the auto-fill job.
+- **Terminal when NO city is profitable: leave slots EMPTY, status `completed`**
+  (it succeeded at not losing money), and surface the per-city economics ladder
+  (`AutoFillJobStatus.cityEconomics` + the `doneMessage` "best option" summary +
+  the tracker's orange `⊘` city chips). NEVER auto-attach a least-loss combo — the
+  operator must not be silently committed to a loss.
+- **The single-unit fallback is gated on the RUNNING total** (committedCost grows
+  as units attach): a unit that tips the booking into a loss STOPS the fill rather
+  than attaching one profitable + one loss-making unit. `existingAttachedCost` is
+  captured ONCE (pre-job baseline) and this job's attaches are summed separately —
+  don't conflate with `job.totalCost` (double-count).
+
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
   wrong because…"* rather than *"this code has a bug"*.

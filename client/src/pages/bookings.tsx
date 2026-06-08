@@ -1327,12 +1327,16 @@ type CityExpansionCityResult = {
   placeName: string;
   driveMinutes: number;
   tier: 1 | 2;
-  status: "pending" | "scanning" | "no-pair" | "pair" | "skipped" | "scan-error";
+  status: "pending" | "scanning" | "no-pair" | "pair" | "unprofitable" | "skipped" | "scan-error";
   listingsExported?: number;
   suggestedPair: boolean;
   workerOnline?: boolean;
   reason?: string;
   durationMs?: number;
+  // Economics recorded by the profit gate (accepted "pair" OR rejected "unprofitable").
+  comboCost?: number;
+  expectedProfit?: number;
+  accepted?: boolean;
 };
 
 type CityExpansionJobStatus = {
@@ -1525,9 +1529,19 @@ type AutoFillJobStatus = {
   skipped: Array<{ unitId: string; unitLabel: string; reason: string }>;
   searchAudits: AutoFillSearchAudit[];
   comboOptions: AutoFillComboOption[];
+  cityEconomics?: Array<{
+    source: "resort" | "home-city" | "nearby" | "single-unit-city";
+    label: string;
+    comboCost: number;
+    expectedProfit: number;
+    accepted: boolean;
+    reason?: string;
+  }>;
   slotsTotal: number;
   slotsFilled: number;
   totalCost: number | null;
+  expectedRevenue?: number;
+  expectedProfit?: number | null;
   error: string | null;
 };
 
@@ -1748,27 +1762,38 @@ function BuyInEscalationStages({
     if (foundEarly) return "skipped";
     if (rows.some((r) => r.status === "scanning")) return "searching";
     if (expRunning && rows.some((r) => r.status === "pending")) return "searching";
-    if (rows.length > 0 && rows.every((r) => ["no-pair", "scan-error", "skipped"].includes(r.status))) return "no-pair";
+    if (rows.length > 0 && rows.every((r) => ["no-pair", "unprofitable", "scan-error", "skipped"].includes(r.status))) return "no-pair";
     if (expRunning && tierNum === 1 && rows.length === 0) return "searching";
     return "idle";
   };
 
+  const usd0 = (n: number) => `$${Math.round(n).toLocaleString()}`;
   const cityChip = (c: CityExpansionCityResult) => {
     const sym = c.status === "pair" ? "✓"
+      : c.status === "unprofitable" ? "⊘"
       : c.status === "scanning" ? "…"
       : c.status === "no-pair" ? "✗"
       : c.status === "scan-error" ? "!"
       : c.status === "skipped" ? "–"
       : "·";
     const cls = c.status === "pair" ? "bg-emerald-100 text-emerald-800 border-emerald-300"
+      : c.status === "unprofitable" ? "bg-orange-100 text-orange-800 border-orange-300"
       : c.status === "scanning" ? "bg-amber-100 text-amber-800 border-amber-300"
       : c.status === "no-pair" ? "bg-slate-100 text-slate-600 border-slate-200"
       : c.status === "pending" ? "bg-slate-50 text-slate-400 border-slate-200"
       : "bg-rose-50 text-rose-700 border-rose-200";
+    // Show the economics for any city where a combo was priced (accepted or not).
+    const econ = typeof c.comboCost === "number"
+      ? ` · ${usd0(c.comboCost)}${typeof c.expectedProfit === "number" ? ` → ${usd0(c.expectedProfit)}` : ""}`
+      : "";
     return (
-      <span key={`${c.tier}-${c.citySearchTerm}`} className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 ${cls}`}>
+      <span
+        key={`${c.tier}-${c.citySearchTerm}`}
+        className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 ${cls}`}
+        title={c.reason ?? undefined}
+      >
         <span className="font-bold">{sym}</span>
-        {c.placeName || c.citySearchTerm}{typeof c.driveMinutes === "number" ? ` · ${c.driveMinutes}m` : ""}
+        {c.placeName || c.citySearchTerm}{typeof c.driveMinutes === "number" ? ` · ${c.driveMinutes}m` : ""}{econ}
       </span>
     );
   };
@@ -5845,6 +5870,10 @@ export default function Bookings() {
           community: slot.community ?? null,
         })),
         groundFloorBedrooms: Array.from(requiredGroundFloorBedrooms),
+        // Net revenue (same getNetRevenue the bookings page uses for profit) so
+        // the server's profit gate matches the row's profit number. 0 / unknown
+        // (manual reservations, inquiries) disables the gate server-side.
+        expectedRevenue: getNetRevenue(reservation),
       }).then((r) => r.json());
       if (!startResp?.jobId) {
         throw new Error(startResp?.error || "Could not start the auto-fill search.");
