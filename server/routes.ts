@@ -11599,6 +11599,16 @@ Requirements:
   };
   // Buy-in scans must always hit live SearchAPI + sidecar work — no HTTP result cache.
   const FIND_BUY_IN_TTL_MS = 0;
+  // Mobile-resilience RECOVERY window (separate from the disabled live cache
+  // above). A trustworthy, priced, COMPLETED scan is retained for this long so
+  // a client that lost its connection mid-scan — the classic case is iOS Safari
+  // backgrounding the tab, which tears down the in-flight fetch after ~30s —
+  // can re-fire the SAME search and get the finished result instead of
+  // restarting a full sidecar scan from zero (which looks "paused"/stuck to the
+  // operator). It is OPT-IN via ?recover=1 (the Auto-fill client always sends
+  // it), so brand-new interactive searches still alway run live — FIND_BUY_IN_TTL_MS
+  // stays 0 and the normal read path keeps skipping the cache.
+  const FIND_BUY_IN_RECOVERY_TTL_MS = 120_000;
   const REVERSE_IMAGE_LISTING_TTL_MS = 12 * 60 * 60_000;
   // Railway's edge can return "Application failed to respond" when a
   // long handler stays silent. find-buy-in is allowed to run longer
@@ -12881,6 +12891,11 @@ Requirements:
     // Backgrounding the Operations tab closes the browser socket; without
     // detached in-flight scans, every refetch restarts sidecar work from zero.
     const skipResultCache = req.query.nocache === "1" || FIND_BUY_IN_TTL_MS <= 0;
+    // ?recover=1 lets a reconnecting client consult the short-lived recovery
+    // cache (a completed scan retained for FIND_BUY_IN_RECOVERY_TTL_MS) even
+    // though the live result cache is disabled. nocache=1 still forces a fully
+    // fresh scan and beats recover.
+    const allowRecoveryCache = req.query.recover === "1" && req.query.nocache !== "1";
     const allowInFlightJoin = req.query.nocache !== "1";
     const nodeRes = res as any;
     let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -12935,11 +12950,11 @@ Requirements:
       // refocus or in-flight join can pick up the finished result.
       console.log(`[find-buy-in] client disconnected; continuing detached scan ${cacheKey}`);
     });
-    if (!skipResultCache) {
+    if (!skipResultCache || allowRecoveryCache) {
       const cached = findBuyInCache.get(cacheKey);
       if (cached && cached.expiresAt > Date.now()) {
         const ageSec = Math.round((Date.now() - cached.createdAt) / 1000);
-        console.log(`[find-buy-in] cache hit ${cacheKey} (age ${ageSec}s)`);
+        console.log(`[find-buy-in] ${allowRecoveryCache && skipResultCache ? "recovery " : ""}cache hit ${cacheKey} (age ${ageSec}s)`);
         return sendFindBuyInJson({ ...cached.value, fromCache: true, cacheAgeSec: ageSec });
       }
     }
@@ -16567,11 +16582,19 @@ Requirements:
     const cacheTtlMs = scanComplete && FIND_BUY_IN_TTL_MS > 0
       ? (priced.length > 0 ? FIND_BUY_IN_TTL_MS : 30_000)
       : 0;
-    if (cacheTtlMs > 0) {
+    // Retain a trustworthy, priced, completed result for the recovery window
+    // even though the live cache (cacheTtlMs) is normally 0. This entry is only
+    // ever served to a ?recover=1 re-fire (see allowRecoveryCache) — a client
+    // reconnecting after a dropped connection — never to a fresh interactive
+    // search. Partial/timeout scans (priced 0 or !scanComplete) are NOT retained
+    // so recovery can never replay a bad "0 results" answer.
+    const recoveryTtlMs = scanComplete && priced.length > 0 ? FIND_BUY_IN_RECOVERY_TTL_MS : 0;
+    const effectiveTtlMs = Math.max(cacheTtlMs, recoveryTtlMs);
+    if (effectiveTtlMs > 0) {
       findBuyInCache.set(cacheKey, {
         value: responseBody,
         createdAt: Date.now(),
-        expiresAt: Date.now() + cacheTtlMs,
+        expiresAt: Date.now() + effectiveTtlMs,
       });
     } else {
       findBuyInCache.delete(cacheKey);
@@ -16584,7 +16607,7 @@ Requirements:
       }
       findBuyInInFlight.delete(cacheKey);
     }
-    console.log(`[find-buy-in] ${cacheTtlMs > 0 ? "cached" : "not caching"} ${cacheKey} (TTL ${cacheTtlMs / 1000}s; cache size now ${findBuyInCache.size})`);
+    console.log(`[find-buy-in] ${effectiveTtlMs > 0 ? (cacheTtlMs > 0 ? "cached" : "recovery-cached") : "not caching"} ${cacheKey} (TTL ${effectiveTtlMs / 1000}s; cache size now ${findBuyInCache.size})`);
     return sendFindBuyInJson(responseBody);
   });
 
