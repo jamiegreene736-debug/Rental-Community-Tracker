@@ -797,3 +797,113 @@ export function groupCityVrboByBedroom(listings: CityVrboListing[]): Map<number,
   }
   return map;
 }
+
+export type CityVrboMatchDiagnostics = {
+  pricedTotal: number;
+  matched: number;
+  unmatched: number;
+  /** Each priced listing counted once, by its STRONGEST community signal. */
+  bySignal: {
+    dictionary: number;
+    complex: number;
+    phrase: number;
+    photo: number;
+    propertyManager: number;
+    none: number;
+  };
+  /** Cluster keys that hold >= bedroomPlan.length listings AND can satisfy the
+   *  bedroom plan with distinct units (i.e. could actually form a pair). */
+  pairableClusters: number;
+  /** Largest clusters (any signal) for eyeballing what's grouping (and whether a
+   *  property-manager / boilerplate phrase is dominating — the over-cluster trap). */
+  topClusters: Array<{ label: string; source: CommunityMatchSource; size: number; bedrooms: number[] }>;
+  /** Titles of priced listings with NO community signal at all — the population a
+   *  text-frequency / extra matching layer would need to rescue. */
+  unmatchedSample: Array<{ title: string; bedrooms: number | null }>;
+};
+
+/**
+ * Read-only instrumentation: for the priced pool, report how many listings got a
+ * community signal (and which kind), how many clusters could actually pair, and a
+ * sample of the listings that matched NOTHING. This is a measurement tool to
+ * decide whether more matching machinery (text-frequency mining, etc.) is worth
+ * it — and to expose the property-manager / boilerplate over-cluster trap if a
+ * huge low-precision cluster shows up in `topClusters`. Does not affect pairing.
+ */
+export function summarizeCityVrboMatching(
+  listings: CityVrboListing[],
+  bedroomPlan: number[],
+  nights: number,
+): CityVrboMatchDiagnostics {
+  const plan = bedroomPlan.filter((b) => Number.isFinite(b) && b > 0);
+  const priced = listings
+    .map((l) => ({
+      l,
+      total: listingTotalPrice(l, nights),
+      br: typeof l.bedrooms === "number" && Number.isFinite(l.bedrooms) ? Math.round(l.bedrooms) : 0,
+    }))
+    .filter((r) => r.total > 0 && r.br > 0);
+
+  const bySignal = { dictionary: 0, complex: 0, phrase: 0, photo: 0, propertyManager: 0, none: 0 };
+  const unmatchedSample: Array<{ title: string; bedrooms: number | null }> = [];
+  const buckets = new Map<string, { source: CommunityMatchSource; rows: typeof priced }>();
+  let matched = 0;
+
+  for (const row of priced) {
+    const textKeys = sharedResortPhraseKeys(row.l);
+    const photoKeys = [...imageSignatureKeys(row.l), ...((row.l.photoHashes ?? []).map((h) => `img:${h}`))];
+    const pm = propertyManagerKey(row.l);
+    for (const key of [...textKeys, ...photoKeys, ...(pm ? [pm] : [])]) {
+      const b = buckets.get(key) ?? { source: matchSourceForKey(key), rows: [] as typeof priced };
+      b.rows.push(row);
+      buckets.set(key, b);
+    }
+    let best: keyof typeof bySignal = "none";
+    if (textKeys.some((k) => k.startsWith("dict:"))) best = "dictionary";
+    else if (textKeys.some((k) => k.startsWith("complex:"))) best = "complex";
+    else if (textKeys.some((k) => k.startsWith("phrase:"))) best = "phrase";
+    else if (photoKeys.length) best = "photo";
+    else if (pm) best = "propertyManager";
+    bySignal[best] += 1;
+    if (best === "none") {
+      if (unmatchedSample.length < 15) unmatchedSample.push({ title: String(row.l.title ?? ""), bedrooms: row.br || null });
+    } else {
+      matched += 1;
+    }
+  }
+
+  const canSatisfyPlan = (rows: typeof priced): boolean => {
+    const used = new Set<string>();
+    for (const br of plan) {
+      const m = rows.find((r) => r.br === br && !used.has(r.l.url));
+      if (!m) return false;
+      used.add(m.l.url);
+    }
+    return true;
+  };
+  let pairableClusters = 0;
+  const clusterList: CityVrboMatchDiagnostics["topClusters"] = [];
+  // forEach + index-dedup (not for-of / Set→Array.from) to avoid the repo's
+  // downlevel-iteration TS noise.
+  buckets.forEach((b, key) => {
+    if (b.rows.length >= plan.length && canSatisfyPlan(b.rows)) pairableClusters += 1;
+    const brs = b.rows.map((r) => r.br);
+    clusterList.push({
+      label: communityKeyLabel(key),
+      source: b.source,
+      size: b.rows.length,
+      bedrooms: brs.filter((v, i) => brs.indexOf(v) === i).sort((a, c) => c - a),
+    });
+  });
+  clusterList.sort((a, c) => c.size - a.size);
+
+  return {
+    pricedTotal: priced.length,
+    matched,
+    unmatched: priced.length - matched,
+    bySignal,
+    pairableClusters,
+    topClusters: clusterList.slice(0, 8),
+    unmatchedSample,
+  };
+}

@@ -5,6 +5,7 @@
 import {
   sharedResortPhraseKeys,
   suggestCityVrboComboPair,
+  summarizeCityVrboMatching,
   type CityVrboListing,
 } from "../shared/city-vrbo-combo";
 
@@ -115,6 +116,23 @@ const singletonPool = [
 ];
 check("e2e: singleton complexName → NO pair (needs >=2 sharing the community)",
   suggestCityVrboComboPair(singletonPool, [3, 2], 7) === null);
+
+// ── 5) match diagnostics (read-only instrumentation) ─────────────────────────
+const diagPool = [
+  L("https://vrbo.com/d1", "Poipu Kai Resort 3BR", 3, 3000),
+  L("https://vrbo.com/d2", "Poipu Kie 2BR Oceanfront", 2, 2000),       // alias → poipu kai
+  L("https://vrbo.com/d3", "Beautiful 3BR Beachfront Escape", 3, 2500), // no signal
+  L("https://vrbo.com/d4", "Tropical 2BR Paradise Retreat", 2, 1800),   // no signal
+];
+const diag = summarizeCityVrboMatching(diagPool, [3, 2], 7);
+check("diag: pricedTotal counts all priced+bedroomed listings", diag.pricedTotal === 4, diag);
+check("diag: 2 matched (the two Poipu Kai), 2 unmatched", diag.matched === 2 && diag.unmatched === 2, diag);
+check("diag: bySignal.dictionary === 2", diag.bySignal.dictionary === 2, diag.bySignal);
+check("diag: unmatchedSample surfaces the generic titles",
+  diag.unmatchedSample.some((u) => /Beachfront Escape/.test(u.title)) && diag.unmatchedSample.some((u) => /Paradise Retreat/.test(u.title)),
+  diag.unmatchedSample);
+check("diag: poipu kai cluster is pairable (3BR + 2BR present)", diag.pairableClusters >= 1, diag);
+check("diag: topClusters includes poipu kai", diag.topClusters.some((c) => c.label === "poipu kai"), diag.topClusters);
 
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
