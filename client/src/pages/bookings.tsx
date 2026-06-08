@@ -5828,11 +5828,16 @@ export default function Bookings() {
       listingId,
       skipExpansion = false,
       awaitExpansionInline = false,
+      forceRestart = false,
     }: {
       reservation: GuestyReservation;
       propertyId?: number | null;
       listingId?: string | null;
       silent?: boolean;
+      // forceRestart: bulk fresh re-run — supersede any in-flight job for this
+      //   reservation server-side (the bulk path detached its units, so reusing
+      //   the old job would carry a stale baseline + old slot set).
+      forceRestart?: boolean;
       // skipExpansion: re-invocation after a nearby-city expansion ended with no
       //   combo — run the per-slot + single-unit safety net WITHOUT starting
       //   another expansion job (prevents a loop).
@@ -5930,6 +5935,9 @@ export default function Bookings() {
         // the server's profit gate matches the row's profit number. 0 / unknown
         // (manual reservations, inquiries) disables the gate server-side.
         expectedRevenue: getNetRevenue(reservation),
+        // Bulk fresh re-run: tell the server to supersede any in-flight job for
+        // this reservation rather than reuse it (units were just detached).
+        forceRestart,
       }).then((r) => r.json());
       if (!startResp?.jobId) {
         throw new Error(startResp?.error || "Could not start the auto-fill search.");
@@ -6446,9 +6454,18 @@ export default function Bookings() {
         && reservation.slots.some((slot) => !slot.buyIn);
     })
   ), [reservationPropertyMeta, reservations]);
+  // What the bulk queue actually RUNS: every SELECTED buy-in-capable reservation
+  // (mapped property + has buy-in slots), INCLUDING ones already fully attached.
+  // The queue detaches their units and re-searches from scratch, so they're
+  // eligible to run even though "Select open" (eligibleGlobalReservations) only
+  // auto-selects bookings with open slots.
   const selectedBulkEligibleReservations = useMemo(() => (
-    eligibleGlobalReservations.filter((reservation) => bulkSelectedReservations[reservation._id])
-  ), [bulkSelectedReservations, eligibleGlobalReservations]);
+    reservations.filter((reservation) => {
+      if (!bulkSelectedReservations[reservation._id]) return false;
+      const meta = reservationPropertyMeta.get(reservation._id);
+      return !!meta?.propertyId && reservation.slotsTotal > 0 && reservation.slots.length > 0;
+    })
+  ), [bulkSelectedReservations, reservations, reservationPropertyMeta]);
   const setBulkQueueItem = (reservationId: string, patch: Partial<BulkBuyInQueueItem>) => {
     setBulkBuyInQueueItems((prev) => prev.map((item) => (
       item.reservationId === reservationId ? { ...item, ...patch } : item
@@ -6496,7 +6513,9 @@ export default function Bookings() {
       queuedFor: bulkBuyInQueuedForText(reservation, meta.propertyName, meta.propertyId),
       status: "queued",
       message: "Queued",
-      totalSlots: reservation.slots.filter((slot) => !slot.buyIn).length,
+      // ALL slots: the queue detaches any attached units and re-fills every slot,
+      // so the filled/total report is against the full unit count, not just open.
+      totalSlots: reservation.slots.length,
     };
   };
   const selectAllEligibleGlobalBookings = () => {
@@ -6568,8 +6587,39 @@ export default function Bookings() {
       setAutoFillStartedByReservation((prev) => ({ ...prev, [item.reservationId]: Date.now() }));
 
       try {
+        // OVERRIDE attached units: detach every existing buy-in so this
+        // reservation is searched FRESH from scratch (operator: a queued
+        // reservation with units already attached is overridden, not topped-up or
+        // skipped). After detach the DB is clean, so the server reads
+        // existingAttachedCost=0 and re-fills EVERY slot via the SAME server-side
+        // auto-fill job the "Auto-fill cheapest" button runs. A detach failure
+        // throws → the outer catch marks the item failed (no partial search).
+        const attachedSlots = reservation.slots.filter((s) => s.buyIn?.id);
+        if (attachedSlots.length > 0) {
+          setBulkQueueItem(item.reservationId, {
+            message: `Detaching ${attachedSlots.length} attached unit${attachedSlots.length === 1 ? "" : "s"} for a fresh search…`,
+          });
+          for (const slot of attachedSlots) {
+            const buyInId = slot.buyIn!.id;
+            const detachResp = await apiRequest("POST", `/api/bookings/detach-buy-in/${buyInId}`)
+              .then((r) => r.json())
+              .catch((e: any) => { throw new Error(`Could not detach existing unit (buy-in ${buyInId}): ${e?.message ?? e}`); });
+            if (detachResp?.error) throw new Error(`Could not detach existing unit (buy-in ${buyInId}): ${detachResp.error}`);
+          }
+          await logBulkBuyInQueueEvent(
+            { ...item, status: "running" },
+            "info",
+            `Detached ${attachedSlots.length} attached unit(s) before a fresh search`,
+          );
+        }
+        // All slots now empty (DB + this fresh copy) so auto-fill re-searches
+        // every unit — identical to clicking "Auto-fill cheapest" on an open booking.
+        const freshReservation: GuestyReservation = attachedSlots.length > 0
+          ? { ...reservation, fullyLinked: false, slots: reservation.slots.map((s) => ({ ...s, buyIn: null })) }
+          : reservation;
+
         const result = await autoFillMutation.mutateAsync({
-          reservation,
+          reservation: freshReservation,
           propertyId: item.propertyId,
           listingId: item.listingId,
           silent: true,
@@ -6577,6 +6627,10 @@ export default function Bookings() {
           // nearby-city expansion inline (rather than handing off to the row
           // poller) — keeps result.results correct for the pass/fail report below.
           awaitExpansionInline: true,
+          // Supersede any in-flight job for this reservation (e.g. a manual
+          // "Auto-fill cheapest" still running) so the just-detached fresh search
+          // isn't dropped onto a stale reused job.
+          forceRestart: true,
         });
         const filled = result.results.filter((row) => row.picked).length;
         const total = result.results.length;
@@ -6637,6 +6691,13 @@ export default function Bookings() {
         await logBulkBuyInQueueEvent(updated, "error", "Bulk buy-in queue item crashed", {
           stack: error?.stack,
         });
+      } finally {
+        // ALWAYS release run-tracking for this reservation. Bulk items aren't
+        // driven by the row poller, so without this a failed/superseded item
+        // (e.g. a detach error throws before the mutation) leaves the id stuck in
+        // autoFillRunRef + autoFillStartedByReservation — which blocks the
+        // visibility-resume re-fire and a later manual Auto-fill for that row.
+        stopTrackingAutoFill(item.reservationId);
       }
     }
 
@@ -7356,14 +7417,22 @@ export default function Bookings() {
                             const channel = reservation.integration?.platform ?? reservation.source ?? "direct";
                             const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
                             const queueItem = bulkQueueItemsByReservationId.get(reservation._id);
-                            const eligibleForBulk = !!meta?.propertyId && reservation.slots.some((slot) => !slot.buyIn);
+                            // Buy-in capable = mapped property + has buy-in slots.
+                            // Attached reservations ARE selectable: queuing one
+                            // detaches its units and re-searches from scratch.
+                            const eligibleForBulk = !!meta?.propertyId && reservation.slots.length > 0;
+                            const hasOpenSlot = reservation.slots.some((slot) => !slot.buyIn);
                             const queuedFor = meta?.propertyId
                               ? bulkBuyInQueuedForText(reservation, meta.propertyName, meta.propertyId)
                               : "No mapped property";
                             const queueStatus = queueItem?.status
-                              ?? (reservation.fullyLinked ? "completed" : eligibleForBulk ? "queued" : "skipped");
+                              ?? (eligibleForBulk ? "queued" : "skipped");
                             const queueLabel = queueItem?.message
-                              ?? (reservation.fullyLinked ? "Filled" : eligibleForBulk ? "Ready" : "No open slots");
+                              ?? (!eligibleForBulk
+                                ? "No buy-in slots"
+                                : hasOpenSlot
+                                  ? "Ready"
+                                  : "Filled · re-search on queue");
                             return (
                               <div
                                 key={`global-booking-${reservation._id}`}

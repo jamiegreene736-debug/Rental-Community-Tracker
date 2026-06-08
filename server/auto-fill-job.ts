@@ -91,6 +91,13 @@ export type StartAutoFillInput = {
   // is DISABLED and attach behaves as before.
   expectedRevenue?: number;
   silent?: boolean;
+  // Bulk-queue fresh re-run: supersede (cancel) any in-flight job for this
+  // reservation and start a NEW one instead of reusing it. The bulk path detaches
+  // the reservation's units before this POST, so a reused job would carry a stale
+  // existingAttachedCost baseline AND its old (smaller) slot set — leaving a
+  // detached slot unfilled. forceRestart guarantees the fresh job reads the
+  // post-detach DB (baseline 0) and the full slot set. See AGENTS.md #8.
+  forceRestart?: boolean;
 };
 
 // Per-city economics recorded by the profit gate (resort, home-city, and each
@@ -1179,12 +1186,25 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
     : [];
   if (slots.length === 0) throw new AutoFillValidationError("at least one empty slot (unitId + bedrooms) required");
 
-  // Single-flight: a live job for this reservation already exists → return it.
+  // Single-flight: a live job for this reservation already exists → return it,
+  // UNLESS forceRestart (bulk fresh re-run) — then supersede it so a stale job
+  // (old slot set + pre-detach baseline) can't be reused. Cancel + finalize the
+  // old job so its worker stops attaching, then fall through to a fresh job.
   const existingId = activeJobByReservation.get(reservationId);
   if (existingId) {
     const existing = autoFillJobs.get(existingId);
     if (existing && !isTerminal(existing.status)) {
-      return { jobId: existing.id, status: existing.status, reused: true };
+      if (!input.forceRestart) {
+        return { jobId: existing.id, status: existing.status, reused: true };
+      }
+      // Supersede: stop the old worker (canceled) + mark terminal so any poller
+      // on the old jobId resolves. finalize() only clears the active mapping if it
+      // still points at the old id, so the fresh job's mapping (set below) is safe
+      // even if the old worker finalizes again later.
+      existing.canceled = true;
+      existing.status = "failed";
+      existing.error = existing.error ?? "Superseded by a fresh re-run";
+      finalize(existing);
     }
     activeJobByReservation.delete(reservationId);
   }
