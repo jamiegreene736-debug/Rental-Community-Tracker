@@ -93,13 +93,50 @@ check("e2e: typo half pairs with correct half (resortPhrase poipu kai)",
 check("e2e: the pair uses the two Poipu Kai units (a + b), not the Kiahuna distractor",
   !!pair && new Set(pair.picks.map((p) => p.url)).size === 2 && pair.picks.every((p) => p.url !== "https://vrbo.com/c"), pair?.picks?.map((p) => p.url));
 
-// 4b) two DIFFERENT communities must NOT pair.
+// 4b) two NON-adjacent communities must NOT pair (Poipu vs Princeville).
 const noPairPool = [
   L("https://vrbo.com/x", "Poipu Kai Resort 3BR", 3, 3000),
-  L("https://vrbo.com/y", "Kiahuna Plantation 2BR", 2, 2000),
+  L("https://vrbo.com/y", "Mauna Kai Princeville 2BR", 2, 2000),
 ];
 const noPair = suggestCityVrboComboPair(noPairPool, [3, 2], 7);
-check("e2e: Poipu Kai 3BR + Kiahuna 2BR → NO pair (different communities)", noPair === null, noPair);
+check("e2e: Poipu Kai + Mauna Kai(Princeville) → NO pair (not walkable-adjacent)", noPair === null, noPair);
+
+// 4b-2) ADJACENCY: Poipu Kai 3BR + Kiahuna 3BR pair for [3,3] when no single
+// complex has two 3BRs (the large-unit scarcity fix). matchSource = adjacency.
+const adjPool = [
+  L("https://vrbo.com/p1", "Poipu Kai Resort 3BR", 3, 3000),
+  L("https://vrbo.com/p2", "Kiahuna Plantation 3BR", 3, 3200),
+];
+const adjPair = suggestCityVrboComboPair(adjPool, [3, 3], 7);
+check("e2e: adjacency pairs Poipu Kai 3BR + Kiahuna 3BR for [3,3]",
+  !!adjPair && adjPair.picks.length === 2 && adjPair.matchSource === "adjacency", adjPair);
+
+// 4b-3) single-complex pair PREFERRED over a cheaper adjacency pair.
+const prefPool = [
+  L("https://vrbo.com/q1", "Poipu Kai Resort 3BR A", 3, 3000),
+  L("https://vrbo.com/q2", "Poipu Kai Resort 3BR B", 3, 3100),
+  L("https://vrbo.com/q3", "Kiahuna Plantation 3BR", 3, 2500), // cheaper but cross-complex
+];
+const prefPair = suggestCityVrboComboPair(prefPool, [3, 3], 7);
+check("e2e: single-complex (poipu kai) preferred over cheaper adjacency",
+  !!prefPair && prefPair.matchSource === "dictionary" && prefPair.resortPhrase === "poipu kai", prefPair);
+
+// 4b-4) >=BEDROOM: a 4BR satisfies a 3BR slot (one complex with 3BR + 4BR fills [3,3]).
+const bigPool = [
+  L("https://vrbo.com/g1", "Poipu Kai Resort 3BR", 3, 3000),
+  L("https://vrbo.com/g2", "Poipu Kai Resort 4BR", 4, 3500),
+];
+check("e2e: 3BR + 4BR fills a [3,3] plan (bigger unit allowed)",
+  !!suggestCityVrboComboPair(bigPool, [3, 3], 7), suggestCityVrboComboPair(bigPool, [3, 3], 7));
+
+// 4b-5) >=BEDROOM assignment: a cheap 3BR must go to the 3-slot, not the 2-slot
+// (largest-requirement-first), so a [2,3] plan still fills both.
+const assignPool = [
+  L("https://vrbo.com/h1", "Poipu Kai Resort 2BR", 2, 5000), // 2BR, expensive
+  L("https://vrbo.com/h2", "Poipu Kai Resort 3BR", 3, 2000), // 3BR, cheap
+];
+check("e2e: [2,3] with a cheap 3BR fills both (largest-first assignment)",
+  !!suggestCityVrboComboPair(assignPool, [2, 3], 7), suggestCityVrboComboPair(assignPool, [2, 3], 7));
 
 // 4c) LLM-style complexName clusters generic titles (mutual validation: 2 share it).
 const llmPool = [
