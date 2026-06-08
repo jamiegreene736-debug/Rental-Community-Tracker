@@ -29,6 +29,7 @@
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import { evaluateComboProfit, profitToleranceUsd } from "@shared/buy-in-profit";
 import {
   getExpansionJob,
   serializeExpansionJob,
@@ -51,6 +52,10 @@ const CITY_VRBO_LOOPBACK_TIMEOUT_MS = 300_000;
 const JOB_TTL_MS = 2 * 60 * 60 * 1000;
 const EXPANSION_POLL_INTERVAL_MS = 3_000;
 const EXPANSION_POLL_CAP_MS = 40 * 60_000;
+// Profit-gate tuning (env-overridable): accept a combo when
+// profit >= -max(FLAT, PCT * revenue). Default $50 floor / 2% of revenue.
+const PROFIT_MIN_FLAT_USD = Number(process.env.AUTOFILL_PROFIT_MIN_FLAT ?? 50) || 0;
+const PROFIT_MIN_PCT = Number(process.env.AUTOFILL_PROFIT_MIN_PCT ?? 0.02) || 0;
 
 // ── types ────────────────────────────────────────────────────────────────────
 type JobStatus = "queued" | "running" | "completed" | "failed";
@@ -77,7 +82,24 @@ export type StartAutoFillInput = {
   // Guesty conversation scan and passes it through so the server job stays a
   // dumb orchestrator).
   groundFloorBedrooms?: number[];
+  // The booking's net revenue (client getNetRevenue: hostPayout -> netIncome ->
+  // fareAccommodation -> totalPaid), so the profit gate matches the bookings-page
+  // number. When <= 0 / omitted (manual reservations, inquiries) the profit gate
+  // is DISABLED and attach behaves as before.
+  expectedRevenue?: number;
   silent?: boolean;
+};
+
+// Per-city economics recorded by the profit gate (resort, home-city, and each
+// nearby city), so the operator sees what each city offered even when nothing
+// was profitable enough to attach.
+export type CityEconomics = {
+  source: AttachStage;
+  label: string;
+  comboCost: number;
+  expectedProfit: number;
+  accepted: boolean;
+  reason?: string;
 };
 
 type AttachStage = "resort" | "home-city" | "nearby" | "single-unit-city";
@@ -145,11 +167,18 @@ type AutoFillJob = {
   slots: AutoFillSlotInput[];
   groundFloorBedrooms: Set<number>;
   silent: boolean;
+  // Profit gate (computed once at start).
+  expectedRevenue: number;
+  existingAttachedCost: number;
+  revenueAvailable: number;
+  minProfit: number;
+  gateEnabled: boolean;
   escalation: AutoFillEscalation;
   attached: AutoFillAttached[];
   skipped: AutoFillSkipped[];
   searchAudits: AutoFillSearchAudit[];
   comboOptions: any[];
+  cityEconomics: CityEconomics[];
   totalCost: number | null;
   error: string | null;
   canceled: boolean;
@@ -168,9 +197,12 @@ export type AutoFillJobStatus = {
   skipped: AutoFillSkipped[];
   searchAudits: AutoFillSearchAudit[];
   comboOptions: any[];
+  cityEconomics: CityEconomics[];
   slotsTotal: number;
   slotsFilled: number;
   totalCost: number | null;
+  expectedRevenue: number;
+  expectedProfit: number | null;
   error: string | null;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
@@ -692,16 +724,30 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
     // to this reservation (sibling slots filled before / concurrently). This is
     // the no-double-attach guard: we never re-fill a slot that's already filled.
     const used = new Set<string>();
+    // PRE-JOB baseline cost (cost already committed on sibling slots before this
+    // job ran) — captured ONCE so re-reads after this job's own attaches don't
+    // double-count (this job's attaches are tracked separately in job.attached).
+    let baselineCostCaptured = false;
     const refreshFilled = async (): Promise<Set<string>> => {
       const existing = await storage.getBuyInsByReservation(job.reservationId).catch(() => []);
       const filled = new Set<string>();
+      let existingCost = 0;
       for (const b of existing) {
         if (b.status === "cancelled") continue;
         if (b.unitId) filled.add(b.unitId);
+        existingCost += Number(b.costPaid) || 0;
         addUsedListingIdentity(used, { url: b.airbnbListingUrl, title: titleFromBuyInNotes(b.notes) });
       }
+      if (!baselineCostCaptured) {
+        job.existingAttachedCost = existingCost;
+        baselineCostCaptured = true;
+      }
+      job.revenueAvailable = job.expectedRevenue - committedCost();
       return filled;
     };
+    // Total cost committed so far = pre-job baseline + everything THIS job attached.
+    const committedCost = (): number =>
+      job.existingAttachedCost + job.attached.reduce((s, a) => s + (Number(a.totalPrice) || 0), 0);
     let filledUnitIds = await refreshFilled();
     const remainingSlots = (): AutoFillSlotInput[] =>
       job.slots.filter((s) => !filledUnitIds.has(s.unitId) && !job.attached.some((a) => a.unitId === s.unitId));
@@ -711,6 +757,29 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       finalize(job);
       return;
     }
+
+    if (!job.gateEnabled) {
+      job.message = "Profit gate disabled (booking revenue unknown) — attaching cheapest as before.";
+      touch(job);
+    }
+
+    // Profit gate: a proposed combo (cost C) is OK to attach iff the booking stays
+    // profitable/break-even. The cheapest combo per city IS the max-profit one
+    // there, so an unprofitable cheapest => no acceptable combo in that city =>
+    // record economics + move to the next city. Disabled when revenue is unknown.
+    // Uses committedCost() so a second/partial pick is gated on the RUNNING total.
+    const gate = (comboCost: number) =>
+      evaluateComboProfit({
+        expectedRevenue: job.expectedRevenue,
+        existingCost: committedCost(),
+        comboCost,
+        flat: PROFIT_MIN_FLAT_USD,
+        pct: PROFIT_MIN_PCT,
+      });
+    const recordEconomics = (source: AttachStage, label: string, comboCost: number, profit: number, accepted: boolean, reason?: string) => {
+      job.cityEconomics.push({ source, label, comboCost: Math.round(comboCost), expectedProfit: Math.round(profit), accepted, reason });
+      touch(job);
+    };
 
     const unitConfig = PROPERTY_UNIT_CONFIGS[job.propertyId];
     const isComboProperty = !!unitConfig && unitConfig.units.length >= 2;
@@ -760,12 +829,31 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         poolByBedroom.set(bedrooms, []);
       }
     }
-    // Assign cheapest distinct unit per slot (cheapest-first across slots).
-    for (const slot of remainingSlots()) {
-      if (job.canceled) break;
-      const pool = poolByBedroom.get(slot.bedrooms) ?? [];
-      const pick = pool.find((c) => !hasUsedListingIdentity(used, c));
-      if (pick) await attachPick({ job, base, slot, pick, searchedBedrooms: slot.bedrooms, used, stage: "resort", comboLabel: isComboProperty ? `Resort search ${job.community ?? ""}`.trim() : undefined });
+    // PROPOSE the cheapest distinct unit per remaining slot (no attach yet), gate
+    // the WHOLE proposed combo by profit, then attach all-or-nothing — so we never
+    // commit a partial unprofitable resort set. If unprofitable, record the
+    // economics and fall through to the city stages.
+    {
+      const proposeUsed = new Set(used);
+      const proposal: Array<{ slot: AutoFillSlotInput; pick: LiveCandidate }> = [];
+      for (const slot of remainingSlots()) {
+        const pool = poolByBedroom.get(slot.bedrooms) ?? [];
+        const pick = pool.find((c) => !hasUsedListingIdentity(proposeUsed, c));
+        if (pick) { proposal.push({ slot, pick }); addUsedListingIdentity(proposeUsed, pick); }
+      }
+      if (proposal.length > 0) {
+        const comboCost = proposal.reduce((s, p) => s + (Number(p.pick.totalPrice) || 0), 0);
+        const v = gate(comboCost);
+        if (v.acceptable) {
+          for (const { slot, pick } of proposal) {
+            if (job.canceled) break;
+            await attachPick({ job, base, slot, pick, searchedBedrooms: slot.bedrooms, used, stage: "resort", comboLabel: isComboProperty ? `Resort search ${job.community ?? ""}`.trim() : undefined });
+          }
+        } else {
+          recordEconomics("resort", `Resort ${job.community ?? ""}`.trim() || "Resort", comboCost, v.profit, false,
+            `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (below break-even); searched on`);
+        }
+      }
     }
     filledUnitIds = await refreshFilled();
     const afterResort = remainingSlots();
@@ -801,10 +889,23 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         setEscalation(job, { homeCityTerm: payload?.citySearchTerm, homeCityListings: payload?.listings?.length ?? 0 });
         const pair = payload?.suggestedPair;
         const hasPair = !!pair && Array.isArray(pair.picks) && pair.picks.length >= 2;
-        setEscalation(job, { homeCity: hasPair ? "found" : "no-pair", ...(hasPair ? { foundAt: "home-city" as const } : {}) });
         if (hasPair) {
-          await attachCityCombo(job, base, payload, used);
+          const comboCost = (pair.picks as any[]).reduce((s, pk) => s + (Number(pk?.totalPrice) || 0), 0);
+          const v = gate(comboCost);
           for (const b of pair.bedrooms ?? []) setAudit(job, auditFromCity(b, payload));
+          if (v.acceptable) {
+            setEscalation(job, { homeCity: "found", foundAt: "home-city" });
+            await attachCityCombo(job, base, payload, used);
+          } else {
+            // Found a pair, but it loses money — record economics + keep searching
+            // nearby cities (the cheapest combo here is the max-profit one, so no
+            // other home-city combo would be better).
+            setEscalation(job, { homeCity: "no-pair" });
+            recordEconomics("home-city", payload?.citySearchTerm ?? "home city", comboCost, v.profit, false,
+              `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (below break-even); searching nearby cities`);
+          }
+        } else {
+          setEscalation(job, { homeCity: "no-pair" });
         }
       } catch (e: any) {
         setEscalation(job, { homeCity: "skipped" });
@@ -812,13 +913,24 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
     }
 
     // ── Stage 3-4: nearby-city combo expansion (combo properties only) ──
+    // Runs whenever >=2 slots are still empty — i.e. the home city had NO pair OR
+    // an UNPROFITABLE one (an accepted home combo would have filled the slots, so
+    // remainingSlots<2 and this is skipped). Keep searching cities for a
+    // profitable/break-even combo; the expansion applies the SAME profit gate.
     const homeWorkerOnline = cityPayload?.sidecar?.workerOnline === true;
-    const homeHadPair = !!cityPayload?.suggestedPair && (cityPayload.suggestedPair.picks?.length ?? 0) >= 2;
-    if (cityCapable && isComboProperty && remainingSlots().length >= 2 && homeWorkerOnline && !homeHadPair && !job.canceled) {
-      await runExpansion(job, base, used);
+    if (cityCapable && isComboProperty && remainingSlots().length >= 2 && homeWorkerOnline && !job.canceled) {
+      const g0 = gate(0); // gate(0).profit == revenueAvailable (revenue - committed)
+      await runExpansion(job, base, used, {
+        revenueAvailable: g0.profit,
+        minProfit: g0.minProfit,
+        profitGateEnabled: g0.gateEnabled,
+      });
     }
 
     // ── Per-slot single-unit city fallback for anything still empty ──
+    // Profit-gated on the RUNNING total (committedCost grows as units attach), so
+    // adding a unit that tips the booking into a loss STOPS the fill rather than
+    // attaching one profitable + one loss-making unit.
     if (cityCapable && remainingSlots().length > 0 && !job.canceled) {
       touch(job, { phase: "single-unit-city", message: "City VRBO fallback for remaining units…", progress: 80 });
       try {
@@ -831,6 +943,13 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           setAudit(job, auditFromCity(slot.bedrooms, payload));
           const row = rows.find((r) => !hasUsedListingIdentity(used, { url: r.url, title: r.title, sourceLabel: r.sourceLabel }));
           if (!row) continue;
+          const cost = Number(row.totalPrice) || 0;
+          const v = gate(cost);
+          if (!v.acceptable) {
+            recordEconomics("single-unit-city", `${payload?.citySearchTerm ?? "city"} ${slot.unitLabel}`.trim(), cost, v.profit, false,
+              `adding ${slot.unitLabel} ($${Math.round(cost).toLocaleString()}) → est. profit $${Math.round(v.profit).toLocaleString()} (below break-even); left empty`);
+            break; // further units only deepen the loss
+          }
           await attachPick({
             job, base, slot,
             pick: liveCandidateFromCityRow(row, slot.bedrooms, job.nights),
@@ -859,12 +978,30 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
   }
 }
 
+function jobExpectedProfit(job: AutoFillJob): number | null {
+  if (!job.gateEnabled) return null;
+  const cost = job.existingAttachedCost + job.attached.reduce((s, a) => s + (Number(a.totalPrice) || 0), 0);
+  return job.expectedRevenue - cost;
+}
+
 function doneMessage(job: AutoFillJob): string {
   const filled = job.attached.length;
   const total = job.slots.length;
-  if (filled === 0) return "No verified priced candidate could be attached. Open Find buy-in to review.";
-  const cost = job.totalCost != null ? ` · Total buy-in cost: $${Math.round(job.totalCost).toLocaleString()}` : "";
-  return `Attached ${filled}/${total} unit${total === 1 ? "" : "s"}${cost}`;
+  const usd = (n: number) => `$${Math.round(n).toLocaleString()}`;
+  // Nothing attached: if the profit gate rejected combos, say so with the
+  // best-found economics (the operator is intentionally NOT committed to a loss).
+  if (filled === 0) {
+    const rejected = job.cityEconomics.filter((c) => !c.accepted);
+    if (job.gateEnabled && rejected.length > 0) {
+      const best = rejected.reduce((a, b) => (b.expectedProfit > a.expectedProfit ? b : a));
+      return `No profitable combination found (revenue ${usd(job.expectedRevenue)}). Best option: ${best.label} — combo ${usd(best.comboCost)}, est. profit ${usd(best.expectedProfit)}. Searched ${rejected.length} ${rejected.length === 1 ? "city" : "cities"}; left empty so you're not committed to a loss.`;
+    }
+    return "No verified priced candidate could be attached. Open Find buy-in to review.";
+  }
+  const cost = job.totalCost != null ? ` · Buy-in cost: ${usd(job.totalCost)}` : "";
+  const profit = jobExpectedProfit(job);
+  const profitStr = profit != null ? ` · Revenue ${usd(job.expectedRevenue)} · Est. profit ${usd(profit)}` : "";
+  return `Attached ${filled}/${total} unit${total === 1 ? "" : "s"}${cost}${profitStr}`;
 }
 
 // Assign each combo pick to a DISTINCT slot, consuming each pick exactly once.
@@ -931,12 +1068,26 @@ async function attachCityCombo(
 // Drive the existing nearby-city expansion job IN-PROCESS (start + poll to
 // terminal) and attach the found combo. No HTTP — the expansion module's
 // functions are imported directly.
-async function runExpansion(job: AutoFillJob, base: string, used: Set<string>): Promise<void> {
+async function runExpansion(
+  job: AutoFillJob,
+  base: string,
+  used: Set<string>,
+  gateParams: { revenueAvailable: number; minProfit: number; profitGateEnabled: boolean },
+): Promise<void> {
   touch(job, { phase: "nearby", message: "Widening to nearby cities (drive-time)…", progress: 60 });
   setEscalation(job, { nearbyStatus: "searching" });
   let started: { jobId: string } | null = null;
   try {
-    started = startExpansionJob({ propertyId: job.propertyId, checkIn: job.checkIn, checkOut: job.checkOut });
+    started = startExpansionJob({
+      propertyId: job.propertyId,
+      checkIn: job.checkIn,
+      checkOut: job.checkOut,
+      // Profit gate threaded through so the expansion only STOPS on a profitable
+      // city and records the economics of unprofitable ones (continuing the walk).
+      revenueAvailable: gateParams.revenueAvailable,
+      minProfit: gateParams.minProfit,
+      profitGateEnabled: gateParams.profitGateEnabled,
+    });
   } catch (e: any) {
     if (e instanceof CityExpansionValidationError) { setEscalation(job, { nearbyStatus: "exhausted" }); return; }
     setEscalation(job, { nearbyStatus: "error" }); return;
@@ -957,6 +1108,19 @@ async function runExpansion(job: AutoFillJob, base: string, used: Set<string>): 
     });
     if (s.done) { terminal = s; break; }
     await new Promise((r) => setTimeout(r, EXPANSION_POLL_INTERVAL_MS));
+  }
+  // Fold each nearby city's combo economics into the ladder (accepted OR skipped).
+  for (const c of terminal?.cityResults ?? []) {
+    if (typeof c.comboCost === "number") {
+      job.cityEconomics.push({
+        source: "nearby",
+        label: c.placeName || c.citySearchTerm,
+        comboCost: Math.round(c.comboCost),
+        expectedProfit: Math.round(c.expectedProfit ?? 0),
+        accepted: c.accepted === true,
+        reason: c.reason,
+      });
+    }
   }
   if (terminal?.status === "found" && terminal.combo) {
     setEscalation(job, { foundAt: "nearby" });
@@ -980,9 +1144,12 @@ export function serializeAutoFillJob(job: AutoFillJob): AutoFillJobStatus {
     skipped: job.skipped,
     searchAudits: job.searchAudits,
     comboOptions: job.comboOptions,
+    cityEconomics: job.cityEconomics,
     slotsTotal: job.slots.length,
     slotsFilled: job.attached.length,
     totalCost: job.totalCost,
+    expectedRevenue: job.expectedRevenue,
+    expectedProfit: jobExpectedProfit(job),
     error: job.error,
     timestamps: { createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt },
   };
@@ -1016,6 +1183,9 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
 
   const id = newJobId("afj");
   const now = Date.now();
+  const expectedRevenue = Number(input.expectedRevenue) || 0;
+  const gateEnabled = expectedRevenue > 0;
+  const minProfit = -profitToleranceUsd(expectedRevenue, PROFIT_MIN_FLAT_USD, PROFIT_MIN_PCT);
   const job: AutoFillJob = {
     id,
     status: "queued",
@@ -1037,11 +1207,17 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
     slots,
     groundFloorBedrooms: new Set((input.groundFloorBedrooms ?? []).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)),
     silent: input.silent === true,
+    expectedRevenue,
+    existingAttachedCost: 0,
+    revenueAvailable: expectedRevenue,
+    minProfit,
+    gateEnabled,
     escalation: { resort: "idle", homeCity: "idle", foundAt: null },
     attached: [],
     skipped: [],
     searchAudits: [],
     comboOptions: [],
+    cityEconomics: [],
     totalCost: null,
     error: null,
     canceled: false,

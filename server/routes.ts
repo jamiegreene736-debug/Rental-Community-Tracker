@@ -12804,6 +12804,7 @@ Requirements:
         checkOut: String(req.body?.checkOut ?? ""),
         slots: Array.isArray(req.body?.slots) ? req.body.slots : [],
         groundFloorBedrooms: Array.isArray(req.body?.groundFloorBedrooms) ? req.body.groundFloorBedrooms : [],
+        expectedRevenue: Number(req.body?.expectedRevenue) || 0,
         silent: req.body?.silent === true,
       });
       return res.status(202).json(started);
