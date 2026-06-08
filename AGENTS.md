@@ -165,6 +165,26 @@ page. Three constraints make it actually reach the full count — don't
    share it) is enforced FOR FREE by the existing bucket-size `>= bedroomPlan.length`
    gate, so a single hallucinated label can never form a pair. Don't loosen the
    confidence gate or remove the bucket-size mutual-validation guard.
+   **Bigger-unit fill + walkable-adjacency (2026-06-08).** Two changes target the
+   diagnosed root cause of "no pairs" on large-unit plans (a city pool has plenty
+   of 2BRs but few 3BRs and ~zero 4BRs, so no single complex holds two big units):
+   - **`pickCheapestPlan` now fills a slot with a unit of `>=` the required
+     bedrooms** (a 4BR satisfies a 3BR slot), assigning the LARGEST requirements
+     FIRST so a scarce big unit isn't consumed by a small slot (a [2,3] plan with
+     one cheap 3BR must put it in the 3-slot). Cheapest-first still prefers an
+     exact-size unit when available. Don't revert to `=== targetBr`.
+   - **`WALKABLE_COMPLEX_CLUSTERS` + `evaluateAdjacencyClusters`**: a curated map
+     of complexes within `MAX_BUY_IN_WALK_MINUTES` (~10 min) of EACH OTHER lets a
+     pair be drawn ACROSS complexes (e.g. Poipu Kai 3BR + adjacent Kiahuna 3BR).
+     It is a STRICT FALLBACK — only evaluated when NO single complex (strong/
+     photo/geo) satisfied the plan, so high-confidence same-complex pairs always
+     win; `matchSource:"adjacency"`, medium confidence. **OPERATOR-OWNED & must
+     stay TIGHT**: a pair from one cluster auto-attaches as "walkable", and VRBO
+     hides coords so it CAN'T be auto-verified — only add complexes you KNOW are a
+     short walk apart. Canonicals must match `KAUAI_COMPLEX_DICTIONARY`.
+   - The diagnostic (`summarizeCityVrboMatching`) no longer counts a listing's own
+     SINGLETON photo URL as "matched" (only photo keys SHARED by >=2 listings),
+     so the `[city-vrbo-match-diag]` `matched`/`none` counts read true.
 7. **The SRP harvest captures each card's hero image; SRP-level image matching is
    inert by design, 2026-06-07.** `harvestVrboMapResultCards` /
    `extractVisibleVrboCards` now grab the card `<img>` (VRBO CDN hosts only) so

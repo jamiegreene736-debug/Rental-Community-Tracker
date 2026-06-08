@@ -41,6 +41,7 @@ export type CommunityMatchSource =
   | "shared-phrase"
   | "photo"
   | "property-manager"
+  | "adjacency"
   | "unknown";
 
 export type CityVrboComboPair = {
@@ -539,18 +540,26 @@ export function pairIsWalkable(picks: CityVrboListing[]): {
 
 type ScoredRow = { listing: CityVrboListing; total: number; br: number };
 
+// Fill each slot with the cheapest DISTINCT unit that has AT LEAST the required
+// bedrooms (a bigger unit can house a smaller need — a 4BR satisfies a 3BR slot).
+// Assign the LARGEST requirements first so scarce big units aren't consumed by
+// smaller slots (e.g. for a [2,3] plan, the lone 3BR goes to the 3-slot, not the
+// 2-slot), then return picks in the original plan order. Cheapest-first means an
+// exact-size unit is still preferred when available. Returns null if any slot
+// can't be filled. dedups by url so same-bedroom plans pick two DISTINCT units.
 function pickCheapestPlan(bucket: ScoredRow[], plan: number[]): CityVrboListing[] | null {
-  const picks: CityVrboListing[] = [];
+  const order = plan.map((br, i) => ({ br, i })).sort((a, b) => b.br - a.br);
   const usedUrls = new Set<string>();
-  for (const targetBr of plan) {
+  const picksByIndex: Array<CityVrboListing | null> = new Array(plan.length).fill(null);
+  for (const slot of order) {
     const match = bucket
-      .filter((row) => row.br === targetBr && !usedUrls.has(row.listing.url))
+      .filter((row) => row.br >= slot.br && !usedUrls.has(row.listing.url))
       .sort((a, b) => a.total - b.total)[0];
     if (!match) return null;
     usedUrls.add(match.listing.url);
-    picks.push(match.listing);
+    picksByIndex[slot.i] = match.listing;
   }
-  return picks;
+  return picksByIndex.filter((p): p is CityVrboListing => p !== null);
 }
 
 /**
@@ -585,6 +594,7 @@ function confidenceFor(source: CommunityMatchSource): "high" | "medium" | "low" 
       return "high";
     case "complex-name":
     case "shared-phrase":
+    case "adjacency":
       return "medium";
     default:
       return "low";
@@ -645,6 +655,62 @@ function matchSourceForKey(key: string): CommunityMatchSource {
   if (key.startsWith("img:") || key.startsWith("imgurl:")) return "photo";
   if (key.startsWith("pm:")) return "property-manager";
   return "unknown";
+}
+
+// Curated groups of complexes that are within MAX_BUY_IN_WALK_MINUTES (~10 min /
+// ~0.5 mi) walk of EACH OTHER. Used ONLY as a FALLBACK when no SINGLE complex can
+// satisfy the bedroom plan (e.g. a 3BR+3BR booking where no one complex has two
+// 3BRs) — single-complex pairs are always preferred. A pair drawn from one
+// cluster is auto-attached as "walkable", so OPERATOR: only add complexes you KNOW
+// are genuinely a short walk apart (VRBO hides per-listing coords, so this can't
+// be auto-derived). Canonicals MUST match KAUAI_COMPLEX_DICTIONARY entries.
+export const WALKABLE_COMPLEX_CLUSTERS: string[][] = [
+  // Poipu Kai resort + the directly-adjacent Kiahuna Plantation. Both are
+  // 3BR-rich, so this is the cluster that fixes the common 3BR+3BR "no pair".
+  ["poipu kai", "kiahuna plantation"],
+  // Poipu Beach Park / Hoone Rd waterfront row (mostly 2BR).
+  ["nihi kai villas", "poipu sands", "makahuena", "poipu shores"],
+];
+
+function dictCanonicalsOf(listing: CityVrboListing): string[] {
+  return sharedResortPhraseKeys(listing)
+    .filter((k) => k.startsWith("dict:"))
+    .map((k) => communityKeyLabel(k));
+}
+
+/**
+ * Walkable-adjacency FALLBACK: when no single complex satisfies the bedroom plan,
+ * try pairing ACROSS complexes that share a curated walkable cluster. Medium
+ * confidence (cross-complex, but curated-adjacent). Returns the cheapest such
+ * pair, or null. guardSameUnit drops a relisted-unit pairing.
+ */
+function evaluateAdjacencyClusters(priced: ScoredRow[], plan: number[], nights: number): CityVrboComboPair | null {
+  let best: CityVrboComboPair | null = null;
+  const canonByRow = new Map<ScoredRow, string[]>();
+  for (const r of priced) canonByRow.set(r, dictCanonicalsOf(r.listing));
+  for (const cluster of WALKABLE_COMPLEX_CLUSTERS) {
+    const clusterSet = new Set(cluster);
+    const rows = priced.filter((r) => (canonByRow.get(r) ?? []).some((c) => clusterSet.has(c)));
+    if (rows.length < plan.length) continue;
+    const picks = pickCheapestPlan(rows, plan);
+    if (!picks) continue;
+    if (picks.some((p, i) => picks.some((q, j) => j > i && looksLikeSameUnit(p, q)))) continue;
+    const totalCost = picks.reduce((sum, p) => sum + listingTotalPrice(p, nights), 0);
+    if (!best || totalCost < best.totalCost) {
+      const usedCanon = Array.from(new Set(picks.flatMap((p) => dictCanonicalsOf(p)).filter((c) => clusterSet.has(c))));
+      best = {
+        resortPhrase: (usedCanon.length ? usedCanon : cluster).join(" + "),
+        bedrooms: plan,
+        picks,
+        totalCost,
+        walkMinutes: null,
+        walkSource: "adjacency",
+        matchSource: "adjacency",
+        matchConfidence: "medium",
+      };
+    }
+  }
+  return best;
 }
 
 /**
@@ -752,6 +818,12 @@ export function suggestCityVrboComboPair(
     candidates.sort((a, b) => a.totalCost - b.totalCost);
     return candidates[0];
   }
+  // Walkable-adjacency fallback — pair ACROSS complexes in a curated walkable
+  // cluster, but ONLY now that no single complex could satisfy the plan (so
+  // high-confidence same-complex pairs always win). This is what rescues large-
+  // unit plans (e.g. 3BR+3BR) where no one complex has two big units.
+  const adjacencyPair = evaluateAdjacencyClusters(priced, plan, nights);
+  if (adjacencyPair) return adjacencyPair;
   // PM fallback — pairWalkability requires coordinate-confirmed walkability for
   // PM clusters (one PM spans the whole town), so a PM pair only survives when
   // coords place the two units within walking distance. Medium confidence.
@@ -849,7 +921,9 @@ export function summarizeCityVrboMatching(
   const buckets = new Map<string, { source: CommunityMatchSource; rows: typeof priced }>();
   let matched = 0;
 
-  for (const row of priced) {
+  // Pass 1: collect each row's keys and build buckets (so we know which photo
+  // keys are SHARED — a listing's own unique photo URL is not a community match).
+  const perRow = priced.map((row) => {
     const textKeys = sharedResortPhraseKeys(row.l);
     const photoKeys = [...imageSignatureKeys(row.l), ...((row.l.photoHashes ?? []).map((h) => `img:${h}`))];
     const pm = propertyManagerKey(row.l);
@@ -858,11 +932,17 @@ export function summarizeCityVrboMatching(
       b.rows.push(row);
       buckets.set(key, b);
     }
+    return { row, textKeys, photoKeys, pm };
+  });
+  // Pass 2: classify by strongest signal. A photo key counts only when it is
+  // SHARED with another listing (singletons = the listing's own photo, not a match).
+  for (const { row, textKeys, photoKeys, pm } of perRow) {
+    const sharedPhoto = photoKeys.some((k) => (buckets.get(k)?.rows.length ?? 0) >= 2);
     let best: keyof typeof bySignal = "none";
     if (textKeys.some((k) => k.startsWith("dict:"))) best = "dictionary";
     else if (textKeys.some((k) => k.startsWith("complex:"))) best = "complex";
     else if (textKeys.some((k) => k.startsWith("phrase:"))) best = "phrase";
-    else if (photoKeys.length) best = "photo";
+    else if (sharedPhoto) best = "photo";
     else if (pm) best = "propertyManager";
     bySignal[best] += 1;
     if (best === "none") {
