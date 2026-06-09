@@ -538,6 +538,79 @@ runs inside the server job) but left in place; don't wire it back to the button.
    kickstart -k gui/$(id -u)/com.vrbosidecar.worker`, NOT a Railway deploy. The
    client also takes a `navigator.wakeLock('screen')` while `bulkBuyInQueueRunning`
    (instant, tab-visible-only layer; the caffeinate is the deeper guard).
+   **Updated 2026-06-09 (PR for the server-side bulk queue):** the supervisor now
+   also treats `bulkAutoFillActive === true` (a new field on `GET .../status`,
+   true while the server-side bulk queue runs) as "busy", so caffeinate holds for
+   the WHOLE bulk run — not just while VRBO requests happen to sit in the sidecar
+   queue. Between reservations the sidecar can briefly idle (job hand-off,
+   cache-only ladder stages); without this the 5-min grace could lapse and the Mac
+   sleep mid-queue. This too is a DAEMON change (cp supervisor.mjs + kickstart).
+
+### Bulk buy-in queue is a SERVER-SIDE background job (Load-Bearing, 2026-06-09)
+
+The bookings-page **bulk buy-in queue** ("Run bulk buy-ins" over many selected
+reservations) no longer runs as a CLIENT `for`-loop. The whole queue now runs
+server-side in `server/bulk-auto-fill-job.ts` (modeled on `auto-fill-job.ts`):
+the client builds each reservation's self-contained payload ONCE, POSTs the whole
+list to `POST /api/operations/bulk-auto-fill`, and then only POLLS
+`GET /api/operations/bulk-auto-fill/:id` for per-item progress.
+
+**Why:** the per-RESERVATION search was already server-side (`auto-fill-job.ts`),
+but the ORCHESTRATION — which reservation runs next — lived in the browser
+(`startBulkBuyInQueue`'s `for`-loop `await`ing each job inline). When Safari
+suspended the tab overnight (screen sleep / Mac idle / backgrounded tab) the JS
+event loop froze mid-`await`, no further jobs were POSTed, and the queue silently
+stalled — the operator left it running overnight and **zero** reservations ran.
+The wake-lock only holds while the tab is visible, and caffeinate only engaged
+when the sidecar already had work (which it never got). The Cancel button also
+did nothing because it flipped a client ref the frozen loop never read. Now the
+operator clicks Start once and can **close Safari entirely** — the server walks
+the queue and the launchd sidecar daemon (kept awake by the bulkAutoFillActive
+caffeinate signal, #9 above) finishes every search.
+
+Load-bearing choices — don't "simplify" them away:
+
+1. **Per reservation the bulk job calls the EXISTING `startAutoFillJob` in-process**
+   (with `forceRestart:true`, `silent:true`, `owner:"bulk"`) and polls
+   `getAutoFillJob` to terminal — it does NOT re-implement the ladder. So the
+   $100 profit gate, all-or-nothing combo rule, nearby-city expansion, and the
+   loss-combo `/last` capture all keep working unchanged.
+2. **owner="bulk" isolates these jobs from the row-level `/active` rediscovery**
+   (`getActiveAutoFillJobForReservation(id, { excludeBulk:true })`) so the row
+   poller never re-attaches to a bulk-driven reservation and races the
+   orchestrator's single-flight / `forceRestart` (B1). The client ALSO skips
+   reservations in `bulkActiveReservationIdsRef` in its row rediscovery —
+   belt-and-suspenders.
+3. **Override-detach is ATOMIC (B2).** Per item it snapshots the attached buy-in
+   ids, detaches all, and on ANY detach failure RE-ATTACHES the already-detached
+   ones (`storage.attachBuyIn(id, reservationId)`) so the reservation ends exactly
+   as it began — never stranded partially detached on the money path — then fails
+   the item. Detach is `storage.detachBuyIn` directly (no side effects; the HTTP
+   route does only this).
+4. **Cancel hits a real endpoint** (`POST .../:id/cancel`) that sets the bulk
+   `canceled` flag AND `cancelAutoFillJob`s the in-flight reservation. Partial
+   fills before the cancel landed are surfaced honestly ("Cancelled — attached
+   X/Y …"), not hidden behind a clean "cancelled".
+5. **Sidecar circuit breaker (M5):** before each item the orchestrator checks
+   `getHeartbeat().isOnline` (with one 10s re-check to absorb a blip); if the
+   worker is genuinely offline it marks the remaining items failed and STOPS
+   rather than grinding each through the ladder's ~40-min expansion timeouts.
+6. **Start resumes the sidecar queue** (`resumeQueue()`) because a prior "Clear
+   Queue" pause makes the sidecar REFUSE every enqueue — every search would
+   silently fail. Clicking Start is explicit intent to run.
+7. **Idempotent + redeploy-resilient:** a still-running bulk job is REUSED on a
+   duplicate POST (no second queue). The job store is in-memory (2h TTL, lost on
+   redeploy — picks persist to Postgres); the client poller treats a `:id` 404 as
+   "job lost" and auto-resumes ONCE by re-POSTing the not-yet-terminal items.
+8. **Polling is full-record + stable-order (M6):** `GET /:id` returns every item,
+   every field, in insertion order; the client REPLACES `bulkBuyInQueueItems`
+   wholesale (never a shallow patch that could erase prior progress fields). The
+   POST returns immediately (the loop is fire-and-forget) so it never holds an
+   HTTP request past Railway's edge timeout.
+
+The old client `for`-loop + its server-restart retry are GONE; `setBulkQueueItem`
+/ `logBulkBuyInQueueEvent` may now be unused (the server logs to console — single
+writer). Don't wire the loop back to the Start button.
 
 ### Auto-fill is PROFITABILITY-GATED (Load-Bearing, 2026-06-08)
 

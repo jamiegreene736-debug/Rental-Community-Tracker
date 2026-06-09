@@ -1554,6 +1554,57 @@ type AutoFillJobStatus = {
   timestamps?: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
 
+// Mirrors server/bulk-auto-fill-job.ts serializeBulkAutoFillJob. The whole bulk
+// queue now runs server-side; the client posts the list once and polls this.
+type BulkAutoFillJobStatus = {
+  bulkJobId: string;
+  status: "running" | "completed" | "cancelled";
+  done: boolean;
+  total: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+  running: number;
+  queued: number;
+  currentIndex: number;
+  items: Array<{
+    reservationId: string;
+    propertyId: number;
+    listingId: string | null;
+    propertyName: string;
+    guestName: string;
+    checkIn: string;
+    checkOut: string;
+    queuedFor: string;
+    status: BulkBuyInQueueStatus;
+    message: string;
+    error?: string;
+    filled: number;
+    totalSlots: number;
+    startedAt: string | null;
+    finishedAt: string | null;
+  }>;
+  timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
+};
+
+// One reservation's fully self-contained payload for the server bulk endpoint.
+type BulkAutoFillItemPayload = {
+  reservationId: string;
+  propertyId: number;
+  listingId: string | null;
+  propertyName: string;
+  community: string | null;
+  checkIn: string;
+  checkOut: string;
+  slots: Array<{ unitId: string; unitLabel: string; bedrooms: number; community: string | null }>;
+  groundFloorBedrooms: number[];
+  expectedRevenue: number;
+  buyInIdsToDetach: number[];
+  guestName: string;
+  queuedFor: string;
+};
+
 // The shape the auto-fill mutation returns / the bulk queue report consumes.
 type AutoFillResultRow = {
   slot: { unitId: string; unitLabel: string; bedrooms: number };
@@ -5167,6 +5218,20 @@ export default function Bookings() {
   const [bulkBuyInQueueItems, setBulkBuyInQueueItems] = useState<BulkBuyInQueueItem[]>([]);
   const [bulkBuyInQueueRunning, setBulkBuyInQueueRunning] = useState(false);
   const bulkBuyInCancelRef = useRef(false);
+  // The server-side bulk queue is the source of truth (server/bulk-auto-fill-job.ts).
+  // The client posts the list once, then polls this job id for per-item progress —
+  // so the queue keeps running with the browser closed. The payloads ref retains
+  // the posted items so the poller can auto-resume after a server restart (M4).
+  const [bulkAutoFillJobId, setBulkAutoFillJobId] = useState<string | null>(null);
+  const bulkPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const bulkPayloadsRef = useRef<BulkAutoFillItemPayload[]>([]);
+  const bulkResumeAttemptedRef = useRef(false);
+  // Always-current copies for the poller closures (state would be stale): the
+  // last-applied items (for M4 survivor computation) and the set of reservation
+  // ids the active bulk queue owns (so the row-level /active + /last rediscovery
+  // skip them — belt-and-suspenders with the server's owner=bulk exclusion, B1).
+  const bulkItemsRef = useRef<BulkBuyInQueueItem[]>([]);
+  const bulkActiveReservationIdsRef = useRef<Set<string>>(new Set());
 
   // Keep the screen (and thus the Mac) awake while a bulk buy-in queue runs. The
   // queue LOOP is client-driven and the local sidecar must keep polling, so if the
@@ -6386,7 +6451,9 @@ export default function Bookings() {
       const ids = reservationsRef.current
         .filter((r) => (r.slotsFilled ?? 0) < (r.slotsTotal ?? 0))
         .map((r) => r._id)
-        .filter((id) => !(id in autoFillJobs));
+        // Skip reservations a server-side bulk queue currently owns — the bulk
+        // dialog drives their progress; a row poller here would race it (B1).
+        .filter((id) => !(id in autoFillJobs) && !bulkActiveReservationIdsRef.current.has(id));
       if (ids.length === 0) return;
       try {
         const data = await apiGetJson<{ jobs: Record<string, AutoFillJobStatus> }>(
@@ -6429,7 +6496,9 @@ export default function Bookings() {
       const ids = reservationsRef.current
         .filter((r) => (r.slotsFilled ?? 0) < (r.slotsTotal ?? 0))
         .map((r) => r._id)
-        .filter((id) => !(id in autoFillJobs));
+        // Skip reservations a server-side bulk queue currently owns — the bulk
+        // dialog drives their progress; a row poller here would race it (B1).
+        .filter((id) => !(id in autoFillJobs) && !bulkActiveReservationIdsRef.current.has(id));
       if (ids.length === 0) return;
       try {
         const data = await apiGetJson<{ jobs: Record<string, AutoFillJobStatus> }>(
@@ -6458,6 +6527,30 @@ export default function Bookings() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reservations]);
+
+  // Rediscover a SERVER-SIDE bulk queue still running for this operator: the
+  // queue survives a closed/reloaded browser, so on mount we ask the server for
+  // the latest bulk job and, if it's still running, re-attach the poller + reopen
+  // the dialog so the operator sees live progress. Runs once on mount; the poller
+  // it (re)starts owns subsequent updates. Always tears the poller down on unmount.
+  useEffect(() => {
+    let cancelled = false;
+    const rediscoverBulk = async () => {
+      if (bulkPollTimerRef.current) return; // already polling a job we started
+      try {
+        const data = await apiGetJson<{ job: BulkAutoFillJobStatus | null }>("/api/operations/bulk-auto-fill/active");
+        if (cancelled || !data?.job) return;
+        if (data.job.done) return; // finished while we were away — nothing to resume
+        setBulkAutoFillJobId(data.job.bulkJobId);
+        applyBulkStatus(data.job);
+        setBulkBuyInQueueOpen(true);
+        startBulkPoller(data.job.bulkJobId);
+      } catch { /* best effort */ }
+    };
+    void rediscoverBulk();
+    return () => { cancelled = true; stopBulkPoller(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Server-side auto-fill job: poller wiring ──────────────────────────────
   const clearAutoFillJob = (reservationId: string) => {
@@ -6731,20 +6824,179 @@ export default function Bookings() {
     });
   };
   const clearBulkBookingSelection = () => setBulkSelectedReservations({});
-  const cancelBulkBuyInQueue = () => {
+  const cancelBulkBuyInQueue = async () => {
     bulkBuyInCancelRef.current = true;
+    // Cancel the SERVER job — this is what actually stops the queue (the old
+    // client ref did nothing once the tab was reloaded/suspended, which is why
+    // the Cancel button appeared dead). The poller then reflects the server's
+    // cancelled statuses; we also optimistically grey out still-queued rows.
+    if (bulkAutoFillJobId) {
+      try {
+        await apiRequest("POST", `/api/operations/bulk-auto-fill/${bulkAutoFillJobId}/cancel`);
+      } catch (e: any) {
+        toast({ title: "Cancel failed", description: e?.message ?? String(e), variant: "destructive" });
+      }
+    }
     setBulkBuyInQueueItems((prev) => prev.map((item) => (
       item.status === "queued"
         ? { ...item, status: "cancelled", message: "Cancelled before running", finishedAt: new Date().toISOString() }
         : item
     )));
   };
+  // ── Server-side bulk queue: apply / poll / start ──────────────────────────
+  // The queue runs on the server (server/bulk-auto-fill-job.ts) so it survives a
+  // closed or suspended tab — the old client `for`-loop froze mid-`await` when
+  // Safari backgrounded the tab overnight and never ran. We POST the list once,
+  // then poll the bulk job and REPLACE the dialog's items wholesale from the
+  // server's authoritative per-item status (stable insertion order — M6).
+  const applyBulkStatus = (status: BulkAutoFillJobStatus) => {
+    const items: BulkBuyInQueueItem[] = status.items.map((si) => ({
+      id: `${status.bulkJobId}:${si.reservationId}`,
+      jobId: status.bulkJobId,
+      reservationId: si.reservationId,
+      propertyId: si.propertyId,
+      listingId: si.listingId,
+      propertyName: si.propertyName,
+      guestName: si.guestName,
+      checkIn: si.checkIn,
+      checkOut: si.checkOut,
+      queuedFor: si.queuedFor,
+      status: si.status,
+      message: si.message,
+      error: si.error,
+      filled: si.filled,
+      totalSlots: si.totalSlots,
+      startedAt: si.startedAt ?? undefined,
+      finishedAt: si.finishedAt ?? undefined,
+    }));
+    setBulkBuyInQueueItems(items);
+    bulkItemsRef.current = items;
+    bulkActiveReservationIdsRef.current = status.done
+      ? new Set()
+      : new Set(items.map((it) => it.reservationId));
+    setBulkBuyInQueueRunning(!status.done);
+  };
+
+  const stopBulkPoller = () => {
+    if (bulkPollTimerRef.current) { clearInterval(bulkPollTimerRef.current); bulkPollTimerRef.current = null; }
+  };
+
+  const finishBulkQueue = (status: BulkAutoFillJobStatus | null) => {
+    stopBulkPoller();
+    setBulkBuyInQueueRunning(false);
+    bulkActiveReservationIdsRef.current = new Set();
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    if (status) {
+      toast({
+        title: "Bulk buy-in queue finished",
+        description: `${status.completed} filled · ${status.skipped} partial · ${status.failed} failed${status.cancelled ? ` · ${status.cancelled} cancelled` : ""}.`,
+      });
+    } else {
+      toast({ title: "Bulk buy-in queue finished" });
+    }
+  };
+
+  const startBulkPoller = (bulkJobId: string) => {
+    stopBulkPoller();
+    bulkResumeAttemptedRef.current = false;
+    const tick = async () => {
+      try {
+        const status = await apiGetJson<BulkAutoFillJobStatus>(`/api/operations/bulk-auto-fill/${bulkJobId}`);
+        applyBulkStatus(status);
+        if (status.done) finishBulkQueue(status);
+      } catch (e: any) {
+        const msg = String(e?.message ?? "");
+        // M4: the bulk job vanished (server restart / TTL eviction). Auto-resume
+        // ONCE by re-POSTing the not-yet-terminal items — safe because every
+        // attach persists to Postgres and detach is idempotent.
+        if (/\b404\b/.test(msg) && !bulkResumeAttemptedRef.current && bulkPayloadsRef.current.length > 0) {
+          bulkResumeAttemptedRef.current = true;
+          const terminal = new Set(
+            bulkItemsRef.current
+              .filter((it) => ["completed", "failed", "skipped", "cancelled"].includes(it.status))
+              .map((it) => it.reservationId),
+          );
+          const survivors = bulkPayloadsRef.current.filter((p) => !terminal.has(p.reservationId));
+          if (survivors.length > 0) {
+            try {
+              const resp = await apiRequest("POST", "/api/operations/bulk-auto-fill", { items: survivors }).then((r) => r.json());
+              if (resp?.bulkJobId) {
+                setBulkAutoFillJobId(resp.bulkJobId);
+                bulkPayloadsRef.current = survivors;
+                if (resp.status) applyBulkStatus(resp.status);
+                startBulkPoller(resp.bulkJobId);
+                toast({ title: "Bulk queue resumed", description: "The server had restarted; re-queued the remaining bookings." });
+                return;
+              }
+            } catch { /* fall through */ }
+          }
+          stopBulkPoller();
+          setBulkBuyInQueueRunning(false);
+          bulkActiveReservationIdsRef.current = new Set();
+        }
+        // Other transient errors (401 redirect / network blip) — keep polling.
+      }
+    };
+    void tick();
+    bulkPollTimerRef.current = setInterval(() => void tick(), 3000);
+  };
+
+  // Build one reservation's fully self-contained payload for the server bulk job:
+  // the ground-floor scan + net revenue + the attached buy-in ids to detach. Done
+  // up front (operator present) so the server never needs the client mid-run.
+  const buildBulkAutoFillItemPayload = async (reservation: GuestyReservation): Promise<BulkAutoFillItemPayload | null> => {
+    const meta = reservationPropertyMeta.get(reservation._id);
+    if (!meta?.propertyId) return null;
+    const propertyId = meta.propertyId;
+    const unitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
+    const toDateOnly = (s?: string) => (!s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10));
+    const ci = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
+    const co = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ci) || !/^\d{4}-\d{2}-\d{2}$/.test(co)) return null;
+    // ALL slots — the queue detaches every attached unit and re-fills the full set.
+    const slots = reservation.slots.map((s) => ({
+      unitId: s.unitId, unitLabel: s.unitLabel, bedrooms: s.bedrooms, community: s.community ?? null,
+    }));
+    if (slots.length === 0) return null;
+
+    let groundFloorBedrooms: number[] = [];
+    if (unitConfig) {
+      try {
+        const req = await apiRequest("GET", groundFloorRequirementHref(reservation, propertyId))
+          .then((r) => r.json() as Promise<GroundFloorRequirement>);
+        groundFloorBedrooms = groundFloorTargetBedrooms(req).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+      } catch { groundFloorBedrooms = []; }
+    }
+
+    const community = unitConfig?.community ?? reservation.slots.find((s) => s.community)?.community ?? null;
+    return {
+      reservationId: reservation._id,
+      propertyId,
+      listingId: meta.guestyListingId ?? null,
+      propertyName: meta.propertyName,
+      community,
+      checkIn: ci,
+      checkOut: co,
+      slots,
+      groundFloorBedrooms,
+      // Same getNetRevenue the single button uses, so the server profit gate
+      // matches the row's profit number (0 / unknown disables the gate).
+      expectedRevenue: getNetRevenue(reservation),
+      buyInIdsToDetach: reservation.slots.filter((s) => s.buyIn?.id).map((s) => s.buyIn!.id),
+      guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
+      queuedFor: bulkBuyInQueuedForText(reservation, meta.propertyName, propertyId),
+    };
+  };
+
   const startBulkBuyInQueue = async () => {
     const jobId = `bulk-buy-in-${Date.now()}`;
-    const queue = selectedBulkEligibleReservations
+    const selected = selectedBulkEligibleReservations;
+    const displayItems = selected
       .map((reservation) => buildBulkQueueItem(reservation, jobId))
       .filter((item): item is BulkBuyInQueueItem => !!item);
-    if (queue.length === 0) {
+    if (displayItems.length === 0) {
       toast({
         title: "No eligible bookings selected",
         description: "Select bookings with open buy-in slots from the global All bookings table.",
@@ -6753,201 +7005,45 @@ export default function Bookings() {
     }
 
     bulkBuyInCancelRef.current = false;
-    setBulkBuyInQueueItems(queue);
+    setBulkBuyInQueueItems(displayItems);
+    bulkItemsRef.current = displayItems;
     setBulkBuyInQueueOpen(true);
     setBulkBuyInQueueRunning(true);
-    await Promise.all(queue.map((item) => logBulkBuyInQueueEvent(item, "info", "Bulk buy-in queue item queued")));
 
-    for (const item of queue) {
-      if (bulkBuyInCancelRef.current) {
-        setBulkQueueItem(item.reservationId, {
-          status: "cancelled",
-          message: "Cancelled by operator",
-          finishedAt: new Date().toISOString(),
-        });
-        await logBulkBuyInQueueEvent({ ...item, status: "cancelled", message: "Cancelled by operator" }, "warn", "Bulk buy-in queue item cancelled");
-        continue;
-      }
-
-      const reservation = reservations.find((row) => row._id === item.reservationId);
-      if (!reservation) {
-        const message = "Reservation disappeared from the global list before it could run";
-        setBulkQueueItem(item.reservationId, {
-          status: "failed",
-          message,
-          error: message,
-          finishedAt: new Date().toISOString(),
-        });
-        await logBulkBuyInQueueEvent({ ...item, status: "failed", error: message }, "error", message);
-        continue;
-      }
-
-      setBulkQueueItem(item.reservationId, {
-        status: "running",
-        message: "Running buy-in search",
-        startedAt: new Date().toISOString(),
-      });
-      autoFillRunRef.current.add(item.reservationId);
-      clearAutoFillDiagnostics(item.reservationId);
-      setAutoFillStartedByReservation((prev) => ({ ...prev, [item.reservationId]: Date.now() }));
-
-      try {
-        // OVERRIDE attached units: detach every existing buy-in so this
-        // reservation is searched FRESH from scratch (operator: a queued
-        // reservation with units already attached is overridden, not topped-up or
-        // skipped). After detach the DB is clean, so the server reads
-        // existingAttachedCost=0 and re-fills EVERY slot via the SAME server-side
-        // auto-fill job the "Auto-fill cheapest" button runs. A detach failure
-        // throws → the outer catch marks the item failed (no partial search).
-        const attachedSlots = reservation.slots.filter((s) => s.buyIn?.id);
-        if (attachedSlots.length > 0) {
-          setBulkQueueItem(item.reservationId, {
-            message: `Detaching ${attachedSlots.length} attached unit${attachedSlots.length === 1 ? "" : "s"} for a fresh search…`,
-          });
-          for (const slot of attachedSlots) {
-            const buyInId = slot.buyIn!.id;
-            const detachResp = await apiRequest("POST", `/api/bookings/detach-buy-in/${buyInId}`)
-              .then((r) => r.json())
-              .catch((e: any) => { throw new Error(`Could not detach existing unit (buy-in ${buyInId}): ${e?.message ?? e}`); });
-            if (detachResp?.error) throw new Error(`Could not detach existing unit (buy-in ${buyInId}): ${detachResp.error}`);
-          }
-          await logBulkBuyInQueueEvent(
-            { ...item, status: "running" },
-            "info",
-            `Detached ${attachedSlots.length} attached unit(s) before a fresh search`,
-          );
-        }
-        // All slots now empty (DB + this fresh copy) so auto-fill re-searches
-        // every unit — identical to clicking "Auto-fill cheapest" on an open booking.
-        const freshReservation: GuestyReservation = attachedSlots.length > 0
-          ? { ...reservation, fullyLinked: false, slots: reservation.slots.map((s) => ({ ...s, buyIn: null })) }
-          : reservation;
-
-        // The SAME server-side auto-fill, but RESILIENT to a transient server
-        // restart. Auto-fill jobs are in-memory, so a Railway redeploy mid-run
-        // wipes them and the poll comes back "Auto-fill job was lost (server
-        // restart)". Picks persist to Postgres as they attach, so a re-POST
-        // (forceRestart) resumes/redoes the search. Retry a bounded number of
-        // times — covering a redeploy window — before letting the item fail.
-        const MAX_JOB_LOST_RETRIES = 3;
-        const JOB_LOST_RETRY_DELAY_MS = 15_000;
-        const wasJobLost = (r: AutoFillMutationResult): boolean =>
-          r.results.length > 0
-          && r.results.every((row) => !row.picked)
-          && r.results.some((row) => row.skippedReasons.some((reason) => /job was lost|server restart/i.test(reason)));
-        let result: AutoFillMutationResult | null = null;
-        for (let attempt = 0; attempt <= MAX_JOB_LOST_RETRIES; attempt += 1) {
-          if (bulkBuyInCancelRef.current) break;
-          if (attempt > 0) {
-            setBulkQueueItem(item.reservationId, {
-              message: `Search interrupted (server restart) — retrying ${attempt}/${MAX_JOB_LOST_RETRIES}…`,
-            });
-            await logBulkBuyInQueueEvent({ ...item, status: "running" }, "warn",
-              `Auto-fill job lost to a server restart — retry ${attempt}/${MAX_JOB_LOST_RETRIES}`);
-            await new Promise((r) => setTimeout(r, JOB_LOST_RETRY_DELAY_MS));
-          }
-          try {
-            result = await autoFillMutation.mutateAsync({
-              reservation: freshReservation,
-              propertyId: item.propertyId,
-              listingId: item.listingId,
-              silent: true,
-              // Bulk runs sequentially and is already long-running, so it polls the
-              // nearby-city expansion inline (rather than handing off to the row
-              // poller) — keeps result.results correct for the pass/fail report below.
-              awaitExpansionInline: true,
-              // Supersede any in-flight job for this reservation (e.g. a manual
-              // "Auto-fill cheapest" still running) so the just-detached fresh
-              // search isn't dropped onto a stale reused job.
-              forceRestart: true,
-            });
-          } catch (e: any) {
-            // A throw during the restart window (network / 502 / interrupted) is
-            // also a transient symptom — retry until the budget is exhausted.
-            if (attempt >= MAX_JOB_LOST_RETRIES || bulkBuyInCancelRef.current) throw e;
-            result = null;
-            continue;
-          }
-          if (!wasJobLost(result)) break; // a real terminal result (filled OR genuine no-pair)
-        }
-        if (!result) {
-          throw new Error(bulkBuyInCancelRef.current
-            ? "Cancelled during a server-restart retry"
-            : "Auto-fill failed after retrying a server restart");
-        }
-        const filled = result.results.filter((row) => row.picked).length;
-        const total = result.results.length;
-        const failedReasons = result.results
-          .flatMap((row) => row.skippedReasons)
-          .filter(Boolean);
-        if (filled === 0) {
-          const message = failedReasons[0] ?? "No verified priced candidate was attached";
-          const updated = {
-            ...item,
-            status: "failed" as const,
-            message,
-            error: failedReasons.join(" | ") || message,
-            filled,
-            totalSlots: total,
-            finishedAt: new Date().toISOString(),
-          };
-          setBulkQueueItem(item.reservationId, updated);
-          await logBulkBuyInQueueEvent(updated, "error", "Bulk buy-in queue item failed to attach any buy-ins", {
-            reasons: failedReasons,
-            searchAudits: result.searchAudits,
-            comboOptions: result.comboOptions,
-          });
-          continue;
-        }
-
-        const updated = {
-          ...item,
-          status: filled === total ? "completed" as const : "skipped" as const,
-          message: filled === total
-            ? `Attached ${filled}/${total} buy-in${total === 1 ? "" : "s"}`
-            : `Attached ${filled}/${total}; review remaining slots`,
-          filled,
-          totalSlots: total,
-          finishedAt: new Date().toISOString(),
-        };
-        setBulkQueueItem(item.reservationId, updated);
-        await logBulkBuyInQueueEvent(
-          updated,
-          filled === total ? "info" : "warn",
-          filled === total ? "Bulk buy-in queue item completed" : "Bulk buy-in queue item partially completed",
-          {
-            searchAudits: result.searchAudits,
-            comboOptions: result.comboOptions,
-          },
-        );
-      } catch (error: any) {
-        const raw = String(error?.message ?? error ?? "Unknown bulk buy-in error");
-        const updated = {
-          ...item,
-          status: "failed" as const,
-          message: raw,
-          error: raw,
-          finishedAt: new Date().toISOString(),
-        };
-        setBulkQueueItem(item.reservationId, updated);
-        console.error("[bulk-buy-ins] queue item failed", updated, error);
-        await logBulkBuyInQueueEvent(updated, "error", "Bulk buy-in queue item crashed", {
-          stack: error?.stack,
-        });
-      } finally {
-        // ALWAYS release run-tracking for this reservation. Bulk items aren't
-        // driven by the row poller, so without this a failed/superseded item
-        // (e.g. a detach error throws before the mutation) leaves the id stuck in
-        // autoFillRunRef + autoFillStartedByReservation — which blocks the
-        // visibility-resume re-fire and a later manual Auto-fill for that row.
-        stopTrackingAutoFill(item.reservationId);
-      }
+    // Build each reservation's payload (ground-floor scans run here, while the
+    // operator is present), then hand the WHOLE list to the server, which walks
+    // the queue on its own. The operator can close the tab/browser after this.
+    let payloads: BulkAutoFillItemPayload[] = [];
+    try {
+      payloads = (await Promise.all(selected.map((r) => buildBulkAutoFillItemPayload(r))))
+        .filter((p): p is BulkAutoFillItemPayload => !!p);
+    } catch (e: any) {
+      toast({ title: "Could not prepare the queue", description: e?.message ?? String(e), variant: "destructive" });
+      setBulkBuyInQueueRunning(false);
+      return;
     }
+    if (payloads.length === 0) {
+      toast({ title: "No eligible bookings", description: "None of the selected bookings could be prepared.", variant: "destructive" });
+      setBulkBuyInQueueRunning(false);
+      return;
+    }
+    bulkPayloadsRef.current = payloads;
+    bulkActiveReservationIdsRef.current = new Set(payloads.map((p) => p.reservationId));
 
-    setBulkBuyInQueueRunning(false);
-    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-    toast({ title: "Bulk buy-in queue finished" });
+    try {
+      const resp = await apiRequest("POST", "/api/operations/bulk-auto-fill", { items: payloads }).then((r) => r.json());
+      if (!resp?.bulkJobId) throw new Error(resp?.error || "Could not start the bulk queue.");
+      setBulkAutoFillJobId(resp.bulkJobId);
+      if (resp.status) applyBulkStatus(resp.status);
+      startBulkPoller(resp.bulkJobId);
+      toast({
+        title: "Bulk queue started on the server",
+        description: "It keeps running even if you close this tab or your browser. Reopen Bookings to check progress.",
+      });
+    } catch (e: any) {
+      toast({ title: "Could not start the bulk queue", description: e?.message ?? String(e), variant: "destructive" });
+      setBulkBuyInQueueRunning(false);
+    }
   };
 
   const toggleExpanded = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
