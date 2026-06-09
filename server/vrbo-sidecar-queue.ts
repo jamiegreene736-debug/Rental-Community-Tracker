@@ -95,7 +95,38 @@ export type SidecarVrboParams = {
   queueContext?: SidecarQueueContext;
   /** City-wide VRBO inventory export (single term, exhaustive list scroll + GraphQL pagination). */
   cityWideInventory?: boolean;
+  /**
+   * The property's EXPECTED US state, normalized to a full lowercase name
+   * ("florida", "hawaii", …). The daemon's mainland-namesake destination guard
+   * (vrboResolvedToNonHawaiiState) uses it to ACCEPT a resolution that matches the
+   * expected state (a Florida property legitimately resolves to Florida) while
+   * still rejecting a mismatch (a Hawaii property drifting to "Port Allen,
+   * Louisiana"). Omitted/"hawaii" → byte-identical legacy behavior (reject all
+   * non-Hawaii). See AGENTS.md geo-guard note + listing-geo.ts.
+   */
+  expectedState?: string;
 };
+
+// USPS abbreviation → full lowercase state name. The destination's state field is
+// often the abbreviation ("FL"); the daemon guard matches on full names, so
+// normalize here (server-side, type-checked) before threading expectedState.
+const US_STATE_ABBR_TO_FULL: Record<string, string> = {
+  al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california",
+  co: "colorado", ct: "connecticut", de: "delaware", fl: "florida", ga: "georgia",
+  hi: "hawaii", id: "idaho", il: "illinois", in: "indiana", ia: "iowa", ks: "kansas",
+  ky: "kentucky", la: "louisiana", me: "maine", md: "maryland", ma: "massachusetts",
+  mi: "michigan", mn: "minnesota", ms: "mississippi", mo: "missouri", mt: "montana",
+  ne: "nebraska", nv: "nevada", nh: "new hampshire", nj: "new jersey", nm: "new mexico",
+  ny: "new york", nc: "north carolina", nd: "north dakota", oh: "ohio", ok: "oklahoma",
+  or: "oregon", pa: "pennsylvania", ri: "rhode island", sc: "south carolina",
+  sd: "south dakota", tn: "tennessee", tx: "texas", ut: "utah", vt: "vermont",
+  va: "virginia", wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming",
+};
+function fullStateNameLower(state?: string | null): string | undefined {
+  const s = String(state ?? "").trim().toLowerCase();
+  if (!s) return undefined;
+  return US_STATE_ABBR_TO_FULL[s] ?? s; // already a full name, or unknown → pass through
+}
 
 export type SidecarVrboPhotoScrapeParams = {
   url: string;
@@ -2420,6 +2451,11 @@ export async function searchVrboViaSidecar(opts: {
         searchVariations: policy.terms,
         queueContext: opts.queueContext,
         cityWideInventory: Boolean(opts.cityWideInventory),
+        // Thread the property's expected state (full lowercase name) so the daemon
+        // guard accepts a same-state resolution (e.g. a Florida property → Florida)
+        // instead of dropping it as a mainland namesake. Derived from the parsed
+        // search location; "hawaii"/undefined keeps the legacy reject-all behavior.
+        expectedState: fullStateNameLower(location.state),
         variationMode: {
           filterTokens: policy.filterTokens,
           maxVariations: policy.maxVariations,
