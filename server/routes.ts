@@ -12827,7 +12827,11 @@ Requirements:
         .split(",").map((s) => s.trim()).filter(Boolean);
       const out: Record<string, any> = {};
       for (const id of ids) {
-        const job = getActiveAutoFillJobForReservation(id);
+        // excludeBulk: a reservation currently being driven by the server-side
+        // bulk queue must NOT also get a row poller re-attached here — that would
+        // race the bulk orchestrator's single-flight (B1). The bulk dialog owns
+        // those rows' progress.
+        const job = getActiveAutoFillJobForReservation(id, { excludeBulk: true });
         if (job) out[id] = serializeAutoFillJob(job);
       }
       return res.json({ jobs: out });
@@ -12872,6 +12876,66 @@ Requirements:
       const { cancelAutoFillJob } = await import("./auto-fill-job");
       const ok = cancelAutoFillJob(String(req.params.jobId));
       if (!ok) return res.status(404).json({ error: "auto-fill job not found or expired" });
+      return res.json({ ok: true });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // ── Server-side BULK auto-fill queue (server/bulk-auto-fill-job.ts) ──────────
+  // The whole bulk queue runs server-side so it survives the browser tab
+  // suspending/closing — the prior client-driven for-loop stalled overnight when
+  // Safari backgrounded the tab. The client POSTs the full list ONCE and polls.
+  //
+  // START: returns immediately (202-style) with a bulkJobId; the sequential
+  // orchestration runs fire-and-forget. Idempotent — a still-running job is
+  // reused so a double-clicked Start can't spawn two queues.
+  app.post("/api/operations/bulk-auto-fill", async (req: Request, res: Response) => {
+    try {
+      const { startBulkAutoFillJob, BulkAutoFillValidationError, getBulkAutoFillJob, serializeBulkAutoFillJob } =
+        await import("./bulk-auto-fill-job");
+      const items = Array.isArray(req.body?.items) ? req.body.items : [];
+      try {
+        const { bulkJobId, reused } = startBulkAutoFillJob(items);
+        const job = getBulkAutoFillJob(bulkJobId);
+        return res.json({ bulkJobId, reused, status: job ? serializeBulkAutoFillJob(job) : null });
+      } catch (e: any) {
+        if (e instanceof BulkAutoFillValidationError) return res.status(400).json({ error: e.message });
+        throw e;
+      }
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // "active" MUST precede ":bulkJobId". Returns the latest bulk job (running OR
+  // recently finished) so a reopened browser can rebuild the queue dialog.
+  app.get("/api/operations/bulk-auto-fill/active", async (_req: Request, res: Response) => {
+    try {
+      const { getLatestBulkAutoFillJob, serializeBulkAutoFillJob } = await import("./bulk-auto-fill-job");
+      const job = getLatestBulkAutoFillJob();
+      return res.json({ job: job ? serializeBulkAutoFillJob(job) : null });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/operations/bulk-auto-fill/:bulkJobId", async (req: Request, res: Response) => {
+    try {
+      const { getBulkAutoFillJob, serializeBulkAutoFillJob } = await import("./bulk-auto-fill-job");
+      const job = getBulkAutoFillJob(String(req.params.bulkJobId));
+      if (!job) return res.status(404).json({ error: "bulk auto-fill job not found or expired" });
+      return res.json(serializeBulkAutoFillJob(job));
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.post("/api/operations/bulk-auto-fill/:bulkJobId/cancel", async (req: Request, res: Response) => {
+    try {
+      const { cancelBulkAutoFillJob } = await import("./bulk-auto-fill-job");
+      const ok = cancelBulkAutoFillJob(String(req.params.bulkJobId));
+      if (!ok) return res.status(404).json({ error: "bulk auto-fill job not found or expired" });
       return res.json({ ok: true });
     } catch (e: any) {
       return res.status(500).json({ error: e?.message ?? String(e) });
@@ -23454,9 +23518,17 @@ Return ONLY compact JSON with this exact shape:
   });
 
   // GET /api/admin/vrbo-sidecar/status — diagnostic snapshot of queue.
+  // bulkAutoFillActive: true while the server-side bulk queue is running, so the
+  // daemon's caffeinate guard (supervisor.mjs) keeps the Mac awake for the WHOLE
+  // bulk run — not just while VRBO requests happen to be in the sidecar queue.
+  // Between reservations the sidecar can briefly idle (job hand-off, cache hits);
+  // without this signal the 5-min caffeinate grace could lapse and the Mac sleep
+  // mid-queue, stranding the rest. See AGENTS.md bulk-queue load-bearing (M1).
   app.get("/api/admin/vrbo-sidecar/status", async (_req, res) => {
     const { getStatus } = await import("./vrbo-sidecar-queue");
-    return res.json({ ...getStatus(), sidecarLane: getSidecarLaneStatus() });
+    const { getLatestBulkAutoFillJob } = await import("./bulk-auto-fill-job");
+    const bulkAutoFillActive = getLatestBulkAutoFillJob()?.status === "running";
+    return res.json({ ...getStatus(), sidecarLane: getSidecarLaneStatus(), bulkAutoFillActive });
   });
 
   // GET /api/vrbo-sidecar/status — public queue counters for the

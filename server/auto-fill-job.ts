@@ -98,6 +98,12 @@ export type StartAutoFillInput = {
   // detached slot unfilled. forceRestart guarantees the fresh job reads the
   // post-detach DB (baseline 0) and the full slot set. See AGENTS.md #8.
   forceRestart?: boolean;
+  // Who started this job. Bulk-queue jobs set owner="bulk" so the row-level
+  // /active rediscovery (getActiveAutoFillJobForReservation with excludeBulk)
+  // does NOT re-attach a competing row poller — that would race the bulk
+  // orchestrator's single-flight and could forceRestart it mid-search. See
+  // AGENTS.md "Bulk buy-in queue is a SERVER-SIDE background job" (B1).
+  owner?: "row" | "bulk";
 };
 
 // Per-city economics recorded by the profit gate (resort, home-city, and each
@@ -196,6 +202,9 @@ type AutoFillJob = {
   totalCost: number | null;
   error: string | null;
   canceled: boolean;
+  // "bulk" when started by the server-side bulk queue, "row" (default) for a
+  // direct "Auto-fill cheapest" click. Lets row-level rediscovery skip bulk jobs.
+  owner: "row" | "bulk";
 };
 
 export type AutoFillJobStatus = {
@@ -1372,6 +1381,7 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
     totalCost: null,
     error: null,
     canceled: false,
+    owner: input.owner === "bulk" ? "bulk" : "row",
   };
   autoFillJobs.set(id, job);
   activeJobByReservation.set(reservationId, id);
@@ -1391,12 +1401,18 @@ export function getAutoFillJob(jobId: string): AutoFillJob | null {
 
 // Rediscover the live job for a reservation (so a returning client can resume
 // polling without remembering the jobId). Returns the live or most-recent job.
-export function getActiveAutoFillJobForReservation(reservationId: string): AutoFillJob | null {
+// excludeBulk (used by the row-level /active endpoint) skips jobs the bulk queue
+// owns, so the row poller never competes with the bulk orchestrator's
+// single-flight on the same reservation (would race a forceRestart). See B1.
+export function getActiveAutoFillJobForReservation(
+  reservationId: string,
+  opts?: { excludeBulk?: boolean },
+): AutoFillJob | null {
   cleanupStaleJobs();
   const id = activeJobByReservation.get(reservationId);
   if (id) {
     const job = autoFillJobs.get(id);
-    if (job) return job;
+    if (job && !(opts?.excludeBulk && job.owner === "bulk")) return job;
   }
   return null;
 }

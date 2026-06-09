@@ -63,7 +63,12 @@ async function pollKeepAwake() {
     clearTimeout(timer);
     if (res.ok) {
       const s = await res.json();
-      if ((Number(s?.pending) || 0) + (Number(s?.inProgress) || 0) > 0) lastBusyAt = Date.now();
+      // Busy if the sidecar queue has work OR a server-side BULK auto-fill queue
+      // is running. The bulk flag keeps the Mac awake across inter-reservation
+      // gaps (job hand-off, cache-only ladder stages) that would otherwise let the
+      // queue idle past the grace window and sleep mid-run. See AGENTS.md (M1).
+      const sidecarBusy = (Number(s?.pending) || 0) + (Number(s?.inProgress) || 0) > 0;
+      if (sidecarBusy || s?.bulkAutoFillActive === true) lastBusyAt = Date.now();
     }
   } catch {
     // Transient blip (server unreachable): hold the current assertion until the
