@@ -357,6 +357,11 @@ type AutoFillComboOption = {
   unavailableReason?: string;
   unavailableDetails?: string[];
   note?: string;
+  // A REJECTED (over-budget) walkable pair captured so the operator can review it
+  // after the search and "attach anyway" to override the loss limit. lossProfit is
+  // the projected (negative) profit. See server recordLossComboOption.
+  isLoss?: boolean;
+  lossProfit?: number;
   picks: Array<{
     bedrooms: number;
     source?: "airbnb" | "vrbo" | "booking" | "pm";
@@ -1546,6 +1551,7 @@ type AutoFillJobStatus = {
   expectedRevenue?: number;
   expectedProfit?: number | null;
   error: string | null;
+  timestamps?: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
 
 // The shape the auto-fill mutation returns / the bulk queue report consumes.
@@ -3996,6 +4002,122 @@ function groundFloorTargetBedrooms(req?: GroundFloorRequirement | null): number[
   return Array.from(targets).sort((a, b) => b - a);
 }
 
+// Durable "Last buy-in search" panel — surfaces the OVER-BUDGET (loss) combos a
+// search found and skipped, so the operator can review them after the bulk queue
+// closes and one-click "accept the loss" to override the $100 max-loss limit.
+// Fed from the in-memory server last-job store (survives closing the queue +
+// page reload, lost only on server redeploy). lossCombos are the attachable
+// walkable pairs; lossLog is the full economics ledger of every rejected combo.
+function LastBuyInSearchPanel({
+  lossCombos,
+  lossLog,
+  finishedAt,
+  onAttachCombo,
+  attachingComboLabel,
+}: {
+  lossCombos: AutoFillComboOption[];
+  lossLog: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string }>;
+  finishedAt?: number | null;
+  onAttachCombo: (option: AutoFillComboOption) => void;
+  attachingComboLabel?: string | null;
+}) {
+  if (lossCombos.length === 0 && lossLog.length === 0) return null;
+  return (
+    <div className="rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs" data-testid="last-buy-in-search-panel">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-medium text-amber-900">Last buy-in search · over-budget combinations</p>
+        {finishedAt ? (
+          <span className="text-[10px] text-amber-700">{new Date(finishedAt).toLocaleString()}</span>
+        ) : null}
+      </div>
+      <p className="mt-0.5 text-[11px] text-amber-800">
+        These walkable same-community combos were found but skipped for exceeding the $100 max-loss limit. Review and attach one to override.
+      </p>
+      {lossCombos.length > 0 && (
+        <div className="mt-2 space-y-1.5">
+          {lossCombos.map((option) => {
+            const attaching = attachingComboLabel === option.label;
+            const loss = typeof option.lossProfit === "number" ? -option.lossProfit : null;
+            return (
+              <div key={option.label} className="rounded border border-amber-200 bg-white/70 px-2 py-1.5">
+                <div className="grid grid-cols-[1fr_auto] gap-3">
+                  <div className="min-w-0">
+                    <p className="font-medium text-foreground">{option.label}</p>
+                    <p className="truncate text-[11px] text-muted-foreground">
+                      {option.picks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
+                    </p>
+                    {loss != null && (
+                      <p className="text-[11px] font-medium text-red-700">Would lose {fmtMoney(loss)}</p>
+                    )}
+                    {option.picks.some((pick) => pick.url) && (
+                      <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
+                        {option.picks.map((pick, index) =>
+                          pick.url ? (
+                            <a
+                              key={`${option.label}-link-${index}`}
+                              href={pick.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="max-w-[46%] truncate text-[10px] text-blue-600 underline"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {pick.title}
+                            </a>
+                          ) : null,
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="font-semibold tabular-nums">{fmtMoney(option.totalCost)}</span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-[11px] border-red-300 text-red-700 hover:bg-red-50"
+                      disabled={!!attachingComboLabel}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const ok = window.confirm(
+                          `Attach ${option.label} for ${fmtMoney(option.totalCost)}?\n\nThis combo is over the $100 max-loss limit${loss != null ? ` and would lose about ${fmtMoney(loss)}` : ""}. Any buy-ins already on this booking will be replaced.`,
+                        );
+                        if (ok) onAttachCombo(option);
+                      }}
+                      data-testid={`button-attach-loss-combo-${option.label}`}
+                    >
+                      {attaching ? "Attaching…" : "Attach (accept the loss)"}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {lossLog.length > 0 && (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-[11px] font-medium text-amber-900">
+            Full loss log ({lossLog.length} combo{lossLog.length === 1 ? "" : "s"} considered)
+          </summary>
+          <ul className="mt-1 space-y-0.5">
+            {lossLog.map((entry, index) => (
+              <li key={`loss-log-${index}`} className="text-[11px] text-muted-foreground">
+                <span className="font-medium text-foreground">{entry.label}</span>{" "}
+                <span className="capitalize">({entry.source.replace(/-/g, " ")})</span> · {fmtMoney(entry.comboCost)} ·{" "}
+                {entry.expectedProfit < 0
+                  ? <span className="text-red-700">est. loss {fmtMoney(-entry.expectedProfit)}</span>
+                  : <>est. profit {fmtMoney(entry.expectedProfit)}</>}
+                {entry.reason ? <> · {entry.reason}</> : null}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function ComboComparisonPanel({
   options,
   targetResortName,
@@ -5033,6 +5155,10 @@ export default function Bookings() {
   };
   const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
   const [lastAutoFillAudits, setLastAutoFillAudits] = useState<Record<string, AutoFillSearchAudit[]>>({});
+  // Durable "last buy-in search" per reservation (fetched from the server's
+  // last-job store) so the loss-combo economics survive closing the bulk queue +
+  // a page reload — the operator can review them and override-attach a loss combo.
+  const [lastSearchByReservation, setLastSearchByReservation] = useState<Record<string, AutoFillJobStatus>>({});
   const [cityInventoryScanTrigger, setCityInventoryScanTrigger] = useState<Record<string, number>>({});
   const rawReservationsRef = useRef<GuestyReservation[]>([]);
 
@@ -6291,6 +6417,48 @@ export default function Bookings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reservations]);
 
+  // Backfill the durable "Last buy-in search" panel after a full page reload /
+  // navigation: the loss-combo log lives in an in-memory server store (2h TTL),
+  // so on mount we fetch the most-recent finished job for each not-fully-filled
+  // row. Live rows (already in autoFillJobs) get fresher data straight from the
+  // poller via updateAutoFillJobState, so they're excluded here.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchLast = async () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      const ids = reservationsRef.current
+        .filter((r) => (r.slotsFilled ?? 0) < (r.slotsTotal ?? 0))
+        .map((r) => r._id)
+        .filter((id) => !(id in autoFillJobs));
+      if (ids.length === 0) return;
+      try {
+        const data = await apiGetJson<{ jobs: Record<string, AutoFillJobStatus> }>(
+          `/api/operations/auto-fill/last?reservationIds=${encodeURIComponent(ids.join(","))}`,
+        );
+        if (cancelled) return;
+        const jobs = data?.jobs ?? {};
+        if (Object.keys(jobs).length === 0) return;
+        setLastSearchByReservation((prev) => {
+          const next = { ...prev };
+          for (const [reservationId, status] of Object.entries(jobs)) {
+            if (status) next[reservationId] = status;
+          }
+          return next;
+        });
+      } catch { /* best effort — a 401/404/network hiccup just means try again next tick */ }
+    };
+    void fetchLast();
+    const onFocus = () => void fetchLast();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reservations]);
+
   // ── Server-side auto-fill job: poller wiring ──────────────────────────────
   const clearAutoFillJob = (reservationId: string) => {
     setAutoFillJobs((prev) => {
@@ -6317,6 +6485,10 @@ export default function Bookings() {
     });
     if (s.searchAudits?.length) setLastAutoFillAudits((prev) => ({ ...prev, [reservationId]: s.searchAudits }));
     if (s.comboOptions?.length) setLastAutoFillCombos((prev) => ({ ...prev, [reservationId]: s.comboOptions }));
+    // Keep the full last-search status (loss log + attachable loss combos) so the
+    // "Last buy-in search" row panel survives closing the bulk-queue dialog. The
+    // /last fetch re-populates this after a full page reload.
+    setLastSearchByReservation((prev) => ({ ...prev, [reservationId]: s }));
   };
   // Terminal handler for the interactive auto-fill job. Slots are ALREADY
   // attached server-side; here we just refresh the lists so they render, clear
@@ -8176,7 +8348,18 @@ export default function Bookings() {
                 const rowSidecarOnly = rowAutoFillRunning
                   && !autoFillMutation.isPending
                   && autoFillSidecarActive;
-                const comboOptions = lastAutoFillCombos[r._id] ?? [];
+                // Durable last-search status (loss log + loss combos). Live rows get
+                // it from the poller; reloaded rows from the /last fetch above.
+                const lastSearch = lastSearchByReservation[r._id] ?? null;
+                const allCombos = (lastAutoFillCombos[r._id]?.length
+                  ? lastAutoFillCombos[r._id]
+                  : lastSearch?.comboOptions) ?? [];
+                // Keep over-budget combos OUT of the normal panels — they'd sort as a
+                // "cheapest combo" and skew the cancellation advice. They render in the
+                // amber LastBuyInSearchPanel with an explicit accept-the-loss attach.
+                const comboOptions = allCombos.filter((o) => !o.isLoss);
+                const lossCombos = allCombos.filter((o) => o.isLoss);
+                const lossLog = (lastSearch?.cityEconomics ?? []).filter((c) => !c.accepted);
                 const searchAudits = lastAutoFillAudits[r._id] ?? [];
                 const manualReservation = isManualReservation(r);
                 const reservationMeta = buyInPropertyMetaForReservation(r);
@@ -8466,6 +8649,15 @@ export default function Bookings() {
                             community={selectedPropertyId
                               ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community ?? ""
                               : r.slots.find((slot) => slot.community)?.community ?? ""}
+                            onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
+                            attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
+                          />
+                        )}
+                        {(lossCombos.length > 0 || lossLog.length > 0) && (
+                          <LastBuyInSearchPanel
+                            lossCombos={lossCombos}
+                            lossLog={lossLog}
+                            finishedAt={lastSearch?.timestamps?.finishedAt ?? null}
                             onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
                             attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
                           />
