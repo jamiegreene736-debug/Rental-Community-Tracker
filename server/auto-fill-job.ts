@@ -232,6 +232,11 @@ export class AutoFillValidationError extends Error {
 const autoFillJobs = new Map<string, AutoFillJob>();
 // reservationId -> live jobId (single-flight: one auto-fill job per reservation).
 const activeJobByReservation = new Map<string, string>();
+// reservationId -> MOST-RECENT jobId (kept after the job finalizes, unlike
+// activeJobByReservation). Lets the bookings page re-show the last search's
+// loss-combo economics after the operator closes the bulk-queue dialog. Bounded
+// by JOB_TTL_MS via cleanupStaleJobs (the job itself is evicted at 2h).
+const lastJobByReservation = new Map<string, string>();
 const activeJobIds = new Set<string>();
 
 const TERMINAL = new Set<JobStatus>(["completed", "failed"]);
@@ -794,6 +799,8 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       job.cityEconomics.push({ source, label, comboCost: Math.round(comboCost), expectedProfit: Math.round(profit), accepted, reason });
       touch(job);
     };
+    const recordLossComboOption = (label: string, pair: any, comboCost: number, profit: number) =>
+      pushLossComboOption(job, label, pair, comboCost, profit);
 
     const unitConfig = PROPERTY_UNIT_CONFIGS[job.propertyId];
     const isComboProperty = !!unitConfig && unitConfig.units.length >= 2;
@@ -866,6 +873,18 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         } else {
           recordEconomics("resort", `Resort ${job.community ?? ""}`.trim() || "Resort", comboCost, v.profit, false,
             `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searched on`);
+          // The resort itself is the same-community walkable combo — a PRIME
+          // override candidate. Capture it as an attachable loss option, but only
+          // when the proposal covers EVERY slot (the client attach requires
+          // picks.length === slots.length).
+          if (proposal.length === job.slots.length) {
+            recordLossComboOption(
+              `Resort ${job.community ?? ""}`.trim() || "Resort",
+              { bedrooms: proposal.map((p) => p.slot.bedrooms), picks: proposal.map((p) => p.pick) },
+              comboCost,
+              v.profit,
+            );
+          }
         }
       }
     }
@@ -921,6 +940,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
             setEscalation(job, { homeCity: "no-pair" });
             recordEconomics("home-city", payload?.citySearchTerm ?? "home city", comboCost, v.profit, false,
               `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searching nearby cities`);
+            recordLossComboOption(payload?.citySearchTerm ?? "home city", pair, comboCost, v.profit);
           }
         } else {
           setEscalation(job, { homeCity: "no-pair" });
@@ -1092,6 +1112,53 @@ export function assignComboPicksToSlots(
   return out;
 }
 
+// Capture a REJECTED (over-budget) walkable pair as an ATTACHABLE option so the
+// operator can review it after the search and one-click "attach anyway" to
+// override the loss limit. Shaped like the client's AutoFillComboOption +
+// isLoss/lossProfit. Only same-community walkable pairs (resort / home-city /
+// nearby-city) land here — their picks are in hand and the attach won't trip the
+// proximity guard. `pair` is a suggestedPair-shaped object (CityVrboComboPair or
+// its serialized twin): { picks: CityVrboListing[], bedrooms: number[] }.
+// `profit` is negative for a loss; `comboCost` is the pair's total. Module-level
+// so both runAutoFillJob (resort/home-city) and runExpansion (nearby) can call it.
+function pushLossComboOption(
+  job: AutoFillJob,
+  label: string,
+  pair: any,
+  comboCost: number,
+  profit: number,
+): void {
+  if (!pair || !Array.isArray(pair.picks) || pair.picks.length < 2) return;
+  // Don't log the same walkable pair twice (resort + home-city can re-surface the
+  // same cheapest pair across stages). Key on the sorted attach URLs.
+  const urls = (pair.picks as any[]).map((p) => String(p?.url ?? "")).filter(Boolean).sort();
+  const key = urls.join("|");
+  if (key && job.comboOptions.some((o: any) => o.isLoss && o.__lossKey === key)) return;
+  const picks = (pair.picks as any[]).map((p, i) => ({
+    bedrooms: Number(pair.bedrooms?.[i] ?? p?.bedrooms ?? 0) || 0,
+    source: "vrbo" as const,
+    sourceLabel: String(p?.sourceLabel ?? "Vrbo"),
+    title: String(p?.title ?? "Unit"),
+    totalPrice: Number(p?.totalPrice) || 0,
+    nightlyPrice: Number(p?.nightlyPrice) || undefined,
+    url: String(p?.url ?? ""),
+    image: p?.image,
+    images: Array.isArray(p?.images) ? p.images.filter(Boolean).slice(0, 12) : undefined,
+  }));
+  job.comboOptions.push({
+    label,
+    bedrooms: Array.isArray(pair.bedrooms) ? pair.bedrooms : picks.map((x) => x.bedrooms),
+    totalCost: Math.round(comboCost),
+    selected: false,
+    isLoss: true,
+    lossProfit: Math.round(profit),
+    note: `Walkable ${label} pair — would lose $${Math.round(-profit).toLocaleString()} (over the $${PROFIT_MIN_FLAT_USD.toLocaleString()} limit). Attach to override.`,
+    picks,
+    __lossKey: key,
+  });
+  touch(job);
+}
+
 // Attach a city suggestedPair's picks to the remaining slots, consuming each pick
 // once (see assignComboPicksToSlots). Shared by the home-city and nearby-expansion
 // combo paths — pass the right `stage` so the attached record is labeled correctly.
@@ -1157,7 +1224,10 @@ async function runExpansion(
     if (!exp) break; // lost (redeploy)
     const s = serializeExpansionJob(exp);
     setEscalation(job, {
-      tierResults: s.cityResults,
+      // Strip lossPair from the LIVE escalation copy — the client doesn't need the
+      // picks here (they arrive as attachable comboOptions); keeps polling lean.
+      // The terminal fold below reads s.cityResults directly, so it keeps lossPair.
+      tierResults: s.cityResults.map(({ lossPair, ...rest }) => rest),
       nearbyStatus: s.status === "found" ? "found"
         : s.status === "worker_offline" ? "worker_offline"
         : s.status === "error" ? "error"
@@ -1177,6 +1247,17 @@ async function runExpansion(
         accepted: c.accepted === true,
         reason: c.reason,
       });
+      // Surface each rejected nearby pair as an attachable "accept the loss"
+      // override option (its picks rode along in c.lossPair).
+      if (c.accepted !== true && c.lossPair) {
+        pushLossComboOption(
+          job,
+          c.placeName || c.citySearchTerm,
+          c.lossPair,
+          c.comboCost,
+          c.expectedProfit ?? 0,
+        );
+      }
     }
   }
   if (terminal?.status === "found" && terminal.combo) {
@@ -1294,6 +1375,7 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
   };
   autoFillJobs.set(id, job);
   activeJobByReservation.set(reservationId, id);
+  lastJobByReservation.set(reservationId, id);
   void runAutoFillJob(job).catch((err) => {
     job.status = "failed";
     job.error = String(err?.message ?? err);
@@ -1317,6 +1399,15 @@ export function getActiveAutoFillJobForReservation(reservationId: string): AutoF
     if (job) return job;
   }
   return null;
+}
+
+// The MOST-RECENT job for a reservation, terminal or live (unlike the active
+// accessor, which drops it on finalize). Powers the durable "last search" panel
+// so the loss-combo economics survive closing the bulk-queue dialog.
+export function getLastAutoFillJobForReservation(reservationId: string): AutoFillJob | null {
+  cleanupStaleJobs();
+  const id = lastJobByReservation.get(reservationId);
+  return id ? autoFillJobs.get(id) ?? null : null;
 }
 
 export function cancelAutoFillJob(jobId: string): boolean {

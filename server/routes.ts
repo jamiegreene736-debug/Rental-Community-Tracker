@@ -12836,6 +12836,25 @@ Requirements:
     }
   });
 
+  // "last" (like "active") MUST precede :jobId. Returns the MOST-RECENT job per
+  // reservation (terminal OR live) so the bookings page can show the last search's
+  // loss-combo economics after the bulk-queue dialog is closed.
+  app.get("/api/operations/auto-fill/last", async (req: Request, res: Response) => {
+    try {
+      const { getLastAutoFillJobForReservation, serializeAutoFillJob } = await import("./auto-fill-job");
+      const ids = String(req.query.reservationIds ?? req.query.reservationId ?? "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const out: Record<string, any> = {};
+      for (const id of ids) {
+        const job = getLastAutoFillJobForReservation(id);
+        if (job) out[id] = serializeAutoFillJob(job);
+      }
+      return res.json({ jobs: out });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   app.get("/api/operations/auto-fill/:jobId", async (req: Request, res: Response) => {
     try {
       const { getAutoFillJob, serializeAutoFillJob } = await import("./auto-fill-job");

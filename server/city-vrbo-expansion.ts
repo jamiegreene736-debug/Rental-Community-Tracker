@@ -100,6 +100,11 @@ export type ExpansionCityResult = {
   comboCost?: number;
   expectedProfit?: number;
   accepted?: boolean;
+  // For UNPROFITABLE cities only: the cheapest walkable pair we rejected, kept so
+  // the auto-fill job can surface it as an attachable "accept the loss" override
+  // option after the search. Just the 2 picks + bedrooms — compact (~1-2KB), not
+  // the full city inventory, so polling the job status stays cheap.
+  lossPair?: NonNullable<CityVrboScanResult["suggestedPair"]>;
 };
 
 // The inventory payload shape the client consumes — identical to the
@@ -507,7 +512,9 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
             finalize(job);
             return;
           }
-          // Found a pair, but unprofitable → record + keep searching.
+          // Found a pair, but unprofitable → record + keep searching. Keep the
+          // rejected pair (compact) so the auto-fill job can offer it as an
+          // "accept the loss" override after the ladder finishes.
           setCityResult(job, p.term, {
             status: "unprofitable",
             suggestedPair: true,
@@ -516,6 +523,7 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
             comboCost,
             expectedProfit: profit,
             accepted: false,
+            lossPair: scan.suggestedPair,
             reason: `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(profit).toLocaleString()} (worse than the $${Math.abs(Math.round(job.minProfit)).toLocaleString()} max-loss limit); searched on`,
           });
           touch(job);
