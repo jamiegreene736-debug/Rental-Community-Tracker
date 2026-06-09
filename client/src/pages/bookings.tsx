@@ -472,7 +472,7 @@ type BulkBuyInQueueItem = {
   // Over-budget combos found but not attached (would lose money) + per-city loss
   // ledger, surfaced inline in the queue dialog with a one-click accept-the-loss.
   lossCombos?: AutoFillComboOption[];
-  lossLog?: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string }>;
+  lossLog?: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string; units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }> }>;
 };
 
 interface Candidate {
@@ -1548,6 +1548,7 @@ type AutoFillJobStatus = {
     expectedProfit: number;
     accepted: boolean;
     reason?: string;
+    units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }>;
   }>;
   slotsTotal: number;
   slotsFilled: number;
@@ -1589,7 +1590,7 @@ type BulkAutoFillJobStatus = {
     startedAt: string | null;
     finishedAt: string | null;
     lossCombos: AutoFillComboOption[];
-    lossLog: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string }>;
+    lossLog: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string; units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }> }>;
   }>;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
@@ -4073,7 +4074,7 @@ function LastBuyInSearchPanel({
   attachingComboLabel,
 }: {
   lossCombos: AutoFillComboOption[];
-  lossLog: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string }>;
+  lossLog: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string; units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }> }>;
   finishedAt?: number | null;
   onAttachCombo: (option: AutoFillComboOption) => void;
   attachingComboLabel?: string | null;
@@ -4157,17 +4158,42 @@ function LastBuyInSearchPanel({
           <summary className="cursor-pointer text-[11px] font-medium text-amber-900">
             Full loss log ({lossLog.length} combo{lossLog.length === 1 ? "" : "s"} considered)
           </summary>
-          <ul className="mt-1 space-y-0.5">
-            {lossLog.map((entry, index) => (
-              <li key={`loss-log-${index}`} className="text-[11px] text-muted-foreground">
-                <span className="font-medium text-foreground">{entry.label}</span>{" "}
-                <span className="capitalize">({entry.source.replace(/-/g, " ")})</span> · {fmtMoney(entry.comboCost)} ·{" "}
-                {entry.expectedProfit < 0
-                  ? <span className="text-red-700">est. loss {fmtMoney(-entry.expectedProfit)}</span>
-                  : <>est. profit {fmtMoney(entry.expectedProfit)}</>}
-                {entry.reason ? <> · {entry.reason}</> : null}
-              </li>
-            ))}
+          <ul className="mt-1 space-y-1.5">
+            {lossLog.map((entry, index) => {
+              const units = entry.units ?? [];
+              // Bedroom-split combination type, e.g. "3BR + 3BR" or "4BR + 2BR".
+              const comboType = units.length > 0 ? units.map((u) => `${u.bedrooms}BR`).join(" + ") : null;
+              return (
+                <li key={`loss-log-${index}`} className="text-[11px] text-muted-foreground">
+                  <span className="font-medium text-foreground">{entry.label}</span>{" "}
+                  <span className="capitalize">({entry.source.replace(/-/g, " ")})</span>
+                  {comboType ? <> · <span className="font-medium text-foreground">{comboType}</span></> : null} · {fmtMoney(entry.comboCost)} ·{" "}
+                  {entry.expectedProfit < 0
+                    ? <span className="text-red-700">est. loss {fmtMoney(-entry.expectedProfit)}</span>
+                    : <>est. profit {fmtMoney(entry.expectedProfit)}</>}
+                  {entry.reason ? <> · {entry.reason}</> : null}
+                  {units.some((u) => u.url) ? (
+                    <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
+                      {units.map((u, i) =>
+                        u.url ? (
+                          <a
+                            key={`loss-log-${index}-link-${i}`}
+                            href={u.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="max-w-[46%] truncate text-[10px] text-blue-600 underline"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {u.bedrooms}BR{u.sourceLabel ? ` · ${u.sourceLabel}` : ""}
+                            {typeof u.totalPrice === "number" && u.totalPrice > 0 ? ` · ${fmtMoney(u.totalPrice)}` : ""}
+                          </a>
+                        ) : null,
+                      )}
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}
