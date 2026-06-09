@@ -718,6 +718,15 @@ unit-tested in `tests/buy-in-profit.test.ts` (incl. the $9,919 stay: −$100 mat
     lean — the terminal fold reads `terminal.cityResults` directly to keep it.
   - **Override is NEVER automatic** — surfacing a loss combo must not attach it; the
     operator confirms each one. Don't add an auto-attach-least-loss path.
+  - **Each `cityEconomics` "Full loss log" row carries a `units` breakdown
+    (2026-06-09, PR #620)** — `{bedrooms,url,title,totalPrice,sourceLabel}[]` — so
+    the row shows the bedroom-split combo TYPE (e.g. "3BR + 3BR") + a clickable link
+    per unit, even for the ledger rows that have no attachable card (single-unit,
+    rollback summary). Built by `comboUnitsFromPicks(picks, bedrooms?)` where the
+    SLOT bedrooms win over the scraped pick's own field. `cityEconomics` rides the
+    serialize / Postgres-jsonb / bulk-`lossLog` paths VERBATIM — don't strip `units`
+    from any of them thinking it's redundant with the attachable `lossCombos` cards;
+    the log covers cases the cards don't.
 
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
