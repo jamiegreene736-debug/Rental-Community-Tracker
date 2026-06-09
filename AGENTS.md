@@ -138,6 +138,26 @@ page. Three constraints make it actually reach the full count — don't
    "fix" the 144→82 gap by removing the <2BR filter** — a 1BR/studio can never be
    a combo unit; the fix is showing the breakdown, not widening the pool. Locked
    by `tests/city-vrbo-coverage.test.ts`.
+   **OUT-OF-AREA guard: a mainland namesake must never be harvested/attached
+   (2026-06-08, `shared/listing-geo.ts`).** The bulk queue attached a
+   "Charming Baton Rouge Retreat ~ 3 Mi to LSU!" (Baton Rouge, LOUISIANA) to a
+   Poipu Kai (Kauai, HAWAII) booking: the nearby-city expansion searched
+   "Port Allen" (a real Kauai town) and VRBO autocomplete resolved it to
+   "Port Allen, Louisiana" (next to Baton Rouge/LSU), harvesting mainland
+   listings the matcher then clustered ("baton rouge retreat") + attached. Every
+   buy-in market is Hawaii, so the fix is two layers: **(1) daemon
+   (`worker.mjs` `vrboResolvedToNonHawaiiState`)** — the existing destination
+   guard (`stateMatchesExpectedDestination`, which already special-cased Florida)
+   now rejects ANY search whose RESOLVED `/search?destination=` / title names a
+   non-Hawaii US state, so a wrong-region search harvests nothing
+   (`throwIfDestinationMismatch`). **(2) server (`city-vrbo-inventory.ts`
+   `normalizeSidecarCandidates`)** — drops any harvested listing whose
+   `locationText` names a non-Hawaii state (`droppedOutOfArea`), BEFORE the
+   matcher/single-unit-fallback sees it. **Check `locationText` ONLY, never the
+   title** — titles are noisy ("Indiana Jones villa", a "Condo, CA King Bed"
+   amenity would false-drop). A Hawaii token ALWAYS wins (never over-drop a real
+   Kauai unit); ambiguous/no-state → KEEP. Locked by `tests/listing-geo.test.ts`.
+   Don't narrow the daemon guard back to Florida-only.
 6. **Same-community pairing is cluster-first + multi-signal, not title-substring,
    2026-06-07 (`shared/city-vrbo-combo.ts`).** `suggestCityVrboComboPair`
    clusters the city pool by ANY same-community signal — a curated Kauai complex
