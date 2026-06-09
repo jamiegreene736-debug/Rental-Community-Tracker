@@ -946,35 +946,72 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
     }
 
     // ── Per-slot single-unit city fallback for anything still empty ──
-    // Profit-gated on the RUNNING total (committedCost grows as units attach), so
-    // adding a unit that tips the booking into a loss STOPS the fill rather than
-    // attaching one profitable + one loss-making unit.
+    // ALL-OR-NOTHING for a COMBO booking (operator, 2026-06-08): a 6BR/2-unit
+    // group needs ALL its units, and they must be WALKABLE to each other (the
+    // attach endpoint's proximity guard enforces it — a cross-community pick is
+    // rejected "units too far apart"). When there's no profitable WALKABLE pair
+    // within the $100 limit, the cheap single units are scattered across
+    // communities, so this fallback can only ever attach ONE — a lone unit that
+    // can't house the group. So: if we can't fill EVERY remaining slot with a
+    // valid (walkable + within-$100) unit, attach NONE and leave it for manual
+    // review. Profit-gated on the RUNNING total (committedCost grows as units
+    // attach). A SINGLE-unit booking (one slot) attaches normally — no combo.
     if (cityCapable && remainingSlots().length > 0 && !job.canceled) {
       touch(job, { phase: "single-unit-city", message: "City VRBO fallback for remaining units…", progress: 80 });
+      const slotsToFill = remainingSlots();
+      const allOrNothing = slotsToFill.length >= 2;
+      const stageStartAttachCount = job.attached.length;
+      let failed = false;
+      let failReason = "";
       try {
         const payload = await fetchCity();
-        for (const slot of remainingSlots()) {
-          if (job.canceled) break;
+        for (const slot of slotsToFill) {
+          if (job.canceled) { failed = true; failReason = "canceled"; break; }
           const rows = ((payload?.byBedroom?.[slot.bedrooms] ?? []) as any[])
             .filter((r) => (Number(r.totalPrice) || 0) > 0)
             .sort((a, b) => (Number(a.totalPrice) || Infinity) - (Number(b.totalPrice) || Infinity));
           setAudit(job, auditFromCity(slot.bedrooms, payload));
           const row = rows.find((r) => !hasUsedListingIdentity(used, { url: r.url, title: r.title, sourceLabel: r.sourceLabel }));
-          if (!row) continue;
+          if (!row) { failed = true; failReason = `${slot.unitLabel}: no distinct ${slot.bedrooms}BR unit available`; break; }
           const cost = Number(row.totalPrice) || 0;
           const v = gate(cost);
           if (!v.acceptable) {
             recordEconomics("single-unit-city", `${payload?.citySearchTerm ?? "city"} ${slot.unitLabel}`.trim(), cost, v.profit, false,
               `adding ${slot.unitLabel} ($${Math.round(cost).toLocaleString()}) → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); left empty`);
+            failed = true;
+            failReason = `${slot.unitLabel}: $${Math.round(cost).toLocaleString()} exceeds the $${PROFIT_MIN_FLAT_USD.toLocaleString()} loss limit`;
             break; // further units only deepen the loss
           }
-          await attachPick({
+          const ok = await attachPick({
             job, base, slot,
             pick: liveCandidateFromCityRow(row, slot.bedrooms, job.nights),
             searchedBedrooms: slot.bedrooms,
             used, stage: "single-unit-city",
             comboLabel: `City VRBO ${row.sourceLabel ?? "unit"}`,
           });
+          if (!ok) {
+            // attach rejected (proximity "too far apart" / unverified / dup) — for a
+            // combo this means no walkable partner, so the whole fill can't complete.
+            failed = true;
+            failReason = `${slot.unitLabel}: attach rejected (no walkable partner / unavailable)`;
+            break;
+          }
+        }
+        // Roll back a PARTIAL combo fill: detach anything this stage attached so we
+        // never leave a lone unit on a multi-unit booking.
+        if (allOrNothing && failed && job.attached.length > stageStartAttachCount) {
+          const rolledBack = job.attached.splice(stageStartAttachCount);
+          for (const a of rolledBack) {
+            if (a.buyInId != null) await storage.detachBuyIn(a.buyInId).catch(() => {});
+          }
+          recomputeTotals(job);
+          recordEconomics(
+            "single-unit-city",
+            `${payload?.citySearchTerm ?? "city"} combo`,
+            0, 0, false,
+            `no profitable WALKABLE combo for all ${slotsToFill.length} units (${failReason}); detached ${rolledBack.length} lone unit(s) and left the booking empty for manual review`,
+          );
+          touch(job);
         }
       } catch { /* best effort */ }
     }

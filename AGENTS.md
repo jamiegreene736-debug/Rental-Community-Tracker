@@ -567,6 +567,20 @@ unit-tested in `tests/buy-in-profit.test.ts` (incl. the $9,919 stay: −$100 mat
   than attaching one profitable + one loss-making unit. `existingAttachedCost` is
   captured ONCE (pre-job baseline) and this job's attaches are summed separately —
   don't conflate with `job.totalCost` (double-count).
+- **The single-unit fallback is ALL-OR-NOTHING for a combo booking (operator,
+  2026-06-08).** When `>=2` slots remain, it must fill EVERY slot with a valid
+  (walkable + within-$100) unit or attach NONE. Why: a 6BR/2-unit group needs all
+  its units, and the attach proximity guard rejects a cross-community 2nd pick
+  ("units too far apart"). When there's no profitable WALKABLE pair within $100,
+  the cheap single units are scattered across communities (e.g. Lea: Pane Road in
+  Lawai $3,380 attaches, Hale Malu in Kiahuna $3,877 is rejected as too far) — so
+  the fallback could only ever leave a LONE unit that can't house the group. So it
+  now rolls back (`storage.detachBuyIn` + splice `job.attached` + `recomputeTotals`)
+  any partial it attached and records "no profitable WALKABLE combo for all N units
+  … left empty for manual review." A SINGLE-unit booking (one slot) attaches
+  normally. Don't revert to per-slot independent fills — a 1/2 combo is the bug
+  this fixes. (The cause was diagnosed via the job's `skipped` reason
+  "attach rejected (Buy-in units too far apart)".)
 
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
