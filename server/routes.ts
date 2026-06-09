@@ -13052,6 +13052,13 @@ Requirements:
     // and Google Hotels supplement. Direct PM/Lens discovery is disabled.
     const includePm = false;
     const airbnbDirectLensEnabled = false;
+    // Buy-in sourcing is VRBO-only by default (operator, 2026-06-09): VRBO (the
+    // local sidecar) produces the attachable units; the Airbnb + Google-Hotels
+    // SearchAPI legs mostly yielded un-attachable rows (no usable direct-booking
+    // link) and burned SearchAPI quota. They run in PARALLEL with VRBO so they
+    // were never the queue's bottleneck (VRBO ~2-4 min vs SearchAPI ~2-3 s), but
+    // they're wasted work. Re-enable with FIND_BUY_IN_SEARCHAPI_OTA=1 if needed.
+    const includeSearchApiOtaSources = /^(1|true|yes)$/i.test(String(process.env.FIND_BUY_IN_SEARCHAPI_OTA ?? ""));
     const propertyUnitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
     const googleDiscoveryEnabled = airbnbDirectLensEnabled;
     const pmGoogleDiscoveryEnabled = includePm && googleDiscoveryEnabled;
@@ -14279,6 +14286,10 @@ Requirements:
     const airbnbSidecarAbort = makeSidecarAbort("airbnb-searchapi");
     const airbnbPromise: Promise<Candidate[]> = (async () => {
       try {
+        if (!includeSearchApiOtaSources) {
+          airbnbSidecarReason = "Disabled — buy-in sourcing is VRBO-only (FIND_BUY_IN_SEARCHAPI_OTA off).";
+          return [];
+        }
         if (alternativeScoutOtaMapOnly) {
           airbnbSidecarReason = "Skipped for alternative city map scout; VRBO map results are authoritative.";
           return [];
@@ -14383,6 +14394,10 @@ Requirements:
     const googleHotelsAbort = makeSidecarAbort("google-hotels-searchapi");
     const googleHotelsPromise: Promise<GoogleHotelsBuyInCandidate[]> = (async () => {
       try {
+        if (!includeSearchApiOtaSources) {
+          googleHotelsReason = "Disabled — buy-in sourcing is VRBO-only (FIND_BUY_IN_SEARCHAPI_OTA off).";
+          return [];
+        }
         if (alternativeScoutOtaMapOnly) {
           googleHotelsReason = "Skipped for alternative city map scout; VRBO map results are authoritative.";
           return [];
