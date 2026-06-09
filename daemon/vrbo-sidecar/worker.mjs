@@ -2899,6 +2899,30 @@ function vrboSearchDestinationFromUrl(rawUrl) {
   }
 }
 
+// Mainland-namesake guard. Every buy-in market is in Hawaii, so if VRBO's
+// autocomplete resolved a search to a NON-Hawaii US state it landed on the wrong
+// place — e.g. nearby Kauai town "Port Allen" → "Port Allen, LOUISIANA" (next to
+// Baton Rouge / LSU), which harvested mainland listings that got attached to a
+// Hawaii booking. (The Florida special-case below was the narrow precedent; this
+// generalizes it to all 49 other states.) Inlined here because worker.mjs can't
+// import the TS shared/listing-geo leaf.
+const NON_HAWAII_US_STATES = [
+  "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
+  "delaware", "florida", "georgia", "idaho", "illinois", "indiana", "iowa", "kansas",
+  "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan", "minnesota",
+  "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
+  "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+  "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas",
+  "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming",
+];
+const HAWAII_DESTINATION_RE = /\b(hawaii|kauai|maui|oahu|molokai|lanai|honolulu|lihue|kona|hilo)\b/;
+function vrboResolvedToNonHawaiiState(urlDestination, title) {
+  const text = `${urlDestination || ""} ${normalizeDestinationGuardText(title || "")}`.trim();
+  if (!text) return false;
+  if (HAWAII_DESTINATION_RE.test(text)) return false; // resolved to Hawaii → fine
+  return NON_HAWAII_US_STATES.some((s) => new RegExp(`\\b${s}\\b`).test(text));
+}
+
 function destinationGuardTokens(...values) {
   const stop = new Set([
     "resort",
@@ -2935,6 +2959,10 @@ function stateMatchesExpectedDestination(state, ...expectedValues) {
   const expectedText = normalizeDestinationGuardText(expectedValues.filter(Boolean).join(" "));
   const haystack = normalizeDestinationGuardText(`${state.url ?? ""} ${state.title ?? ""} ${state.bodyExcerpt ?? ""}`);
   const urlDestination = vrboSearchDestinationFromUrl(state?.url ?? "");
+  // Reject a mainland-namesake resolution (e.g. "Port Allen, Louisiana") before
+  // any token matching — port+allen would otherwise match an expected
+  // "Port Allen, Hawaii" because the state is treated as a generic token.
+  if (vrboResolvedToNonHawaiiState(urlDestination, state?.title)) return false;
   const genericLocationTokens = new Set([
     "hawaii", "koloa", "kauai", "island", "states", "america", "united", "beach", "county",
   ]);

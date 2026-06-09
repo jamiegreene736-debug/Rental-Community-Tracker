@@ -13,11 +13,15 @@ import {
   vrboReportedTotalFromMapHarvest,
   type CityVrboCoverage,
 } from "@shared/city-vrbo-coverage";
+import { listingIsOutOfArea } from "@shared/listing-geo";
 
 export type CityVrboFilterPipeline = {
   rawSidecar: number;
   droppedNoPrice: number;
   droppedBelowMinBedrooms: number;
+  // Dropped because the listing's location names a non-Hawaii US state — e.g. VRBO
+  // resolving nearby "Port Allen" to Port Allen, LOUISIANA. See shared/listing-geo.
+  droppedOutOfArea: number;
   afterNormalize: number;
   phraseFilter: string | null;
   afterPhraseFilter: number;
@@ -223,11 +227,16 @@ function rawCandidateBedroomSignal(candidate: SidecarVrboCandidate): number | nu
 function normalizeSidecarCandidates(
   candidates: SidecarVrboCandidate[],
   nights: number,
+  // Every buy-in market is in Hawaii, so out-of-state listings are always bogus
+  // (VRBO resolving a Kauai town name to a mainland namesake). Parameterized for
+  // future non-Hawaii markets; listingIsOutOfArea no-ops when target isn't Hawaii.
+  targetState = "Hawaii",
 ): { rawListings: CityVrboListing[]; listings: CityVrboListing[]; pipeline: CityVrboScrapeCacheEntry["normalizePipeline"] } {
   const rawDeduped = new Map<string, CityVrboListing>();
   const deduped = new Map<string, CityVrboListing>();
   let droppedNoPrice = 0;
   let droppedBelowMinBedrooms = 0;
+  let droppedOutOfArea = 0;
   for (const candidate of candidates) {
     const total = Math.round(Number(candidate.totalPrice) || 0);
     const nightly = Number(candidate.nightlyPrice) > 0
@@ -267,6 +276,18 @@ function normalizeSidecarCandidates(
     if (!rawPrevious || (mappedTotal > 0 && (rawPreviousTotal <= 0 || mappedTotal < rawPreviousTotal))) {
       rawDeduped.set(mapped.url, mapped);
     }
+    // Out-of-area guard: drop listings clearly in a non-Hawaii US state. VRBO
+    // autocomplete resolved a Kauai town to a mainland namesake (Port Allen →
+    // Port Allen, LOUISIANA), harvesting Baton Rouge/LSU listings that the matcher
+    // then clustered + attached to a Hawaii booking. Drop them from the matcher
+    // pool BEFORE clustering. Checks the locationText (the card's "City, State"
+    // line) ONLY — NOT the title, which is noisy ("Indiana Jones villa", a
+    // "Condo, CA King Bed" amenity, etc. would false-drop). The daemon's
+    // resolved-destination guard is the backstop when a card has no locationText.
+    if (listingIsOutOfArea(mapped.locationText, targetState)) {
+      droppedOutOfArea += 1;
+      continue;
+    }
     if (total <= 0 && nightly <= 0) {
       droppedNoPrice += 1;
       continue;
@@ -296,6 +317,7 @@ function normalizeSidecarCandidates(
       rawSidecar: candidates.length,
       droppedNoPrice,
       droppedBelowMinBedrooms,
+      droppedOutOfArea,
       afterNormalize: listings.length,
       byBedroom,
     },
@@ -336,6 +358,7 @@ function logFilterPipeline(
     `[city-vrbo-inventory] community="${community}" ${checkIn}→${checkOut} ` +
     `${fromCache ? "cache-hit" : "fresh-scrape"} pipeline: ` +
     `raw=${pipeline.rawSidecar} -noPrice=${pipeline.droppedNoPrice} -minBR=${pipeline.droppedBelowMinBedrooms} ` +
+    `${pipeline.droppedOutOfArea ? `-outOfArea=${pipeline.droppedOutOfArea} ` : ""}` +
     `normalized=${pipeline.afterNormalize}` +
     (pipeline.phraseFilter ? ` phrase="${pipeline.phraseFilter}" filtered=${pipeline.afterPhraseFilter}` : "") +
     ` buckets=${pipeline.phraseBuckets} pair=${pipeline.suggestedPair ? "yes" : "no"}` +
@@ -521,6 +544,7 @@ async function runCityScanCore(args: {
       rawSidecar: 0,
       droppedNoPrice: 0,
       droppedBelowMinBedrooms: 0,
+      droppedOutOfArea: 0,
       afterNormalize: 0,
       phraseFilter: args.filterPhrase?.trim() || null,
       afterPhraseFilter: 0,
