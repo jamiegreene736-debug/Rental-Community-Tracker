@@ -103,6 +103,11 @@ type BulkItemState = {
   autoFillJobId: string | null;
   startedAt: number | null;
   finishedAt: number | null;
+  // Over-budget combos found but not attached (would lose money) + the per-city
+  // loss ledger, so the queue dialog can show + attach them. AutoFillComboOption[]
+  // (isLoss) and CityEconomics[] (accepted !== true).
+  lossCombos: any[];
+  lossLog: any[];
   // retained for processing, not serialized to the client
   _input: BulkAutoFillItemInput;
 };
@@ -137,6 +142,8 @@ export type BulkAutoFillItemView = {
   totalSlots: number;
   startedAt: string | null;
   finishedAt: string | null;
+  lossCombos: any[];
+  lossLog: any[];
 };
 
 export type BulkAutoFillJobStatus = {
@@ -353,6 +360,12 @@ async function runBulkJob(job: BulkJob): Promise<void> {
       const total = last?.slotsTotal ?? item.totalSlots;
       item.filled = filled;
       item.totalSlots = total;
+      // Carry the over-budget combos + per-city loss ledger onto the item so the
+      // queue dialog can show "found in city X / Y but would lose money" + a
+      // one-click attach, without a second fetch. (Also persisted durably via the
+      // auto-fill job's finalize → auto_fill_loss_options.)
+      item.lossCombos = (last?.comboOptions ?? []).filter((c: any) => c?.isLoss);
+      item.lossLog = (last?.cityEconomics ?? []).filter((c: any) => c?.accepted !== true);
       if (filled === 0) {
         const reason = last?.skipped?.[0]?.reason
           ?? last?.error
@@ -422,6 +435,8 @@ export function startBulkAutoFillJob(items: BulkAutoFillItemInput[]): { bulkJobI
       autoFillJobId: null,
       startedAt: null,
       finishedAt: null,
+      lossCombos: [],
+      lossLog: [],
       _input: { ...input, slots },
     };
   });
@@ -510,6 +525,8 @@ export function serializeBulkAutoFillJob(job: BulkJob): BulkAutoFillJobStatus {
       totalSlots: it.totalSlots,
       startedAt: it.startedAt ? new Date(it.startedAt).toISOString() : null,
       finishedAt: it.finishedAt ? new Date(it.finishedAt).toISOString() : null,
+      lossCombos: it.lossCombos ?? [],
+      lossLog: it.lossLog ?? [],
     })),
     timestamps: { createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt },
   };

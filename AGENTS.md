@@ -674,14 +674,26 @@ unit-tested in `tests/buy-in-profit.test.ts` (incl. the $9,919 stay: −$100 mat
   `cityEconomics` ledger. The bookings page surfaces both in a durable amber
   `LastBuyInSearchPanel` on the reservation row, with a confirm-gated "Attach
   (accept the loss)" button that reuses `attachComboMutation`. Load-bearing pieces:
-  - **Durability = a server last-job store, NOT client state.** The bulk queue runs
-    server-side and the operator clicks OUT of the queue dialog, so client-only
-    combo state died on close. `lastJobByReservation` (kept AFTER the job finalizes,
-    unlike `activeJobByReservation`; 2h TTL via `cleanupStaleJobs`) +
-    `GET /api/operations/auto-fill/last?reservationIds=` lets the row re-show the
-    last search after closing the dialog AND after a full page reload. Lost only on
-    server redeploy — acceptable, picks persist to Postgres as they attach. The
-    `/last` route MUST be registered before `:jobId` (same as `/active`).
+  - **Durability = the in-memory last-job store, NOW BACKED BY POSTGRES (2026-06-09).**
+    The bulk queue runs server-side and the operator clicks OUT of the queue dialog,
+    so client-only combo state died on close. `lastJobByReservation` (kept AFTER the
+    job finalizes, unlike `activeJobByReservation`; 2h TTL) +
+    `GET /api/operations/auto-fill/last?reservationIds=` re-shows it. BUT the
+    in-memory store is wiped by the 2h TTL AND every redeploy (operator hit this:
+    a deploy erased a 24-booking run's loss options). So `finalize()` now ALSO
+    upserts the loss combos + city economics to `auto_fill_loss_options` (Postgres,
+    keyed by reservationId, latest search wins; table created in
+    `ensureRuntimeSchema`), and `/last` falls back to that DB row (mapped into an
+    AutoFillJobStatus-compatible shape) when the in-memory job is gone. So loss
+    options survive permanently. The `/last` route MUST be registered before
+    `:jobId` (same as `/active`).
+  - **Surfaced in BOTH the reservation row AND the bulk-queue dialog (2026-06-09).**
+    The bulk orchestrator carries each item's `lossCombos`+`lossLog` onto the
+    serialized bulk status, and the queue dialog renders the SAME
+    `LastBuyInSearchPanel` per item (full-width below the row) — so the operator
+    sees "found in city X / Y but would lose $Z" and can one-click attach right in
+    the results, not just by expanding each booking row. The dialog's attach looks
+    the reservation up in the live `reservations` list (toasts if it's not in view).
   - **`isLoss` combos are filtered OUT of `ComboComparisonPanel` AND the cancellation
     advice** — otherwise a loss combo sorts as the "cheapest combo" and skews the
     advised cost. They render ONLY in `LastBuyInSearchPanel`. Don't merge the two.

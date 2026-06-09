@@ -12840,9 +12840,13 @@ Requirements:
     }
   });
 
-  // "last" (like "active") MUST precede :jobId. Returns the MOST-RECENT job per
-  // reservation (terminal OR live) so the bookings page can show the last search's
-  // loss-combo economics after the bulk-queue dialog is closed.
+  // "last" (like "active") MUST precede :jobId. Returns the MOST-RECENT search's
+  // loss-combo economics per reservation so the bookings page + bulk dialog can
+  // show the over-budget options after the dialog is closed. In-memory job first
+  // (freshest); falls back to the DURABLE Postgres record (auto_fill_loss_options)
+  // when the 2h in-memory TTL or a redeploy has cleared it — so the loss options
+  // survive permanently. The DB row is mapped into an AutoFillJobStatus-compatible
+  // shape carrying comboOptions + cityEconomics so the client panel works unchanged.
   app.get("/api/operations/auto-fill/last", async (req: Request, res: Response) => {
     try {
       const { getLastAutoFillJobForReservation, serializeAutoFillJob } = await import("./auto-fill-job");
@@ -12851,7 +12855,36 @@ Requirements:
       const out: Record<string, any> = {};
       for (const id of ids) {
         const job = getLastAutoFillJobForReservation(id);
-        if (job) out[id] = serializeAutoFillJob(job);
+        if (job) {
+          out[id] = serializeAutoFillJob(job);
+          continue;
+        }
+        // Durable fallback: the in-memory job is gone (TTL/redeploy) → read Postgres.
+        const persisted = await storage.getAutoFillLossOptions(id).catch(() => undefined);
+        if (persisted) {
+          const finishedMs = persisted.finishedAt ? new Date(persisted.finishedAt).getTime() : null;
+          const updatedMs = persisted.updatedAt ? new Date(persisted.updatedAt).getTime() : Date.now();
+          out[id] = {
+            jobId: `persisted:${id}`,
+            status: persisted.status ?? "completed",
+            done: true,
+            phase: "done",
+            message: "",
+            progress: 100,
+            reservationId: id,
+            escalation: { resort: "idle", homeCity: "idle", foundAt: null },
+            attached: [],
+            skipped: [],
+            searchAudits: [],
+            comboOptions: Array.isArray(persisted.comboOptions) ? persisted.comboOptions : [],
+            cityEconomics: Array.isArray(persisted.cityEconomics) ? persisted.cityEconomics : [],
+            slotsTotal: persisted.slotsTotal ?? 0,
+            slotsFilled: persisted.slotsFilled ?? 0,
+            totalCost: null,
+            error: null,
+            timestamps: { createdAt: updatedMs, startedAt: null, finishedAt: finishedMs },
+          };
+        }
       }
       return res.json({ jobs: out });
     } catch (e: any) {
