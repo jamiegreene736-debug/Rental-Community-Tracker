@@ -590,6 +590,34 @@ unit-tested in `tests/buy-in-profit.test.ts` (incl. the $9,919 stay: −$100 mat
   normally. Don't revert to per-slot independent fills — a 1/2 combo is the bug
   this fixes. (The cause was diagnosed via the job's `skipped` reason
   "attach rejected (Buy-in units too far apart)".)
+- **Rejected (over-budget) combos are LOGGED and one-click OVERRIDABLE (operator,
+  2026-06-08, PR #610).** A "leave slots empty" terminal is correct but used to be
+  a black box — once the operator closed the bulk-queue dialog, every loss combo
+  the search found vanished. Now each rejected SAME-COMMUNITY WALKABLE pair (resort
+  stage when the proposal covers every slot, home-city, AND every nearby-expansion
+  city) is captured via module-level `pushLossComboOption` in `server/auto-fill-job.ts`
+  as an attachable `AutoFillComboOption` with `isLoss:true`/`lossProfit` (deduped by
+  sorted attach URLs), pushed onto `job.comboOptions` alongside the existing
+  `cityEconomics` ledger. The bookings page surfaces both in a durable amber
+  `LastBuyInSearchPanel` on the reservation row, with a confirm-gated "Attach
+  (accept the loss)" button that reuses `attachComboMutation`. Load-bearing pieces:
+  - **Durability = a server last-job store, NOT client state.** The bulk queue runs
+    server-side and the operator clicks OUT of the queue dialog, so client-only
+    combo state died on close. `lastJobByReservation` (kept AFTER the job finalizes,
+    unlike `activeJobByReservation`; 2h TTL via `cleanupStaleJobs`) +
+    `GET /api/operations/auto-fill/last?reservationIds=` lets the row re-show the
+    last search after closing the dialog AND after a full page reload. Lost only on
+    server redeploy — acceptable, picks persist to Postgres as they attach. The
+    `/last` route MUST be registered before `:jobId` (same as `/active`).
+  - **`isLoss` combos are filtered OUT of `ComboComparisonPanel` AND the cancellation
+    advice** — otherwise a loss combo sorts as the "cheapest combo" and skews the
+    advised cost. They render ONLY in `LastBuyInSearchPanel`. Don't merge the two.
+  - **Expansion carries a COMPACT `lossPair`** (the 2 picks, NOT the full ~200-listing
+    inventory) on unprofitable `ExpansionCityResult`s; the LIVE escalation copy in
+    `runExpansion` strips it (`map(({lossPair, ...rest}) => rest)`) so polling stays
+    lean — the terminal fold reads `terminal.cityResults` directly to keep it.
+  - **Override is NEVER automatic** — surfacing a loss combo must not attach it; the
+    operator confirms each one. Don't add an auto-attach-least-loss path.
 
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
