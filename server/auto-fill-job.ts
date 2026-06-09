@@ -635,6 +635,43 @@ function recomputeTotals(job: AutoFillJob): void {
     : (costs.length > 0 ? costs.reduce((s, n) => s + n, 0) : null);
 }
 
+// ALL-OR-NOTHING reconciliation for combo bookings (operator: 2026-06-08, combos
+// must fill EVERY unit or none — a lone unit can't house the group and the attach
+// proximity guard rejects a cross-community 2nd pick). PR #608's rollback only
+// covered the single-unit FALLBACK stage, but a partial can also be left by the
+// resort / home-city / nearby combo stages — e.g. the 1st unit attaches, then the
+// 2nd is proximity-rejected (the guard only fires once >=2 are attached). This
+// FINAL pass, run before EVERY finalize (normal AND error path), detaches every
+// unit THIS job attached when a COMBO booking ends partially filled, leaving it
+// empty for manual review. Safe because the client only ever passes the EMPTY
+// slots to fill, so job.slots has no pre-attached siblings — rolling back
+// job.attached can't strand a prior-run sibling. No-op for single-unit bookings,
+// complete fills, empty results, or a canceled job (cancel reports partials
+// honestly). See AGENTS.md #608 + the bulk-queue load-bearing note.
+async function reconcileComboAllOrNothing(job: AutoFillJob): Promise<void> {
+  if (job.canceled) return;
+  const unitConfig = PROPERTY_UNIT_CONFIGS[job.propertyId];
+  const isComboProperty = !!unitConfig && unitConfig.units.length >= 2;
+  if (!isComboProperty) return;
+  const filled = job.attached.length;
+  if (filled === 0 || filled >= job.slots.length) return; // empty or complete → nothing to roll back
+  const rolledBack = job.attached.splice(0);
+  for (const a of rolledBack) {
+    if (a.buyInId != null) { try { await storage.detachBuyIn(a.buyInId); } catch { /* best effort */ } }
+  }
+  recomputeTotals(job);
+  for (const slot of job.slots) {
+    if (!job.skipped.some((s) => s.unitId === slot.unitId)) {
+      job.skipped.push({
+        unitId: slot.unitId,
+        unitLabel: slot.unitLabel,
+        reason: `${slot.unitLabel}: partial combo rolled back — no complete walkable combo for all ${job.slots.length} units; detached ${rolledBack.length} lone unit${rolledBack.length === 1 ? "" : "s"} and left the booking empty for manual review`,
+      });
+    }
+  }
+  touch(job);
+}
+
 // ── attach (server analog of the client createAndAttachPick) ─────────────────
 async function attachPick(args: {
   job: AutoFillJob;
@@ -1045,9 +1082,16 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       } catch { /* best effort */ }
     }
 
+    // All-or-nothing: a combo left partially filled by ANY stage rolls back to
+    // empty (the single-unit fallback above only guards its own stage). doneMessage
+    // recomputes from job.attached, so a rollback correctly reports 0 filled.
+    await reconcileComboAllOrNothing(job);
     touch(job, { status: "completed", phase: "done", message: doneMessage(job), progress: 100, finishedAt: Date.now() });
     finalize(job);
   } catch (e: any) {
+    // A throw mid-combo (e.g. an attach failed after the 1st unit) can also leave a
+    // lone unit — reconcile before finalizing so we never strand a partial combo.
+    try { await reconcileComboAllOrNothing(job); } catch { /* best effort */ }
     touch(job, {
       status: "failed",
       phase: "failed",
