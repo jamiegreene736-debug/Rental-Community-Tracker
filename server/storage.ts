@@ -16,6 +16,7 @@ import {
   type AutoReplyStyleExample, type InsertAutoReplyStyleExample,
   type BookingConfirmation, type InsertBookingConfirmation,
   type BookingAlternativePage, bookingAlternativePages,
+  type AutoFillLossOptions, autoFillLossOptions,
   type QuoSmsMessage, type InsertQuoSmsMessage,
   type QuoCallEvent, type InsertQuoCallEvent,
   type GuestInboxInternalNote, type InsertGuestInboxInternalNote,
@@ -233,6 +234,17 @@ export interface IStorage {
   getDueQueuedAutoReplyLogs(now: Date, limit?: number): Promise<AutoReplyLog[]>;
   getSetting(key: string): Promise<string | undefined>;
   setSetting(key: string, value: string): Promise<void>;
+  getAutoFillLossOptions(reservationId: string): Promise<AutoFillLossOptions | undefined>;
+  upsertAutoFillLossOptions(row: {
+    reservationId: string;
+    propertyId?: number | null;
+    status?: string | null;
+    slotsTotal?: number | null;
+    slotsFilled?: number | null;
+    comboOptions: unknown;
+    cityEconomics: unknown;
+    finishedAt?: Date | null;
+  }): Promise<void>;
   createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample>;
   getRecentAutoReplyStyleExamples(limit?: number): Promise<AutoReplyStyleExample[]>;
 
@@ -1015,6 +1027,58 @@ export class DatabaseStorage implements IStorage {
   async setSetting(key: string, value: string): Promise<void> {
     await db.insert(appSettings).values({ key, value, updatedAt: new Date() })
       .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: new Date() } });
+  }
+
+  async getAutoFillLossOptions(reservationId: string): Promise<AutoFillLossOptions | undefined> {
+    try {
+      const [row] = await db.select().from(autoFillLossOptions)
+        .where(eq(autoFillLossOptions.reservationId, reservationId)).limit(1);
+      return row;
+    } catch {
+      // Table missing until ensureRuntimeSchema / db:push runs — degrade to none.
+      return undefined;
+    }
+  }
+
+  async upsertAutoFillLossOptions(row: {
+    reservationId: string;
+    propertyId?: number | null;
+    status?: string | null;
+    slotsTotal?: number | null;
+    slotsFilled?: number | null;
+    comboOptions: unknown;
+    cityEconomics: unknown;
+    finishedAt?: Date | null;
+  }): Promise<void> {
+    const values = {
+      reservationId: row.reservationId,
+      propertyId: row.propertyId ?? null,
+      status: row.status ?? null,
+      slotsTotal: row.slotsTotal ?? null,
+      slotsFilled: row.slotsFilled ?? null,
+      comboOptions: (row.comboOptions ?? []) as any,
+      cityEconomics: (row.cityEconomics ?? []) as any,
+      finishedAt: row.finishedAt ?? null,
+      updatedAt: new Date(),
+    };
+    try {
+      await db.insert(autoFillLossOptions).values(values).onConflictDoUpdate({
+        target: autoFillLossOptions.reservationId,
+        set: {
+          propertyId: values.propertyId,
+          status: values.status,
+          slotsTotal: values.slotsTotal,
+          slotsFilled: values.slotsFilled,
+          comboOptions: values.comboOptions,
+          cityEconomics: values.cityEconomics,
+          finishedAt: values.finishedAt,
+          updatedAt: values.updatedAt,
+        },
+      });
+    } catch (e) {
+      // Non-fatal: persistence is a convenience layer over the in-memory store.
+      console.warn(`[auto-fill] could not persist loss options for ${row.reservationId}: ${(e as Error).message}`);
+    }
   }
 
   async createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample> {

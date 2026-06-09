@@ -992,6 +992,25 @@ export const bookingAlternativePages = pgTable("booking_alternative_pages", {
 });
 export type BookingAlternativePage = typeof bookingAlternativePages.$inferSelect;
 
+// Durable per-reservation "over-budget combos" the auto-fill search found but did
+// not attach (would have lost money). Persisted so the operator can review the
+// options + one-click attach a loss combo even after the in-memory job expires
+// (2h) or a redeploy wipes it. Upserted by reservationId on every auto-fill
+// finalize — always the LATEST search. comboOptions holds the attachable loss
+// combos (AutoFillComboOption[] with isLoss), cityEconomics the per-city ledger.
+export const autoFillLossOptions = pgTable("auto_fill_loss_options", {
+  reservationId: text("reservation_id").primaryKey(),
+  propertyId: integer("property_id"),
+  status: text("status"),
+  slotsTotal: integer("slots_total"),
+  slotsFilled: integer("slots_filled"),
+  comboOptions: jsonb("combo_options"),
+  cityEconomics: jsonb("city_economics"),
+  finishedAt: timestamp("finished_at"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type AutoFillLossOptions = typeof autoFillLossOptions.$inferSelect;
+
 // ── Quo / OpenPhone SMS messages mirrored into the Guesty inbox ──
 // Guesty remains the reservation + conversation source of truth. These rows
 // store SMS messages sent/received through the 808 Quo number and attach them

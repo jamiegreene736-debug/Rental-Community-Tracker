@@ -409,6 +409,21 @@ function finalize(job: AutoFillJob): void {
     activeJobByReservation.delete(job.reservationId);
   }
   touch(job);
+  // DURABLY persist this search's over-budget combos + per-city economics, keyed
+  // by reservation (latest search wins). Survives the 2h in-memory TTL AND a
+  // redeploy, so the operator can review/attach the loss options anytime. Always
+  // overwrites — a later successful re-run clears stale loss options. Fire-and-
+  // forget; persistence is a convenience over the in-memory lastJobByReservation.
+  void storage.upsertAutoFillLossOptions({
+    reservationId: job.reservationId,
+    propertyId: job.propertyId,
+    status: job.status,
+    slotsTotal: job.slots.length,
+    slotsFilled: job.attached.length,
+    comboOptions: job.comboOptions,
+    cityEconomics: job.cityEconomics,
+    finishedAt: job.finishedAt != null ? new Date(job.finishedAt) : null,
+  }).catch(() => { /* best effort */ });
 }
 
 async function getJson(url: string, timeoutMs: number): Promise<any> {

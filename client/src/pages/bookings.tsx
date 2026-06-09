@@ -469,6 +469,10 @@ type BulkBuyInQueueItem = {
   totalSlots?: number;
   startedAt?: string;
   finishedAt?: string;
+  // Over-budget combos found but not attached (would lose money) + per-city loss
+  // ledger, surfaced inline in the queue dialog with a one-click accept-the-loss.
+  lossCombos?: AutoFillComboOption[];
+  lossLog?: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string }>;
 };
 
 interface Candidate {
@@ -1584,6 +1588,8 @@ type BulkAutoFillJobStatus = {
     totalSlots: number;
     startedAt: string | null;
     finishedAt: string | null;
+    lossCombos: AutoFillComboOption[];
+    lossLog: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string }>;
   }>;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
@@ -6868,6 +6874,8 @@ export default function Bookings() {
       totalSlots: si.totalSlots,
       startedAt: si.startedAt ?? undefined,
       finishedAt: si.finishedAt ?? undefined,
+      lossCombos: si.lossCombos ?? [],
+      lossLog: si.lossLog ?? [],
     }));
     setBulkBuyInQueueItems(items);
     bulkItemsRef.current = items;
@@ -9520,9 +9528,13 @@ export default function Bookings() {
                         Select bookings in the global table and click Run bulk buy-ins.
                       </div>
                     ) : (
-                      bulkBuyInQueueItems.map((item) => (
+                      bulkBuyInQueueItems.map((item) => {
+                        const itemLossCombos = item.lossCombos ?? [];
+                        const itemLossLog = item.lossLog ?? [];
+                        const itemHasLoss = itemLossCombos.length > 0 || itemLossLog.length > 0;
+                        return (
+                        <div key={item.id}>
                         <div
-                          key={item.id}
                           className="grid grid-cols-[120px_1.3fr_1.2fr_2fr_1.5fr] gap-3 px-3 py-2.5 text-sm"
                           data-testid={`bulk-buy-in-queue-item-${item.reservationId}`}
                         >
@@ -9570,7 +9582,23 @@ export default function Bookings() {
                             )}
                           </div>
                         </div>
-                      ))
+                        {itemHasLoss && (
+                          <div className="px-3 pb-3">
+                            <LastBuyInSearchPanel
+                              lossCombos={itemLossCombos}
+                              lossLog={itemLossLog}
+                              onAttachCombo={(option) => {
+                                const r = reservations.find((x) => x._id === item.reservationId);
+                                if (r) attachComboMutation.mutate({ reservation: r, option });
+                                else toast({ title: "Open the booking to attach", description: "This booking isn't in the current view — open it from the table to attach this combo.", variant: "destructive" });
+                              }}
+                              attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
+                            />
+                          </div>
+                        )}
+                        </div>
+                        );
+                      })
                     )}
                   </div>
                 </div>

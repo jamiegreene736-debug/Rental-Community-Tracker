@@ -353,4 +353,19 @@ export async function ensureRuntimeSchema(): Promise<void> {
     )
   `);
   console.log("[schema] ensured top_market_scan_cache table");
+
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS auto_fill_loss_options (
+      reservation_id text PRIMARY KEY,
+      property_id integer,
+      status text,
+      slots_total integer,
+      slots_filled integer,
+      combo_options jsonb NOT NULL DEFAULT '[]'::jsonb,
+      city_economics jsonb NOT NULL DEFAULT '[]'::jsonb,
+      finished_at timestamp,
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured auto_fill_loss_options table");
 }
