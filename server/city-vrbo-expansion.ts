@@ -435,6 +435,10 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
             checkIn: job.checkIn,
             checkOut: job.checkOut,
             bedroomPlan: job.bedroomPlan,
+            // The nearby town has no community; pass the ORIGINATING property's
+            // state so a Florida combo's expansion towns aren't filtered against
+            // the "Hawaii" default (HI properties still pass "Hawaii").
+            targetState: BUY_IN_MARKET_LOCATIONS[job.community]?.state,
           });
         } catch (err: any) {
           setCityResult(job, p.term, { status: "scan-error", reason: String(err?.message ?? err) });

@@ -7,7 +7,7 @@ import {
   type CityVrboComboPair,
   type CityVrboListing,
 } from "@shared/city-vrbo-combo";
-import { cityWideSearchLocationForBuyInMarket } from "@shared/buy-in-market";
+import { cityWideSearchLocationForBuyInMarket, BUY_IN_MARKET_LOCATIONS } from "@shared/buy-in-market";
 import {
   buildCityScanCoverage,
   vrboReportedTotalFromMapHarvest,
@@ -408,8 +408,18 @@ async function scrapeCityVrboPool(args: {
   checkOut: string;
   bedroomPlan: number[];
   walletBudgetMs?: number;
+  // The property's expected US state (full name, e.g. "Florida"). The out-of-area
+  // geo filter (listingIsOutOfArea) only drops when this is "Hawaii", so passing
+  // the real state for a non-Hawaii market KEEPS its listings instead of dropping
+  // them all. Resolution order: explicit targetState (expansion path) → the
+  // community's market state (home-city path) → "Hawaii" (default; byte-identical
+  // mainland-namesake drop for HI). See AGENTS.md geo-guard note.
+  targetState?: string;
 }): Promise<CityVrboScrapeCacheEntry | null> {
   const citySearchTerm = resolveCityVrboSearchTerm(args);
+  const targetState = args.targetState
+    ?? (args.community ? BUY_IN_MARKET_LOCATIONS[args.community]?.state : undefined)
+    ?? "Hawaii";
   const nights = Math.max(
     1,
     Math.round(
@@ -449,7 +459,7 @@ async function scrapeCityVrboPool(args: {
     return null;
   }
 
-  const { rawListings, listings, pipeline } = normalizeSidecarCandidates(r.candidates ?? [], nights);
+  const { rawListings, listings, pipeline } = normalizeSidecarCandidates(r.candidates ?? [], nights, targetState);
   return {
     expiresAt: Date.now() + CITY_VRBO_CACHE_TTL_MS,
     citySearchTerm,
@@ -505,6 +515,7 @@ async function runCityScanCore(args: {
   filterPhrase?: string;
   skipCache?: boolean;
   walletBudgetMs?: number;
+  targetState?: string;
 }): Promise<CityVrboScanResult> {
   const citySearchTerm = resolveCityVrboSearchTerm(args);
   const nights = Math.max(
@@ -533,6 +544,7 @@ async function runCityScanCore(args: {
       checkOut: args.checkOut,
       bedroomPlan: args.bedroomPlan,
       walletBudgetMs: args.walletBudgetMs,
+      targetState: args.targetState,
     });
     if (scrapeEntry) {
       cityVrboScrapeCache.set(cacheKey, scrapeEntry);
@@ -748,6 +760,11 @@ export async function runCityVrboInventoryScanForCity(args: {
   filterPhrase?: string;
   skipCache?: boolean;
   walletBudgetMs?: number;
+  // Originating property's expected state (full name). The nearby-city expansion
+  // has no `community`, so without this a Florida combo's expansion towns would
+  // be filtered as out-of-area against the "Hawaii" default. The expansion job
+  // passes its property's state here. Omitted → "Hawaii" (HI byte-identical).
+  targetState?: string;
 }): Promise<CityVrboScanResult> {
   return runCityScanCore({
     cacheKey: cacheKeyForCityTerm(args.citySearchTerm, args.checkIn, args.checkOut),
@@ -759,6 +776,7 @@ export async function runCityVrboInventoryScanForCity(args: {
     filterPhrase: args.filterPhrase,
     skipCache: args.skipCache,
     walletBudgetMs: args.walletBudgetMs,
+    targetState: args.targetState,
   });
 }
 
