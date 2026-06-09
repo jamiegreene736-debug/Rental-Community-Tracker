@@ -370,7 +370,16 @@ don't "simplify" them away:
    Photon `/reverse` + `driveMinutesBetweenCoords` pattern from
    `/api/community/nearby-cities`, anchored on `BUY_IN_MARKET_LOCATIONS[community]`
    (so NO initial geocode). Tier 1 = ≤20 min, tier 2 = ≤45 min, nearest-first,
-   per-tier caps (env `CITY_VRBO_EXPANSION_TIER{1,2}_*`). `nearbyBuyInMarketsForScoutDetailed`
+   per-tier caps (env `CITY_VRBO_EXPANSION_TIER{1,2}_*`). **City caps are 8/8
+   (raised from 4/5, 2026-06-08):** at 4/5 the walk stopped at the ~9 NEAREST towns
+   (all ≤21 min on Kauai) and never reached the 21–45 min band (Wailua/Kapaa/
+   Anahola), so "within 45 min" wasn't actually reaching 45 min. 8/8 sweeps each
+   tier's full radius (Kauai self-caps at ~12–14 towns ≤45 min). The expansion
+   BUDGET was bumped 30→38 min to fit the wider sweep (the furthest towns scan
+   LAST, so a tight budget would cut exactly the ones we widened to reach); stays
+   under the auto-fill 40-min poll cap. Trade-off: an UNFILLABLE booking ties up
+   the sidecar longer — dial the caps/budget down for big bulk queues.
+   `nearbyBuyInMarketsForScoutDetailed`
    (curated markets only) is deliberately NOT used — the operator wants arbitrary
    real towns. Coordinates are used ONLY for discovery + drive math; the VRBO
    destination is always a plain `"City, State"` string (sight+click policy).

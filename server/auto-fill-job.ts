@@ -1047,9 +1047,14 @@ function doneMessage(job: AutoFillJob): string {
   // best-found economics (the operator is intentionally NOT committed to a loss).
   if (filled === 0) {
     const rejected = job.cityEconomics.filter((c) => !c.accepted);
+    // Count cities actually SCANNED (home city + every nearby tier city that ran),
+    // not just the ones that produced a priced combo — otherwise the message
+    // under-reports (e.g. "5" when 9 nearby + home were searched).
+    const nearbyScanned = (job.escalation.tierResults ?? []).filter((c) => c.status && c.status !== "pending").length;
+    const citiesSearched = nearbyScanned + 1; // + the home city
     if (job.gateEnabled && rejected.length > 0) {
       const best = rejected.reduce((a, b) => (b.expectedProfit > a.expectedProfit ? b : a));
-      return `No profitable combination found (revenue ${usd(job.expectedRevenue)}). Best option: ${best.label} — combo ${usd(best.comboCost)}, est. profit ${usd(best.expectedProfit)}. Searched ${rejected.length} ${rejected.length === 1 ? "city" : "cities"}; left empty so you're not committed to a loss.`;
+      return `No profitable combination found (revenue ${usd(job.expectedRevenue)}). Best option: ${best.label} — combo ${usd(best.comboCost)}, est. profit ${usd(best.expectedProfit)}. Searched ${citiesSearched} ${citiesSearched === 1 ? "city" : "cities"} (home + nearby); left empty so you're not committed to a loss.`;
     }
     return "No verified priced candidate could be attached. Open Find buy-in to review.";
   }

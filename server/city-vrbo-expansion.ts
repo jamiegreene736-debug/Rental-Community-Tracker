@@ -41,10 +41,27 @@ const TIER1_MAX_MIN = envInt("CITY_VRBO_EXPANSION_TIER1_MAX_MIN", 20, 5);
 const TIER2_MAX_MIN = envInt("CITY_VRBO_EXPANSION_TIER2_MAX_MIN", 45, TIER1_MAX_MIN + 5);
 const TIER1_RADIUS_KM = envInt("CITY_VRBO_EXPANSION_TIER1_RADIUS_KM", 35, 5);
 const TIER2_RADIUS_KM = envInt("CITY_VRBO_EXPANSION_TIER2_RADIUS_KM", 70, TIER1_RADIUS_KM);
-const TIER1_CITY_CAP = envInt("CITY_VRBO_EXPANSION_TIER1_CITY_CAP", 4, 1);
-const TIER2_CITY_CAP = envInt("CITY_VRBO_EXPANSION_TIER2_CITY_CAP", 5, 1);
-const EXPANSION_BUDGET_MS = envInt("CITY_VRBO_EXPANSION_BUDGET_MS", 30 * 60_000, 5 * 60_000);
-const EXPANSION_JOB_TTL_MS = envInt("CITY_VRBO_EXPANSION_JOB_TTL_MS", 30 * 60_000, 5 * 60_000);
+// City caps: how many towns each tier scans (nearest-first). These were 4/5,
+// which on Kauai capped the walk at the ~9 NEAREST towns (all ≤21 min) and never
+// reached the 21–45 min band (Wailua ~28, Kapaa ~35, Anahola ~45) — so the
+// "within 45 min" tier wasn't actually reaching 45 min (operator, 2026-06-08).
+// Raised so each tier covers its full drive-time radius: tier 1 sweeps all towns
+// ≤20 min, tier 2 the rest ≤45 min. Kauai has ~12–14 towns within 45 min of a
+// south-shore market, so the actual count self-caps below these. Trade-off: an
+// UNFILLABLE booking now scans more cities (~2 min each) before giving up; a
+// fillable one still stops at the first profitable pair. Env-tunable if a bulk
+// queue gets too slow.
+const TIER1_CITY_CAP = envInt("CITY_VRBO_EXPANSION_TIER1_CITY_CAP", 8, 1);
+const TIER2_CITY_CAP = envInt("CITY_VRBO_EXPANSION_TIER2_CITY_CAP", 8, 1);
+// 38 min (was 30): with the wider city caps a full Kauai sweep is ~12–14 cities
+// at ~2 min each ≈ 26–28 min, and the 21–45 min towns are scanned LAST — so the
+// budget needs headroom or the furthest (the ones we just widened to reach) get
+// cut by "time budget exhausted". Stays under the auto-fill job's 40-min poll cap
+// (EXPANSION_POLL_CAP_MS) so the parent is still polling when it finishes.
+// NOTE: an UNFILLABLE booking now ties up the sidecar longer; in a big bulk queue
+// dial CITY_VRBO_EXPANSION_TIER*_CITY_CAP / _BUDGET_MS down if it's too slow.
+const EXPANSION_BUDGET_MS = envInt("CITY_VRBO_EXPANSION_BUDGET_MS", 38 * 60_000, 5 * 60_000);
+const EXPANSION_JOB_TTL_MS = envInt("CITY_VRBO_EXPANSION_JOB_TTL_MS", 38 * 60_000, 5 * 60_000);
 const HOME_RADIUS_KM = envInt("CITY_VRBO_EXPANSION_HOME_RADIUS_KM", 5, 1);
 
 // ── public types ───────────────────────────────────────────────────────────
