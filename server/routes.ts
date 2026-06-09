@@ -13388,6 +13388,12 @@ Requirements:
       if (/\bstudio\b|\befficiency\b/.test(t)) return 0;
       const m = t.match(/(?:^|[\W_])(\d+)\s*(?:br|bd|bdr|bedrooms?)(?=$|[\W_])/);
       if (m) return parseInt(m[1], 10);
+      // "2B/2B" (bedroom/bathroom) notation, common in FL condo titles
+      // ("Sun N' Fun 2B/2B Vacation Condo"). Bedroom-first by convention; the
+      // letter between the slash and the bath digit distinguishes it from the
+      // bare "2/2" handled below. Studio is already returned above.
+      const bedBath = t.match(/\b([1-9])\s*b\s*\/\s*[1-9]\s*b\b/);
+      if (bedBath) return parseInt(bedBath[1], 10);
       const slash = t.match(/\b([1-9])\s*\/\s*(?:[1-9](?:\.5)?)\b/);
       if (slash) return parseInt(slash[1], 10);
       const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
@@ -14343,7 +14349,19 @@ Requirements:
             url: withStayDates("airbnb", link),
             nightlyPrice: Math.round(nightly),
             totalPrice: Math.round(total),
-            bedrooms: bedroomFromText(`${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`) ?? undefined,
+            // Prefer SearchAPI's STRUCTURED bedroom count (authoritative — same
+            // field airbnbScoutRowQualifiesForBedroom trusts) over title text.
+            // Many listings (esp. Florida: "Santa Maria 104 | Walk to the Sand")
+            // carry no bedroom count in the title, so text-only parsing returned
+            // null and the final identity gate dropped them as "no explicit NBR
+            // proof". The gate still rejects a true no-signal candidate (this only
+            // supplies a real signal when SearchAPI has one) and a mismatch.
+            bedrooms: (
+              typeof p?.bedrooms === "number" ? p.bedrooms
+              : typeof p?.bedroom_count === "number" ? p.bedroom_count
+              : typeof p?.bedrooms_count === "number" ? p.bedrooms_count
+              : bedroomFromText(`${p?.name ?? p?.title ?? ""} ${p?.description ?? ""}`)
+            ) ?? undefined,
             image,
             images: Array.isArray(p?.images) ? p.images.filter((url: unknown): url is string => typeof url === "string" && /^https?:\/\//i.test(url)).slice(0, 3) : undefined,
             snippet: String(p?.description ?? "").slice(0, 160),
