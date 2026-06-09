@@ -35,6 +35,7 @@ import {
   getExpansionJob,
   serializeExpansionJob,
   startExpansionJob,
+  tierCeilingMinutes,
   CityExpansionValidationError,
   type CityExpansionJobStatus,
   type ExpansionCityResult,
@@ -121,6 +122,14 @@ export type CityEconomics = {
   // each unit. Optional — older persisted rows (and the combo-rollback summary
   // entry) may omit it. See LastBuyInSearchPanel "Full loss log" in bookings.tsx.
   units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }>;
+  // Which scan stage surfaced this combo, so the loss-log row shows whether it was
+  // found in the same city (city-wide scan) or a drive-time expansion ring. These
+  // are populated ONLY for source === "nearby" — resort/home-city/single-unit-city
+  // all bucket as "same city" (drive 0) and the client derives that from `source`.
+  // Older persisted rows omit them and render with a neutral "Nearby drive" label.
+  scopeTier?: 1 | 2; // 1 = ~20-min ring, 2 = ~45-min ring
+  driveMinutes?: number; // actual drive time to the nearby town (sub-text)
+  driveMinutesCeiling?: number; // env-accurate tier ceiling (tierCeilingMinutes) — no client 20/45 literal
 };
 
 type AttachStage = "resort" | "home-city" | "nearby" | "single-unit-city";
@@ -865,8 +874,8 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       job.cityEconomics.push({ source, label, comboCost: Math.round(comboCost), expectedProfit: Math.round(profit), accepted, reason, units });
       touch(job);
     };
-    const recordLossComboOption = (label: string, pair: any, comboCost: number, profit: number) =>
-      pushLossComboOption(job, label, pair, comboCost, profit);
+    const recordLossComboOption = (label: string, pair: any, comboCost: number, profit: number, scope: LossComboScope) =>
+      pushLossComboOption(job, label, pair, comboCost, profit, scope);
 
     const unitConfig = PROPERTY_UNIT_CONFIGS[job.propertyId];
     const isComboProperty = !!unitConfig && unitConfig.units.length >= 2;
@@ -950,6 +959,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
               { bedrooms: proposal.map((p) => p.slot.bedrooms), picks: proposal.map((p) => p.pick) },
               comboCost,
               v.profit,
+              { scopeCategory: "home" }, // resort search = the configured community itself
             );
           }
         }
@@ -1008,7 +1018,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
             recordEconomics("home-city", payload?.citySearchTerm ?? "home city", comboCost, v.profit, false,
               `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searching nearby cities`,
               comboUnitsFromPicks(pair.picks, pair.bedrooms));
-            recordLossComboOption(payload?.citySearchTerm ?? "home city", pair, comboCost, v.profit);
+            recordLossComboOption(payload?.citySearchTerm ?? "home city", pair, comboCost, v.profit, { scopeCategory: "home" });
           }
         } else {
           setEscalation(job, { homeCity: "no-pair" });
@@ -1219,16 +1229,28 @@ function comboUnitsFromPicks(
   return units.length > 0 ? units : undefined;
 }
 
+// Scan-stage scope stamped on an attachable loss CARD so the operator can see
+// whether it came from the same city (city-wide scan) or a drive-time ring. The
+// `scopeCategory` is REQUIRED so every call site must declare it — a forgotten
+// home-city chip becomes a compile error, not a silently missing badge.
+type LossComboScope = {
+  scopeCategory: "home" | "tier1" | "tier2"; // home = resort/home-city/single-unit; tier1/2 = nearby
+  driveMinutes?: number; // nearby only — actual drive time to the town
+  driveMinutesCeiling?: number; // nearby only — env-accurate tier ceiling (tierCeilingMinutes)
+};
+
 function pushLossComboOption(
   job: AutoFillJob,
   label: string,
   pair: any,
   comboCost: number,
   profit: number,
+  scope: LossComboScope,
 ): void {
   if (!pair || !Array.isArray(pair.picks) || pair.picks.length < 2) return;
   // Don't log the same walkable pair twice (resort + home-city can re-surface the
-  // same cheapest pair across stages). Key on the sorted attach URLs.
+  // same cheapest pair across stages). Key on the sorted attach URLs. If two stages
+  // share pick URLs the FIRST-pushed card (resort → home-city → nearby) keeps its scope.
   const urls = (pair.picks as any[]).map((p) => String(p?.url ?? "")).filter(Boolean).sort();
   const key = urls.join("|");
   if (key && job.comboOptions.some((o: any) => o.isLoss && o.__lossKey === key)) return;
@@ -1252,6 +1274,9 @@ function pushLossComboOption(
     lossProfit: Math.round(profit),
     note: `Walkable ${label} pair — would lose $${Math.round(-profit).toLocaleString()} (over the $${PROFIT_MIN_FLAT_USD.toLocaleString()} limit). Attach to override.`,
     picks,
+    scopeCategory: scope.scopeCategory,
+    driveMinutes: scope.driveMinutes,
+    driveMinutesCeiling: scope.driveMinutesCeiling,
     __lossKey: key,
   });
   touch(job);
@@ -1345,6 +1370,11 @@ async function runExpansion(
         accepted: c.accepted === true,
         reason: c.reason,
         units: comboUnitsFromPicks(c.lossPair?.picks, c.lossPair?.bedrooms),
+        // Drive-time scope: the ONLY loss-log site where the 20-vs-45 ring can't be
+        // derived from `source` alone. c.tier/c.driveMinutes are stamped per city.
+        scopeTier: c.tier,
+        driveMinutes: c.driveMinutes,
+        driveMinutesCeiling: tierCeilingMinutes(c.tier),
       });
       // Surface each rejected nearby pair as an attachable "accept the loss"
       // override option (its picks rode along in c.lossPair).
@@ -1355,6 +1385,11 @@ async function runExpansion(
           c.lossPair,
           c.comboCost,
           c.expectedProfit ?? 0,
+          {
+            scopeCategory: c.tier === 1 ? "tier1" : "tier2",
+            driveMinutes: c.driveMinutes,
+            driveMinutesCeiling: tierCeilingMinutes(c.tier),
+          },
         );
       }
     }

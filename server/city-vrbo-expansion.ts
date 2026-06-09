@@ -165,6 +165,8 @@ export type CityExpansionJobStatus = {
   checkOut: string;
   phase: { tier: ExpansionTier | 0; label: string };
   tier: number | null; // tier -> drive-minute ceiling, for the UI
+  tier1Ceiling: number; // env-accurate tier-1 ceiling (default 20), always present
+  tier2Ceiling: number; // env-accurate tier-2 ceiling (default 45), always present
   currentCity: string | null;
   citiesSearched: string[];
   scannedCount: number;
@@ -667,6 +669,16 @@ export function cancelExpansionJob(jobId: string): boolean {
 const tierMinutes = (tier: ExpansionTier | 0): number | null =>
   tier === 1 ? TIER1_MAX_MIN : tier === 2 ? TIER2_MAX_MIN : null;
 
+// Public, env-accurate drive-time ceiling for a tier (the floored effective value
+// of CITY_VRBO_EXPANSION_TIER{1,2}_MAX_MIN, defaults 20 / 45). The auto-fill job
+// uses this to stamp each nearby loss combo with the "within ~N-min drive" ceiling
+// so the UI chip/label never hardcodes 20/45 and can't drift from an env override.
+// Delegates to tierMinutes (the tier 1|2 ? branch already lives there + at the
+// worker's maxMin); the `?? TIER2_MAX_MIN` is an unreachable guard (tier is 1|2).
+export function tierCeilingMinutes(tier: ExpansionTier): number {
+  return tierMinutes(tier) ?? TIER2_MAX_MIN;
+}
+
 export function serializeExpansionJob(job: ExpansionJob): CityExpansionJobStatus {
   return {
     jobId: job.id,
@@ -677,6 +689,11 @@ export function serializeExpansionJob(job: ExpansionJob): CityExpansionJobStatus
     checkOut: job.checkOut,
     phase: job.phase,
     tier: tierMinutes(job.phase.tier),
+    // Stable per-tier ceilings (vs `tier`, which is only the CURRENT phase's
+    // ceiling) so the client can render BOTH the 20-min and 45-min stage titles
+    // env-accurately at once and after the active phase advances.
+    tier1Ceiling: tierCeilingMinutes(1),
+    tier2Ceiling: tierCeilingMinutes(2),
     currentCity: job.progress.currentCity,
     citiesSearched: job.citiesSearched,
     scannedCount: job.progress.citiesScanned,

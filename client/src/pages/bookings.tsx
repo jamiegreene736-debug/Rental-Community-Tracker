@@ -362,6 +362,14 @@ type AutoFillComboOption = {
   // the projected (negative) profit. See server recordLossComboOption.
   isLoss?: boolean;
   lossProfit?: number;
+  // Which scan stage surfaced this loss pair, for the scan-scope chip. home = same
+  // city as the community (resort / home-city / single-unit fallback); tier1/tier2 =
+  // the nearby drive-time expansion rings. driveMinutesCeiling is the env-accurate
+  // "~N min" ceiling fed by the server (tierCeilingMinutes), so the chip never
+  // hardcodes 20/45. Older cards omit these and render with no chip.
+  scopeCategory?: "home" | "tier1" | "tier2";
+  driveMinutes?: number;
+  driveMinutesCeiling?: number;
   picks: Array<{
     bedrooms: number;
     source?: "airbnb" | "vrbo" | "booking" | "pm";
@@ -451,6 +459,23 @@ type BuyInSearchConfirmationPayload = {
 
 type BulkBuyInQueueStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
 
+// One row of the "Full loss log" (the per-city cityEconomics ledger). scopeTier /
+// driveMinutes / driveMinutesCeiling are present only for nearby-expansion rows
+// (source === "nearby") so the row can show whether the combo came from the same
+// city or a drive-time ring. The trailing `| string` on `source` keeps an unknown
+// future scope type-checking and rendering gracefully.
+type LossLogEntry = {
+  source: "resort" | "home-city" | "nearby" | "single-unit-city" | string;
+  label: string;
+  comboCost: number;
+  expectedProfit: number;
+  reason?: string;
+  scopeTier?: 1 | 2;
+  driveMinutes?: number;
+  driveMinutesCeiling?: number;
+  units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }>;
+};
+
 type BulkBuyInQueueItem = {
   id: string;
   jobId: string;
@@ -472,7 +497,7 @@ type BulkBuyInQueueItem = {
   // Over-budget combos found but not attached (would lose money) + per-city loss
   // ledger, surfaced inline in the queue dialog with a one-click accept-the-loss.
   lossCombos?: AutoFillComboOption[];
-  lossLog?: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string; units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }> }>;
+  lossLog?: LossLogEntry[];
 };
 
 interface Candidate {
@@ -1359,6 +1384,8 @@ type CityExpansionJobStatus = {
   checkOut: string;
   phase: { tier: 0 | 1 | 2; label: string };
   tier: number | null;
+  tier1Ceiling: number; // env-accurate tier-1 drive ceiling (default 20)
+  tier2Ceiling: number; // env-accurate tier-2 drive ceiling (default 45)
   currentCity: string | null;
   citiesSearched: string[];
   scannedCount: number;
@@ -1549,6 +1576,9 @@ type AutoFillJobStatus = {
     accepted: boolean;
     reason?: string;
     units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }>;
+    scopeTier?: 1 | 2;
+    driveMinutes?: number;
+    driveMinutesCeiling?: number;
   }>;
   slotsTotal: number;
   slotsFilled: number;
@@ -1590,7 +1620,7 @@ type BulkAutoFillJobStatus = {
     startedAt: string | null;
     finishedAt: string | null;
     lossCombos: AutoFillComboOption[];
-    lossLog: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string; units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }> }>;
+    lossLog: LossLogEntry[];
   }>;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
@@ -1772,9 +1802,12 @@ function AutoFillJobPoller({
 
 // ── Buy-in search-escalation tracker ────────────────────────────────────────
 // Visualizes the 4-stage ladder the buy-in auto-fill walks:
-//   1 Resort search → 2 Home city → 3 Cities within 20 min → 4 Cities within 45 min.
+//   1 Resort search → 2 Home city → 3 Cities within tier-1 → 4 Cities within tier-2.
+//   (tier-1/tier-2 drive-time ceilings default to 20 / 45 min, env-tunable.)
 // Stages 1-2 come from the auto-fill mutation; stages 3-4 from the expansion job
-// (server/city-vrbo-expansion.ts tier 1 = 20 min, tier 2 = 45 min).
+// (server/city-vrbo-expansion.ts tier 1 / tier 2; the drive-time ceilings are
+// env-tunable via CITY_VRBO_EXPANSION_TIER{1,2}_MAX_MIN, defaults 20 / 45 min,
+// and are server-fed into the stage titles so they never drift).
 type EscalationStageStatus = "idle" | "searching" | "found" | "no-pair" | "skipped";
 type BuyInEscalation = {
   resort: EscalationStageStatus;
@@ -1789,6 +1822,11 @@ type BuyInEscalation = {
   // (the "we searched 20 towns and found nothing" view).
   tierResults?: CityExpansionCityResult[];
   nearbyStatus?: "searching" | "found" | "exhausted" | "worker_offline" | "error";
+  // Env-accurate drive-time ceilings captured from the expansion job, so the
+  // stage titles ("Cities within N min") stay correct after the job clears and
+  // never hardcode 20/45 (the ceilings are env-overridable on the server).
+  tier1Ceiling?: number;
+  tier2Ceiling?: number;
   startedAt: number;
 };
 
@@ -1811,6 +1849,8 @@ function BuyInEscalationStages({
   expansion?: {
     status: "pending" | "running" | "found" | "exhausted" | "worker_offline" | "error";
     tier: number | null;
+    tier1Ceiling?: number;
+    tier2Ceiling?: number;
     currentCity: string | null;
     scannedCount: number;
     totalCount: number;
@@ -1906,6 +1946,11 @@ function BuyInEscalationStages({
 
   const t1Status = tierStatus(tier1, 1);
   const t2Status = tierStatus(tier2, 2);
+  // Drive-time ceilings: server-fed (live job first, then the escalation snapshot
+  // so the titles survive after the job clears); the 20/45 literals are only a
+  // pre-data fallback before any expansion status has arrived.
+  const t1Ceiling = expansion?.tier1Ceiling ?? escalation.tier1Ceiling ?? 20;
+  const t2Ceiling = expansion?.tier2Ceiling ?? escalation.tier2Ceiling ?? 45;
   const subForTier = (rows: CityExpansionCityResult[]): string | undefined =>
     rows.length ? undefined : (foundEarly ? "skipped — pair found earlier" : undefined);
 
@@ -1958,11 +2003,11 @@ function BuyInEscalationStages({
         ) : null}
       </div>
       <div>
-        <StageRow n={3} title="Cities within 20 min" sub={subForTier(tier1)} status={t1Status} />
+        <StageRow n={3} title={`Cities within ${t1Ceiling} min`} sub={subForTier(tier1)} status={t1Status} />
         {tier1.length > 0 ? <div className="ml-7 mt-1 flex flex-wrap gap-1">{tier1.map(cityChip)}</div> : null}
       </div>
       <div>
-        <StageRow n={4} title="Cities within 45 min" sub={subForTier(tier2)} status={t2Status} />
+        <StageRow n={4} title={`Cities within ${t2Ceiling} min`} sub={subForTier(tier2)} status={t2Status} />
         {tier2.length > 0 ? <div className="ml-7 mt-1 flex flex-wrap gap-1">{tier2.map(cityChip)}</div> : null}
       </div>
       {expRunning && expansion?.currentCity ? (
@@ -4060,6 +4105,55 @@ function groundFloorTargetBedrooms(req?: GroundFloorRequirement | null): number[
   return Array.from(targets).sort((a, b) => b - a);
 }
 
+// ── Scan-scope chip helpers ────────────────────────────────────────────────
+// Each loss combo is tagged with WHICH scan stage surfaced it: the same city as
+// the community (city-wide scan), or a drive-time expansion ring (~20 / ~45 min).
+// The minute number is always server-fed (driveMinutesCeiling) so the chip can't
+// drift from an env override; the 20/45 literals are only a legacy fallback for
+// rows persisted before this shipped.
+type ScanScopeBucket = "home" | "tier1" | "tier2" | "nearby";
+
+// Loss-LOG rows: source tells us home vs nearby; scopeTier splits nearby into the
+// two rings. Legacy nearby rows (no scopeTier) stay NEUTRAL ("nearby") rather than
+// being force-bucketed — so a real tier-1 city is never mislabeled as tier-2.
+function bucketFromLossLog(entry: LossLogEntry): ScanScopeBucket {
+  if (entry.source === "nearby") {
+    return entry.scopeTier === 1 ? "tier1" : entry.scopeTier === 2 ? "tier2" : "nearby";
+  }
+  return "home";
+}
+
+function scopeChipLabel(bucket: ScanScopeBucket, ceiling?: number): string {
+  switch (bucket) {
+    case "home": return "Same city";
+    case "tier1": return `Within ~${ceiling ?? 20}-min drive`;
+    case "tier2": return `Within ~${ceiling ?? 45}-min drive`;
+    default: return "Nearby drive";
+  }
+}
+
+function scopeChipCls(bucket: ScanScopeBucket): string {
+  const tone =
+    bucket === "home" ? "bg-blue-100 text-blue-700"
+    : bucket === "tier1" ? "bg-violet-100 text-violet-700"
+    : bucket === "tier2" ? "bg-amber-100 text-amber-800"
+    : "bg-slate-100 text-slate-700";
+  return `inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${tone}`;
+}
+
+// Sub-text under the "Same city" chip preserves the resort/home-city/single-unit
+// distinction (all three bucket to "home"); nearby shows the exact drive time.
+function scopeSubText(entry: LossLogEntry): string | null {
+  const bucket = bucketFromLossLog(entry);
+  if (bucket === "home") {
+    if (entry.source === "resort") return "resort search";
+    if (entry.source === "home-city") return "home city";
+    if (entry.source === "single-unit-city") return "single-unit fallback";
+    return null;
+  }
+  return typeof entry.driveMinutes === "number" ? `${Math.round(entry.driveMinutes)} min drive` : null;
+}
+
 // Durable "Last buy-in search" panel — surfaces the OVER-BUDGET (loss) combos a
 // search found and skipped, so the operator can review them after the bulk queue
 // closes and one-click "accept the loss" to override the $100 max-loss limit.
@@ -4074,7 +4168,7 @@ function LastBuyInSearchPanel({
   attachingComboLabel,
 }: {
   lossCombos: AutoFillComboOption[];
-  lossLog: Array<{ source: string; label: string; comboCost: number; expectedProfit: number; reason?: string; units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }> }>;
+  lossLog: LossLogEntry[];
   finishedAt?: number | null;
   onAttachCombo: (option: AutoFillComboOption) => void;
   attachingComboLabel?: string | null;
@@ -4100,7 +4194,15 @@ function LastBuyInSearchPanel({
               <div key={option.label} className="rounded border border-amber-200 bg-white/70 px-2 py-1.5">
                 <div className="grid grid-cols-[1fr_auto] gap-3">
                   <div className="min-w-0">
-                    <p className="font-medium text-foreground">{option.label}</p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="font-medium text-foreground">{option.label}</p>
+                      {option.scopeCategory ? (
+                        <span className={scopeChipCls(option.scopeCategory)}>
+                          {scopeChipLabel(option.scopeCategory, option.driveMinutesCeiling)}
+                          {typeof option.driveMinutes === "number" ? ` · ${Math.round(option.driveMinutes)} min` : ""}
+                        </span>
+                      ) : null}
+                    </div>
                     <p className="truncate text-[11px] text-muted-foreground">
                       {option.picks.map((pick) => `${pick.bedrooms}BR ${pick.sourceLabel} ${fmtMoney(pick.totalPrice)}`).join(" + ")}
                     </p>
@@ -4163,10 +4265,14 @@ function LastBuyInSearchPanel({
               const units = entry.units ?? [];
               // Bedroom-split combination type, e.g. "3BR + 3BR" or "4BR + 2BR".
               const comboType = units.length > 0 ? units.map((u) => `${u.bedrooms}BR`).join(" + ") : null;
+              // Which scan stage surfaced this combo (same city / ~20-min / ~45-min ring).
+              const bucket = bucketFromLossLog(entry);
+              const subText = scopeSubText(entry);
               return (
                 <li key={`loss-log-${index}`} className="text-[11px] text-muted-foreground">
                   <span className="font-medium text-foreground">{entry.label}</span>{" "}
-                  <span className="capitalize">({entry.source.replace(/-/g, " ")})</span>
+                  <span className={scopeChipCls(bucket)}>{scopeChipLabel(bucket, entry.driveMinutesCeiling)}</span>
+                  {subText ? <> <span className="text-muted-foreground">· {subText}</span></> : null}
                   {comboType ? <> · <span className="font-medium text-foreground">{comboType}</span></> : null} · {fmtMoney(entry.comboCost)} ·{" "}
                   {entry.expectedProfit < 0
                     ? <span className="text-red-700">est. loss {fmtMoney(-entry.expectedProfit)}</span>
@@ -5978,13 +6084,16 @@ export default function Bookings() {
     // handleExpansionResolved, which snapshots + clears the row).
     status: "pending" | "running" | "found" | "exhausted" | "worker_offline" | "error";
     tier: number | null;
+    tier1Ceiling: number;
+    tier2Ceiling: number;
     currentCity: string | null;
     citiesSearched: string[];
     scannedCount: number;
     totalCount: number;
     message?: string;
-    // Per-city, per-tier results (tier 1 = within 20 min, tier 2 = within 45 min)
-    // so the escalation tracker can show each nearby city's pass/fail live.
+    // Per-city, per-tier results (tier 1 / tier 2 — drive-time ceilings are
+    // env-tunable, defaults within 20 / 45 min) so the escalation tracker can
+    // show each nearby city's pass/fail live.
     cityResults: CityExpansionCityResult[];
   };
   const [expansionJobs, setExpansionJobs] = useState<Record<string, ExpansionJobState>>({});
@@ -5997,7 +6106,8 @@ export default function Bookings() {
   >({});
 
   // ── Buy-in search-escalation tracker (the 4-stage ladder the operator sees) ──
-  // resort search → home city → cities within 20 min → cities within 45 min.
+  // resort search → home city → cities within tier-1 → cities within tier-2
+  // (drive-time ceilings default to ~20 / ~45 min, env-tunable + server-fed).
   // Stages 1-2 are recorded live by the auto-fill mutation; stages 3-4 derive
   // from the expansion job above. Types + UI live at module scope
   // (BuyInEscalation / BuyInEscalationStages). Keyed by reservation id.
@@ -6659,6 +6769,8 @@ export default function Bookings() {
           jobId: s.jobId,
           status: s.status, // pending/running while polling; terminal handled by resolver
           tier: s.tier,
+          tier1Ceiling: s.tier1Ceiling,
+          tier2Ceiling: s.tier2Ceiling,
           currentCity: s.currentCity,
           citiesSearched: s.citiesSearched,
           scannedCount: s.scannedCount,
@@ -6690,6 +6802,10 @@ export default function Bookings() {
         homeCity: "no-pair",
         tierResults: status.cityResults ?? [],
         nearbyStatus,
+        // Keep the env-accurate ceilings on the snapshot so the stage titles stay
+        // correct after the job row is cleared.
+        tier1Ceiling: status.tier1Ceiling,
+        tier2Ceiling: status.tier2Ceiling,
         ...(status.status === "found" ? { foundAt: "nearby" as const } : {}),
       });
     }
@@ -6738,7 +6854,7 @@ export default function Bookings() {
         toast({
           title: "No nearby-city combo found",
           description: searched > 0
-            ? `Searched ${searched} ${searched === 1 ? "city" : "cities"} within 45 min — no same-community pair. Filling slots individually…`
+            ? `Searched ${searched} ${searched === 1 ? "city" : "cities"} within ${status?.tier2Ceiling ?? 45} min — no same-community pair. Filling slots individually…`
             : "No nearby cities yielded a same-community pair. Filling slots individually…",
         });
       }
