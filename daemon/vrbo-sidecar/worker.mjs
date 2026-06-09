@@ -2916,11 +2916,25 @@ const NON_HAWAII_US_STATES = [
   "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming",
 ];
 const HAWAII_DESTINATION_RE = /\b(hawaii|kauai|maui|oahu|molokai|lanai|honolulu|lihue|kona|hilo)\b/;
-function vrboResolvedToNonHawaiiState(urlDestination, title) {
+// expectedState (full lowercase name, threaded from the server when known) makes
+// this REGION-AWARE: a resolution to a non-Hawaii state is a "mismatch" to reject
+// ONLY when it disagrees with the property's expected state. So a Florida property
+// (expectedState="florida") resolving to Florida is FINE; a Hawaii property
+// (expectedState "hawaii"/undefined) resolving to Louisiana is still rejected
+// (the $2,604 Port-Allen-Louisiana guard). Default (no/"hawaii" expectedState) is
+// byte-identical to before: reject every non-Hawaii resolution.
+function vrboResolvedToNonHawaiiState(urlDestination, title, expectedState) {
   const text = `${urlDestination || ""} ${normalizeDestinationGuardText(title || "")}`.trim();
   if (!text) return false;
   if (HAWAII_DESTINATION_RE.test(text)) return false; // resolved to Hawaii → fine
-  return NON_HAWAII_US_STATES.some((s) => new RegExp(`\\b${s}\\b`).test(text));
+  const resolvedState = NON_HAWAII_US_STATES.find((s) => new RegExp(`\\b${s}\\b`).test(text));
+  if (!resolvedState) return false; // didn't resolve to any recognized US state
+  const expected = String(expectedState || "").trim().toLowerCase();
+  if (expected && expected !== "hawaii") {
+    // The property is in a known non-Hawaii state → accept that state, reject others.
+    return resolvedState !== expected;
+  }
+  return true; // Hawaii / unknown expectation → any mainland resolution is wrong.
 }
 
 function destinationGuardTokens(...values) {
@@ -2954,6 +2968,18 @@ function destinationGuardTokens(...values) {
   ));
 }
 
+// Derive the property's EXPECTED state from the expected-destination values. The
+// server appends a full lowercase state name ("florida"/"hawaii") to the guard's
+// destination, so we match full names only (NO ambiguous 2-letter abbreviations
+// like "in"/"or"/"me" that collide with common words). Hawaii wins first so an
+// incidental mainland token in a Hawaii resort name can't relax the guard.
+function extractExpectedStateFromDestination(...values) {
+  const text = normalizeDestinationGuardText(values.filter(Boolean).join(" "));
+  if (!text) return undefined;
+  if (HAWAII_DESTINATION_RE.test(text)) return "hawaii";
+  return NON_HAWAII_US_STATES.find((s) => new RegExp(`\\b${s}\\b`).test(text)) ?? undefined;
+}
+
 function stateMatchesExpectedDestination(state, ...expectedValues) {
   if (!state) return false;
   const expectedText = normalizeDestinationGuardText(expectedValues.filter(Boolean).join(" "));
@@ -2961,8 +2987,11 @@ function stateMatchesExpectedDestination(state, ...expectedValues) {
   const urlDestination = vrboSearchDestinationFromUrl(state?.url ?? "");
   // Reject a mainland-namesake resolution (e.g. "Port Allen, Louisiana") before
   // any token matching — port+allen would otherwise match an expected
-  // "Port Allen, Hawaii" because the state is treated as a generic token.
-  if (vrboResolvedToNonHawaiiState(urlDestination, state?.title)) return false;
+  // "Port Allen, Hawaii" because the state is treated as a generic token. The
+  // expectedState (when the server threaded one) makes this region-aware so a
+  // legitimately-Florida property is NOT rejected for resolving to Florida.
+  const expectedState = extractExpectedStateFromDestination(...expectedValues);
+  if (vrboResolvedToNonHawaiiState(urlDestination, state?.title, expectedState)) return false;
   const genericLocationTokens = new Set([
     "hawaii", "koloa", "kauai", "island", "states", "america", "united", "beach", "county",
   ]);
@@ -7642,6 +7671,13 @@ async function runVrboMapBoundsSearchVariant(id, params, variant = null) {
 async function runVrboSearchVariant(id, params, variant = null, visibleAttempt = 0) {
   const { destination, searchTerm, checkIn, checkOut, bedrooms } = params;
   const exhaustiveCityExport = Boolean(params?.cityWideInventory);
+  // Region-aware destination guard: append the property's expected state (full
+  // lowercase name from the server, e.g. "florida") to the destination ONLY for
+  // the post-submit mainland-namesake checks, so a Florida property resolving to
+  // Florida is accepted. NOT used for the pre-submit homepage-form match (that
+  // judges the typed field, where a state token would force needless re-fills).
+  const expectedState = String(params?.expectedState || "").trim().toLowerCase();
+  const guardDestination = expectedState ? `${destination}, ${expectedState}` : destination;
   const effectiveSearchTerm = String(variant?.searchTerm || searchTerm || destination || "").trim();
   const typedQuery = String(variant?.typedQuery || otaBaseSearchQuery(searchTerm, destination) || effectiveSearchTerm).trim();
   log(
@@ -7774,7 +7810,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     title: await page.title().catch(() => ""),
     bodyExcerpt: "",
   };
-  let correctionReasons = vrboStateCorrectionReasons(quickPostSubmitState, checkIn, checkOut, effectiveSearchTerm, destination);
+  let correctionReasons = vrboStateCorrectionReasons(quickPostSubmitState, checkIn, checkOut, effectiveSearchTerm, guardDestination);
   if (correctionReasons.length > 0) {
     log(`vrbo_search ${id}: post-submit state not settled yet (${correctionReasons.join("+")} mismatch); waiting for visible results before deciding`);
   }
@@ -7812,10 +7848,10 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
       retryLater: true,
     });
   }
-  correctionReasons = vrboStateCorrectionReasons(state, checkIn, checkOut, effectiveSearchTerm, destination);
+  correctionReasons = vrboStateCorrectionReasons(state, checkIn, checkOut, effectiveSearchTerm, guardDestination);
   if (correctionReasons.length > 0) {
     const haystack = normalizeDestinationGuardText(`${state?.url ?? ""} ${state?.title ?? ""} ${state?.bodyExcerpt ?? ""}`);
-    const expectedText = normalizeDestinationGuardText(`${effectiveSearchTerm} ${destination}`);
+    const expectedText = normalizeDestinationGuardText(`${effectiveSearchTerm} ${guardDestination}`);
     const clearlyWrongFloridaDefault =
       /\b(?:orlando|kissimmee|florida)\b/.test(haystack) && !/\bflorida\b/.test(expectedText);
     if (visibleSearchWasAuthoritative && !clearlyWrongFloridaDefault && !correctionReasons.includes("destination")) {
@@ -7858,7 +7894,7 @@ async function runVrboSearchVariant(id, params, variant = null, visibleAttempt =
     );
   }
   if (!visibleSearchWasAuthoritative) {
-    throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, destination);
+    throwIfDestinationMismatch(state, "vrbo_search", id, effectiveSearchTerm, guardDestination);
     throwIfVrboDateMismatch(state, "vrbo_search", id, checkIn, checkOut);
   }
   // Let the first propertySearchListings GraphQL batch land before pagination replay.
