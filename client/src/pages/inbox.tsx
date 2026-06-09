@@ -3406,8 +3406,8 @@ export default function InboxPage() {
         delete next[vars.id];
         return next;
       });
-      if (data.ok) toast({ title: "Saved and analyzed", description: data.analysis });
-      else toast({ title: "Analyze failed", description: data.error, variant: "destructive" });
+      if (data.ok) toast({ title: "Saved — taught the AI from your edit", description: data.analysis });
+      else toast({ title: "Save failed", description: data.error, variant: "destructive" });
     },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
@@ -3588,9 +3588,10 @@ export default function InboxPage() {
 
       <div className="max-w-7xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
         {/* ── AI AUTO-REPLY ATTENTION BANNER ──
-            Replaces the old "AI Draft Approval" tab. Clean replies now send
-            themselves; only the messages the AI held (uncertain / urgent /
-            out-of-scope / errored) surface here for the operator. */}
+            Replaces the old "AI Draft Approval" tab. Auto-send is OFF by default
+            (2026-06-09) so EVERY AI draft surfaces here for the operator to edit
+            + Save (which teaches the AI) or Send. If the operator flips Auto-send
+            ON, clean drafts send themselves and only held messages surface. */}
         {isAdmin && (
           <div className="mb-4" data-testid="panel-auto-reply">
             {/* Status + automation controls */}
@@ -3737,25 +3738,31 @@ export default function InboxPage() {
                                 >
                                   <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> Send
                                 </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => saveDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
-                                  disabled={saveDraftReply.isPending || !autoReplyDraftValue(log).trim()}
-                                  data-testid={`button-attn-save-${log.id}`}
-                                >
-                                  <FileText className="h-3.5 w-3.5 mr-1.5" /> Save
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => analyzeDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
-                                  disabled={analyzeDraftReply.isPending || !autoReplyDraftValue(log).trim()}
-                                  title="Save this edit and teach the AI from it"
-                                  data-testid={`button-attn-analyze-${log.id}`}
-                                >
-                                  <Sparkles className={`h-3.5 w-3.5 mr-1.5 ${analyzeDraftReply.isPending ? "animate-spin" : ""}`} /> Save &amp; learn
-                                </Button>
+                                {/* Save teaches the AI whenever you actually edited
+                                    the draft (it records the original→edited diff as
+                                    a style example); an unchanged draft just saves,
+                                    so we don't burn an LLM analysis on a no-op. */}
+                                {(() => {
+                                  const edited = autoReplyDraftValue(log).trim() !== (log.replyDraft ?? "").trim();
+                                  const pending = saveDraftReply.isPending || analyzeDraftReply.isPending;
+                                  return (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        const replyDraft = autoReplyDraftValue(log);
+                                        if (edited) analyzeDraftReply.mutate({ id: log.id, replyDraft });
+                                        else saveDraftReply.mutate({ id: log.id, replyDraft });
+                                      }}
+                                      disabled={pending || !autoReplyDraftValue(log).trim()}
+                                      title={edited ? "Save your edit — the AI learns from your changes" : "Save this draft for later"}
+                                      data-testid={`button-attn-save-${log.id}`}
+                                    >
+                                      <Sparkles className={`h-3.5 w-3.5 mr-1.5 ${analyzeDraftReply.isPending ? "animate-spin" : ""}`} />
+                                      {edited ? "Save & teach AI" : "Save"}
+                                    </Button>
+                                  );
+                                })()}
                                 <Button
                                   size="sm"
                                   variant="outline"

@@ -25,20 +25,25 @@ let _lastRunResult: { processed: number; sent: number; drafted: number; flagged:
 // a sendAfter deadline (the review window) and a separate send pass
 // (runAutoSendQueue) sends it only if it's still uncontested at that point.
 //
-// FULL-AUTO DEFAULT (2026-06-08, operator request "make it fully automated"):
-// auto-send now defaults ON and area answers are no longer held. The operator no
-// longer approves clean drafts — only the messages the model flags (uncertain /
-// urgent / out-of-scope) wait for a human, surfaced in the inbox attention banner.
-// The one-time SETTING_FULLAUTO_ROLLOUT flag below forces this on at boot
-// regardless of any stale persisted "false", while still letting a later operator
-// OFF toggle stick. See AGENTS.md "Auto-reply is FULLY AUTOMATED".
+// AUTO-SEND DISABLED BY DEFAULT (2026-06-09, operator: "disable the automatic
+// reply feature"). Auto-SEND is OFF: nothing goes out to a guest automatically.
+// Draft GENERATION is unchanged (`_enabled`, orthogonal) — the AI still drafts a
+// reply for every incoming guest message; with auto-send off those land as
+// status "drafted" and surface in the inbox attention banner, where the operator
+// edits + Saves (teaching the AI from the edit) or Sends. The one-time
+// SETTING_DISABLE_ROLLOUT flag below forces auto-send OFF at boot regardless of
+// the stale persisted "true" left by the 2026-06-08 full-auto rollout, while
+// still letting a later operator ON toggle stick. (The historical
+// SETTING_FULLAUTO_ROLLOUT block remains but is superseded — the disable rollout
+// runs first and returns.) See AGENTS.md "Auto-reply is DRAFTS-ONLY".
 const SETTING_AUTOSEND_ENABLED = "auto_send.master_enabled";
 const SETTING_REVIEW_WINDOW = "auto_send.review_window_seconds";
 const SETTING_HOLD_RECOMMENDATIONS = "auto_send.hold_recommendations";
 const SETTING_FULLAUTO_ROLLOUT = "auto_send.full_auto_rollout_v1";
-let _autoSendEnabled = true;       // FULL-AUTO: clean drafts send themselves
+const SETTING_DISABLE_ROLLOUT = "auto_send.disabled_rollout_v2";
+let _autoSendEnabled = false;      // DRAFTS-ONLY: nothing auto-sends; every reply waits for the operator
 let _reviewWindowSeconds = 90;
-let _holdRecommendations = false;  // FULL-AUTO: area answers auto-send too (output filter is the backstop)
+let _holdRecommendations = false;  // moot while auto-send is off (only gates which clean drafts would queue)
 let _autoSendConfigLoaded = false;
 let _isAutoSendRunning = false;
 let _lastAutoSendAt: Date | null = null;
@@ -65,10 +70,48 @@ export function setAutoReplyEnabled(enabled: boolean) {
 
 export async function loadAutoSendConfig(): Promise<void> {
   try {
-    // One-time full-automation rollout. If the flag is unset, this is the first
-    // boot after the "fully automated" change: FORCE auto-send ON + stop holding
-    // area answers, persist them (so an operator's later OFF toggle sticks), seed
-    // the review window if unset, and stamp the rollout flag so we only force once.
+    // One-time DISABLE rollout (2026-06-09, operator: "disable the automatic
+    // reply feature"). If the flag is unset this is the first boot after the
+    // disable change: FORCE auto-send OFF — overriding the stale persisted "true"
+    // left by the earlier full-auto rollout — persist it (so a later operator ON
+    // toggle sticks), revert any drafts queued for auto-send back to the manual
+    // review queue so they surface in the attention banner, preserve the window /
+    // hold settings, then stamp the flag so we only force once. Draft generation
+    // is untouched — the AI keeps drafting for human review + teaching.
+    const disableRollout = await storage.getSetting(SETTING_DISABLE_ROLLOUT);
+    if (disableRollout == null) {
+      _autoSendEnabled = false;
+      await storage.setSetting(SETTING_AUTOSEND_ENABLED, "false");
+      try {
+        const queued = (await storage.getAutoReplyLogs(300)).filter((l) => l.status === "queued" && !l.replySent);
+        for (const l of queued) await storage.updateAutoReplyLog(l.id, { status: "drafted", sendAfter: null });
+        if (queued.length) console.log(`[auto-reply] disable rollout: reverted ${queued.length} queued draft(s) to manual review`);
+      } catch (e) {
+        console.warn(`[auto-reply] disable rollout: could not revert queued drafts: ${(e as Error).message}`);
+      }
+      const [window, hold] = await Promise.all([
+        storage.getSetting(SETTING_REVIEW_WINDOW),
+        storage.getSetting(SETTING_HOLD_RECOMMENDATIONS),
+      ]);
+      if (window != null) {
+        const n = Number(window);
+        if (Number.isFinite(n) && n >= 0) _reviewWindowSeconds = Math.min(Math.round(n), 3600);
+      }
+      if (hold != null) _holdRecommendations = hold !== "false";
+      await storage.setSetting(SETTING_DISABLE_ROLLOUT, "1");
+      // Also stamp the (now-superseded) enable-rollout flag so it can NEVER force
+      // auto-send back ON — critical on a FRESH DB, where it would otherwise be
+      // unstamped and fire on the next boot after this block returns.
+      await storage.setSetting(SETTING_FULLAUTO_ROLLOUT, "1");
+      _autoSendConfigLoaded = true;
+      console.log("[auto-reply] auto-send DISABLED by one-time rollout (drafts still generated for manual review + teaching)");
+      return;
+    }
+
+    // One-time full-automation rollout (2026-06-08, superseded by the disable
+    // rollout above — kept for history; only ever reached if disabled_rollout_v2
+    // is stamped while full_auto_rollout_v1 is somehow unset, which doesn't happen
+    // on a fresh DB because the disable rollout runs first and returns).
     const rollout = await storage.getSetting(SETTING_FULLAUTO_ROLLOUT);
     if (rollout == null) {
       _autoSendEnabled = true;

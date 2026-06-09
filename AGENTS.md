@@ -1799,20 +1799,34 @@ established it so you can read the rationale in the commit message.
     also add an output pattern in `OUTPUT_RISK_PATTERNS`. See PR
     that added this entry.
 
-    **Auto-reply is FULLY AUTOMATED — auto-send default ON + inbox
-    attention banner (Load-Bearing, 2026-06-08; supersedes the
-    Decision-Log 2026-06-07 "Part B default OFF" rollout).** Operator
-    asked to make the guest responder fully automatic: clean, in-scope
-    replies SEND THEMSELVES; the human only sees the messages the model
-    held. Don't revert these without operator ask:
-    - `loadAutoSendConfig` runs a ONE-TIME rollout keyed on
-      `auto_send.full_auto_rollout_v1`: on the first boot after this
-      change it FORCES `auto_send.master_enabled=true` and
-      `auto_send.hold_recommendations=false` and persists them, so the
-      deploy turns auto-send on regardless of any stale persisted
-      "false" — while a LATER operator OFF toggle still sticks (the flag
-      is already stamped, so we never re-force). In-memory defaults also
-      flipped (`_autoSendEnabled=true`, `_holdRecommendations=false`).
+    **Auto-reply is DRAFTS-ONLY — auto-send default OFF (Load-Bearing,
+    2026-06-09; SUPERSEDES the 2026-06-08 "FULLY AUTOMATED / auto-send
+    default ON" decision below).** Operator asked to "disable the
+    automatic reply feature": NOTHING goes out to a guest automatically.
+    Draft GENERATION is unchanged (`_enabled`, orthogonal to auto-send) —
+    the AI still drafts a reply for EVERY incoming guest message; with
+    auto-send off those land as status "drafted" and surface in the inbox
+    attention banner, where the operator edits + Saves (which TEACHES the
+    AI from the original→edited diff via `analyzeAndSaveDraftedReply` →
+    `auto_reply_style_examples`) or Sends. The whole 3-layer safety stack,
+    the banner UI, and the toggle below are UNCHANGED — only the default
+    flipped. Don't revert without operator ask:
+    - `loadAutoSendConfig` runs a ONE-TIME DISABLE rollout keyed on
+      `auto_send.disabled_rollout_v2`: on the first boot after this change
+      it FORCES `auto_send.master_enabled=false` and persists it
+      (overriding the stale "true" the 2026-06-08 rollout left), reverts
+      any `queued` sends back to `drafted` (so they show in the banner),
+      and ALSO stamps `auto_send.full_auto_rollout_v1` so the superseded
+      enable-rollout can never re-fire (critical on a fresh DB). A LATER
+      operator ON toggle still sticks. In-memory default is now
+      `_autoSendEnabled=false`. The banner Auto-send toggle re-enables the
+      full-auto behavior described below if the operator ever wants it.
+    - [HISTORICAL, pre-2026-06-09] The enable path: `loadAutoSendConfig`
+      formerly ran a ONE-TIME rollout keyed on
+      `auto_send.full_auto_rollout_v1` that FORCED
+      `auto_send.master_enabled=true` +
+      `auto_send.hold_recommendations=false`. In-memory defaults were
+      `_autoSendEnabled=true`, `_holdRecommendations=false`.
     - The 3-layer safety stack above is UNCHANGED and is what makes this
       safe: a flagged / errored / urgent / unmapped-listing / area-
       uncertain message is HELD, never queued. The clean path now drafts
