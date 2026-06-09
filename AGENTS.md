@@ -144,20 +144,35 @@ page. Three constraints make it actually reach the full count — don't
    Poipu Kai (Kauai, HAWAII) booking: the nearby-city expansion searched
    "Port Allen" (a real Kauai town) and VRBO autocomplete resolved it to
    "Port Allen, Louisiana" (next to Baton Rouge/LSU), harvesting mainland
-   listings the matcher then clustered ("baton rouge retreat") + attached. Every
-   buy-in market is Hawaii, so the fix is two layers: **(1) daemon
-   (`worker.mjs` `vrboResolvedToNonHawaiiState`)** — the existing destination
-   guard (`stateMatchesExpectedDestination`, which already special-cased Florida)
-   now rejects ANY search whose RESOLVED `/search?destination=` / title names a
-   non-Hawaii US state, so a wrong-region search harvests nothing
-   (`throwIfDestinationMismatch`). **(2) server (`city-vrbo-inventory.ts`
-   `normalizeSidecarCandidates`)** — drops any harvested listing whose
-   `locationText` names a non-Hawaii state (`droppedOutOfArea`), BEFORE the
-   matcher/single-unit-fallback sees it. **Check `locationText` ONLY, never the
-   title** — titles are noisy ("Indiana Jones villa", a "Condo, CA King Bed"
-   amenity would false-drop). A Hawaii token ALWAYS wins (never over-drop a real
-   Kauai unit); ambiguous/no-state → KEEP. Locked by `tests/listing-geo.test.ts`.
-   Don't narrow the daemon guard back to Florida-only.
+   listings the matcher then clustered ("baton rouge retreat") + attached. The fix
+   is two layers: **(1) daemon (`worker.mjs` `vrboResolvedToNonHawaiiState`)** — the
+   destination guard (`stateMatchesExpectedDestination`) rejects a search whose
+   RESOLVED `/search?destination=` / title names a non-Hawaii US state, so a
+   wrong-region search harvests nothing (`throwIfDestinationMismatch`). **(2) server
+   (`city-vrbo-inventory.ts` `normalizeSidecarCandidates`)** — drops any harvested
+   listing whose `locationText` names a non-Hawaii state (`droppedOutOfArea`),
+   BEFORE the matcher/single-unit-fallback sees it. **Check `locationText` ONLY,
+   never the title** — titles are noisy ("Indiana Jones villa", a "Condo, CA King
+   Bed" amenity would false-drop). A Hawaii token ALWAYS wins (never over-drop a
+   real Kauai unit); ambiguous/no-state → KEEP. Locked by
+   `tests/listing-geo.test.ts`.
+   **REGION-AWARE update (2026-06-09): the portfolio is NO LONGER Hawaii-only**
+   (Florida properties — Santa Maria Resort/Fort Myers Beach, Bonita National — were
+   added), and the daemon guard was over-rejecting them (a FL property legitimately
+   resolves to "Florida" → was dropped → 0 VRBO inventory). The daemon guard now
+   takes the property's EXPECTED state, threaded from the server as
+   `vrbo_search` param `expectedState` (full lowercase name; `searchVrboViaSidecar`
+   normalizes the parsed location state via a USPS abbr→full map, "FL"→"florida").
+   `vrboResolvedToNonHawaiiState(urlDestination, title, expectedState)` rejects a
+   non-Hawaii resolution ONLY when it DISAGREES with `expectedState`; default
+   (absent/"hawaii") is byte-identical → Baton-Rouge still rejected. `runVrboSearch-
+   Variant` appends the state to a `guardDestination` used ONLY in the post-submit
+   checks (not the pre-submit homepage-form match). Verified live: FL VRBO 0→35
+   exported; Baton-Rouge logic test 5/5. **Don't narrow the daemon guard back to
+   reject-all-non-Hawaii.** SIBLING STILL PENDING: the layer-(2) server geo-drop +
+   `city-vrbo-inventory.ts` `targetState` still default to Hawaii, so FL COMBO
+   bookings' city-wide path needs the same region threading (the current FL
+   bookings are single-unit, which only hits the daemon find-buy-in path).
 6. **Same-community pairing is cluster-first + multi-signal, not title-substring,
    2026-06-07 (`shared/city-vrbo-combo.ts`).** `suggestCityVrboComboPair`
    clusters the city pool by ANY same-community signal — a curated Kauai complex
