@@ -116,6 +116,11 @@ export type CityEconomics = {
   expectedProfit: number;
   accepted: boolean;
   reason?: string;
+  // The units that made up this too-expensive combination, so the loss-log row
+  // can show the bedroom-split type (e.g. "3BR + 3BR") + a clickable link to
+  // each unit. Optional — older persisted rows (and the combo-rollback summary
+  // entry) may omit it. See LastBuyInSearchPanel "Full loss log" in bookings.tsx.
+  units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }>;
 };
 
 type AttachStage = "resort" | "home-city" | "nearby" | "single-unit-city";
@@ -856,8 +861,8 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         flat: PROFIT_MIN_FLAT_USD,
         pct: PROFIT_MIN_PCT,
       });
-    const recordEconomics = (source: AttachStage, label: string, comboCost: number, profit: number, accepted: boolean, reason?: string) => {
-      job.cityEconomics.push({ source, label, comboCost: Math.round(comboCost), expectedProfit: Math.round(profit), accepted, reason });
+    const recordEconomics = (source: AttachStage, label: string, comboCost: number, profit: number, accepted: boolean, reason?: string, units?: CityEconomics["units"]) => {
+      job.cityEconomics.push({ source, label, comboCost: Math.round(comboCost), expectedProfit: Math.round(profit), accepted, reason, units });
       touch(job);
     };
     const recordLossComboOption = (label: string, pair: any, comboCost: number, profit: number) =>
@@ -933,7 +938,8 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           }
         } else {
           recordEconomics("resort", `Resort ${job.community ?? ""}`.trim() || "Resort", comboCost, v.profit, false,
-            `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searched on`);
+            `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searched on`,
+            comboUnitsFromPicks(proposal.map((p) => p.pick), proposal.map((p) => p.slot.bedrooms)));
           // The resort itself is the same-community walkable combo — a PRIME
           // override candidate. Capture it as an attachable loss option, but only
           // when the proposal covers EVERY slot (the client attach requires
@@ -1000,7 +1006,8 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
             // other home-city combo would be better).
             setEscalation(job, { homeCity: "no-pair" });
             recordEconomics("home-city", payload?.citySearchTerm ?? "home city", comboCost, v.profit, false,
-              `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searching nearby cities`);
+              `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searching nearby cities`,
+              comboUnitsFromPicks(pair.picks, pair.bedrooms));
             recordLossComboOption(payload?.citySearchTerm ?? "home city", pair, comboCost, v.profit);
           }
         } else {
@@ -1058,7 +1065,8 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           const v = gate(cost);
           if (!v.acceptable) {
             recordEconomics("single-unit-city", `${payload?.citySearchTerm ?? "city"} ${slot.unitLabel}`.trim(), cost, v.profit, false,
-              `adding ${slot.unitLabel} ($${Math.round(cost).toLocaleString()}) → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); left empty`);
+              `adding ${slot.unitLabel} ($${Math.round(cost).toLocaleString()}) → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); left empty`,
+              comboUnitsFromPicks([row], [slot.bedrooms]));
             failed = true;
             failReason = `${slot.unitLabel}: $${Math.round(cost).toLocaleString()} exceeds the $${PROFIT_MIN_FLAT_USD.toLocaleString()} loss limit`;
             break; // further units only deepen the loss
@@ -1091,6 +1099,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
             `${payload?.citySearchTerm ?? "city"} combo`,
             0, 0, false,
             `no profitable WALKABLE combo for all ${slotsToFill.length} units (${failReason}); detached ${rolledBack.length} lone unit(s) and left the booking empty for manual review`,
+            comboUnitsFromPicks(rolledBack, rolledBack.map((a) => a.bedrooms)),
           );
           touch(job);
         }
@@ -1189,6 +1198,27 @@ export function assignComboPicksToSlots(
 // its serialized twin): { picks: CityVrboListing[], bedrooms: number[] }.
 // `profit` is negative for a loss; `comboCost` is the pair's total. Module-level
 // so both runAutoFillJob (resort/home-city) and runExpansion (nearby) can call it.
+// Build the CityEconomics.units breakdown from a list of picks (live candidates
+// or city rows). `bedrooms[i]` (when supplied, e.g. the slot's bedroom count)
+// wins over the pick's own bedroom field — the resort/combo bedrooms come from
+// the SLOTS, not the scraped pick. Drops picks with no URL (nothing to link).
+function comboUnitsFromPicks(
+  picks: any[] | undefined,
+  bedrooms?: Array<number | undefined>,
+): CityEconomics["units"] {
+  if (!Array.isArray(picks)) return undefined;
+  const units = picks
+    .map((p, i) => ({
+      bedrooms: Number(bedrooms?.[i] ?? p?.bedrooms ?? 0) || 0,
+      url: String(p?.url ?? ""),
+      title: p?.title ? String(p.title) : undefined,
+      totalPrice: Number(p?.totalPrice) || undefined,
+      sourceLabel: p?.sourceLabel ? String(p.sourceLabel) : undefined,
+    }))
+    .filter((u) => u.url);
+  return units.length > 0 ? units : undefined;
+}
+
 function pushLossComboOption(
   job: AutoFillJob,
   label: string,
@@ -1314,6 +1344,7 @@ async function runExpansion(
         expectedProfit: Math.round(c.expectedProfit ?? 0),
         accepted: c.accepted === true,
         reason: c.reason,
+        units: comboUnitsFromPicks(c.lossPair?.picks, c.lossPair?.bedrooms),
       });
       // Surface each rejected nearby pair as an attachable "accept the loss"
       // override option (its picks rode along in c.lossPair).
