@@ -323,6 +323,10 @@ async function runBulkJob(job: BulkJob): Promise<void> {
         last = serializeAutoFillJob(af);
         item.filled = last.slotsFilled;
         item.totalSlots = last.slotsTotal;
+        // Surface the auto-fill job's LIVE phase message (e.g. "Searching the home
+        // city on VRBO…", "Widening to nearby cities…") so the dialog reflects real
+        // progress instead of freezing on the pre-search "Detaching…" notice.
+        if (last.message) item.message = last.message;
         touch(job);
         if (last.done) break;
         if (Date.now() - itemStartedAt > ITEM_CAP_MS) break;
