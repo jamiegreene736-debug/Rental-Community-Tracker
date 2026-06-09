@@ -727,6 +727,24 @@ unit-tested in `tests/buy-in-profit.test.ts` (incl. the $9,919 stay: −$100 mat
     serialize / Postgres-jsonb / bulk-`lossLog` paths VERBATIM — don't strip `units`
     from any of them thinking it's redundant with the attachable `lossCombos` cards;
     the log covers cases the cards don't.
+  - **Each loss combo also carries a SCAN-SCOPE tag (2026-06-09, PR #622)** — which
+    stage of the escalation ladder found it: "Same city" (resort / home-city /
+    single-unit fallback), "Within ~20-min drive" (expansion tier 1), or
+    "Within ~45-min drive" (tier 2). The loss-LOG row uses `cityEconomics.scopeTier`
+    (1|2, nearby only) + `source` (home/nearby); the loss-CARD uses
+    `AutoFillComboOption.scopeCategory` ("home"|"tier1"|"tier2"). Both also carry
+    `driveMinutes` + `driveMinutesCeiling`. **Load-bearing — minute numbers are
+    SERVER-FED, never a client literal:** `tierCeilingMinutes(tier)` (exported from
+    `city-vrbo-expansion.ts`, env-floored from `CITY_VRBO_EXPANSION_TIER{1,2}_MAX_MIN`)
+    feeds `driveMinutesCeiling` on every nearby combo AND `tier1Ceiling`/`tier2Ceiling`
+    on `serializeExpansionJob` — which also drive the escalation-tracker StageRow
+    titles + the no-nearby toast (threaded through `ExpansionJobState` + the
+    `BuyInEscalation` snapshot, `?? 20`/`?? 45` only as a pre-data fallback). Don't
+    re-hardcode 20/45 anywhere. Legacy nearby rows (no `scopeTier`) render a NEUTRAL
+    "Nearby drive" chip — do NOT force-bucket them to tier-2 (a real tier-1 city would
+    be mislabeled). Only the nearby fold can resolve the 20-vs-45 split; resort/
+    home-city/single-unit all bucket "Same city" from `source` (single-unit-city's
+    `fetchCity()` is ALWAYS the home city — no city override).
 
 - **Before flagging a concern**, check if the behaviour is documented
   here. If it is, your flag should be *"this intentional decision is
