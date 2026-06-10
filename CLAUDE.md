@@ -43,6 +43,64 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-10 (city research: surface MULTIPLE distinct combos per pool — "find more
+  than the duplicate combo"): Operator saw a bulk buy-in queue scan where the nearby-
+  city expansion surfaced the SAME two listings across 4 different cities for a ~6BR
+  Poipu Kai combo, and asked whether VRBO clusters one listing under multiple cities
+  or it was a glitch — and if clustering, to expand the search to find more than the
+  duplicate. DIAGNOSIS (from the LIVE sidecar daemon log `~/.vrbo-sidecar-daemon/
+  sidecar-launchd.log`, NOT a guess): it's genuine VRBO behavior, NOT a code/worker
+  glitch. A 2026-06-25→07-03 run had Koloa / Lawai / Eleele each return the IDENTICAL
+  187-candidate pool (same `harvestTotal=191`, same `graphqlResponses=2/348`); each town
+  navigated to a DISTINCT destination/regionId (so no stale-pool reuse), and VRBO's
+  dropdown even drifted "Lawai" → "Lawai Beach, Koloa". VRBO's region boundaries for
+  adjacent small Kauai towns overlap, so they return the same broad south-shore pool;
+  it's INTERMITTENT (a 2026-12-27 run did NOT collapse: Kalaheo 255 / Eleele 191 /
+  Hanapepe 266). The branch already had the collapse-guard (drop duplicate towns,
+  8063ab4); this is its complement. KEY INSIGHT: that broad pool holds MANY distinct
+  same-community clusters (confirmed Pili Mai / Poipu Sands / Poipu Kai / Makahuena /
+  Kuhio Shores in one dump), but `suggestCityVrboComboPair` returned only the SINGLE
+  cheapest and discarded the rest. FIX (server-side, Railway-deployable, additive):
+  (1) NEW `suggestCityVrboComboPairs(listings, plan, nights, limit)` in
+  `shared/city-vrbo-combo.ts` — greedy peel reusing the unchanged singular 100% so
+  `result[0]` is byte-identical to `suggestCityVrboComboPair` (LOAD-BEARING: the
+  attach + profit-gate decisions key off the single cheapest and must NOT change;
+  locked by tests/city-vrbo-combo.test.ts), URL-disjoint combos with a cluster-
+  diversity preference (a Kiahuna pair before a 2nd Poipu Kai pair).
+  (2) `server/city-vrbo-inventory.ts` threads `suggestedPairs` onto `CityVrboScanResult`
+  (computed once in `applyFiltersToPool`; `suggestedPair` is now `suggestedPairs[0]`).
+  (3) `server/city-vrbo-expansion.ts` stamps `altPairs = scan.suggestedPairs.slice(1)`
+  on the accepted "pair" + "unprofitable" rows.
+  (4) `server/auto-fill-job.ts` `pushAlternativeComboOption` (isLoss:false,
+  **isAlternative:true**) + `surfaceAlternativeCombos` (re-checks each alt against the
+  profit gate → non-loss alternative vs over-budget loss card); home-city stage
+  surfaces `payload.suggestedPairs.slice(1)` (covers the all-collapse-to-home case),
+  the expansion terminal fold surfaces `c.altPairs`. `__lossKey` dedupe widened to be
+  loss-agnostic so no pair appears as both a loss card and an alternative, and the
+  same alt from a home + collapsed-nearby pool isn't shown twice. Live poll copy strips
+  `altPairs` (lean ticks).
+  (5) `server/bulk-auto-fill-job.ts` `item.altCombos = comboOptions.filter(!isLoss &&
+  isAlternative)`.
+  (6) `client/src/pages/bookings.tsx`: new `AlternateCombosPanel`; alternatives render
+  in the manual `CityVrboInventoryPanel` (from `data.suggestedPairs.slice(1)`), the
+  per-row auto-fill result, and the bulk dialog. LOAD-BEARING: alternatives are tagged
+  `isAlternative` and kept OUT of `comboOptions` (so `ComboComparisonPanel` + the
+  cancellation-advice math, which verify against the CONFIGURED resort, are unchanged —
+  a cross-complex alt would be wrongly rejected there). Alternatives are OPERATOR-CLICK-
+  ONLY (the CityVrboInventoryPanel auto-attach effect stays scoped to the single
+  cheapest `comboOption`); attaching one goes through `attachComboMutation` which
+  DETACHES every slot then re-attaches, so it REPLACES the current pick (no double-book).
+  Tunable: `CITY_VRBO_TOP_COMBOS` (default 5). FUTURE LEVER (not built): for genuinely
+  different sub-area inventory, the worker's existing map-bounds mode
+  (`runVrboMapBoundsSearchVariant`) could search a tight box around a far town — heavier,
+  needs worker+server wiring + VRBO sight+click compliance. Verified: combo suite 63/0
+  (incl. 14 new plural tests + the element-0 equivalence lock), `npm test` fully green,
+  `npm run build` clean (client+server), `npm run check` adds ZERO new TS errors
+  (baseline-diffed across all 7 touched files). NOTE: this branch
+  (`claude/city-research-dedup-and-radius`) is SHARED/unpushed with concurrent sessions
+  (single-unit nearby walk + daemon external-monitor work) — committed only these 7
+  files; did not merge.
+
 - 2026-06-10 (bulk buy-in queue: make FAILED-scan logs diagnosable + green the test suite):
   Operator asked to review the most-recent buy-in queue's FAILED scans and confirm
   nothing went wrong in scraping / sorting / combo-finding. Audited the whole failure

@@ -108,6 +108,10 @@ type BulkItemState = {
   // (isLoss) and CityEconomics[] (accepted !== true).
   lossCombos: any[];
   lossLog: any[];
+  // Gate-passing ALTERNATIVE combos from the same pool (isAlternative) — the OTHER
+  // distinct same-community combos VRBO's broad regional pool holds beyond the one
+  // attached, so the operator gets more than the duplicate combo.
+  altCombos: any[];
   // retained for processing, not serialized to the client
   _input: BulkAutoFillItemInput;
 };
@@ -144,6 +148,7 @@ export type BulkAutoFillItemView = {
   finishedAt: string | null;
   lossCombos: any[];
   lossLog: any[];
+  altCombos: any[];
 };
 
 export type BulkAutoFillJobStatus = {
@@ -366,6 +371,9 @@ async function runBulkJob(job: BulkJob): Promise<void> {
       // auto-fill job's finalize → auto_fill_loss_options.)
       item.lossCombos = (last?.comboOptions ?? []).filter((c: any) => c?.isLoss);
       item.lossLog = (last?.cityEconomics ?? []).filter((c: any) => c?.accepted !== true);
+      // The OTHER distinct same-community combos found in the same pool (beyond the
+      // one attached) — surfaced in the queue dialog with a one-click attach.
+      item.altCombos = (last?.comboOptions ?? []).filter((c: any) => !c?.isLoss && c?.isAlternative);
       if (filled === 0) {
         // Surface the REAL reason so "checking the failed-scan logs" distinguishes a
         // genuine outcome from a bug. The old code always showed a generic "No
@@ -458,6 +466,7 @@ export function startBulkAutoFillJob(items: BulkAutoFillItemInput[]): { bulkJobI
       finishedAt: null,
       lossCombos: [],
       lossLog: [],
+      altCombos: [],
       _input: { ...input, slots },
     };
   });
@@ -548,6 +557,7 @@ export function serializeBulkAutoFillJob(job: BulkJob): BulkAutoFillJobStatus {
       finishedAt: it.finishedAt ? new Date(it.finishedAt).toISOString() : null,
       lossCombos: it.lossCombos ?? [],
       lossLog: it.lossLog ?? [],
+      altCombos: it.altCombos ?? [],
     })),
     timestamps: { createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt },
   };

@@ -753,6 +753,81 @@ export function suggestCityVrboComboPair(
   return best;
 }
 
+/**
+ * Top-N DISTINCT same-community combos from one pool, cheapest-first.
+ *
+ * WHY THIS EXISTS (operator 2026-06-10): VRBO returns the IDENTICAL broad
+ * regional pool for adjacent small Kauai towns (Koloa/Lawai/Eleele all came back
+ * with the same ~187 listings), so re-scanning towns just re-surfaces the SAME
+ * cheapest pair — "the same two listings in 4 cities". But that broad pool is
+ * full of distinct same-community clusters (Poipu Kai, Kiahuna, Pili Mai, Nihi
+ * Kai, Makahuena, Koloa Landing, …). `suggestCityVrboComboPair` only ever returns
+ * the single cheapest pair and discards the rest. This mines the SAME pool for
+ * the next-best DISTINCT combos so the operator gets real choices instead of one
+ * duplicate. (Server-side / Railway-deployable; complements the cross-city
+ * collapse guard in server/city-vrbo-expansion.ts.)
+ *
+ * GUARANTEES (load-bearing — locked by tests/city-vrbo-combo.test.ts):
+ *  - `result[0]` is byte-identical to `suggestCityVrboComboPair(...)` (the first
+ *    round runs the unchanged singular over the full pool), so the existing
+ *    attach/profit-gate decisions that key off the single cheapest pair NEVER
+ *    change. This is purely additive.
+ *  - Every returned combo is produced by the unchanged singular primitive, so
+ *    walkability gating, the same-unit guard, the strong>photo>geo>adjacency>pm
+ *    precedence, and all bedroom-split handling hold per combo.
+ *  - The combos are pairwise URL-disjoint (no listing appears in two combos).
+ *  - Combos PREFER different resort clusters first (a Kiahuna pair before a
+ *    second Poipu Kai pair); same-cluster runner-ups are only returned once every
+ *    distinct cluster is exhausted and `limit` isn't met.
+ */
+export function suggestCityVrboComboPairs(
+  listings: CityVrboListing[],
+  bedroomPlan: number[],
+  nights: number,
+  limit: number,
+): CityVrboComboPair[] {
+  if (!Array.isArray(listings) || listings.length === 0 || !(limit > 0)) return [];
+  const results: CityVrboComboPair[] = [];
+  const usedUrls = new Set<string>();
+  // Strong-text cluster keys (dict/complex/phrase) of resorts already represented.
+  // Used ONLY to PREFER cluster diversity in the first pass; cleared of effect once
+  // we allow same-cluster runner-ups, so it can never reject a valid combo outright.
+  const blockedClusterKeys = new Set<string>();
+  let allowSameCluster = false;
+
+  while (results.length < limit) {
+    const remaining = listings.filter((l) => {
+      if (l.url && usedUrls.has(l.url)) return false;
+      if (!allowSameCluster) {
+        // Diversity pass: drop listings belonging to an already-surfaced resort
+        // cluster so the next combo comes from a DIFFERENT complex when possible.
+        const keys = sharedResortPhraseKeys(l);
+        if (keys.length && keys.some((k) => blockedClusterKeys.has(k))) return false;
+      }
+      return true;
+    });
+
+    const pair = suggestCityVrboComboPair(remaining, bedroomPlan, nights);
+    if (!pair) {
+      // No distinct-cluster combo left → allow a runner-up from an already-seen
+      // cluster (still URL-disjoint) before giving up. Flip once.
+      if (!allowSameCluster) {
+        allowSameCluster = true;
+        continue;
+      }
+      break;
+    }
+
+    results.push(pair);
+    for (const p of pair.picks) {
+      if (p.url) usedUrls.add(p.url);
+      for (const k of sharedResortPhraseKeys(p)) blockedClusterKeys.add(k);
+    }
+  }
+
+  return results;
+}
+
 function suggestPairForExactPlan(
   listings: CityVrboListing[],
   bedroomPlan: number[],
