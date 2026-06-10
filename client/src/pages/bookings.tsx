@@ -7466,8 +7466,38 @@ export default function Bookings() {
     bulkPayloadsRef.current = payloads;
     bulkActiveReservationIdsRef.current = new Set(payloads.map((p) => p.reservationId));
 
+    // Ride through a server redeploy on START. The operator may click Run exactly
+    // when Railway is mid-deploy — the server then returns 502 "Application failed
+    // to respond" (or the fetch fails outright) for the cold-boot window. Without
+    // this the initial POST throws once, the dialog shows a dead error, and the
+    // queue only runs if the operator notices and clicks again (the "took a couple
+    // minutes to start the search" report, 2026-06-10). So retry transient
+    // 502/503/504 + network failures for a bounded window, surfacing a "restarting…"
+    // notice so the wait is legible; a real 4xx (bad payload / auth-redirect) still
+    // fails fast. Mirrors the poller's 404 auto-resume (M4). A Cancel click breaks
+    // out via bulkBuyInCancelRef.
+    const startPostDeadline = Date.now() + 180_000; // ~3 min covers a Railway cold boot
+    const isTransientStartError = (err: any) => {
+      const msg = String(err?.message ?? err ?? "");
+      return /^(502|503|504):/.test(msg) || /failed to fetch|fetch failed|networkerror|load failed/i.test(msg);
+    };
+    let startAttempt = 0;
     try {
-      const resp = await apiRequest("POST", "/api/operations/bulk-auto-fill", { items: payloads }).then((r) => r.json());
+      let resp: any;
+      for (;;) {
+        try {
+          resp = await apiRequest("POST", "/api/operations/bulk-auto-fill", { items: payloads }).then((r) => r.json());
+          break;
+        } catch (err: any) {
+          if (bulkBuyInCancelRef.current || !isTransientStartError(err) || Date.now() >= startPostDeadline) throw err;
+          startAttempt += 1;
+          toast({
+            title: "Server is restarting — retrying…",
+            description: `The queue starts automatically once the server is back (attempt ${startAttempt}).`,
+          });
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
+        }
+      }
       if (!resp?.bulkJobId) throw new Error(resp?.error || "Could not start the bulk queue.");
       setBulkAutoFillJobId(resp.bulkJobId);
       if (resp.status) applyBulkStatus(resp.status);
