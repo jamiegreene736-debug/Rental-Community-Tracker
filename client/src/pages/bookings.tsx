@@ -4169,6 +4169,46 @@ function relScanTime(ms: number | null | undefined): string {
   return `${Math.floor(days / 30)}mo ago`;
 }
 
+// Where the most recent scan SOURCED the attached buy-ins, parsed from the notes
+// the server stamps ("Buy-in source: <category> (town)"). Lets the operations
+// "Last scan" column show fill provenance so the operator sees whether a booking
+// was filled from the booked resort (original community), the same town (original
+// city), or a drive-time town (nearby city). Best-effort for buy-ins attached
+// before the marker existed (resort vs a generic "city" scan — legacy notes can't
+// distinguish home from nearby). Returns null when no attached buy-in has a signal.
+const BUY_IN_SOURCE_RE = /Buy-in source:\s*(original community|original city|nearby city)(?:\s*\(([^)]+)\))?/i;
+function fillSourceLabel(reservation: GuestyReservation): { text: string; tone: "green" | "blue" | "amber" } | null {
+  const cats = new Set<string>();
+  let nearbyTown = "";
+  for (const slot of reservation.slots ?? []) {
+    const notes = slot.buyIn?.notes;
+    if (!notes) continue;
+    const m = String(notes).match(BUY_IN_SOURCE_RE);
+    if (m) {
+      const cat = m[1].toLowerCase();
+      cats.add(cat);
+      if (cat === "nearby city" && m[2] && !nearbyTown) nearbyTown = m[2].trim();
+    } else if (/Resort search|Verified by find-buy-in/i.test(notes)) {
+      cats.add("original community");
+    } else if (/Matched from city-wide VRBO map|City VRBO/i.test(notes)) {
+      cats.add("city"); // legacy notes can't tell original city from nearby
+    }
+  }
+  if (cats.size === 0) return null;
+  if (cats.size > 1) return { text: "mixed sources", tone: "amber" };
+  const only = Array.from(cats)[0];
+  if (only === "original community") return { text: "original community", tone: "green" };
+  if (only === "original city") return { text: "original city", tone: "blue" };
+  if (only === "nearby city") return { text: `nearby city${nearbyTown ? ` · ${nearbyTown}` : ""}`, tone: "amber" };
+  return { text: "city scan", tone: "blue" }; // legacy ambiguous
+}
+
+const FILL_SOURCE_TONE: Record<"green" | "blue" | "amber", string> = {
+  green: "text-green-700",
+  blue: "text-sky-700",
+  amber: "text-amber-700",
+};
+
 // "Last scan" status badge for the operations dashboard. At a glance it tells the
 // operator whether the most recent auto-fill scan FILLED the booking, left it
 // PARTIAL, FAILED / came back empty (with the reason + any over-budget loss combos
@@ -4196,11 +4236,17 @@ function LastScanCell({ reservation, last, scanning }: { reservation: GuestyRese
       </Badge>
     );
   }
+  const source = fillSourceLabel(reservation);
   if (filled >= total) {
     return (
       <div className="min-w-0">
         <Badge className="text-[10px] bg-green-600 text-white">Filled {filled}/{total}</Badge>
-        {when && <p className="mt-0.5 text-[10px] text-muted-foreground">{when}</p>}
+        {source && (
+          <p className={`mt-0.5 truncate text-[10px] ${FILL_SOURCE_TONE[source.tone]}`} title={`Filled from ${source.text}`}>
+            from {source.text}
+          </p>
+        )}
+        {when && <p className="truncate text-[10px] text-muted-foreground">{when}</p>}
       </div>
     );
   }
@@ -4208,6 +4254,11 @@ function LastScanCell({ reservation, last, scanning }: { reservation: GuestyRese
     return (
       <div className="min-w-0">
         <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-700">Partial {filled}/{total}</Badge>
+        {source && (
+          <p className={`truncate text-[10px] ${FILL_SOURCE_TONE[source.tone]}`} title={`Filled from ${source.text}`}>
+            from {source.text}
+          </p>
+        )}
         <p className="mt-0.5 truncate text-[10px] text-amber-700">rescan to fill {total - filled} more</p>
         {when && <p className="truncate text-[10px] text-muted-foreground">{when}</p>}
       </div>
