@@ -18553,15 +18553,96 @@ Requirements:
       const enrichedResults = await Promise.all(enrichmentPromises);
       const enriched = enrichedResults.filter((r): r is any => r != null);
 
-      enriched.sort((a, b) => {
+      // Manual (operator-added) bookings live in the local manual_reservations table,
+      // NOT in Guesty's account-wide /reservations list — so they never showed up in
+      // the global summary. Merge them here with the SAME enriched shape the global
+      // table consumes (+ the operations* property mapping so the Property column and
+      // bulk eligibility work, + a synthetic listingId so the client's global
+      // reservationPropertyMeta loop — which skips rows with no listingId — includes
+      // them, + createdAt for the "Date Added" column). includePast is honored by the
+      // storage filter; committed-only by default (a cancelled manual row only shows
+      // when includeCanceled is on), mirroring the Guesty path.
+      const manualRows = await storage.getManualReservations({ includePast }).catch(() => []);
+      const manualEnriched = await Promise.all(
+        manualRows.map(async (row) => {
+          const reservationId = `manual:${row.id}`;
+          const unitSlots = getPropertyUnits(row.propertyId) as OperationsListingTarget["unitSlots"];
+          const attached = unitSlots.length > 0 ? await storage.getBuyInsByReservation(reservationId) : [];
+          const slots = unitSlots.map((slot) => {
+            const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
+            return { ...slot, buyIn };
+          });
+          const filled = slots.filter((s) => s.buyIn).length;
+          const nights = Math.max(1, Math.round((+new Date(row.checkOut) - +new Date(row.checkIn)) / 86400000));
+          const guestName = String(row.guestName ?? "").trim();
+          const [firstName] = guestName.split(/\s+/);
+          const totalRate = Number(row.totalRate ?? 0) || 0;
+          const createdAt = row.createdAt instanceof Date
+            ? row.createdAt.toISOString()
+            : (row.createdAt ?? undefined);
+          return {
+            _id: reservationId,
+            status: row.status ?? "manual",
+            createdAt,
+            checkIn: row.checkIn,
+            checkOut: row.checkOut,
+            checkInDateLocalized: row.checkIn,
+            checkOutDateLocalized: row.checkOut,
+            nightsCount: nights,
+            guest: {
+              fullName: guestName || "Manual guest",
+              firstName: firstName || guestName || "Manual",
+              email: row.guestEmail ?? undefined,
+            },
+            money: {
+              hostPayout: totalRate,
+              fareAccommodation: totalRate,
+              netIncome: totalRate,
+              totalPaid: 0,
+              balanceDue: totalRate,
+              isFullyPaid: false,
+            },
+            source: "Manual",
+            integration: { platform: "Manual" },
+            confirmationCode: reservationId,
+            operationsListingId: reservationId,
+            listingId: reservationId,
+            operationsPropertyId: row.propertyId,
+            operationsPropertyName: PROPERTY_UNIT_CONFIGS[row.propertyId]?.community ?? `Manual property ${row.propertyId}`,
+            operationsMapped: true,
+            operationsBuyInConfigured: slots.length > 0,
+            manualReservation: {
+              id: row.id,
+              propertyId: row.propertyId,
+              guestName: row.guestName,
+              guestEmail: row.guestEmail,
+              guestPhone: row.guestPhone,
+              totalRate: row.totalRate,
+              notes: row.notes,
+              status: row.status,
+            },
+            slots,
+            slotsFilled: filled,
+            slotsTotal: slots.length,
+            fullyLinked: slots.length > 0 && filled === slots.length,
+          };
+        }),
+      );
+      const manualVisible = manualEnriched.filter(
+        (m) => includeCanceled || !/cancel|declin|expired|void/i.test(String(m.status ?? "")),
+      );
+
+      const enrichedAll = [...enriched, ...manualVisible];
+      enrichedAll.sort((a, b) => {
         const ad = String(a.checkInDateLocalized ?? a.checkIn ?? "");
         const bd = String(b.checkInDateLocalized ?? b.checkIn ?? "");
         return ad.localeCompare(bd);
       });
 
       res.json({
-        reservations: enriched,
-        total: enriched.length,
+        reservations: enrichedAll,
+        total: enrichedAll.length,
+        manualCount: manualVisible.length,
         listingCount: listingById.size,
         targetCount: targetByListingId.size,
         missingListingIds: Array.from(missingListingIds),
