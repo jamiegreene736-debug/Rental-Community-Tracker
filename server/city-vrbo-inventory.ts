@@ -3,6 +3,7 @@ import {
   filterCityVrboListingsByPhrase,
   groupCityVrboByBedroom,
   suggestCityVrboComboPair,
+  suggestCityVrboComboPairs,
   summarizeCityVrboMatching,
   type CityVrboComboPair,
   type CityVrboListing,
@@ -107,6 +108,11 @@ const CITY_VRBO_LLM_COMMUNITY = (process.env.CITY_VRBO_LLM_COMMUNITY ?? "1") !==
 // to surface the property-manager / boilerplate over-cluster trap. Read-only;
 // disable with CITY_VRBO_MATCH_DIAG=0.
 const CITY_VRBO_MATCH_DIAG = (process.env.CITY_VRBO_MATCH_DIAG ?? "1") !== "0";
+// How many DISTINCT same-community combos to mine from each pool (the cheapest is
+// the canonical suggestedPair; the rest are surfaced as alternatives so the
+// operator gets more than one option out of VRBO's broad regional pool — see the
+// suggestCityVrboComboPairs rationale in shared/city-vrbo-combo.ts). Floored at 1.
+const CITY_VRBO_TOP_COMBOS = Math.max(1, Number(process.env.CITY_VRBO_TOP_COMBOS ?? 5));
 const CITY_VRBO_ENRICH_MAX = Math.max(2, Number(process.env.CITY_VRBO_ENRICH_MAX ?? 8));
 // Keep this well under Railway's HTTP edge timeout once added to the main scrape
 // (~60-90s) so the whole request stays comfortably bounded. 75s default.
@@ -376,6 +382,7 @@ function applyFiltersToPool(
   listings: CityVrboListing[];
   byBedroom: Record<number, CityVrboListing[]>;
   suggestedPair: CityVrboComboPair | null;
+  suggestedPairs: CityVrboComboPair[];
   filterPipeline: CityVrboFilterPipeline;
 } {
   const phrase = String(filterPhrase ?? "").trim() || null;
@@ -383,9 +390,14 @@ function applyFiltersToPool(
   const byBedroomMap = groupCityVrboByBedroom(filtered);
   const byBedroom: Record<number, CityVrboListing[]> = {};
   for (const [br, rows] of byBedroomMap) byBedroom[br] = rows;
-  const suggestedPair = suggestCityVrboComboPair(filtered, bedroomPlan, nights);
+  // suggestedPairs[0] is byte-identical to the singular suggestedPair (the plural's
+  // first round runs the unchanged singular over the full pool) — so every existing
+  // consumer that keys off the single cheapest pair is unaffected. The rest are the
+  // distinct alternative combos hiding in the same pool.
+  const suggestedPairs = suggestCityVrboComboPairs(filtered, bedroomPlan, nights, CITY_VRBO_TOP_COMBOS);
+  const suggestedPair = suggestedPairs[0] ?? null;
   const filterPipeline = buildFilterPipeline(basePipeline, filtered, phrase, suggestedPair);
-  return { listings: filtered, byBedroom, suggestedPair, filterPipeline };
+  return { listings: filtered, byBedroom, suggestedPair, suggestedPairs, filterPipeline };
 }
 
 // Resolve the VRBO destination string for a scan. The community-keyed flow
@@ -484,6 +496,9 @@ export type CityVrboScanResult = {
   listings: CityVrboListing[];
   byBedroom: Record<number, CityVrboListing[]>;
   suggestedPair: CityVrboComboPair | null;
+  // The top-N distinct same-community combos mined from this pool (cheapest first).
+  // suggestedPairs[0] === suggestedPair; the rest are operator-attachable alternatives.
+  suggestedPairs: CityVrboComboPair[];
   filterPipeline: CityVrboFilterPipeline;
   fromCache: boolean;
   // Found-vs-usable-vs-VRBO-total breakdown so the tracker doesn't read the
@@ -572,6 +587,7 @@ async function runCityScanCore(args: {
       listings: [],
       byBedroom: {},
       suggestedPair: null,
+      suggestedPairs: [],
       filterPipeline: emptyPipeline,
       fromCache: false,
       coverage: buildCityScanCoverage({
@@ -718,6 +734,7 @@ async function runCityScanCore(args: {
     listings: filtered.listings,
     byBedroom: filtered.byBedroom,
     suggestedPair: filtered.suggestedPair,
+    suggestedPairs: filtered.suggestedPairs,
     filterPipeline: filtered.filterPipeline,
     fromCache,
     coverage,

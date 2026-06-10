@@ -1055,6 +1055,19 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         } else {
           setEscalation(job, { homeCity: "no-pair" });
         }
+        // Surface the OTHER distinct combos hiding in the same home-city pool. VRBO
+        // returns the same broad regional pool for adjacent towns, so this pool
+        // usually holds several walkable same-community combos beyond the cheapest;
+        // re-checked against the profit gate and offered as operator-attachable
+        // options (this is what gives the operator MORE than the one duplicate
+        // combo even when every nearby town collapses back to this same pool).
+        surfaceAlternativeCombos(
+          job,
+          (payload?.suggestedPairs ?? []).slice(1),
+          payload?.citySearchTerm ?? "home city",
+          { scopeCategory: "home" },
+          (comboCost) => { const v = gate(comboCost); return { acceptable: v.acceptable, profit: v.profit }; },
+        );
       } catch (e: any) {
         setEscalation(job, { homeCity: "skipped" });
       }
@@ -1413,7 +1426,11 @@ function pushLossComboOption(
   // share pick URLs the FIRST-pushed card (resort → home-city → nearby) keeps its scope.
   const urls = (pair.picks as any[]).map((p) => String(p?.url ?? "")).filter(Boolean).sort();
   const key = urls.join("|");
-  if (key && job.comboOptions.some((o: any) => o.isLoss && o.__lossKey === key)) return;
+  // Loss-agnostic dedupe: the same walkable pair must never appear twice in
+  // comboOptions — neither as two loss cards NOR as both a loss card and a
+  // non-loss alternative (the alternative miner and the loss path can surface the
+  // same pair from a shared/collapsed pool). First push wins.
+  if (key && job.comboOptions.some((o: any) => o.__lossKey === key)) return;
   const picks = (pair.picks as any[]).map((p, i) => ({
     bedrooms: Number(pair.bedrooms?.[i] ?? p?.bedrooms ?? 0) || 0,
     source: "vrbo" as const,
@@ -1440,6 +1457,87 @@ function pushLossComboOption(
     __lossKey: key,
   });
   touch(job);
+}
+
+// Capture a PROFITABLE (gate-passing) DISTINCT same-community combo from a pool as
+// an attachable ALTERNATIVE option (isLoss:false). VRBO returns the same broad
+// regional pool for adjacent towns, so a single pool typically holds several
+// walkable same-community combos (Pili Mai, Makahuena, Kuhio Shores, …) beyond the
+// cheapest one we auto-attach. Surfacing them gives the operator MORE than the one
+// duplicate combo — they're operator-click-only (NEVER auto-attached) and the
+// attach replaces the current pick (attachComboMutation detaches-then-attaches).
+// Same shape + URL-set dedupe as pushLossComboOption so the client renders/attaches
+// it identically; the ONLY differences are isLoss:false and the note.
+function pushAlternativeComboOption(
+  job: AutoFillJob,
+  label: string,
+  pair: any,
+  comboCost: number,
+  profit: number,
+  scope: LossComboScope,
+): void {
+  if (!pair || !Array.isArray(pair.picks) || pair.picks.length < 2) return;
+  const urls = (pair.picks as any[]).map((p) => String(p?.url ?? "")).filter(Boolean).sort();
+  const key = urls.join("|");
+  if (key && job.comboOptions.some((o: any) => o.__lossKey === key)) return;
+  const picks = (pair.picks as any[]).map((p, i) => ({
+    bedrooms: Number(pair.bedrooms?.[i] ?? p?.bedrooms ?? 0) || 0,
+    source: "vrbo" as const,
+    sourceLabel: String(p?.sourceLabel ?? "Vrbo"),
+    title: String(p?.title ?? "Unit"),
+    totalPrice: Number(p?.totalPrice) || 0,
+    nightlyPrice: Number(p?.nightlyPrice) || undefined,
+    url: String(p?.url ?? ""),
+    image: p?.image,
+    images: Array.isArray(p?.images) ? p.images.filter(Boolean).slice(0, 12) : undefined,
+  }));
+  job.comboOptions.push({
+    label,
+    bedrooms: Array.isArray(pair.bedrooms) ? pair.bedrooms : picks.map((x) => x.bedrooms),
+    totalCost: Math.round(comboCost),
+    selected: false,
+    isLoss: false,
+    // Marks a gate-passing ALTERNATIVE combo (vs the cheapest one we auto-attached).
+    // The client keeps these OUT of ComboComparisonPanel + the cancellation-advice
+    // math (which verify against the configured resort and would reject a different-
+    // complex pair) and renders them in a dedicated "other combos in this pool" panel.
+    isAlternative: true,
+    note: `Another walkable same-community combo from this pool ($${Math.round(comboCost).toLocaleString()}). Attach to use it instead of the current pick.`,
+    picks,
+    scopeCategory: scope.scopeCategory,
+    driveMinutes: scope.driveMinutes,
+    driveMinutesCeiling: scope.driveMinutesCeiling,
+    __lossKey: key,
+  });
+  touch(job);
+}
+
+// Surface a list of DISTINCT runner-up combos (CityVrboComboPair-shaped) from one
+// pool as attachable options, routing each by the profit gate: a gate-passing combo
+// becomes a non-loss alternative, an over-budget one becomes a loss override card.
+// `evalProfit` is supplied by the caller because the home-city stage uses the live
+// gate() closure while the nearby expansion uses its own pre-netted gate params.
+function surfaceAlternativeCombos(
+  job: AutoFillJob,
+  pairs: any[] | undefined,
+  baseLabel: string,
+  scope: LossComboScope,
+  evalProfit: (comboCost: number) => { acceptable: boolean; profit: number },
+): void {
+  if (!Array.isArray(pairs)) return;
+  let n = 0;
+  for (const pair of pairs) {
+    if (!pair || !Array.isArray(pair.picks) || pair.picks.length < 2) continue;
+    const comboCost = (pair.picks as any[]).reduce((s, pk) => s + (Number(pk?.totalPrice) || 0), 0);
+    if (!(comboCost > 0)) continue;
+    n += 1;
+    // Unique label per option (client React key + attach identity) — two combos in
+    // the same resort/city would otherwise collide.
+    const label = `${baseLabel} · option ${n}`;
+    const { acceptable, profit } = evalProfit(comboCost);
+    if (acceptable) pushAlternativeComboOption(job, label, pair, comboCost, profit, scope);
+    else pushLossComboOption(job, label, pair, comboCost, profit, scope);
+  }
 }
 
 // Attach a city suggestedPair's picks to the remaining slots, consuming each pick
@@ -1508,10 +1606,10 @@ async function runExpansion(
     if (!exp) break; // lost (redeploy)
     const s = serializeExpansionJob(exp);
     setEscalation(job, {
-      // Strip lossPair from the LIVE escalation copy — the client doesn't need the
-      // picks here (they arrive as attachable comboOptions); keeps polling lean.
-      // The terminal fold below reads s.cityResults directly, so it keeps lossPair.
-      tierResults: s.cityResults.map(({ lossPair, ...rest }) => rest),
+      // Strip lossPair + altPairs from the LIVE escalation copy — the client doesn't
+      // need the picks here (they arrive as attachable comboOptions); keeps polling
+      // lean. The terminal fold below reads s.cityResults directly, so it keeps both.
+      tierResults: s.cityResults.map(({ lossPair, altPairs, ...rest }) => rest),
       nearbyStatus: s.status === "found" ? "found"
         : s.status === "worker_offline" ? "worker_offline"
         : s.status === "error" ? "error"
@@ -1553,6 +1651,23 @@ async function runExpansion(
           },
         );
       }
+      // Surface the OTHER distinct combos from this same nearby pool (beyond the one
+      // recorded above) — the winning city's runner-ups AND an unprofitable city's
+      // alternatives — re-checked against the SAME profit gate the expansion used.
+      surfaceAlternativeCombos(
+        job,
+        c.altPairs,
+        c.placeName || c.citySearchTerm,
+        {
+          scopeCategory: c.tier === 1 ? "tier1" : "tier2",
+          driveMinutes: c.driveMinutes,
+          driveMinutesCeiling: tierCeilingMinutes(c.tier),
+        },
+        (comboCost) => {
+          const profit = gateParams.revenueAvailable - comboCost;
+          return { acceptable: !gateParams.profitGateEnabled || profit >= gateParams.minProfit, profit };
+        },
+      );
     }
   }
   if (terminal?.status === "found" && terminal.combo) {

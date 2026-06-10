@@ -107,6 +107,12 @@ export type ExpansionCityResult = {
   // option after the search. Just the 2 picks + bedrooms — compact (~1-2KB), not
   // the full city inventory, so polling the job status stays cheap.
   lossPair?: NonNullable<CityVrboScanResult["suggestedPair"]>;
+  // The DISTINCT runner-up combos from this city's pool, beyond the one recorded
+  // above (i.e. scan.suggestedPairs.slice(1)). VRBO returns the same broad pool for
+  // adjacent towns, so a single pool often holds several same-community combos
+  // (Pili Mai, Makahuena, Kuhio Shores, …); these let the auto-fill job offer the
+  // operator MORE than the one duplicate combo. Compact (picks + bedrooms only).
+  altPairs?: NonNullable<CityVrboScanResult["suggestedPair"]>[];
 };
 
 // The inventory payload shape the client consumes — identical to the
@@ -616,6 +622,9 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
               comboCost,
               expectedProfit: job.profitGateEnabled ? profit : undefined,
               accepted: true,
+              // Runner-up combos from the SAME winning pool, beyond the one being
+              // attached — surfaced by the auto-fill job as additional options.
+              altPairs: (scan.suggestedPairs ?? []).slice(1),
             });
             job.result = {
               comboSourceCity: p.term,
@@ -640,6 +649,9 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
             expectedProfit: profit,
             accepted: false,
             lossPair: scan.suggestedPair,
+            // Runner-up combos in this same pool (re-checked against the profit gate
+            // by the auto-fill job) so the operator sees more than the one loss pair.
+            altPairs: (scan.suggestedPairs ?? []).slice(1),
             reason: `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(profit).toLocaleString()} (worse than the $${Math.abs(Math.round(job.minProfit)).toLocaleString()} max-loss limit); searched on`,
           });
           touch(job);

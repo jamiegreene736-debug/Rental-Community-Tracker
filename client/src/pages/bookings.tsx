@@ -362,6 +362,12 @@ type AutoFillComboOption = {
   // the projected (negative) profit. See server recordLossComboOption.
   isLoss?: boolean;
   lossProfit?: number;
+  // A gate-passing DISTINCT same-community combo from the same pool, OTHER than the
+  // cheapest one we auto-attached (VRBO returns the same broad regional pool for
+  // adjacent towns, so one pool holds several combos). Kept OUT of ComboComparison
+  // Panel + cancellation advice (which verify against the configured resort); shown
+  // in a dedicated "other combos in this pool" panel. Operator-click-only.
+  isAlternative?: boolean;
   // Which scan stage surfaced this loss pair, for the scan-scope chip. home = same
   // city as the community (resort / home-city / single-unit fallback); tier1/tier2 =
   // the nearby drive-time expansion rings. driveMinutesCeiling is the env-accurate
@@ -498,6 +504,9 @@ type BulkBuyInQueueItem = {
   // ledger, surfaced inline in the queue dialog with a one-click accept-the-loss.
   lossCombos?: AutoFillComboOption[];
   lossLog?: LossLogEntry[];
+  // Gate-passing ALTERNATIVE combos from the same pool (the other distinct same-
+  // community combos beyond the one attached), surfaced in the queue dialog.
+  altCombos?: AutoFillComboOption[];
 };
 
 interface Candidate {
@@ -1248,6 +1257,17 @@ type CityVrboInventoryListing = {
   images?: string[];
 };
 
+type CityVrboComboPairView = {
+  resortPhrase: string;
+  bedrooms: number[];
+  picks: CityVrboInventoryListing[];
+  totalCost: number;
+  walkMinutes: number | null;
+  walkSource: string;
+  matchSource?: string;
+  matchConfidence?: "high" | "medium" | "low";
+};
+
 type CityVrboInventoryResponse = {
   propertyId: number;
   community: string;
@@ -1256,16 +1276,12 @@ type CityVrboInventoryResponse = {
   rawListings?: CityVrboInventoryListing[];
   listings: CityVrboInventoryListing[];
   byBedroom: Record<number, CityVrboInventoryListing[]>;
-  suggestedPair: {
-    resortPhrase: string;
-    bedrooms: number[];
-    picks: CityVrboInventoryListing[];
-    totalCost: number;
-    walkMinutes: number | null;
-    walkSource: string;
-    matchSource?: string;
-    matchConfidence?: "high" | "medium" | "low";
-  } | null;
+  suggestedPair: CityVrboComboPairView | null;
+  // Top-N distinct same-community combos from the same pool, cheapest-first.
+  // suggestedPairs[0] === suggestedPair; the rest are the alternative combos VRBO's
+  // broad regional pool holds beyond the one we auto-attach. Optional so a stale
+  // cached GET response without it still decodes.
+  suggestedPairs?: CityVrboComboPairView[];
   sidecar: {
     workerOnline: boolean;
     durationMs: number;
@@ -1324,8 +1340,10 @@ function cityInventorySearchSummary(
   };
 }
 
-function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFillComboOption | null {
-  const pair = data.suggestedPair;
+// Map ONE city VRBO pair → an attachable combo option. Extracted so both the
+// cheapest suggestedPair AND each alternative combo (suggestedPairs.slice(1)) reuse
+// the exact same picks shape / attach contract.
+function comboOptionFromCityPair(pair: CityVrboComboPairView): AutoFillComboOption | null {
   if (!pair?.picks?.length || pair.picks.length !== pair.bedrooms.length) return null;
   return {
     label: `${pair.bedrooms.map((b) => `${b}BR`).join(" + ")} · ${pair.resortPhrase}`,
@@ -1351,6 +1369,10 @@ function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFill
       verifiedReason: "Matched resort phrase in city VRBO dropdown inventory",
     })),
   };
+}
+
+function cityComboOptionFromInventory(data: CityVrboInventoryResponse): AutoFillComboOption | null {
+  return data.suggestedPair ? comboOptionFromCityPair(data.suggestedPair) : null;
 }
 
 // ── Nearby-city combo expansion (background job + polling) ──────────────────
@@ -1621,6 +1643,7 @@ type BulkAutoFillJobStatus = {
     finishedAt: string | null;
     lossCombos: AutoFillComboOption[];
     lossLog: LossLogEntry[];
+    altCombos?: AutoFillComboOption[];
   }>;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
@@ -2085,6 +2108,20 @@ function CityVrboInventoryPanel({
     staleTime: 0,
   });
   const comboOption = useMemo(() => (data ? cityComboOptionFromInventory(data) : null), [data]);
+  // The OTHER distinct same-community combos hiding in this pool (beyond the
+  // cheapest one shown above). VRBO returns the same broad regional pool for
+  // adjacent towns, so this pool usually holds several walkable combos (Pili Mai,
+  // Makahuena, Kuhio Shores, …) — surface them so the operator gets more than the
+  // one duplicate combo. Operator-click-only; never auto-attached.
+  const alternateComboOptions = useMemo<AutoFillComboOption[]>(() => {
+    const alts = (data?.suggestedPairs ?? []).slice(1); // [0] is the cheapest, already shown
+    return alts
+      .map(comboOptionFromCityPair)
+      .filter((o): o is AutoFillComboOption => !!o)
+      // Unique label per option (React key + attach identity) — two combos in the
+      // same resort would otherwise collide.
+      .map((o, i) => ({ ...o, label: `${o.label} · alt ${i + 1}` }));
+  }, [data]);
   const bedroomGroups = data
     ? Object.entries(data.byBedroom).sort(([a], [b]) => Number(b) - Number(a))
     : [];
@@ -2279,6 +2316,17 @@ function CityVrboInventoryPanel({
           ) : (
             <p className="mt-1 text-amber-900">No walkable {bedroomPlan.map((b) => `${b}BR`).join(" + ")} pair with a shared resort title for these dates.</p>
           )}
+          {/* Other distinct walkable combos in the SAME pool — VRBO clusters the
+              same broad regional inventory under multiple nearby towns, so one scan
+              often holds several same-community combos. Attaching one REPLACES the
+              current pick (attachComboMutation detaches-then-attaches). */}
+          <div className="mt-2">
+            <AlternateCombosPanel
+              options={alternateComboOptions}
+              onAttachCombo={onAttachCombo}
+              attaching={attaching}
+            />
+          </div>
           {/* Manual override — operator picks the specific listing for each unit
               slot (e.g. the 3BR and the 2BR), then attaches that custom pair. */}
           {data.listings.length > 0 && reservation.slots.length >= 2 && (
@@ -4442,6 +4490,86 @@ function LastBuyInSearchPanel({
           </ul>
         </details>
       )}
+    </div>
+  );
+}
+
+// Renders the OTHER distinct same-community combos found in the same VRBO pool
+// (beyond the cheapest one auto-attached). VRBO returns the same broad regional
+// pool for adjacent towns, so one scan typically holds several walkable combos at
+// different complexes (Pili Mai, Makahuena, Kuhio Shores, …). These are NOT verified
+// against the configured resort (they're intentionally other complexes), so they get
+// their own panel + a one-click attach that REPLACES the current pick. Operator-only.
+function AlternateCombosPanel({
+  options,
+  onAttachCombo,
+  attaching,
+  attachingComboLabel,
+  title = "Other walkable combos in this pool",
+}: {
+  options: AutoFillComboOption[];
+  onAttachCombo?: (option: AutoFillComboOption) => void;
+  attaching?: boolean;
+  attachingComboLabel?: string | null;
+  title?: string;
+}) {
+  if (!options.length) return null;
+  return (
+    <div className="rounded-md border border-indigo-200 bg-indigo-50/60 px-3 py-2 text-xs" data-testid="alternate-combos-panel">
+      <p className="font-semibold text-indigo-950">{title} ({options.length})</p>
+      <p className="mt-0.5 text-[11px] text-muted-foreground">
+        Different same-community pairs found in the same VRBO export (VRBO clusters the same broad pool under nearby towns). Attach one to use it instead of the cheapest.
+      </p>
+      <div className="mt-2 space-y-1.5">
+        {options.map((option) => {
+          const attachingThis = attaching || attachingComboLabel === option.label;
+          return (
+            <div
+              key={option.label}
+              className="flex items-center justify-between gap-3 rounded border border-indigo-100 bg-white/70 px-2 py-1.5"
+            >
+              <div className="min-w-0">
+                <p className="truncate font-medium text-foreground">
+                  {option.label}{option.totalCost != null ? ` · ${fmtMoney(option.totalCost)}` : ""}
+                </p>
+                <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
+                  {option.picks.map((p, i) =>
+                    p.url ? (
+                      <a
+                        key={`${option.label}-pick-${i}`}
+                        href={p.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="max-w-[46%] truncate text-[10px] text-blue-600 underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {p.bedrooms}BR{p.sourceLabel ? ` · ${p.sourceLabel}` : ""}
+                        {typeof p.totalPrice === "number" && p.totalPrice > 0 ? ` · ${fmtMoney(p.totalPrice)}` : ""}
+                      </a>
+                    ) : null,
+                  )}
+                </div>
+                {option.scopeCategory && option.scopeCategory !== "home" && typeof option.driveMinutesCeiling === "number" ? (
+                  <p className="mt-0.5 text-[10px] text-muted-foreground">within ~{option.driveMinutesCeiling} min drive</p>
+                ) : null}
+              </div>
+              {onAttachCombo && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 shrink-0"
+                  disabled={attachingThis}
+                  onClick={(e) => { e.stopPropagation(); onAttachCombo(option); }}
+                  data-testid={`button-attach-alt-combo-${option.label.replace(/[^a-z0-9]+/gi, "-")}`}
+                >
+                  {attachingThis ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Zap className="mr-1 h-3.5 w-3.5" />}
+                  Attach
+                </Button>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -7157,6 +7285,7 @@ export default function Bookings() {
       finishedAt: si.finishedAt ?? undefined,
       lossCombos: si.lossCombos ?? [],
       lossLog: si.lossLog ?? [],
+      altCombos: si.altCombos ?? [],
     }));
     setBulkBuyInQueueItems(items);
     bulkItemsRef.current = items;
@@ -8756,8 +8885,12 @@ export default function Bookings() {
                 // Keep over-budget combos OUT of the normal panels — they'd sort as a
                 // "cheapest combo" and skew the cancellation advice. They render in the
                 // amber LastBuyInSearchPanel with an explicit accept-the-loss attach.
-                const comboOptions = allCombos.filter((o) => !o.isLoss);
+                const comboOptions = allCombos.filter((o) => !o.isLoss && !o.isAlternative);
                 const lossCombos = allCombos.filter((o) => o.isLoss);
+                // The OTHER distinct same-community combos from the same pool (kept
+                // out of comboOptions so ComboComparisonPanel + the cancellation
+                // advice — which verify against the configured resort — are unchanged).
+                const altCombos = allCombos.filter((o) => !o.isLoss && o.isAlternative);
                 const lossLog = (lastSearch?.cityEconomics ?? []).filter((c) => !c.accepted);
                 const searchAudits = lastAutoFillAudits[r._id] ?? [];
                 const manualReservation = isManualReservation(r);
@@ -9057,6 +9190,13 @@ export default function Bookings() {
                             lossCombos={lossCombos}
                             lossLog={lossLog}
                             finishedAt={lastSearch?.timestamps?.finishedAt ?? null}
+                            onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
+                            attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
+                          />
+                        )}
+                        {altCombos.length > 0 && (
+                          <AlternateCombosPanel
+                            options={altCombos}
                             onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
                             attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
                           />
@@ -9827,6 +9967,7 @@ export default function Bookings() {
                         const itemLossCombos = item.lossCombos ?? [];
                         const itemLossLog = item.lossLog ?? [];
                         const itemHasLoss = itemLossCombos.length > 0 || itemLossLog.length > 0;
+                        const itemAltCombos = item.altCombos ?? [];
                         return (
                         <div key={item.id}>
                         <div
@@ -9882,6 +10023,19 @@ export default function Bookings() {
                             <LastBuyInSearchPanel
                               lossCombos={itemLossCombos}
                               lossLog={itemLossLog}
+                              onAttachCombo={(option) => {
+                                const r = reservations.find((x) => x._id === item.reservationId);
+                                if (r) attachComboMutation.mutate({ reservation: r, option });
+                                else toast({ title: "Open the booking to attach", description: "This booking isn't in the current view — open it from the table to attach this combo.", variant: "destructive" });
+                              }}
+                              attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
+                            />
+                          </div>
+                        )}
+                        {itemAltCombos.length > 0 && (
+                          <div className="px-3 pb-3">
+                            <AlternateCombosPanel
+                              options={itemAltCombos}
                               onAttachCombo={(option) => {
                                 const r = reservations.find((x) => x._id === item.reservationId);
                                 if (r) attachComboMutation.mutate({ reservation: r, option });
