@@ -6,6 +6,7 @@ import {
   comboSplitsForPlan,
   sharedResortPhraseKeys,
   suggestCityVrboComboPair,
+  suggestCityVrboComboPairs,
   summarizeCityVrboMatching,
   type CityVrboListing,
 } from "../shared/city-vrbo-combo";
@@ -213,6 +214,107 @@ check("diag: unmatchedSample surfaces the generic titles",
   diag.unmatchedSample);
 check("diag: poipu kai cluster is pairable (3BR + 2BR present)", diag.pairableClusters >= 1, diag);
 check("diag: topClusters includes poipu kai", diag.topClusters.some((c) => c.label === "poipu kai"), diag.topClusters);
+
+// ── 6) PLURAL: top-N DISTINCT combos from one pool ───────────────────────────
+// suggestCityVrboComboPairs mines the SAME broad pool VRBO returns for adjacent
+// towns for MULTIPLE distinct same-community combos, instead of the single
+// cheapest. result[0] MUST equal the singular (back-compat / attach + profit gate
+// key off the single cheapest — never let the plural change it).
+const samePicks = (a: CityVrboComboPairLike, b: CityVrboComboPairLike): boolean =>
+  !!a && !!b && a.totalCost === b.totalCost && a.resortPhrase === b.resortPhrase &&
+  a.picks.length === b.picks.length &&
+  a.picks.map((p) => p.url).sort().join("|") === b.picks.map((p) => p.url).sort().join("|");
+type CityVrboComboPairLike = { totalCost: number; resortPhrase: string; picks: { url: string; bedrooms?: number | null }[] };
+const allUrls = (combos: CityVrboComboPairLike[]): string[] => combos.flatMap((c) => c.picks.map((p) => p.url));
+const noDupUrls = (combos: CityVrboComboPairLike[]): boolean => { const u = allUrls(combos); return new Set(u).size === u.length; };
+
+// 6-1) EQUIVALENCE: result[0] is byte-identical to the singular (locks back-compat).
+const eqPool = [
+  L("https://vrbo.com/e1", "Poipu Kai Resort 3BR A", 3, 3000),
+  L("https://vrbo.com/e2", "Poipu Kai Resort 3BR B", 3, 3050),
+  L("https://vrbo.com/e3", "Kiahuna Plantation 3BR", 3, 3500),
+  L("https://vrbo.com/e4", "Kiahuna Plantation 3BR B", 3, 3600),
+];
+const eqSingular = suggestCityVrboComboPair(eqPool, [3, 3], 7);
+const eqPlural = suggestCityVrboComboPairs(eqPool, [3, 3], 7, 5);
+check("plural: result[0] equals the singular cheapest pair",
+  !!eqSingular && eqPlural.length >= 1 && samePicks(eqPlural[0], eqSingular), { eqSingular, top: eqPlural[0] });
+
+// 6-2) DISTINCT-URL NON-OVERLAP: 4 same-community 3BRs, plan [3,3] → 2 combos, no shared URL.
+const fourPool = [
+  L("https://vrbo.com/f1", "Poipu Kai Resort 3BR A", 3, 3000),
+  L("https://vrbo.com/f2", "Poipu Kai Resort 3BR B", 3, 3100),
+  L("https://vrbo.com/f3", "Poipu Kai Resort 3BR C", 3, 3200),
+  L("https://vrbo.com/f4", "Poipu Kai Resort 3BR D", 3, 3300),
+];
+const fourCombos = suggestCityVrboComboPairs(fourPool, [3, 3], 7, 5);
+check("plural: 4 same-community 3BRs → exactly 2 combos", fourCombos.length === 2, fourCombos.map((c) => c.totalCost));
+check("plural: the 2 combos share NO listing URL", noDupUrls(fourCombos), allUrls(fourCombos));
+
+// 6-3) DIFFERENT-CLUSTER PREFERENCE: a 2nd Poipu Kai pair is CHEAPER than the
+// Kiahuna pair, yet combo[1] is the KIAHUNA pair (new cluster preferred);
+// the cheaper 2nd Poipu Kai pair only appears at combo[2] (same-cluster allowed).
+const divPool = [
+  L("https://vrbo.com/v1", "Poipu Kai Resort 3BR A", 3, 3000),
+  L("https://vrbo.com/v2", "Poipu Kai Resort 3BR B", 3, 3050),
+  L("https://vrbo.com/v3", "Poipu Kai Resort 3BR C", 3, 3100),
+  L("https://vrbo.com/v4", "Poipu Kai Resort 3BR D", 3, 3150),
+  L("https://vrbo.com/v5", "Kiahuna Plantation 3BR A", 3, 3500),
+  L("https://vrbo.com/v6", "Kiahuna Plantation 3BR B", 3, 3600),
+];
+const divCombos = suggestCityVrboComboPairs(divPool, [3, 3], 7, 3);
+check("plural: combo[0] is the cheapest overall (Poipu Kai pair)",
+  divCombos[0]?.resortPhrase === "poipu kai", divCombos.map((c) => `${c.resortPhrase} $${c.totalCost}`));
+check("plural: combo[1] prefers the DIFFERENT cluster (Kiahuna) over a cheaper 2nd Poipu Kai pair",
+  divCombos[1]?.resortPhrase === "kiahuna plantation", divCombos.map((c) => `${c.resortPhrase} $${c.totalCost}`));
+check("plural: combo[2] is the same-cluster runner-up (2nd Poipu Kai pair)",
+  divCombos[2]?.resortPhrase === "poipu kai", divCombos.map((c) => `${c.resortPhrase} $${c.totalCost}`));
+check("plural: all 3 combos are URL-disjoint", noDupUrls(divCombos), allUrls(divCombos));
+
+// 6-4) LIMIT HONORED: a pool that could yield >=3 combos, limit 2 → exactly 2,
+// and combo[0] is still the global cheapest.
+const limitCombos = suggestCityVrboComboPairs(divPool, [3, 3], 7, 2);
+check("plural: limit honored (2 of >=3 possible)", limitCombos.length === 2, limitCombos.length);
+check("plural: limited result[0] still equals the singular",
+  !!suggestCityVrboComboPair(divPool, [3, 3], 7) && samePicks(limitCombos[0], suggestCityVrboComboPair(divPool, [3, 3], 7)!), limitCombos[0]);
+
+// 6-5) EMPTY / INSUFFICIENT pools.
+check("plural: empty pool → []", suggestCityVrboComboPairs([], [3, 3], 7, 5).length === 0);
+check("plural: limit 0 → []", suggestCityVrboComboPairs(fourPool, [3, 3], 7, 0).length === 0);
+const threePool = [
+  L("https://vrbo.com/t1", "Poipu Kai Resort 3BR A", 3, 3000),
+  L("https://vrbo.com/t2", "Poipu Kai Resort 3BR B", 3, 3100),
+  L("https://vrbo.com/t3", "Poipu Kai Resort 3BR C", 3, 3200),
+];
+check("plural: 3 same-community units → only 1 combo (2nd would reuse a URL)",
+  suggestCityVrboComboPairs(threePool, [3, 3], 7, 5).length === 1, suggestCityVrboComboPairs(threePool, [3, 3], 7, 5).length);
+
+// 6-6) WALKABILITY PRESERVED: after the one walkable combo, the only leftovers are
+// single units in DIFFERENT non-adjacent communities → NO second (non-walkable)
+// combo is ever fabricated to reach the limit.
+const walkPool = [
+  L("https://vrbo.com/w1", "Poipu Kai Resort 3BR A", 3, 3000),
+  L("https://vrbo.com/w2", "Poipu Kai Resort 3BR B", 3, 3100),
+  L("https://vrbo.com/w3", "Mauna Kai Princeville 3BR", 3, 2000), // far, lone
+  L("https://vrbo.com/w4", "Kaha Lani Resort 3BR", 3, 1900),      // far, lone (different community)
+];
+const walkCombos = suggestCityVrboComboPairs(walkPool, [3, 3], 7, 5);
+check("plural: never fabricates a non-walkable cross-community combo to fill the limit",
+  walkCombos.length === 1 && walkCombos[0].resortPhrase === "poipu kai", walkCombos.map((c) => c.resortPhrase));
+
+// 6-7) SPLIT DIVERSITY: a single community has both a 4+2 pair and a 3+3 pair for a
+// [3,3] booking; the two surfaced combos use DIFFERENT splits and share no URL.
+const splitDivPool = [
+  L("https://vrbo.com/d1", "Poipu Kai Resort 3BR A", 3, 3000),
+  L("https://vrbo.com/d2", "Poipu Kai Resort 3BR B", 3, 3000),
+  L("https://vrbo.com/d3", "Poipu Kai Resort 4BR", 4, 2800),
+  L("https://vrbo.com/d4", "Poipu Kai Resort 2BR", 2, 1900),
+];
+const splitDivCombos = suggestCityVrboComboPairs(splitDivPool, [3, 3], 7, 5);
+const brSet = (c: CityVrboComboPairLike) => new Set(c.picks.map((p) => p.bedrooms));
+check("plural: combo[0] is the cheaper 4+2 split", !!splitDivCombos[0] && brSet(splitDivCombos[0]).has(4) && brSet(splitDivCombos[0]).has(2), splitDivCombos[0]?.picks?.map((p) => p.bedrooms));
+check("plural: combo[1] is the 3+3 split (different split, URL-disjoint)",
+  !!splitDivCombos[1] && [...brSet(splitDivCombos[1])].every((b) => b === 3) && noDupUrls(splitDivCombos), splitDivCombos[1]?.picks?.map((p) => p.bedrooms));
 
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
