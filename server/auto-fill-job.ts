@@ -40,6 +40,7 @@ import {
   CityExpansionValidationError,
   type CityExpansionJobStatus,
   type ExpansionCityResult,
+  type NearbyTownForScan,
 } from "./city-vrbo-expansion";
 import {
   getCachedCommunityListingUrls,
@@ -1175,6 +1176,25 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       const towns = await nearbyTownsForCommunity(unitConfig.community, SINGLE_UNIT_NEARBY_MAX_MIN, SINGLE_UNIT_NEARBY_TOWN_CAP);
       const deadline = Date.now() + SINGLE_UNIT_NEARBY_BUDGET_MS;
       let attachedNearby = false;
+      // getHeartbeat lets us tell a genuine worker drop from a healthy worker just
+      // timing out one scan (vrbo-sidecar-queue returns workerOnline:false for both).
+      const { getHeartbeat } = await import("./vrbo-sidecar-queue");
+      // Record every town we scan in the escalation ladder (tierResults) — same
+      // structure the combo expansion populates — so single-unit runs also show the
+      // nearby cities searched + the "Searched N cities" summary counts them.
+      const nearbyTierResults: ExpansionCityResult[] = [];
+      const recordTown = (t: NearbyTownForScan, status: ExpansionCityResult["status"], extra?: Partial<ExpansionCityResult>) => {
+        nearbyTierResults.push({
+          citySearchTerm: t.citySearchTerm,
+          placeName: t.placeName,
+          driveMinutes: t.driveMinutes,
+          tier: t.driveMinutes <= tierCeilingMinutes(1) ? 1 : 2,
+          status,
+          suggestedPair: false,
+          ...extra,
+        });
+        setEscalation(job, { tierResults: [...nearbyTierResults] });
+      };
       for (const town of towns) {
         if (job.canceled || Date.now() > deadline || remainingSlots().length === 0) break;
         let scan: CityVrboScanResult;
@@ -1186,19 +1206,27 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
             bedroomPlan: [slot.bedrooms],
             targetState: town.state,
           });
-        } catch { continue; }
-        // Worker dropped mid-walk → stop (a genuinely-offline worker returns
-        // workerOnline=false; a per-scan timeout on a healthy worker also does, but
-        // either way there's no point hammering the rest of the ring).
-        if (!scan.sidecar.workerOnline) { setEscalation(job, { nearbyStatus: "worker_offline" }); break; }
+        } catch (err: any) { recordTown(town, "scan-error", { reason: String(err?.message ?? err) }); continue; }
+        // workerOnline:false is a genuine drop OR a healthy worker exhausting this
+        // scan's per-scan wallet. Reconcile against the live heartbeat like the combo
+        // expansion (city-vrbo-expansion.ts): only a real offline aborts the ring; a
+        // transient timeout records the town and walks on so the 45-min reach holds.
+        if (!scan.sidecar.workerOnline) {
+          if (!getHeartbeat().isOnline) { setEscalation(job, { nearbyStatus: "worker_offline" }); break; }
+          recordTown(town, "scan-error", { reason: scan.sidecar.reason });
+          continue;
+        }
         const townUrls = new Set((scan.rawListings ?? []).map((l) => l.url).filter((u): u is string => Boolean(u)));
-        if (jaccardVsHome(townUrls) >= SINGLE_UNIT_NEARBY_COLLAPSE_JACCARD) continue; // collapsed to home pool
+        if (jaccardVsHome(townUrls) >= SINGLE_UNIT_NEARBY_COLLAPSE_JACCARD) {
+          recordTown(town, "duplicate", { listingsExported: scan.listings.length, reason: `VRBO returned the same broad pool as the home city — not a distinct local search for ${town.placeName}` });
+          continue; // collapsed to home pool
+        }
         setAudit(job, auditFromCity(slot.bedrooms, scan));
         const rows = ((scan.byBedroom?.[slot.bedrooms] ?? []) as any[])
           .filter((r) => (Number(r.totalPrice) || 0) > 0)
           .sort((a, b) => (Number(a.totalPrice) || Infinity) - (Number(b.totalPrice) || Infinity));
         const row = rows.find((r) => !hasUsedListingIdentity(used, { url: r.url, title: r.title, sourceLabel: r.sourceLabel }));
-        if (!row) continue;
+        if (!row) { recordTown(town, "no-pair", { listingsExported: scan.listings.length }); continue; }
         const cost = Number(row.totalPrice) || 0;
         const v = gate(cost);
         const label = `${town.placeName} (${town.driveMinutes} min) ${slot.unitLabel}`.trim();
@@ -1206,6 +1234,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           recordEconomics("nearby", label, cost, v.profit, false,
             `${slot.unitLabel} $${Math.round(cost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searched on`,
             comboUnitsFromPicks([row], [slot.bedrooms]));
+          recordTown(town, "unprofitable", { listingsExported: scan.listings.length, comboCost: Math.round(cost), expectedProfit: Math.round(v.profit), accepted: false });
           continue; // a nearer-but-pricier loss; a farther town may still be acceptable
         }
         const ok = await attachPick({
@@ -1216,7 +1245,13 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           sourceCity: town.citySearchTerm,
           comboLabel: `City VRBO ${row.sourceLabel ?? "unit"} · ${town.driveMinutes} min drive`,
         });
-        if (ok) { attachedNearby = true; setEscalation(job, { nearbyStatus: "found", foundAt: "nearby" }); break; }
+        if (ok) {
+          attachedNearby = true;
+          recordTown(town, "pair", { listingsExported: scan.listings.length, comboCost: Math.round(cost), expectedProfit: Math.round(v.profit), accepted: true });
+          setEscalation(job, { nearbyStatus: "found", foundAt: "nearby" });
+          break;
+        }
+        recordTown(town, "no-pair", { listingsExported: scan.listings.length, reason: "attach rejected (unavailable / unverified / duplicate)" });
       }
       if (!attachedNearby && remainingSlots().length > 0) setEscalation(job, { nearbyStatus: "exhausted" });
     }
