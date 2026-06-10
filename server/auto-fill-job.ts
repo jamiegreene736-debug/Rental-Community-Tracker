@@ -1163,7 +1163,27 @@ function doneMessage(job: AutoFillJob): string {
       const best = rejected.reduce((a, b) => (b.expectedProfit > a.expectedProfit ? b : a));
       return `No profitable combination found (revenue ${usd(job.expectedRevenue)}). Best option: ${best.label} — combo ${usd(best.comboCost)}, est. profit ${usd(best.expectedProfit)}. Searched ${citiesSearched} ${citiesSearched === 1 ? "city" : "cities"} (home + nearby); left empty so you're not committed to a loss.`;
     }
-    return "No verified priced candidate could be attached. Open Find buy-in to review.";
+    // Genuine no-combo (not a profit-gate rejection): surface what the scrape
+    // actually RETURNED so a failed scan can be triaged — a home city that returned
+    // 0 listings is a scrape/sidecar problem, whereas N listings with no pair is a
+    // matcher (combo-finding) outcome. homeCity* come from the city-wide VRBO scan
+    // (combo properties); resort counts from the find-buy-in audits (single-unit).
+    const homeListings = job.escalation.homeCityListings;
+    const homeTerm = job.escalation.homeCityTerm;
+    const homeUsable = job.escalation.homeCityCoverage?.usable;
+    const resortScanned = job.searchAudits.reduce((s, a) => s + (a.counts?.scanned ?? 0), 0);
+    const diag: string[] = ["No verified priced candidate could be attached."];
+    if (typeof homeListings === "number") {
+      diag.push(
+        `Home city${homeTerm ? ` "${homeTerm}"` : ""} returned ${homeListings} VRBO listing${homeListings === 1 ? "" : "s"}` +
+        `${typeof homeUsable === "number" ? ` (${homeUsable} usable >=2BR)` : ""}.`,
+      );
+    } else if (resortScanned > 0) {
+      diag.push(`Resort search scanned ${resortScanned} listing${resortScanned === 1 ? "" : "s"}.`);
+    }
+    if (nearbyScanned > 0) diag.push(`Searched ${nearbyScanned} nearby ${nearbyScanned === 1 ? "city" : "cities"}.`);
+    diag.push("Open Find buy-in to review.");
+    return diag.join(" ");
   }
   const cost = job.totalCost != null ? ` · Buy-in cost: ${usd(job.totalCost)}` : "";
   const profit = jobExpectedProfit(job);

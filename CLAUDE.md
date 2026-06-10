@@ -43,6 +43,50 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-10 (bulk buy-in queue: make FAILED-scan logs diagnosable + green the test suite):
+  Operator asked to review the most-recent buy-in queue's FAILED scans and confirm
+  nothing went wrong in scraping / sorting / combo-finding. Audited the whole failure
+  pipeline (`server/bulk-auto-fill-job.ts` → `server/auto-fill-job.ts` →
+  `server/city-vrbo-inventory.ts` → `shared/city-vrbo-combo.ts` →
+  `server/city-vrbo-expansion.ts`): the scrape→normalize→sort→combo LOGIC is correct
+  and test-covered; the real defect was DIAGNOSTICS. A scan that ends 0-filled was
+  always reported by the bulk queue with a single generic "No verified priced
+  candidate was attached", DISCARDING the auto-fill job's precise terminal message —
+  so a profit-gate loss (loss combos found), a genuinely-empty scrape, a thrown error,
+  and a 50-min timeout were indistinguishable in the queue dialog (and the headline
+  contradicted the loss-combo `LastBuyInSearchPanel` rendered right below it). Fixes:
+  (1) `server/bulk-auto-fill-job.ts` `filled===0` branch now picks the reason by the
+  auto-fill job's terminal STATE: `!done` → "Search timed out after N min"; status
+  `failed` → the error / per-slot skip reasons; completed-0 → the auto-fill
+  `doneMessage` (the rich "No profitable combination found … Best option …" economics,
+  or the empty-scrape line). `item.error` now carries only the per-slot skip breakdown
+  (no verbatim duplicate of the headline). The dialog already renders `item.message`
+  (red) + `item.error` + the loss panel, so this is immediately visible.
+  (2) `server/auto-fill-job.ts` `doneMessage` no-combo branch now appends SCRAPE
+  COVERAGE — `Home city "<term>" returned N VRBO listings (M usable >=2BR)` (or the
+  resort-scan count for single-unit) + nearby-city count — so a 0-listing SCRAPE
+  problem reads differently from a matched-but-no-pair (combo-finding) outcome. This
+  is the line that lets the operator tell "scraping went wrong" from "matcher found
+  nothing" when reviewing a failed scan.
+  Confirmed NOT a bug (don't re-chase): the Florida / non-Hawaii region geo-threading
+  is already wired through all three layers — daemon guard `expectedState` (parsed
+  from the "City, Florida" destination in `searchVrboViaSidecar`), server geo-drop
+  `targetState` (from `BUY_IN_MARKET_LOCATIONS[community].state`, PR #618), and the
+  expansion's `targetState` (`city-vrbo-expansion.ts` line ~443) — so the AGENTS.md
+  "SIBLING STILL PENDING" Florida note in the geo-guard section is STALE.
+  (3) Test hygiene: `npm test` had been RED since the auto-fill/bulk queue moved
+  server-side (PRs #612 etc.) — `tests/pipeline-logic.test.ts` had FIVE meta-assertions
+  still grepping client `bookings.tsx` for attach / walkability / PM-discovery
+  internals that now live in `server/auto-fill-job.ts` + `shared/city-vrbo-combo.ts` +
+  the attach route (`Buy-in units too far apart`). Repointed each to its true location
+  (intent preserved), plus two drifted relocation-Guest-Page string guards
+  (unconditional VRBO detail scrape; community gallery `slice(6→8)`). Suite now 0
+  failures; `npm run build` passes; `npm run check` adds no new errors in touched files
+  (the ~285 repo-wide TS errors are pre-existing). NOTE: could NOT pull the operator's
+  live Railway runtime logs from the cloud session (no Railway/DB creds), so the audit
+  was code-path based — the diagnostics fix is what makes the NEXT run's failed scans
+  self-explaining in the dialog.
+
 - 2026-06-08 (guest inbox: FULLY AUTOMATED auto-reply + attention banner):
   Operator asked to make the inbox responder fully automatic, with a top-of-inbox
   notice that surfaces the messages he should check (not-100%-confident or
