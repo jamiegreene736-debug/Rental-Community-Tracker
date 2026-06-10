@@ -61,7 +61,8 @@ export type SidecarOpType =
   | "pm_url_check_batch"
   | "vrbo_upload_photos"
   | "booking_upload_photos"
-  | "guesty_disconnect_channel";
+  | "guesty_disconnect_channel"
+  | "vrbo_book";
 
 export type SidecarAirbnbParams = {
   destination: string;
@@ -282,6 +283,34 @@ export type SidecarGuestyDisconnectResult = {
   message: string;
 };
 
+// VRBO buy-in checkout. The sidecar drives ONE VRBO listing through guest
+// checkout UP TO the payment step, fills only the traveler block (the actual
+// guest's name + a unique per-unit email alias + the fixed booking phone), then
+// surfaces the (yellow) Chrome window and BLOCKS while the operator enters card
+// details + clicks "Book now" themselves. Card/billing fields are never touched
+// by automation. See server/buy-in-checkout-job.ts + daemon processVrboBook.
+export type SidecarVrboBookParams = {
+  buyInId: number;
+  listingUrl: string;
+  checkIn: string; // YYYY-MM-DD
+  checkOut: string; // YYYY-MM-DD
+  firstName: string;
+  lastName: string;
+  email: string; // unique per-unit traveler alias
+  phone: string; // fixed operator booking phone (407 449 7941)
+  bedrooms?: number;
+  queueContext?: SidecarQueueContext;
+};
+
+export type SidecarVrboBookResult = {
+  stage: "booked" | "awaiting_payment_timeout";
+  confirmed: boolean;
+  confirmationNumber: string | null;
+  travelerFilled?: Record<string, boolean>;
+  listingUrl?: string;
+  navUrl?: string;
+};
+
 export type SidecarParamsByOp = {
   airbnb_search: SidecarAirbnbParams;
   vrbo_search: SidecarVrboParams;
@@ -295,6 +324,7 @@ export type SidecarParamsByOp = {
   vrbo_upload_photos: SidecarPhotoUploadParams;
   booking_upload_photos: SidecarPhotoUploadParams;
   guesty_disconnect_channel: SidecarGuestyDisconnectParams;
+  vrbo_book: SidecarVrboBookParams;
 };
 
 // Result shapes per op type.
@@ -469,7 +499,8 @@ export type SidecarRequest = {
     | SidecarPmUrlCheckParams
     | SidecarPmUrlCheckBatchParams
     | SidecarPhotoUploadParams
-    | SidecarGuestyDisconnectParams;
+    | SidecarGuestyDisconnectParams
+    | SidecarVrboBookParams;
   requestKey: string;
   results?:
     | SidecarPropertyCandidate[]
@@ -480,6 +511,7 @@ export type SidecarRequest = {
     | SidecarPmUrlCheckBatchResult
     | SidecarPhotoUploadResult
     | SidecarGuestyDisconnectResult
+    | SidecarVrboBookResult
     | null;
   searchVariationSummary?: SidecarSearchVariationSummary;
   mapHarvest?: SidecarMapHarvestStats | null;
@@ -639,6 +671,9 @@ const DEFAULT_OP_CONCURRENCY: Partial<Record<SidecarOpType, number>> = {
   booking_search: 1,
   vrbo_search: 1,
   vrbo_photo_scrape: 1,
+  // One human-paced checkout at a time — it pins a Chrome slot for the whole
+  // payment handoff, so never run two concurrently.
+  vrbo_book: 1,
 };
 
 function isAvailabilityBulkSearch(
@@ -1297,6 +1332,12 @@ function localWorkerIsPreferred(now = nowMs()): boolean {
 }
 
 function canClaimOp(request: SidecarRequest, runtime?: SidecarWorkerRuntime | null): boolean {
+  // vrbo_book (buy-in checkout) runs ONLY on the local Mac sidecar: the handler
+  // ships there via `cp` (not in the Railway image), the operator's residential
+  // IP is the one that clears VRBO's wall, and the human payment handoff happens
+  // on the operator's own screen. Never let a server/Railway worker claim it
+  // (it would throw "unknown opType: vrbo_book").
+  if (request.opType === "vrbo_book" && runtime?.source !== "local") return false;
   if (runtime?.source === "server" && isOtaBrowserOp(request.opType) && localWorkerIsPreferred()) {
     return false;
   }
@@ -1743,7 +1784,8 @@ export function enqueueOp(
     | { opType: "pm_url_check_batch"; params: SidecarPmUrlCheckBatchParams }
     | { opType: "vrbo_upload_photos"; params: SidecarPhotoUploadParams }
     | { opType: "booking_upload_photos"; params: SidecarPhotoUploadParams }
-    | { opType: "guesty_disconnect_channel"; params: SidecarGuestyDisconnectParams },
+    | { opType: "guesty_disconnect_channel"; params: SidecarGuestyDisconnectParams }
+    | { opType: "vrbo_book"; params: SidecarVrboBookParams },
 ): { id: string; deduped: boolean } {
   cleanup();
   if (queuePaused) {
@@ -2097,7 +2139,8 @@ function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
       case "pm_url_check": return "PM";
       case "google_serp": return "Google";
       case "vrbo_photo_scrape":
-      case "vrbo_upload_photos": return "VRBO";
+      case "vrbo_upload_photos":
+      case "vrbo_book": return "VRBO";
       case "booking_upload_photos": return "Booking.com";
       case "zillow_photo_scrape": return "Zillow";
       case "guesty_disconnect_channel": return "Guesty";
@@ -2113,6 +2156,7 @@ function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
       case "pm_url_check_batch": return `PM rate checks${siteCount ? ` (${siteCount} pages)` : ""}`;
       case "pm_url_check": return "PM rate check";
       case "google_serp": return "Google discovery";
+      case "vrbo_book": return "VRBO booking";
       case "vrbo_photo_scrape": return "VRBO photo scrape";
       case "zillow_photo_scrape": return "Zillow photo scrape";
       case "vrbo_upload_photos": return "VRBO photo upload";
@@ -2212,6 +2256,7 @@ export function getStatus(): {
     vrbo_upload_photos: 0,
     booking_upload_photos: 0,
     guesty_disconnect_channel: 0,
+    vrbo_book: 0,
   };
   const activeRequests: SidecarStatusRequest[] = [];
   const pendingRequests: SidecarStatusRequest[] = [];
@@ -2362,6 +2407,7 @@ function labelForOpType(opType: string): string {
     case "pm_url_check_batch": return "PM rate checks";
     case "pm_url_check": return "PM rate check";
     case "google_serp": return "Google discovery";
+    case "vrbo_book": return "VRBO booking";
     case "vrbo_photo_scrape": return "VRBO photo scrape";
     case "zillow_photo_scrape": return "Zillow photo scrape";
     case "vrbo_upload_photos": return "VRBO photo upload";
@@ -3022,6 +3068,51 @@ export async function disconnectGuestyChannelViaSidecar(opts: {
   };
 }
 
+// VRBO buy-in checkout. Enqueues a `vrbo_book` op and waits for the worker to
+// drive the listing to payment, surface the (yellow) window, BLOCK for the
+// operator to enter card details, and detect the booking confirmation. The
+// wallet is long (default 50m) to cover a human-paced payment; the daemon's own
+// hard timeout (SIDECAR_VRBO_BOOK_TIMEOUT_MS, default 45m) fires first so we
+// still get a result. `onStage` is called each poll with the op's live stage
+// (the worker emits "awaiting payment — operator entering card" once the window
+// is up) so the checkout job can flip to an awaiting_payment status.
+export async function bookVrboUnitViaSidecar(opts: {
+  params: SidecarVrboBookParams;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+  queueBudgetMs?: number;
+  signal?: AbortSignal;
+  onStage?: (stage: string | undefined, request: SidecarRequest) => void;
+}): Promise<{
+  result: SidecarVrboBookResult | null;
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (!opts.params?.listingUrl || !opts.params?.email) {
+    return { result: null, workerOnline: false, durationMs: 0, reason: "listingUrl and email required" };
+  }
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "vrbo_book",
+      // Every booking is a one-off interactive run: never dedup onto another
+      // request and never serve a cached result.
+      params: { ...opts.params, queueContext: { ...opts.params.queueContext, forceFresh: true, skipResultCache: true } },
+    },
+    pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    walletBudgetMs: opts.walletBudgetMs ?? (Number(process.env.SIDECAR_VRBO_BOOK_WALLET_MS) || 50 * 60_000),
+    queueBudgetMs: opts.queueBudgetMs ?? (Number(process.env.SIDECAR_VRBO_BOOK_QUEUE_MS) || 10 * 60_000),
+    signal: opts.signal,
+    onPoll: opts.onStage ? (req) => opts.onStage!(req.stage, req) : undefined,
+  });
+  return {
+    result: (r.results as SidecarVrboBookResult | undefined) ?? null,
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
 // Shared enqueue + poll loop. Each `searchXViaSidecar` is a thin
 // op-typed wrapper around this.
 async function awaitOpResult(opts: {
@@ -3031,6 +3122,11 @@ async function awaitOpResult(opts: {
   queueBudgetMs?: number;
   signal?: AbortSignal;
   stopGeneration?: number;
+  // Called once per poll tick with the live request (incl. its `stage`, set
+  // from the worker's heartbeat label). Lets a caller surface intermediate
+  // states — e.g. the checkout job flipping to "awaiting payment" while the op
+  // is still in_progress. Must not throw.
+  onPoll?: (request: SidecarRequest) => void;
 }): Promise<{
   results: SidecarRequest["results"];
   searchVariationSummary?: SidecarSearchVariationSummary;
@@ -3124,6 +3220,11 @@ async function awaitOpResult(opts: {
           durationMs: nowMs() - startedAt,
           reason: "request expired before completion (worker likely offline)",
         };
+      }
+      try {
+        opts.onPoll?.(r);
+      } catch {
+        /* onPoll must never break the poll loop */
       }
       const now = nowMs();
       if (r.status === "completed") {

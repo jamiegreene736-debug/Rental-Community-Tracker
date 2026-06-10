@@ -12934,6 +12934,76 @@ Requirements:
     }
   });
 
+  // ── Buy-in checkout (server/buy-in-checkout-job.ts) ──────────────────────────
+  // The step after a unit is attached: BOOK it on vrbo.com, automated UP TO
+  // payment, then surface the (yellow) sidecar Chrome window for the operator to
+  // enter card details + click "Book now". One job per buy-in (single-flight).
+  // The bookings page's per-unit "Buy this unit in" button starts it and polls.
+  app.post("/api/operations/buy-in-checkout", async (req: Request, res: Response) => {
+    try {
+      const { startBuyInCheckoutJob } = await import("./buy-in-checkout-job");
+      const started = startBuyInCheckoutJob({
+        buyInId: Number(req.body?.buyInId),
+        reservationId: String(req.body?.reservationId ?? ""),
+        guestFirstName: req.body?.guestFirstName ?? null,
+        guestLastName: req.body?.guestLastName ?? null,
+      });
+      return res.status(202).json(started);
+    } catch (e: any) {
+      const { CheckoutValidationError } = await import("./buy-in-checkout-job");
+      if (e instanceof CheckoutValidationError) return res.status(400).json({ error: e.message });
+      console.error("[buy-in-checkout] start error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // active MUST be registered before :jobId so "active" isn't matched as a jobId.
+  // Rediscovery is keyed by buyInId so a returning client can re-attach per-unit
+  // pollers. Pass reservationIds (the visible rows) and/or buyInIds.
+  app.get("/api/operations/buy-in-checkout/active", async (req: Request, res: Response) => {
+    try {
+      const { getCheckoutJobsForReservation, getCheckoutJobForBuyIn, serializeCheckoutJob } = await import("./buy-in-checkout-job");
+      const reservationIds = String(req.query.reservationIds ?? req.query.reservationId ?? "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const buyInIds = String(req.query.buyInIds ?? req.query.buyInId ?? "")
+        .split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
+      const out: Record<string, any> = {};
+      for (const rid of reservationIds) {
+        for (const job of getCheckoutJobsForReservation(rid)) out[String(job.buyInId)] = serializeCheckoutJob(job);
+      }
+      for (const bid of buyInIds) {
+        const job = getCheckoutJobForBuyIn(bid);
+        if (job) out[String(bid)] = serializeCheckoutJob(job);
+      }
+      return res.json({ jobs: out });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/operations/buy-in-checkout/:jobId", async (req: Request, res: Response) => {
+    try {
+      const { getBuyInCheckoutJob, serializeCheckoutJob } = await import("./buy-in-checkout-job");
+      const job = getBuyInCheckoutJob(String(req.params.jobId));
+      if (!job) return res.status(404).json({ error: "checkout job not found or expired" });
+      return res.json(serializeCheckoutJob(job));
+    } catch (e: any) {
+      console.error("[buy-in-checkout] poll error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.post("/api/operations/buy-in-checkout/:jobId/cancel", async (req: Request, res: Response) => {
+    try {
+      const { cancelBuyInCheckoutJob } = await import("./buy-in-checkout-job");
+      const ok = cancelBuyInCheckoutJob(String(req.params.jobId));
+      if (!ok) return res.status(404).json({ error: "checkout job not found or expired" });
+      return res.json({ ok: true });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   // ── Server-side BULK auto-fill queue (server/bulk-auto-fill-job.ts) ──────────
   // The whole bulk queue runs server-side so it survives the browser tab
   // suspending/closing — the prior client-driven for-loop stalled overnight when

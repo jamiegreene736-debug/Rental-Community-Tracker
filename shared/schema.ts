@@ -44,6 +44,17 @@ export const buyIns = pgTable("buy_ins", {
   attachedAt: timestamp("attached_at"),
   unitTypeConfidence: integer("unit_type_confidence"), // 0-100 from computeUnitTypeConfidence at search time
   unitTypeConfidenceBreakdown: jsonb("unit_type_confidence_breakdown"), // optional array of {layer, points, reason}
+  // --- VRBO buy-in checkout lifecycle (server/buy-in-checkout-job.ts) ---
+  // Tracks the actual PURCHASE of this unit on vrbo.com (distinct from
+  // `status` active/cancelled and from `attachedAt` = when we internally
+  // picked it). Doubles as the idempotency guard: a row at "booked" is
+  // never re-driven through checkout. See memory buy-in-checkout-automation-plan.
+  bookingStatus: text("booking_status").notNull().default("not_started"),
+  // not_started | queued | in_progress | awaiting_payment | booked | failed
+  bookingConfirmation: text("booking_confirmation"), // VRBO itinerary/confirmation number, set on confirmed purchase
+  bookedAt: timestamp("booked_at"), // when the purchase actually completed on vrbo.com
+  travelerEmail: text("traveler_email"), // the unique per-unit alias used as the VRBO traveler email
+  bookingError: text("booking_error"), // last checkout failure/skip reason for operator diagnostics
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
