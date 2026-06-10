@@ -780,6 +780,27 @@ export async function runCityVrboInventoryScanForCity(args: {
   });
 }
 
+/**
+ * Listing URLs from a community's CACHED home pool (the rawListings the sidecar
+ * harvested), or null if nothing is cached for these dates. Used by the nearby-
+ * city expansion (city-vrbo-expansion.ts) to detect when a town's VRBO search
+ * "collapsed" to the same broad pool as the home community: VRBO returns the
+ * IDENTICAL regional result set for tiny towns it can't pin in its destination
+ * dropdown (observed: Koloa's "Lawai, Hawaii"/"Eleele, Hawaii" scans came back
+ * byte-for-byte equal to the "Poipu Kai" home pool — same 187 listings, so the
+ * combo matcher suggested the SAME pair for each "city"). The expansion drops
+ * such collapsed towns so one combo isn't surfaced as N distinct opportunities.
+ */
+export function getCachedCommunityListingUrls(
+  community: string,
+  checkIn: string,
+  checkOut: string,
+): string[] | null {
+  const entry = cityVrboScrapeCache.get(cacheKeyForScrape(community, checkIn, checkOut));
+  if (!entry) return null;
+  return entry.rawListings.map((l) => l.url).filter((u): u is string => Boolean(u));
+}
+
 /** Evict cached city pools (tests or admin). */
 export function clearCityVrboInventoryCache(community?: string): number {
   if (!community) {

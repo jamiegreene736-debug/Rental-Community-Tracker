@@ -27,6 +27,7 @@ import {
 } from "@shared/buy-in-market";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import {
+  getCachedCommunityListingUrls,
   runCityVrboInventoryScanForCity,
   type CityVrboScanResult,
 } from "./city-vrbo-inventory";
@@ -81,6 +82,7 @@ export type ExpansionCityStatus =
   | "no-pair"
   | "pair"
   | "unprofitable" // a same-community pair was found but it loses money — skipped, searched on
+  | "duplicate" // VRBO returned the same broad pool as an already-scanned city — dropped
   | "skipped"
   | "scan-error";
 
@@ -330,6 +332,32 @@ async function nearbyTownsForCoords(args: {
   }
 }
 
+// Cross-city collapse guard. VRBO returns the IDENTICAL broad regional pool for
+// tiny towns it can't pin in its destination dropdown, so different "cities" come
+// back with the same listings and suggestCityVrboComboPair yields the SAME pair
+// for each (operator: "the same two listings appear in 4 different city
+// searches"). A town whose harvested pool overlaps an already-scanned city's pool
+// at or above this Jaccard threshold is treated as a collapse and dropped. The
+// observed case is exact (Jaccard 1.0 — Koloa's "Lawai"/"Eleele" == "Poipu Kai",
+// 187 listings each); genuinely-distinct adjacent towns share SOME listings but
+// land well below this, so the threshold is tuned high to never false-drop a real
+// town. Env-tunable. (Root cause is the worker returning a stale/broad pool for
+// an unresolved town; this is the Railway-deployable server-side guard.)
+const COLLAPSE_JACCARD = (() => {
+  const raw = Number(process.env.CITY_VRBO_EXPANSION_COLLAPSE_JACCARD);
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.85;
+})();
+
+function poolJaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  let inter = 0;
+  // .forEach (not for…of) to avoid the project's TS2802 downlevel-iteration noise.
+  small.forEach((u) => { if (large.has(u)) inter += 1; });
+  const union = a.size + b.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
 // ── worker ─────────────────────────────────────────────────────────────────
 async function runExpansionWorker(job: ExpansionJob): Promise<void> {
   job.status = "running";
@@ -348,6 +376,16 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
   const searched = new Set<string>();
   searched.add(normTerm(job.homeCitySearchTerm));
   searched.add(normTerm(`${loc.city}, ${loc.state}`));
+
+  // Collapse guard state. Seed with the home community's cached pool so a town
+  // VRBO collapses back to the home/broad result set is caught on the FIRST town
+  // (not only dup-vs-dup between two towns). Cache may be cold (TTL elapsed) → the
+  // guard then relies on cross-town comparison only; either way it never errors.
+  const scannedPools: Array<{ label: string; urls: Set<string> }> = [];
+  const homePoolUrls = getCachedCommunityListingUrls(job.community, job.checkIn, job.checkOut);
+  if (homePoolUrls && homePoolUrls.length) {
+    scannedPools.push({ label: job.community, urls: new Set(homePoolUrls) });
+  }
 
   // getHeartbeat is the same online signal runCityVrboInventoryScan returns via
   // sidecar.workerOnline. Gate up-front: an offline worker leaves each scan
@@ -484,6 +522,34 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
           job.status = "worker_offline";
           finalize(job);
           return;
+        }
+
+        // Collapse guard: if VRBO handed back (essentially) the same pool as an
+        // already-scanned city, this town isn't a distinct local search — drop it
+        // so the same combo isn't surfaced as another "city" (operator's "same two
+        // listings in 4 cities"). Keyed on the FULL harvested pool (rawListings),
+        // not the >=2BR-filtered set, so it catches the search collapse itself
+        // rather than incidental filter overlap.
+        const poolUrls = new Set(
+          (scan.rawListings ?? []).map((l) => l.url).filter((u): u is string => Boolean(u)),
+        );
+        if (poolUrls.size > 0) {
+          const dupOf = scannedPools.find((prior) => poolJaccard(poolUrls, prior.urls) >= COLLAPSE_JACCARD);
+          if (dupOf) {
+            console.log(
+              `[city-vrbo-expansion] "${p.term}" collapsed to "${dupOf.label}" pool ` +
+              `(jaccard≥${COLLAPSE_JACCARD}, ${poolUrls.size} listings) — dropping as duplicate`,
+            );
+            setCityResult(job, p.term, {
+              status: "duplicate",
+              listingsExported: scan.listings.length,
+              durationMs: scan.sidecar.durationMs,
+              reason: `VRBO returned the same broad pool as ${dupOf.label} — not a distinct local search for ${p.placeName}`,
+            });
+            touch(job);
+            continue;
+          }
+          scannedPools.push({ label: p.placeName, urls: poolUrls });
         }
 
         const exported = scan.listings.length;

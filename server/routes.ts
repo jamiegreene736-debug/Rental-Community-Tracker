@@ -11618,7 +11618,18 @@ Requirements:
   const FIND_BUY_IN_ROUTE_BUDGET_MS = 270_000;
   const FIND_BUY_IN_IN_FLIGHT_MAX_AGE_MS = FIND_BUY_IN_ROUTE_BUDGET_MS + 30_000;
   const FIND_BUY_IN_RESPONSE_KEEPALIVE_MS = 15_000;
-  const FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS = 250_000;
+  // NOTE FOR CODEX: outer withTimeout on the sidecar VRBO call (searchVrboViaSidecar
+  // walletBudgetMs:180_000 below). MUST sit between the worker's real work ceiling
+  // and Railway's ~300s edge:
+  //   - Worker wallet is 180_000ms; a legit multi-variation scan was observed in
+  //     prod returning at ~185s (wallet + transport) — so this cannot be 180_000
+  //     (would abort a *successful* 185s scan). Floor is ~185s + margin.
+  //   - It was 250_000, which on a HUNG worker produced real
+  //     "GET /api/operations/find-buy-in 200 in 251449ms" requests with only ~48s
+  //     of edge headroom — one extra pipeline step trips the edge into a 502.
+  // 210_000 keeps ~25s above the observed max legit scan and restores ~90s of edge
+  // headroom. vrboSidecarAbort.abort cancels the in-flight Chrome op when it fires.
+  const FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS = 210_000;
   const FIND_BUY_IN_MIN_SIDECAR_BATCH_MS = 5_000;
   // Lazy LRU-ish eviction — runs on every set, drops expired entries
   // to keep the map bounded. With ~12 properties × ~30 active windows
@@ -39295,17 +39306,33 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
-  // GET /api/community/nearby-cities?state=Hawaii&query=Koloa
-  // Returns nearby cities/towns (populated places) within ~20min drive of the
-  // input city. Used by Add Combo Listing UI to let operator pivot research
+  // GET /api/community/nearby-cities?state=Hawaii&query=Koloa&maxMinutes=45
+  // Returns nearby cities/towns (populated places) within `maxMinutes` drive of
+  // the input city. Used by Add Combo Listing UI to let operator pivot research
   // to adjacent cities. Backed by Photon reverse (radius) + drive math.
+  //
+  // NOTE FOR CODEX: `maxMinutes` was a hard-coded 20 (with a fixed 25km Photon
+  // radius + 6-city cap), which blocked the operator from researching anything
+  // past the immediate ring of towns — Koloa only ever surfaced Omao/Lawai/Puhi/
+  // Eleele/Hanapepe/Lihue. It is now an operator-tunable query param defaulting
+  // to 45 (matching the AUTOMATIC city-vrbo-expansion TIER2_MAX_MIN ceiling, so
+  // the manual pivot can reach the same towns the auto-ladder does), clamped
+  // [5, 120]. The Photon reverse radius scales with it (driveMinutesBetweenCoords
+  // is ~2.31 min/haversine-mile ⇒ a maxMinutes town is ≤ ~0.70 km/min straight-
+  // line; radius = maxMinutes × 1.2 km comfortably over-covers that) and the
+  // result cap rises to 14 so farther rings aren't truncated to 6. This is a
+  // discovery/research radius only — it does NOT touch MAX_BUY_IN_WALK_MINUTES,
+  // the separate (and unchanged) constraint that the two units WITHIN one combo
+  // must be walkable to each other.
   const nearbyCitiesCache = new Map<string, { cities: Array<{ name: string; minutes: number }>; ts: number }>();
   const NEARBY_CITIES_TTL = 10 * 60 * 1000;
   app.get("/api/community/nearby-cities", async (req, res) => {
     const state = String(req.query.state || "").trim();
     const query = String(req.query.query || "").trim();
     if (query.length < 2) return res.json({ cities: [] });
-    const cacheKey = `${state.toLowerCase()}|${query.toLowerCase()}`;
+    const maxMinutes = Math.max(5, Math.min(120, Math.round(Number(req.query.maxMinutes) || 45)));
+    const reverseRadiusKm = Math.min(130, Math.max(25, Math.round(maxMinutes * 1.2)));
+    const cacheKey = `${state.toLowerCase()}|${query.toLowerCase()}|${maxMinutes}`;
     const cached = nearbyCitiesCache.get(cacheKey);
     if (cached && Date.now() - cached.ts < NEARBY_CITIES_TTL) return res.json({ cities: cached.cities });
     try {
@@ -39332,12 +39359,12 @@ Return ONLY compact JSON with this exact shape:
         if (Number.isFinite(lat) && Number.isFinite(lon)) { cLat=lat; cLon=lon; break; }
       }
       if (cLat==null || cLon==null) { nearbyCitiesCache.set(cacheKey,{cities:[],ts:Date.now()}); return res.json({cities:[]}); }
-      // Reverse for nearby places within ~25km
+      // Reverse for nearby places within the (maxMinutes-scaled) radius
       const revUrl = new URL("https://photon.komoot.io/reverse");
       revUrl.searchParams.set("lat", String(cLat));
       revUrl.searchParams.set("lon", String(cLon));
-      revUrl.searchParams.set("radius", "25");
-      revUrl.searchParams.set("limit", "30");
+      revUrl.searchParams.set("radius", String(reverseRadiusKm));
+      revUrl.searchParams.set("limit", "40");
       revUrl.searchParams.set("osm_tag", "place");
       const revResp = await fetch(revUrl.toString(), { headers: { "User-Agent": "NexStay/1.0 (contact: jamie.greene736@gmail.com)" } });
       if (!revResp.ok) return res.json({cities:[]});
@@ -39357,10 +39384,10 @@ Return ONLY compact JSON with this exact shape:
         const [lon, lat] = f.geometry?.coordinates ?? [];
         if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
         const mins = driveMinutesBetweenCoords(cLat, cLon, lat, lon);
-        if (mins == null || mins > 20) continue;
+        if (mins == null || mins > maxMinutes) continue;
         seen.add(key);
         out.push({ name: display, minutes: mins });
-        if (out.length >= 6) break;
+        if (out.length >= 14) break;
       }
       out.sort((a,b)=> a.minutes-b.minutes || a.name.localeCompare(b.name));
       nearbyCitiesCache.set(cacheKey, { cities: out, ts: Date.now() });
