@@ -367,12 +367,33 @@ async function runBulkJob(job: BulkJob): Promise<void> {
       item.lossCombos = (last?.comboOptions ?? []).filter((c: any) => c?.isLoss);
       item.lossLog = (last?.cityEconomics ?? []).filter((c: any) => c?.accepted !== true);
       if (filled === 0) {
-        const reason = last?.skipped?.[0]?.reason
-          ?? last?.error
-          ?? "No verified priced candidate was attached";
+        // Surface the REAL reason so "checking the failed-scan logs" distinguishes a
+        // genuine outcome from a bug. The old code always showed a generic "No
+        // verified priced candidate was attached", which hid WHY — even when the
+        // auto-fill job had a precise terminal message (profit-gated loss combos,
+        // an empty scrape, a thrown error). Three cases:
+        //   • job still running at the item cap → it timed out (not a no-inventory)
+        //   • job ended "failed" (threw)        → the exception / per-slot skips
+        //   • job ended "completed" but 0 filled → the auto-fill doneMessage, which
+        //     already explains it ("No profitable combination found … Best option …"
+        //     with per-city economics, or "No verified priced candidate could be
+        //     attached. Home city returned N listings …" so a 0-listing SCRAPE
+        //     problem reads differently from a matched-but-unprofitable result).
+        const skipReasons = (last?.skipped ?? []).map((s) => s.reason).filter(Boolean);
+        let reason: string;
+        if (last && !last.done) {
+          reason = `Search timed out after ${Math.round(ITEM_CAP_MS / 60_000)} min before completing — re-run to retry`;
+        } else if (last?.status === "failed") {
+          reason = last.error || skipReasons[0] || "Auto-fill failed";
+        } else {
+          reason = last?.message || skipReasons[0] || last?.error || "No verified priced candidate was attached";
+        }
         item.status = "failed";
         item.message = reason;
-        item.error = (last?.skipped ?? []).map((s) => s.reason).filter(Boolean).join(" | ") || reason;
+        // The red error box carries the per-slot skip breakdown (extra detail beyond
+        // the headline); leave it empty when there are no skips so the message isn't
+        // duplicated verbatim into the box.
+        item.error = skipReasons.length ? skipReasons.join(" | ") : undefined;
       } else {
         item.status = filled === total ? "completed" : "skipped";
         item.message = filled === total

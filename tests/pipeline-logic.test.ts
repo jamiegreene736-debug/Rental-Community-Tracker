@@ -3124,25 +3124,31 @@ assert.ok(
   textMatchesResortPhrase("Villas of Kamalii 30 · Princeville", "Kamalii"),
   "resort phrase filter should match Kamalii listing titles",
 );
+// The auto-fill escalation ladder + the buy-in ATTACH moved SERVER-SIDE
+// (server/auto-fill-job.ts) so it survives the operator leaving the bookings page
+// (see AGENTS.md "Auto-fill cheapest is a SERVER-SIDE background job"). These
+// guards therefore assert on the server job + the shared matcher, not the retired
+// client mutation that used to live in bookings.tsx.
+const autoFillJobSource = readFileSync("server/auto-fill-job.ts", "utf8");
+const cityComboSource = readFileSync("shared/city-vrbo-combo.ts", "utf8");
 assert.ok(
   !routesSource.includes("candidate.verified !== \"yes\"") &&
     routesSource.includes("const configuredSlot = pid") &&
-    bookingsSource.includes("unitTypeConfidence: Math.round(pick.unitTypeConfidence)"),
-  "attached buy-ins should not depend on a non-persisted verified column and should persist search confidence when available",
+    autoFillJobSource.includes("unitTypeConfidence: Math.round(pick.unitTypeConfidence)"),
+  "attached buy-ins should not depend on a non-persisted verified column and should persist search confidence when available (server-side auto-fill job)",
 );
 assert.ok(
-  bookingsSource.includes("alternativePicksAreWalkable") &&
-    bookingsSource.includes("MAX_BUY_IN_WALK_MINUTES") &&
-    bookingsSource.includes("sharedResortPhraseKeys") &&
-    bookingsSource.includes("tooFarForBuyInPair") &&
-    bookingsSource.includes("Matched units are too far apart for a buy-in pair") &&
-    bookingsSource.includes("!tooFarForBuyInPair"),
-  "auto-fill combo selection should reject non-walkable pairs before creating partial buy-in attachments",
+  cityComboSource.includes("pairIsWalkable") &&
+    cityComboSource.includes("MAX_BUY_IN_WALK_MINUTES") &&
+    cityComboSource.includes("sharedResortPhraseKeys") &&
+    autoFillJobSource.includes("reconcileComboAllOrNothing") &&
+    routesSource.includes("Buy-in units too far apart"),
+  "auto-fill combo selection should reject non-walkable pairs (shared matcher walkability + attach proximity guard) and roll back partial combos all-or-nothing",
 );
 assert.ok(
-  bookingsSource.includes("/api/operations/city-vrbo-inventory") &&
-    bookingsSource.includes('"city-vrbo"'),
-  "auto-fill should fall back to city-wide VRBO inventory and attach with city-vrbo source",
+  autoFillJobSource.includes("/api/operations/city-vrbo-inventory") &&
+    autoFillJobSource.includes("single-unit-city"),
+  "auto-fill should fall back to city-wide VRBO inventory (server-side single-unit-city stage)",
 );
 
 	assert.ok(
@@ -3271,9 +3277,8 @@ assert.ok(
 );
 assert.ok(
   routesSource.includes("const includePm = false") &&
-    bookingsComboSource.includes("const autoDirectBookingCandidatesFor") &&
-    bookingsComboSource.includes("return [];"),
-  "find-buy-in and auto-fill should not run PM/direct source discovery",
+    routesSource.includes("if (!includePm) return [];"),
+  "find-buy-in (and the server-side auto-fill ladder that calls it) should not run PM/direct source discovery",
 );
 assert.ok(
   routesSource.includes("Google Lens reverse-image search is disabled to preserve SearchAPI quota"),
@@ -3379,12 +3384,11 @@ const cityInventorySource = readFileSync("server/city-vrbo-inventory.ts", "utf8"
 	  "city VRBO inventory should cache the full scrape pool, use an export-sized budget, and log per-stage filter counts",
 	);
 assert.ok(
-  bookingsSource.includes("city-vrbo-inventory") &&
-    bookingsSource.includes('attachSource === "city-vrbo"') &&
-    bookingsSource.includes("resortComboComplete") &&
-    bookingsSource.includes("remainingEmptySlots") &&
-    bookingsSource.includes("setCityInventoryScanTrigger"),
-  "auto-fill should attach resort combo only when complete, then city-wide VRBO fallback without per-community scout",
+  autoFillJobSource.includes("/api/operations/city-vrbo-inventory") &&
+    autoFillJobSource.includes('stage: "resort"') &&
+    autoFillJobSource.includes("reconcileComboAllOrNothing") &&
+    autoFillJobSource.includes("single-unit-city"),
+  "server-side auto-fill should attach the resort combo all-or-nothing, then fall back to city-wide VRBO (home-city + single-unit-city) without per-community scout",
 );
 	assert.ok(
 	  bookingsSource.includes("CityVrboInventoryPanel") &&
@@ -3419,7 +3423,7 @@ assert.ok(
 );
 assert.ok(
   routesSource.includes("MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS = 10") &&
-    routesSource.includes("isVrboAlternativeUrl(sourceUrl) && initialPhotos.length < MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS") &&
+    routesSource.includes("const vrboDetails = isVrboAlternativeUrl(sourceUrl)") &&
     routesSource.includes("scrapeVrboAlternativeDetails(sourceUrl)") &&
     routesSource.includes("photoSource") &&
     routesSource.includes("photoScrapeReason"),
@@ -3441,7 +3445,7 @@ assert.ok(
     routesSource.includes("vacation-rental-expertz-mark.png") &&
     routesSource.includes("communityAmenityFallbackTags") &&
     routesSource.includes("fallbackWalkForResort(String(alternativeCommunity") &&
-    routesSource.includes("const topCommunityPhotos = communityPhotoUrls.slice(0, 6)") &&
+    routesSource.includes("const topCommunityPhotos = communityPhotoUrls.slice(0, 8)") &&
     !routesSource.includes("attachedPhotoUrls") &&
     !routesSource.includes("vacation-rental-expertz-horizontal-transparent.png") &&
     !routesSource.includes("Instead of ${escapeHtml(originalCommunity)}"),
