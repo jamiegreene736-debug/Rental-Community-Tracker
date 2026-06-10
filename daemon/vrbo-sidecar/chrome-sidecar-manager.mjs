@@ -3,7 +3,7 @@ import http from "http";
 import net from "net";
 import os from "os";
 import path from "path";
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
 import { boolFromEnv, nonEmptyEnv, resolveChromeProxyConfig, sanitizeProxyOption } from "./proxy-config.mjs";
 
 const DEFAULT_VIEWPORT = { width: 1600, height: 1000 };
@@ -62,6 +62,54 @@ function parseSize(value, fallback = DEFAULT_VIEWPORT) {
 
 function formatPosition(pos) {
   return `${Math.round(pos.left)},${Math.round(pos.top)}`;
+}
+
+// ── External display detection (macOS) ───────────────────────────────────────
+// When the operator plugs in a second monitor we want the sidecar Chrome windows
+// to live ON that display, visible and persistent, instead of hidden offscreen on
+// the laptop where they flap open/minimized. CGDisplayBounds returns each display's
+// bounds in Quartz TOP-LEFT global points — the exact coordinate space Chrome's
+// --window-position / Browser.setWindowBounds use — so no Cocoa bottom-left flip is
+// needed. `osascript -l JavaScript` with the ObjC bridge needs NO Accessibility /
+// Automation (TCC) permission, so it works from the launchd background daemon (same
+// constraint the worker's lsappinfo focus-guard solves). Returns the first non-main
+// active display, or null when only the built-in display is connected / detection
+// fails (→ caller keeps the existing hidden/offscreen mode).
+const EXTERNAL_DISPLAY_JXA =
+  "ObjC.import('AppKit');ObjC.import('CoreGraphics');" +
+  "var s=$.NSScreen.screens,m=$.CGMainDisplayID(),o=[];" +
+  "for(var i=0;i<s.count;i++){" +
+  "var d=s.objectAtIndex(i).deviceDescription.objectForKey('NSScreenNumber').unsignedIntValue;" +
+  "var b=$.CGDisplayBounds(d);" +
+  "o.push({main:d==m,left:Math.round(b.origin.x),top:Math.round(b.origin.y)," +
+  "width:Math.round(b.size.width),height:Math.round(b.size.height)});}" +
+  "JSON.stringify(o)";
+
+export function detectExternalDisplayBounds() {
+  if (process.platform !== "darwin") return null;
+  try {
+    const out = execFileSync("osascript", ["-l", "JavaScript", "-e", EXTERNAL_DISPLAY_JXA], {
+      timeout: 1_500,
+      encoding: "utf8",
+    });
+    const displays = JSON.parse(String(out || "[]"));
+    if (!Array.isArray(displays) || displays.length < 2) return null;
+    const external = displays.find(
+      (d) =>
+        d && !d.main &&
+        Number.isFinite(d.width) && Number.isFinite(d.height) &&
+        d.width > 200 && d.height > 200,
+    );
+    if (!external) return null;
+    return {
+      left: Math.round(external.left),
+      top: Math.round(external.top),
+      width: Math.round(external.width),
+      height: Math.round(external.height),
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function sendBrowserCdpCommand(cdpUrl, method, params = {}, timeoutMs = 3_000) {
@@ -676,6 +724,17 @@ export class ChromeSidecarManager {
     this.visibleGridColumns = Math.max(1, Math.floor(numberFromEnv("SIDECAR_CHROME_VISIBLE_GRID_COLUMNS", 2)));
     this.visibleGridGapX = Math.max(0, Math.floor(numberFromEnv("SIDECAR_CHROME_VISIBLE_GRID_GAP_X", 24)));
     this.visibleGridGapY = Math.max(0, Math.floor(numberFromEnv("SIDECAR_CHROME_VISIBLE_GRID_GAP_Y", 36)));
+    // When a second monitor is connected, auto-place the sidecar Chrome on it,
+    // visible and never minimized (see detectExternalDisplayBounds + externalDisplay).
+    // Default on; SIDECAR_USE_EXTERNAL_DISPLAY=0 reverts to the env-driven hidden/
+    // visible behavior. Detection is cached for a few seconds so we react to a
+    // plug/unplug within one scan without spawning osascript on every window op.
+    this.useExternalDisplay = boolFromEnv("SIDECAR_USE_EXTERNAL_DISPLAY", true);
+    this.externalDisplayMargin = Math.max(0, Math.floor(numberFromEnv("SIDECAR_EXTERNAL_DISPLAY_MARGIN", 0)));
+    this.externalDisplayCascadeStep = Math.max(0, Math.floor(numberFromEnv("SIDECAR_EXTERNAL_DISPLAY_CASCADE_STEP", 28)));
+    this.externalDisplayTtlMs = Math.max(0, Math.floor(numberFromEnv("SIDECAR_EXTERNAL_DISPLAY_TTL_MS", 4_000)));
+    this._externalDisplayCache = { at: 0, value: undefined };
+    this._externalDisplayLogKey = null;
     this.lockDir =
       process.env.SIDECAR_LOCK_DIR ??
       path.join(os.homedir(), ".vrbo-sidecar", "locks");
@@ -855,9 +914,13 @@ export class ChromeSidecarManager {
       }
     }
 
+    // Resolve external-display placement ONCE per acquire so launch + enforce agree
+    // (the per-call detection cache could otherwise expire across waitForCdp's ≤20s
+    // wait and read a different topology between the two).
+    const ext = this.externalDisplay();
     if (!(await this.isCdpReady(instance.cdpUrl))) {
       try {
-        await this.launchLocalChrome(chromeInstance, proxyConfig, request, localProxyBridge);
+        await this.launchLocalChrome(chromeInstance, proxyConfig, request, localProxyBridge, ext);
       } catch (e) {
         await localProxyBridge?.close().catch(() => {});
         if (wantsFreshProxiedChrome) fs.rmSync(chromeInstance.chromeDataDir, { recursive: true, force: true });
@@ -885,7 +948,7 @@ export class ChromeSidecarManager {
       if (!(await this.localCdpHasPageTargets(instance.cdpUrl))) {
         await this.recoverDeadLocalCdp(instance.cdpUrl);
       }
-      await this.enforceLocalWindowMode(instance);
+      await this.enforceLocalWindowMode(instance, ext);
     }
 
     const heartbeat = setInterval(() => {
@@ -1138,23 +1201,24 @@ export class ChromeSidecarManager {
     return { sessionId, baseUrl };
   }
 
-  async launchLocalChrome(instance = this.localInstances[0], proxyConfig = null, request = {}, localProxyBridge = null) {
+  async launchLocalChrome(instance = this.localInstances[0], proxyConfig = null, request = {}, localProxyBridge = null, ext = this.externalDisplay()) {
     if (!fs.existsSync(this.localChromeBinary)) {
       throw new Error(`Google Chrome not found at ${this.localChromeBinary}`);
     }
     fs.mkdirSync(instance.chromeDataDir, { recursive: true });
-    const visiblePosition = this.visiblePositionForInstance(instance);
-    const windowSize = this.localVisible
-      ? this.visibleWindowSize
+    const visible = this.localVisible || !!ext;
+    const visiblePosition = this.visiblePositionForInstance(instance, ext);
+    const windowSize = visible
+      ? (ext ? ext.windowSize : this.visibleWindowSize)
       : { width: this.viewport.width, height: this.viewport.height + 80 };
     const chromeArgs = [
       `--remote-debugging-port=${instance.cdpPort}`,
       "--remote-debugging-address=127.0.0.1",
       `--user-data-dir=${instance.chromeDataDir}`,
       `--window-size=${windowSize.width},${windowSize.height}`,
-      `--window-position=${this.localVisible ? visiblePosition : this.hiddenWindowPosition}`,
+      `--window-position=${visible ? visiblePosition : this.hiddenWindowPosition}`,
       "--force-device-scale-factor=1",
-      ...(this.localVisible ? [] : ["--start-minimized", "--no-startup-window"]),
+      ...(visible ? [] : ["--start-minimized", "--no-startup-window"]),
       "--disable-notifications",
       "--disable-backgrounding-occluded-windows",
       "--no-first-run",
@@ -1184,13 +1248,13 @@ export class ChromeSidecarManager {
       );
     }
     const launchViaMacOpen = process.platform === "darwin" && this.macosBackgroundLaunch;
-    const launchHiddenOnMac = launchViaMacOpen && !this.localVisible;
+    const launchHiddenOnMac = launchViaMacOpen && !visible;
     const macAppPath = launchViaMacOpen
       ? macAppPathFromChromeBinary(this.localChromeBinary)
       : "";
     const command = macAppPath ? "open" : this.localChromeBinary;
     const args = macAppPath
-      ? ["-g", ...(this.localVisible ? [] : ["-j"]), "-n", macAppPath, "--args", ...chromeArgs]
+      ? ["-g", ...(visible ? [] : ["-j"]), "-n", macAppPath, "--args", ...chromeArgs]
       : chromeArgs;
     this.log(
       `spawning ${instance.label} ${
@@ -1201,11 +1265,55 @@ export class ChromeSidecarManager {
     proc.unref?.();
   }
 
-  async enforceVisibleBounds(instance) {
-    if (!this.localVisible) return;
-    const position = this.visiblePositionObjectForInstance(instance);
-    await enforceChromeWindowBounds(instance.cdpUrl, position, this.visibleWindowSize)
-      .then(() => this.log(`${instance.label} visible bounds enforced at ${formatPosition(position)} ${this.visibleWindowSize.width}x${this.visibleWindowSize.height}`))
+  // Resolve the current external-display placement (cached). Returns
+  // { bounds, origin, windowSize } when a second monitor is connected and the
+  // feature is enabled, else null (→ env-driven hidden/visible behavior).
+  externalDisplay() {
+    if (!this.useExternalDisplay || process.platform !== "darwin") return null;
+    const now = Date.now();
+    if (
+      this._externalDisplayCache.value !== undefined &&
+      now - this._externalDisplayCache.at < this.externalDisplayTtlMs
+    ) {
+      return this._externalDisplayCache.value;
+    }
+    const bounds = detectExternalDisplayBounds();
+    let value = null;
+    if (bounds) {
+      const margin = this.externalDisplayMargin;
+      value = {
+        bounds,
+        origin: { left: bounds.left + margin, top: bounds.top + margin },
+        // Fill the display minus margins; never exceed the display itself (so a
+        // small portable monitor or a large margin can't push the window off it).
+        windowSize: {
+          width: Math.max(1, bounds.width - margin * 2),
+          height: Math.max(1, bounds.height - margin * 2),
+        },
+      };
+    }
+    this._externalDisplayCache = { at: now, value };
+    // Log only on transitions so we don't spam the launchd log every acquire.
+    const key = value
+      ? `${bounds.left},${bounds.top},${bounds.width},${bounds.height}`
+      : "none";
+    if (key !== this._externalDisplayLogKey) {
+      this._externalDisplayLogKey = key;
+      this.log(
+        value
+          ? `external display detected (${bounds.width}x${bounds.height} at ${bounds.left},${bounds.top}); placing sidecar Chrome there, visible, no minimize`
+          : "no external display connected; sidecar Chrome stays hidden/offscreen",
+      );
+    }
+    return value;
+  }
+
+  async enforceVisibleBounds(instance, ext = this.externalDisplay()) {
+    if (!this.localVisible && !ext) return;
+    const position = this.visiblePositionObjectForInstance(instance, ext);
+    const size = ext ? ext.windowSize : this.visibleWindowSize;
+    await enforceChromeWindowBounds(instance.cdpUrl, position, size)
+      .then(() => this.log(`${instance.label} visible bounds enforced at ${formatPosition(position)} ${size.width}x${size.height}`))
       .catch((e) => this.log(`${instance.label} visible bounds enforcement skipped: ${e?.message ?? e}`));
   }
 
@@ -1217,20 +1325,32 @@ export class ChromeSidecarManager {
       .catch((e) => this.log(`${instance.label} hidden bounds enforcement skipped: ${e?.message ?? e}`));
   }
 
-  async enforceLocalWindowMode(instance) {
-    if (this.localVisible) {
-      await this.enforceVisibleBounds(instance);
+  async enforceLocalWindowMode(instance, ext = this.externalDisplay()) {
+    if (this.localVisible || ext) {
+      await this.enforceVisibleBounds(instance, ext);
       return;
     }
     await this.enforceHiddenBounds(instance);
   }
 
-  visiblePositionForInstance(instance) {
-    if (!this.localVisible) return this.hiddenWindowPosition;
-    return formatPosition(this.visiblePositionObjectForInstance(instance));
+  visiblePositionForInstance(instance, ext = this.externalDisplay()) {
+    if (!this.localVisible && !ext) return this.hiddenWindowPosition;
+    return formatPosition(this.visiblePositionObjectForInstance(instance, ext));
   }
 
-  visiblePositionObjectForInstance(instance) {
+  visiblePositionObjectForInstance(instance, ext = this.externalDisplay()) {
+    if (ext) {
+      // Cascade windows a little within the external display, clamped so every
+      // window stays fully on that monitor (collapses to a stack at the origin
+      // when one window already fills the display).
+      const step = this.externalDisplayCascadeStep;
+      const maxLeft = Math.max(ext.origin.left, ext.bounds.left + ext.bounds.width - ext.windowSize.width);
+      const maxTop = Math.max(ext.origin.top, ext.bounds.top + ext.bounds.height - ext.windowSize.height);
+      return {
+        left: Math.min(ext.origin.left + instance.index * step, maxLeft),
+        top: Math.min(ext.origin.top + instance.index * step, maxTop),
+      };
+    }
     if (!this.localVisible) return parsePosition(this.hiddenWindowPosition, { left: -32000, top: -32000 });
     const explicit = this.visibleWindowPositions[instance.index];
     if (explicit) return explicit;
