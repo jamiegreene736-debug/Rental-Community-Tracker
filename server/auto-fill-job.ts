@@ -711,8 +711,12 @@ async function attachPick(args: {
   used: Set<string>;
   stage: AttachStage;
   comboLabel?: string;
+  // The town/community this pick came from, recorded in the buy-in notes so the
+  // operations "Last scan" column can show whether a booking was filled from the
+  // original community (resort), the original city, or a nearby city. Optional.
+  sourceCity?: string;
 }): Promise<boolean> {
-  const { job, base, slot, pick, searchedBedrooms, used, stage, comboLabel } = args;
+  const { job, base, slot, pick, searchedBedrooms, used, stage, comboLabel, sourceCity } = args;
   const skip = (reason: string) => {
     job.skipped.push({ unitId: slot.unitId, unitLabel: slot.unitLabel, reason: `${slot.unitLabel}: ${reason}` });
     touch(job);
@@ -748,9 +752,17 @@ async function attachPick(args: {
     pick.airbnbAnchorUrl,
   ].filter((u): u is string => !!u && listingUrlKey(u) !== listingUrlKey(pick.url)))).slice(0, 8);
   const identitySuffix = sameUnitEvidenceUrls.length > 0 ? ` · Same-unit evidence: ${sameUnitEvidenceUrls.join(" ")}` : "";
+  // Fill provenance in operator terms, parsed client-side (/Buy-in source: …/) for
+  // the "Last scan" column: resort = the booked ORIGINAL COMMUNITY; home-city +
+  // the single-unit-city fallback = the ORIGINAL CITY (same town); nearby = a
+  // drive-time town. MUST come before the photo marker, which has to stay last
+  // (AGENTS.md Load-Bearing #1: manualBuyInPhotoUrlsFromNotes parses every URL
+  // after "Manual photo URLs:").
+  const sourceCategory = stage === "resort" ? "original community" : stage === "nearby" ? "nearby city" : "original city";
+  const sourceSuffix = ` · Buy-in source: ${sourceCategory}${sourceCity ? ` (${sourceCity})` : ""}`;
   // Manual photo URLs marker MUST stay last (AGENTS.md Load-Bearing #1).
   const photoSuffix = buyInPhotoNotesSuffix([pick.image, ...(pick.images ?? [])]);
-  const notes = `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${groundFloorSuffix}${identitySuffix}${photoSuffix}`;
+  const notes = `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${groundFloorSuffix}${identitySuffix}${sourceSuffix}${photoSuffix}`;
 
   try {
     const createResp = await postJson(`${base}/api/buy-ins`, {
@@ -943,7 +955,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         if (v.acceptable) {
           for (const { slot, pick } of proposal) {
             if (job.canceled) break;
-            await attachPick({ job, base, slot, pick, searchedBedrooms: slot.bedrooms, used, stage: "resort", comboLabel: isComboProperty ? `Resort search ${job.community ?? ""}`.trim() : undefined });
+            await attachPick({ job, base, slot, pick, searchedBedrooms: slot.bedrooms, used, stage: "resort", sourceCity: job.community ?? undefined, comboLabel: isComboProperty ? `Resort search ${job.community ?? ""}`.trim() : undefined });
           }
         } else {
           recordEconomics("resort", `Resort ${job.community ?? ""}`.trim() || "Resort", comboCost, v.profit, false,
@@ -1086,6 +1098,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
             pick: liveCandidateFromCityRow(row, slot.bedrooms, job.nights),
             searchedBedrooms: slot.bedrooms,
             used, stage: "single-unit-city",
+            sourceCity: payload?.citySearchTerm,
             comboLabel: `City VRBO ${row.sourceLabel ?? "unit"}`,
           });
           if (!ok) {
@@ -1327,6 +1340,7 @@ async function attachCityCombo(
       pick: liveCandidateFromCityRow(pair.picks[pickIndex], slot.bedrooms, job.nights),
       searchedBedrooms: slot.bedrooms,
       used, stage,
+      sourceCity: payload?.citySearchTerm,
       comboLabel: `City VRBO ${pair.resortPhrase ?? "pair"}`,
     });
   }
