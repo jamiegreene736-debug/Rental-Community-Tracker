@@ -529,6 +529,12 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
             // state so a Florida combo's expansion towns aren't filtered against
             // the "Hawaii" default (HI properties still pass "Hawaii").
             targetState: BUY_IN_MARKET_LOCATIONS[job.community]?.state,
+            // NOTE: the nearby-town expansion deliberately KEEPS Phase-4 detail
+            // enrichment (no skipDetailEnrich) — this is the deepest cross-town
+            // recovery stage where opening a few candidate detail pages most
+            // earns its keep. Only the HOME-CITY loopback (auto-fill-job.ts
+            // fetchCity, skipEnrich=1) suppresses it, per operator choice
+            // 2026-06-10 (the visible single-resort home pass was the complaint).
           });
         } catch (err: any) {
           setCityResult(job, p.term, { status: "scan-error", reason: String(err?.message ?? err) });

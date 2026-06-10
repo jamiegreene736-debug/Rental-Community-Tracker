@@ -12716,6 +12716,13 @@ Requirements:
       }
       const filterPhrase = typeof req.query.phrase === "string" ? req.query.phrase.trim() : "";
       const skipCache = req.query.nocache === "1";
+      // skipEnrich=1 → suppress Phase-4 detail-page enrichment (no opening of
+      // individual VRBO listing detail pages). The AUTOMATED auto-fill / bulk
+      // buy-in loopback (server/auto-fill-job.ts fetchCity) sets this so the
+      // unattended queue never drives the sidecar into per-listing detail pages;
+      // the operator's MANUAL "Scan city VRBO" button omits it and keeps full
+      // enrichment. See city-vrbo-inventory.ts runCityScanCore Phase-4 gate.
+      const skipDetailEnrich = req.query.skipEnrich === "1";
       const { runCityVrboInventoryScan } = await import("./city-vrbo-inventory");
       const payload = await runCityVrboInventoryScan({
         community: unitConfig.community,
@@ -12724,6 +12731,7 @@ Requirements:
         bedroomPlan: unitConfig.units.map((unit) => unit.bedrooms),
         filterPhrase: filterPhrase || undefined,
         skipCache,
+        skipDetailEnrich,
       });
       const responsePayload = {
         propertyId,

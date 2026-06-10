@@ -1017,7 +1017,12 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
     let cityPayload: any = null;
     const fetchCity = async (): Promise<any> => {
       if (cityPayload) return cityPayload;
-      const params = new URLSearchParams({ propertyId: String(job.propertyId), checkIn: job.checkIn, checkOut: job.checkOut });
+      // skipEnrich=1: this is the AUTOMATED auto-fill / bulk buy-in loopback, so
+      // suppress Phase-4 detail-page enrichment — the unattended queue must NOT
+      // drive the (now-visible) sidecar into individual VRBO listing detail pages.
+      // The operator's MANUAL "Scan city VRBO" button omits this and keeps full
+      // enrichment. See server/city-vrbo-inventory.ts runCityScanCore Phase-4 gate.
+      const params = new URLSearchParams({ propertyId: String(job.propertyId), checkIn: job.checkIn, checkOut: job.checkOut, skipEnrich: "1" });
       cityPayload = await getJson(`${base}/api/operations/city-vrbo-inventory?${params.toString()}`, CITY_VRBO_LOOPBACK_TIMEOUT_MS);
       return cityPayload;
     };
@@ -1218,6 +1223,10 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
             checkOut: job.checkOut,
             bedroomPlan: [slot.bedrooms],
             targetState: town.state,
+            // NOTE: the single-unit nearby walk is a nearby-town recovery stage
+            // and KEEPS Phase-4 detail enrichment (no skipDetailEnrich), like the
+            // combo expansion. Only the HOME-CITY loopback suppresses it (operator
+            // choice 2026-06-10). See server/city-vrbo-inventory.ts Phase-4 gate.
           });
         } catch (err: any) { recordTown(town, "scan-error", { reason: String(err?.message ?? err) }); continue; }
         // workerOnline:false is a genuine drop OR a healthy worker exhausting this

@@ -531,6 +531,14 @@ async function runCityScanCore(args: {
   skipCache?: boolean;
   walletBudgetMs?: number;
   targetState?: string;
+  // When true, SKIP the Phase-4 detail-page enrichment (no opening of individual
+  // VRBO listing detail pages to harvest coords/complexName). Defaults false
+  // (current behavior). The AUTOMATED auto-fill / bulk buy-in paths set this so the
+  // unattended queue never drives the visible sidecar into per-listing detail pages
+  // (operator-facing: "stop looking into individual VRBO listings"); the operator's
+  // MANUAL "Scan city VRBO" button omits it and keeps full enrichment. See the gate
+  // at the Phase-4 block below.
+  skipDetailEnrich?: boolean;
 }): Promise<CityVrboScanResult> {
   const citySearchTerm = resolveCityVrboSearchTerm(args);
   const nights = Math.max(
@@ -654,6 +662,7 @@ async function runCityScanCore(args: {
   // re-run the matcher — coords let it geo-cluster nearby units the SRP can't.
   if (
     CITY_VRBO_DETAIL_ENRICH &&
+    !args.skipDetailEnrich &&
     !filtered.suggestedPair &&
     !scrapeEntry.detailEnriched &&
     scrapeEntry.listings.length > 0
@@ -749,6 +758,9 @@ export async function runCityVrboInventoryScan(args: {
   bedroomPlan: number[];
   filterPhrase?: string;
   skipCache?: boolean;
+  // Automated callers (auto-fill loopback) pass true to suppress the Phase-4
+  // detail-page enrichment; the manual scan omits it. See runCityScanCore.
+  skipDetailEnrich?: boolean;
 }): Promise<CityVrboScanResult> {
   return runCityScanCore({
     cacheKey: cacheKeyForScrape(args.community, args.checkIn, args.checkOut),
@@ -759,6 +771,7 @@ export async function runCityVrboInventoryScan(args: {
     bedroomPlan: args.bedroomPlan,
     filterPhrase: args.filterPhrase,
     skipCache: args.skipCache,
+    skipDetailEnrich: args.skipDetailEnrich,
   });
 }
 
@@ -782,6 +795,10 @@ export async function runCityVrboInventoryScanForCity(args: {
   // be filtered as out-of-area against the "Hawaii" default. The expansion job
   // passes its property's state here. Omitted → "Hawaii" (HI byte-identical).
   targetState?: string;
+  // Nearby-town scans (combo expansion + single-unit walk) pass true so each
+  // town's no-pair recovery does NOT fan out into per-listing detail scrapes —
+  // that per-town multiplication is the worst offender for the automated queue.
+  skipDetailEnrich?: boolean;
 }): Promise<CityVrboScanResult> {
   return runCityScanCore({
     cacheKey: cacheKeyForCityTerm(args.citySearchTerm, args.checkIn, args.checkOut),
@@ -794,6 +811,7 @@ export async function runCityVrboInventoryScanForCity(args: {
     skipCache: args.skipCache,
     walletBudgetMs: args.walletBudgetMs,
     targetState: args.targetState,
+    skipDetailEnrich: args.skipDetailEnrich,
   });
 }
 
