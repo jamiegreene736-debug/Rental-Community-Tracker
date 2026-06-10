@@ -217,6 +217,10 @@ const liveKey = (propertyId: number, bedrooms: number): LiveBuyInKey => `${prope
 
 export type MonthlyMarketRate = {
   medianNightly: number;
+  // Prior scan's value for this month + when that scan ran (injected server-side
+  // by annotatePreviousMonthlyRates). Drives the "was $X" cell in the pricing table.
+  previousMedianNightly?: number;
+  previousRefreshedAt?: string;
   season?: SeasonType;
   checkIn?: string;
   checkOut?: string;
@@ -265,6 +269,8 @@ function parseMonthlyRates(input: unknown): Record<string, MonthlyMarketRate> {
       : undefined;
     parsed[yearMonth] = {
       medianNightly,
+      previousMedianNightly: parseNullableRate(raw.previousMedianNightly) ?? undefined,
+      previousRefreshedAt: typeof raw.previousRefreshedAt === "string" ? raw.previousRefreshedAt : undefined,
       season,
       checkIn: typeof raw.checkIn === "string" ? raw.checkIn : undefined,
       checkOut: typeof raw.checkOut === "string" ? raw.checkOut : undefined,
@@ -316,6 +322,19 @@ export function getLiveMonthlyBuyIn(
   const monthly = getLiveBuyIn(propertyId, bedrooms)?.monthlyRates[yearMonth]?.medianNightly;
   if (monthly == null || !Number.isFinite(monthly) || monthly <= 0) return null;
   return Math.round(monthly);
+}
+
+// The PRIOR scan's monthly basis for (propertyId, bedrooms, yearMonth), if the
+// last market-rate refresh recorded one. Powers the "was $X" reference in the
+// pricing table. Returns null when there's no prior value (first scan).
+export function getLivePreviousMonthlyBuyIn(
+  propertyId: number,
+  bedrooms: number,
+  yearMonth: string,
+): number | null {
+  const prev = getLiveBuyIn(propertyId, bedrooms)?.monthlyRates[yearMonth]?.previousMedianNightly;
+  if (prev == null || !Number.isFinite(prev) || prev <= 0) return null;
+  return Math.round(prev);
 }
 
 function fallbackSeasonBasisFromLow(

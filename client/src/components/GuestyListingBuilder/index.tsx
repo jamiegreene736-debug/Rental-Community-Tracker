@@ -3693,6 +3693,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const monthlySampleTotal = monthlySampleComplete
         ? Math.round(monthlySampleRates.reduce((s, n) => s + (n ?? 0), 0))
         : null;
+      // Prior scan's basis (summed across units) + when it ran — surfaced as
+      // "was $X" so the operator sees scan-over-scan rate movement per cell.
+      let previousRefreshedAt: string | undefined;
+      const previousSampleRates = propPricing.units.map((u) => {
+        const cell = getLiveBuyIn(propertyId, u.bedrooms)?.monthlyRates[row.yearMonth];
+        if (cell?.previousRefreshedAt && !previousRefreshedAt) previousRefreshedAt = cell.previousRefreshedAt;
+        const prev = cell?.previousMedianNightly;
+        return typeof prev === "number" && Number.isFinite(prev) && prev > 0 ? prev : null;
+      });
+      const previousMonthlySampleTotal = previousSampleRates.every((n) => n != null)
+        ? Math.round(previousSampleRates.reduce((s, n) => s + (n ?? 0), 0))
+        : null;
       const currentUnitRates = propPricing.units.map((u) => {
         const buyInRate = getBuyInRate(u.community, u.bedrooms, propertyId, row.season, row.yearMonth);
         return {
@@ -3708,6 +3720,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         totalBuyIn: currentUnitRates.reduce((s, u) => s + u.buyInRate, 0),
         totalSell:  currentUnitRates.reduce((s, u) => s + u.sellRate, 0),
         monthlySampleTotal,
+        previousMonthlySampleTotal,
+        previousRefreshedAt,
       };
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -6172,6 +6186,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                             sample ${row.monthlySampleTotal.toLocaleString()} vs buy-in ${buyIn.toLocaleString()}
                                           </div>
                                         )}
+                                        {row.previousMonthlySampleTotal != null && (() => {
+                                          const prev = row.previousMonthlySampleTotal;
+                                          const cur = row.monthlySampleTotal ?? buyIn;
+                                          const deltaPct = prev > 0 ? ((cur - prev) / prev) * 100 : null;
+                                          const up = deltaPct != null && deltaPct > 0.05;
+                                          const down = deltaPct != null && deltaPct < -0.05;
+                                          // Buy-in COST: lower = cheaper to acquire = better margin → green when it drops.
+                                          const color = down ? "#166534" : up ? "#b45309" : "#9ca3af";
+                                          const when = row.previousRefreshedAt ? new Date(row.previousRefreshedAt).toLocaleDateString() : null;
+                                          return (
+                                            <div
+                                              style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}
+                                              title={`Previous scan${when ? ` (${when})` : ""}: $${prev.toLocaleString()}/night basis. Current: $${Math.round(cur).toLocaleString()}.`}
+                                            >
+                                              was ${prev.toLocaleString()}
+                                              {(up || down) && deltaPct != null && (
+                                                <span style={{ color, fontWeight: 600, marginLeft: 4 }}>
+                                                  {up ? "▲" : "▼"} {Math.abs(deltaPct).toFixed(1)}%
+                                                </span>
+                                              )}
+                                            </div>
+                                          );
+                                        })()}
                                       </td>
                                       <td style={{ fontWeight: 600 }}>${sheet.toLocaleString()}</td>
                                       <td style={{ fontWeight: 600 }}>

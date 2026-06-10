@@ -94,6 +94,10 @@ export type LegacySeason = "LOW" | "HIGH" | "HOLIDAY";
 
 export type HybridMonthlyRate = {
   medianNightly: number;
+  // Injected by upsertPropertyMarketRate (not the scan) — the prior scan's
+  // value for this month, surfaced as "was $X" in the pricing table.
+  previousMedianNightly?: number;
+  previousRefreshedAt?: string;
   season: "LOW" | "HIGH" | "HOLIDAY";
   checkIn: string;
   checkOut: string;

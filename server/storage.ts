@@ -36,6 +36,7 @@ import {
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
   propertyComplianceOverrides,
 } from "@shared/schema";
+import { annotatePreviousMonthlyRates } from "@shared/market-rate-history";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
 
@@ -695,6 +696,29 @@ export class DatabaseStorage implements IStorage {
   // Read paths return `PropertyMarketRate[]` ordered by bedrooms ASC so
   // a property with mixed-BR units gets a stable iteration order.
   async upsertPropertyMarketRate(input: InsertPropertyMarketRate): Promise<PropertyMarketRate> {
+    // Carry the PRIOR scan's monthly medians forward as `previousMedianNightly`
+    // per month before we overwrite the row, so the pricing table can show a
+    // "was $X" scan-over-scan reference in each rate cell. Read the existing row
+    // FIRST (this upsert deletes + re-inserts, so the prior monthlyRates is
+    // otherwise lost). jsonb-only — no migration. See market-rate-history.ts.
+    const [prior] = await db
+      .select()
+      .from(propertyMarketRates)
+      .where(and(
+        eq(propertyMarketRates.propertyId, input.propertyId),
+        eq(propertyMarketRates.bedrooms, input.bedrooms),
+      ))
+      .limit(1);
+    if (prior && input.monthlyRates && typeof input.monthlyRates === "object") {
+      const priorRefreshedAt = prior.refreshedAt instanceof Date
+        ? prior.refreshedAt.toISOString()
+        : (prior.refreshedAt ? String(prior.refreshedAt) : undefined);
+      annotatePreviousMonthlyRates(
+        input.monthlyRates as Record<string, any>,
+        (prior.monthlyRates ?? undefined) as Record<string, any> | undefined,
+        priorRefreshedAt,
+      );
+    }
     await db
       .delete(propertyMarketRates)
       .where(and(

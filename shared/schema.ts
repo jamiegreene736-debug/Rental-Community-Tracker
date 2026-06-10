@@ -730,6 +730,12 @@ export const propertyMarketRates = pgTable("property_market_rates", {
   medianNightlyHoliday: numeric("median_nightly_holiday", { precision: 10, scale: 2 }),
   monthlyRates: jsonb("monthly_rates").$type<Record<string, {
     medianNightly: number;
+    // Prior scan's medianNightly for this month + when that scan ran. Injected
+    // by upsertPropertyMarketRate (annotatePreviousMonthlyRates) so the pricing
+    // table can show a "was $X" scan-over-scan reference per cell. No migration
+    // — it lives inside this jsonb. See shared/market-rate-history.ts.
+    previousMedianNightly?: number;
+    previousRefreshedAt?: string;
     season?: "LOW" | "HIGH" | "HOLIDAY";
     checkIn?: string;
     checkOut?: string;
