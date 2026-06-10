@@ -8375,7 +8375,21 @@ export async function registerRoutes(
   // sees the app is still alive, then ends with the real JSON body.
   const FIND_BUY_IN_ROUTE_BUDGET_MS = 270_000;
   const FIND_BUY_IN_RESPONSE_KEEPALIVE_MS = 15_000;
-  const FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS = 250_000;
+  // NOTE FOR CODEX: outer withTimeout on the whole sidecar VRBO call (see
+  // searchVrboViaSidecar below, walletBudgetMs:180_000). This MUST sit
+  // between the worker's real work ceiling and Railway's ~300s edge:
+  //   - The worker's own wallet is 180_000ms; a legit multi-variation
+  //     scan was observed in prod returning at ~185s (wallet + transport).
+  //     So this cannot be 180_000 (the investigation's first instinct) —
+  //     that would abort a *successful* 185s scan. Floor is ~185s + margin.
+  //   - It was 250_000, which on a HUNG worker produced real
+  //     "GET /api/operations/find-buy-in 200 in 251449ms" requests with
+  //     only ~48s of headroom under the ~300s edge — one extra pipeline
+  //     step (lens/PM verify/lane wait) and that 251s request 502s.
+  // 210_000 keeps ~25s above the observed max legit scan and restores
+  // ~90s of edge headroom. vrboSidecarAbort.abort cancels the in-flight
+  // Chrome op the instant this fires (wired into withTimeout below).
+  const FIND_BUY_IN_SIDECAR_SOURCE_BUDGET_MS = 210_000;
   const FIND_BUY_IN_MIN_SIDECAR_BATCH_MS = 5_000;
   // Lazy LRU-ish eviction — runs on every set, drops expired entries
   // to keep the map bounded. With ~12 properties × ~30 active windows
