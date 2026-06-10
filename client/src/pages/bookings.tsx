@@ -7991,7 +7991,8 @@ export default function Bookings() {
               <div className="overflow-hidden rounded border">
                 <div className="max-h-[560px] overflow-auto">
                   <div className="min-w-[1600px]">
-                    <div className="sticky top-0 z-10 grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_1.4fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                    <div className="sticky top-0 z-10 grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                      <div>Last scan</div>
                       <div>
                         <input
                           type="checkbox"
@@ -8015,14 +8016,13 @@ export default function Bookings() {
                       <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
                       <SortHeader label="Net profit" active={sortBy === "profit"} dir={sortDir} onClick={() => toggleSort("profit")} align="right" />
                       <SortHeader label="Fill" active={sortBy === "status"} dir={sortDir} onClick={() => toggleSort("status")} />
-                      <div>Last scan</div>
                       <div className="text-right">Open</div>
                     </div>
                     <div className="divide-y">
                       {globalBookingMonthSections.map((section) => (
                         <div key={`global-booking-month-${section.key}`} className="divide-y">
-                          <div className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_1.4fr_72px] gap-3 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800">
-                            <div style={{ gridColumn: "1 / span 7" }}>
+                          <div className="grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800">
+                            <div style={{ gridColumn: "1 / span 8" }}>
                               {section.label}
                               <span className="ml-2 font-normal text-muted-foreground">
                                 {section.totals.bookingCount} booking{section.totals.bookingCount === 1 ? "" : "s"}
@@ -8033,7 +8033,7 @@ export default function Bookings() {
                             <div className={`text-right ${section.totals.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
                               {fmtMoney(section.totals.profit)}
                             </div>
-                            <div className="text-[10px] font-normal text-muted-foreground" style={{ gridColumn: "11 / -1" }}>
+                            <div className="text-[10px] font-normal text-muted-foreground" style={{ gridColumn: "12 / -1" }}>
                               {section.totals.openSlots} open slot{section.totals.openSlots === 1 ? "" : "s"}
                             </div>
                           </div>
@@ -8065,7 +8065,7 @@ export default function Bookings() {
                                 key={`global-booking-${reservation._id}`}
                                 role="button"
                                 tabIndex={0}
-                                className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_1.4fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                                className="grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
                                 onClick={() => openReservationDetail(reservation._id)}
                                 onKeyDown={(event) => {
                                   if (event.key === "Enter" || event.key === " ") {
@@ -8075,6 +8075,13 @@ export default function Bookings() {
                                 }}
                                 data-testid={`global-booking-row-${reservation._id}`}
                               >
+                                <div className="min-w-0">
+                                  <LastScanCell
+                                    reservation={reservation}
+                                    last={lastSearchByReservation[reservation._id]}
+                                    scanning={queueItem?.status === "running"}
+                                  />
+                                </div>
                                 <div onClick={(event) => event.stopPropagation()}>
                                   <input
                                     type="checkbox"
@@ -8169,7 +8176,13 @@ export default function Bookings() {
                                   <p className={`font-medium ${row.expectedProfit >= 0 ? "text-green-700" : "text-red-700"}`}>
                                     {fmtMoney(row.expectedProfit)}
                                   </p>
-                                  <p className="text-[10px] text-muted-foreground">after buy-ins</p>
+                                  {row.netRevenue > 0 ? (
+                                    <p className={`text-[10px] ${row.expectedProfit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                                      {Math.round((row.expectedProfit / row.netRevenue) * 100)}% margin
+                                    </p>
+                                  ) : (
+                                    <p className="text-[10px] text-muted-foreground">after buy-ins</p>
+                                  )}
                                 </div>
                                 <div>
                                   <Badge
@@ -8187,13 +8200,6 @@ export default function Bookings() {
                                       : "Guesty"}
                                   </Badge>
                                 </div>
-                                <div className="min-w-0">
-                                  <LastScanCell
-                                    reservation={reservation}
-                                    last={lastSearchByReservation[reservation._id]}
-                                    scanning={queueItem?.status === "running"}
-                                  />
-                                </div>
                                 <div className="text-right">
                                   <Button
                                     size="sm"
@@ -8210,8 +8216,8 @@ export default function Bookings() {
                               </div>
                             );
                           })}
-                          <div className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_1.4fr_72px] gap-3 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-950">
-                            <div style={{ gridColumn: "1 / span 7" }}>
+                          <div className="grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-950">
+                            <div style={{ gridColumn: "1 / span 8" }}>
                               Subtotal for {section.label}
                             </div>
                             <div className="text-right">{fmtMoney(section.totals.revenue)}</div>
@@ -8219,15 +8225,15 @@ export default function Bookings() {
                             <div className={`text-right ${section.totals.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
                               {fmtMoney(section.totals.profit)}
                             </div>
-                            <div className="text-[10px] font-normal text-blue-900/80" style={{ gridColumn: "11 / -1" }}>
+                            <div className="text-[10px] font-normal text-blue-900/80" style={{ gridColumn: "12 / -1" }}>
                               {section.totals.bookingCount} booking{section.totals.bookingCount === 1 ? "" : "s"}
                             </div>
                           </div>
                         </div>
                       ))}
                       {globalBookingGrandTotals && (
-                        <div className="grid grid-cols-[42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_1.4fr_72px] gap-3 border-t-2 border-slate-300 bg-slate-900 px-3 py-3 text-sm font-semibold text-white">
-                          <div style={{ gridColumn: "1 / span 7" }}>
+                        <div className="grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-t-2 border-slate-300 bg-slate-900 px-3 py-3 text-sm font-semibold text-white">
+                          <div style={{ gridColumn: "1 / span 8" }}>
                             Total for all visible months
                             <span className="ml-2 font-normal text-slate-300">
                               {globalBookingGrandTotals.bookingCount} booking{globalBookingGrandTotals.bookingCount === 1 ? "" : "s"}
@@ -8238,7 +8244,7 @@ export default function Bookings() {
                           <div className={`text-right ${globalBookingGrandTotals.profit >= 0 ? "text-green-300" : "text-red-300"}`}>
                             {fmtMoney(globalBookingGrandTotals.profit)}
                           </div>
-                          <div className="text-[10px] font-normal text-slate-300" style={{ gridColumn: "11 / -1" }}>
+                          <div className="text-[10px] font-normal text-slate-300" style={{ gridColumn: "12 / -1" }}>
                             {globalBookingGrandTotals.openSlots} open slot{globalBookingGrandTotals.openSlots === 1 ? "" : "s"}
                           </div>
                         </div>
