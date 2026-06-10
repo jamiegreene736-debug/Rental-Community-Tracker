@@ -29,7 +29,7 @@
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
-import { evaluateComboProfit, profitToleranceUsd } from "@shared/buy-in-profit";
+import { evaluateComboProfit, minAcceptableProfit } from "@shared/buy-in-profit";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import {
   getExpansionJob,
@@ -60,6 +60,12 @@ const EXPANSION_POLL_CAP_MS = 40 * 60_000;
 // (pct 0) so the cap is uniform across stay sizes — see shared/buy-in-profit.ts.
 const PROFIT_MIN_FLAT_USD = Number(process.env.AUTOFILL_PROFIT_MIN_FLAT ?? 100) || 0;
 const PROFIT_MIN_PCT = Number(process.env.AUTOFILL_PROFIT_MIN_PCT ?? 0) || 0;
+// OPT-IN positive margin floor (default 0 = off → the $100 max-loss model is
+// unchanged). When > 0 a combo must clear this fraction of revenue in profit or
+// it's rejected and the slots are left empty. See minAcceptableProfit: this is
+// a fulfilment-time "don't over-pay" guard, NOT how 20% margin is created (that
+// is the SELL price — baseRateForTargetMargin + Guesty channel markups).
+const PROFIT_MARGIN_FLOOR_PCT = Number(process.env.AUTOFILL_PROFIT_MARGIN_FLOOR_PCT ?? 0) || 0;
 
 // ── types ────────────────────────────────────────────────────────────────────
 type JobStatus = "queued" | "running" | "completed" | "failed";
@@ -869,6 +875,7 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         comboCost,
         flat: PROFIT_MIN_FLAT_USD,
         pct: PROFIT_MIN_PCT,
+        marginFloorPct: PROFIT_MARGIN_FLOOR_PCT,
       });
     const recordEconomics = (source: AttachStage, label: string, comboCost: number, profit: number, accepted: boolean, reason?: string, units?: CityEconomics["units"]) => {
       job.cityEconomics.push({ source, label, comboCost: Math.round(comboCost), expectedProfit: Math.round(profit), accepted, reason, units });
@@ -1470,7 +1477,10 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
   const now = Date.now();
   const expectedRevenue = Number(input.expectedRevenue) || 0;
   const gateEnabled = expectedRevenue > 0;
-  const minProfit = -profitToleranceUsd(expectedRevenue, PROFIT_MIN_FLAT_USD, PROFIT_MIN_PCT);
+  // minProfit is what the nearby-city expansion is handed (it gets minProfit,
+  // not the raw revenue). Keep it consistent with the gate() above so the
+  // opt-in margin floor applies there too.
+  const minProfit = minAcceptableProfit(expectedRevenue, PROFIT_MIN_FLAT_USD, PROFIT_MIN_PCT, PROFIT_MARGIN_FLOOR_PCT);
   const job: AutoFillJob = {
     id,
     status: "queued",

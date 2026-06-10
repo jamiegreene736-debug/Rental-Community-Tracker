@@ -8,7 +8,8 @@
 
 import {
   BUY_IN_RATES,
-  SEASON_MULTIPLIERS,
+  baseRateForTargetMargin,
+  computeChannelMarkups,
   getBuyInRate,
   getCommunityRegion,
   getLiveBuyIn,
@@ -21,6 +22,8 @@ import {
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 
 export {
+  baseRateForTargetMargin,
+  computeChannelMarkups,
   getBuyInRate,
   getCommunityRegion,
   getLiveBuyIn,
@@ -103,11 +106,20 @@ export function minProfitableRate(
   return Math.ceil(((1 + targetMargin) * buyIn) / (1 - fee));
 }
 
+// The base calendar rate pushed to Guesty. NET OF FEES: this grosses the
+// margin up by the direct/processing fee so a direct booking actually NETS
+// `targetMargin` on cost, and Guesty's per-channel markups (configured in
+// Guesty) gross OTAs up on top to net the same. Delegates to the shared
+// single-source helper so client + server agree.
+//
+// Was `Math.ceil((1 + targetMargin) * buyIn)` — fee-blind, which only netted
+// ~1.4% on Airbnb and a loss on Booking.com (Decision Log 2026-06-10). Do not
+// revert.
 export function cleanBaseRateFromBuyIn(
   buyIn: number,
   targetMargin: number = MIN_PROFIT_MARGIN,
 ): number {
-  return Math.ceil((1 + targetMargin) * buyIn);
+  return baseRateForTargetMargin(buyIn, targetMargin);
 }
 
 /**

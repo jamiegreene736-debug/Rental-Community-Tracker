@@ -3,7 +3,7 @@ import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry, GuestyListingSummary } from "@/services/guestyService";
-import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
+import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, computeChannelMarkups, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
 import {
@@ -783,9 +783,18 @@ function GuestyRatePushCard({
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
         💵 Guesty rate push — marked-up base calendar rates
       </div>
+      <p style={{ fontSize: 11, color: "#6b7280", marginBottom: 8, maxWidth: 760 }}>
+        Pushes the <b>buy-in cost plus target margin, net of the direct/processing fee</b> to
+        Guesty's base calendar rate for each month. Guesty applies its channel pricing rules on top.
+      </p>
       <p style={{ fontSize: 11, color: "#6b7280", marginBottom: 12, maxWidth: 760 }}>
-        Pushes the <b>buy-in cost plus target margin</b> to Guesty's base calendar rate for each month.
-        Guesty will apply its channel pricing rules after this base rate is stored.
+        ✅ <b>Confirm these per-channel markups are set in Guesty</b> so every channel nets the
+        same margin (the base rate only nets the target on Direct):{" "}
+        {(() => {
+          const m = computeChannelMarkups();
+          return `Airbnb +${(m.airbnb * 100).toFixed(1)}% · Vrbo +${(m.vrbo * 100).toFixed(1)}% · Booking.com +${(m.booking * 100).toFixed(1)}%`;
+        })()}
+        . Without them, OTA bookings net the base minus the full channel fee (a loss on Booking.com).
       </p>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <label style={{ fontSize: 11, color: "#6b7280" }}>

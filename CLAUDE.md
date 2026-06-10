@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-10 (buy-in margins: SELL price is now net of channel fees + cost-side
+  loss buffers): Operator reported losing money on buy-ins and asked for 20%
+  margins. ROOT CAUSE was sell-side: the base Guesty rate was `(1+margin)×cost`
+  (gross, BEFORE fees) → ~1.4% net on Airbnb, a loss on Booking.com even with a
+  perfect cost estimate. Fix = single shared `baseRateForTargetMargin` in
+  `shared/pricing-rates.ts` = `ceil((1+margin)×cost/(1−feeDirect))`; both
+  `cleanBaseRateFromBuyIn` (client) and `cleanBaseRateFromBuyInServer` (routes)
+  delegate to it. Still ONE channel-blind base rate — Guesty's per-channel
+  markups (Airbnb +14.8% · Vrbo +5.5% · Booking +16.9%, from
+  `computeChannelMarkups`) do the OTA gross-up, surfaced as a READ-ONLY confirm
+  prompt in the builder rate-push card (NOT pushed — the "Guesty owns channel
+  pricing" pipeline-logic guards still hold). Cost buffers added to
+  `/api/inbox/buy-in-estimate` ONLY: per-night season + last-minute lead premium
+  (`BUYIN_LASTMINUTE_{7,14,30}D`) + a `recommendedSell` block. Fulfilment gate
+  got an OPT-IN margin floor `AUTOFILL_PROFIT_MARGIN_FLOOR_PCT` (default 0 = the
+  $100-max-loss model unchanged; a hard floor only refuses thin already-sold
+  bookings, it can't create margin). DEFERRED (tested load-bearing, operator's
+  call): p40→p60 cost basis + raising HOLIDAY/HIGH season multipliers. Full
+  rationale in AGENTS.md ("Buy-in SELL price is NET OF FEES" + Decision Log
+  2026-06-10). Verified: build clean, buy-in-profit 21/21. No live data in the
+  session, so the per-booking pattern breakdown was structural, not run.
+
 - 2026-06-08 (guest inbox: FULLY AUTOMATED auto-reply + attention banner):
   Operator asked to make the inbox responder fully automatic, with a top-of-inbox
   notice that surfaces the messages he should check (not-100%-confident or

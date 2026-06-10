@@ -851,6 +851,59 @@ established it so you can read the rationale in the commit message.
       "mixed-up" signal and is computed via `photo-hashing.ts` regardless of
       whether the vision call succeeds (it still runs with no `ANTHROPIC_API_KEY`).
 
+### Buy-in SELL price is NET OF FEES (Load-Bearing, 2026-06-10)
+
+The base calendar rate the app pushes to Guesty is computed by the single
+shared helper **`baseRateForTargetMargin(buyIn, targetMargin)`** in
+`shared/pricing-rates.ts`:
+
+```
+base = ceil( (1 + targetMargin) × buyInCost / (1 − CHANNEL_HOST_FEE.direct) )
+```
+
+It is the DIRECT-channel guest price: a direct booking nets `base ×
+(1 − feeDirect)`, so grossing up by the direct/processing fee is what makes the
+base actually NET `targetMargin` on cost. Both `cleanBaseRateFromBuyIn` (client
+`pricing-data.ts`) and `cleanBaseRateFromBuyInServer` (`server/routes.ts`)
+delegate to it. Load-bearing constraints — don't "fix" them back:
+
+1. **Do NOT revert to the fee-blind `Math.ceil((1 + margin) × buyIn)`.** That
+   was a 20% GROSS markup applied BEFORE channel fees; even with a correct cost
+   estimate it netted only ~1.4% on Airbnb and a LOSS on Booking.com — the root
+   cause of "I'm losing money" on OTA bookings (Decision Log 2026-06-10).
+2. **It stays a SINGLE channel-blind BASE rate.** The OTA gross-up happens in
+   Guesty via per-channel markups (`computeChannelMarkups`: Airbnb +14.8% ·
+   Vrbo +5.5% · Booking +16.9%), which the operator configures IN Guesty.
+   `routes.ts`/`availability-scheduler.ts` must NOT push per-channel markups —
+   the "Guesty owns channel pricing rules" `pipeline-logic` guards
+   (`routeSource`/`schedulerSource` must not include `computeChannelMarkups` /
+   `push-channel-markups`) still hold. The markup % is surfaced ONLY as a
+   read-only "confirm these are set in Guesty" prompt in the builder rate-push
+   card (client-side, allowed) — never pushed from the server.
+3. **Identity that makes #2 correct:** with Guesty markup
+   `m_ch = (1−feeDirect)/(1−feeCh) − 1`, the OTA guest pays
+   `base × (1 + m_ch) = (1+m)c/(1−feeCh) = minProfitableRate(c, ch)`, which nets
+   `(1+m)c` after that channel's fee. Locked by `tests/buy-in-profit.test.ts`
+   ("base+Guesty-markups net ≥ 20% on cost on EVERY channel"). If you change
+   `CHANNEL_HOST_FEE`, the builder prompt's markups move with it automatically.
+4. **Cost-side loss buffers live ONLY in `/api/inbox/buy-in-estimate`** (triage,
+   NOT the calendar push): per-NIGHT season weighting (boundary-straddle
+   under-costing) + a last-minute lead premium (`BUYIN_LASTMINUTE_{7,14,30}D`,
+   default ≤7d +20% / ≤14d +12% / ≤30d +6%) for the short-lead loss pattern,
+   plus a `recommendedSell` block. Don't wire these into the push without an
+   operator ask — they're a triage signal, the push uses the live monthly basis.
+5. **Fulfilment gate margin floor is OPT-IN and OFF by default.**
+   `AUTOFILL_PROFIT_MARGIN_FLOOR_PCT` (`minAcceptableProfit`,
+   `shared/buy-in-profit.ts`) defaults 0 → the $100-max-loss model is unchanged.
+   A hard floor at fulfilment can't CREATE margin (revenue is already fixed by
+   the sell price); it only REFUSES thin already-sold bookings (leaves slots
+   empty → strands a booked guest). Margin is won at the SELL price (#1). Keep
+   it off unless the operator explicitly wants fulfilment to refuse thin combos.
+6. **DEFERRED, not done (tested load-bearing — needs explicit per-item sign-off):**
+   `MARKET_PRICING_PERCENTILE` p40→p60 (`tests/hybrid-pricing.test.ts` pins p40,
+   "raw P40 basis without a median-floor backup") and raising `SEASON_MULTIPLIERS`
+   HOLIDAY/HIGH. Both raise guest prices and were left for the operator to decide.
+
 ### Availability & pricing
 
 10. **Auto-scan scheduler flips ON when the tab loads for any
@@ -2128,6 +2181,7 @@ Examples:
 2026-06-07 · Jamie asked the buy-in tool to add a fourth fallback rung: after resort search → city-wide VRBO finds no combo, auto-research the cities within a 20-min drive and city-scan each; if still none, expand to 45 min, scanning all cities not already searched · ACCEPTED, background-job + polling, combo-only (Jamie's choices via AskUserQuestion) · New `server/city-vrbo-expansion.ts` (in-memory job store + worker + Photon `/reverse` drive-time town discovery anchored on `BUY_IN_MARKET_LOCATIONS` coords) + 3 endpoints under `POST/GET /api/operations/city-vrbo-inventory/expand[/:jobId[/cancel]]`. `runCityVrboInventoryScan` was generalized (extracted `runCityScanCore`; added exported `runCityVrboInventoryScanForCity` with a DISJOINT `term:…|city-vrbo-term-v1` cache namespace). Client `autoFillMutation` starts the job when the home-city scan ran worker-online with no pair, hands it to a row poller (`CityExpansionJobPoller`) that attaches the found combo (no-clobber) or re-invokes auto-fill `skipExpansion:true` for the per-slot net; bulk queue polls inline (`awaitExpansionInline`). Built via a 4-agent design workflow + a 23-agent adversarial review (10 findings confirmed + fixed: healthy-worker wallet-timeout vs offline reconciliation, provider-cooldown short-circuit, attach-button mid-attach race, found-but-not-attachable safety-net fall-through, poller 401/deadline terminal, unmount-cancel, skipExpansion home-scan skip). See the "Drive-time nearby-city combo expansion" Load-Bearing subsection above for the 6 load-bearing constraints. Verified: `npm run build` clean, `tests/city-vrbo-expansion.smoke.ts` 8/8 (combo-only gate, single-flight, offline fast-bail), Photon discovery returns a sane Kauai ladder for Poipu Kai. Live VRBO leg verified on Railway post-deploy.
 2026-06-08 · Jamie reported that running "Auto-fill cheapest" from iPhone Safari, then leaving the app, made the search "basically pause" and produce nothing on return · ACCEPTED, PR #588 (`claude/mobile-buy-in-search-resilience`) · Root cause is a CLIENT mobile-resilience gap, NOT a server cancellation (the `booking_search`+`vrbo_search` "server cancelled request" churn in the sidecar log is the scheduled availability pass hitting its 90s per-op wallet budget under single-Chrome-lane contention — confirmed via a 4-agent trace; find-buy-in disables booking and continues detached on disconnect). iOS Safari suspends a backgrounded tab and tears down in-flight fetches (~30s) while freezing JS timers; the find-buy-in scan finishes server-side but `FIND_BUY_IN_TTL_MS=0` deletes the result, so the re-fire on return restarts from zero. **Two LOAD-BEARING decisions in this fix that look like bugs cold — don't "fix" them back:** (1) `server/routes.ts` find-buy-in now WRITES to `findBuyInCache` even though `FIND_BUY_IN_TTL_MS=0` — these are RECOVERY-only entries (trustworthy+priced+complete, 120s `FIND_BUY_IN_RECOVERY_TTL_MS`) read ONLY by a `?recover=1` re-fire (`allowRecoveryCache`), never by a normal interactive search, so the "buy-in scans always run live" invariant holds; the Auto-fill client (`getFindBuyInForBedrooms`) always sends `recover=1` so its retry/resume is idempotent within the window. (2) `CityExpansionJobPoller` (`client/src/pages/bookings.tsx`) no longer cancels the server job on a HIDDEN unmount — only on a DELIBERATE (tab-visible) unmount — because a backgrounded/discarded tab killing a live multi-minute sidecar job is exactly the reported bug; a hidden unmount leaves the job to finish under its own 30-min server budget. Also: the poller cap is now cumulative FOREGROUND/active polling time (suspended gaps not billed), not wall-clock-from-mount (which tripped instantly on resume and declared live jobs "lost"); added a foreground-resume tick; added an auto-fill visibility-resume effect that re-fires a transient-interrupted run with empty slots (guarded against re-running abandoned/already-filled searches). Known follow-up NOT in this PR: full iOS page-discard recovery for in-flight combos (persist expansion `jobId` to localStorage to re-attach after a hard reload) — only the suspend-and-return path is fixed. Verified: `npm run build` clean (client+server), `npm run check` adds zero new TS errors in both files (baseline-diffed), Railway deploy `38cdcc5` booted clean + healthy (base 302→/login, gated API 401).
 2026-06-08 · Jamie asked to make the guest-inbox responder FULLY AUTOMATED ("the automatic reply/responder… this will now be fully automated"), with a top-of-inbox notice that pops up the messages he should check (not-100%-confident or super-urgent), and to REMOVE the "AI Draft Approval" tab · ACCEPTED · This SUPERSEDES the 2026-06-07 "Part B default OFF" decision above — auto-send is now default ON. The Part B engine (queue → review window → `runAutoSendQueue` re-validation) was already built and correct; this change just (a) flips the default on via a one-time persisted rollout flag (`auto_send.full_auto_rollout_v1` forces master_enabled=true + hold_recommendations=false at first boot, regardless of stale state, while a later operator OFF still sticks), (b) sharpens the HOLD rails — a SYSTEM_PROMPT "AUTO-SEND MODE" confidence gate ("not fully confident → flag", "urgent → flag immediately"), explicit urgency keywords in `RISK_KEYWORDS`, and `forceDraftForReview:true` on the clean path so held items still carry a conservative reviewable draft — and (c) moves the review UI from the removed tab into a top ATTENTION BANNER (`client/src/pages/inbox.tsx`, above the now-controlled `<Tabs>`, isAdmin-gated): a slim status row with the auto-send toggle/window/Check-now + a red/amber "N messages need your review" list of HELD items (drafted/flagged/error, urgent-first via the client-side display-only `AUTO_REPLY_URGENT_RE`), each with Send/Save/Save&learn/Redo/Open-thread/Decline; clean "queued" rows auto-send silently and show only as a count. No schema change (urgency is display-only; the server hold via RISK_KEYWORDS is the authority). See the new "Auto-reply is FULLY AUTOMATED" Load-Bearing note under #24. Verified: `npm run build` clean (client+server), `npm run check` adds zero new TS errors in the two touched files; reviewed via a 3-dimension adversarial workflow (auto-send safety / client banner / cross-file integration). **The single OFF switch is the banner's Auto-send toggle** — it reverts to held-for-manual without redeploy.
+2026-06-10 · Jamie reported "in many cases I am losing money" on buy-ins and asked to detect loss patterns + adjust pricing to ensure 20% margins (chose: 20%-on-cost net of fees; Guesty channel markups already configured; skip the data script) · ACCEPTED · ROOT CAUSE was a SELL-side bug, not a cost bug: the base calendar rate was `Math.ceil((1 + margin) × buyInCost)` — a 20% GROSS markup applied BEFORE channel fees, so even with a perfect cost estimate it netted only ~1.4% on Airbnb and a LOSS on Booking.com. Fix: a single shared `baseRateForTargetMargin(buyIn, margin)` (`shared/pricing-rates.ts`) = `ceil((1+margin)×buyIn / (1 − feeDirect))` — the base now nets the margin on cost AFTER the direct/processing fee, which is the correct foundation for Guesty's per-channel markups (`computeChannelMarkups`: Airbnb +14.8% · Vrbo +5.5% · Booking +16.9%) so EVERY channel nets the target. Both `cleanBaseRateFromBuyIn` (client) and `cleanBaseRateFromBuyInServer` (routes) delegate to it — STILL a single channel-blind BASE rate, so the "Guesty owns channel pricing rules" decision + its `pipeline-logic` guards are preserved (routes/scheduler push no per-channel markups; the markup % is surfaced as a READ-ONLY confirm prompt in the builder rate-push card, not pushed). Cost-side loss buffers added to `/api/inbox/buy-in-estimate` only (triage, not the push): per-NIGHT season weighting (boundary-straddle under-costing) + a last-minute lead premium (≤7d +20% / ≤14d +12% / ≤30d +6%, env-overridable) for the short-lead loss pattern, plus a `recommendedSell` (base + per-channel guest price to net the target). Fulfilment gate got an OPT-IN positive margin floor (`AUTOFILL_PROFIT_MARGIN_FLOOR_PCT`, `minAcceptableProfit` in `shared/buy-in-profit.ts`); DEFAULT 0 keeps the $100-max-loss model byte-identical (a hard floor at fulfilment can't CREATE margin — revenue is already fixed — it only refuses thin already-sold bookings, so it's off by default to avoid stranding guests). DEFERRED + flagged to operator (tested load-bearing, not flipped silently): `MARKET_PRICING_PERCENTILE` p40→p60 (`tests/hybrid-pricing.test.ts` pins p40) and raising `SEASON_MULTIPLIERS` HOLIDAY/HIGH. See the new "Buy-in SELL price is NET OF FEES" Load-Bearing subsection. Verified: `npm run build` clean (client+server), `tests/buy-in-profit.test.ts` 21/21 (incl. "base+Guesty-markups net ≥ 20% on EVERY channel" + margin-floor), tsc adds no new errors in touched files; no live data access in the session (DB/Guesty unreachable) so the empirical per-booking breakdown was delivered as structural analysis, not run.
 ```
 
 (Populate on first dispute.)

@@ -120,6 +120,7 @@ import {
 import {
   BUY_IN_RATES,
   CHANNEL_HOST_FEE,
+  baseRateForTargetMargin,
   clampSuspiciousAirbnbBuyInRate,
   getCommunityRegion,
   getBuyInRate,
@@ -839,11 +840,17 @@ function bulkPricingBaseUrl(): string {
   return `http://127.0.0.1:${process.env.PORT || "5000"}`;
 }
 
+// Base calendar rate pushed to Guesty — NET OF the direct/processing fee so a
+// direct booking nets `targetMargin` on cost and Guesty's per-channel markups
+// gross OTAs up on top to net the same. Single-sourced from the shared helper;
+// do NOT revert to the fee-blind `(1 + targetMargin) * buyIn` (Decision Log
+// 2026-06-10 — that lost money on OTA channels). This stays a single
+// channel-blind BASE rate, so "Guesty owns channel pricing rules" is preserved.
 const cleanBaseRateFromBuyInServer = (
   buyIn: number,
   targetMargin: number,
 ): number => {
-  return Math.ceil((1 + targetMargin) * buyIn);
+  return baseRateForTargetMargin(buyIn, targetMargin);
 };
 
 const parsePositivePricingRate = (value: unknown): number | null => {
@@ -10848,20 +10855,47 @@ Requirements:
         });
       }
 
-      // Season is keyed off the CHECK-IN month. A stay that straddles a
-      // season boundary still gets a single rate — the cost-basis tables
-      // are coarse and the inbox is a triage view, not a billing system.
-      const yearMonth = `${checkInDate.getUTCFullYear()}-${String(checkInDate.getUTCMonth() + 1).padStart(2, "0")}`;
       const region = getCommunityRegion(pricingArea);
-      const season = getSeasonForMonth(yearMonth, region);
+      // The check-in month's season is kept for display/back-compat, but the
+      // COST below is summed PER NIGHT so a stay straddling a season boundary
+      // (LOW arrival rolling into a HIGH/HOLIDAY window) is no longer
+      // under-costed — a real loss driver. (Decision Log 2026-06-10.)
+      const checkInYm = `${checkInDate.getUTCFullYear()}-${String(checkInDate.getUTCMonth() + 1).padStart(2, "0")}`;
+      const season = getSeasonForMonth(checkInYm, region);
+      const ymFor = (d: Date) =>
+        `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+      const nightDates: Date[] = [];
+      for (let i = 0; i < nights; i++) {
+        nightDates.push(new Date(checkInDate.getTime() + i * 86_400_000));
+      }
 
-      // Per-unit line items. propertyId passes through to getBuyInRate so
-      // the live per-property market-rate cache (PR #282) is honored when
-      // populated — falls back to BUY_IN_RATES[pricingArea][${BR}BR] ×
-      // season multiplier otherwise.
+      // Last-minute (short-lead) cost premium: near-term buy-ins compete for
+      // scarce remaining inventory and cost more than the static/median basis.
+      // Keyed on days from NOW to check-in (≈ booking→arrival lead for a fresh
+      // inquiry — the loss pattern the operator named). Env-overridable;
+      // applied to ACCOMMODATION only (cleaning is flat). (Decision Log 2026-06-10.)
+      const leadDays = Math.max(
+        0,
+        Math.ceil((checkInDate.getTime() - Date.now()) / 86_400_000),
+      );
+      const lmFactor = (envKey: string, dflt: number) => Number(process.env[envKey] ?? dflt) || dflt;
+      let lastMinuteFactor = 1;
+      let lastMinuteBand: "<=7d" | "<=14d" | "<=30d" | ">30d" = ">30d";
+      if (leadDays <= 7) { lastMinuteFactor = lmFactor("BUYIN_LASTMINUTE_7D", 1.2); lastMinuteBand = "<=7d"; }
+      else if (leadDays <= 14) { lastMinuteFactor = lmFactor("BUYIN_LASTMINUTE_14D", 1.12); lastMinuteBand = "<=14d"; }
+      else if (leadDays <= 30) { lastMinuteFactor = lmFactor("BUYIN_LASTMINUTE_30D", 1.06); lastMinuteBand = "<=30d"; }
+
+      // Per-unit line items. propertyId passes through to getBuyInRate so the
+      // live per-property market-rate cache is honored when populated — falls
+      // back to BUY_IN_RATES[pricingArea][${BR}BR] × season multiplier.
       const units = property.units.map((u, idx) => {
-        const nightlyRate = getBuyInRate(pricingArea, u.bedrooms, mapping.propertyId, season, yearMonth);
-        const lineTotal = nightlyRate * nights;
+        let baseLineTotal = 0;
+        for (const d of nightDates) {
+          const ym = ymFor(d);
+          baseLineTotal += getBuyInRate(pricingArea, u.bedrooms, mapping.propertyId, getSeasonForMonth(ym, region), ym);
+        }
+        const lineTotal = Math.round(baseLineTotal * lastMinuteFactor);
+        const nightlyRate = Math.round(lineTotal / nights);
         return {
           label: u.unitNumber ? `Unit ${u.unitNumber}` : `Unit ${String.fromCharCode(65 + idx)}`,
           bedrooms: u.bedrooms,
@@ -10875,6 +10909,28 @@ Requirements:
       const grandTotal = accommodationTotal + cleaningTotal;
       const perNightAmortized = Math.round(grandTotal / nights);
 
+      // Recommended SELL to net the target margin ON COST, AFTER channel fees.
+      // baseRateTotal is the direct/base calendar rate (what the app pushes to
+      // Guesty); byChannel shows what the guest must end up paying on each
+      // channel for the SAME net margin (Guesty's per-channel markups, owned in
+      // Guesty, gross the base up to these). (Decision Log 2026-06-10.)
+      const targetMargin = (() => {
+        const q = Number(req.query.targetMargin);
+        return Number.isFinite(q) && q >= 0 && q <= 1 ? q : 0.2;
+      })();
+      const baseRateTotal = baseRateForTargetMargin(grandTotal, targetMargin);
+      const byChannel: Record<string, number> = {};
+      for (const ch of ["direct", "airbnb", "vrbo", "booking"] as const) {
+        const fee = CHANNEL_HOST_FEE[ch] ?? 0;
+        byChannel[ch] = Math.ceil(((1 + targetMargin) * grandTotal) / (1 - fee));
+      }
+      const recommendedSell = {
+        targetMargin,
+        baseRateTotal,
+        perNight: Math.round(baseRateTotal / nights),
+        byChannel,
+      };
+
       return res.json({
         ok: true,
         propertyId: mapping.propertyId,
@@ -10883,6 +10939,9 @@ Requirements:
         region,
         season,
         nights,
+        leadDays,
+        lastMinuteBand,
+        lastMinuteFactor,
         checkIn: checkInRaw,
         checkOut: checkOutRaw,
         units,
@@ -10892,6 +10951,7 @@ Requirements:
         unitCount: property.units.length,
         grandTotal,
         perNightAmortized,
+        recommendedSell,
       });
     } catch (err: any) {
       console.error("[buy-in-estimate] error:", err);

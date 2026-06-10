@@ -475,6 +475,32 @@ export function computeChannelMarkups(
   return out;
 }
 
+// ── BASE CALENDAR RATE (net of the direct/processing fee) ──────────────────
+// The single rate the app pushes to Guesty's base calendar. It is the
+// DIRECT-channel guest price: a direct booking nets `base × (1 - feeDirect)`,
+// so to actually NET `(1 + targetMargin) × buyInCost` we must gross the base
+// up by the direct/Stripe fee. Guesty's per-channel markups (the
+// `computeChannelMarkups` values, configured INSIDE Guesty per the
+// "Guesty owns channel pricing rules" decision) then gross up Airbnb/VRBO/
+// Booking ON TOP of this base so every channel nets the same margin.
+//
+// Identity check: base = (1+m)c/(1-feeDirect); with Guesty markup
+// m_ch = (1-feeDirect)/(1-feeCh) - 1, the OTA guest pays
+// base × (1+m_ch) = (1+m)c/(1-feeCh) = minProfitableRate(c, ch), which nets
+// (1+m)c after that channel's fee. So this base is the load-bearing
+// foundation — get it wrong (e.g. the old fee-blind `(1+m)×c`) and EVERY
+// channel nets short of target (≈1.4% on Airbnb, a loss on Booking.com).
+//
+// NOTE FOR CODEX: do NOT revert this to `Math.ceil((1 + margin) * buyIn)`.
+// That fee-blind form is what made buy-ins lose money on OTA channels even
+// when the cost estimate was correct (Decision Log 2026-06-10).
+export function baseRateForTargetMargin(buyIn: number, targetMargin: number): number {
+  const feeDirect = CHANNEL_HOST_FEE.direct ?? 0;
+  const denom = 1 - feeDirect;
+  if (!(denom > 0)) return Math.ceil((1 + targetMargin) * buyIn);
+  return Math.ceil(((1 + targetMargin) * buyIn) / denom);
+}
+
 // Maps our logical channel keys to Guesty's integration platform keys.
 // Confirmed from a live listing readback 2026-04-21.
 export const CHANNEL_TO_GUESTY_KEY: Record<ChannelKey, string> = {
