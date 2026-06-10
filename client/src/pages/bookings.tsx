@@ -8122,7 +8122,7 @@ export default function Bookings() {
               <div className="overflow-hidden rounded border">
                 <div className="max-h-[560px] overflow-auto">
                   <div className="min-w-[1600px]">
-                    <div className="sticky top-0 z-10 grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                    <div className="sticky top-0 z-10 grid grid-cols-[1.4fr_42px_110px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
                       <div>Last scan</div>
                       <div>
                         <input
@@ -8138,6 +8138,7 @@ export default function Bookings() {
                         />
                       </div>
                       <SortHeader label="Check-in" active={sortBy === "checkIn"} dir={sortDir} onClick={() => toggleSort("checkIn")} />
+                      <div>Date Added</div>
                       <div>Queue</div>
                       <SortHeader label="Property" active={sortBy === "property"} dir={sortDir} onClick={() => toggleSort("property")} />
                       <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
@@ -8152,8 +8153,8 @@ export default function Bookings() {
                     <div className="divide-y">
                       {globalBookingMonthSections.map((section) => (
                         <div key={`global-booking-month-${section.key}`} className="divide-y">
-                          <div className="grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800">
-                            <div style={{ gridColumn: "1 / span 8" }}>
+                          <div className="grid grid-cols-[1.4fr_42px_110px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800">
+                            <div style={{ gridColumn: "1 / span 9" }}>
                               {section.label}
                               <span className="ml-2 font-normal text-muted-foreground">
                                 {section.totals.bookingCount} booking{section.totals.bookingCount === 1 ? "" : "s"}
@@ -8164,7 +8165,7 @@ export default function Bookings() {
                             <div className={`text-right ${section.totals.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
                               {fmtMoney(section.totals.profit)}
                             </div>
-                            <div className="text-[10px] font-normal text-muted-foreground" style={{ gridColumn: "12 / -1" }}>
+                            <div className="text-[10px] font-normal text-muted-foreground" style={{ gridColumn: "13 / -1" }}>
                               {section.totals.openSlots} open slot{section.totals.openSlots === 1 ? "" : "s"}
                             </div>
                           </div>
@@ -8196,7 +8197,7 @@ export default function Bookings() {
                                 key={`global-booking-${reservation._id}`}
                                 role="button"
                                 tabIndex={0}
-                                className="grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                                className="grid grid-cols-[1.4fr_42px_110px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
                                 onClick={() => openReservationDetail(reservation._id)}
                                 onKeyDown={(event) => {
                                   if (event.key === "Enter" || event.key === " ") {
@@ -8235,6 +8236,14 @@ export default function Bookings() {
                                   <p className="text-[10px] text-muted-foreground">
                                     {fmtDate(checkOutOf(reservation))}
                                   </p>
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="font-medium" title="Date the guest booked / the booking was added">
+                                    {fmtDate(reservation.createdAt)}
+                                  </p>
+                                  {reservation.manualReservation && (
+                                    <p className="text-[10px] text-muted-foreground">manual</p>
+                                  )}
                                 </div>
                                 <div className="min-w-0">
                                   <Badge
@@ -8347,8 +8356,8 @@ export default function Bookings() {
                               </div>
                             );
                           })}
-                          <div className="grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-950">
-                            <div style={{ gridColumn: "1 / span 8" }}>
+                          <div className="grid grid-cols-[1.4fr_42px_110px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-950">
+                            <div style={{ gridColumn: "1 / span 9" }}>
                               Subtotal for {section.label}
                             </div>
                             <div className="text-right">{fmtMoney(section.totals.revenue)}</div>
@@ -8356,15 +8365,15 @@ export default function Bookings() {
                             <div className={`text-right ${section.totals.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
                               {fmtMoney(section.totals.profit)}
                             </div>
-                            <div className="text-[10px] font-normal text-blue-900/80" style={{ gridColumn: "12 / -1" }}>
+                            <div className="text-[10px] font-normal text-blue-900/80" style={{ gridColumn: "13 / -1" }}>
                               {section.totals.bookingCount} booking{section.totals.bookingCount === 1 ? "" : "s"}
                             </div>
                           </div>
                         </div>
                       ))}
                       {globalBookingGrandTotals && (
-                        <div className="grid grid-cols-[1.4fr_42px_110px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-t-2 border-slate-300 bg-slate-900 px-3 py-3 text-sm font-semibold text-white">
-                          <div style={{ gridColumn: "1 / span 8" }}>
+                        <div className="grid grid-cols-[1.4fr_42px_110px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-t-2 border-slate-300 bg-slate-900 px-3 py-3 text-sm font-semibold text-white">
+                          <div style={{ gridColumn: "1 / span 9" }}>
                             Total for all visible months
                             <span className="ml-2 font-normal text-slate-300">
                               {globalBookingGrandTotals.bookingCount} booking{globalBookingGrandTotals.bookingCount === 1 ? "" : "s"}
@@ -8375,7 +8384,7 @@ export default function Bookings() {
                           <div className={`text-right ${globalBookingGrandTotals.profit >= 0 ? "text-green-300" : "text-red-300"}`}>
                             {fmtMoney(globalBookingGrandTotals.profit)}
                           </div>
-                          <div className="text-[10px] font-normal text-slate-300" style={{ gridColumn: "12 / -1" }}>
+                          <div className="text-[10px] font-normal text-slate-300" style={{ gridColumn: "13 / -1" }}>
                             {globalBookingGrandTotals.openSlots} open slot{globalBookingGrandTotals.openSlots === 1 ? "" : "s"}
                           </div>
                         </div>
