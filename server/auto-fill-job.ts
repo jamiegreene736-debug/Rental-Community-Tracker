@@ -33,13 +33,20 @@ import { evaluateComboProfit, profitToleranceUsd } from "@shared/buy-in-profit";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import {
   getExpansionJob,
+  nearbyTownsForCommunity,
   serializeExpansionJob,
   startExpansionJob,
   tierCeilingMinutes,
   CityExpansionValidationError,
   type CityExpansionJobStatus,
   type ExpansionCityResult,
+  type NearbyTownForScan,
 } from "./city-vrbo-expansion";
+import {
+  getCachedCommunityListingUrls,
+  runCityVrboInventoryScanForCity,
+  type CityVrboScanResult,
+} from "./city-vrbo-inventory";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
@@ -60,6 +67,19 @@ const EXPANSION_POLL_CAP_MS = 40 * 60_000;
 // (pct 0) so the cap is uniform across stay sizes — see shared/buy-in-profit.ts.
 const PROFIT_MIN_FLAT_USD = Number(process.env.AUTOFILL_PROFIT_MIN_FLAT ?? 100) || 0;
 const PROFIT_MIN_PCT = Number(process.env.AUTOFILL_PROFIT_MIN_PCT ?? 0) || 0;
+
+// Single-unit nearby-city walk (single LISTINGS only — combo properties get the
+// full tiered pair expansion in Stage 3-4). How far to walk, how many towns to
+// scan before giving up, and the wall-clock budget. Walk stops at the FIRST
+// profitable unit, so it usually returns well before these caps. Env-tunable.
+const SINGLE_UNIT_NEARBY_MAX_MIN = Math.max(5, Math.min(120, Number(process.env.AUTO_FILL_SINGLE_NEARBY_MAX_MIN) || 45));
+const SINGLE_UNIT_NEARBY_TOWN_CAP = Math.max(1, Number(process.env.AUTO_FILL_SINGLE_NEARBY_TOWN_CAP) || 10);
+const SINGLE_UNIT_NEARBY_BUDGET_MS = Math.max(60_000, Number(process.env.AUTO_FILL_SINGLE_NEARBY_BUDGET_MS) || 20 * 60_000);
+// A nearby town whose harvested pool overlaps the home pool at/above this Jaccard
+// is a VRBO "collapse" (it handed back the home/broad result set, not a distinct
+// town search) — skip it so a home-area unit isn't re-offered as "nearby". Mirrors
+// the combo expansion's COLLAPSE_JACCARD.
+const SINGLE_UNIT_NEARBY_COLLAPSE_JACCARD = 0.85;
 
 // ── types ────────────────────────────────────────────────────────────────────
 type JobStatus = "queued" | "running" | "completed" | "failed";
@@ -1127,6 +1147,113 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           touch(job);
         }
       } catch { /* best effort */ }
+    }
+
+    // ── Single-unit nearby-city walk (single LISTINGS only) ──
+    // Combo bookings get the full tiered pair expansion (Stage 3-4). Single-unit
+    // bookings previously stopped at the home city — they never scanned nearby
+    // towns (operator, 2026-06-10). Walk the SAME nearest-first towns the combo
+    // expansion uses (up to ~45 min), scanning each for ONE qualifying unit and
+    // attaching the first profitable one. Collapsed towns (VRBO handed back the
+    // home pool) are skipped so a home-area unit isn't re-offered as "nearby".
+    // Gated to !isComboProperty: scattering a combo's units across towns would
+    // break the walkable-combo invariant (that's the pair expansion's job).
+    const singleUnitWorkerOnline = cityPayload?.sidecar?.workerOnline === true;
+    if (
+      cityCapable && !isComboProperty && unitConfig &&
+      remainingSlots().length === 1 && singleUnitWorkerOnline && !job.canceled
+    ) {
+      const slot = remainingSlots()[0];
+      touch(job, { phase: "nearby", message: `Searching nearby cities (≤${SINGLE_UNIT_NEARBY_MAX_MIN} min) on VRBO…`, progress: 85 });
+      setEscalation(job, { nearbyStatus: "searching" });
+      const homePoolUrls = new Set(getCachedCommunityListingUrls(unitConfig.community, job.checkIn, job.checkOut) ?? []);
+      const jaccardVsHome = (urls: Set<string>): number => {
+        if (!homePoolUrls.size || !urls.size) return 0;
+        let inter = 0;
+        urls.forEach((u) => { if (homePoolUrls.has(u)) inter += 1; });
+        return inter / (homePoolUrls.size + urls.size - inter);
+      };
+      const towns = await nearbyTownsForCommunity(unitConfig.community, SINGLE_UNIT_NEARBY_MAX_MIN, SINGLE_UNIT_NEARBY_TOWN_CAP);
+      const deadline = Date.now() + SINGLE_UNIT_NEARBY_BUDGET_MS;
+      let attachedNearby = false;
+      // getHeartbeat lets us tell a genuine worker drop from a healthy worker just
+      // timing out one scan (vrbo-sidecar-queue returns workerOnline:false for both).
+      const { getHeartbeat } = await import("./vrbo-sidecar-queue");
+      // Record every town we scan in the escalation ladder (tierResults) — same
+      // structure the combo expansion populates — so single-unit runs also show the
+      // nearby cities searched + the "Searched N cities" summary counts them.
+      const nearbyTierResults: ExpansionCityResult[] = [];
+      const recordTown = (t: NearbyTownForScan, status: ExpansionCityResult["status"], extra?: Partial<ExpansionCityResult>) => {
+        nearbyTierResults.push({
+          citySearchTerm: t.citySearchTerm,
+          placeName: t.placeName,
+          driveMinutes: t.driveMinutes,
+          tier: t.driveMinutes <= tierCeilingMinutes(1) ? 1 : 2,
+          status,
+          suggestedPair: false,
+          ...extra,
+        });
+        setEscalation(job, { tierResults: [...nearbyTierResults] });
+      };
+      for (const town of towns) {
+        if (job.canceled || Date.now() > deadline || remainingSlots().length === 0) break;
+        let scan: CityVrboScanResult;
+        try {
+          scan = await runCityVrboInventoryScanForCity({
+            citySearchTerm: town.citySearchTerm,
+            checkIn: job.checkIn,
+            checkOut: job.checkOut,
+            bedroomPlan: [slot.bedrooms],
+            targetState: town.state,
+          });
+        } catch (err: any) { recordTown(town, "scan-error", { reason: String(err?.message ?? err) }); continue; }
+        // workerOnline:false is a genuine drop OR a healthy worker exhausting this
+        // scan's per-scan wallet. Reconcile against the live heartbeat like the combo
+        // expansion (city-vrbo-expansion.ts): only a real offline aborts the ring; a
+        // transient timeout records the town and walks on so the 45-min reach holds.
+        if (!scan.sidecar.workerOnline) {
+          if (!getHeartbeat().isOnline) { setEscalation(job, { nearbyStatus: "worker_offline" }); break; }
+          recordTown(town, "scan-error", { reason: scan.sidecar.reason });
+          continue;
+        }
+        const townUrls = new Set((scan.rawListings ?? []).map((l) => l.url).filter((u): u is string => Boolean(u)));
+        if (jaccardVsHome(townUrls) >= SINGLE_UNIT_NEARBY_COLLAPSE_JACCARD) {
+          recordTown(town, "duplicate", { listingsExported: scan.listings.length, reason: `VRBO returned the same broad pool as the home city — not a distinct local search for ${town.placeName}` });
+          continue; // collapsed to home pool
+        }
+        setAudit(job, auditFromCity(slot.bedrooms, scan));
+        const rows = ((scan.byBedroom?.[slot.bedrooms] ?? []) as any[])
+          .filter((r) => (Number(r.totalPrice) || 0) > 0)
+          .sort((a, b) => (Number(a.totalPrice) || Infinity) - (Number(b.totalPrice) || Infinity));
+        const row = rows.find((r) => !hasUsedListingIdentity(used, { url: r.url, title: r.title, sourceLabel: r.sourceLabel }));
+        if (!row) { recordTown(town, "no-pair", { listingsExported: scan.listings.length }); continue; }
+        const cost = Number(row.totalPrice) || 0;
+        const v = gate(cost);
+        const label = `${town.placeName} (${town.driveMinutes} min) ${slot.unitLabel}`.trim();
+        if (!v.acceptable) {
+          recordEconomics("nearby", label, cost, v.profit, false,
+            `${slot.unitLabel} $${Math.round(cost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searched on`,
+            comboUnitsFromPicks([row], [slot.bedrooms]));
+          recordTown(town, "unprofitable", { listingsExported: scan.listings.length, comboCost: Math.round(cost), expectedProfit: Math.round(v.profit), accepted: false });
+          continue; // a nearer-but-pricier loss; a farther town may still be acceptable
+        }
+        const ok = await attachPick({
+          job, base, slot,
+          pick: liveCandidateFromCityRow(row, slot.bedrooms, job.nights),
+          searchedBedrooms: slot.bedrooms,
+          used, stage: "nearby",
+          sourceCity: town.citySearchTerm,
+          comboLabel: `City VRBO ${row.sourceLabel ?? "unit"} · ${town.driveMinutes} min drive`,
+        });
+        if (ok) {
+          attachedNearby = true;
+          recordTown(town, "pair", { listingsExported: scan.listings.length, comboCost: Math.round(cost), expectedProfit: Math.round(v.profit), accepted: true });
+          setEscalation(job, { nearbyStatus: "found", foundAt: "nearby" });
+          break;
+        }
+        recordTown(town, "no-pair", { listingsExported: scan.listings.length, reason: "attach rejected (unavailable / unverified / duplicate)" });
+      }
+      if (!attachedNearby && remainingSlots().length > 0) setEscalation(job, { nearbyStatus: "exhausted" });
     }
 
     // All-or-nothing: a combo left partially filled by ANY stage rolls back to

@@ -1363,7 +1363,7 @@ type CityExpansionCityResult = {
   placeName: string;
   driveMinutes: number;
   tier: 1 | 2;
-  status: "pending" | "scanning" | "no-pair" | "pair" | "unprofitable" | "skipped" | "scan-error";
+  status: "pending" | "scanning" | "no-pair" | "pair" | "unprofitable" | "duplicate" | "skipped" | "scan-error";
   listingsExported?: number;
   suggestedPair: boolean;
   workerOnline?: boolean;
@@ -1887,7 +1887,7 @@ function BuyInEscalationStages({
     if (foundEarly) return "skipped";
     if (rows.some((r) => r.status === "scanning")) return "searching";
     if (expRunning && rows.some((r) => r.status === "pending")) return "searching";
-    if (rows.length > 0 && rows.every((r) => ["no-pair", "unprofitable", "scan-error", "skipped"].includes(r.status))) return "no-pair";
+    if (rows.length > 0 && rows.every((r) => ["no-pair", "unprofitable", "duplicate", "scan-error", "skipped"].includes(r.status))) return "no-pair";
     if (expRunning && tierNum === 1 && rows.length === 0) return "searching";
     return "idle";
   };
@@ -1898,6 +1898,7 @@ function BuyInEscalationStages({
       : c.status === "unprofitable" ? "⊘"
       : c.status === "scanning" ? "…"
       : c.status === "no-pair" ? "✗"
+      : c.status === "duplicate" ? "≡"
       : c.status === "scan-error" ? "!"
       : c.status === "skipped" ? "–"
       : "·";
@@ -1905,6 +1906,7 @@ function BuyInEscalationStages({
       : c.status === "unprofitable" ? "bg-orange-100 text-orange-800 border-orange-300"
       : c.status === "scanning" ? "bg-amber-100 text-amber-800 border-amber-300"
       : c.status === "no-pair" ? "bg-slate-100 text-slate-600 border-slate-200"
+      : c.status === "duplicate" ? "bg-indigo-50 text-indigo-600 border-indigo-200"
       : c.status === "pending" ? "bg-slate-50 text-slate-400 border-slate-200"
       : "bg-rose-50 text-rose-700 border-rose-200";
     // Show the economics for any city where a combo was priced (accepted or not).
