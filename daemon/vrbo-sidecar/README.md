@@ -203,6 +203,29 @@ snapshots and vision fallback screenshots; if logs ever show
 `warning: scrape viewport stayed small`, increase
 `SIDECAR_CHROME_VISIBLE_SIZE` before trusting provider card extraction.
 
+### Automatic second-monitor mode (macOS)
+
+When a second monitor is connected, the sidecar AUTO-DETECTS it and runs
+Chrome **visible on that monitor, never minimized** — so you can watch
+scans on the external display instead of the laptop screen, with no
+pop-up/minimize flap. When no external monitor is connected it keeps the
+default hidden/offscreen behavior. This works regardless of
+`SIDECAR_CHROME_VISIBLE` (so you don't have to flip an env when you plug
+in / unplug the monitor), and it reacts within one scan.
+
+Detection uses `CGDisplayBounds` via `osascript -l JavaScript` (needs no
+Accessibility/Automation permission, so it runs from the launchd daemon)
+and returns the first non-main display's bounds in Chrome's own
+top-left global coordinate space, so the window lands exactly on the
+external display with no manual grid tuning.
+
+```sh
+SIDECAR_USE_EXTERNAL_DISPLAY=1   # default on; set 0 to disable and keep env-driven behavior
+SIDECAR_EXTERNAL_DISPLAY_MARGIN=0        # inset (px) from the display edges
+SIDECAR_EXTERNAL_DISPLAY_CASCADE_STEP=28 # per-window offset when multiple instances run
+SIDECAR_EXTERNAL_DISPLAY_TTL_MS=4000     # detection cache (plug/unplug reaction window)
+```
+
 ## Local concurrency
 
 Server Chrome is enabled by default for the installed LaunchAgent. The

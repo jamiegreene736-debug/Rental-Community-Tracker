@@ -25,7 +25,7 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawn, execFile } from "child_process";
-import { ChromeSidecarManager } from "./chrome-sidecar-manager.mjs";
+import { ChromeSidecarManager, detectExternalDisplayBounds } from "./chrome-sidecar-manager.mjs";
 import { resolveChromeProxyConfig, runChromeProxyStartupPreflight } from "./proxy-config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -897,10 +897,38 @@ function shouldBlockNavigation(rawUrl) {
   return Boolean(host && BLOCKED_NAV_HOST_RE.test(host));
 }
 
+// When a second monitor is connected the sidecar Chrome lives visibly on it (the
+// manager places it there); never minimize/hide it in that case — that "pop up and
+// minimize" flap is exactly what the external-display mode replaces. Cached so we
+// don't spawn osascript on every page-create. Mirrors the manager's detection.
+// Parse the off-switch with the SAME boolFromEnv semantics the manager uses
+// (ChromeSidecarManager.useExternalDisplay) so the two processes can't disagree
+// on whether the feature is enabled (e.g. SIDECAR_USE_EXTERNAL_DISPLAY=false/off).
+const USE_EXTERNAL_DISPLAY = boolFromEnv("SIDECAR_USE_EXTERNAL_DISPLAY", true);
+let _externalDisplayActiveCache = { at: 0, present: false };
+function externalDisplaySidecarActive() {
+  if (!USE_EXTERNAL_DISPLAY) return false;
+  if (process.platform !== "darwin") return false;
+  const now = Date.now();
+  if (now - _externalDisplayActiveCache.at < 4_000) return _externalDisplayActiveCache.present;
+  let present = false;
+  try {
+    present = Boolean(detectExternalDisplayBounds());
+  } catch {
+    present = false;
+  }
+  _externalDisplayActiveCache = { at: now, present };
+  return present;
+}
+
 async function minimizeSidecarWindow(targetPage = page) {
   if (!SIDECAR_AUTO_MINIMIZE) return;
   if (usingHeadlessRuntime()) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
+  // External monitor present → keep Chrome visible on it; never minimize. Checked
+  // last (after the cheap guards) so the osascript probe only runs when a minimize
+  // would otherwise actually happen.
+  if (externalDisplaySidecarActive()) return;
   if (!context || !targetPage || targetPage.isClosed?.()) return;
   const session = await withSoftTimeout(context.newCDPSession(targetPage), 1_500, null);
   if (!session) return;
@@ -940,6 +968,8 @@ function scheduleSidecarMinimize(targetPage = page) {
   if (!SIDECAR_AUTO_MINIMIZE) return;
   if (usingHeadlessRuntime()) return;
   if (SIDE_CAR_CHROME_VISIBLE || captchaWindowVisible) return;
+  // External monitor present → keep Chrome visible on it; never minimize.
+  if (externalDisplaySidecarActive()) return;
   // Hand focus back to the operator's app alongside the off-screen minimize —
   // the page-create that precedes this is one of the moments Chrome activates.
   scheduleReturnFocus();
@@ -1020,22 +1050,40 @@ async function setCaptchaWindowVisibility(targetPage = page, visible, label = "s
       if (/^vrbo/i.test(String(label || ""))) {
         await setVrboChallengeHighlight(targetPage, false, label, id).catch(() => {});
       }
-      const hidden = parseWindowPosition(process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? HIDDEN_WINDOW_POSITION, { left: -32000, top: -32000 });
-      await withSoftTimeout(
-        session.send("Browser.setWindowBounds", {
-          windowId,
-          bounds: {
-            left: hidden.left,
-            top: hidden.top,
-            width: VIEWPORT.width,
-            height: VIEWPORT.height + 80,
-          },
-        }),
-        1_500,
-      );
-      await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } }), 1_500);
-      log(`${label} ${id}: returned Chrome window to hidden/background mode`);
-      await postScreenSnapshot({ id, opType: label }, targetPage, "CAPTCHA cleared/backgrounded", { force: true });
+      // When a second monitor is connected, the sidecar Chrome is supposed to LIVE
+      // on it (visible, never minimized). Clearing a CAPTCHA must not yank it back
+      // offscreen+minimized — that's the exact flap external-display mode removes.
+      // Restore it onto the external display instead of hiding it.
+      const extBounds = externalDisplaySidecarActive() ? detectExternalDisplayBounds() : null;
+      if (extBounds) {
+        await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } }), 1_500);
+        await withSoftTimeout(
+          session.send("Browser.setWindowBounds", {
+            windowId,
+            bounds: { left: extBounds.left, top: extBounds.top, width: extBounds.width, height: extBounds.height },
+          }),
+          1_500,
+        );
+        log(`${label} ${id}: CAPTCHA cleared; kept Chrome on external display (${extBounds.width}x${extBounds.height} at ${extBounds.left},${extBounds.top})`);
+        await postScreenSnapshot({ id, opType: label }, targetPage, "CAPTCHA cleared/kept on external display", { force: true });
+      } else {
+        const hidden = parseWindowPosition(process.env.SIDECAR_CHROME_HIDDEN_POSITION ?? HIDDEN_WINDOW_POSITION, { left: -32000, top: -32000 });
+        await withSoftTimeout(
+          session.send("Browser.setWindowBounds", {
+            windowId,
+            bounds: {
+              left: hidden.left,
+              top: hidden.top,
+              width: VIEWPORT.width,
+              height: VIEWPORT.height + 80,
+            },
+          }),
+          1_500,
+        );
+        await withSoftTimeout(session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } }), 1_500);
+        log(`${label} ${id}: returned Chrome window to hidden/background mode`);
+        await postScreenSnapshot({ id, opType: label }, targetPage, "CAPTCHA cleared/backgrounded", { force: true });
+      }
     }
     return true;
   } catch (e) {
