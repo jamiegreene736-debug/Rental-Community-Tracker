@@ -332,6 +332,50 @@ async function nearbyTownsForCoords(args: {
   }
 }
 
+export type NearbyTownForScan = { citySearchTerm: string; placeName: string; driveMinutes: number; state: string };
+
+/**
+ * Nearby towns for a buy-in community, nearest-first, within `maxDriveMinutes`
+ * (hard-capped at the TIER2 ceiling), excluding the home town. A thin reuse of
+ * the expansion's OWN nearby-town discovery (nearbyTownsForCoords + the same
+ * coords-first home exclusion) so the SINGLE-unit auto-fill walk
+ * (server/auto-fill-job.ts) covers the same towns the combo pair-expansion does
+ * — the combo path stays the full tiered runExpansionWorker, untouched. Returns
+ * [] when the community has no map coordinates.
+ */
+export async function nearbyTownsForCommunity(
+  community: string,
+  maxDriveMinutes: number = TIER2_MAX_MIN,
+  limit: number = TIER1_CITY_CAP + TIER2_CITY_CAP,
+): Promise<NearbyTownForScan[]> {
+  const loc = BUY_IN_MARKET_LOCATIONS[community];
+  if (!loc) return [];
+  const cap = Math.max(5, Math.min(TIER2_MAX_MIN, Math.round(maxDriveMinutes)));
+  const radiusKm = Math.min(TIER2_RADIUS_KM, Math.max(TIER1_RADIUS_KM, Math.round(cap * 1.6)));
+  const towns = await nearbyTownsForCoords({
+    lat: loc.lat,
+    lng: loc.lng,
+    state: loc.state,
+    radiusKm,
+    maxDriveMinutes: cap,
+    limit: limit * 2,
+  });
+  const out: NearbyTownForScan[] = [];
+  const seen = new Set<string>();
+  seen.add(normTerm(`${loc.city}, ${loc.state}`));
+  seen.add(normTerm(cityWideSearchLocationForBuyInMarket(community) ?? `${community}, ${loc.state}`));
+  for (const t of towns) {
+    if (haversineMiles(loc.lat, loc.lng, t.lat, t.lng) * 1.60934 <= HOME_RADIUS_KM) continue;
+    const term = `${t.placeName}, ${t.state || loc.state}`;
+    const key = normTerm(term);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ citySearchTerm: term, placeName: t.placeName, driveMinutes: t.driveMinutes, state: t.state || loc.state });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 // Cross-city collapse guard. VRBO returns the IDENTICAL broad regional pool for
 // tiny towns it can't pin in its destination dropdown, so different "cities" come
 // back with the same listings and suggestCityVrboComboPair yields the SAME pair
