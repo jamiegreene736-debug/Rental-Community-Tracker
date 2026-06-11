@@ -10054,14 +10054,26 @@ Requirements:
     }).length;
 
     let worstPair: { a: typeof units[number]; b: typeof units[number]; walk: WalkResult } | null = null;
-    // A pair is UNVERIFIABLE when (a) we have no real geocoded walk (the value
-    // came from the configured resort's footprint default), (b) at least one
-    // unit was a CITY-WIDE candidate (could be from any resort in town), and
-    // (c) the two titles carry no positive same/adjacent-community evidence.
-    // Trusting the footprint fallback there is how a Puamana unit and a Wyndham
-    // Ka Eo Kai unit got attached to one booking as a "4 minute walk"
-    // (2026-06-10). Such a pair must FAIL the proximity gate.
+    // A CITY-WIDE pair (either unit from the city-wide pool — could be ANY
+    // resort in town) is UNVERIFIABLE unless it has real evidence of belonging
+    // together. Real evidence is ONE of:
+    //  (a) a geocoded walk between two REAL addresses (saved on the buy-in or
+    //      scraped from the listing page) — actual buildings, trustworthy even
+    //      cross-resort; or
+    //  (b) positive same/adjacent-community evidence in the TITLES (shared
+    //      resort phrase, or a curated WALKABLE_COMPLEX_CLUSTERS adjacency).
+    // A geocoded walk between TITLE-GUESS addresses does NOT count for a
+    // cross-resort pair: geocoding "title-soup, Town, HI" drops fuzzy pins, and
+    // that's how a Puamana 3BR + a Wyndham Ka Eo Kai 2BR — different resorts —
+    // got attached to one booking as a "4 minute walk within Mauna Kai"
+    // (2026-06-10, twice: first via the footprint fallback, then via fuzzy
+    // title geocodes 870ft apart). The configured-resort footprint fallback
+    // never counts either. Such a pair must FAIL the proximity gate; the
+    // operator can whitelist genuinely-adjacent resorts in
+    // WALKABLE_COMPLEX_CLUSTERS (one curated line).
     let unverifiedPair: { a: typeof units[number]; b: typeof units[number]; walk: WalkResult } | null = null;
+    const hasRealAddress = (u: typeof units[number]) =>
+      u.addressSource === "saved" || u.addressSource === "scraped";
     for (let i = 0; i < units.length; i++) {
       for (let j = i + 1; j < units.length; j++) {
         let walk = await walkBetween(units[i].address, units[j].address, resortName).catch(() => fallbackWalkForResort(resortName));
@@ -10071,9 +10083,11 @@ Requirements:
           // than telling the operator two unknown buildings are "steps apart."
           walk = fallbackWalkForResort(resortName);
         }
+        const geoTrustworthy =
+          walk.source === "geocoded" && hasRealAddress(units[i]) && hasRealAddress(units[j]);
         if (
-          walk.source !== "geocoded" &&
           (units[i].cityWide || units[j].cityWide) &&
+          !geoTrustworthy &&
           !titlesShareWalkableCommunity(String(units[i].title ?? ""), String(units[j].title ?? ""))
         ) {
           unverifiedPair = { a: units[i], b: units[j], walk };
@@ -10098,8 +10112,8 @@ Requirements:
           ...unverifiedPair.walk,
           description:
             `Different resorts by listing title ("${String(unverifiedPair.a.title ?? "").slice(0, 60)}" vs ` +
-            `"${String(unverifiedPair.b.title ?? "").slice(0, 60)}") and no location data — ` +
-            `walking distance cannot be verified for these city-wide units.`,
+            `"${String(unverifiedPair.b.title ?? "").slice(0, 60)}") and no reliable location data ` +
+            `(listing titles only, no real addresses) — walking distance cannot be verified for these city-wide units.`,
         },
         confidence: "unverified-cross-resort" as const,
         withinLimit: false,
