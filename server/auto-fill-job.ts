@@ -31,6 +31,7 @@ import { storage } from "./storage";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { evaluateComboProfit, profitToleranceUsd } from "@shared/buy-in-profit";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
+import { suggestCityVrboComboPairs, type CityVrboListing } from "@shared/city-vrbo-combo";
 import {
   getExpansionJob,
   nearbyTownsForCommunity,
@@ -592,6 +593,44 @@ function liveCandidateFromCityRow(row: any, bedrooms: number, nights: number): L
   };
 }
 
+// Cap on how many distinct resort-pool combos to mine (cheapest first); mirrors
+// CITY_VRBO_TOP_COMBOS in city-vrbo-inventory.ts.
+const RESORT_COMBO_LIMIT = Math.max(1, Number(process.env.CITY_VRBO_TOP_COMBOS ?? 5));
+
+// Map the resort search's VRBO candidates into CityVrboListing rows so the
+// same-community combo matcher (clustering / walkability / bedroom splits /
+// >=-bedroom fill) can run over them. VRBO-ONLY — the matcher + the attach
+// proximity guard assume VRBO city listings; an Airbnb/Booking/PM pick would be
+// wrongly verified against the configured resort. The poolByBedroom KEY is the
+// searched bedroom count, so each row gets an accurate bedrooms value. Deduped by
+// listing url; priced only (candidatesFromFindBuyIn already drops totalPrice<=0).
+function resortVrboListingsFromPool(poolByBedroom: Map<number, LiveCandidate[]>): CityVrboListing[] {
+  const out: CityVrboListing[] = [];
+  const seen = new Set<string>();
+  for (const [br, cands] of Array.from(poolByBedroom.entries())) {
+    for (const c of cands) {
+      if (c.source !== "vrbo" || !/vrbo\.com|homeaway/i.test(c.url)) continue;
+      if (!((Number(c.totalPrice) || 0) > 0)) continue;
+      const key = listingUrlKey(c.url);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        url: c.url,
+        title: c.title,
+        bedrooms: candidateBedrooms(c, br),
+        nightlyPrice: c.nightlyPrice,
+        totalPrice: c.totalPrice,
+        lat: c.lat ?? null,
+        lng: c.lng ?? null,
+        sourceLabel: c.sourceLabel ?? "Vrbo",
+        image: c.image ?? undefined,
+        images: c.images,
+      });
+    }
+  }
+  return out;
+}
+
 function auditFromFindBuyIn(bedrooms: number, data: any, groundFloorOnly: boolean): AutoFillSearchAudit {
   const cheapest = (data?.cheapest ?? []) as any[];
   const candidates = cheapest.slice(0, 20).map((c) => ({
@@ -1008,6 +1047,57 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       touch(job, { status: "completed", phase: "done", message: doneMessage(job), progress: 100, finishedAt: Date.now() });
       finalize(job);
       return;
+    }
+
+    // ── Stage 1.5: same-community COMBO mined from the resort candidates ──
+    // The Stage-1 proposal above is a NAIVE cheapest-distinct-per-slot pick — it
+    // never runs the same-community combo MATCHER (cluster / walkability / bedroom
+    // splits / >=-bedroom fill), so it misses walkable cross-sub-community pairs and
+    // split fills (e.g. 4BR+2BR for a [3,3] plan) that the city-vrbo stages find.
+    // Re-run that SAME matcher over the resort search's own VRBO candidates — the
+    // truest same-community units, already in hand — so a profitable IN-RESORT combo
+    // is attached even when the later home-city city-wide scan flakes/fails (the
+    // exact gap that left a $9,919 booking empty). Reuses Stage-2's gate +
+    // attachCityCombo + surfaceAlternativeCombos via a synthetic payload so nothing
+    // diverges from the home-city path. VRBO-only (resortVrboListingsFromPool) so a
+    // cross-source pick never reaches the configured-resort verification math.
+    if (isComboProperty && remainingSlots().length >= 2 && !job.canceled) {
+      // Defensive: the resort-pool combo is a BONUS path; if anything here throws,
+      // swallow it and fall through to the existing city stages — never fail the
+      // whole item over the extra attempt.
+      try {
+        const resortListings = resortVrboListingsFromPool(poolByBedroom);
+        const resortPlan = remainingSlots().map((s) => s.bedrooms);
+        if (resortListings.length >= 2 && resortPlan.length >= 2) {
+          const resortPairs = suggestCityVrboComboPairs(resortListings, resortPlan, job.nights, RESORT_COMBO_LIMIT);
+          const pair = resortPairs[0];
+          if (pair && Array.isArray(pair.picks) && pair.picks.length >= 2) {
+            const resortLabel = `${job.community ?? "Resort"} (resort search)`;
+            const resortPayload = { citySearchTerm: resortLabel, listings: resortListings, suggestedPair: pair, suggestedPairs: resortPairs };
+            const comboCost = (pair.picks as any[]).reduce((s, pk) => s + (Number(pk?.totalPrice) || 0), 0);
+            const v = gate(comboCost);
+            if (v.acceptable) {
+              setEscalation(job, { resort: "found", foundAt: "resort" });
+              await attachCityCombo(job, base, resortPayload, used, "resort");
+            } else {
+              recordEconomics("resort", resortLabel, comboCost, v.profit, false,
+                `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(v.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); searching the city next`,
+                comboUnitsFromPicks(pair.picks, pair.bedrooms));
+              recordLossComboOption(resortLabel, pair, comboCost, v.profit, { scopeCategory: "home" });
+            }
+            surfaceAlternativeCombos(job, resortPairs.slice(1), resortLabel, { scopeCategory: "home" },
+              (cc) => { const vv = gate(cc); return { acceptable: vv.acceptable, profit: vv.profit }; });
+          }
+        }
+        filledUnitIds = await refreshFilled();
+        if (remainingSlots().length === 0) {
+          touch(job, { status: "completed", phase: "done", message: doneMessage(job), progress: 100, finishedAt: Date.now() });
+          finalize(job);
+          return;
+        }
+      } catch (e: any) {
+        console.warn(`[auto-fill] resort-pool combo attempt failed (continuing to city stages): ${e?.message ?? e}`);
+      }
     }
 
     // City stages only run for configured static combo/single properties (the
