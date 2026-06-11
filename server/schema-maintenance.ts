@@ -368,4 +368,44 @@ export async function ensureRuntimeSchema(): Promise<void> {
     )
   `);
   console.log("[schema] ensured auto_fill_loss_options table");
+
+  // Guest payment/refund receipts (auto-sent). Created here too so a fresh
+  // Railway deploy works before `npm run db:push` runs. UNIQUE on token (the
+  // /receipt/:token durable page) and dedup_key (one receipt per transaction).
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS guest_receipts (
+      id serial PRIMARY KEY,
+      token varchar(64) NOT NULL UNIQUE,
+      dedup_key text NOT NULL UNIQUE,
+      reservation_id text NOT NULL,
+      conversation_id text,
+      kind text NOT NULL,
+      amount numeric(10,2),
+      currency text,
+      transaction_date text,
+      guest_name text,
+      listing_id text,
+      listing_nickname text,
+      channel text,
+      message_body text NOT NULL,
+      payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+      status text NOT NULL DEFAULT 'pending',
+      error_message text,
+      expires_at timestamp,
+      message_sent_at timestamp,
+      first_opened_at timestamp,
+      last_opened_at timestamp,
+      open_count integer NOT NULL DEFAULT 0,
+      created_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS guest_receipts_reservation_idx
+      ON guest_receipts (reservation_id, created_at DESC)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS guest_receipts_created_idx
+      ON guest_receipts (created_at DESC)
+  `);
+  console.log("[schema] ensured guest_receipts table");
 }

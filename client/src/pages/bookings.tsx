@@ -287,6 +287,21 @@ type RelocationSentStatus = {
   openCount: number;
 };
 
+// Persistent "did we auto-send this guest a payment/refund receipt?" record,
+// keyed by reservation. Drives the "Receipt sent" badge on the bookings row.
+type ReceiptSentStatus = {
+  kind: string;
+  amount: number;
+  sentAt: string | null;
+  channel: string | null;
+  token: string;
+  opened: boolean;
+  openCount: number;
+  count: number;
+  paymentCount: number;
+  refundCount: number;
+};
+
 type BuyInCancellationTier = "do_not_cancel" | "watch" | "consider_cancel" | "strong_cancel" | "cancel";
 
 type BuyInCancellationAdvice = {
@@ -6050,6 +6065,22 @@ export default function Bookings() {
   });
   const relocationSentStatus = relocationSentStatusQuery.data?.statuses ?? {};
 
+  // Parallel batch lookup for auto-sent payment/refund receipts, so each row can
+  // show a durable "Receipt sent" badge (the scheduler sends these server-side;
+  // there's no client mutation to invalidate, so it just refetches on staleTime).
+  const receiptSentStatusQuery = useQuery<{ statuses: Record<string, ReceiptSentStatus | null> }>({
+    queryKey: ["/api/operations/guest-receipts/sent-status", visibleReservationIds],
+    queryFn: async () => {
+      const resp = await apiRequest("POST", "/api/operations/guest-receipts/sent-status", {
+        reservationIds: visibleReservationIds,
+      });
+      return resp.json();
+    },
+    enabled: visibleReservationIds.length > 0,
+    staleTime: 30_000,
+  });
+  const receiptSentStatus = receiptSentStatusQuery.data?.statuses ?? {};
+
   useEffect(() => {
     if (!focusedReservationId) return;
     const reservationIsVisible = reservations.some((reservation) => reservation._id === focusedReservationId);
@@ -9502,6 +9533,27 @@ export default function Bookings() {
                                         <CheckCircle2 className="h-3.5 w-3.5" />
                                         Guest messaged {fmtDate(st.messageSentAt)}
                                         {st.opened ? " · opened ✓" : ""}
+                                      </span>
+                                    );
+                                  })()}
+                                  {/* Persistent confirmation that an auto payment/refund receipt
+                                      was sent to this guest. Rendered once per reservation (on the
+                                      first slot), independent of buy-in attachment. */}
+                                  {slot.unitId === (r.slots[0]?.unitId ?? null)
+                                    && receiptSentStatus[r._id]?.sentAt && (() => {
+                                    const rc = receiptSentStatus[r._id]!;
+                                    const label = rc.count > 1
+                                      ? `${rc.count} receipts sent`
+                                      : `${rc.kind === "refund" ? "Refund" : "Payment"} receipt sent`;
+                                    return (
+                                      <span
+                                        className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
+                                        title={`Latest: ${rc.kind === "refund" ? "refund" : "payment"} receipt of $${rc.amount.toFixed(2)}${rc.channel ? ` via ${rc.channel}` : ""} on ${fmtDate(rc.sentAt)}${rc.opened ? ` · guest opened${rc.openCount ? ` ${rc.openCount}×` : ""}` : " · not opened yet"}${rc.count > 1 ? ` · ${rc.paymentCount} payment / ${rc.refundCount} refund total` : ""}`}
+                                        data-testid={`badge-receipt-sent-${r._id}`}
+                                      >
+                                        <FileText className="h-3.5 w-3.5" />
+                                        {label} {fmtDate(rc.sentAt)}
+                                        {rc.opened ? " · opened ✓" : ""}
                                       </span>
                                     );
                                   })()}

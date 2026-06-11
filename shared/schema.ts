@@ -992,6 +992,50 @@ export const bookingAlternativePages = pgTable("booking_alternative_pages", {
 });
 export type BookingAlternativePage = typeof bookingAlternativePages.$inferSelect;
 
+// ── Guest payment / refund receipts (auto-sent) ──
+// One row per money transaction we sent the guest a receipt for. The row is
+// BOTH the dedup ledger (`dedupKey` is UNIQUE, so a given charge/refund is
+// messaged exactly once) AND the durable receipt-page store (the tokenized
+// /receipt/:token page the message links to). Lifecycle:
+//   status "pending"  -> row + token created, message not yet posted
+//   status "sent"     -> Guesty message posted (messageSentAt stamped)
+//   status "error"    -> post failed; retried on the next scheduler tick
+// The auto-send scheduler is server/guest-receipts.ts. openCount /
+// firstOpenedAt / lastOpenedAt are incremented only for UNAUTHENTICATED (guest)
+// opens of the page — operator previews carry the admin session and are not
+// counted (see GET /receipt/:token), mirroring booking_alternative_pages.
+export const guestReceipts = pgTable("guest_receipts", {
+  id: serial("id").primaryKey(),
+  token: varchar("token", { length: 64 }).notNull().unique(),   // /receipt/:token durable page
+  dedupKey: text("dedup_key").notNull().unique(),               // reservationId|kind|day|amount
+  reservationId: text("reservation_id").notNull(),
+  conversationId: text("conversation_id"),
+  kind: text("kind").notNull(),                                 // "payment" | "refund"
+  amount: numeric("amount", { precision: 10, scale: 2 }),       // positive USD (refunds stored as the absolute value)
+  currency: text("currency"),
+  transactionDate: text("transaction_date"),                    // ISO timestamp of the charge/refund
+  guestName: text("guest_name"),
+  listingId: text("listing_id"),
+  listingNickname: text("listing_nickname"),
+  channel: text("channel"),                                     // resolved send channel: bookingCom | airbnb2 | homeaway | email
+  messageBody: text("message_body").notNull(),
+  payload: jsonb("payload").notNull(),                          // render data for the /receipt page
+  status: text("status").notNull().default("pending"),         // "pending" | "sent" | "error"
+  errorMessage: text("error_message"),
+  expiresAt: timestamp("expires_at"),
+  messageSentAt: timestamp("message_sent_at"),
+  firstOpenedAt: timestamp("first_opened_at"),
+  lastOpenedAt: timestamp("last_opened_at"),
+  openCount: integer("open_count").default(0).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export const insertGuestReceiptSchema = createInsertSchema(guestReceipts).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertGuestReceipt = z.infer<typeof insertGuestReceiptSchema>;
+export type GuestReceipt = typeof guestReceipts.$inferSelect;
+
 // Durable per-reservation "over-budget combos" the auto-fill search found but did
 // not attach (would have lost money). Persisted so the operator can review the
 // options + one-click attach a loss combo even after the in-memory job expires

@@ -1710,6 +1710,25 @@ function AdminDashboard() {
       amount: number;
       description: string;
     }>;
+    // Auto-sent guest payment/refund receipts (the scheduler posted these to
+    // guests; see server/guest-receipts.ts).
+    guestReceiptsSent30Days?: number;
+    guestReceiptPaymentsSent30Days?: number;
+    guestReceiptRefundsSent30Days?: number;
+    guestReceiptsSent48Hours?: number;
+    guestReceipts?: Array<{
+      id: number;
+      reservationId: string;
+      kind: string;
+      amount: number;
+      guestName: string | null;
+      listingNickname: string | null;
+      channel: string | null;
+      token: string;
+      sentAt: string;
+      opened: boolean;
+      openCount: number;
+    }>;
     bookings: RevenueBookingSummary[];
     largestBooking: RevenueBookingSummary | null;
     highestGrossingBooking: RevenueBookingSummary | null;
@@ -2716,6 +2735,18 @@ function AdminDashboard() {
                     <p className="text-xs text-muted-foreground">Collected excludes scheduled/pending/failed/voided; refunds shown separately</p>
                   </div>
                 </div>
+                <div className="rounded-md border border-sky-200 bg-sky-50/60 p-3 dark:border-sky-900 dark:bg-sky-950/30" data-testid="block-guest-receipts">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-sky-700 dark:text-sky-300">Guest receipts sent, 30 days</p>
+                    <p className="text-xs text-muted-foreground">Auto-sent payment &amp; refund confirmations</p>
+                  </div>
+                  <p className="mt-1 text-lg font-semibold text-sky-700 dark:text-sky-300">
+                    {revenueSummary?.guestReceiptsSent30Days ?? 0} receipt{(revenueSummary?.guestReceiptsSent30Days ?? 0) === 1 ? "" : "s"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {revenueSummary?.guestReceiptPaymentsSent30Days ?? 0} payment · {revenueSummary?.guestReceiptRefundsSent30Days ?? 0} refund · {revenueSummary?.guestReceiptsSent48Hours ?? 0} in last 48h
+                  </p>
+                </div>
                 <div className="rounded-md border bg-muted/30 p-3" data-testid="block-expected-deposits">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-xs font-medium text-muted-foreground">Expected bank deposits</p>
@@ -2805,6 +2836,47 @@ function AdminDashboard() {
                             <TableCell className="align-top">{refund.listingName}</TableCell>
                             <TableCell className="align-top">{refund.description || "Refund"}</TableCell>
                             <TableCell className="whitespace-nowrap text-right align-top font-medium text-rose-600 dark:text-rose-400">−{formatCurrency(refund.amount)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                ) : null}
+                {revenueSummary?.guestReceipts?.length ? (
+                  <div className="max-w-full overflow-x-auto rounded-md border" data-testid="block-guest-receipts-feed">
+                    <div className="border-b bg-sky-50 px-3 py-2 text-xs font-medium text-sky-700 dark:bg-sky-950/40 dark:text-sky-300">
+                      Guest receipts auto-sent in this 30-day window (payment &amp; refund confirmations)
+                    </div>
+                    <Table className="min-w-[820px] table-fixed">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[140px]">Sent</TableHead>
+                          <TableHead className="w-[160px]">Guest</TableHead>
+                          <TableHead className="w-[200px]">Listing</TableHead>
+                          <TableHead className="w-[90px]">Type</TableHead>
+                          <TableHead className="w-[110px]">Channel</TableHead>
+                          <TableHead className="w-[90px]">Opened</TableHead>
+                          <TableHead className="w-[100px] text-right">Amount</TableHead>
+                          <TableHead className="w-[70px]">Receipt</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {revenueSummary.guestReceipts.map((receipt) => (
+                          <TableRow key={receipt.id} data-testid={`row-guest-receipt-${receipt.id}`}>
+                            <TableCell className="whitespace-nowrap align-top">{formatShortDateTime(receipt.sentAt)}</TableCell>
+                            <TableCell className="align-top">{receipt.guestName || "Guest"}</TableCell>
+                            <TableCell className="align-top">{receipt.listingNickname || "—"}</TableCell>
+                            <TableCell className="align-top">
+                              <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${receipt.kind === "refund" ? "bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300" : "bg-sky-100 text-sky-800 dark:bg-sky-950/50 dark:text-sky-300"}`}>
+                                {receipt.kind === "refund" ? "Refund" : "Payment"}
+                              </span>
+                            </TableCell>
+                            <TableCell className="align-top">{receipt.channel || "—"}</TableCell>
+                            <TableCell className="align-top">{receipt.opened ? `✓${receipt.openCount > 1 ? ` ×${receipt.openCount}` : ""}` : "—"}</TableCell>
+                            <TableCell className={`whitespace-nowrap text-right align-top font-medium ${receipt.kind === "refund" ? "text-amber-700 dark:text-amber-300" : ""}`}>{formatCurrency(receipt.amount)}</TableCell>
+                            <TableCell className="align-top">
+                              <a href={`/receipt/${receipt.token}?preview=1`} target="_blank" rel="noreferrer" className="text-sky-600 underline hover:text-sky-700 dark:text-sky-400">View</a>
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
