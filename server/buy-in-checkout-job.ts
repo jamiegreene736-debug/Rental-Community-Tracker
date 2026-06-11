@@ -15,10 +15,34 @@
 
 import { storage } from "./storage";
 import { bookVrboUnitViaSidecar, getHeartbeat } from "./vrbo-sidecar-queue";
-import { aliasPrefixForGuest, createSimpleLoginAlias, extractSimpleLoginAliasEmail } from "./simplelogin";
+import { createSimpleLoginAlias, extractSimpleLoginAliasEmail } from "./simplelogin";
 
 // Operator's fixed VRBO traveler phone for every buy-in (407 449 7941).
 export const BUYIN_BOOKING_PHONE = process.env.BUYIN_BOOKING_PHONE || "4074497941";
+
+// Per-GUEST booking email domain (operator, 2026-06-10). Each guest gets the
+// deterministic address firstname.lastname@emailprivaccy.com — a SimpleLogin
+// custom-domain alias that is NEVER deleted and whose received mail is stored in
+// that guest's portal inbox. Same guest (any unit / any booking) reuses the same
+// address + inbox. Spelled exactly as the operator gave it (double-c).
+export const BUYIN_TRAVELER_EMAIL_DOMAIN = process.env.BUYIN_TRAVELER_EMAIL_DOMAIN || "emailprivaccy.com";
+
+function sanitizeNamePart(s: string | null | undefined): string {
+  return String(s ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+// firstname.lastname (operator scheme). Falls back gracefully for single-name
+// guests. The "." separator matches the operator's example jamie.greene.
+export function guestEmailLocalPart(firstName: string | null | undefined, lastName: string | null | undefined): string {
+  const f = sanitizeNamePart(firstName);
+  const l = sanitizeNamePart(lastName);
+  return [f, l].filter(Boolean).join(".") || "guest";
+}
 
 type CheckoutStatus = "queued" | "running" | "awaiting_payment" | "completed" | "failed";
 const TERMINAL = new Set<CheckoutStatus>(["completed", "failed"]);
@@ -180,22 +204,31 @@ async function runCheckoutJob(job: CheckoutJob): Promise<void> {
     setStatus(job, "running", "Creating a unique booking email for this unit…");
     await storage.updateBuyIn(job.buyInId, { bookingStatus: "in_progress", bookingError: null });
 
-    // Mint (or reuse) a UNIQUE per-unit email alias for the VRBO traveler email.
+    // Per-guest booking email: firstname.lastname@emailprivaccy.com. Deterministic,
+    // never deleted, reused across the guest's units/bookings (shared inbox).
     let email = buyIn.travelerEmail;
     if (!email) {
+      const localPart = guestEmailLocalPart(firstName, lastName);
+      email = `${localPart}@${BUYIN_TRAVELER_EMAIL_DOMAIN}`;
       try {
-        const prefix = `${aliasPrefixForGuest(`${firstName} ${lastName}`, job.reservationId)}.u${job.buyInId}`;
         const alias = await createSimpleLoginAlias({
-          prefix,
+          prefix: localPart,
+          domain: BUYIN_TRAVELER_EMAIL_DOMAIN,
           guestName: `${firstName} ${lastName}`.trim(),
-          note: `Buy-in checkout · unit ${job.buyInId} · reservation ${job.reservationId}`,
+          note: `Buy-in guest inbox · ${firstName} ${lastName} · reservation ${job.reservationId}`,
         });
-        email = extractSimpleLoginAliasEmail(alias);
+        email = extractSimpleLoginAliasEmail(alias) || email;
       } catch (e: any) {
-        throw new Error(`Could not create the unit's booking email alias: ${String(e?.message ?? e)}`);
+        // Same guest already has this address → reuse it (the address is
+        // deterministic, so we already know it). Any OTHER failure (e.g. the
+        // domain isn't a verified SimpleLogin custom domain) is fatal.
+        const msg = String(e?.message ?? e).toLowerCase();
+        if (!/already|in use|exist|duplicate|taken/.test(msg)) {
+          throw new Error(`Could not create the guest booking email (${email}): ${String(e?.message ?? e)}`);
+        }
       }
     }
-    if (!email) throw new Error("Could not resolve a traveler email alias for this unit");
+    if (!email) throw new Error("Could not resolve a guest booking email for this unit");
     job.travelerEmail = email;
     await storage.updateBuyIn(job.buyInId, { travelerEmail: email });
 

@@ -300,6 +300,37 @@ export const insertBuyInEmailSchema = createInsertSchema(buyInEmails).omit({
 export type InsertBuyInEmail = z.infer<typeof insertBuyInEmailSchema>;
 export type BuyInEmail = typeof buyInEmails.$inferSelect;
 
+// Per-guest booking inbox (operator, 2026-06-10): every message received at a
+// guest's firstname.lastname@emailprivaccy.com booking address is stored here,
+// keyed by aliasEmail, kept forever (independent of buy_in_emails, which is
+// vendor/PM comms keyed by reservation). Populated by the inbound email webhook
+// when a message is addressed to a guest booking alias.
+export const guestInboxMessages = pgTable("guest_inbox_messages", {
+  id: serial("id").primaryKey(),
+  aliasEmail: text("alias_email").notNull(), // the guest address = the inbox key (lowercased)
+  guestName: text("guest_name"),
+  buyInId: integer("buy_in_id"), // best-effort attribution to the unit this address books
+  reservationId: text("reservation_id"), // best-effort
+  direction: text("direction").notNull().default("inbound"),
+  fromEmail: text("from_email").notNull(),
+  toEmail: text("to_email").notNull(),
+  subject: text("subject").notNull(),
+  body: text("body").notNull(),
+  attachmentsJson: text("attachments_json"),
+  providerMessageId: text("provider_message_id"),
+  rawPayload: text("raw_payload"),
+  receivedAt: timestamp("received_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertGuestInboxMessageSchema = createInsertSchema(guestInboxMessages).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertGuestInboxMessage = z.infer<typeof insertGuestInboxMessageSchema>;
+export type GuestInboxMessage = typeof guestInboxMessages.$inferSelect;
+
 export const rentalAgreements = pgTable("rental_agreements", {
   id: serial("id").primaryKey(),
   token: text("token").notNull(),

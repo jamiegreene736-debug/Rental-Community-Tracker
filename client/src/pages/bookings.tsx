@@ -4441,6 +4441,84 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
   );
 }
 
+// ── Per-guest booking inbox (firstname.lastname@emailprivaccy.com) ───────────
+// Reads the messages received at this unit's guest booking address (VRBO
+// confirmation, host messages) — stored forever in the portal. Shows once the
+// unit has a booking email.
+type GuestInboxMessageClient = {
+  id: number;
+  subject: string;
+  fromEmail: string;
+  toEmail: string;
+  body: string;
+  receivedAt: string;
+};
+
+function GuestInboxButton({ buyIn }: { buyIn: BuyIn }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<{ aliasEmail: string | null; guestName: string | null; messages: GuestInboxMessageClient[] } | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    apiGetJson<{ aliasEmail: string | null; guestName: string | null; messages: GuestInboxMessageClient[] }>(`/api/guest-inbox?buyInId=${buyIn.id}`)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData({ aliasEmail: buyIn.travelerEmail ?? null, guestName: null, messages: [] }); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, buyIn.id]);
+
+  const email = buyIn.travelerEmail;
+  if (!email) return null; // only once the unit has a booking email
+  const count = data?.messages.length ?? 0;
+
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => setOpen(true)}
+        title={`Guest inbox — ${email}`}
+        data-testid={`button-guest-inbox-${buyIn.id}`}
+      >
+        <Mail className="h-3.5 w-3.5 mr-1" /> Inbox{count ? ` (${count})` : ""}
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Guest inbox{data?.guestName ? ` — ${data.guestName}` : ""}</DialogTitle>
+            <DialogDescription>{email}</DialogDescription>
+          </DialogHeader>
+          {loading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground py-6">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : !data || data.messages.length === 0 ? (
+            <div className="text-sm text-muted-foreground py-6">
+              No messages yet. VRBO confirmations and host messages sent to {email} will appear here and are kept forever.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {data.messages.map((m) => (
+                <div key={m.id} className="rounded border p-3 text-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium truncate">{m.subject}</span>
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">From: {m.fromEmail}</div>
+                  <div className="mt-2 whitespace-pre-wrap break-words text-sm">{String(m.body || "").slice(0, 6000)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 function LastScanCell({ reservation, last, scanning }: { reservation: GuestyReservation; last?: AutoFillJobStatus; scanning?: boolean }) {
   const total = reservation.slotsTotal ?? 0;
   const filled = reservation.slotsFilled ?? 0;
@@ -9618,6 +9696,8 @@ export default function Bookings() {
                                   {/* Book this attached unit on VRBO (automated up to payment;
                                       operator enters the card in the yellow-bordered popup). */}
                                   {slot.buyIn && <BuyThisUnitInButton buyIn={slot.buyIn} reservation={r} />}
+                                  {/* Per-guest booking inbox (firstname.lastname@emailprivaccy.com). */}
+                                  {slot.buyIn && <GuestInboxButton buyIn={slot.buyIn} />}
                                   {slot.buyIn.airbnbListingUrl && (
                                     <Button
                                       size="sm"
