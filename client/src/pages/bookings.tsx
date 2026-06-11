@@ -14843,12 +14843,22 @@ function CancellationNoticeDialog({
       : "the booking channel";
   const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
   const firstName = guestName.split(/\s+/)[0] || "there";
+  // Only promise a refund when Guesty shows payment was actually collected
+  // (totalPaid > 0). If nothing has been paid there is nothing to refund, so the
+  // refund/receipt/no-fees language is omitted entirely.
+  const hasTakenPayment = asMoneyNumber(reservation.money?.totalPaid) > 0;
+  const refundBlock = hasTakenPayment
+    ? " Because payment has already been collected, we are issuing you a full refund, and no cancellation fees will be imposed. "
+      + "You will receive a receipt once the refund has been processed, which will happen within 24-48 hours."
+    : "";
   const defaultMessage =
     `Hi ${firstName},\n\n`
     + "I'm so sorry, but there is an issue with the unit and we need to cancel this booking. "
-    + "I sincerely apologize for the inconvenience and any disruption to your plans. "
+    + "I sincerely apologize for the inconvenience and any disruption to your plans."
+    + refundBlock + " "
     + "Please reach out with any questions and we'll help however we can.\n\n"
-    + "Thank you for your understanding.";
+    + "Thank you for your understanding.\n\n"
+    + "John Carpenter";
   const [message, setMessage] = useState(defaultMessage);
   const [sent, setSent] = useState(false);
 
