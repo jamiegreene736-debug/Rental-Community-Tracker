@@ -9783,6 +9783,68 @@ Requirements:
     }
   });
 
+  // Operator clicks "Send cancellation notice" on a buy-in search result: draft a
+  // predefined apology, send it to the guest through the channel they booked with
+  // (same Guesty conversation plumbing as the relocation message), and record an
+  // INTERNAL flag that we notified them. This deliberately does NOT cancel the
+  // Guesty reservation — it's a guest notification plus a durable "sent" marker.
+  app.post("/api/operations/send-cancellation-notice", async (req, res) => {
+    try {
+      const reservationId = normalizeAlternativeText(req.body?.reservationId, 120);
+      const channel = normalizeAlternativeText(req.body?.channel, 40) || null;
+      const body = sanitizeForChatText(String(req.body?.body ?? ""), { maxLength: 4_000 }).trim();
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      if (!body) return res.status(400).json({ error: "message body required" });
+
+      const conversation = await findGuestyConversationForReservation(reservationId);
+      if (!conversation) return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
+
+      // The conversation's module carries the channel the guest booked through,
+      // so Guesty routes to VRBO/Booking.com/Airbnb. If the channel-typed send is
+      // rejected, retry once over email so the notice still reaches the guest.
+      const sendGuestMessage = (mod: Record<string, unknown>) =>
+        guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversation.id)}/send-message`, {
+          body,
+          module: mod,
+        });
+      try {
+        await sendGuestMessage(conversation.module);
+      } catch (sendErr: any) {
+        if ((conversation.module?.type ?? "email") === "email") throw sendErr;
+        console.error("[cancellation-notice] channel send failed, retrying over email:", sendErr?.message ?? sendErr);
+        await sendGuestMessage({ type: "email" });
+      }
+      // Internal flag ONLY — we intentionally do not change the reservation status.
+      await storage.recordCancellationNoticeSent(reservationId, channel, body).catch((e) =>
+        console.error("[cancellation-notice] mark-sent failed:", e?.message ?? e));
+      return res.json({ ok: true, conversationId: conversation.id });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to send cancellation notice", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Batch "was a cancellation notice already sent?" status for the bookings list,
+  // so each row can show a durable "Cancellation notice sent ✓" badge.
+  app.post("/api/operations/cancellation-notice-status", async (req, res) => {
+    try {
+      const raw = Array.isArray(req.body?.reservationIds) ? req.body.reservationIds : [];
+      const reservationIds = Array.from(new Set<string>(
+        raw.map((id: unknown) => normalizeAlternativeText(id, 120)).filter(Boolean),
+      )).slice(0, 300);
+      const statuses: Record<string, { sentAt: Date | null; channel: string | null } | null> = {};
+      for (const id of reservationIds) statuses[id] = null;
+      if (reservationIds.length > 0) {
+        const rows = await storage.getCancellationNoticesByReservationIds(reservationIds);
+        for (const row of rows) {
+          statuses[row.reservationId] = { sentAt: row.sentAt, channel: row.channel ?? null };
+        }
+      }
+      return res.json({ statuses });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to read cancellation notice status", message: err?.message ?? String(err) });
+    }
+  });
+
   // Batch "have we sent this guest a receipt?" status for the bookings list.
   // Given reservation IDs, returns per reservation the most recent SENT receipt
   // (kind/amount/date/channel/open-tracking) + counts, so a row can show a

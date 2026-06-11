@@ -369,6 +369,16 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured auto_fill_loss_options table");
 
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS cancellation_notices (
+      reservation_id text PRIMARY KEY,
+      channel text,
+      message text,
+      sent_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured cancellation_notices table");
+
   // Guest payment/refund receipts (auto-sent). Created here too so a fresh
   // Railway deploy works before `npm run db:push` runs. UNIQUE on token (the
   // /receipt/:token durable page) and dedup_key (one receipt per transaction).

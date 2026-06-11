@@ -1055,6 +1055,19 @@ export const autoFillLossOptions = pgTable("auto_fill_loss_options", {
 });
 export type AutoFillLossOptions = typeof autoFillLossOptions.$inferSelect;
 
+// Internal "we told the guest we're cancelling" flag, keyed by reservation.
+// Set when the operator clicks "Send cancellation notice" on the Operations
+// tab — it sends a guest message through the booking channel and records that
+// it went out. It deliberately does NOT cancel the Guesty reservation; it's a
+// notification + an internal marker so the row shows a durable "sent" badge.
+export const cancellationNotices = pgTable("cancellation_notices", {
+  reservationId: text("reservation_id").primaryKey(),
+  channel: text("channel"),
+  message: text("message"),
+  sentAt: timestamp("sent_at").defaultNow().notNull(),
+});
+export type CancellationNotice = typeof cancellationNotices.$inferSelect;
+
 // ── Quo / OpenPhone SMS messages mirrored into the Guesty inbox ──
 // Guesty remains the reservation + conversation source of truth. These rows
 // store SMS messages sent/received through the 808 Quo number and attach them
