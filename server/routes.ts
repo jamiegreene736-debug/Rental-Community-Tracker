@@ -11040,6 +11040,31 @@ Requirements:
     }
   });
 
+  // POST /api/simplelogin/test-alias  body: { prefix?, guestName? }
+  // Diagnostic (operator-only, portal-gated): mint a REAL alias on the guest
+  // booking domain (emailprivaccy.com) via the EXACT booking code path, to confirm
+  // the custom domain + mailbox + API key are wired before relying on it in a real
+  // booking. Returns the created address + the mailbox(es) it forwards to. The
+  // alias persists in SimpleLogin (delete it there if unwanted).
+  app.post("/api/simplelogin/test-alias", async (req, res) => {
+    try {
+      const { createSimpleLoginAlias, extractSimpleLoginAliasEmail } = await import("./simplelogin");
+      const { BUYIN_TRAVELER_EMAIL_DOMAIN } = await import("./buy-in-checkout-job");
+      const prefix = (String(req.body?.prefix ?? "diagnostic.test").trim().toLowerCase().replace(/[^a-z0-9.]+/g, "")) || "diagnostic.test";
+      const guestName = String(req.body?.guestName ?? "Diagnostic Test").trim() || null;
+      const alias = await createSimpleLoginAlias({ prefix, domain: BUYIN_TRAVELER_EMAIL_DOMAIN, guestName, note: "diagnostic test alias (buy-in email setup check)" });
+      const email = extractSimpleLoginAliasEmail(alias) || `${prefix}@${BUYIN_TRAVELER_EMAIL_DOMAIN}`;
+      const forwardsTo = Array.isArray(alias?.mailboxes)
+        ? alias.mailboxes.map((m: any) => m?.email).filter(Boolean)
+        : alias?.mailbox?.email
+          ? [alias.mailbox.email]
+          : [];
+      res.json({ ok: true, email, domain: BUYIN_TRAVELER_EMAIL_DOMAIN, onCorrectDomain: email.toLowerCase().endsWith(`@${BUYIN_TRAVELER_EMAIL_DOMAIN.toLowerCase()}`), forwardsTo });
+    } catch (err: any) {
+      res.status(400).json({ ok: false, error: err?.message ?? String(err) });
+    }
+  });
+
   app.get("/api/bookings/:reservationId/buy-in-communications", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
