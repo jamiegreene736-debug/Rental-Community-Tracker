@@ -43,6 +43,31 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-10/11 (attach proximity gate: cross-resort city-wide pairs BLOCKED without real
+  evidence; commits c681791 + aa6ec2a, deployed + live-verified): Operator caught the
+  per-slot city fallback attaching a Puamana 3BR + a Wyndham Ka Eo Kai 2BR (different
+  Princeville resorts) to one booking as a "4 minute walk… within Mauna Kai Princeville".
+  TWO holes in estimateAttachedBuyInProximity (server/routes.ts), confirmed live:
+  (1) with no saved address, the guard geocodes TITLE-built guesses; on geocode failure
+  walkBetween falls back to fallbackWalkForResort(configured resort) =
+  RESORT_DEFAULT_WALK_MINUTES["Mauna Kai Princeville"] = 4 → gate passed on fabricated
+  minutes; (2) after the first fix, the geocoder RESOLVED the title-soup strings and
+  returned a plausible 870ft geocoded walk — fuzzy pins, still not real evidence (the
+  two resorts may genuinely be adjacent on Wyllie Rd, but title-geocodes can land
+  anywhere). RULE NOW (LOAD-BEARING): a CITY-WIDE pair passes the gate only with
+  (a) a geocoded walk between two REAL addresses (saved/scraped), or (b) title
+  community evidence via titlesShareWalkableCommunity (shared/city-vrbo-combo.ts —
+  sharedResortPhraseKeys intersection OR curated WALKABLE_COMPLEX_CLUSTERS adjacency).
+  Footprint fallbacks + title-guess geocodes no longer authorize cross-resort attaches;
+  resort-scoped attaches keep the old optimistic fallback (their search scope constrains
+  location). 409 confidence "unverified-cross-resort". 6 unit tests incl. the exact
+  incident pair (combo suite 69/0). Remediated: detached the mispair twice (390/391,
+  392/393), re-ran under the fixed gate → honest 0-filled terminal ("left empty so
+  you're not committed to a loss; searched 8 cities"). If the operator ever WANTS
+  Puamana + Ka Eo Kai treated as walkable-adjacent, add a curated
+  WALKABLE_COMPLEX_CLUSTERS group (may also need KAUAI_COMPLEX_DICTIONARY entries for
+  both names so dict: canonicals exist).
+
 - 2026-06-10 (buy-in searches SURVIVE deploys: durable scan outcome + boot resume;
   commits 121caa4 / 97fe102 / e91565a, all deployed + live-verified): Operator hit two
   incidents the same day. (1) Saw the bulk queue "look into individual VRBO listings" —
