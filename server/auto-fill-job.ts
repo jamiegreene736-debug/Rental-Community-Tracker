@@ -1199,6 +1199,22 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
           { scopeCategory: "home" },
           (comboCost) => { const v = gate(comboCost); return { acceptable: v.acceptable, profit: v.profit }; },
         );
+        // LAST-RESORT recall: when NO confirmed same-community combo filled the slots,
+        // surface the cheapest "community unconfirmed" combos (formed from generic-
+        // titled cheap units the gate can't cluster) as operator-click alternatives to
+        // VERIFY + attach. Only PROFITABLE ones — an unconfirmed loss combo has no value.
+        if (remainingSlots().length >= 2) {
+          let u = 0;
+          for (const pair of (payload?.unconfirmedPairs ?? [])) {
+            if (!pair || !Array.isArray(pair.picks) || pair.picks.length < 2) continue;
+            const cost = (pair.picks as any[]).reduce((s, pk) => s + (Number(pk?.totalPrice) || 0), 0);
+            if (!(cost > 0)) continue;
+            const v = gate(cost);
+            if (!v.acceptable) continue;
+            u += 1;
+            pushAlternativeComboOption(job, `${payload?.citySearchTerm ?? "city"} · unconfirmed ${u}`, pair, cost, v.profit, { scopeCategory: "home" }, true);
+          }
+        }
       } catch (e: any) {
         setEscalation(job, { homeCity: "skipped" });
       }
@@ -1610,6 +1626,7 @@ function pushAlternativeComboOption(
   comboCost: number,
   profit: number,
   scope: LossComboScope,
+  unconfirmedCommunity = false,
 ): void {
   if (!pair || !Array.isArray(pair.picks) || pair.picks.length < 2) return;
   const urls = (pair.picks as any[]).map((p) => String(p?.url ?? "")).filter(Boolean).sort();
@@ -1637,7 +1654,12 @@ function pushAlternativeComboOption(
     // math (which verify against the configured resort and would reject a different-
     // complex pair) and renders them in a dedicated "other combos in this pool" panel.
     isAlternative: true,
-    note: `Another walkable same-community combo from this pool ($${Math.round(comboCost).toLocaleString()}). Attach to use it instead of the current pick.`,
+    // Carried to the client so the alternatives panel labels it "⚠ community
+    // unconfirmed" and prompts the operator to verify walkability before booking.
+    unconfirmedCommunity: unconfirmedCommunity || undefined,
+    note: unconfirmedCommunity
+      ? `⚠ Community UNCONFIRMED — cheapest combo in this pool ($${Math.round(comboCost).toLocaleString()}), but the units' generic titles meant we could NOT confirm they're in the same walkable community. Verify they're close enough before booking.`
+      : `Another walkable same-community combo from this pool ($${Math.round(comboCost).toLocaleString()}). Attach to use it instead of the current pick.`,
     picks,
     scopeCategory: scope.scopeCategory,
     driveMinutes: scope.driveMinutes,
