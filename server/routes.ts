@@ -13149,6 +13149,135 @@ Requirements:
     }
   });
 
+  // ── Verify community for an UNCONFIRMED combo (operator-triggered) ─────────
+  // The bulk/auto-fill ladder surfaces generic-titled VRBO units as "community
+  // unconfirmed" alternatives (suggestUnconfirmedCityVrboComboPairs): cheap pairs
+  // the same-community MATCHER can't cluster because the titles name no complex.
+  // This endpoint is the operator-click ENRICH half — it opens each unit's VRBO
+  // detail page (real local Chrome via the sidecar), harvests the listing
+  // DESCRIPTION prose (VRBO hides coords/address for most Kauai listings —
+  // AGENTS #8/#9, so the description is the only reliable same-community signal),
+  // resolves each unit's complex from that prose against the dictionary, and
+  // returns a same-community / walkable verdict + photos + a description excerpt
+  // so the operator can eyeball walkability before booking. OPERATOR-ONLY: this
+  // is the only path that opens individual VRBO listings for community-checking;
+  // the unattended queue must NOT (commit 121caa4 — keeps the bulk HOME-CITY pass
+  // from driving the sidecar into per-listing detail pages).
+  app.post("/api/operations/verify-combo-community", async (req: Request, res: Response) => {
+    try {
+      const rawUnits = Array.isArray(req.body?.units) ? req.body.units : [];
+      const units = rawUnits
+        .map((u: any) => ({
+          url: typeof u?.url === "string" ? u.url.trim() : "",
+          title: typeof u?.title === "string" ? u.title.trim() : "",
+        }))
+        .filter((u: { url: string }) => /^https?:\/\//i.test(u.url));
+      if (units.length < 2) {
+        return res.status(400).json({ error: "Provide at least 2 unit { url, title } objects to verify" });
+      }
+      if (units.length > 4) units.length = 4; // a combo is at most a few slots
+      const {
+        resolveUnitCommunityFromText,
+        verifyResolvedUnitsShareCommunity,
+      } = await import("../shared/city-vrbo-combo");
+      const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
+
+      const scraped = await Promise.all(
+        units.map(async (u: { url: string; title: string }) => {
+          try {
+            const r = await scrapeVrboPhotosViaSidecar({
+              url: u.url,
+              maxPhotos: 8,
+              walletBudgetMs: 90_000,
+              pollIntervalMs: 1500,
+            });
+            const descriptionText = String((r as { descriptionText?: string | null }).descriptionText ?? "");
+            const resolved = resolveUnitCommunityFromText({
+              title: u.title,
+              descriptionText,
+              complexName: r.complexName,
+            });
+            return {
+              url: u.url,
+              title: u.title,
+              scrapeOk: r.workerOnline && (r.photos.length > 0 || !!descriptionText || !!r.complexName),
+              workerOnline: r.workerOnline,
+              reason: r.reason,
+              photos: r.photos.slice(0, 6),
+              sleeps: r.sleeps,
+              bedText: r.bedText || "",
+              complexName: r.complexName,
+              descriptionExcerpt: descriptionText.slice(0, 600),
+              resolvedCommunity: resolved.label,
+              dictCanonicals: resolved.dictCanonicals,
+              communityKeys: resolved.keys,
+            };
+          } catch (e: any) {
+            return {
+              url: u.url,
+              title: u.title,
+              scrapeOk: false,
+              workerOnline: false,
+              reason: e?.message ?? String(e),
+              photos: [] as string[],
+              sleeps: null as number | null,
+              bedText: "",
+              complexName: null as string | null,
+              descriptionExcerpt: "",
+              resolvedCommunity: null as string | null,
+              dictCanonicals: [] as string[],
+              communityKeys: [] as string[],
+            };
+          }
+        }),
+      );
+
+      // Overall verdict across all unit pairs: the WEAKEST positive wins (so a
+      // 3-unit combo is "same-community" only if every pair shares one); any
+      // pair that resolves to two DISTINCT communities makes it "different";
+      // otherwise "unresolved" (description never named the complex — common).
+      let sawSame = false;
+      let sawAdjacent = false;
+      let sawDifferent = false;
+      let sawResolvable = false;
+      for (let i = 0; i < scraped.length; i += 1) {
+        for (let j = i + 1; j < scraped.length; j += 1) {
+          const v = verifyResolvedUnitsShareCommunity(
+            { keys: scraped[i].communityKeys, dictCanonicals: scraped[i].dictCanonicals },
+            { keys: scraped[j].communityKeys, dictCanonicals: scraped[j].dictCanonicals },
+          );
+          if (v === "same-community") { sawSame = true; sawResolvable = true; }
+          else if (v === "walkable-adjacent") { sawAdjacent = true; sawResolvable = true; }
+          else if (v === "different") { sawDifferent = true; sawResolvable = true; }
+        }
+      }
+      const verdict: "same-community" | "walkable-adjacent" | "different" | "unresolved" =
+        sawDifferent ? "different"
+        : sawSame && !sawAdjacent ? "same-community"
+        : (sawSame || sawAdjacent) ? "walkable-adjacent"
+        : "unresolved";
+
+      const labels = Array.from(
+        new Set(scraped.map((u) => u.resolvedCommunity).filter((x): x is string => !!x)),
+      );
+      const summary =
+        verdict === "same-community"
+          ? `Both units resolve to the same community (${labels.join(", ") || "matched"}). Walkable — safe to book together.`
+          : verdict === "walkable-adjacent"
+          ? `Units are in adjacent, curated-walkable communities (${labels.join(" + ")}). Likely walkable — confirm on the map before booking.`
+          : verdict === "different"
+          ? `Units resolve to DIFFERENT communities (${labels.join(" vs ")}). Not confirmed walkable — open both listings before booking.`
+          : !sawResolvable && scraped.some((u) => !u.scrapeOk)
+          ? "Could not read enough listing detail to confirm the community (VRBO hides location). Open both listings and verify the map yourself."
+          : "Neither description names a recognizable complex (VRBO hides location). Can't auto-confirm — open both listings and verify walkability yourself.";
+
+      return res.json({ ok: true, verdict, summary, communities: labels, units: scraped });
+    } catch (e: any) {
+      console.error("[verify-combo-community] error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   // ── Nearby-city combo expansion (background job + polling) ────────────────
   // When a >=2-unit combo booking's resort + home-city VRBO scans both fail to
   // surface a same-community pair, the client starts this job, which widens the

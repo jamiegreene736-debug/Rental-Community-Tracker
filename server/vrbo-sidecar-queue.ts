@@ -444,6 +444,11 @@ export type SidecarVrboPhotoScrapeResult = {
   lng?: number | null;
   complexName?: string | null;
   streetAddress?: string | null;
+  // Listing title + og:description + "About this property" body harvested from the
+  // detail page. VRBO hides coords/address for most Kauai listings, so this prose is
+  // the only reliable same-community signal — the server matches it against the
+  // complex dictionary to resolve a generic-titled unit's community on operator demand.
+  descriptionText?: string | null;
 };
 
 export type SidecarPmUrlCheckResult = {
@@ -2499,6 +2504,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   lng: number | null;
   complexName: string | null;
   streetAddress: string | null;
+  descriptionText: string | null;
   workerOnline: boolean;
   durationMs: number;
   reason: string;
@@ -2512,6 +2518,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
       lng: null,
       complexName: null,
       streetAddress: null,
+      descriptionText: null,
       workerOnline: false,
       durationMs: 0,
       reason: "valid url required",
@@ -2539,6 +2546,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
     lng: Number.isFinite(lng) ? lng : null,
     complexName: scraped?.complexName ?? null,
     streetAddress: scraped?.streetAddress ?? null,
+    descriptionText: scraped?.descriptionText ?? null,
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
