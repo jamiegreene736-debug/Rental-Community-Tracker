@@ -13166,14 +13166,29 @@ Requirements:
   app.post("/api/operations/verify-combo-community", async (req: Request, res: Response) => {
     try {
       const rawUnits = Array.isArray(req.body?.units) ? req.body.units : [];
+      // SSRF guard: this endpoint hands each URL to the sidecar's local Chrome
+      // (page.goto), so it MUST only accept vrbo.com listing URLs — the combo
+      // picks are always VRBO units. Restricting here (not in the daemon, which
+      // navigates whatever it's handed) matches the codebase pattern
+      // (isVrboAlternativeUrl, line ~7844) and stops an attacker pointing the
+      // browser at localhost / RFC-1918 / metadata endpoints. De-dupe by URL too
+      // so a relisted pair can't drive two scrapes of the same page.
+      const isVrboListingUrl = (url: string): boolean => /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
+      const seenUrls = new Set<string>();
       const units = rawUnits
         .map((u: any) => ({
           url: typeof u?.url === "string" ? u.url.trim() : "",
           title: typeof u?.title === "string" ? u.title.trim() : "",
         }))
-        .filter((u: { url: string }) => /^https?:\/\//i.test(u.url));
+        .filter((u: { url: string }) => {
+          if (!isVrboListingUrl(u.url)) return false;
+          const key = u.url.toLowerCase();
+          if (seenUrls.has(key)) return false;
+          seenUrls.add(key);
+          return true;
+        });
       if (units.length < 2) {
-        return res.status(400).json({ error: "Provide at least 2 unit { url, title } objects to verify" });
+        return res.status(400).json({ error: "Provide at least 2 distinct vrbo.com unit { url, title } objects to verify" });
       }
       if (units.length > 4) units.length = 4; // a combo is at most a few slots
       const {

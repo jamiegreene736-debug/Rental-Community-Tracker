@@ -467,6 +467,26 @@ check("guard: generic title vs named complex is NOT same-community",
     "enrich verdict: one side unresolved → unresolved",
     verifyResolvedUnitsShareCommunity(a, c) === "unresolved",
   );
+
+  // ── PRECISION: single-word dictionary triggers in STREET names must NOT resolve ──
+  // "near Kiahuna Road" is a landmark, not the Kiahuna Plantation complex. Before the
+  // street-qualifier strip this falsely resolved to dict:kiahuna plantation and (via
+  // WALKABLE_COMPLEX_CLUSTERS with poipu kai) produced a bogus "walkable-adjacent".
+  const streetOnly = resolveUnitCommunityFromText({ title: "Beautiful Ocean View Home", descriptionText: "A lovely home near Kiahuna Road with easy beach access." });
+  check("enrich precision: a bare 'Kiahuna Road' street mention does NOT resolve to a complex", streetOnly.label === null, streetOnly.label);
+  check(
+    "enrich precision: Poipu Kai unit + 'near Kiahuna Road' unit is NOT falsely walkable-adjacent",
+    verifyResolvedUnitsShareCommunity(a, streetOnly) === "unresolved",
+  );
+  // The strip must be NARROW — legit multi-word phrases that happen to precede a
+  // street type still resolve.
+  const poipuKaiDrive = resolveUnitCommunityFromText({ title: "Condo", descriptionText: "Our unit sits right on Poipu Kai Drive steps from the pools." });
+  check("enrich precision: 'Poipu Kai Drive' STILL resolves to poipu kai (multi-word phrase preserved)", poipuKaiDrive.dictCanonicals.includes("poipu kai"), poipuKaiDrive.dictCanonicals);
+  const kiahunaPlantationDrive = resolveUnitCommunityFromText({ title: "Condo", descriptionText: "Located along Kiahuna Plantation Drive near the golf course." });
+  check("enrich precision: 'Kiahuna Plantation Drive' STILL resolves to kiahuna plantation", kiahunaPlantationDrive.dictCanonicals.includes("kiahuna plantation"), kiahunaPlantationDrive.dictCanonicals);
+  // A genuine "Kiahuna Plantation" prose mention (no street type) is unaffected.
+  const kiahunaReal = resolveUnitCommunityFromText({ title: "Condo", descriptionText: "Stay at Kiahuna Plantation with resort grounds and tennis." });
+  check("enrich precision: a genuine 'Kiahuna Plantation' mention still resolves", kiahunaReal.dictCanonicals.includes("kiahuna plantation"));
 }
 
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
