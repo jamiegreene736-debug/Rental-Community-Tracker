@@ -316,5 +316,59 @@ check("plural: combo[0] is the cheaper 4+2 split", !!splitDivCombos[0] && brSet(
 check("plural: combo[1] is the 3+3 split (different split, URL-disjoint)",
   !!splitDivCombos[1] && [...brSet(splitDivCombos[1])].every((b) => b === 3) && noDupUrls(splitDivCombos), splitDivCombos[1]?.picks?.map((p) => p.bedrooms));
 
+// ── 7) SAME-UNIT GUARD inside the slot filler (incident 2026-06-11) ──────────
+// The LIVE Cecilio Marquez/Princeville scan suggested vrbo.com/4650285 (br=3) +
+// vrbo.com/4650292 (br=2) as one combo — the SAME relisted broker unit with
+// byte-identical titles (modulo a double space) and identical $8,234 totals.
+// URL dedup can't catch a relist; the title-identity guard must apply in
+// pickCheapestPlan itself (strong text clusters had NO same-unit guard).
+
+// 7-1) THE INCIDENT PAIR, verbatim: two same-titled records must NOT pair with
+// each other; the genuine distinct partner in the SAME cluster pairs instead.
+const incidentPool = [
+  L("https://www.vrbo.com/4650285", "Wyndham Bali Hai Villas |  5 2BR Villas Sleeps 30!", 3, 8234, "Wyndham Bali Hai"),
+  L("https://www.vrbo.com/4650292", "Wyndham Bali Hai Villas | 5 2BR Villas Sleeps 30!", 2, 8234, "Wyndham Bali Hai"),
+  L("https://www.vrbo.com/4116793", "Wyndham Bali Hai | 2BR Suite with Resort Access", 2, 1706, "Wyndham Bali Hai"),
+];
+const incidentPair = suggestCityVrboComboPair(incidentPool, [3, 2], 7);
+check("same-unit: identical-title records do not pair with each other",
+  !incidentPair || !(
+    incidentPair.picks.some((p) => p.url === "https://www.vrbo.com/4650285") &&
+    incidentPair.picks.some((p) => p.url === "https://www.vrbo.com/4650292")
+  ), incidentPair?.picks?.map((p) => p.url));
+check("same-unit: the cluster's genuine distinct 2BR partners the 3BR instead",
+  !!incidentPair && incidentPair.picks.some((p) => p.url === "https://www.vrbo.com/4116793"),
+  incidentPair?.picks?.map((p) => `${p.bedrooms}BR ${p.url}`));
+
+// 7-2) NO distinct partner anywhere → NO pair (better empty than a phantom).
+const twinOnlyPool = [
+  L("https://www.vrbo.com/4650285", "Wyndham Bali Hai Villas |  5 2BR Villas Sleeps 30!", 3, 8234, "Wyndham Bali Hai"),
+  L("https://www.vrbo.com/4650292", "Wyndham Bali Hai Villas | 5 2BR Villas Sleeps 30!", 2, 8234, "Wyndham Bali Hai"),
+];
+check("same-unit: twins with no third unit → null (no phantom combo)",
+  suggestCityVrboComboPair(twinOnlyPool, [3, 2], 7) === null,
+  suggestCityVrboComboPair(twinOnlyPool, [3, 2], 7));
+
+// 7-3) PLURAL inherits the guard: the phantom must not appear in ANY combo.
+const incidentCombos = suggestCityVrboComboPairs(incidentPool, [3, 2], 7, 5);
+check("same-unit: plural never surfaces the twin-vs-twin combo",
+  incidentCombos.every((c) =>
+    !(c.picks.some((p) => p.url === "https://www.vrbo.com/4650285") &&
+      c.picks.some((p) => p.url === "https://www.vrbo.com/4650292"))),
+  incidentCombos.map((c) => c.picks.map((p) => p.url)));
+
+// 7-4) PREFIX relists ("…Ocean View" vs "…Ocean View Updated") are also
+// same-unit; a distinct unit with a different descriptor still pairs.
+const prefixPool = [
+  L("https://vrbo.com/px1", "Kiahuna Plantation Ocean View", 3, 3000),
+  L("https://vrbo.com/px2", "Kiahuna Plantation Ocean View Updated", 2, 2000), // prefix relist of px1
+  L("https://vrbo.com/px3", "Kiahuna Plantation Garden Wing", 2, 2400),
+];
+const prefixPair = suggestCityVrboComboPair(prefixPool, [3, 2], 7);
+check("same-unit: prefix-title relist skipped, distinct unit pairs",
+  !!prefixPair && prefixPair.picks.some((p) => p.url === "https://vrbo.com/px3") &&
+    !prefixPair.picks.some((p) => p.url === "https://vrbo.com/px2"),
+  prefixPair?.picks?.map((p) => p.url));
+
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

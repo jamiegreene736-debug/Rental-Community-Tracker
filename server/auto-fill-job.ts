@@ -1312,8 +1312,15 @@ function doneMessage(job: AutoFillJob): string {
     // under-reports (e.g. "5" when 9 nearby + home were searched).
     const nearbyScanned = (job.escalation.tierResults ?? []).filter((c) => c.status && c.status !== "pending").length;
     const citiesSearched = nearbyScanned + 1; // + the home city
-    if (job.gateEnabled && rejected.length > 0) {
-      const best = rejected.reduce((a, b) => (b.expectedProfit > a.expectedProfit ? b : a));
+    // "Best option" must come from a PRICED combo. The single-unit-city rollback
+    // records an informational comboCost:0/profit:0 sentinel ("no walkable combo
+    // for all units; detached lone unit"), and 0 beats every real negative-profit
+    // entry in this max-reduce — which printed the nonsense headline "Best option:
+    // … combo $0, est. profit $0" while a real $16k/-$10.6k option sat right
+    // below it (operator incident 2026-06-11, Cecilio Marquez/Princeville).
+    const rejectedPriced = rejected.filter((c) => c.comboCost > 0);
+    if (job.gateEnabled && rejectedPriced.length > 0) {
+      const best = rejectedPriced.reduce((a, b) => (b.expectedProfit > a.expectedProfit ? b : a));
       return `No profitable combination found (revenue ${usd(job.expectedRevenue)}). Best option: ${best.label} — combo ${usd(best.comboCost)}, est. profit ${usd(best.expectedProfit)}. Searched ${citiesSearched} ${citiesSearched === 1 ? "city" : "cities"} (home + nearby); left empty so you're not committed to a loss.`;
     }
     // Genuine no-combo (not a profit-gate rejection): surface what the scrape
