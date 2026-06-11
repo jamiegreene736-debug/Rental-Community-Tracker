@@ -134,6 +134,16 @@ app.get("/api/auth/session", (_req, res) => {
     },
     async () => {
       log(`serving on port ${port}`);
+      // Resume buy-in searches a redeploy killed mid-run (auto-fill rows +
+      // the bulk queue). Deferred a few seconds: the ladder self-calls over
+      // loopback HTTP, so the server must be fully listening and warmed, and
+      // boot-time schedulers below get first claim on the event loop. Gate:
+      // AUTO_FILL_RESUME=0 disables. See server/auto-fill-resume.ts.
+      setTimeout(() => {
+        void import("./auto-fill-resume")
+          .then((m) => m.resumeInterruptedAutoFillWork())
+          .catch((err) => console.error("[auto-fill-resume] boot resume failed:", err?.message ?? err));
+      }, 15_000);
       await cleanupStaleRuns();
       startWeeklyScheduler();
       startAutoApproveScheduler();

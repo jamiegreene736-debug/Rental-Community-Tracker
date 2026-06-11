@@ -1061,8 +1061,35 @@ export const autoFillLossOptions = pgTable("auto_fill_loss_options", {
   doneMessage: text("done_message"),
   error: text("error"),
   startedAt: timestamp("started_at"),
+  // Deploy-survival (2026-06-10): the full StartAutoFillInput persisted at job
+  // start so a search killed by a redeploy can be RESUMED on the next boot
+  // (server/auto-fill-resume.ts) instead of dying silently. jobId is preserved
+  // across the resume so an open client poller keeps working; owner
+  // ("row"/"bulk") lets the boot resume skip bulk-owned rows (the bulk queue
+  // resumes those itself); resumeAttempts caps restart loops (a job that keeps
+  // killing the server must not resurrect forever).
+  request: jsonb("request"),
+  jobId: text("job_id"),
+  owner: text("owner"),
+  resumeAttempts: integer("resume_attempts").default(0),
 });
 export type AutoFillLossOptions = typeof autoFillLossOptions.$inferSelect;
+
+// Durable snapshot of the (single) bulk buy-in queue so a Railway redeploy
+// mid-queue RESUMES instead of dying silently (deploys land every ~10 min from
+// concurrent sessions — observed killing a live queue 2026-06-10). The whole
+// BulkJob (incl. each item's self-contained _input) serializes to jsonb; resume
+// rebuilds it under the SAME id (open dialogs keep polling), re-queues the item
+// that was mid-flight, and skips already-terminal items. One queue at a time —
+// upsert prunes other rows.
+export const bulkAutoFillState = pgTable("bulk_auto_fill_state", {
+  id: text("id").primaryKey(),
+  status: text("status"),
+  state: jsonb("state"),
+  resumeAttempts: integer("resume_attempts").default(0),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type BulkAutoFillState = typeof bulkAutoFillState.$inferSelect;
 
 // Internal "we told the guest we're cancelling" flag, keyed by reservation.
 // Set when the operator clicks "Send cancellation notice" on the Operations

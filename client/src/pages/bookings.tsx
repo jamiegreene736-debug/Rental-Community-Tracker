@@ -1799,6 +1799,10 @@ function AutoFillJobPoller({
     const SUSPEND_GAP_MS = 30_000;
     let activeElapsedMs = 0;
     let lastTickAt = Date.now();
+    // Consecutive-404 window: a redeploy 404s this jobId until the server's boot
+    // resume re-registers it under the SAME id (~15s after listen). Reset on any
+    // successful poll.
+    let notFoundStreakMs = 0;
     const tick = async () => {
       if (cancelled || resolvedRef.current) return;
       const now = Date.now();
@@ -1813,6 +1817,7 @@ function AutoFillJobPoller({
       try {
         const data = await apiGetJson<AutoFillJobStatus>(`/api/operations/auto-fill/${jobId}`);
         if (cancelled || resolvedRef.current) return;
+        notFoundStreakMs = 0;
         onState(data);
         if (data.done) {
           resolvedRef.current = true;
@@ -1820,11 +1825,23 @@ function AutoFillJobPoller({
           return;
         }
       } catch (e: any) {
-        // 404 (job lost / server restart) + 401/403 (portal session lost) are terminal.
-        if (/\b(404|401|403)\b/.test(String(e?.message ?? ""))) {
+        // 401/403 (portal session lost) are terminal. A 404 is NO LONGER instantly
+        // terminal: a Railway redeploy kills the job briefly, but the server's
+        // boot resume (server/auto-fill-resume.ts) re-registers it under the SAME
+        // jobId ~15s after the new process is listening — so tolerate up to ~60s
+        // of 404s before giving up, and keep polling the same id.
+        if (/\b(401|403)\b/.test(String(e?.message ?? ""))) {
           resolvedRef.current = true;
           if (!cancelled) onResolved(null);
           return;
+        }
+        if (/\b404\b/.test(String(e?.message ?? ""))) {
+          notFoundStreakMs += 3000;
+          if (notFoundStreakMs > 60_000) {
+            resolvedRef.current = true;
+            if (!cancelled) onResolved(null);
+            return;
+          }
         }
       }
       if (!cancelled && !resolvedRef.current) timer = setTimeout(tick, 3000);

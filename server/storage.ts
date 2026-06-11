@@ -18,6 +18,7 @@ import {
   type BookingConfirmation, type InsertBookingConfirmation,
   type BookingAlternativePage, bookingAlternativePages,
   type AutoFillLossOptions, autoFillLossOptions,
+  type BulkAutoFillState, bulkAutoFillState,
   type CancellationNotice, cancellationNotices,
   type QuoSmsMessage, type InsertQuoSmsMessage,
   type QuoCallEvent, type InsertQuoCallEvent,
@@ -39,7 +40,7 @@ import {
   propertyComplianceOverrides,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, and, gte, lte, lt, or, inArray, sql } from "drizzle-orm";
+import { eq, desc, and, gte, lte, lt, or, inArray, ne, sql } from "drizzle-orm";
 
 function listingUrlKey(url: string | null | undefined): string {
   if (!url) return "";
@@ -258,8 +259,15 @@ export interface IStorage {
     reservationId: string;
     propertyId?: number | null;
     slotsTotal?: number | null;
+    request?: unknown;
+    jobId?: string | null;
+    owner?: string | null;
+    resumeAttempts?: number;
   }): Promise<void>;
   markAutoFillSearchInterrupted(reservationId: string, error: string): Promise<void>;
+  getResumableAutoFillRows(updatedSince: Date): Promise<AutoFillLossOptions[]>;
+  upsertBulkAutoFillState(row: { id: string; status: string; state: unknown; resumeAttempts?: number }): Promise<void>;
+  getLatestBulkAutoFillState(): Promise<BulkAutoFillState | undefined>;
   recordCancellationNoticeSent(reservationId: string, channel: string | null, message: string | null): Promise<void>;
   getCancellationNoticesByReservationIds(reservationIds: string[]): Promise<CancellationNotice[]>;
   createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample>;
@@ -1141,6 +1149,10 @@ export class DatabaseStorage implements IStorage {
     reservationId: string;
     propertyId?: number | null;
     slotsTotal?: number | null;
+    request?: unknown;
+    jobId?: string | null;
+    owner?: string | null;
+    resumeAttempts?: number;
   }): Promise<void> {
     const now = new Date();
     try {
@@ -1156,6 +1168,10 @@ export class DatabaseStorage implements IStorage {
         doneMessage: null,
         error: null,
         startedAt: now,
+        request: (row.request ?? null) as any,
+        jobId: row.jobId ?? null,
+        owner: row.owner ?? null,
+        resumeAttempts: row.resumeAttempts ?? 0,
         updatedAt: now,
       }).onConflictDoUpdate({
         target: autoFillLossOptions.reservationId,
@@ -1165,6 +1181,10 @@ export class DatabaseStorage implements IStorage {
           finishedAt: null,
           doneMessage: null,
           error: null,
+          request: (row.request ?? null) as any,
+          jobId: row.jobId ?? null,
+          owner: row.owner ?? null,
+          resumeAttempts: row.resumeAttempts ?? 0,
           updatedAt: now,
         },
       });
@@ -1175,7 +1195,7 @@ export class DatabaseStorage implements IStorage {
 
   // Best-effort shutdown stamp (SIGTERM → deploy/restart): the search died
   // mid-run. Only flips status/error — combos from the last completed search
-  // stay reviewable.
+  // stay reviewable, and request/jobId/owner survive for the boot resume.
   async markAutoFillSearchInterrupted(reservationId: string, error: string): Promise<void> {
     const now = new Date();
     try {
@@ -1192,6 +1212,59 @@ export class DatabaseStorage implements IStorage {
       });
     } catch {
       // Shutting down — nothing else to do.
+    }
+  }
+
+  // Rows whose search died mid-run (status still running/interrupted) recently
+  // enough to be worth resuming on boot. Owner/request/attempt filtering happens
+  // in the caller (server/auto-fill-resume.ts) — keep the query dumb.
+  async getResumableAutoFillRows(updatedSince: Date): Promise<AutoFillLossOptions[]> {
+    try {
+      return await db.select().from(autoFillLossOptions)
+        .where(and(
+          inArray(autoFillLossOptions.status, ["running", "interrupted"]),
+          gte(autoFillLossOptions.updatedAt, updatedSince),
+        ));
+    } catch (e) {
+      console.warn(`[auto-fill] could not load resumable rows: ${(e as Error).message}`);
+      return [];
+    }
+  }
+
+  // Single-queue semantics: persisting one bulk job prunes every other row, so
+  // getLatestBulkAutoFillState() can never resurrect a stale older queue.
+  async upsertBulkAutoFillState(row: { id: string; status: string; state: unknown; resumeAttempts?: number }): Promise<void> {
+    const now = new Date();
+    try {
+      await db.insert(bulkAutoFillState).values({
+        id: row.id,
+        status: row.status,
+        state: (row.state ?? null) as any,
+        resumeAttempts: row.resumeAttempts ?? 0,
+        updatedAt: now,
+      }).onConflictDoUpdate({
+        target: bulkAutoFillState.id,
+        set: {
+          status: row.status,
+          state: (row.state ?? null) as any,
+          resumeAttempts: row.resumeAttempts ?? 0,
+          updatedAt: now,
+        },
+      });
+      await db.delete(bulkAutoFillState).where(ne(bulkAutoFillState.id, row.id));
+    } catch (e) {
+      console.warn(`[bulk-auto-fill] could not persist bulk state ${row.id}: ${(e as Error).message}`);
+    }
+  }
+
+  async getLatestBulkAutoFillState(): Promise<BulkAutoFillState | undefined> {
+    try {
+      const [row] = await db.select().from(bulkAutoFillState)
+        .orderBy(desc(bulkAutoFillState.updatedAt)).limit(1);
+      return row;
+    } catch (e) {
+      console.warn(`[bulk-auto-fill] could not load bulk state: ${(e as Error).message}`);
+      return undefined;
     }
   }
 
