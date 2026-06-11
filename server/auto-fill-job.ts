@@ -69,6 +69,15 @@ const EXPANSION_POLL_CAP_MS = 40 * 60_000;
 const PROFIT_MIN_FLAT_USD = Number(process.env.AUTOFILL_PROFIT_MIN_FLAT ?? 100) || 0;
 const PROFIT_MIN_PCT = Number(process.env.AUTOFILL_PROFIT_MIN_PCT ?? 0) || 0;
 
+// Even when the resort stage already filled every slot, ALWAYS run the home-city
+// scan (which fires the HomeToGo sidecar alongside VRBO) so a bulk/auto-fill item
+// always consults HomeToGo, and AUTO-SWAP to it when HomeToGo+VRBO yields a CHEAPER
+// profitable combo than the attached resort combo (operator-approved 2026-06-11:
+// "always run HomeToGo … keep the cheaper of the two"). Only swap when the saving
+// clears this floor — a guarded detach→re-attach has a (small) cost/risk, so don't
+// churn the booking for trivial pennies. Env-tunable; default $25.
+const HOMETOGO_SWAP_MIN_SAVINGS_USD = Math.max(0, Number(process.env.AUTOFILL_HOMETOGO_SWAP_MIN_SAVINGS ?? 25) || 0);
+
 // Single-unit nearby-city walk (single LISTINGS only — combo properties get the
 // full tiered pair expansion in Stage 3-4). How far to walk, how many towns to
 // scan before giving up, and the wall-clock budget. Walk stops at the FIRST
@@ -959,6 +968,134 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
     const unitConfig = PROPERTY_UNIT_CONFIGS[job.propertyId];
     const isComboProperty = !!unitConfig && unitConfig.units.length >= 2;
 
+    // City stages only run for configured static combo/single properties (the
+    // city-vrbo endpoint requires a PROPERTY_UNIT_CONFIGS entry). Drafts and
+    // Guesty-derived targets get Stage 1 only — exactly as the client gated it.
+    // (Hoisted above Stage 1 so the resort-stage HomeToGo swap can reuse fetchCity.)
+    const cityCapable = !!unitConfig;
+    let cityPayload: any = null;
+    const fetchCity = async (): Promise<any> => {
+      if (cityPayload) return cityPayload;
+      // skipEnrich=1: this is the AUTOMATED auto-fill / bulk buy-in loopback, so
+      // suppress Phase-4 detail-page enrichment — the unattended queue must NOT
+      // drive the (now-visible) sidecar into individual VRBO listing detail pages.
+      // The operator's MANUAL "Scan city VRBO" button omits this and keeps full
+      // enrichment. See server/city-vrbo-inventory.ts runCityScanCore Phase-4 gate.
+      const params = new URLSearchParams({ propertyId: String(job.propertyId), checkIn: job.checkIn, checkOut: job.checkOut, skipEnrich: "1" });
+      cityPayload = await getJson(`${base}/api/operations/city-vrbo-inventory?${params.toString()}`, CITY_VRBO_LOOPBACK_TIMEOUT_MS);
+      return cityPayload;
+    };
+
+    // ── Resort-stage HomeToGo cheaper-combo swap ──
+    // Invoked at each point where the RESORT stage (Stage 1 per-slot or Stage 1.5
+    // resort-pool combo) has already filled every slot. Before we finalize, ALWAYS
+    // run the home-city scan (fetchCity → fires the HomeToGo sidecar alongside VRBO)
+    // so a bulk/auto-fill item ALWAYS consults HomeToGo, and AUTO-SWAP to it when the
+    // HomeToGo+VRBO pool yields a CHEAPER profitable combo than the attached resort
+    // combo (operator-approved 2026-06-11: "always run HomeToGo … keep the cheaper").
+    //
+    // GUARDED so the booking can never end EMPTY: the swap detaches the resort buy-ins
+    // then re-attaches the home-city combo via attachCityCombo; if that re-attach
+    // leaves any slot empty (e.g. the attach proximity gate 409s a cross-complex
+    // pair), it ROLLS BACK by re-attaching the original resort buy-ins by id (the
+    // detached records still exist, status active — detachBuyIn only nulls the
+    // reservation link). Cross-source HomeToGo picks ride the SAME attach proximity
+    // gate as VRBO, so a bad cross-resort swap is rejected → rollback → resort kept.
+    // Returns true iff it performed (and kept) a swap; the caller finalizes either way.
+    const runResortHomeCitySwap = async (): Promise<void> => {
+      if (!cityCapable || !isComboProperty || job.canceled) return;
+      // Only meaningful when the resort stage filled EVERY slot (we have a complete
+      // resort combo to compare against). A partial fill falls through to Stage 2.
+      if (job.attached.length === 0 || job.attached.length < job.slots.length) return;
+      const resortSnapshot = job.attached.map((a) => ({ ...a }));
+      const resortComboCost = resortSnapshot.reduce((s, a) => s + (Number(a.totalPrice) || 0), 0);
+      // Profit of a home-city combo AS A REPLACEMENT — gate against the pre-job
+      // baseline ONLY (exclude the resort combo we'd detach). The normal `gate`
+      // closure uses committedCost(), which still includes the attached resort combo
+      // and would double-count, making every replacement look unprofitable. Used both
+      // for the swap decision AND for labeling the surfaced operator alternatives
+      // (which are ALSO replacements — clicking one detaches-then-re-attaches).
+      const swapGate = (comboCost: number) => evaluateComboProfit({
+        expectedRevenue: job.expectedRevenue,
+        existingCost: job.existingAttachedCost,
+        comboCost,
+        flat: PROFIT_MIN_FLAT_USD,
+        pct: PROFIT_MIN_PCT,
+      });
+      touch(job, { phase: "home-city", message: "Checking HomeToGo + VRBO for a cheaper combo…", progress: 50 });
+      setEscalation(job, { homeCity: "searching" });
+      let payload: any = null;
+      try { payload = await fetchCity(); } catch { setEscalation(job, { homeCity: "no-pair" }); return; }
+      setEscalation(job, {
+        homeCityTerm: payload?.citySearchTerm,
+        homeCityListings: payload?.listings?.length ?? 0,
+        homeCityCoverage: payload?.coverage as CityVrboCoverage | undefined,
+      });
+      const pair = payload?.suggestedPair;
+      const hasPair = !!pair && Array.isArray(pair.picks) && pair.picks.length >= 2;
+      // Surface the home-city combos as operator-clickable alternatives whether or not
+      // we auto-swap, so the operator always SEES what HomeToGo found.
+      surfaceAlternativeCombos(
+        job,
+        (payload?.suggestedPairs ?? []).slice(hasPair ? 1 : 0),
+        payload?.citySearchTerm ?? "home city",
+        { scopeCategory: "home" },
+        (cc) => { const v = swapGate(cc); return { acceptable: v.acceptable, profit: v.profit }; },
+      );
+      if (!hasPair) { setEscalation(job, { homeCity: "no-pair" }); return; }
+      const homeCityCost = (pair.picks as any[]).reduce((s, pk) => s + (Number(pk?.totalPrice) || 0), 0);
+      const verdict = swapGate(homeCityCost);
+      const cheaper = homeCityCost < resortComboCost - HOMETOGO_SWAP_MIN_SAVINGS_USD;
+      recordEconomics(
+        "home-city",
+        `${payload?.citySearchTerm ?? "home city"} (HomeToGo + VRBO)`,
+        homeCityCost,
+        verdict.profit,
+        false,
+        cheaper && verdict.acceptable
+          ? `combo $${Math.round(homeCityCost).toLocaleString()} beats the attached resort combo $${Math.round(resortComboCost).toLocaleString()} — swapping`
+          : !verdict.acceptable
+            ? `combo $${Math.round(homeCityCost).toLocaleString()} → est. profit $${Math.round(verdict.profit).toLocaleString()} (worse than the $${PROFIT_MIN_FLAT_USD.toLocaleString()} max-loss limit); keeping the resort combo`
+            : `combo $${Math.round(homeCityCost).toLocaleString()} (not cheaper than the attached resort combo $${Math.round(resortComboCost).toLocaleString()}); keeping the resort combo`,
+        comboUnitsFromPicks(pair.picks, pair.bedrooms),
+      );
+      if (!cheaper || !verdict.acceptable) return; // keep the resort combo
+
+      // ── guarded swap ──
+      // 1) detach the resort combo (records stay in the DB, just unlinked)
+      for (const a of resortSnapshot) {
+        if (a.buyInId != null) { try { await storage.detachBuyIn(a.buyInId); } catch { /* best effort */ } }
+      }
+      job.attached.splice(0);
+      recomputeTotals(job);
+      filledUnitIds = await refreshFilled();
+      // 2) attach the home-city combo into the now-empty slots. Fresh used-set so the
+      //    detached resort identities don't block an identical-but-cheaper HomeToGo unit.
+      await attachCityCombo(job, base, payload, new Set<string>());
+      filledUnitIds = await refreshFilled();
+      if (remainingSlots().length === 0) {
+        // swap succeeded — keep the cheaper home-city combo
+        setEscalation(job, { homeCity: "found", foundAt: "home-city" });
+        return;
+      }
+      // 3) ROLLBACK — the home-city re-attach didn't fill every slot. Detach whatever
+      //    it managed to attach, then re-attach the original resort buy-ins by id so
+      //    the booking is restored to the (complete) resort combo, never left empty.
+      const partial = job.attached.splice(0);
+      for (const a of partial) {
+        if (a.buyInId != null) { try { await storage.detachBuyIn(a.buyInId); } catch { /* best effort */ } }
+      }
+      for (const a of resortSnapshot) {
+        if (a.buyInId == null) continue;
+        try { await postJson(`${base}/api/bookings/${encodeURIComponent(job.reservationId)}/attach-buy-in`, { buyInId: a.buyInId }, 60_000); }
+        catch { /* best effort — reconcileComboAllOrNothing is the final backstop */ }
+      }
+      job.attached.splice(0, job.attached.length, ...resortSnapshot);
+      recomputeTotals(job);
+      filledUnitIds = await refreshFilled();
+      setEscalation(job, { homeCity: "no-pair", resort: "found", foundAt: "resort" });
+    };
+
     // find-buy-in deduped per bedroom group. recover=1 is NOT used (it only
     // replays the recovery cache); a fresh call re-runs the scan. We retry once
     // when the scan came back EMPTY and incomplete (a transient sidecar blip).
@@ -1052,6 +1189,9 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       ...(afterResort.length === 0 ? { foundAt: "resort" as const } : {}),
     });
     if (afterResort.length === 0) {
+      // Resort Stage 1 filled every slot — still consult HomeToGo + VRBO and swap to
+      // a cheaper profitable combo if one exists (guarded; never leaves slots empty).
+      await runResortHomeCitySwap();
       touch(job, { status: "completed", phase: "done", message: doneMessage(job), progress: 100, finishedAt: Date.now() });
       finalize(job);
       return;
@@ -1099,6 +1239,9 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         }
         filledUnitIds = await refreshFilled();
         if (remainingSlots().length === 0) {
+          // Resort Stage 1.5 filled every slot — still consult HomeToGo + VRBO and
+          // swap to a cheaper profitable combo if one exists (guarded; never empties).
+          await runResortHomeCitySwap();
           touch(job, { status: "completed", phase: "done", message: doneMessage(job), progress: 100, finishedAt: Date.now() });
           finalize(job);
           return;
@@ -1107,18 +1250,6 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
         console.warn(`[auto-fill] resort-pool combo attempt failed (continuing to city stages): ${e?.message ?? e}`);
       }
     }
-
-    // City stages only run for configured static combo/single properties (the
-    // city-vrbo endpoint requires a PROPERTY_UNIT_CONFIGS entry). Drafts and
-    // Guesty-derived targets get Stage 1 only — exactly as the client gated it.
-    const cityCapable = !!unitConfig;
-    let cityPayload: any = null;
-    const fetchCity = async (): Promise<any> => {
-      if (cityPayload) return cityPayload;
-      const params = new URLSearchParams({ propertyId: String(job.propertyId), checkIn: job.checkIn, checkOut: job.checkOut });
-      cityPayload = await getJson(`${base}/api/operations/city-vrbo-inventory?${params.toString()}`, CITY_VRBO_LOOPBACK_TIMEOUT_MS);
-      return cityPayload;
-    };
 
     // ── Stage 2: home-city VRBO combo (combo properties only) ──
     if (cityCapable && isComboProperty && remainingSlots().length >= 2 && !job.canceled) {
