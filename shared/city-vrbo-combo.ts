@@ -465,6 +465,47 @@ export function listingTotalPrice(listing: CityVrboListing, nights: number): num
   return 0;
 }
 
+// Building/unit identifiers in a listing title ("Pili Mai 14K" → "14k", "Waikomo Stream
+// Villas 503" → "503", "Poipu Shores A206" → "a206", "Lawai Beach Resort C103" → "c103").
+// Used for CROSS-SOURCE dedup (the same physical unit listed on both VRBO and HomeToGo has
+// different URLs, so URL-dedup misses it). Conservative on purpose: strips count phrases
+// ("3BR", "2 bath", "5 min walk", "sleeps 8") so an incidental number is NOT taken as a unit,
+// and only accepts letter-attached tokens (14k/a206/c103) or bare 3-4 digit numbers (503/1752)
+// — NOT bare 1-2 digit numbers (which are almost always counts, not unit IDs).
+export function unitTokensFromTitle(title: string | null | undefined): string[] {
+  let t = String(title ?? "").toLowerCase().replace(/&amp;/g, "&");
+  t = t.replace(/\b\d+\s*(?:br|bd|beds?|bedrooms?|ba|baths?|bathrooms?|min(?:ute)?s?|guests?|sleeps?|nights?|stars?|persons?|floor|fl)\b/g, " ");
+  const tokens = new Set<string>();
+  for (const m of t.matchAll(/\b([a-z]?\d{1,4}[a-z]?)\b/g)) {
+    const tok = m[1];
+    const digits = tok.replace(/[^0-9]/g, "");
+    const hasLetter = /[a-z]/.test(tok);
+    if (hasLetter && digits.length >= 1) tokens.add(tok);        // 14k, 6k, a206, c103
+    else if (!hasLetter && digits.length >= 3) tokens.add(tok);  // 503, 211, 1752, 100, 425
+  }
+  return Array.from(tokens);
+}
+
+type SamePhysicalUnitInput = Pick<CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName" | "bedrooms">;
+
+// True when two listings are (with high confidence) the SAME physical unit — used to dedupe a
+// VRBO listing against a HomeToGo onsite listing of the same unit. Requires ALL THREE:
+//   (1) a SHARED resort/complex phrase (sharedResortPhraseKeys intersection) — so "...503" at
+//       two DIFFERENT resorts never matches; (2) a SHARED unit token — so different units in the
+//       same resort (14K vs 15H) never match; (3) NON-CONFLICTING bedrooms (same, or unknown on
+//       a side). Precision over recall: a missed dedupe just shows a unit twice (harmless); a
+//       FALSE dedupe would drop a distinct real candidate, so we never match on a weak signal.
+export function listingsAreSamePhysicalUnit(a: SamePhysicalUnitInput, b: SamePhysicalUnitInput): boolean {
+  const ab = Number(a.bedrooms), bb = Number(b.bedrooms);
+  if (Number.isFinite(ab) && Number.isFinite(bb) && Math.round(ab) !== Math.round(bb)) return false;
+  const aKeys = new Set(sharedResortPhraseKeys(a));
+  if (aKeys.size === 0) return false;
+  if (!sharedResortPhraseKeys(b).some((k) => aKeys.has(k))) return false;
+  const aTok = new Set(unitTokensFromTitle(a.title));
+  if (aTok.size === 0) return false;
+  return unitTokensFromTitle(b.title).some((tk) => aTok.has(tk));
+}
+
 function walkMinutesBetween(a: CityVrboListing, b: CityVrboListing): number | null {
   const latA = typeof a.lat === "number" ? a.lat : null;
   const lngA = typeof a.lng === "number" ? a.lng : null;
