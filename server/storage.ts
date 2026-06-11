@@ -1,6 +1,7 @@
 import {
   type User, type InsertUser,
   type BuyIn, type InsertBuyIn, // now includes unitTypeConfidence and breakdown after schema update
+  type GuestInboxMessage, type InsertGuestInboxMessage,
   type ReservationCancellationAudit, type InsertReservationCancellationAudit,
   type ManualReservation, type InsertManualReservation,
   type LodgifyBooking, type InsertLodgifyBooking,
@@ -32,7 +33,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, appSettings, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
+  users, buyIns, guestInboxMessages, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, appSettings, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
   type PropertyMarketRate, type InsertPropertyMarketRate,
   type PricingUpdateLog, type InsertPricingUpdateLog,
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
@@ -133,6 +134,10 @@ export interface IStorage {
   // so a single reservation can have multiple attached buy-ins (one per unitId).
   getBuyInCandidates(params: { propertyId: number; unitId: string; checkIn: string; checkOut: string }): Promise<BuyIn[]>;
   getBuyInsByReservation(reservationId: string): Promise<BuyIn[]>;
+  // Per-guest booking inbox (firstname.lastname@emailprivaccy.com).
+  getBuyInByTravelerEmail(email: string): Promise<BuyIn | undefined>;
+  createGuestInboxMessage(values: InsertGuestInboxMessage): Promise<GuestInboxMessage>;
+  getGuestInboxMessages(aliasEmail: string, limit?: number): Promise<GuestInboxMessage[]>;
   attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined>;
   detachBuyIn(buyInId: number): Promise<BuyIn | undefined>;
 
@@ -373,6 +378,30 @@ export class DatabaseStorage implements IStorage {
 
   async getBuyInsByReservation(reservationId: string): Promise<BuyIn[]> {
     return db.select().from(buyIns).where(eq(buyIns.guestyReservationId, reservationId));
+  }
+
+  async getBuyInByTravelerEmail(email: string): Promise<BuyIn | undefined> {
+    const e = String(email ?? "").trim().toLowerCase();
+    if (!e) return undefined;
+    const rows = await db.select().from(buyIns)
+      .where(sql`lower(${buyIns.travelerEmail}) = ${e}`)
+      .orderBy(desc(buyIns.id))
+      .limit(1);
+    return rows[0];
+  }
+
+  async createGuestInboxMessage(values: InsertGuestInboxMessage): Promise<GuestInboxMessage> {
+    const [row] = await db.insert(guestInboxMessages).values(values).returning();
+    return row;
+  }
+
+  async getGuestInboxMessages(aliasEmail: string, limit = 200): Promise<GuestInboxMessage[]> {
+    const e = String(aliasEmail ?? "").trim().toLowerCase();
+    if (!e) return [];
+    return db.select().from(guestInboxMessages)
+      .where(sql`lower(${guestInboxMessages.aliasEmail}) = ${e}`)
+      .orderBy(desc(guestInboxMessages.receivedAt))
+      .limit(limit);
   }
 
   async attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined> {

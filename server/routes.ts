@@ -11172,6 +11172,44 @@ Requirements:
         return res.status(400).json({ error: "from, to, and body or attachments are required" });
       }
 
+      // Guest booking inbox: a message addressed to a guest's
+      // firstname.lastname@emailprivaccy.com booking alias (e.g. a VRBO booking
+      // confirmation) is stored in that guest's portal inbox, keyed by the alias
+      // address and kept forever. This runs BEFORE vendor matching so guest mail
+      // is never 404'd as "no matching vendor contact".
+      const guestEmailDomain = (process.env.BUYIN_TRAVELER_EMAIL_DOMAIN || "emailprivaccy.com").trim().toLowerCase();
+      const guestBuyIn = await storage.getBuyInByTravelerEmail(toEmail);
+      const isGuestAlias = !!guestBuyIn || (!!guestEmailDomain && toEmail.endsWith(`@${guestEmailDomain}`));
+      if (isGuestAlias) {
+        const providerMessageId = String(req.body?.messageId ?? req.body?.message_id ?? "") || null;
+        // Idempotent on relay retries.
+        if (providerMessageId) {
+          const recent = await storage.getGuestInboxMessages(toEmail, 100);
+          if (recent.some((m) => m.providerMessageId && m.providerMessageId === providerMessageId)) {
+            return res.json({ deduped: true });
+          }
+        }
+        const localPart = toEmail.split("@")[0] || "";
+        const guestName = localPart
+          .split(/[._]+/).filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || null;
+        const stored = await storage.createGuestInboxMessage({
+          aliasEmail: toEmail,
+          guestName,
+          buyInId: guestBuyIn?.id ?? null,
+          reservationId: guestBuyIn?.guestyReservationId ?? null,
+          direction: "inbound",
+          fromEmail,
+          toEmail,
+          subject,
+          body,
+          attachmentsJson: attachments.length ? JSON.stringify(attachments) : null,
+          providerMessageId,
+          rawPayload: JSON.stringify(req.body ?? {}),
+        });
+        return res.json({ guestInboxMessage: stored });
+      }
+
       let [contact] = await db
         .select()
         .from(buyInVendorContacts)
@@ -11231,6 +11269,30 @@ Requirements:
     } catch (err: any) {
       const message = err?.message ?? "Unknown error";
       res.status(/attachment/i.test(message) ? 400 : 500).json({ error: "Failed to record inbound buy-in email", message });
+    }
+  });
+
+  // GET /api/guest-inbox?aliasEmail=jamie.greene@emailprivaccy.com  (or ?buyInId=123)
+  // Per-guest booking inbox: the messages received at a guest's
+  // firstname.lastname@emailprivaccy.com address (VRBO confirmations, host
+  // messages, etc.), newest first. Powers the bookings-row "Guest inbox" button.
+  app.get("/api/guest-inbox", async (req, res) => {
+    try {
+      let aliasEmail = String(req.query.aliasEmail ?? "").trim().toLowerCase();
+      const buyInId = Number(req.query.buyInId);
+      if (!aliasEmail && Number.isFinite(buyInId) && buyInId > 0) {
+        const buyIn = await storage.getBuyIn(buyInId);
+        aliasEmail = String(buyIn?.travelerEmail ?? "").trim().toLowerCase();
+      }
+      if (!aliasEmail) return res.json({ aliasEmail: null, guestName: null, messages: [] });
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+      const messages = await storage.getGuestInboxMessages(aliasEmail, limit);
+      const guestName = messages.find((m) => m.guestName)?.guestName
+        ?? ((aliasEmail.split("@")[0] || "").split(/[._]+/).filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || null);
+      res.json({ aliasEmail, guestName, messages });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch guest inbox", message: err?.message ?? String(err) });
     }
   });
 
