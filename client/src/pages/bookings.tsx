@@ -4805,6 +4805,138 @@ function LastBuyInSearchPanel({
 // different complexes (Pili Mai, Makahuena, Kuhio Shores, …). These are NOT verified
 // against the configured resort (they're intentionally other complexes), so they get
 // their own panel + a one-click attach that REPLACES the current pick. Operator-only.
+type VerifyCommunityUnit = {
+  url: string;
+  title: string;
+  scrapeOk: boolean;
+  workerOnline: boolean;
+  reason: string;
+  photos: string[];
+  sleeps: number | null;
+  bedText: string;
+  complexName: string | null;
+  descriptionExcerpt: string;
+  resolvedCommunity: string | null;
+  dictCanonicals: string[];
+  communityKeys: string[];
+};
+type VerifyCommunityResult = {
+  ok: boolean;
+  verdict: "same-community" | "walkable-adjacent" | "different" | "unresolved";
+  summary: string;
+  communities: string[];
+  units: VerifyCommunityUnit[];
+};
+
+// Operator-click ENRICH half for an "⚠ community unconfirmed" alternative: opens
+// each unit's VRBO detail page via the local sidecar, resolves the complex from the
+// listing DESCRIPTION prose (VRBO hides coords/address — AGENTS #8/#9), and renders
+// the same-community / walkable verdict + photos + a description excerpt so the
+// operator can eyeball walkability before booking. Self-contained (own mutation +
+// state) so it can drop into every AlternateCombosPanel render site.
+function VerifyCommunityButton({ option }: { option: AutoFillComboOption }) {
+  const { toast } = useToast();
+  const [result, setResult] = useState<VerifyCommunityResult | null>(null);
+  const verify = useMutation({
+    mutationFn: async () => {
+      const units = option.picks
+        .filter((p) => !!p.url)
+        .map((p) => ({ url: p.url, title: p.title || p.sourceLabel || "" }));
+      const res = await apiRequest("POST", "/api/operations/verify-combo-community", { units });
+      return (await res.json()) as VerifyCommunityResult;
+    },
+    onSuccess: (data) => {
+      setResult(data);
+      const tone =
+        data.verdict === "same-community" || data.verdict === "walkable-adjacent" ? "default" : "destructive";
+      toast({
+        title:
+          data.verdict === "same-community"
+            ? "Same community ✓"
+            : data.verdict === "walkable-adjacent"
+            ? "Walkable-adjacent"
+            : data.verdict === "different"
+            ? "Different communities"
+            : "Could not confirm",
+        description: data.summary,
+        variant: tone as any,
+      });
+    },
+    onError: (e: any) =>
+      toast({ title: "Verify failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
+  const verdictStyles: Record<VerifyCommunityResult["verdict"], string> = {
+    "same-community": "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300",
+    "walkable-adjacent": "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300",
+    different: "border-red-300 bg-red-50 text-red-800 dark:border-red-700 dark:bg-red-950/40 dark:text-red-300",
+    unresolved: "border-slate-300 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300",
+  };
+
+  return (
+    <div className="mt-1">
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-6 px-2 text-[10px]"
+        disabled={verify.isPending}
+        onClick={(e) => { e.stopPropagation(); verify.mutate(); }}
+        data-testid={`button-verify-community-${option.label.replace(/[^a-z0-9]+/gi, "-")}`}
+      >
+        {verify.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Search className="mr-1 h-3 w-3" />}
+        {verify.isPending ? "Opening listings…" : "Verify community"}
+      </Button>
+      {result ? (
+        <div className={`mt-1 rounded border px-2 py-1.5 text-[10px] ${verdictStyles[result.verdict]}`}>
+          <p className="font-semibold">{result.summary}</p>
+          <div className="mt-1 space-y-1.5">
+            {result.units.map((u, i) => (
+              <div key={`${option.label}-vu-${i}`} className="rounded bg-white/50 px-1.5 py-1 dark:bg-black/20">
+                <p className="font-medium">
+                  Unit {i + 1}:{" "}
+                  {u.resolvedCommunity ? (
+                    <span className="font-semibold">{u.resolvedCommunity}</span>
+                  ) : (
+                    <span className="italic opacity-80">{u.scrapeOk ? "no complex named in listing" : `could not read listing (${u.reason || "scrape failed"})`}</span>
+                  )}
+                  {typeof u.sleeps === "number" && u.sleeps > 0 ? ` · sleeps ${u.sleeps}` : ""}
+                </p>
+                {u.photos.length > 0 ? (
+                  <div className="mt-1 flex gap-1 overflow-x-auto">
+                    {u.photos.slice(0, 5).map((src, j) => (
+                      <img
+                        key={`${option.label}-vu-${i}-img-${j}`}
+                        src={src}
+                        alt=""
+                        loading="lazy"
+                        className="h-12 w-16 shrink-0 rounded object-cover"
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                {u.descriptionExcerpt ? (
+                  <p className="mt-1 line-clamp-3 opacity-80">{u.descriptionExcerpt}</p>
+                ) : null}
+                {u.url ? (
+                  <a
+                    href={u.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-0.5 inline-block text-blue-600 underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    Open listing ↗
+                  </a>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function AlternateCombosPanel({
   options,
   onAttachCombo,
@@ -4855,9 +4987,12 @@ function AlternateCombosPanel({
                   )}
                 </div>
                 {option.unconfirmedCommunity ? (
-                  <p className="mt-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
-                    ⚠ community unconfirmed — open both listings and verify they're walkable before booking
-                  </p>
+                  <>
+                    <p className="mt-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                      ⚠ community unconfirmed — verify walkability before booking
+                    </p>
+                    <VerifyCommunityButton option={option} />
+                  </>
                 ) : null}
                 {option.scopeCategory && option.scopeCategory !== "home" && typeof option.driveMinutesCeiling === "number" ? (
                   <p className="mt-0.5 text-[10px] text-muted-foreground">within ~{option.driveMinutesCeiling} min drive</p>

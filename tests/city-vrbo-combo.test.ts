@@ -10,6 +10,8 @@ import {
   suggestUnconfirmedCityVrboComboPairs,
   summarizeCityVrboMatching,
   titlesShareWalkableCommunity,
+  resolveUnitCommunityFromText,
+  verifyResolvedUnitsShareCommunity,
   type CityVrboListing,
 } from "../shared/city-vrbo-combo";
 
@@ -365,6 +367,52 @@ check("guard: generic title vs named complex is NOT same-community",
     return true;
   })());
   check("unconfirmed: <2 priced units → empty", suggestUnconfirmedCityVrboComboPairs([L("a", "x", 3, 0)], [3, 3], 7, 3).length === 0);
+}
+
+// ── ENRICH half: resolveUnitCommunityFromText + verifyResolvedUnitsShareCommunity ──
+// The operator-click verify endpoint feeds the detail-page DESCRIPTION prose here
+// (VRBO hides coords/address). A generic title that the matcher can't cluster STILL
+// resolves once the description names the complex.
+{
+  // Generic title, but the description prose names the resort → resolves to a canonical.
+  const a = resolveUnitCommunityFromText({
+    title: "Poipu Pool House: Private Ocean Views",
+    descriptionText: "Welcome to our home within the Poipu Kai resort, steps from Brennecke's Beach.",
+  });
+  check("enrich: description prose resolves a generic title to its complex", a.label === "poipu kai", a.label);
+  check("enrich: dictCanonicals carries the resolved complex", a.dictCanonicals.includes("poipu kai"));
+
+  // A title that names a complex resolves even with no description.
+  const b = resolveUnitCommunityFromText({ title: "Nihi Kai Villas #300 by Parrish", descriptionText: "" });
+  check("enrich: title-only still resolves a named complex", b.dictCanonicals.includes("nihi kai villas"), b.dictCanonicals);
+
+  // Truly generic both ways → unresolved (no false positive).
+  const c = resolveUnitCommunityFromText({ title: "Beautiful 2BR condo", descriptionText: "Cozy unit near the beach with a pool." });
+  check("enrich: a generic unit with no complex named stays unresolved", c.label === null, c.label);
+
+  // Two units, both resolving to Poipu Kai → same-community.
+  check(
+    "enrich verdict: same complex in both descriptions → same-community",
+    verifyResolvedUnitsShareCommunity(a, resolveUnitCommunityFromText({ title: "Greenbelt home", descriptionText: "Located in Poipu Kai near the tennis courts." })) === "same-community",
+  );
+  // Poipu Kai + Kiahuna Plantation (curated cluster) → walkable-adjacent.
+  check(
+    "enrich verdict: curated-adjacent communities → walkable-adjacent",
+    verifyResolvedUnitsShareCommunity(a, resolveUnitCommunityFromText({ title: "Garden suite", descriptionText: "A unit at Kiahuna Plantation with resort grounds." })) === "walkable-adjacent",
+  );
+  // Two distinct, non-adjacent dictionary communities → different.
+  check(
+    "enrich verdict: two distinct non-adjacent complexes → different",
+    verifyResolvedUnitsShareCommunity(
+      resolveUnitCommunityFromText({ title: "x", descriptionText: "Stay at the Cliffs at Princeville on the north shore." }),
+      resolveUnitCommunityFromText({ title: "y", descriptionText: "Our condo is in Poipu Kai on the south shore." }),
+    ) === "different",
+  );
+  // One side unresolved → overall unresolved (never a false positive).
+  check(
+    "enrich verdict: one side unresolved → unresolved",
+    verifyResolvedUnitsShareCommunity(a, c) === "unresolved",
+  );
 }
 
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);

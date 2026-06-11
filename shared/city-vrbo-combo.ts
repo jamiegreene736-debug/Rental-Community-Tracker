@@ -727,6 +727,70 @@ export function titlesShareWalkableCommunity(titleA: string, titleB: string): bo
 }
 
 /**
+ * Resolve ONE unit's community from its text. Unlike the combo matcher (which
+ * works off card titles/snippets), this is fed the listing DESCRIPTION prose
+ * harvested from the detail page — VRBO hides coords/address for most Kauai
+ * listings (AGENTS #8/#9), so the description is the only reliable same-community
+ * signal. The description is passed as `snippet` so it flows through the
+ * dictionary EXACT-regex scan in sharedResortPhraseKeys (which scans
+ * title+sourceLabel+snippet) — that's where prose like "...within Poipu Kai..."
+ * or "Nihi Kai Villas #300" resolves to a canonical. Returns every community key
+ * found plus a best human label. Used ONLY by the operator-triggered
+ * verify-community endpoint — NOT by the unattended matcher (precision guard:
+ * description prose can name a NEARBY complex, so the operator eyeballs the
+ * result rather than the queue auto-clustering on it).
+ */
+export function resolveUnitCommunityFromText(input: {
+  title?: string | null;
+  descriptionText?: string | null;
+  complexName?: string | null;
+  sourceLabel?: string | null;
+}): { keys: string[]; dictCanonicals: string[]; complexKeys: string[]; label: string | null } {
+  const candidate = {
+    title: input.title ?? "",
+    sourceLabel: input.sourceLabel ?? "",
+    snippet: input.descriptionText ?? "",
+    complexName: input.complexName ?? null,
+  } as Pick<CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName">;
+  const keys = sharedResortPhraseKeys(candidate);
+  const dictCanonicals = keys.filter((k) => k.startsWith("dict:")).map((k) => communityKeyLabel(k));
+  const complexKeys = keys
+    .filter((k) => k.startsWith("complex:") || k.startsWith("phrase:"))
+    .map((k) => communityKeyLabel(k));
+  const label = dictCanonicals[0] ?? complexKeys[0] ?? null;
+  return { keys, dictCanonicals, complexKeys, label };
+}
+
+/**
+ * Same intersection logic as titlesShareWalkableCommunity, but operating on the
+ * resolved key sets from resolveUnitCommunityFromText (which fold in the detail-page
+ * description). Returns the strongest verdict: "same-community" (key intersection),
+ * "walkable-adjacent" (dictionary canonicals share a WALKABLE_COMPLEX_CLUSTERS group),
+ * "different" (both resolved to specific, NON-overlapping communities), or
+ * "unresolved" (one/both produced no community signal — common for generic VRBO
+ * descriptions that never name the resort).
+ */
+export function verifyResolvedUnitsShareCommunity(
+  a: { keys: string[]; dictCanonicals: string[] },
+  b: { keys: string[]; dictCanonicals: string[] },
+): "same-community" | "walkable-adjacent" | "different" | "unresolved" {
+  if (a.keys.length === 0 || b.keys.length === 0) return "unresolved";
+  const setA = new Set(a.keys);
+  if (b.keys.some((k) => setA.has(k))) return "same-community";
+  if (a.dictCanonicals.length && b.dictCanonicals.length) {
+    for (const cluster of WALKABLE_COMPLEX_CLUSTERS) {
+      const clusterSet = new Set(cluster);
+      if (a.dictCanonicals.some((c) => clusterSet.has(c)) && b.dictCanonicals.some((c) => clusterSet.has(c))) {
+        return "walkable-adjacent";
+      }
+    }
+    // Both named a specific, distinct dictionary community with no shared cluster.
+    return "different";
+  }
+  return "unresolved";
+}
+
+/**
  * Walkable-adjacency FALLBACK: when no single complex satisfies the bedroom plan,
  * try pairing ACROSS complexes that share a curated walkable cluster. Medium
  * confidence (cross-complex, but curated-adjacent). Returns the cheapest such
