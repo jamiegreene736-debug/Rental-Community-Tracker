@@ -7,7 +7,11 @@ import {
   sharedResortPhraseKeys,
   suggestCityVrboComboPair,
   suggestCityVrboComboPairs,
+  suggestUnconfirmedCityVrboComboPairs,
   summarizeCityVrboMatching,
+  titlesShareWalkableCommunity,
+  resolveUnitCommunityFromText,
+  verifyResolvedUnitsShareCommunity,
   type CityVrboListing,
 } from "../shared/city-vrbo-combo";
 
@@ -369,6 +373,121 @@ check("same-unit: prefix-title relist skipped, distinct unit pairs",
   !!prefixPair && prefixPair.picks.some((p) => p.url === "https://vrbo.com/px3") &&
     !prefixPair.picks.some((p) => p.url === "https://vrbo.com/px2"),
   prefixPair?.picks?.map((p) => p.url));
+
+// ── titlesShareWalkableCommunity: the attach-route proximity guard's
+// cross-resort evidence check (2026-06-10 incident: a Puamana unit + a Wyndham
+// Ka Eo Kai unit attached to one booking as a "4 minute walk" because geocoding
+// failed and the configured-resort footprint fallback passed the gate).
+check("guard: the actual incident pair (Puamana vs Wyndham Ka Eo Kai) is NOT same-community",
+  !titlesShareWalkableCommunity(
+    "Puamana Peaceful 3BR North Shore Stay",
+    "Princeville Paradise 2BR Suite @ Wyndham Ka Eo Kai",
+  ));
+check("guard: same complex by dictionary ('Kaha Lani' both sides) IS same-community",
+  titlesShareWalkableCommunity(
+    "Kaha Lani Oceanfront Resort #129 - Beautiful and Private 2 B",
+    "2 Bedroom Ocean View w/Lanai – Kaha Lani 107",
+  ));
+check("guard: same complex by phrase ('Poipu Kai Resort' both sides) IS same-community",
+  titlesShareWalkableCommunity("Poipu Kai Resort 3BR A", "Poipu Kai Resort 2BR garden view"));
+check("guard: curated-adjacent complexes (Poipu Kai + Kiahuna Plantation) ARE walkable together",
+  titlesShareWalkableCommunity("Poipu Kai Resort 3BR ocean view", "Kiahuna Plantation #245 garden suite"));
+check("guard: two GENERIC titles (no resort evidence either side) are NOT assumed same-community",
+  !titlesShareWalkableCommunity("Ocean view 3BR with pool", "Beautiful 2BR condo near the beach"));
+check("guard: generic title vs named complex is NOT same-community",
+  !titlesShareWalkableCommunity("Ocean view 3BR with pool", "Poipu Kai Resort 2BR"));
+
+// ── suggestUnconfirmedCityVrboComboPairs: last-resort recall over generic units ──
+// The cheap units have generic titles the same-community gate can't cluster; this
+// surfaces the cheapest combo anyway (operator verifies + auto-attach never uses it).
+{
+  const L = (url: string, title: string, br: number, total: number): CityVrboListing =>
+    ({ url, title, bedrooms: br, totalPrice: total, sourceLabel: "Vrbo" });
+  const pool = [
+    L("u1", "Poipu Pool House: Ocean Views", 4, 4368),
+    L("u2", "Gorgeous Greenbelt Home", 4, 4389),
+    L("u3", "Villas at Poipu Kai Penthouse", 3, 9000),
+    L("u4", "Beautiful 4 bedroom Poipu Kai", 4, 9664),
+    L("u5", "Random 2BR condo", 2, 3000),
+  ];
+  const r = suggestUnconfirmedCityVrboComboPairs(pool, [3, 3], 7, 3, ["u3", "u4"]);
+  check("unconfirmed: forms a combo from generic units", r.length >= 1, r.length);
+  check("unconfirmed: every pair tagged unconfirmedCommunity", r.every((p) => p.unconfirmedCommunity === true));
+  check("unconfirmed: cheapest combo wins (4BR+2BR $7368 beats the named pairs)", r[0]?.totalCost === 7368, r[0]?.totalCost);
+  check("unconfirmed: never reuses excluded confirmed-pair urls", !r.some((p) => p.picks.some((x) => x.url === "u3" || x.url === "u4")));
+  check("unconfirmed: combos are url-disjoint", (() => {
+    const seen = new Set<string>();
+    for (const p of r) for (const x of p.picks) { if (x.url && seen.has(x.url)) return false; if (x.url) seen.add(x.url); }
+    return true;
+  })());
+  check("unconfirmed: <2 priced units → empty", suggestUnconfirmedCityVrboComboPairs([L("a", "x", 3, 0)], [3, 3], 7, 3).length === 0);
+}
+
+// ── ENRICH half: resolveUnitCommunityFromText + verifyResolvedUnitsShareCommunity ──
+// The operator-click verify endpoint feeds the detail-page DESCRIPTION prose here
+// (VRBO hides coords/address). A generic title that the matcher can't cluster STILL
+// resolves once the description names the complex.
+{
+  // Generic title, but the description prose names the resort → resolves to a canonical.
+  const a = resolveUnitCommunityFromText({
+    title: "Poipu Pool House: Private Ocean Views",
+    descriptionText: "Welcome to our home within the Poipu Kai resort, steps from Brennecke's Beach.",
+  });
+  check("enrich: description prose resolves a generic title to its complex", a.label === "poipu kai", a.label);
+  check("enrich: dictCanonicals carries the resolved complex", a.dictCanonicals.includes("poipu kai"));
+
+  // A title that names a complex resolves even with no description.
+  const b = resolveUnitCommunityFromText({ title: "Nihi Kai Villas #300 by Parrish", descriptionText: "" });
+  check("enrich: title-only still resolves a named complex", b.dictCanonicals.includes("nihi kai villas"), b.dictCanonicals);
+
+  // Truly generic both ways → unresolved (no false positive).
+  const c = resolveUnitCommunityFromText({ title: "Beautiful 2BR condo", descriptionText: "Cozy unit near the beach with a pool." });
+  check("enrich: a generic unit with no complex named stays unresolved", c.label === null, c.label);
+
+  // Two units, both resolving to Poipu Kai → same-community.
+  check(
+    "enrich verdict: same complex in both descriptions → same-community",
+    verifyResolvedUnitsShareCommunity(a, resolveUnitCommunityFromText({ title: "Greenbelt home", descriptionText: "Located in Poipu Kai near the tennis courts." })) === "same-community",
+  );
+  // Poipu Kai + Kiahuna Plantation (curated cluster) → walkable-adjacent.
+  check(
+    "enrich verdict: curated-adjacent communities → walkable-adjacent",
+    verifyResolvedUnitsShareCommunity(a, resolveUnitCommunityFromText({ title: "Garden suite", descriptionText: "A unit at Kiahuna Plantation with resort grounds." })) === "walkable-adjacent",
+  );
+  // Two distinct, non-adjacent dictionary communities → different.
+  check(
+    "enrich verdict: two distinct non-adjacent complexes → different",
+    verifyResolvedUnitsShareCommunity(
+      resolveUnitCommunityFromText({ title: "x", descriptionText: "Stay at the Cliffs at Princeville on the north shore." }),
+      resolveUnitCommunityFromText({ title: "y", descriptionText: "Our condo is in Poipu Kai on the south shore." }),
+    ) === "different",
+  );
+  // One side unresolved → overall unresolved (never a false positive).
+  check(
+    "enrich verdict: one side unresolved → unresolved",
+    verifyResolvedUnitsShareCommunity(a, c) === "unresolved",
+  );
+
+  // ── PRECISION: single-word dictionary triggers in STREET names must NOT resolve ──
+  // "near Kiahuna Road" is a landmark, not the Kiahuna Plantation complex. Before the
+  // street-qualifier strip this falsely resolved to dict:kiahuna plantation and (via
+  // WALKABLE_COMPLEX_CLUSTERS with poipu kai) produced a bogus "walkable-adjacent".
+  const streetOnly = resolveUnitCommunityFromText({ title: "Beautiful Ocean View Home", descriptionText: "A lovely home near Kiahuna Road with easy beach access." });
+  check("enrich precision: a bare 'Kiahuna Road' street mention does NOT resolve to a complex", streetOnly.label === null, streetOnly.label);
+  check(
+    "enrich precision: Poipu Kai unit + 'near Kiahuna Road' unit is NOT falsely walkable-adjacent",
+    verifyResolvedUnitsShareCommunity(a, streetOnly) === "unresolved",
+  );
+  // The strip must be NARROW — legit multi-word phrases that happen to precede a
+  // street type still resolve.
+  const poipuKaiDrive = resolveUnitCommunityFromText({ title: "Condo", descriptionText: "Our unit sits right on Poipu Kai Drive steps from the pools." });
+  check("enrich precision: 'Poipu Kai Drive' STILL resolves to poipu kai (multi-word phrase preserved)", poipuKaiDrive.dictCanonicals.includes("poipu kai"), poipuKaiDrive.dictCanonicals);
+  const kiahunaPlantationDrive = resolveUnitCommunityFromText({ title: "Condo", descriptionText: "Located along Kiahuna Plantation Drive near the golf course." });
+  check("enrich precision: 'Kiahuna Plantation Drive' STILL resolves to kiahuna plantation", kiahunaPlantationDrive.dictCanonicals.includes("kiahuna plantation"), kiahunaPlantationDrive.dictCanonicals);
+  // A genuine "Kiahuna Plantation" prose mention (no street type) is unaffected.
+  const kiahunaReal = resolveUnitCommunityFromText({ title: "Condo", descriptionText: "Stay at Kiahuna Plantation with resort grounds and tennis." });
+  check("enrich precision: a genuine 'Kiahuna Plantation' mention still resolves", kiahunaReal.dictCanonicals.includes("kiahuna plantation"));
+}
 
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

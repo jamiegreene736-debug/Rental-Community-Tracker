@@ -4,7 +4,9 @@ import {
   groupCityVrboByBedroom,
   suggestCityVrboComboPair,
   suggestCityVrboComboPairs,
+  suggestUnconfirmedCityVrboComboPairs,
   summarizeCityVrboMatching,
+  listingsAreSamePhysicalUnit,
   type CityVrboComboPair,
   type CityVrboListing,
 } from "@shared/city-vrbo-combo";
@@ -14,7 +16,7 @@ import {
   vrboReportedTotalFromMapHarvest,
   type CityVrboCoverage,
 } from "@shared/city-vrbo-coverage";
-import { listingIsOutOfArea } from "@shared/listing-geo";
+import { listingIsOutOfArea, coordsWithinState } from "@shared/listing-geo";
 
 export type CityVrboFilterPipeline = {
   rawSidecar: number;
@@ -54,7 +56,10 @@ type SidecarVrboCandidate = {
   priceIncludesTaxes?: boolean;
   priceIncludesFees?: boolean;
   availabilityOnly?: boolean;
+  /** Set by the HomeToGo scraper ("HomeToGo"); absent for VRBO candidates. */
+  sourceLabel?: string;
 };
+
 
 type CityVrboScrapeCacheEntry = {
   expiresAt: number;
@@ -67,6 +72,8 @@ type CityVrboScrapeCacheEntry = {
     durationMs: number;
     reason: string;
     rawCount: number;
+    /** How many of rawCount came from the HomeToGo onsite source (0 when disabled). */
+    hometogoCount?: number;
     mapHarvest: Record<string, unknown> | null;
   };
   normalizePipeline: Omit<CityVrboFilterPipeline, "phraseFilter" | "afterPhraseFilter" | "phraseBuckets" | "suggestedPair">;
@@ -263,7 +270,8 @@ function normalizeSidecarCandidates(
       reviewCount: typeof candidate.reviewCount === "number" && Number.isFinite(candidate.reviewCount) ? Math.round(candidate.reviewCount) : null,
       lat: typeof candidate.lat === "number" && Number.isFinite(candidate.lat) ? candidate.lat : null,
       lng: typeof candidate.lng === "number" && Number.isFinite(candidate.lng) ? candidate.lng : null,
-      sourceLabel: "Vrbo",
+      // HomeToGo candidates carry their own sourceLabel ("HomeToGo"); VRBO ones don't.
+      sourceLabel: candidate.sourceLabel || "Vrbo",
       locationText: candidate.locationText || null,
       snippet: candidate.snippet,
       image: candidate.image,
@@ -383,6 +391,7 @@ function applyFiltersToPool(
   byBedroom: Record<number, CityVrboListing[]>;
   suggestedPair: CityVrboComboPair | null;
   suggestedPairs: CityVrboComboPair[];
+  unconfirmedPairs: CityVrboComboPair[];
   filterPipeline: CityVrboFilterPipeline;
 } {
   const phrase = String(filterPhrase ?? "").trim() || null;
@@ -396,8 +405,15 @@ function applyFiltersToPool(
   // distinct alternative combos hiding in the same pool.
   const suggestedPairs = suggestCityVrboComboPairs(filtered, bedroomPlan, nights, CITY_VRBO_TOP_COMBOS);
   const suggestedPair = suggestedPairs[0] ?? null;
+  // LAST-RESORT recall: cheapest combos formed WITHOUT a same-community signal
+  // (the cheap units often have generic titles the gate can't cluster), excluding
+  // units already in a CONFIRMED pair. Surfaced ONLY as operator-click "community
+  // unconfirmed" alternatives — never auto-attached. See suggestUnconfirmedCityVrboComboPairs.
+  const confirmedUrls = new Set<string>();
+  for (const p of suggestedPairs) for (const pk of p.picks) if (pk?.url) confirmedUrls.add(pk.url);
+  const unconfirmedPairs = suggestUnconfirmedCityVrboComboPairs(filtered, bedroomPlan, nights, CITY_VRBO_TOP_COMBOS, confirmedUrls);
   const filterPipeline = buildFilterPipeline(basePipeline, filtered, phrase, suggestedPair);
-  return { listings: filtered, byBedroom, suggestedPair, suggestedPairs, filterPipeline };
+  return { listings: filtered, byBedroom, suggestedPair, suggestedPairs, unconfirmedPairs, filterPipeline };
 }
 
 // Resolve the VRBO destination string for a scan. The community-keyed flow
@@ -438,13 +454,37 @@ async function scrapeCityVrboPool(args: {
       (new Date(`${args.checkOut}T12:00:00`).getTime() - new Date(`${args.checkIn}T12:00:00`).getTime()) / 86_400_000,
     ),
   );
-  const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
+  const { searchVrboViaSidecar, searchHometogoViaSidecar } = await import("./vrbo-sidecar-queue");
   const scanLabel = args.community ? `city-vrbo-inventory:${args.community}` : `city-vrbo-expansion:${citySearchTerm}`;
   console.log(
     `[city-vrbo-inventory] vrbo sidecar start label="${args.community ?? citySearchTerm}" ` +
     `search="${citySearchTerm}" mode=destination-dropdown-export-all`,
   );
-  const r = await searchVrboViaSidecar({
+  // HomeToGo onsite-source stack (added 2026-06-11; operator-approved). Fires CONCURRENTLY
+  // with the VRBO scan (own sidecar concurrency group) so it inherits the nearby-town
+  // expansion + home-city retry for free without serializing behind VRBO. Gated by
+  // CITY_HOMETOGO_ENABLED (default OFF until the worker handler is live) and fully
+  // NON-FATAL: any HomeToGo failure leaves the VRBO pool untouched. Only the "Booking
+  // through HomeToGo" (onsite) subset is kept — the worker does the OTA filtering.
+  const hometogoEnabled = process.env.CITY_HOMETOGO_ENABLED === "1";
+  const hometogoPromise: Promise<SidecarVrboCandidate[]> = hometogoEnabled
+    ? searchHometogoViaSidecar({
+        destination: citySearchTerm,
+        searchTerm: citySearchTerm,
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        targetState,
+        cityWideInventory: true,
+        walletBudgetMs: args.walletBudgetMs ?? CITY_VRBO_WALLET_BUDGET_MS,
+        queueContext: { scanLabel: `${scanLabel}:hometogo`, dateLabel: `${args.checkIn}→${args.checkOut}`, skipResultCache: true },
+      })
+        .then((res) => (res?.candidates ?? []) as SidecarVrboCandidate[])
+        .catch((err) => {
+          console.warn(`[city-vrbo-inventory] HomeToGo scan failed (non-fatal): ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+          return [] as SidecarVrboCandidate[];
+        })
+    : Promise.resolve([] as SidecarVrboCandidate[]);
+  const runScan = () => searchVrboViaSidecar({
     destination: citySearchTerm,
     searchTerm: citySearchTerm,
     checkIn: args.checkIn,
@@ -460,6 +500,35 @@ async function scrapeCityVrboPool(args: {
       skipResultCache: true,
     },
   });
+  let r = await runScan();
+  // HOME-CITY RETRY (2026-06-11): the bare-town destination prime is the daemon's
+  // most fragile step — one DOM pick that fails the town+state token check, then a
+  // single un-retried Anthropic-vision click. When that vision click intermittently
+  // flakes the scan returns 0 with a destination-acceptance reason (worker still
+  // online, NOT a real cooldown/block/CAPTCHA), and the home-city SAME-COMMUNITY
+  // pool — the single biggest pool — gets silently skipped (the ladder escalates to
+  // tiny nearby towns and can miss the cheap combo entirely). On that transient,
+  // re-run a couple times; a fresh prime usually lands the suggestion (same as how
+  // the expansion towns succeed). Home-city ONLY (args.community set) — expansion
+  // towns overlap the same pool and a per-town retry would blow the expansion budget.
+  // Never retry genuine cooldowns/blocks/CAPTCHA — that burns budget and deepens the
+  // provider backoff.
+  const homeCityRetries = args.community
+    ? Math.max(0, Math.min(3, Number(process.env.CITY_VRBO_HOME_RETRY ?? 2) || 0))
+    : 0;
+  const isTransientDestMiss = (reason?: string | null): boolean => {
+    const s = String(reason ?? "");
+    if (/cool(?:ing)?\s*down|\bblock|proxy|captcha|challenge|cancel/i.test(s)) return false;
+    return /did not accept destination|provider'?s default|geolocated|did not keep destination|destination (?:mismatch|drift)|refusing to submit/i.test(s);
+  };
+  for (let attempt = 1; attempt <= homeCityRetries; attempt++) {
+    if (!r || r.workerOnline !== true || (r.candidates?.length ?? 0) > 0 || !isTransientDestMiss(r.reason)) break;
+    console.log(
+      `[city-vrbo-inventory] home-city "${args.community}" destination not confirmed ` +
+      `(0 exported, reason="${r.reason ?? ""}") — retry ${attempt}/${homeCityRetries}`,
+    );
+    r = await runScan();
+  }
   if (r) {
     console.log(
       `[city-vrbo-inventory] vrbo sidecar finish label="${args.community ?? citySearchTerm}" ` +
@@ -467,11 +536,60 @@ async function scrapeCityVrboPool(args: {
     );
   }
 
-  if (!r) {
+  // Merge in the concurrent HomeToGo onsite candidates (empty unless CITY_HOMETOGO_ENABLED).
+  // Order: VRBO first, then HomeToGo — normalizeSidecarCandidates dedupes by URL (the two
+  // sources never share a URL) and keeps the cheaper on any collision, so VRBO behavior is
+  // byte-identical when HomeToGo is disabled or returns nothing.
+  //
+  // COORDS-REGION GUARD (LOAD-BEARING, 2026-06-11): HomeToGo's destination sight+click can
+  // intermittently FAIL to scope (a flaked autocomplete submits a GLOBAL search → a worldwide
+  // onsite pool: Colorado, Cabo, Tahiti...). The locationText out-of-area filter only knows US
+  // states, so an international leak (Tahiti) slips into the matcher. Because every HomeToGo
+  // offer carries EXACT coords, we hard-drop any whose lat/lon fall outside the target state's
+  // bounding box BEFORE the pool — defense-in-depth that makes a destination flake harmless and
+  // keeps an out-of-region unit from ever reaching the combo matcher / the coords attach gate.
+  const hometogoRaw = await hometogoPromise;
+  const hometogoCandidates = hometogoRaw.filter((c) => coordsWithinState(c.lat, c.lng, targetState));
+  const hometogoDroppedOOR = hometogoRaw.length - hometogoCandidates.length;
+  if (hometogoDroppedOOR > 0) {
+    console.warn(`[city-vrbo-inventory] HomeToGo dropped ${hometogoDroppedOOR}/${hometogoRaw.length} OUT-OF-REGION candidate(s) (coords outside ${targetState}) — destination likely did not scope`);
+  }
+  // CROSS-SOURCE DEDUP (2026-06-11): the same physical unit can be listed on BOTH VRBO and
+  // HomeToGo-onsite (a PM distributing the same unit two ways). The two carry DIFFERENT URLs
+  // (vrbo.com vs hometogo.com/rental), so normalizeSidecarCandidates' URL-dedup misses them and
+  // the combo-finder could pick the VRBO copy + the HomeToGo copy as the two halves of one combo
+  // (booking the same unit twice). listingsAreSamePhysicalUnit matches conservatively (shared
+  // resort phrase + shared unit token + non-conflicting bedrooms); on a match we keep the CHEAPER
+  // and drop the other. Only runs when HomeToGo is enabled; VRBO-only behavior is unchanged.
+  const vrboCandidates = r?.candidates ?? [];
+  const priceOf = (c: SidecarVrboCandidate) =>
+    (Number(c.totalPrice) > 0 ? Number(c.totalPrice) : 0)
+    || (Number(c.nightlyPrice) > 0 ? Number(c.nightlyPrice) * Math.max(1, nights) : 0)
+    || Number.POSITIVE_INFINITY;
+  const vrboUrlsToDrop = new Set<string>();
+  let crossSourceDeduped = 0;
+  const hometogoDeduped = hometogoCandidates.filter((h) => {
+    const dupV = vrboCandidates.find((v) => !vrboUrlsToDrop.has(v.url) && listingsAreSamePhysicalUnit(h, v));
+    if (!dupV) return true;
+    crossSourceDeduped += 1;
+    if (priceOf(h) < priceOf(dupV)) { vrboUrlsToDrop.add(dupV.url); return true; } // HomeToGo cheaper → keep it, drop VRBO copy
+    return false; // VRBO same-or-cheaper → drop the HomeToGo copy
+  });
+  if (crossSourceDeduped > 0) {
+    console.log(`[city-vrbo-inventory] cross-source dedup: ${crossSourceDeduped} HomeToGo↔VRBO same-unit collision(s) resolved (kept cheaper)`);
+  }
+  const vrboKept = vrboUrlsToDrop.size ? vrboCandidates.filter((v) => !vrboUrlsToDrop.has(v.url)) : vrboCandidates;
+
+  if (hometogoCandidates.length) {
+    console.log(`[city-vrbo-inventory] HomeToGo merged ${hometogoDeduped.length} in-region onsite candidate(s) (after ${crossSourceDeduped} cross-source dedup) into "${args.community ?? citySearchTerm}" pool`);
+  }
+
+  if (!r && !hometogoDeduped.length) {
     return null;
   }
 
-  const { rawListings, listings, pipeline } = normalizeSidecarCandidates(r.candidates ?? [], nights, targetState);
+  const mergedCandidates = [...vrboKept, ...hometogoDeduped];
+  const { rawListings, listings, pipeline } = normalizeSidecarCandidates(mergedCandidates, nights, targetState);
   return {
     expiresAt: Date.now() + CITY_VRBO_CACHE_TTL_MS,
     citySearchTerm,
@@ -479,10 +597,11 @@ async function scrapeCityVrboPool(args: {
     rawListings,
     listings,
     sidecar: {
-      workerOnline: r.workerOnline,
-      durationMs: r.durationMs,
-      reason: r.reason,
-      rawCount: r.candidates?.length ?? 0,
+      workerOnline: r?.workerOnline ?? false,
+      durationMs: r?.durationMs ?? 0,
+      reason: r?.reason ?? "",
+      rawCount: mergedCandidates.length,
+      hometogoCount: hometogoDeduped.length,
       mapHarvest: r?.mapHarvest ?? null,
     },
     normalizePipeline: pipeline,
@@ -499,6 +618,9 @@ export type CityVrboScanResult = {
   // The top-N distinct same-community combos mined from this pool (cheapest first).
   // suggestedPairs[0] === suggestedPair; the rest are operator-attachable alternatives.
   suggestedPairs: CityVrboComboPair[];
+  // Cheapest combos formed WITHOUT a same-community signal (generic-titled units).
+  // Operator-click "community unconfirmed" alternatives only — never auto-attached.
+  unconfirmedPairs: CityVrboComboPair[];
   filterPipeline: CityVrboFilterPipeline;
   fromCache: boolean;
   // Found-vs-usable-vs-VRBO-total breakdown so the tracker doesn't read the
@@ -588,6 +710,7 @@ async function runCityScanCore(args: {
       byBedroom: {},
       suggestedPair: null,
       suggestedPairs: [],
+      unconfirmedPairs: [],
       filterPipeline: emptyPipeline,
       fromCache: false,
       coverage: buildCityScanCoverage({
@@ -735,6 +858,7 @@ async function runCityScanCore(args: {
     byBedroom: filtered.byBedroom,
     suggestedPair: filtered.suggestedPair,
     suggestedPairs: filtered.suggestedPairs,
+    unconfirmedPairs: filtered.unconfirmedPairs,
     filterPipeline: filtered.filterPipeline,
     fromCache,
     coverage,

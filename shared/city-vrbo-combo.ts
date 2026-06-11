@@ -57,6 +57,14 @@ export type CityVrboComboPair = {
   matchSource?: CommunityMatchSource;
   /** Rough confidence in the "same community" claim for this pair. */
   matchConfidence?: "high" | "medium" | "low";
+  /**
+   * TRUE when this pair was formed WITHOUT a confirmed same-community signal —
+   * the cheapest units regardless of complex (their generic titles couldn't be
+   * clustered). These are OPERATOR-CLICK alternatives only: NEVER auto-attached,
+   * never mixed into the confirmed suggestCityVrboComboPairs results. The operator
+   * verifies walkability before booking. See suggestUnconfirmedCityVrboComboPairs.
+   */
+  unconfirmedCommunity?: boolean;
 };
 
 function normalizedIdentityText(value: string): string {
@@ -457,6 +465,47 @@ export function listingTotalPrice(listing: CityVrboListing, nights: number): num
   return 0;
 }
 
+// Building/unit identifiers in a listing title ("Pili Mai 14K" → "14k", "Waikomo Stream
+// Villas 503" → "503", "Poipu Shores A206" → "a206", "Lawai Beach Resort C103" → "c103").
+// Used for CROSS-SOURCE dedup (the same physical unit listed on both VRBO and HomeToGo has
+// different URLs, so URL-dedup misses it). Conservative on purpose: strips count phrases
+// ("3BR", "2 bath", "5 min walk", "sleeps 8") so an incidental number is NOT taken as a unit,
+// and only accepts letter-attached tokens (14k/a206/c103) or bare 3-4 digit numbers (503/1752)
+// — NOT bare 1-2 digit numbers (which are almost always counts, not unit IDs).
+export function unitTokensFromTitle(title: string | null | undefined): string[] {
+  let t = String(title ?? "").toLowerCase().replace(/&amp;/g, "&");
+  t = t.replace(/\b\d+\s*(?:br|bd|beds?|bedrooms?|ba|baths?|bathrooms?|min(?:ute)?s?|guests?|sleeps?|nights?|stars?|persons?|floor|fl)\b/g, " ");
+  const tokens = new Set<string>();
+  for (const m of t.matchAll(/\b([a-z]?\d{1,4}[a-z]?)\b/g)) {
+    const tok = m[1];
+    const digits = tok.replace(/[^0-9]/g, "");
+    const hasLetter = /[a-z]/.test(tok);
+    if (hasLetter && digits.length >= 1) tokens.add(tok);        // 14k, 6k, a206, c103
+    else if (!hasLetter && digits.length >= 3) tokens.add(tok);  // 503, 211, 1752, 100, 425
+  }
+  return Array.from(tokens);
+}
+
+type SamePhysicalUnitInput = Pick<CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName" | "bedrooms">;
+
+// True when two listings are (with high confidence) the SAME physical unit — used to dedupe a
+// VRBO listing against a HomeToGo onsite listing of the same unit. Requires ALL THREE:
+//   (1) a SHARED resort/complex phrase (sharedResortPhraseKeys intersection) — so "...503" at
+//       two DIFFERENT resorts never matches; (2) a SHARED unit token — so different units in the
+//       same resort (14K vs 15H) never match; (3) NON-CONFLICTING bedrooms (same, or unknown on
+//       a side). Precision over recall: a missed dedupe just shows a unit twice (harmless); a
+//       FALSE dedupe would drop a distinct real candidate, so we never match on a weak signal.
+export function listingsAreSamePhysicalUnit(a: SamePhysicalUnitInput, b: SamePhysicalUnitInput): boolean {
+  const ab = Number(a.bedrooms), bb = Number(b.bedrooms);
+  if (Number.isFinite(ab) && Number.isFinite(bb) && Math.round(ab) !== Math.round(bb)) return false;
+  const aKeys = new Set(sharedResortPhraseKeys(a));
+  if (aKeys.size === 0) return false;
+  if (!sharedResortPhraseKeys(b).some((k) => aKeys.has(k))) return false;
+  const aTok = new Set(unitTokensFromTitle(a.title));
+  if (aTok.size === 0) return false;
+  return unitTokensFromTitle(b.title).some((tk) => aTok.has(tk));
+}
+
 function walkMinutesBetween(a: CityVrboListing, b: CityVrboListing): number | null {
   const latA = typeof a.lat === "number" ? a.lat : null;
   const lngA = typeof a.lng === "number" ? a.lng : null;
@@ -698,6 +747,129 @@ function dictCanonicalsOf(listing: CityVrboListing): string[] {
 }
 
 /**
+ * Do two listing TITLES carry positive evidence of being in the same (or a
+ * curated-adjacent) walkable community? True when their resort-phrase keys
+ * intersect (same named complex — the combo matcher's own notion) OR their
+ * dictionary canonicals share a WALKABLE_COMPLEX_CLUSTERS group (e.g. Poipu Kai
+ * + Kiahuna Plantation).
+ *
+ * LOAD-BEARING consumer: the attach route's proximity guard
+ * (estimateAttachedBuyInProximity in server/routes.ts). City-wide candidates can
+ * be from ANY resort in town, and when geocoding fails the walk falls back to
+ * the CONFIGURED resort's footprint default — which silently passed a
+ * cross-resort pair as a "4 minute walk" (Puamana + Wyndham Ka Eo Kai attached
+ * to one booking, 2026-06-10). The guard now requires THIS check to pass before
+ * trusting the footprint fallback for city-wide units. Titles only — no network.
+ */
+export function titlesShareWalkableCommunity(titleA: string, titleB: string): boolean {
+  const a = { title: titleA, sourceLabel: "", snippet: "", complexName: null } as Pick<
+    CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName"
+  >;
+  const b = { title: titleB, sourceLabel: "", snippet: "", complexName: null } as Pick<
+    CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName"
+  >;
+  const keysA = sharedResortPhraseKeys(a);
+  if (keysA.length === 0) return false;
+  const keysB = sharedResortPhraseKeys(b);
+  if (keysB.length === 0) return false;
+  const setA = new Set(keysA);
+  if (keysB.some((k) => setA.has(k))) return true;
+  const dictA = keysA.filter((k) => k.startsWith("dict:")).map((k) => communityKeyLabel(k));
+  const dictB = keysB.filter((k) => k.startsWith("dict:")).map((k) => communityKeyLabel(k));
+  if (dictA.length && dictB.length) {
+    for (const cluster of WALKABLE_COMPLEX_CLUSTERS) {
+      const clusterSet = new Set(cluster);
+      if (dictA.some((c) => clusterSet.has(c)) && dictB.some((c) => clusterSet.has(c))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Resolve ONE unit's community from its text. Unlike the combo matcher (which
+ * works off card titles/snippets), this is fed the listing DESCRIPTION prose
+ * harvested from the detail page — VRBO hides coords/address for most Kauai
+ * listings (AGENTS #8/#9), so the description is the only reliable same-community
+ * signal. The description is passed as `snippet` so it flows through the
+ * dictionary EXACT-regex scan in sharedResortPhraseKeys (which scans
+ * title+sourceLabel+snippet) — that's where prose like "...within Poipu Kai..."
+ * or "Nihi Kai Villas #300" resolves to a canonical. Returns every community key
+ * found plus a best human label. Used ONLY by the operator-triggered
+ * verify-community endpoint — NOT by the unattended matcher (precision guard:
+ * description prose can name a NEARBY complex, so the operator eyeballs the
+ * result rather than the queue auto-clustering on it).
+ *
+ * PRECISION (enrich-only): six dictionary entries match on a SINGLE bare word
+ * (kiahuna, makahuena, waikomo, manualoha, sealodge, lanikai). In long
+ * description prose those also match STREET names — "near Kiahuna Road" would
+ * resolve to dict:kiahuna plantation and, via WALKABLE_COMPLEX_CLUSTERS, falsely
+ * read as walkable-adjacent to a real Poipu Kai unit. We strip ONLY
+ * "<single-word-trigger> <street-type>" runs from the DESCRIPTION (not the title,
+ * which is short/curated) before the dictionary scan. This is deliberately narrow:
+ * it cannot break a legit multi-word phrase — "Poipu Kai Drive" survives (poipu/kai
+ * aren't triggers) and "Kiahuna Plantation Drive" survives (kiahuna is followed by
+ * "plantation", not a street type). Scoped to this enrich path — the shared
+ * KAUAI_COMPLEX_DICTIONARY is left untouched (tightening it would change the
+ * load-bearing unattended matcher's recall on bare-name titles like "Kiahuna 245").
+ */
+const STREET_NAME_TRIGGER_RE =
+  /\b(?:kiahuna|makahuena|waikomo|manualoha|manauloha|sealodge|sea\s+lodge|lanikai)\s+(?:roads?|rd|streets?|st|drives?|dr|avenues?|ave|ways?|lanes?|ln|boulevards?|blvd|highways?|hwy|places?|pl|courts?|ct|circles?|cir|loops?|terraces?|ter)\b/gi;
+function stripStreetQualifiers(text: string): string {
+  if (!text) return "";
+  return text.replace(STREET_NAME_TRIGGER_RE, " ");
+}
+
+export function resolveUnitCommunityFromText(input: {
+  title?: string | null;
+  descriptionText?: string | null;
+  complexName?: string | null;
+  sourceLabel?: string | null;
+}): { keys: string[]; dictCanonicals: string[]; complexKeys: string[]; label: string | null } {
+  const candidate = {
+    title: input.title ?? "",
+    sourceLabel: input.sourceLabel ?? "",
+    snippet: stripStreetQualifiers(input.descriptionText ?? ""),
+    complexName: input.complexName ?? null,
+  } as Pick<CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName">;
+  const keys = sharedResortPhraseKeys(candidate);
+  const dictCanonicals = keys.filter((k) => k.startsWith("dict:")).map((k) => communityKeyLabel(k));
+  const complexKeys = keys
+    .filter((k) => k.startsWith("complex:") || k.startsWith("phrase:"))
+    .map((k) => communityKeyLabel(k));
+  const label = dictCanonicals[0] ?? complexKeys[0] ?? null;
+  return { keys, dictCanonicals, complexKeys, label };
+}
+
+/**
+ * Same intersection logic as titlesShareWalkableCommunity, but operating on the
+ * resolved key sets from resolveUnitCommunityFromText (which fold in the detail-page
+ * description). Returns the strongest verdict: "same-community" (key intersection),
+ * "walkable-adjacent" (dictionary canonicals share a WALKABLE_COMPLEX_CLUSTERS group),
+ * "different" (both resolved to specific, NON-overlapping communities), or
+ * "unresolved" (one/both produced no community signal — common for generic VRBO
+ * descriptions that never name the resort).
+ */
+export function verifyResolvedUnitsShareCommunity(
+  a: { keys: string[]; dictCanonicals: string[] },
+  b: { keys: string[]; dictCanonicals: string[] },
+): "same-community" | "walkable-adjacent" | "different" | "unresolved" {
+  if (a.keys.length === 0 || b.keys.length === 0) return "unresolved";
+  const setA = new Set(a.keys);
+  if (b.keys.some((k) => setA.has(k))) return "same-community";
+  if (a.dictCanonicals.length && b.dictCanonicals.length) {
+    for (const cluster of WALKABLE_COMPLEX_CLUSTERS) {
+      const clusterSet = new Set(cluster);
+      if (a.dictCanonicals.some((c) => clusterSet.has(c)) && b.dictCanonicals.some((c) => clusterSet.has(c))) {
+        return "walkable-adjacent";
+      }
+    }
+    // Both named a specific, distinct dictionary community with no shared cluster.
+    return "different";
+  }
+  return "unresolved";
+}
+
+/**
  * Walkable-adjacency FALLBACK: when no single complex satisfies the bedroom plan,
  * try pairing ACROSS complexes that share a curated walkable cluster. Medium
  * confidence (cross-complex, but curated-adjacent). Returns the cheapest such
@@ -756,6 +928,69 @@ export { comboSplitsForPlan };
  * across splits wins (configured split preferred on ties). The winning split is
  * reported in the returned pair's `bedrooms`.
  */
+/**
+ * LAST-RESORT recall: top-N cheapest 2-unit combos from the pool IGNORING the
+ * same-community signal. Used only when no community-CONFIRMED pair clears the
+ * profit gate (e.g. the cheap units have generic titles like "Poipu Pool House"
+ * that the same-community gate can't cluster, so the only confirmed pairs are the
+ * expensive named-complex ones). These pair the cheapest units regardless of
+ * complex, are tagged `unconfirmedCommunity:true`, and are ONLY surfaced as
+ * OPERATOR-CLICK alternatives — NEVER auto-attached and NEVER mixed into the
+ * confirmed suggestCityVrboComboPairs results. The operator verifies walkability
+ * (e.g. via description-text enrichment) before booking.
+ *
+ * `excludeUrls` = listings already in a confirmed pair, so these surface DISTINCT
+ * cheaper options instead of re-pairing the same units.
+ */
+export function suggestUnconfirmedCityVrboComboPairs(
+  listings: CityVrboListing[],
+  bedroomPlan: number[],
+  nights: number,
+  limit: number,
+  excludeUrls: Iterable<string> = [],
+): CityVrboComboPair[] {
+  if (!Array.isArray(listings) || listings.length === 0 || !(limit > 0)) return [];
+  const plan = bedroomPlan.filter((br) => Number.isFinite(br) && br > 0);
+  if (plan.length < 2) return [];
+  const splits = comboSplitsForPlan(plan);
+  const used = new Set<string>();
+  for (const u of excludeUrls) if (u) used.add(String(u));
+  const results: CityVrboComboPair[] = [];
+
+  while (results.length < limit) {
+    const priced: ScoredRow[] = listings
+      .map((listing) => ({
+        listing,
+        total: listingTotalPrice(listing, nights),
+        br: typeof listing.bedrooms === "number" && Number.isFinite(listing.bedrooms) ? Math.round(listing.bedrooms) : 0,
+      }))
+      .filter((row) => row.total > 0 && row.br > 0 && !!row.listing.url && !used.has(row.listing.url));
+    if (priced.length < 2) break;
+
+    let best: { picks: CityVrboListing[]; split: number[]; total: number } | null = null;
+    for (const split of splits) {
+      const picks = pickCheapestPlan(priced, split);
+      if (!picks || picks.length < 2) continue;
+      const total = picks.reduce((s, p) => s + listingTotalPrice(p, nights), 0);
+      if (!best || total < best.total) best = { picks, split, total };
+    }
+    if (!best) break;
+
+    for (const p of best.picks) if (p.url) used.add(p.url);
+    results.push({
+      resortPhrase: "community unconfirmed",
+      bedrooms: best.split,
+      picks: best.picks,
+      totalCost: best.total,
+      walkMinutes: walkMinutesBetween(best.picks[0], best.picks[1]),
+      walkSource: "unknown",
+      matchConfidence: "low",
+      unconfirmedCommunity: true,
+    });
+  }
+  return results;
+}
+
 export function suggestCityVrboComboPair(
   listings: CityVrboListing[],
   bedroomPlan: number[],

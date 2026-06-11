@@ -65,3 +65,26 @@ export function listingIsOutOfArea(
   if (mentionsHawaii(locationText)) return false;
   return mentionsNonHawaiiState(locationText);
 }
+
+// State bounding boxes (padded) for the HomeToGo coords-region guard (2026-06-11). HomeToGo
+// always supplies EXACT per-offer coordinates, so a coordinate check is the most reliable way
+// to drop out-of-region offers when a destination sight+click flakes into a GLOBAL search
+// (a worldwide onsite pool: Colorado/Cabo/Tahiti...). listingIsOutOfArea (locationText, US
+// states only) misses international leaks; this closes that gap. Keyed by full lowercase state
+// name. UNKNOWN state → false (drop): contribute nothing rather than risk an out-of-region unit
+// reaching the combo matcher / the coords attach gate. Add a box when a new market is onboarded.
+// NOTE: scoped to the buy-in MARKET ISLAND, not the whole state. A deep HomeToGo scroll harvests
+// its "recommended elsewhere" padding, which on a Kauai search adds OTHER ISLANDS (Maui/Big
+// Island/Oahu) after the local results — plus a flaked destination can return a global pool. Since
+// EVERY buy-in market is on KAUAI, the "hawaii" box is Kauai-tight (drops other islands + global).
+// Split into per-island boxes if a market on another Hawaiian island is onboarded.
+export const STATE_BBOX: Record<string, { latMin: number; latMax: number; lngMin: number; lngMax: number }> = {
+  hawaii: { latMin: 21.75, latMax: 22.30, lngMin: -159.85, lngMax: -159.25 }, // Kauai (all buy-in markets)
+  florida: { latMin: 24.3, latMax: 31.1, lngMin: -87.8, lngMax: -79.9 },
+};
+export function coordsWithinState(lat: unknown, lng: unknown, state: string | undefined): boolean {
+  if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  const box = STATE_BBOX[String(state ?? "").trim().toLowerCase()];
+  if (!box) return false; // unknown state → drop (safe)
+  return lat >= box.latMin && lat <= box.latMax && lng >= box.lngMin && lng <= box.lngMax;
+}

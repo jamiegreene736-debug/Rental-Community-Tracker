@@ -235,7 +235,8 @@ import {
   looksLikeIndividualListingTitle,
   mergeDiscoveredScoutRowsByResort,
 } from "@shared/alternative-scout-resort";
-import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
+import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, walkBetweenCoords, parseGeoNote, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
+import { titlesShareWalkableCommunity } from "@shared/city-vrbo-combo";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
   unitBuilderData,
@@ -10278,6 +10279,11 @@ Requirements:
   // The UI calls this after at least two slots are filled. It prefers
   // exact saved/scraped addresses, then uses listing titles + known resort
   // street/city hints so the operator can spot units that are far apart.
+  // coordsFromBuyInNotes → parseGeoNote (shared/walking-distance, unit-tested). Reads the
+  // "Geo:" marker a coord-bearing buy-in (HomeToGo onsite) stamps into its notes at attach
+  // time. null for VRBO/Booking (no marker) so their address/geocode path is unchanged.
+  const coordsFromBuyInNotes = parseGeoNote;
+
   async function estimateAttachedBuyInProximity(attachedBuyIns: BuyIn[]) {
     const sorted = attachedBuyIns
       .filter((b) => b.status !== "cancelled")
@@ -10321,6 +10327,12 @@ Requirements:
           unitToken: finalGuess.unitToken,
           address: finalGuess.address,
           addressSource: finalGuess.source,
+          // City-wide candidates can be from ANY resort in town (the note is
+          // stamped by the city-VRBO attach paths) — for those, the configured-
+          // resort footprint fallback below is NOT trustworthy on its own.
+          cityWide: /city-?wide/i.test(String(buyIn?.notes ?? "")),
+          // Exact source coordinates (HomeToGo onsite offers stamp "Geo:" in notes).
+          coords: coordsFromBuyInNotes(buyIn?.notes),
         };
       }),
     );
@@ -10331,14 +10343,57 @@ Requirements:
     }).length;
 
     let worstPair: { a: typeof units[number]; b: typeof units[number]; walk: WalkResult } | null = null;
+    // A CITY-WIDE pair (either unit from the city-wide pool — could be ANY
+    // resort in town) is UNVERIFIABLE unless it has real evidence of belonging
+    // together. Real evidence is ONE of:
+    //  (a) a geocoded walk between two REAL addresses (saved on the buy-in or
+    //      scraped from the listing page) — actual buildings, trustworthy even
+    //      cross-resort; or
+    //  (b) positive same/adjacent-community evidence in the TITLES (shared
+    //      resort phrase, or a curated WALKABLE_COMPLEX_CLUSTERS adjacency).
+    // A geocoded walk between TITLE-GUESS addresses does NOT count for a
+    // cross-resort pair: geocoding "title-soup, Town, HI" drops fuzzy pins, and
+    // that's how a Puamana 3BR + a Wyndham Ka Eo Kai 2BR — different resorts —
+    // got attached to one booking as a "4 minute walk within Mauna Kai"
+    // (2026-06-10, twice: first via the footprint fallback, then via fuzzy
+    // title geocodes 870ft apart). The configured-resort footprint fallback
+    // never counts either. Such a pair must FAIL the proximity gate; the
+    // operator can whitelist genuinely-adjacent resorts in
+    // WALKABLE_COMPLEX_CLUSTERS (one curated line).
+    let unverifiedPair: { a: typeof units[number]; b: typeof units[number]; walk: WalkResult } | null = null;
+    const hasRealAddress = (u: typeof units[number]) =>
+      u.addressSource === "saved" || u.addressSource === "scraped";
     for (let i = 0; i < units.length; i++) {
       for (let j = i + 1; j < units.length; j++) {
-        let walk = await walkBetween(units[i].address, units[j].address, resortName).catch(() => fallbackWalkForResort(resortName));
-        if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
-          // Resort-title searches can geocode both units to the same resort
-          // centroid. In that case the resort footprint default is more honest
-          // than telling the operator two unknown buildings are "steps apart."
-          walk = fallbackWalkForResort(resortName);
+        const ci = units[i].coords, cj = units[j].coords;
+        let walk: WalkResult;
+        let geoTrustworthy: boolean;
+        if (ci && cj) {
+          // BOTH units carry exact source coordinates (HomeToGo onsite) — compute the
+          // walk directly from the listings' own lat/lon. This is STRICTLY stronger
+          // evidence than a geocoded address string, so it authorizes a city-wide /
+          // cross-complex attach (and, conversely, BLOCKS one when the points are truly
+          // far apart via withinLimit below). No fuzzy-centroid collapse risk here: these
+          // are distinct per-offer coordinates, not a shared resort-name geocode.
+          walk = walkBetweenCoords(ci, cj, resortName);
+          geoTrustworthy = true;
+        } else {
+          walk = await walkBetween(units[i].address, units[j].address, resortName).catch(() => fallbackWalkForResort(resortName));
+          if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
+            // Resort-title searches can geocode both units to the same resort
+            // centroid. In that case the resort footprint default is more honest
+            // than telling the operator two unknown buildings are "steps apart."
+            walk = fallbackWalkForResort(resortName);
+          }
+          geoTrustworthy =
+            walk.source === "geocoded" && hasRealAddress(units[i]) && hasRealAddress(units[j]);
+        }
+        if (
+          (units[i].cityWide || units[j].cityWide) &&
+          !geoTrustworthy &&
+          !titlesShareWalkableCommunity(String(units[i].title ?? ""), String(units[j].title ?? ""))
+        ) {
+          unverifiedPair = { a: units[i], b: units[j], walk };
         }
         if (!worstPair || walk.minutes > worstPair.walk.minutes) {
           worstPair = { a: units[i], b: units[j], walk };
@@ -10347,6 +10402,31 @@ Requirements:
     }
 
     if (!worstPair) return null;
+    if (unverifiedPair) {
+      // Honest failure: we cannot place these units near each other, and their
+      // titles say different resorts — surface that instead of the footprint
+      // minutes that would otherwise sail through the gate.
+      return {
+        propertyId: Number.isFinite(propertyId) ? propertyId : null,
+        community: communityName,
+        resortName: displayResort ?? resortName,
+        units,
+        walk: {
+          ...unverifiedPair.walk,
+          description:
+            `Different resorts by listing title ("${String(unverifiedPair.a.title ?? "").slice(0, 60)}" vs ` +
+            `"${String(unverifiedPair.b.title ?? "").slice(0, 60)}") and no reliable location data ` +
+            `(listing titles only, no real addresses) — walking distance cannot be verified for these city-wide units.`,
+        },
+        confidence: "unverified-cross-resort" as const,
+        withinLimit: false,
+        maxMinutes: MAX_BUY_IN_WALK_MINUTES,
+        worstPair: {
+          buyInIds: [unverifiedPair.a.buyInId, unverifiedPair.b.buyInId],
+          unitLabels: [unverifiedPair.a.unitLabel, unverifiedPair.b.unitLabel],
+        },
+      };
+    }
     const displayWalk = relabelWalkDescription(worstPair.walk, displayResort ?? resortName);
     return {
       propertyId: Number.isFinite(propertyId) ? propertyId : null,
@@ -10354,7 +10434,9 @@ Requirements:
       resortName: displayResort ?? resortName,
       units,
       walk: displayWalk,
-      confidence: exactAddressCount >= 2 && worstPair.walk.source === "geocoded"
+      // A "coords" walk (exact source lat/lon, e.g. HomeToGo onsite) is our highest-
+      // confidence signal — label it like an exact address.
+      confidence: worstPair.walk.source === "coords" || (exactAddressCount >= 2 && worstPair.walk.source === "geocoded")
         ? "exact-address" as const
         : worstPair.walk.source === "geocoded"
           ? "listing-title" as const
@@ -13086,6 +13168,150 @@ Requirements:
       return res.json(responsePayload);
     } catch (e: any) {
       console.error("[city-vrbo-inventory] error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // ── Verify community for an UNCONFIRMED combo (operator-triggered) ─────────
+  // The bulk/auto-fill ladder surfaces generic-titled VRBO units as "community
+  // unconfirmed" alternatives (suggestUnconfirmedCityVrboComboPairs): cheap pairs
+  // the same-community MATCHER can't cluster because the titles name no complex.
+  // This endpoint is the operator-click ENRICH half — it opens each unit's VRBO
+  // detail page (real local Chrome via the sidecar), harvests the listing
+  // DESCRIPTION prose (VRBO hides coords/address for most Kauai listings —
+  // AGENTS #8/#9, so the description is the only reliable same-community signal),
+  // resolves each unit's complex from that prose against the dictionary, and
+  // returns a same-community / walkable verdict + photos + a description excerpt
+  // so the operator can eyeball walkability before booking. OPERATOR-ONLY: this
+  // is the only path that opens individual VRBO listings for community-checking;
+  // the unattended queue must NOT (commit 121caa4 — keeps the bulk HOME-CITY pass
+  // from driving the sidecar into per-listing detail pages).
+  app.post("/api/operations/verify-combo-community", async (req: Request, res: Response) => {
+    try {
+      const rawUnits = Array.isArray(req.body?.units) ? req.body.units : [];
+      // SSRF guard: this endpoint hands each URL to the sidecar's local Chrome
+      // (page.goto), so it MUST only accept vrbo.com listing URLs — the combo
+      // picks are always VRBO units. Restricting here (not in the daemon, which
+      // navigates whatever it's handed) matches the codebase pattern
+      // (isVrboAlternativeUrl, line ~7844) and stops an attacker pointing the
+      // browser at localhost / RFC-1918 / metadata endpoints. De-dupe by URL too
+      // so a relisted pair can't drive two scrapes of the same page.
+      const isVrboListingUrl = (url: string): boolean => /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
+      const seenUrls = new Set<string>();
+      const units = rawUnits
+        .map((u: any) => ({
+          url: typeof u?.url === "string" ? u.url.trim() : "",
+          title: typeof u?.title === "string" ? u.title.trim() : "",
+        }))
+        .filter((u: { url: string }) => {
+          if (!isVrboListingUrl(u.url)) return false;
+          const key = u.url.toLowerCase();
+          if (seenUrls.has(key)) return false;
+          seenUrls.add(key);
+          return true;
+        });
+      if (units.length < 2) {
+        return res.status(400).json({ error: "Provide at least 2 distinct vrbo.com unit { url, title } objects to verify" });
+      }
+      if (units.length > 4) units.length = 4; // a combo is at most a few slots
+      const {
+        resolveUnitCommunityFromText,
+        verifyResolvedUnitsShareCommunity,
+      } = await import("../shared/city-vrbo-combo");
+      const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
+
+      const scraped = await Promise.all(
+        units.map(async (u: { url: string; title: string }) => {
+          try {
+            const r = await scrapeVrboPhotosViaSidecar({
+              url: u.url,
+              maxPhotos: 8,
+              walletBudgetMs: 90_000,
+              pollIntervalMs: 1500,
+            });
+            const descriptionText = String((r as { descriptionText?: string | null }).descriptionText ?? "");
+            const resolved = resolveUnitCommunityFromText({
+              title: u.title,
+              descriptionText,
+              complexName: r.complexName,
+            });
+            return {
+              url: u.url,
+              title: u.title,
+              scrapeOk: r.workerOnline && (r.photos.length > 0 || !!descriptionText || !!r.complexName),
+              workerOnline: r.workerOnline,
+              reason: r.reason,
+              photos: r.photos.slice(0, 6),
+              sleeps: r.sleeps,
+              bedText: r.bedText || "",
+              complexName: r.complexName,
+              descriptionExcerpt: descriptionText.slice(0, 600),
+              resolvedCommunity: resolved.label,
+              dictCanonicals: resolved.dictCanonicals,
+              communityKeys: resolved.keys,
+            };
+          } catch (e: any) {
+            return {
+              url: u.url,
+              title: u.title,
+              scrapeOk: false,
+              workerOnline: false,
+              reason: e?.message ?? String(e),
+              photos: [] as string[],
+              sleeps: null as number | null,
+              bedText: "",
+              complexName: null as string | null,
+              descriptionExcerpt: "",
+              resolvedCommunity: null as string | null,
+              dictCanonicals: [] as string[],
+              communityKeys: [] as string[],
+            };
+          }
+        }),
+      );
+
+      // Overall verdict across all unit pairs: the WEAKEST positive wins (so a
+      // 3-unit combo is "same-community" only if every pair shares one); any
+      // pair that resolves to two DISTINCT communities makes it "different";
+      // otherwise "unresolved" (description never named the complex — common).
+      let sawSame = false;
+      let sawAdjacent = false;
+      let sawDifferent = false;
+      let sawResolvable = false;
+      for (let i = 0; i < scraped.length; i += 1) {
+        for (let j = i + 1; j < scraped.length; j += 1) {
+          const v = verifyResolvedUnitsShareCommunity(
+            { keys: scraped[i].communityKeys, dictCanonicals: scraped[i].dictCanonicals },
+            { keys: scraped[j].communityKeys, dictCanonicals: scraped[j].dictCanonicals },
+          );
+          if (v === "same-community") { sawSame = true; sawResolvable = true; }
+          else if (v === "walkable-adjacent") { sawAdjacent = true; sawResolvable = true; }
+          else if (v === "different") { sawDifferent = true; sawResolvable = true; }
+        }
+      }
+      const verdict: "same-community" | "walkable-adjacent" | "different" | "unresolved" =
+        sawDifferent ? "different"
+        : sawSame && !sawAdjacent ? "same-community"
+        : (sawSame || sawAdjacent) ? "walkable-adjacent"
+        : "unresolved";
+
+      const labels = Array.from(
+        new Set(scraped.map((u) => u.resolvedCommunity).filter((x): x is string => !!x)),
+      );
+      const summary =
+        verdict === "same-community"
+          ? `Both units resolve to the same community (${labels.join(", ") || "matched"}). Walkable — safe to book together.`
+          : verdict === "walkable-adjacent"
+          ? `Units are in adjacent, curated-walkable communities (${labels.join(" + ")}). Likely walkable — confirm on the map before booking.`
+          : verdict === "different"
+          ? `Units resolve to DIFFERENT communities (${labels.join(" vs ")}). Not confirmed walkable — open both listings before booking.`
+          : !sawResolvable && scraped.some((u) => !u.scrapeOk)
+          ? "Could not read enough listing detail to confirm the community (VRBO hides location). Open both listings and verify the map yourself."
+          : "Neither description names a recognizable complex (VRBO hides location). Can't auto-confirm — open both listings and verify walkability yourself.";
+
+      return res.json({ ok: true, verdict, summary, communities: labels, units: scraped });
+    } catch (e: any) {
+      console.error("[verify-combo-community] error:", e?.message ?? e);
       return res.status(500).json({ error: e?.message ?? String(e) });
     }
   });
@@ -19404,7 +19630,9 @@ Requirements:
       if (proximity && !proximity.withinLimit) {
         return res.status(409).json({
           error: "Buy-in units too far apart",
-          message: `Buy-in units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking distance. Estimated ${proximity.walk.minutes} minutes between ${proximity.worstPair.unitLabels.join(" and ")}.`,
+          message: proximity.confidence === "unverified-cross-resort"
+            ? `Cannot verify ${proximity.worstPair.unitLabels.join(" and ")} are walkable: ${proximity.walk.description}`
+            : `Buy-in units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking distance. Estimated ${proximity.walk.minutes} minutes between ${proximity.worstPair.unitLabels.join(" and ")}.`,
           walk: proximity.walk,
           maxMinutes: MAX_BUY_IN_WALK_MINUTES,
           confidence: proximity.confidence,
