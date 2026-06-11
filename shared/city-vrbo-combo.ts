@@ -739,7 +739,27 @@ export function titlesShareWalkableCommunity(titleA: string, titleB: string): bo
  * verify-community endpoint — NOT by the unattended matcher (precision guard:
  * description prose can name a NEARBY complex, so the operator eyeballs the
  * result rather than the queue auto-clustering on it).
+ *
+ * PRECISION (enrich-only): six dictionary entries match on a SINGLE bare word
+ * (kiahuna, makahuena, waikomo, manualoha, sealodge, lanikai). In long
+ * description prose those also match STREET names — "near Kiahuna Road" would
+ * resolve to dict:kiahuna plantation and, via WALKABLE_COMPLEX_CLUSTERS, falsely
+ * read as walkable-adjacent to a real Poipu Kai unit. We strip ONLY
+ * "<single-word-trigger> <street-type>" runs from the DESCRIPTION (not the title,
+ * which is short/curated) before the dictionary scan. This is deliberately narrow:
+ * it cannot break a legit multi-word phrase — "Poipu Kai Drive" survives (poipu/kai
+ * aren't triggers) and "Kiahuna Plantation Drive" survives (kiahuna is followed by
+ * "plantation", not a street type). Scoped to this enrich path — the shared
+ * KAUAI_COMPLEX_DICTIONARY is left untouched (tightening it would change the
+ * load-bearing unattended matcher's recall on bare-name titles like "Kiahuna 245").
  */
+const STREET_NAME_TRIGGER_RE =
+  /\b(?:kiahuna|makahuena|waikomo|manualoha|manauloha|sealodge|sea\s+lodge|lanikai)\s+(?:roads?|rd|streets?|st|drives?|dr|avenues?|ave|ways?|lanes?|ln|boulevards?|blvd|highways?|hwy|places?|pl|courts?|ct|circles?|cir|loops?|terraces?|ter)\b/gi;
+function stripStreetQualifiers(text: string): string {
+  if (!text) return "";
+  return text.replace(STREET_NAME_TRIGGER_RE, " ");
+}
+
 export function resolveUnitCommunityFromText(input: {
   title?: string | null;
   descriptionText?: string | null;
@@ -749,7 +769,7 @@ export function resolveUnitCommunityFromText(input: {
   const candidate = {
     title: input.title ?? "",
     sourceLabel: input.sourceLabel ?? "",
-    snippet: input.descriptionText ?? "",
+    snippet: stripStreetQualifiers(input.descriptionText ?? ""),
     complexName: input.complexName ?? null,
   } as Pick<CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName">;
   const keys = sharedResortPhraseKeys(candidate);
