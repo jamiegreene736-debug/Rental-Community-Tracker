@@ -55,6 +55,8 @@ type SidecarVrboCandidate = {
   priceIncludesTaxes?: boolean;
   priceIncludesFees?: boolean;
   availabilityOnly?: boolean;
+  /** Set by the HomeToGo scraper ("HomeToGo"); absent for VRBO candidates. */
+  sourceLabel?: string;
 };
 
 type CityVrboScrapeCacheEntry = {
@@ -68,6 +70,8 @@ type CityVrboScrapeCacheEntry = {
     durationMs: number;
     reason: string;
     rawCount: number;
+    /** How many of rawCount came from the HomeToGo onsite source (0 when disabled). */
+    hometogoCount?: number;
     mapHarvest: Record<string, unknown> | null;
   };
   normalizePipeline: Omit<CityVrboFilterPipeline, "phraseFilter" | "afterPhraseFilter" | "phraseBuckets" | "suggestedPair">;
@@ -264,7 +268,8 @@ function normalizeSidecarCandidates(
       reviewCount: typeof candidate.reviewCount === "number" && Number.isFinite(candidate.reviewCount) ? Math.round(candidate.reviewCount) : null,
       lat: typeof candidate.lat === "number" && Number.isFinite(candidate.lat) ? candidate.lat : null,
       lng: typeof candidate.lng === "number" && Number.isFinite(candidate.lng) ? candidate.lng : null,
-      sourceLabel: "Vrbo",
+      // HomeToGo candidates carry their own sourceLabel ("HomeToGo"); VRBO ones don't.
+      sourceLabel: candidate.sourceLabel || "Vrbo",
       locationText: candidate.locationText || null,
       snippet: candidate.snippet,
       image: candidate.image,
@@ -447,12 +452,36 @@ async function scrapeCityVrboPool(args: {
       (new Date(`${args.checkOut}T12:00:00`).getTime() - new Date(`${args.checkIn}T12:00:00`).getTime()) / 86_400_000,
     ),
   );
-  const { searchVrboViaSidecar } = await import("./vrbo-sidecar-queue");
+  const { searchVrboViaSidecar, searchHometogoViaSidecar } = await import("./vrbo-sidecar-queue");
   const scanLabel = args.community ? `city-vrbo-inventory:${args.community}` : `city-vrbo-expansion:${citySearchTerm}`;
   console.log(
     `[city-vrbo-inventory] vrbo sidecar start label="${args.community ?? citySearchTerm}" ` +
     `search="${citySearchTerm}" mode=destination-dropdown-export-all`,
   );
+  // HomeToGo onsite-source stack (added 2026-06-11; operator-approved). Fires CONCURRENTLY
+  // with the VRBO scan (own sidecar concurrency group) so it inherits the nearby-town
+  // expansion + home-city retry for free without serializing behind VRBO. Gated by
+  // CITY_HOMETOGO_ENABLED (default OFF until the worker handler is live) and fully
+  // NON-FATAL: any HomeToGo failure leaves the VRBO pool untouched. Only the "Booking
+  // through HomeToGo" (onsite) subset is kept — the worker does the OTA filtering.
+  const hometogoEnabled = process.env.CITY_HOMETOGO_ENABLED === "1";
+  const hometogoPromise: Promise<SidecarVrboCandidate[]> = hometogoEnabled
+    ? searchHometogoViaSidecar({
+        destination: citySearchTerm,
+        searchTerm: citySearchTerm,
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        targetState,
+        cityWideInventory: true,
+        walletBudgetMs: args.walletBudgetMs ?? CITY_VRBO_WALLET_BUDGET_MS,
+        queueContext: { scanLabel: `${scanLabel}:hometogo`, dateLabel: `${args.checkIn}→${args.checkOut}`, skipResultCache: true },
+      })
+        .then((res) => (res?.candidates ?? []) as SidecarVrboCandidate[])
+        .catch((err) => {
+          console.warn(`[city-vrbo-inventory] HomeToGo scan failed (non-fatal): ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+          return [] as SidecarVrboCandidate[];
+        })
+    : Promise.resolve([] as SidecarVrboCandidate[]);
   const runScan = () => searchVrboViaSidecar({
     destination: citySearchTerm,
     searchTerm: citySearchTerm,
@@ -505,11 +534,21 @@ async function scrapeCityVrboPool(args: {
     );
   }
 
-  if (!r) {
+  // Merge in the concurrent HomeToGo onsite candidates (empty unless CITY_HOMETOGO_ENABLED).
+  // Order: VRBO first, then HomeToGo — normalizeSidecarCandidates dedupes by URL (the two
+  // sources never share a URL) and keeps the cheaper on any collision, so VRBO behavior is
+  // byte-identical when HomeToGo is disabled or returns nothing.
+  const hometogoCandidates = await hometogoPromise;
+  if (hometogoCandidates.length) {
+    console.log(`[city-vrbo-inventory] HomeToGo merged ${hometogoCandidates.length} onsite candidate(s) into "${args.community ?? citySearchTerm}" pool`);
+  }
+
+  if (!r && !hometogoCandidates.length) {
     return null;
   }
 
-  const { rawListings, listings, pipeline } = normalizeSidecarCandidates(r.candidates ?? [], nights, targetState);
+  const mergedCandidates = [...(r?.candidates ?? []), ...hometogoCandidates];
+  const { rawListings, listings, pipeline } = normalizeSidecarCandidates(mergedCandidates, nights, targetState);
   return {
     expiresAt: Date.now() + CITY_VRBO_CACHE_TTL_MS,
     citySearchTerm,
@@ -517,10 +556,11 @@ async function scrapeCityVrboPool(args: {
     rawListings,
     listings,
     sidecar: {
-      workerOnline: r.workerOnline,
-      durationMs: r.durationMs,
-      reason: r.reason,
-      rawCount: r.candidates?.length ?? 0,
+      workerOnline: r?.workerOnline ?? false,
+      durationMs: r?.durationMs ?? 0,
+      reason: r?.reason ?? "",
+      rawCount: mergedCandidates.length,
+      hometogoCount: hometogoCandidates.length,
       mapHarvest: r?.mapHarvest ?? null,
     },
     normalizePipeline: pipeline,
