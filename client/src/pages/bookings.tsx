@@ -14878,10 +14878,22 @@ function CancellationNoticeDialog({
       : "the booking channel";
   const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
   const firstName = guestName.split(/\s+/)[0] || "there";
-  // Only promise a refund when Guesty shows payment was actually collected
-  // (totalPaid > 0). If nothing has been paid there is nothing to refund, so the
-  // refund/receipt/no-fees language is omitted entirely.
-  const hasTakenPayment = asMoneyNumber(reservation.money?.totalPaid) > 0;
+  // Only promise a refund when the operator actually COLLECTED the guest's money
+  // (so there's something to refund). Robust across channels — Booking.com often
+  // marks a reservation isFullyPaid with totalPaid:0 (collected on the channel, not
+  // in Guesty's ledger), so totalPaid alone false-negatives it. Three independent
+  // positive signals, all reused from this file's existing payment logic:
+  //   (a) Guesty's authoritative isFullyPaid flag,
+  //   (b) a positive reservation-level totalPaid,
+  //   (c) any individual payment row that's genuinely captured AND has a positive amount.
+  // Deliberately does NOT key off balanceDue===0 — Guesty reports 0 for "we don't
+  // collect through Guesty" too, which is NOT proof of collection. Airbnb naturally
+  // falls through to false (Guesty surfaces no collected money for Airbnb), which is
+  // correct: Airbnb processes its own guest refunds, so we don't say "we are issuing one".
+  const hasTakenPayment =
+    reservation.money?.isFullyPaid === true
+    || asMoneyNumber(reservation.money?.totalPaid) > 0
+    || reservationPaymentItems(reservation).some((p) => paymentLooksCollected(p) && paymentAmountOf(p) > 0);
   const refundBlock = hasTakenPayment
     ? " Because payment has already been collected, we are issuing you a full refund, and no cancellation fees will be imposed. "
       + "You will receive a receipt once the refund has been processed, which will happen within 24-48 hours."
