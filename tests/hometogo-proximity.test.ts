@@ -13,6 +13,7 @@
 // can NOT take the trusted coords path (parseGeoNote returns null for one side), so it
 // falls back to the existing address/title gate that correctly blocks it.
 import { parseGeoNote, walkBetweenCoords, MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
+import { coordsWithinState } from "../shared/listing-geo";
 
 let pass = 0;
 let fail = 0;
@@ -61,6 +62,21 @@ check("Poipu↔Princeville EXCEEDS the walk limit (blocked)", wFar.minutes > MAX
 const htgCoords = parseGeoNote(htgNote);
 const vrboCoords = parseGeoNote("Auto-filled from Vrbo — Some Condo · Matched from city-wide VRBO map");
 check("mixed pair can NOT take the coords path (one side is null)", !!htgCoords && vrboCoords === null);
+
+// ── coords-region guard (the global-pool safety net) ────────────────────────
+// A flaked HomeToGo destination returns a WORLDWIDE pool; we drop offers whose exact
+// coords fall outside the target state so Colorado/Cabo/Tahiti never reach the matcher.
+check("Poipu/Kauai coords are IN Hawaii", coordsWithinState(21.8846, -159.4578, "Hawaii"));
+check("Big Island (Kona) coords are IN Hawaii", coordsWithinState(19.62, -155.95, "Hawaii"));
+check("Colorado (Copper Mtn) DROPPED", !coordsWithinState(39.5019, -106.159, "Hawaii"));
+check("Cabo San Lucas DROPPED", !coordsWithinState(22.886, -109.908, "Hawaii"));
+check("Park City Utah DROPPED", !coordsWithinState(40.711, -111.549, "Hawaii"));
+check("Santa Fe NM DROPPED", !coordsWithinState(35.6947, -105.956, "Hawaii"));
+check("Tahiti (intl, no US state) DROPPED — closes the listingIsOutOfArea gap", !coordsWithinState(-17.5, -149.5, "Hawaii"));
+check("null/NaN coords DROPPED", !coordsWithinState(null, null, "Hawaii") && !coordsWithinState(NaN, NaN, "Hawaii"));
+check("UNKNOWN target state DROPS (safe default)", !coordsWithinState(21.88, -159.45, "Atlantis"));
+check("Florida coords IN Florida box", coordsWithinState(28.5, -81.4, "Florida"));
+check("Hawaii coords NOT in Florida box", !coordsWithinState(21.88, -159.45, "Florida"));
 
 console.log(`\nhometogo-proximity: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

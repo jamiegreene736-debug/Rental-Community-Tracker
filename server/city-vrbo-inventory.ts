@@ -15,7 +15,7 @@ import {
   vrboReportedTotalFromMapHarvest,
   type CityVrboCoverage,
 } from "@shared/city-vrbo-coverage";
-import { listingIsOutOfArea } from "@shared/listing-geo";
+import { listingIsOutOfArea, coordsWithinState } from "@shared/listing-geo";
 
 export type CityVrboFilterPipeline = {
   rawSidecar: number;
@@ -58,6 +58,7 @@ type SidecarVrboCandidate = {
   /** Set by the HomeToGo scraper ("HomeToGo"); absent for VRBO candidates. */
   sourceLabel?: string;
 };
+
 
 type CityVrboScrapeCacheEntry = {
   expiresAt: number;
@@ -538,9 +539,22 @@ async function scrapeCityVrboPool(args: {
   // Order: VRBO first, then HomeToGo — normalizeSidecarCandidates dedupes by URL (the two
   // sources never share a URL) and keeps the cheaper on any collision, so VRBO behavior is
   // byte-identical when HomeToGo is disabled or returns nothing.
-  const hometogoCandidates = await hometogoPromise;
+  //
+  // COORDS-REGION GUARD (LOAD-BEARING, 2026-06-11): HomeToGo's destination sight+click can
+  // intermittently FAIL to scope (a flaked autocomplete submits a GLOBAL search → a worldwide
+  // onsite pool: Colorado, Cabo, Tahiti...). The locationText out-of-area filter only knows US
+  // states, so an international leak (Tahiti) slips into the matcher. Because every HomeToGo
+  // offer carries EXACT coords, we hard-drop any whose lat/lon fall outside the target state's
+  // bounding box BEFORE the pool — defense-in-depth that makes a destination flake harmless and
+  // keeps an out-of-region unit from ever reaching the combo matcher / the coords attach gate.
+  const hometogoRaw = await hometogoPromise;
+  const hometogoCandidates = hometogoRaw.filter((c) => coordsWithinState(c.lat, c.lng, targetState));
+  const hometogoDroppedOOR = hometogoRaw.length - hometogoCandidates.length;
+  if (hometogoDroppedOOR > 0) {
+    console.warn(`[city-vrbo-inventory] HomeToGo dropped ${hometogoDroppedOOR}/${hometogoRaw.length} OUT-OF-REGION candidate(s) (coords outside ${targetState}) — destination likely did not scope`);
+  }
   if (hometogoCandidates.length) {
-    console.log(`[city-vrbo-inventory] HomeToGo merged ${hometogoCandidates.length} onsite candidate(s) into "${args.community ?? citySearchTerm}" pool`);
+    console.log(`[city-vrbo-inventory] HomeToGo merged ${hometogoCandidates.length} in-region onsite candidate(s) into "${args.community ?? citySearchTerm}" pool`);
   }
 
   if (!r && !hometogoCandidates.length) {
