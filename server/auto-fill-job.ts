@@ -28,6 +28,7 @@
 
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
+import { onShutdown } from "./shutdown";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { evaluateComboProfit, profitToleranceUsd } from "@shared/buy-in-profit";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -145,6 +146,16 @@ export type StartAutoFillInput = {
   // orchestrator's single-flight and could forceRestart it mid-search. See
   // AGENTS.md "Bulk buy-in queue is a SERVER-SIDE background job" (B1).
   owner?: "row" | "bulk";
+  // BOOT-RESUME ONLY (server/auto-fill-resume.ts): re-register the job under
+  // the SAME id the dead process used, so an operator's still-open poller
+  // (polling /api/operations/auto-fill/:jobId) survives the redeploy without a
+  // 404. Safe at boot because the jobs map is empty; never set this from a
+  // client-facing route.
+  resumeJobId?: string;
+  // Which resume attempt this is (1-based). Persisted to the durable row so a
+  // job that keeps killing the server can't resurrect forever (cap enforced by
+  // the resume module, default 2).
+  resumeAttempt?: number;
 };
 
 // Per-city economics recorded by the profit gate (resort, home-city, and each
@@ -308,31 +319,19 @@ const isTerminal = (s: JobStatus) => TERMINAL.has(s);
 // ── graceful-shutdown stamp ────────────────────────────────────────────────
 // Railway sends SIGTERM before replacing the process on EVERY deploy — and
 // deploys land frequently (7 between 19:54 and 22:21 on 2026-06-10 alone). An
-// in-flight search used to die silently: the in-memory job vanished and the
-// operator saw nothing. Stamp every non-terminal job "interrupted" in Postgres
-// so the scan panel can say so explicitly. NOTE: registering a SIGTERM handler
-// disables Node's default exit, so we MUST exit ourselves; the 2.5s cap keeps a
-// slow/hung DB from stalling the deploy. The durable "running" row written at
-// job start is the backstop for SIGKILL (no graceful window): /auto-fill/last
-// treats a "running" row with no live in-memory job as interrupted too.
-let shutdownHookInstalled = false;
-function installShutdownHook(): void {
-  if (shutdownHookInstalled) return;
-  shutdownHookInstalled = true;
-  process.once("SIGTERM", () => {
-    const active = Array.from(autoFillJobs.values()).filter((j) => !isTerminal(j.status));
-    const stamped = Promise.allSettled(active.map((j) =>
-      storage.markAutoFillSearchInterrupted(
-        j.reservationId,
-        `Search interrupted mid-run by a server restart/redeploy (was: ${j.phase || "running"} — ${j.message || "in progress"}). Re-run Auto-fill to finish.`,
-      ),
-    ));
-    const exit = () => process.exit(0);
-    void stamped.then(exit, exit);
-    setTimeout(exit, 2500).unref();
-  });
-}
-installShutdownHook();
+// in-flight search used to die silently. Stamp every non-terminal job
+// "interrupted" in Postgres; the boot resume (server/auto-fill-resume.ts) then
+// picks these rows up (along with hard-killed "running" rows) and restarts the
+// search on the new process. Shared coordinator: see server/shutdown.ts.
+onShutdown(async () => {
+  const active = Array.from(autoFillJobs.values()).filter((j) => !isTerminal(j.status));
+  await Promise.allSettled(active.map((j) =>
+    storage.markAutoFillSearchInterrupted(
+      j.reservationId,
+      `Search interrupted mid-run by a server restart/redeploy (was: ${j.phase || "running"} — ${j.message || "in progress"}). It resumes automatically when the server is back.`,
+    ),
+  ));
+});
 
 function cleanupStaleJobs(): void {
   const now = Date.now();
@@ -2162,7 +2161,9 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
     activeJobByReservation.delete(reservationId);
   }
 
-  const id = newJobId("afj");
+  // Boot-resume re-registers under the dead process's id so open client pollers
+  // survive the redeploy; safe only because the jobs map is empty at boot.
+  const id = input.resumeJobId && !autoFillJobs.has(input.resumeJobId) ? input.resumeJobId : newJobId("afj");
   const now = Date.now();
   const expectedRevenue = Number(input.expectedRevenue) || 0;
   const gateEnabled = expectedRevenue > 0;
@@ -2209,13 +2210,18 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
   lastJobByReservation.set(reservationId, id);
   // Durable "running" stamp (preserves the previous search's combos): if a
   // deploy/restart kills this job mid-run, the stale "running" row is what lets
-  // /api/operations/auto-fill/last detect + surface the search as INTERRUPTED
-  // instead of silently showing nothing. finalize() overwrites it on any
-  // terminal path; the SIGTERM hook below stamps "interrupted" when it can.
+  // /api/operations/auto-fill/last surface the search as INTERRUPTED — and,
+  // since the FULL request is persisted alongside, what lets the boot resume
+  // (server/auto-fill-resume.ts) restart the search on the new process.
+  // finalize() overwrites it on any terminal path.
   void storage.markAutoFillSearchStarted({
     reservationId,
     propertyId: job.propertyId,
     slotsTotal: job.slots.length,
+    request: { ...input, resumeJobId: undefined, resumeAttempt: undefined },
+    jobId: id,
+    owner: job.owner,
+    resumeAttempts: input.resumeAttempt ?? 0,
   }).catch(() => { /* best effort */ });
   void runAutoFillJob(job).catch((err) => {
     job.status = "failed";
