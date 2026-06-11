@@ -57,6 +57,14 @@ export type CityVrboComboPair = {
   matchSource?: CommunityMatchSource;
   /** Rough confidence in the "same community" claim for this pair. */
   matchConfidence?: "high" | "medium" | "low";
+  /**
+   * TRUE when this pair was formed WITHOUT a confirmed same-community signal —
+   * the cheapest units regardless of complex (their generic titles couldn't be
+   * clustered). These are OPERATOR-CLICK alternatives only: NEVER auto-attached,
+   * never mixed into the confirmed suggestCityVrboComboPairs results. The operator
+   * verifies walkability before booking. See suggestUnconfirmedCityVrboComboPairs.
+   */
+  unconfirmedCommunity?: boolean;
 };
 
 function normalizedIdentityText(value: string): string {
@@ -795,6 +803,69 @@ export { comboSplitsForPlan };
  * across splits wins (configured split preferred on ties). The winning split is
  * reported in the returned pair's `bedrooms`.
  */
+/**
+ * LAST-RESORT recall: top-N cheapest 2-unit combos from the pool IGNORING the
+ * same-community signal. Used only when no community-CONFIRMED pair clears the
+ * profit gate (e.g. the cheap units have generic titles like "Poipu Pool House"
+ * that the same-community gate can't cluster, so the only confirmed pairs are the
+ * expensive named-complex ones). These pair the cheapest units regardless of
+ * complex, are tagged `unconfirmedCommunity:true`, and are ONLY surfaced as
+ * OPERATOR-CLICK alternatives — NEVER auto-attached and NEVER mixed into the
+ * confirmed suggestCityVrboComboPairs results. The operator verifies walkability
+ * (e.g. via description-text enrichment) before booking.
+ *
+ * `excludeUrls` = listings already in a confirmed pair, so these surface DISTINCT
+ * cheaper options instead of re-pairing the same units.
+ */
+export function suggestUnconfirmedCityVrboComboPairs(
+  listings: CityVrboListing[],
+  bedroomPlan: number[],
+  nights: number,
+  limit: number,
+  excludeUrls: Iterable<string> = [],
+): CityVrboComboPair[] {
+  if (!Array.isArray(listings) || listings.length === 0 || !(limit > 0)) return [];
+  const plan = bedroomPlan.filter((br) => Number.isFinite(br) && br > 0);
+  if (plan.length < 2) return [];
+  const splits = comboSplitsForPlan(plan);
+  const used = new Set<string>();
+  for (const u of excludeUrls) if (u) used.add(String(u));
+  const results: CityVrboComboPair[] = [];
+
+  while (results.length < limit) {
+    const priced: ScoredRow[] = listings
+      .map((listing) => ({
+        listing,
+        total: listingTotalPrice(listing, nights),
+        br: typeof listing.bedrooms === "number" && Number.isFinite(listing.bedrooms) ? Math.round(listing.bedrooms) : 0,
+      }))
+      .filter((row) => row.total > 0 && row.br > 0 && !!row.listing.url && !used.has(row.listing.url));
+    if (priced.length < 2) break;
+
+    let best: { picks: CityVrboListing[]; split: number[]; total: number } | null = null;
+    for (const split of splits) {
+      const picks = pickCheapestPlan(priced, split);
+      if (!picks || picks.length < 2) continue;
+      const total = picks.reduce((s, p) => s + listingTotalPrice(p, nights), 0);
+      if (!best || total < best.total) best = { picks, split, total };
+    }
+    if (!best) break;
+
+    for (const p of best.picks) if (p.url) used.add(p.url);
+    results.push({
+      resortPhrase: "community unconfirmed",
+      bedrooms: best.split,
+      picks: best.picks,
+      totalCost: best.total,
+      walkMinutes: walkMinutesBetween(best.picks[0], best.picks[1]),
+      walkSource: "unknown",
+      matchConfidence: "low",
+      unconfirmedCommunity: true,
+    });
+  }
+  return results;
+}
+
 export function suggestCityVrboComboPair(
   listings: CityVrboListing[],
   bedroomPlan: number[],

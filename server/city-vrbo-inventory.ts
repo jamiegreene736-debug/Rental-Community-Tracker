@@ -4,6 +4,7 @@ import {
   groupCityVrboByBedroom,
   suggestCityVrboComboPair,
   suggestCityVrboComboPairs,
+  suggestUnconfirmedCityVrboComboPairs,
   summarizeCityVrboMatching,
   type CityVrboComboPair,
   type CityVrboListing,
@@ -383,6 +384,7 @@ function applyFiltersToPool(
   byBedroom: Record<number, CityVrboListing[]>;
   suggestedPair: CityVrboComboPair | null;
   suggestedPairs: CityVrboComboPair[];
+  unconfirmedPairs: CityVrboComboPair[];
   filterPipeline: CityVrboFilterPipeline;
 } {
   const phrase = String(filterPhrase ?? "").trim() || null;
@@ -396,8 +398,15 @@ function applyFiltersToPool(
   // distinct alternative combos hiding in the same pool.
   const suggestedPairs = suggestCityVrboComboPairs(filtered, bedroomPlan, nights, CITY_VRBO_TOP_COMBOS);
   const suggestedPair = suggestedPairs[0] ?? null;
+  // LAST-RESORT recall: cheapest combos formed WITHOUT a same-community signal
+  // (the cheap units often have generic titles the gate can't cluster), excluding
+  // units already in a CONFIRMED pair. Surfaced ONLY as operator-click "community
+  // unconfirmed" alternatives — never auto-attached. See suggestUnconfirmedCityVrboComboPairs.
+  const confirmedUrls = new Set<string>();
+  for (const p of suggestedPairs) for (const pk of p.picks) if (pk?.url) confirmedUrls.add(pk.url);
+  const unconfirmedPairs = suggestUnconfirmedCityVrboComboPairs(filtered, bedroomPlan, nights, CITY_VRBO_TOP_COMBOS, confirmedUrls);
   const filterPipeline = buildFilterPipeline(basePipeline, filtered, phrase, suggestedPair);
-  return { listings: filtered, byBedroom, suggestedPair, suggestedPairs, filterPipeline };
+  return { listings: filtered, byBedroom, suggestedPair, suggestedPairs, unconfirmedPairs, filterPipeline };
 }
 
 // Resolve the VRBO destination string for a scan. The community-keyed flow
@@ -528,6 +537,9 @@ export type CityVrboScanResult = {
   // The top-N distinct same-community combos mined from this pool (cheapest first).
   // suggestedPairs[0] === suggestedPair; the rest are operator-attachable alternatives.
   suggestedPairs: CityVrboComboPair[];
+  // Cheapest combos formed WITHOUT a same-community signal (generic-titled units).
+  // Operator-click "community unconfirmed" alternatives only — never auto-attached.
+  unconfirmedPairs: CityVrboComboPair[];
   filterPipeline: CityVrboFilterPipeline;
   fromCache: boolean;
   // Found-vs-usable-vs-VRBO-total breakdown so the tracker doesn't read the
@@ -617,6 +629,7 @@ async function runCityScanCore(args: {
       byBedroom: {},
       suggestedPair: null,
       suggestedPairs: [],
+      unconfirmedPairs: [],
       filterPipeline: emptyPipeline,
       fromCache: false,
       coverage: buildCityScanCoverage({
@@ -764,6 +777,7 @@ async function runCityScanCore(args: {
     byBedroom: filtered.byBedroom,
     suggestedPair: filtered.suggestedPair,
     suggestedPairs: filtered.suggestedPairs,
+    unconfirmedPairs: filtered.unconfirmedPairs,
     filterPipeline: filtered.filterPipeline,
     fromCache,
     coverage,

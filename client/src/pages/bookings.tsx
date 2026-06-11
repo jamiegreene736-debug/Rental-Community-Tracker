@@ -391,6 +391,11 @@ type AutoFillComboOption = {
   // Panel + cancellation advice (which verify against the configured resort); shown
   // in a dedicated "other combos in this pool" panel. Operator-click-only.
   isAlternative?: boolean;
+  // TRUE when this alternative was formed WITHOUT a confirmed same-community signal
+  // (cheap generic-titled units the matcher can't cluster). The panel labels it
+  // "⚠ community unconfirmed" and prompts the operator to verify walkability before
+  // booking. Never auto-attached. See server suggestUnconfirmedCityVrboComboPairs.
+  unconfirmedCommunity?: boolean;
   // Which scan stage surfaced this loss pair, for the scan-scope chip. home = same
   // city as the community (resort / home-city / single-unit fallback); tier1/tier2 =
   // the nearby drive-time expansion rings. driveMinutesCeiling is the env-accurate
@@ -4568,7 +4573,7 @@ function AlternateCombosPanel({
           return (
             <div
               key={option.label}
-              className="flex items-center justify-between gap-3 rounded border border-indigo-100 bg-white/70 px-2 py-1.5"
+              className={`flex items-center justify-between gap-3 rounded border px-2 py-1.5 ${option.unconfirmedCommunity ? "border-amber-300 bg-amber-50/70 dark:border-amber-700 dark:bg-amber-950/30" : "border-indigo-100 bg-white/70"}`}
             >
               <div className="min-w-0">
                 <p className="truncate font-medium text-foreground">
@@ -4591,6 +4596,11 @@ function AlternateCombosPanel({
                     ) : null,
                   )}
                 </div>
+                {option.unconfirmedCommunity ? (
+                  <p className="mt-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                    ⚠ community unconfirmed — open both listings and verify they're walkable before booking
+                  </p>
+                ) : null}
                 {option.scopeCategory && option.scopeCategory !== "home" && typeof option.driveMinutesCeiling === "number" ? (
                   <p className="mt-0.5 text-[10px] text-muted-foreground">within ~{option.driveMinutesCeiling} min drive</p>
                 ) : null}

@@ -7,6 +7,7 @@ import {
   sharedResortPhraseKeys,
   suggestCityVrboComboPair,
   suggestCityVrboComboPairs,
+  suggestUnconfirmedCityVrboComboPairs,
   summarizeCityVrboMatching,
   titlesShareWalkableCommunity,
   type CityVrboListing,
@@ -393,6 +394,32 @@ check("guard: two GENERIC titles (no resort evidence either side) are NOT assume
   !titlesShareWalkableCommunity("Ocean view 3BR with pool", "Beautiful 2BR condo near the beach"));
 check("guard: generic title vs named complex is NOT same-community",
   !titlesShareWalkableCommunity("Ocean view 3BR with pool", "Poipu Kai Resort 2BR"));
+
+// ── suggestUnconfirmedCityVrboComboPairs: last-resort recall over generic units ──
+// The cheap units have generic titles the same-community gate can't cluster; this
+// surfaces the cheapest combo anyway (operator verifies + auto-attach never uses it).
+{
+  const L = (url: string, title: string, br: number, total: number): CityVrboListing =>
+    ({ url, title, bedrooms: br, totalPrice: total, sourceLabel: "Vrbo" });
+  const pool = [
+    L("u1", "Poipu Pool House: Ocean Views", 4, 4368),
+    L("u2", "Gorgeous Greenbelt Home", 4, 4389),
+    L("u3", "Villas at Poipu Kai Penthouse", 3, 9000),
+    L("u4", "Beautiful 4 bedroom Poipu Kai", 4, 9664),
+    L("u5", "Random 2BR condo", 2, 3000),
+  ];
+  const r = suggestUnconfirmedCityVrboComboPairs(pool, [3, 3], 7, 3, ["u3", "u4"]);
+  check("unconfirmed: forms a combo from generic units", r.length >= 1, r.length);
+  check("unconfirmed: every pair tagged unconfirmedCommunity", r.every((p) => p.unconfirmedCommunity === true));
+  check("unconfirmed: cheapest combo wins (4BR+2BR $7368 beats the named pairs)", r[0]?.totalCost === 7368, r[0]?.totalCost);
+  check("unconfirmed: never reuses excluded confirmed-pair urls", !r.some((p) => p.picks.some((x) => x.url === "u3" || x.url === "u4")));
+  check("unconfirmed: combos are url-disjoint", (() => {
+    const seen = new Set<string>();
+    for (const p of r) for (const x of p.picks) { if (x.url && seen.has(x.url)) return false; if (x.url) seen.add(x.url); }
+    return true;
+  })());
+  check("unconfirmed: <2 priced units → empty", suggestUnconfirmedCityVrboComboPairs([L("a", "x", 3, 0)], [3, 3], 7, 3).length === 0);
+}
 
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
