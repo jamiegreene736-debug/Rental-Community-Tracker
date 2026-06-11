@@ -597,16 +597,34 @@ type ScoredRow = { listing: CityVrboListing; total: number; br: number };
 // 2-slot), then return picks in the original plan order. Cheapest-first means an
 // exact-size unit is still preferred when available. Returns null if any slot
 // can't be filled. dedups by url so same-bedroom plans pick two DISTINCT units.
+//
+// SAME-UNIT GUARD (operator incident 2026-06-11, Cecilio Marquez/Princeville):
+// URL dedup alone is NOT enough — the same physical unit relisted under two VRBO
+// listing IDs (vrbo.com/4650285 + /4650292, byte-identical broker titles
+// "Wyndham Bali Hai Villas | 5 2BR Villas Sleeps 30!", identical $8,234 price)
+// passed the URL check and was suggested as BOTH halves of one combo. A combo's
+// halves must be physically distinct units, no matter which cluster signal
+// (text/photo/geo/adjacency/PM) grouped them — so the title-identity check lives
+// HERE in the shared slot-filler, not per-cluster. Skipping to the NEXT cheapest
+// candidate (rather than rejecting the whole cluster) keeps recall: the cluster's
+// genuine partner (e.g. a distinct "Wyndham Bali Hai | 2BR Suite") still pairs.
 function pickCheapestPlan(bucket: ScoredRow[], plan: number[]): CityVrboListing[] | null {
   const order = plan.map((br, i) => ({ br, i })).sort((a, b) => b.br - a.br);
   const usedUrls = new Set<string>();
+  const picked: CityVrboListing[] = [];
   const picksByIndex: Array<CityVrboListing | null> = new Array(plan.length).fill(null);
   for (const slot of order) {
     const match = bucket
-      .filter((row) => row.br >= slot.br && !usedUrls.has(row.listing.url))
+      .filter(
+        (row) =>
+          row.br >= slot.br &&
+          !usedUrls.has(row.listing.url) &&
+          !picked.some((p) => looksLikeSameUnit(p, row.listing)),
+      )
       .sort((a, b) => a.total - b.total)[0];
     if (!match) return null;
     usedUrls.add(match.listing.url);
+    picked.push(match.listing);
     picksByIndex[slot.i] = match.listing;
   }
   return picksByIndex.filter((p): p is CityVrboListing => p !== null);
