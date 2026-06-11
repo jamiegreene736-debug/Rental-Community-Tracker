@@ -235,7 +235,7 @@ import {
   looksLikeIndividualListingTitle,
   mergeDiscoveredScoutRowsByResort,
 } from "@shared/alternative-scout-resort";
-import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
+import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, walkBetweenCoords, parseGeoNote, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
 import { titlesShareWalkableCommunity } from "@shared/city-vrbo-combo";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
@@ -10279,6 +10279,11 @@ Requirements:
   // The UI calls this after at least two slots are filled. It prefers
   // exact saved/scraped addresses, then uses listing titles + known resort
   // street/city hints so the operator can spot units that are far apart.
+  // coordsFromBuyInNotes → parseGeoNote (shared/walking-distance, unit-tested). Reads the
+  // "Geo:" marker a coord-bearing buy-in (HomeToGo onsite) stamps into its notes at attach
+  // time. null for VRBO/Booking (no marker) so their address/geocode path is unchanged.
+  const coordsFromBuyInNotes = parseGeoNote;
+
   async function estimateAttachedBuyInProximity(attachedBuyIns: BuyIn[]) {
     const sorted = attachedBuyIns
       .filter((b) => b.status !== "cancelled")
@@ -10326,6 +10331,8 @@ Requirements:
           // stamped by the city-VRBO attach paths) — for those, the configured-
           // resort footprint fallback below is NOT trustworthy on its own.
           cityWide: /city-?wide/i.test(String(buyIn?.notes ?? "")),
+          // Exact source coordinates (HomeToGo onsite offers stamp "Geo:" in notes).
+          coords: coordsFromBuyInNotes(buyIn?.notes),
         };
       }),
     );
@@ -10358,15 +10365,29 @@ Requirements:
       u.addressSource === "saved" || u.addressSource === "scraped";
     for (let i = 0; i < units.length; i++) {
       for (let j = i + 1; j < units.length; j++) {
-        let walk = await walkBetween(units[i].address, units[j].address, resortName).catch(() => fallbackWalkForResort(resortName));
-        if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
-          // Resort-title searches can geocode both units to the same resort
-          // centroid. In that case the resort footprint default is more honest
-          // than telling the operator two unknown buildings are "steps apart."
-          walk = fallbackWalkForResort(resortName);
+        const ci = units[i].coords, cj = units[j].coords;
+        let walk: WalkResult;
+        let geoTrustworthy: boolean;
+        if (ci && cj) {
+          // BOTH units carry exact source coordinates (HomeToGo onsite) — compute the
+          // walk directly from the listings' own lat/lon. This is STRICTLY stronger
+          // evidence than a geocoded address string, so it authorizes a city-wide /
+          // cross-complex attach (and, conversely, BLOCKS one when the points are truly
+          // far apart via withinLimit below). No fuzzy-centroid collapse risk here: these
+          // are distinct per-offer coordinates, not a shared resort-name geocode.
+          walk = walkBetweenCoords(ci, cj, resortName);
+          geoTrustworthy = true;
+        } else {
+          walk = await walkBetween(units[i].address, units[j].address, resortName).catch(() => fallbackWalkForResort(resortName));
+          if (walk.source === "geocoded" && exactAddressCount === 0 && walk.feet < 150) {
+            // Resort-title searches can geocode both units to the same resort
+            // centroid. In that case the resort footprint default is more honest
+            // than telling the operator two unknown buildings are "steps apart."
+            walk = fallbackWalkForResort(resortName);
+          }
+          geoTrustworthy =
+            walk.source === "geocoded" && hasRealAddress(units[i]) && hasRealAddress(units[j]);
         }
-        const geoTrustworthy =
-          walk.source === "geocoded" && hasRealAddress(units[i]) && hasRealAddress(units[j]);
         if (
           (units[i].cityWide || units[j].cityWide) &&
           !geoTrustworthy &&
@@ -10413,7 +10434,9 @@ Requirements:
       resortName: displayResort ?? resortName,
       units,
       walk: displayWalk,
-      confidence: exactAddressCount >= 2 && worstPair.walk.source === "geocoded"
+      // A "coords" walk (exact source lat/lon, e.g. HomeToGo onsite) is our highest-
+      // confidence signal — label it like an exact address.
+      confidence: worstPair.walk.source === "coords" || (exactAddressCount >= 2 && worstPair.walk.source === "geocoded")
         ? "exact-address" as const
         : worstPair.walk.source === "geocoded"
           ? "listing-title" as const

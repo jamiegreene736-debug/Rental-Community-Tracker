@@ -27,8 +27,41 @@ export type WalkResult = {
   minutes: number;       // rounded up to nearest minute
   feet: number;          // rounded to nearest 10 ft
   description: string;   // human-readable sentence for listings
-  source: "geocoded" | "fallback";
+  // "coords" = computed from EXACT source-supplied coordinates (e.g. HomeToGo's
+  // per-offer geoLocation). Strictly MORE trustworthy than "geocoded" (which
+  // resolves a possibly-fuzzy address string) — the points are the listing's own.
+  source: "geocoded" | "fallback" | "coords";
 };
+
+// Parse the "Geo: <lat>,<lon>" marker a coord-bearing buy-in (HomeToGo onsite) stamps
+// into its notes at attach time. Returns null for VRBO/Booking buy-ins (no marker), and
+// rejects out-of-range / 0,0 sentinels. The attach-time proximity gate uses this to
+// authorize a city-wide cross-complex walk on REAL source coordinates.
+export function parseGeoNote(notes: unknown): { lat: number; lng: number } | null {
+  const m = String(notes ?? "").match(/Geo:\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/i);
+  if (!m) return null;
+  const lat = Number(m[1]), lng = Number(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  if (lat === 0 && lng === 0) return null;
+  return { lat, lng };
+}
+
+// Walk between two EXACT coordinate pairs (added 2026-06-11 for the HomeToGo
+// onsite source, whose /searchdetails feed carries each offer's own geoLocation).
+// No geocoding/network — pure haversine on real source coordinates. Reported as
+// source "coords" so the attach-time proximity gate can trust it like (better
+// than) a geocoded-address walk. See server/routes.ts estimateAttachedBuyInProximity.
+export function walkBetweenCoords(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number },
+  resortName?: string,
+): WalkResult {
+  const feetRaw = haversineFeet(a.lat, a.lng, b.lat, b.lng);
+  const feet = Math.max(10, Math.round(feetRaw / 10) * 10);
+  const minutes = walkMinutesFromFeet(feet);
+  return { minutes, feet, description: describeWalk(feet, minutes, resortName), source: "coords" };
+}
 
 // Per-resort defaults (median walking time between any two units within
 // the resort's footprint). Use when geocoding fails or for listings

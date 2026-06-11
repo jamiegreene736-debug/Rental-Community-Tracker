@@ -52,6 +52,7 @@ import {
 export type SidecarOpType =
   | "airbnb_search"
   | "vrbo_search"
+  | "hometogo_search"
   | "vrbo_photo_scrape"
   | "zillow_photo_scrape"
   | "booking_search"
@@ -105,6 +106,21 @@ export type SidecarVrboParams = {
    * non-Hawaii). See AGENTS.md geo-guard note + listing-geo.ts.
    */
   expectedState?: string;
+};
+
+// HomeToGo onsite-offer search params (added 2026-06-11). HomeToGo is scraped via the
+// same sidecar as VRBO, but only its "Booking through HomeToGo" (onsite-checkout) subset
+// is kept. The worker drives the search box (sight+click) + react-day-picker, then reads
+// the page's internal /searchdetails JSON. See worker.mjs processHometogoSearch.
+export type SidecarHometogoParams = {
+  destination: string;
+  searchTerm?: string;
+  checkIn: string;
+  checkOut: string;
+  /** Full US state name (e.g. "Hawaii") used to disambiguate the autocomplete row. */
+  targetState?: string;
+  cityWideInventory?: boolean;
+  queueContext?: SidecarQueueContext;
 };
 
 // USPS abbreviation → full lowercase state name. The destination's state field is
@@ -466,6 +482,7 @@ export type SidecarRequest = {
   params:
     | SidecarAirbnbParams
     | SidecarVrboParams
+    | SidecarHometogoParams
     | SidecarVrboPhotoScrapeParams
     | SidecarZillowPhotoScrapeParams
     | SidecarBookingParams
@@ -1739,6 +1756,7 @@ export function enqueueOp(
   req:
     | { opType: "airbnb_search"; params: SidecarAirbnbParams }
     | { opType: "vrbo_search"; params: SidecarVrboParams }
+    | { opType: "hometogo_search"; params: SidecarHometogoParams }
     | { opType: "vrbo_photo_scrape"; params: SidecarVrboPhotoScrapeParams }
     | { opType: "zillow_photo_scrape"; params: SidecarZillowPhotoScrapeParams }
     | { opType: "booking_search"; params: SidecarBookingParams }
@@ -2207,6 +2225,7 @@ export function getStatus(): {
   const byOpType: Record<SidecarOpType, number> = {
     airbnb_search: 0,
     vrbo_search: 0,
+    hometogo_search: 0,
     vrbo_photo_scrape: 0,
     zillow_photo_scrape: 0,
     booking_search: 0,
@@ -2485,6 +2504,66 @@ export async function searchVrboViaSidecar(opts: {
     ...result,
     providerHealth: recordProviderOutcome("vrbo", result),
     searchVariationSummary: r.searchVariationSummary,
+    mapHarvest: r.mapHarvest ?? null,
+  };
+}
+
+// HomeToGo onsite-offer search via the sidecar (added 2026-06-11). Runs in its own
+// concurrency group (opConcurrencyGroup default → "hometogo_search") so it executes
+// CONCURRENTLY with VRBO rather than serializing behind it. Returns the kept onsite
+// candidates (offerBookingType === "onsite"); the worker does the OTA filtering.
+export async function searchHometogoViaSidecar(opts: {
+  destination: string;
+  searchTerm?: string;
+  checkIn: string;
+  checkOut: string;
+  targetState?: string;
+  cityWideInventory?: boolean;
+  queueContext?: SidecarQueueContext;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+  queueBudgetMs?: number;
+  signal?: AbortSignal;
+  stopGeneration?: number;
+}): Promise<{
+  candidates: SidecarPropertyCandidate[];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+  mapHarvest?: SidecarMapHarvestStats | null;
+} | null> {
+  const walletMs = Math.max(
+    opts.walletBudgetMs ?? 0,
+    numberFromEnv("SIDECAR_HOMETOGO_SEARCH_WALLET_BUDGET_MS", 4 * 60 * 1000),
+  );
+  const queueBudgetMs = Math.max(
+    opts.queueBudgetMs ?? 0,
+    numberFromEnv("SIDECAR_HOMETOGO_SEARCH_QUEUE_BUDGET_MS", walletMs + 60_000),
+  );
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "hometogo_search",
+      params: {
+        destination: opts.destination,
+        searchTerm: opts.searchTerm,
+        checkIn: opts.checkIn,
+        checkOut: opts.checkOut,
+        targetState: opts.targetState,
+        cityWideInventory: Boolean(opts.cityWideInventory),
+        queueContext: opts.queueContext,
+      },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: walletMs,
+    queueBudgetMs,
+    signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
+  });
+  return {
+    candidates: (r.results ?? []) as SidecarPropertyCandidate[],
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
     mapHarvest: r.mapHarvest ?? null,
   };
 }

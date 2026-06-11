@@ -819,9 +819,17 @@ async function attachPick(args: {
   // after "Manual photo URLs:").
   const sourceCategory = stage === "resort" ? "original community" : stage === "nearby" ? "nearby city" : "original city";
   const sourceSuffix = ` · Buy-in source: ${sourceCategory}${sourceCity ? ` (${sourceCity})` : ""}`;
+  // Exact source coordinates (HomeToGo onsite offers carry their own geoLocation; VRBO
+  // picks don't). The attach-time proximity gate (estimateAttachedBuyInProximity →
+  // coordsFromBuyInNotes) reads this "Geo:" marker to authorize a city-wide cross-complex
+  // attach on a REAL coordinate walk — the (a) branch of the 2026-06-10/11 evidence rule.
+  // MUST come before the photo marker, which has to stay last (AGENTS.md Load-Bearing #1).
+  const geoSuffix = (typeof pick.lat === "number" && typeof pick.lng === "number" && Number.isFinite(pick.lat) && Number.isFinite(pick.lng))
+    ? ` · Geo: ${pick.lat.toFixed(6)},${pick.lng.toFixed(6)}`
+    : "";
   // Manual photo URLs marker MUST stay last (AGENTS.md Load-Bearing #1).
   const photoSuffix = buyInPhotoNotesSuffix([pick.image, ...(pick.images ?? [])]);
-  const notes = `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${groundFloorSuffix}${identitySuffix}${sourceSuffix}${photoSuffix}`;
+  const notes = `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${groundFloorSuffix}${identitySuffix}${sourceSuffix}${geoSuffix}${photoSuffix}`;
 
   try {
     const createResp = await postJson(`${base}/api/buy-ins`, {
