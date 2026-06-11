@@ -70,8 +70,14 @@ check("mixed pair can NOT take the coords path (one side is null)", !!htgCoords 
 // ── coords-region guard (the global-pool safety net) ────────────────────────
 // A flaked HomeToGo destination returns a WORLDWIDE pool; we drop offers whose exact
 // coords fall outside the target state so Colorado/Cabo/Tahiti never reach the matcher.
-check("Poipu/Kauai coords are IN Hawaii", coordsWithinState(21.8846, -159.4578, "Hawaii"));
-check("Big Island (Kona) coords are IN Hawaii", coordsWithinState(19.62, -155.95, "Hawaii"));
+// The "Hawaii" guard is scoped to KAUAI (every buy-in market is on Kauai) — it drops the
+// other-island padding HomeToGo adds on a deep scroll, not just global junk.
+check("Poipu/Kauai IN", coordsWithinState(21.8846, -159.4578, "Hawaii"));
+check("Princeville/Kauai (north shore) IN", coordsWithinState(22.223, -159.484, "Hawaii"));
+check("Kapaa/Kauai (east) IN", coordsWithinState(22.075, -159.319, "Hawaii"));
+check("Big Island (Kona) DROPPED — wrong island", !coordsWithinState(19.62, -155.95, "Hawaii"));
+check("Maui (Maui Sands/Kahana) DROPPED — wrong island", !coordsWithinState(20.95, -156.68, "Hawaii"));
+check("Oahu (Honolulu) DROPPED — wrong island", !coordsWithinState(21.31, -157.86, "Hawaii"));
 check("Colorado (Copper Mtn) DROPPED", !coordsWithinState(39.5019, -106.159, "Hawaii"));
 check("Cabo San Lucas DROPPED", !coordsWithinState(22.886, -109.908, "Hawaii"));
 check("Park City Utah DROPPED", !coordsWithinState(40.711, -111.549, "Hawaii"));
