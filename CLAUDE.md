@@ -43,6 +43,38 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-11 (combo pair-finder: SAME relisted unit suggested as BOTH halves of one
+  combo + bogus "Best option … combo $0" headline; PR #638 merged to main, deploy
+  9458d29f live, fix also cherry-picked onto this branch as cd64e9c): Operator caught
+  the Cecilio Marquez/Princeville bulk-queue scan offering "3BR Vrbo $8,234 + 2BR Vrbo
+  $8,234" with the SAME title twice. Confirmed from the durable auto-fill/last record:
+  vrbo.com/4650285 (br=3) + vrbo.com/4650292 (br=2) — the same relisted broker unit,
+  byte-identical titles ("Wyndham Bali Hai Villas | 5 2BR Villas Sleeps 30!", one has
+  a double space), identical totals. TWO root causes, both fixed:
+  (1) `pickCheapestPlan` (shared/city-vrbo-combo.ts) deduped by URL only, and the
+  STRONG text-cluster path in `suggestPairForExactPlan` ran WITHOUT the
+  `looksLikeSameUnit` guard (only photo/geo/adjacency clusters had it) — a relist
+  under a second VRBO listing ID walked straight through. FIX (load-bearing): the
+  title-identity same-unit check now lives INSIDE `pickCheapestPlan`, so EVERY
+  pair-former (singular, plural, adjacency, unconfirmed) inherits it; it skips to the
+  NEXT cheapest candidate instead of rejecting the whole cluster, so the genuine
+  distinct partner still pairs (here: "Wyndham Bali Hai | 2BR Suite" $1,706 → a
+  CHEAPER honest combo). Don't move the guard back to per-cluster post-checks.
+  (2) `doneMessage` (server/auto-fill-job.ts) picked "Best option" by max
+  expectedProfit over ALL rejected cityEconomics rows — and the single-unit-city
+  rollback's informational comboCost:0/profit:0 sentinel ("no walkable combo for all
+  units; detached lone unit") beat every real negative-profit entry, printing
+  "Best option: … combo $0, est. profit $0" above a real $16,468/-$10,648 card. FIX:
+  "Best option" only considers PRICED (comboCost > 0) rejected rows; the sentinel
+  stays in cityEconomics for the dialog detail.
+  ALSO diagnosed, NOT bugs (don't re-chase): the cheap "unconfirmed N" alternatives
+  (e.g. Puamana $2,563 + Wyndham Ka Eo Kai $1,589 — actually profitable) are
+  deliberately operator-click-only — that exact pair IS the 2026-06-10 cross-resort
+  mis-attach incident, so they require manual community verification before attach;
+  and "Townhome B: attach rejected (Buy-in units too far apart)" was the proximity
+  gate correctly rejecting a cross-resort per-slot fallback pair. 5 new tests lock
+  the incident pair verbatim (combo suite 93/0 on this branch, 68/0 on main).
+
 - 2026-06-10/11 (attach proximity gate: cross-resort city-wide pairs BLOCKED without real
   evidence; commits c681791 + aa6ec2a, deployed + live-verified): Operator caught the
   per-slot city fallback attaching a Puamana 3BR + a Wyndham Ka Eo Kai 2BR (different
