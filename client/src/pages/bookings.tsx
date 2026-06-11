@@ -690,7 +690,7 @@ type UnitProximityResponse =
         description: string;
         source: "geocoded" | "fallback";
       };
-      confidence: "exact-address" | "listing-title" | "resort-default";
+      confidence: "exact-address" | "listing-title" | "resort-default" | "unverified-cross-resort";
       withinLimit?: boolean;
       maxMinutes?: number;
       generatedAt: string;
@@ -1043,6 +1043,7 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
   const sourceText = (data: Extract<UnitProximityResponse, { status: "ready" }>) => {
     if (data.confidence === "exact-address") return "address verified";
     if (data.confidence === "listing-title") return "estimated from listing titles";
+    if (data.confidence === "unverified-cross-resort") return "different resorts — walk could not be verified";
     return "resort footprint estimate";
   };
 
@@ -4098,7 +4099,7 @@ type ListingPairWalkResponse = {
     description: string;
     source: "geocoded" | "fallback";
   };
-  confidence: "exact-address" | "listing-title" | "resort-default";
+  confidence: "exact-address" | "listing-title" | "resort-default" | "unverified-cross-resort";
   withinLimit: boolean;
   maxMinutes: number;
 };

@@ -698,6 +698,45 @@ function dictCanonicalsOf(listing: CityVrboListing): string[] {
 }
 
 /**
+ * Do two listing TITLES carry positive evidence of being in the same (or a
+ * curated-adjacent) walkable community? True when their resort-phrase keys
+ * intersect (same named complex — the combo matcher's own notion) OR their
+ * dictionary canonicals share a WALKABLE_COMPLEX_CLUSTERS group (e.g. Poipu Kai
+ * + Kiahuna Plantation).
+ *
+ * LOAD-BEARING consumer: the attach route's proximity guard
+ * (estimateAttachedBuyInProximity in server/routes.ts). City-wide candidates can
+ * be from ANY resort in town, and when geocoding fails the walk falls back to
+ * the CONFIGURED resort's footprint default — which silently passed a
+ * cross-resort pair as a "4 minute walk" (Puamana + Wyndham Ka Eo Kai attached
+ * to one booking, 2026-06-10). The guard now requires THIS check to pass before
+ * trusting the footprint fallback for city-wide units. Titles only — no network.
+ */
+export function titlesShareWalkableCommunity(titleA: string, titleB: string): boolean {
+  const a = { title: titleA, sourceLabel: "", snippet: "", complexName: null } as Pick<
+    CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName"
+  >;
+  const b = { title: titleB, sourceLabel: "", snippet: "", complexName: null } as Pick<
+    CityVrboListing, "title" | "sourceLabel" | "snippet" | "complexName"
+  >;
+  const keysA = sharedResortPhraseKeys(a);
+  if (keysA.length === 0) return false;
+  const keysB = sharedResortPhraseKeys(b);
+  if (keysB.length === 0) return false;
+  const setA = new Set(keysA);
+  if (keysB.some((k) => setA.has(k))) return true;
+  const dictA = keysA.filter((k) => k.startsWith("dict:")).map((k) => communityKeyLabel(k));
+  const dictB = keysB.filter((k) => k.startsWith("dict:")).map((k) => communityKeyLabel(k));
+  if (dictA.length && dictB.length) {
+    for (const cluster of WALKABLE_COMPLEX_CLUSTERS) {
+      const clusterSet = new Set(cluster);
+      if (dictA.some((c) => clusterSet.has(c)) && dictB.some((c) => clusterSet.has(c))) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Walkable-adjacency FALLBACK: when no single complex satisfies the bedroom plan,
  * try pairing ACROSS complexes that share a curated walkable cluster. Medium
  * confidence (cross-complex, but curated-adjacent). Returns the cheapest such
