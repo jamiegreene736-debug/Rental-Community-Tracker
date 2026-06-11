@@ -251,7 +251,16 @@ export interface IStorage {
     comboOptions: unknown;
     cityEconomics: unknown;
     finishedAt?: Date | null;
+    doneMessage?: string | null;
+    error?: string | null;
+    startedAt?: Date | null;
   }): Promise<void>;
+  markAutoFillSearchStarted(row: {
+    reservationId: string;
+    propertyId?: number | null;
+    slotsTotal?: number | null;
+  }): Promise<void>;
+  markAutoFillSearchInterrupted(reservationId: string, error: string): Promise<void>;
   recordCancellationNoticeSent(reservationId: string, channel: string | null, message: string | null): Promise<void>;
   getCancellationNoticesByReservationIds(reservationIds: string[]): Promise<CancellationNotice[]>;
   createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample>;
@@ -1093,6 +1102,9 @@ export class DatabaseStorage implements IStorage {
     comboOptions: unknown;
     cityEconomics: unknown;
     finishedAt?: Date | null;
+    doneMessage?: string | null;
+    error?: string | null;
+    startedAt?: Date | null;
   }): Promise<void> {
     const values = {
       reservationId: row.reservationId,
@@ -1103,6 +1115,9 @@ export class DatabaseStorage implements IStorage {
       comboOptions: (row.comboOptions ?? []) as any,
       cityEconomics: (row.cityEconomics ?? []) as any,
       finishedAt: row.finishedAt ?? null,
+      doneMessage: row.doneMessage ?? null,
+      error: row.error ?? null,
+      startedAt: row.startedAt ?? null,
       updatedAt: new Date(),
     };
     try {
@@ -1116,12 +1131,79 @@ export class DatabaseStorage implements IStorage {
           comboOptions: values.comboOptions,
           cityEconomics: values.cityEconomics,
           finishedAt: values.finishedAt,
+          doneMessage: values.doneMessage,
+          error: values.error,
+          startedAt: values.startedAt,
           updatedAt: values.updatedAt,
         },
       });
     } catch (e) {
       // Non-fatal: persistence is a convenience layer over the in-memory store.
       console.warn(`[auto-fill] could not persist loss options for ${row.reservationId}: ${(e as Error).message}`);
+    }
+  }
+
+  // Stamp "a search is running" at auto-fill job START, durably. DELIBERATELY
+  // PRESERVES the previous search's comboOptions/cityEconomics (no overwrite —
+  // those columns are absent from the conflict set), so a run killed mid-flight
+  // by a deploy still leaves the prior reviewable options behind, with the
+  // "running" status marking the interruption. finalize() later overwrites the
+  // whole row with this run's results.
+  async markAutoFillSearchStarted(row: {
+    reservationId: string;
+    propertyId?: number | null;
+    slotsTotal?: number | null;
+  }): Promise<void> {
+    const now = new Date();
+    try {
+      await db.insert(autoFillLossOptions).values({
+        reservationId: row.reservationId,
+        propertyId: row.propertyId ?? null,
+        status: "running",
+        slotsTotal: row.slotsTotal ?? null,
+        slotsFilled: null,
+        comboOptions: [] as any,
+        cityEconomics: [] as any,
+        finishedAt: null,
+        doneMessage: null,
+        error: null,
+        startedAt: now,
+        updatedAt: now,
+      }).onConflictDoUpdate({
+        target: autoFillLossOptions.reservationId,
+        set: {
+          status: "running",
+          startedAt: now,
+          finishedAt: null,
+          doneMessage: null,
+          error: null,
+          updatedAt: now,
+        },
+      });
+    } catch (e) {
+      console.warn(`[auto-fill] could not mark search started for ${row.reservationId}: ${(e as Error).message}`);
+    }
+  }
+
+  // Best-effort shutdown stamp (SIGTERM → deploy/restart): the search died
+  // mid-run. Only flips status/error — combos from the last completed search
+  // stay reviewable.
+  async markAutoFillSearchInterrupted(reservationId: string, error: string): Promise<void> {
+    const now = new Date();
+    try {
+      await db.insert(autoFillLossOptions).values({
+        reservationId,
+        status: "interrupted",
+        comboOptions: [] as any,
+        cityEconomics: [] as any,
+        error,
+        updatedAt: now,
+      }).onConflictDoUpdate({
+        target: autoFillLossOptions.reservationId,
+        set: { status: "interrupted", error, updatedAt: now },
+      });
+    } catch {
+      // Shutting down — nothing else to do.
     }
   }
 
