@@ -17,6 +17,7 @@ import {
   type BookingConfirmation, type InsertBookingConfirmation,
   type BookingAlternativePage, bookingAlternativePages,
   type AutoFillLossOptions, autoFillLossOptions,
+  type CancellationNotice, cancellationNotices,
   type QuoSmsMessage, type InsertQuoSmsMessage,
   type QuoCallEvent, type InsertQuoCallEvent,
   type GuestInboxInternalNote, type InsertGuestInboxInternalNote,
@@ -37,7 +38,7 @@ import {
   propertyComplianceOverrides,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, and, gte, lte, lt, or, sql } from "drizzle-orm";
+import { eq, desc, and, gte, lte, lt, or, inArray, sql } from "drizzle-orm";
 
 function listingUrlKey(url: string | null | undefined): string {
   if (!url) return "";
@@ -245,6 +246,8 @@ export interface IStorage {
     cityEconomics: unknown;
     finishedAt?: Date | null;
   }): Promise<void>;
+  recordCancellationNoticeSent(reservationId: string, channel: string | null, message: string | null): Promise<void>;
+  getCancellationNoticesByReservationIds(reservationIds: string[]): Promise<CancellationNotice[]>;
   createAutoReplyStyleExample(example: InsertAutoReplyStyleExample): Promise<AutoReplyStyleExample>;
   getRecentAutoReplyStyleExamples(limit?: number): Promise<AutoReplyStyleExample[]>;
 
@@ -1078,6 +1081,38 @@ export class DatabaseStorage implements IStorage {
     } catch (e) {
       // Non-fatal: persistence is a convenience layer over the in-memory store.
       console.warn(`[auto-fill] could not persist loss options for ${row.reservationId}: ${(e as Error).message}`);
+    }
+  }
+
+  // Records that a cancellation notice was sent to the guest. Internal flag
+  // only — it never touches the Guesty reservation status. Upserts by
+  // reservationId so a re-send just refreshes the timestamp/message.
+  async recordCancellationNoticeSent(reservationId: string, channel: string | null, message: string | null): Promise<void> {
+    const now = new Date();
+    try {
+      await db.insert(cancellationNotices).values({
+        reservationId,
+        channel: channel ?? null,
+        message: message ?? null,
+        sentAt: now,
+      }).onConflictDoUpdate({
+        target: cancellationNotices.reservationId,
+        set: { channel: channel ?? null, message: message ?? null, sentAt: now },
+      });
+    } catch (e) {
+      // Non-fatal: the message already went to the guest; the flag is a convenience.
+      console.warn(`[cancellation-notice] could not persist for ${reservationId}: ${(e as Error).message}`);
+    }
+  }
+
+  async getCancellationNoticesByReservationIds(reservationIds: string[]): Promise<CancellationNotice[]> {
+    if (reservationIds.length === 0) return [];
+    try {
+      return await db.select().from(cancellationNotices)
+        .where(inArray(cancellationNotices.reservationId, reservationIds));
+    } catch {
+      // Table missing until ensureRuntimeSchema / db:push runs — degrade to none.
+      return [];
     }
   }
 
