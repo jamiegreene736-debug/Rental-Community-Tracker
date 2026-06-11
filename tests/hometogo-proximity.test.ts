@@ -14,6 +14,10 @@
 // falls back to the existing address/title gate that correctly blocks it.
 import { parseGeoNote, walkBetweenCoords, MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
 import { coordsWithinState } from "../shared/listing-geo";
+import { unitTokensFromTitle, listingsAreSamePhysicalUnit } from "../shared/city-vrbo-combo";
+
+const samePhysUnit = (ta: string, tb: string, ba?: number, bb?: number) =>
+  listingsAreSamePhysicalUnit({ title: ta, bedrooms: ba ?? null }, { title: tb, bedrooms: bb ?? null });
 
 let pass = 0;
 let fail = 0;
@@ -77,6 +81,27 @@ check("null/NaN coords DROPPED", !coordsWithinState(null, null, "Hawaii") && !co
 check("UNKNOWN target state DROPS (safe default)", !coordsWithinState(21.88, -159.45, "Atlantis"));
 check("Florida coords IN Florida box", coordsWithinState(28.5, -81.4, "Florida"));
 check("Hawaii coords NOT in Florida box", !coordsWithinState(21.88, -159.45, "Florida"));
+
+// ── cross-source dedup (same physical unit on VRBO + HomeToGo, different URLs) ───
+// unit-token extraction: real unit IDs kept, incidental counts stripped.
+check("unitTokens 'Pili Mai 14K' → 14k", JSON.stringify(unitTokensFromTitle("Pili Mai 14K")) === JSON.stringify(["14k"]));
+check("unitTokens 'Poipu Shores A206' → a206", unitTokensFromTitle("Poipu Shores A206").includes("a206"));
+check("unitTokens 'Kauai Lawai Beach Resort C103' → c103", unitTokensFromTitle("Kauai Lawai Beach Resort C103").includes("c103"));
+check("unitTokens strips counts: '3BR Poipu Kai home 5 min walk' → none", unitTokensFromTitle("3BR Poipu Kai home 5 min walk").length === 0);
+check("unitTokens '...Villas 503 – PBAC' → 503", unitTokensFromTitle("Waikomo Stream Villas 503 – PBAC Membership, Walk to Ocean").includes("503"));
+
+// same unit across the two sources' title formats → MATCH (would be deduped)
+check("SAME unit: HomeToGo 'Kauai Pili Mai 14K' ↔ VRBO 'Pili Mai 14K – Central AC'", samePhysUnit("Kauai Pili Mai 14K", "Pili Mai 14K – Central AC, walk to pool", 3, 3));
+check("SAME unit: 'Kauai Waikomo Stream Villas 503' ↔ 'Waikomo Stream Villas 503 – PBAC'", samePhysUnit("Kauai Waikomo Stream Villas 503", "Waikomo Stream Villas 503 – PBAC Membership"));
+// different unit, same resort → NO match (the key precision test)
+check("DIFFERENT unit same resort: 'Pili Mai 14K' ↮ 'Pili Mai 15H'", !samePhysUnit("Pili Mai 14K", "Pili Mai 15H – Central"));
+check("DIFFERENT unit same resort: 'Waikomo Stream Villas 503' ↮ '...Villas 100'", !samePhysUnit("Kauai Waikomo Stream Villas 503", "Waikomo Stream Villas 100"));
+// same unit token, DIFFERENT resort → NO match (resort phrase guards it)
+check("SAME token diff resort: 'Waikomo Stream Villas 100' ↮ 'Poipu Sands at Poipu Kai 100'", !samePhysUnit("Waikomo Stream Villas 100", "Poipu Sands at Poipu Kai 100"));
+// bedroom conflict → NO match even if resort+token align
+check("bedroom conflict blocks match: 'Pili Mai 14K' 3BR ↮ 'Pili Mai 14K' 2BR", !samePhysUnit("Pili Mai 14K", "Pili Mai 14K", 3, 2));
+// generic titles (no resort phrase) → NO match (can't confirm same unit)
+check("generic titles never dedupe", !samePhysUnit("Family-oriented condo with hot tub & pool", "Lovely 2BR condo near the beach"));
 
 console.log(`\nhometogo-proximity: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

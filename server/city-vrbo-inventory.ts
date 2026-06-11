@@ -6,6 +6,7 @@ import {
   suggestCityVrboComboPairs,
   suggestUnconfirmedCityVrboComboPairs,
   summarizeCityVrboMatching,
+  listingsAreSamePhysicalUnit,
   type CityVrboComboPair,
   type CityVrboListing,
 } from "@shared/city-vrbo-combo";
@@ -553,15 +554,41 @@ async function scrapeCityVrboPool(args: {
   if (hometogoDroppedOOR > 0) {
     console.warn(`[city-vrbo-inventory] HomeToGo dropped ${hometogoDroppedOOR}/${hometogoRaw.length} OUT-OF-REGION candidate(s) (coords outside ${targetState}) — destination likely did not scope`);
   }
+  // CROSS-SOURCE DEDUP (2026-06-11): the same physical unit can be listed on BOTH VRBO and
+  // HomeToGo-onsite (a PM distributing the same unit two ways). The two carry DIFFERENT URLs
+  // (vrbo.com vs hometogo.com/rental), so normalizeSidecarCandidates' URL-dedup misses them and
+  // the combo-finder could pick the VRBO copy + the HomeToGo copy as the two halves of one combo
+  // (booking the same unit twice). listingsAreSamePhysicalUnit matches conservatively (shared
+  // resort phrase + shared unit token + non-conflicting bedrooms); on a match we keep the CHEAPER
+  // and drop the other. Only runs when HomeToGo is enabled; VRBO-only behavior is unchanged.
+  const vrboCandidates = r?.candidates ?? [];
+  const priceOf = (c: SidecarVrboCandidate) =>
+    (Number(c.totalPrice) > 0 ? Number(c.totalPrice) : 0)
+    || (Number(c.nightlyPrice) > 0 ? Number(c.nightlyPrice) * Math.max(1, nights) : 0)
+    || Number.POSITIVE_INFINITY;
+  const vrboUrlsToDrop = new Set<string>();
+  let crossSourceDeduped = 0;
+  const hometogoDeduped = hometogoCandidates.filter((h) => {
+    const dupV = vrboCandidates.find((v) => !vrboUrlsToDrop.has(v.url) && listingsAreSamePhysicalUnit(h, v));
+    if (!dupV) return true;
+    crossSourceDeduped += 1;
+    if (priceOf(h) < priceOf(dupV)) { vrboUrlsToDrop.add(dupV.url); return true; } // HomeToGo cheaper → keep it, drop VRBO copy
+    return false; // VRBO same-or-cheaper → drop the HomeToGo copy
+  });
+  if (crossSourceDeduped > 0) {
+    console.log(`[city-vrbo-inventory] cross-source dedup: ${crossSourceDeduped} HomeToGo↔VRBO same-unit collision(s) resolved (kept cheaper)`);
+  }
+  const vrboKept = vrboUrlsToDrop.size ? vrboCandidates.filter((v) => !vrboUrlsToDrop.has(v.url)) : vrboCandidates;
+
   if (hometogoCandidates.length) {
-    console.log(`[city-vrbo-inventory] HomeToGo merged ${hometogoCandidates.length} in-region onsite candidate(s) into "${args.community ?? citySearchTerm}" pool`);
+    console.log(`[city-vrbo-inventory] HomeToGo merged ${hometogoDeduped.length} in-region onsite candidate(s) (after ${crossSourceDeduped} cross-source dedup) into "${args.community ?? citySearchTerm}" pool`);
   }
 
-  if (!r && !hometogoCandidates.length) {
+  if (!r && !hometogoDeduped.length) {
     return null;
   }
 
-  const mergedCandidates = [...(r?.candidates ?? []), ...hometogoCandidates];
+  const mergedCandidates = [...vrboKept, ...hometogoDeduped];
   const { rawListings, listings, pipeline } = normalizeSidecarCandidates(mergedCandidates, nights, targetState);
   return {
     expiresAt: Date.now() + CITY_VRBO_CACHE_TTL_MS,
@@ -574,7 +601,7 @@ async function scrapeCityVrboPool(args: {
       durationMs: r?.durationMs ?? 0,
       reason: r?.reason ?? "",
       rawCount: mergedCandidates.length,
-      hometogoCount: hometogoCandidates.length,
+      hometogoCount: hometogoDeduped.length,
       mapHarvest: r?.mapHarvest ?? null,
     },
     normalizePipeline: pipeline,
