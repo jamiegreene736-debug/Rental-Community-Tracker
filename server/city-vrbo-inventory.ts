@@ -444,7 +444,7 @@ async function scrapeCityVrboPool(args: {
     `[city-vrbo-inventory] vrbo sidecar start label="${args.community ?? citySearchTerm}" ` +
     `search="${citySearchTerm}" mode=destination-dropdown-export-all`,
   );
-  const r = await searchVrboViaSidecar({
+  const runScan = () => searchVrboViaSidecar({
     destination: citySearchTerm,
     searchTerm: citySearchTerm,
     checkIn: args.checkIn,
@@ -460,6 +460,35 @@ async function scrapeCityVrboPool(args: {
       skipResultCache: true,
     },
   });
+  let r = await runScan();
+  // HOME-CITY RETRY (2026-06-11): the bare-town destination prime is the daemon's
+  // most fragile step — one DOM pick that fails the town+state token check, then a
+  // single un-retried Anthropic-vision click. When that vision click intermittently
+  // flakes the scan returns 0 with a destination-acceptance reason (worker still
+  // online, NOT a real cooldown/block/CAPTCHA), and the home-city SAME-COMMUNITY
+  // pool — the single biggest pool — gets silently skipped (the ladder escalates to
+  // tiny nearby towns and can miss the cheap combo entirely). On that transient,
+  // re-run a couple times; a fresh prime usually lands the suggestion (same as how
+  // the expansion towns succeed). Home-city ONLY (args.community set) — expansion
+  // towns overlap the same pool and a per-town retry would blow the expansion budget.
+  // Never retry genuine cooldowns/blocks/CAPTCHA — that burns budget and deepens the
+  // provider backoff.
+  const homeCityRetries = args.community
+    ? Math.max(0, Math.min(3, Number(process.env.CITY_VRBO_HOME_RETRY ?? 2) || 0))
+    : 0;
+  const isTransientDestMiss = (reason?: string | null): boolean => {
+    const s = String(reason ?? "");
+    if (/cool(?:ing)?\s*down|\bblock|proxy|captcha|challenge|cancel/i.test(s)) return false;
+    return /did not accept destination|provider'?s default|geolocated|did not keep destination|destination (?:mismatch|drift)|refusing to submit/i.test(s);
+  };
+  for (let attempt = 1; attempt <= homeCityRetries; attempt++) {
+    if (!r || r.workerOnline !== true || (r.candidates?.length ?? 0) > 0 || !isTransientDestMiss(r.reason)) break;
+    console.log(
+      `[city-vrbo-inventory] home-city "${args.community}" destination not confirmed ` +
+      `(0 exported, reason="${r.reason ?? ""}") — retry ${attempt}/${homeCityRetries}`,
+    );
+    r = await runScan();
+  }
   if (r) {
     console.log(
       `[city-vrbo-inventory] vrbo sidecar finish label="${args.community ?? citySearchTerm}" ` +
