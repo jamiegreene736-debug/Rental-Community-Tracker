@@ -34,7 +34,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick, Download,
-  ShieldCheck, Paperclip, X, Minimize2, Plus, Send,
+  ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -285,6 +285,14 @@ type RelocationSentStatus = {
   firstOpenedAt: string | null;
   lastOpenedAt: string | null;
   openCount: number;
+};
+
+// Persistent "did we send the guest a cancellation notice?" record, keyed by
+// reservation. Drives the red "Cancellation notice sent ✓" badge. This is an
+// internal flag only — sending it does NOT cancel the Guesty reservation.
+type CancellationNoticeStatus = {
+  sentAt: string | null;
+  channel: string | null;
 };
 
 type BuyInCancellationTier = "do_not_cancel" | "watch" | "consider_cancel" | "strong_cancel" | "cancel";
@@ -5737,6 +5745,10 @@ export default function Bookings() {
     | { reservation: GuestyReservation }
     | null
   >(null);
+  const [cancellationNoticeTarget, setCancellationNoticeTarget] = useState<
+    | { reservation: GuestyReservation }
+    | null
+  >(null);
   const [cancellationRange, setCancellationRange] = useState<"all" | "365" | "90">("all");
   const [verifyTarget, setVerifyTarget] = useState<
     | { buyIn: BuyIn; reservation: GuestyReservation }
@@ -6196,6 +6208,21 @@ export default function Bookings() {
     staleTime: 30_000,
   });
   const relocationSentStatus = relocationSentStatusQuery.data?.statuses ?? {};
+
+  // Persistent "cancellation notice already sent" status for the visible rows,
+  // so a buy-in-searched row shows a durable "Cancellation notice sent ✓" badge.
+  const cancellationNoticeStatusQuery = useQuery<{ statuses: Record<string, CancellationNoticeStatus | null> }>({
+    queryKey: ["/api/operations/cancellation-notice-status", visibleReservationIds],
+    queryFn: async () => {
+      const resp = await apiRequest("POST", "/api/operations/cancellation-notice-status", {
+        reservationIds: visibleReservationIds,
+      });
+      return resp.json();
+    },
+    enabled: visibleReservationIds.length > 0,
+    staleTime: 30_000,
+  });
+  const cancellationNoticeStatus = cancellationNoticeStatusQuery.data?.statuses ?? {};
 
   useEffect(() => {
     if (!focusedReservationId) return;
@@ -9073,6 +9100,14 @@ export default function Bookings() {
                 const altCombos = allCombos.filter((o) => !o.isLoss && o.isAlternative);
                 const lossLog = (lastSearch?.cityEconomics ?? []).filter((c) => !c.accepted);
                 const searchAudits = lastAutoFillAudits[r._id] ?? [];
+                // A buy-in search has run for this row (live or restored from /last):
+                // gates the red "Send cancellation notice" action below.
+                const buyInSearchDone = !!lastSearch
+                  || searchAudits.length > 0
+                  || comboOptions.length > 0
+                  || altCombos.length > 0
+                  || lossCombos.length > 0
+                  || lossLog.length > 0;
                 const manualReservation = isManualReservation(r);
                 const reservationMeta = buyInPropertyMetaForReservation(r);
                 return (
@@ -9347,6 +9382,40 @@ export default function Bookings() {
                             >
                               <XCircle className="mr-1 h-3.5 w-3.5" />
                               Clear search results
+                            </Button>
+                          </div>
+                        )}
+                        {/* Once a buy-in search has run, offer to notify the guest we
+                            need to cancel. Sends a predefined apology through their
+                            booking channel + records an internal flag — it does NOT
+                            cancel the Guesty reservation. Needs a guest conversation,
+                            so it's hidden on manual reservations. */}
+                        {buyInSearchDone && !manualReservation && (
+                          <div className="flex flex-wrap items-center justify-end gap-2">
+                            {cancellationNoticeStatus[r._id]?.sentAt && (
+                              <span
+                                className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
+                                title={`Cancellation notice sent${cancellationNoticeStatus[r._id]?.channel ? ` via ${cancellationNoticeStatus[r._id]!.channel}` : ""} on ${fmtDate(cancellationNoticeStatus[r._id]!.sentAt)} — the booking was NOT cancelled in Guesty`}
+                                data-testid={`badge-cancellation-notice-sent-${r._id}`}
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                Cancellation notice sent {fmtDate(cancellationNoticeStatus[r._id]!.sentAt)}
+                              </span>
+                            )}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px] border-red-300 text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/40"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCancellationNoticeTarget({ reservation: r });
+                              }}
+                              data-testid={`button-send-cancellation-notice-${r._id}`}
+                              title="Draft + send the guest a notice that we need to cancel this booking (does not cancel the reservation in Guesty)"
+                            >
+                              <Ban className="mr-1 h-3.5 w-3.5" />
+                              Send cancellation notice
                             </Button>
                           </div>
                         )}
@@ -10437,6 +10506,13 @@ export default function Bookings() {
         <RelocateGuestDialog
           reservation={relocateGuestTarget.reservation}
           onClose={() => setRelocateGuestTarget(null)}
+        />
+      )}
+
+      {cancellationNoticeTarget && (
+        <CancellationNoticeDialog
+          reservation={cancellationNoticeTarget.reservation}
+          onClose={() => setCancellationNoticeTarget(null)}
         />
       )}
 
@@ -14659,6 +14735,136 @@ function RelocateGuestDialog({
               <><CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Sent</>
             ) : (
               <><Send className="mr-1 h-3.5 w-3.5" /> Send through {channelLabel}</>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Dialog: drafts + sends a "we need to cancel this booking" notice to the guest
+// through the channel they booked with, and records an internal "sent" flag.
+// IMPORTANT: this only notifies the guest — it does NOT cancel the Guesty
+// reservation. Cancelling for real stays a manual step in Guesty.
+function CancellationNoticeDialog({
+  reservation,
+  onClose,
+}: {
+  reservation: GuestyReservation;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const channel = channelKindOf(reservation);
+  const channelLabel =
+    channel === "booking" ? "Booking.com"
+      : channel === "vrbo" ? "VRBO"
+      : channel === "airbnb" ? "Airbnb"
+      : "the booking channel";
+  const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+  const firstName = guestName.split(/\s+/)[0] || "there";
+  const defaultMessage =
+    `Hi ${firstName},\n\n`
+    + "I'm so sorry, but there is an issue with the unit and we need to cancel this booking. "
+    + "I sincerely apologize for the inconvenience and any disruption to your plans. "
+    + "Please reach out with any questions and we'll help however we can.\n\n"
+    + "Thank you for your understanding.";
+  const [message, setMessage] = useState(defaultMessage);
+  const [sent, setSent] = useState(false);
+
+  const sendNotice = useMutation({
+    mutationFn: async () => {
+      if (!message.trim()) throw new Error("The message is empty.");
+      const response = await apiRequest("POST", "/api/operations/send-cancellation-notice", {
+        reservationId: reservation._id,
+        body: message,
+        channel,
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body?.ok !== true) {
+        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${response.status}`);
+      }
+      return body as { ok: true; conversationId: string };
+    },
+    onSuccess: () => {
+      setSent(true);
+      // Refresh the row's "Cancellation notice sent ✓" badge immediately.
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/cancellation-notice-status"] });
+      toast({ title: `Cancellation notice sent through ${channelLabel}`, description: "Recorded internally — the reservation was NOT cancelled in Guesty." });
+    },
+    onError: (e: any) => toast({ title: "Cancellation notice failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
+  const copyMessage = async () => {
+    if (!message.trim()) return;
+    try { await navigator.clipboard?.writeText(message); toast({ title: "Message copied" }); }
+    catch { toast({ title: "Copy failed", variant: "destructive" }); }
+  };
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Send cancellation notice</DialogTitle>
+          <DialogDescription>
+            Drafts a message telling {firstName} we need to cancel this booking and sends it through {channelLabel}
+            {" "}(the channel they booked with). You can edit the text before sending.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="rounded border bg-muted/30 p-3 text-xs">
+            <p className="font-medium">{guestName} · <span className="text-muted-foreground">{channelLabel}</span></p>
+            <p className="text-muted-foreground">{fmtDate(checkInOf(reservation))} → {fmtDate(checkOutOf(reservation))}</p>
+          </div>
+
+          <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">
+            This only notifies the guest and flags the booking internally. It does <span className="font-semibold">not</span> cancel
+            the reservation in Guesty — cancel it there yourself if/when you're ready.
+          </div>
+
+          {channel === "booking" && (
+            <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+              Booking.com delivers guest messages as plain text; the notice below is formatted accordingly.
+            </div>
+          )}
+
+          <div>
+            <Label htmlFor="cancellationMessage" className="text-xs">Message to guest</Label>
+            <Textarea
+              id="cancellationMessage"
+              rows={10}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              className="text-sm font-mono"
+              data-testid="input-cancellation-notice-message"
+            />
+          </div>
+
+          {sent && (
+            <div className="rounded border border-red-200 bg-red-50/70 px-3 py-2 text-xs text-red-950 dark:border-red-800 dark:bg-red-950/40 dark:text-red-100">
+              <p className="font-medium">Sent through {channelLabel}.</p>
+              <p className="mt-0.5">Recorded as a cancellation notice for this booking. The reservation itself is unchanged in Guesty.</p>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <Button type="button" variant="outline" onClick={copyMessage} disabled={!message.trim()}>
+            <Copy className="mr-1 h-3.5 w-3.5" /> Copy
+          </Button>
+          <Button
+            type="button"
+            className="bg-red-600 text-white hover:bg-red-700 dark:bg-red-700 dark:hover:bg-red-800"
+            onClick={() => sendNotice.mutate()}
+            disabled={!message.trim() || sendNotice.isPending || sent}
+            data-testid="button-confirm-cancellation-notice"
+          >
+            {sendNotice.isPending ? (
+              <><Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> Sending…</>
+            ) : sent ? (
+              <><CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Sent</>
+            ) : (
+              <><Ban className="mr-1 h-3.5 w-3.5" /> Send cancellation notice</>
             )}
           </Button>
         </DialogFooter>
