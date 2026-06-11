@@ -285,6 +285,35 @@ const activeJobIds = new Set<string>();
 const TERMINAL = new Set<JobStatus>(["completed", "failed"]);
 const isTerminal = (s: JobStatus) => TERMINAL.has(s);
 
+// ── graceful-shutdown stamp ────────────────────────────────────────────────
+// Railway sends SIGTERM before replacing the process on EVERY deploy — and
+// deploys land frequently (7 between 19:54 and 22:21 on 2026-06-10 alone). An
+// in-flight search used to die silently: the in-memory job vanished and the
+// operator saw nothing. Stamp every non-terminal job "interrupted" in Postgres
+// so the scan panel can say so explicitly. NOTE: registering a SIGTERM handler
+// disables Node's default exit, so we MUST exit ourselves; the 2.5s cap keeps a
+// slow/hung DB from stalling the deploy. The durable "running" row written at
+// job start is the backstop for SIGKILL (no graceful window): /auto-fill/last
+// treats a "running" row with no live in-memory job as interrupted too.
+let shutdownHookInstalled = false;
+function installShutdownHook(): void {
+  if (shutdownHookInstalled) return;
+  shutdownHookInstalled = true;
+  process.once("SIGTERM", () => {
+    const active = Array.from(autoFillJobs.values()).filter((j) => !isTerminal(j.status));
+    const stamped = Promise.allSettled(active.map((j) =>
+      storage.markAutoFillSearchInterrupted(
+        j.reservationId,
+        `Search interrupted mid-run by a server restart/redeploy (was: ${j.phase || "running"} — ${j.message || "in progress"}). Re-run Auto-fill to finish.`,
+      ),
+    ));
+    const exit = () => process.exit(0);
+    void stamped.then(exit, exit);
+    setTimeout(exit, 2500).unref();
+  });
+}
+installShutdownHook();
+
 function cleanupStaleJobs(): void {
   const now = Date.now();
   for (const [id, job] of Array.from(autoFillJobs.entries())) {
@@ -457,6 +486,14 @@ function finalize(job: AutoFillJob): void {
     comboOptions: job.comboOptions,
     cityEconomics: job.cityEconomics,
     finishedAt: job.finishedAt != null ? new Date(job.finishedAt) : null,
+    // Durable WHY: job.message holds the terminal doneMessage on completion (the
+    // "No profitable combination found … best option … coverage" economics) and
+    // the last phase message on failure. Without this, a redeploy left the
+    // operator bare loss cards with no explanation (observed 2026-06-10: the
+    // 22:21 deploy erased Cecilio Marquez's "$10,648 loss" doneMessage).
+    doneMessage: job.message || null,
+    error: job.error,
+    startedAt: job.startedAt != null ? new Date(job.startedAt) : null,
   }).catch(() => { /* best effort */ });
 }
 
@@ -1796,6 +1833,16 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
   autoFillJobs.set(id, job);
   activeJobByReservation.set(reservationId, id);
   lastJobByReservation.set(reservationId, id);
+  // Durable "running" stamp (preserves the previous search's combos): if a
+  // deploy/restart kills this job mid-run, the stale "running" row is what lets
+  // /api/operations/auto-fill/last detect + surface the search as INTERRUPTED
+  // instead of silently showing nothing. finalize() overwrites it on any
+  // terminal path; the SIGTERM hook below stamps "interrupted" when it can.
+  void storage.markAutoFillSearchStarted({
+    reservationId,
+    propertyId: job.propertyId,
+    slotsTotal: job.slots.length,
+  }).catch(() => { /* best effort */ });
   void runAutoFillJob(job).catch((err) => {
     job.status = "failed";
     job.error = String(err?.message ?? err);

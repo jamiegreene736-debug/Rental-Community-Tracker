@@ -1605,7 +1605,11 @@ type AutoFillJobAttached = {
 };
 type AutoFillJobStatus = {
   jobId: string;
-  status: "queued" | "running" | "completed" | "failed";
+  // "interrupted" is emitted only by the /auto-fill/last persisted fallback: a
+  // deploy/restart killed the search mid-run (durable row still "running"/
+  // "interrupted" with no live job). Rendered as a red incomplete-scan notice
+  // in LastBuyInSearchPanel.
+  status: "queued" | "running" | "completed" | "failed" | "interrupted";
   done: boolean;
   phase: string;
   message: string;
@@ -4604,25 +4608,52 @@ function LastBuyInSearchPanel({
   finishedAt,
   onAttachCombo,
   attachingComboLabel,
+  scanStatus,
+  scanMessage,
 }: {
   lossCombos: AutoFillComboOption[];
   lossLog: LossLogEntry[];
   finishedAt?: number | null;
   onAttachCombo: (option: AutoFillComboOption) => void;
   attachingComboLabel?: string | null;
+  // Durable scan outcome from /auto-fill/last: "interrupted" = a deploy/restart
+  // killed the search mid-run (incomplete scan — render as an error per
+  // operator ask 2026-06-10); scanMessage = the search's terminal doneMessage
+  // (the "No profitable combination found … best option loses $X … coverage"
+  // economics), which now survives redeploys.
+  scanStatus?: string | null;
+  scanMessage?: string | null;
 }) {
-  if (lossCombos.length === 0 && lossLog.length === 0) return null;
+  const interrupted = scanStatus === "interrupted";
+  if (lossCombos.length === 0 && lossLog.length === 0 && !interrupted && !scanMessage) return null;
   return (
     <div className="rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs" data-testid="last-buy-in-search-panel">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-medium text-amber-900">Last buy-in search · over-budget combinations</p>
+        <p className="font-medium text-amber-900">
+          Last buy-in search{lossCombos.length > 0 ? " · over-budget combinations" : ""}
+        </p>
         {finishedAt ? (
           <span className="text-[10px] text-amber-700">{new Date(finishedAt).toLocaleString()}</span>
         ) : null}
       </div>
-      <p className="mt-0.5 text-[11px] text-amber-800">
-        These walkable same-community combos were found but skipped for exceeding the $100 max-loss limit. Review and attach one to override.
-      </p>
+      {interrupted && (
+        <p
+          className="mt-1 rounded border border-red-300 bg-red-50 px-2 py-1 text-[11px] font-medium text-red-800"
+          data-testid="scan-interrupted-notice"
+        >
+          ⚠ Incomplete scan — {scanMessage || "the search was interrupted mid-run (server restarted). Re-run Auto-fill to finish."}
+        </p>
+      )}
+      {!interrupted && scanMessage ? (
+        <p className="mt-1 whitespace-pre-wrap text-[11px] text-amber-900" data-testid="scan-done-message">
+          {scanMessage}
+        </p>
+      ) : null}
+      {lossCombos.length > 0 && (
+        <p className="mt-0.5 text-[11px] text-amber-800">
+          These walkable same-community combos were found but skipped for exceeding the $100 max-loss limit. Review and attach one to override.
+        </p>
+      )}
       {lossCombos.length > 0 && (
         <div className="mt-2 space-y-1.5">
           {lossCombos.map((option) => {
@@ -9512,11 +9543,15 @@ export default function Bookings() {
                             attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
                           />
                         )}
-                        {(lossCombos.length > 0 || lossLog.length > 0) && (
+                        {(lossCombos.length > 0 || lossLog.length > 0
+                          || lastSearch?.status === "interrupted"
+                          || (!!lastSearch?.done && !!lastSearch?.message)) && (
                           <LastBuyInSearchPanel
                             lossCombos={lossCombos}
                             lossLog={lossLog}
                             finishedAt={lastSearch?.timestamps?.finishedAt ?? null}
+                            scanStatus={lastSearch?.status ?? null}
+                            scanMessage={lastSearch?.done ? (lastSearch?.message || null) : null}
                             onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
                             attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
                           />

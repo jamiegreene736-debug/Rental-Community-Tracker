@@ -1050,6 +1050,17 @@ export const autoFillLossOptions = pgTable("auto_fill_loss_options", {
   cityEconomics: jsonb("city_economics"),
   finishedAt: timestamp("finished_at"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  // Durable terminal diagnostics (2026-06-10): the job's final message (the rich
+  // "No profitable combination found … best option loses $X … coverage" line) and
+  // error used to live ONLY in the in-memory job, so every redeploy erased the
+  // WHY of a finished search — the operator saw bare loss cards with no
+  // explanation. startedAt + status="running" written at job START make a scan
+  // that a deploy/restart killed mid-run DETECTABLE: a "running" row with no
+  // live in-memory job is surfaced as status "interrupted" by
+  // /api/operations/auto-fill/last and rendered as an error in the scan panel.
+  doneMessage: text("done_message"),
+  error: text("error"),
+  startedAt: timestamp("started_at"),
 });
 export type AutoFillLossOptions = typeof autoFillLossOptions.$inferSelect;
 
