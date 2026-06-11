@@ -368,4 +368,14 @@ export async function ensureRuntimeSchema(): Promise<void> {
     )
   `);
   console.log("[schema] ensured auto_fill_loss_options table");
+
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS cancellation_notices (
+      reservation_id text PRIMARY KEY,
+      channel text,
+      message text,
+      sent_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured cancellation_notices table");
 }
