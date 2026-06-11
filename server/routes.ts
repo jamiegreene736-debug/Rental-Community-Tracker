@@ -98,6 +98,8 @@ import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigS
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
+import { formatReceiptMoney, formatReceiptLongDate } from "@shared/receipt-message";
+import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
@@ -6987,6 +6989,11 @@ export async function registerRoutes(
       return 0;
     };
 
+    // NOTE FOR CODEX: the payment/refund extraction below is mirrored VERBATIM
+    // in server/guesty-money.ts (used by the guest-receipt scheduler + the
+    // receipts feed). Keep the two in sync — a receipt's amount must equal what
+    // this tile reports. The copies are intentional (this handler is a
+    // load-bearing money path; see guesty-money.ts header).
     const paymentAmount = (payment: any): number => {
       return asNum(payment?.amount ?? payment?.paidAmount ?? payment?.collectedAmount ?? payment?.total ?? payment?.value);
     };
@@ -7413,6 +7420,61 @@ export async function registerRoutes(
       const fundsCollectedAnnualProjection = Math.round(fundsCollectedDailyAvg3Days * 365);
       const revenueAnnualProjection = Math.round(revenueDailyAvg3Days * 365);
 
+      // Guest receipts auto-sent in-window (the payment/refund confirmations the
+      // scheduler posted to guests — see server/guest-receipts.ts). Sourced from
+      // our OWN ledger (guest_receipts), not re-derived from Guesty, so the feed
+      // reflects exactly what we sent + whether the guest opened the page.
+      // Fail-soft if the table is missing (pre-db:push) so the rest of the tile
+      // still renders.
+      const guestReceipts: Array<{
+        id: number;
+        reservationId: string;
+        kind: string;
+        amount: number;
+        guestName: string | null;
+        listingNickname: string | null;
+        channel: string | null;
+        token: string;
+        sentAt: string;
+        opened: boolean;
+        openCount: number;
+      }> = [];
+      let guestReceiptsSent30Days = 0;
+      let guestReceiptPaymentsSent30Days = 0;
+      let guestReceiptRefundsSent30Days = 0;
+      let guestReceiptsSent48Hours = 0;
+      try {
+        const receiptRows = await storage.getRecentGuestReceipts(300);
+        for (const row of receiptRows) {
+          if (row.status !== "sent") continue;
+          const sentRaw = row.messageSentAt ?? row.createdAt;
+          if (!sentRaw) continue;
+          const sentDate = new Date(sentRaw as any);
+          if (Number.isNaN(sentDate.getTime()) || sentDate < start || sentDate > now) continue;
+          guestReceiptsSent30Days += 1;
+          if (row.kind === "refund") guestReceiptRefundsSent30Days += 1;
+          else guestReceiptPaymentsSent30Days += 1;
+          if (sentDate >= fortyEightHourStart) guestReceiptsSent48Hours += 1;
+          guestReceipts.push({
+            id: row.id,
+            reservationId: row.reservationId,
+            kind: row.kind,
+            amount: Number(row.amount ?? 0),
+            guestName: row.guestName ?? null,
+            listingNickname: row.listingNickname ?? null,
+            channel: row.channel ?? null,
+            token: row.token,
+            sentAt: sentDate.toISOString(),
+            opened: (row.openCount ?? 0) > 0,
+            openCount: row.openCount ?? 0,
+          });
+        }
+        guestReceipts.sort((a, b) => b.sentAt.localeCompare(a.sentAt));
+      } catch (receiptErr: any) {
+        const missingTable = /42P01|does not exist|relation .* does not exist/i.test(receiptErr?.message || "");
+        if (!missingTable) console.error(`[dashboard/revenue] guest receipts feed error: ${receiptErr?.message ?? receiptErr}`);
+      }
+
       res.json({
         windowDays,
         revenue,
@@ -7455,6 +7517,12 @@ export async function registerRoutes(
         startDate: start.toISOString(),
         endDate: now.toISOString(),
         windowLabel: `Rolling past ${windowDays} days`,
+        // Auto-sent guest payment/refund receipts (feed + counters).
+        guestReceipts,
+        guestReceiptsSent30Days,
+        guestReceiptPaymentsSent30Days,
+        guestReceiptRefundsSent30Days,
+        guestReceiptsSent48Hours,
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch 30-day revenue", message: err.message });
@@ -8679,6 +8747,134 @@ Requirements:
     }
   };
 
+  // ── Guest-facing payment/refund receipt page ──────────────────────────────
+  // Durable, tokenized receipt the auto-send scheduler links from the guest
+  // message (server/guest-receipts.ts). Public (see server/auth.ts) so a guest
+  // can open it; open tracking counts only genuine guest opens (operator
+  // previews carry the admin session or ?preview=1). Registered BEFORE the SPA
+  // catch-all so it serves server-rendered HTML.
+  app.get("/receipt/:token", async (req, res) => {
+    try {
+      const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+      if (!token) return res.status(404).send("Not found");
+      const row = await storage.getGuestReceiptByToken(token).catch(() => null);
+      if (!row) return res.status(404).send("Receipt not found");
+      if (row.expiresAt && row.expiresAt.getTime() < Date.now()) {
+        return res.status(410).send("This receipt link has expired.");
+      }
+      const adminSecret = process.env.ADMIN_SECRET ?? "";
+      const isOperator = adminSecret ? !!resolvePortalSession(req, adminSecret) : false;
+      const isPreview = String(req.query.preview ?? "") === "1";
+      if (!isOperator && !isPreview) {
+        void storage.recordGuestReceiptOpen(token).catch(() => {});
+      }
+
+      const payload: any = (row.payload && typeof row.payload === "object") ? row.payload : {};
+      const isRefund = String(row.kind) === "refund";
+      const brand = String(payload.brandName ?? "VacationRentalExpertz");
+      const sender = String(payload.senderName ?? "John Carpenter");
+      const guestName = String(payload.guestName ?? payload.guestFirstName ?? "").trim();
+      const propertyName = String(payload.propertyName ?? payload.listingNickname ?? "").trim();
+      const amount = Number(row.amount ?? payload.amount ?? 0);
+      const txnDate = String(payload.transactionDate ?? row.transactionDate ?? "");
+      const checkIn = String(payload.checkIn ?? "");
+      const checkOut = String(payload.checkOut ?? "");
+      const confirmationCode = String(payload.confirmationCode ?? "").trim();
+      const bookingTotal = Number(payload.bookingTotal ?? 0);
+      const history: Array<{ date: string; amount: number }> = Array.isArray(payload.paymentHistory) ? payload.paymentHistory : [];
+      const totalPaid = Number(payload.totalPaidToDate ?? history.reduce((s, p) => s + (Number(p?.amount) || 0), 0));
+      const balance = Math.max(0, bookingTotal - totalPaid);
+      const generatedAt = String(payload.generatedAt ?? (row.messageSentAt ? new Date(row.messageSentAt).toISOString() : ""));
+
+      const row2 = (label: string, value: string, strong = false) =>
+        `<tr><td class="lbl">${escapeHtml(label)}</td><td class="val${strong ? " strong" : ""}">${escapeHtml(value)}</td></tr>`;
+
+      const detailRows: string[] = [];
+      if (propertyName) detailRows.push(row2("Property", propertyName));
+      const stayDates = [checkIn ? formatReceiptLongDate(checkIn) : "", checkOut ? formatReceiptLongDate(checkOut) : ""].filter(Boolean).join(" – ");
+      if (stayDates) detailRows.push(row2("Stay dates", stayDates));
+      if (confirmationCode) detailRows.push(row2("Confirmation", confirmationCode));
+
+      const lineRows: string[] = [];
+      if (isRefund) {
+        lineRows.push(row2(`Refund issued${txnDate ? ` (${formatReceiptLongDate(txnDate)})` : ""}`, formatReceiptMoney(amount), true));
+      } else {
+        if (bookingTotal > 0) lineRows.push(row2("Booking total", formatReceiptMoney(bookingTotal)));
+        lineRows.push(row2(`Payment received${txnDate ? ` (${formatReceiptLongDate(txnDate)})` : ""}`, formatReceiptMoney(amount), true));
+        if (history.length > 1) {
+          for (const p of [...history].sort((a, b) => String(a.date).localeCompare(String(b.date)))) {
+            const isThis = String(p.date).slice(0, 10) === txnDate.slice(0, 10) && Math.abs(Number(p.amount) - amount) < 0.005;
+            lineRows.push(row2(`  ${p.date ? formatReceiptLongDate(p.date) : "Payment"}${isThis ? " (this payment)" : ""}`, formatReceiptMoney(Number(p.amount) || 0)));
+          }
+        }
+        if (bookingTotal > 0) {
+          lineRows.push(row2("Total paid to date", formatReceiptMoney(totalPaid), true));
+          lineRows.push(row2("Remaining balance", formatReceiptMoney(balance), true));
+        }
+      }
+
+      const title = isRefund ? "Refund Receipt" : "Payment Receipt";
+      const accent = isRefund ? "#b45309" : "#0e7490";
+      const note = isRefund
+        ? "This refund goes back to your original payment method and typically takes 5–10 business days to appear on your statement, depending on your bank or card issuer."
+        : "Thank you for your payment. If you have any questions about this charge or your reservation, just reply to your booking message.";
+
+      const html = `<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="robots" content="noindex,nofollow"/>
+<title>${escapeHtml(title)} – ${escapeHtml(brand)}</title>
+<style>
+  :root{--accent:${accent}}
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef2f4;color:#1f2933;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:560px;margin:0 auto;padding:28px 16px 56px}
+  .card{background:#fff;border:1px solid rgba(15,23,42,.08);border-radius:14px;box-shadow:0 18px 42px rgba(15,40,60,.12);overflow:hidden}
+  .head{padding:22px 26px;border-top:5px solid var(--accent);display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+  .brand{font-weight:700;font-size:15px;letter-spacing:.2px}
+  .badge{display:inline-block;background:var(--accent);color:#fff;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;padding:5px 11px;border-radius:999px}
+  .amount{padding:6px 26px 0;font-size:34px;font-weight:800;color:var(--accent)}
+  .amount small{display:block;font-size:12px;font-weight:600;color:#64748b;letter-spacing:.4px;text-transform:uppercase;margin-bottom:2px}
+  h1{font-size:18px;margin:14px 26px 2px}
+  .sub{margin:0 26px 6px;color:#475569;font-size:14px}
+  table{width:calc(100% - 52px);margin:14px 26px;border-collapse:collapse}
+  td{padding:8px 0;border-bottom:1px solid #eef1f4;font-size:14px;vertical-align:top}
+  td.lbl{color:#64748b;white-space:pre}
+  td.val{text-align:right;font-variant-numeric:tabular-nums}
+  td.val.strong,td.lbl.strong{font-weight:700;color:#0f172a}
+  tr:last-child td{border-bottom:none}
+  .note{margin:4px 26px 0;color:#475569;font-size:13px}
+  .foot{margin:18px 26px 24px;padding-top:16px;border-top:1px solid #eef1f4;color:#64748b;font-size:13px}
+  .sig{color:#1f2933;font-weight:600}
+  .actions{margin:18px 26px 26px}
+  .print{appearance:none;border:1px solid var(--accent);background:#fff;color:var(--accent);font-weight:700;font-size:14px;padding:10px 16px;border-radius:9px;cursor:pointer}
+  @media print{body{background:#fff}.card{box-shadow:none;border:none}.actions{display:none}}
+</style></head>
+<body><div class="wrap"><div class="card">
+  <div class="head"><div class="brand">${escapeHtml(brand)}</div><div class="badge">${escapeHtml(isRefund ? "Refund" : "Receipt")}</div></div>
+  <div class="amount"><small>${escapeHtml(isRefund ? "Amount refunded" : "Amount paid")}</small>${escapeHtml(formatReceiptMoney(amount))}</div>
+  <h1>${escapeHtml(title)}</h1>
+  ${guestName ? `<p class="sub">Prepared for ${escapeHtml(guestName)}</p>` : ""}
+  ${detailRows.length ? `<table>${detailRows.join("")}</table>` : ""}
+  <table>${lineRows.join("")}</table>
+  <p class="note">${escapeHtml(note)}</p>
+  <div class="actions"><button class="print" onclick="window.print()">Print / Save as PDF</button></div>
+  <div class="foot">
+    <div class="sig">${escapeHtml(sender)}</div>
+    <div>${escapeHtml(brand)}</div>
+    ${generatedAt ? `<div style="margin-top:6px;font-size:12px">Receipt generated ${escapeHtml(formatReceiptLongDate(generatedAt))}</div>` : ""}
+  </div>
+</div></div></body></html>`;
+
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      return res.send(html);
+    } catch (err: any) {
+      console.error(`[receipt-page] ${err?.message ?? err}`);
+      return res.status(500).send("Unable to load receipt.");
+    }
+  });
+
   app.get("/alternatives/:token", async (req, res) => {
     try {
       const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -9646,6 +9842,92 @@ Requirements:
       return res.json({ statuses });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to read cancellation notice status", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Batch "have we sent this guest a receipt?" status for the bookings list.
+  // Given reservation IDs, returns per reservation the most recent SENT receipt
+  // (kind/amount/date/channel/open-tracking) + counts, so a row can show a
+  // "Receipt sent" badge. Mirrors /api/booking-alternatives/sent-status; keyed
+  // by reservationId. Fail-soft to {} if the table is missing (pre-db:push).
+  app.post("/api/operations/guest-receipts/sent-status", async (req, res) => {
+    try {
+      const raw = Array.isArray(req.body?.reservationIds) ? req.body.reservationIds : [];
+      const reservationIds = Array.from(new Set(
+        raw.map((id: unknown) => normalizeAlternativeText(id, 120)).filter(Boolean),
+      )).slice(0, 300) as string[];
+      const statuses: Record<string, {
+        kind: string;
+        amount: number;
+        sentAt: string | null;
+        channel: string | null;
+        token: string;
+        opened: boolean;
+        openCount: number;
+        count: number;
+        paymentCount: number;
+        refundCount: number;
+      } | null> = {};
+      if (reservationIds.length > 0) {
+        const rows: any[] = await storage.getGuestReceiptsByReservationIds(reservationIds).catch(() => []);
+        const byReservation = new Map<string, any[]>();
+        for (const r of rows) {
+          if (r.status !== "sent") continue;
+          const list = byReservation.get(r.reservationId) ?? [];
+          list.push(r);
+          byReservation.set(r.reservationId, list);
+        }
+        for (const id of reservationIds) {
+          const list = byReservation.get(id);
+          if (!list || list.length === 0) { statuses[id] = null; continue; }
+          // Query returns newest-first, so list[0] is the most recent receipt.
+          const latest = list[0];
+          const sentRaw = latest.messageSentAt ?? latest.createdAt ?? null;
+          statuses[id] = {
+            kind: latest.kind,
+            amount: Number(latest.amount ?? 0),
+            // Serialize to ISO so the wire value matches the client's string type
+            // (res.json would coerce a Date anyway; be explicit).
+            sentAt: sentRaw ? new Date(sentRaw).toISOString() : null,
+            channel: latest.channel ?? null,
+            token: latest.token,
+            opened: (latest.openCount ?? 0) > 0,
+            openCount: latest.openCount ?? 0,
+            count: list.length,
+            paymentCount: list.filter((r) => r.kind === "payment").length,
+            refundCount: list.filter((r) => r.kind === "refund").length,
+          };
+        }
+      }
+      return res.json({ statuses });
+    } catch (err: any) {
+      const missingTable = /42P01|does not exist|relation .* does not exist/i.test(err?.message || "");
+      if (missingTable) return res.json({ statuses: {} });
+      return res.status(500).json({ error: "Failed to read receipt status", message: err?.message ?? String(err) });
+    }
+  });
+
+  app.get("/api/guest-receipts/:token/tracking", async (req, res) => {
+    try {
+      const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+      if (!token) return res.status(400).json({ error: "token required" });
+      const row = await storage.getGuestReceiptByToken(token);
+      if (!row) return res.status(404).json({ error: "receipt not found" });
+      return res.json({
+        token,
+        kind: row.kind,
+        amount: Number(row.amount ?? 0),
+        status: row.status,
+        channel: row.channel,
+        messageSentAt: row.messageSentAt,
+        opened: !!row.firstOpenedAt,
+        firstOpenedAt: row.firstOpenedAt,
+        lastOpenedAt: row.lastOpenedAt,
+        openCount: row.openCount,
+        expiresAt: row.expiresAt,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to read tracking", message: err?.message ?? String(err) });
     }
   });
 
@@ -41782,6 +42064,41 @@ CONSTRAINTS
       // dashboard usable until `npm run db:push` runs on Railway.
       const missingTable = /42P01|does not exist|relation .* does not exist/i.test(err.message || "");
       console.error(`[booking-confirmations/logs] ${missingTable ? "table missing — returning []" : err.message}`);
+      res.json([]);
+    }
+  });
+
+  // ── Guest payment/refund receipt auto-send ──
+  // Status / toggle / manual-run / logs. Mirrors booking-confirmations so the
+  // inbox UI can drive it the same way. The scheduler runs every 5 minutes;
+  // "run now" forces a tick. The toggle is the operator's single OFF switch.
+  app.get("/api/inbox/guest-receipts/status", (_req, res) => {
+    res.json(getGuestReceiptStatus());
+  });
+
+  app.post("/api/inbox/guest-receipts/toggle", (req, res) => {
+    const { enabled } = req.body as { enabled: boolean };
+    setGuestReceiptsEnabled(!!enabled);
+    res.json(getGuestReceiptStatus());
+  });
+
+  app.post("/api/inbox/guest-receipts/run", async (_req, res) => {
+    try {
+      const result = await runGuestReceipts();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Guest-receipt run failed", message: err.message });
+    }
+  });
+
+  app.get("/api/inbox/guest-receipts/logs", async (req, res) => {
+    try {
+      const limit = Math.min(parseInt((req.query.limit as string) ?? "50", 10) || 50, 200);
+      const logs = await storage.getRecentGuestReceipts(limit);
+      res.json(logs);
+    } catch (err: any) {
+      const missingTable = /42P01|does not exist|relation .* does not exist/i.test(err.message || "");
+      console.error(`[guest-receipts/logs] ${missingTable ? "table missing — returning []" : err.message}`);
       res.json([]);
     }
   });

@@ -16,6 +16,7 @@ import {
   type AutoReplyStyleExample, type InsertAutoReplyStyleExample,
   type BookingConfirmation, type InsertBookingConfirmation,
   type BookingAlternativePage, bookingAlternativePages,
+  type GuestReceipt, type InsertGuestReceipt, guestReceipts,
   type AutoFillLossOptions, autoFillLossOptions,
   type CancellationNotice, cancellationNotices,
   type QuoSmsMessage, type InsertQuoSmsMessage,
@@ -270,6 +271,17 @@ export interface IStorage {
   recordBookingAlternativePageOpen(token: string): Promise<void>;
   markBookingAlternativePageSent(token: string, channel: string | null): Promise<void>;
   getBookingAlternativePagesByReservation(reservationId: string): Promise<BookingAlternativePage[]>;
+
+  // Guest payment/refund receipts (auto-sent). dedupKey/token are UNIQUE.
+  createGuestReceipt(r: InsertGuestReceipt): Promise<GuestReceipt>;
+  getGuestReceiptByDedupKey(dedupKey: string): Promise<GuestReceipt | undefined>;
+  getGuestReceiptByToken(token: string): Promise<GuestReceipt | undefined>;
+  markGuestReceiptSent(token: string, conversationId: string | null, channel: string | null): Promise<void>;
+  markGuestReceiptError(token: string, errorMessage: string): Promise<void>;
+  updateGuestReceiptContent(token: string, fields: { messageBody: string; payload: unknown; conversationId?: string | null }): Promise<void>;
+  recordGuestReceiptOpen(token: string): Promise<void>;
+  getRecentGuestReceipts(limit?: number): Promise<GuestReceipt[]>;
+  getGuestReceiptsByReservationIds(reservationIds: string[]): Promise<GuestReceipt[]>;
 
   createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
   getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
@@ -1204,6 +1216,68 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(bookingAlternativePages)
       .where(eq(bookingAlternativePages.reservationId, reservationId))
       .orderBy(desc(bookingAlternativePages.createdAt));
+  }
+
+  // ── Guest payment/refund receipts (auto-sent) ──
+  async createGuestReceipt(r: InsertGuestReceipt): Promise<GuestReceipt> {
+    const [row] = await db.insert(guestReceipts).values(r).returning();
+    return row;
+  }
+
+  async getGuestReceiptByDedupKey(dedupKey: string): Promise<GuestReceipt | undefined> {
+    const [row] = await db.select().from(guestReceipts).where(eq(guestReceipts.dedupKey, dedupKey)).limit(1);
+    return row;
+  }
+
+  async getGuestReceiptByToken(token: string): Promise<GuestReceipt | undefined> {
+    const [row] = await db.select().from(guestReceipts).where(eq(guestReceipts.token, token)).limit(1);
+    return row;
+  }
+
+  async markGuestReceiptSent(token: string, conversationId: string | null, channel: string | null): Promise<void> {
+    await db.update(guestReceipts).set({
+      status: "sent",
+      conversationId: conversationId ?? null,
+      channel: channel ?? null,
+      errorMessage: null,
+      messageSentAt: new Date(),
+    }).where(eq(guestReceipts.token, token));
+  }
+
+  async markGuestReceiptError(token: string, errorMessage: string): Promise<void> {
+    await db.update(guestReceipts).set({
+      status: "error",
+      errorMessage: errorMessage.slice(0, 1000),
+    }).where(eq(guestReceipts.token, token));
+  }
+
+  // Refresh a not-yet-sent receipt's body + page payload from current data, so
+  // a retry re-sends an up-to-date message (and the durable page matches).
+  async updateGuestReceiptContent(token: string, fields: { messageBody: string; payload: unknown; conversationId?: string | null }): Promise<void> {
+    await db.update(guestReceipts).set({
+      messageBody: fields.messageBody,
+      payload: fields.payload as any,
+      ...(fields.conversationId !== undefined ? { conversationId: fields.conversationId ?? null } : {}),
+    }).where(eq(guestReceipts.token, token));
+  }
+
+  async recordGuestReceiptOpen(token: string): Promise<void> {
+    await db.update(guestReceipts).set({
+      openCount: sql`${guestReceipts.openCount} + 1`,
+      lastOpenedAt: new Date(),
+      firstOpenedAt: sql`COALESCE(${guestReceipts.firstOpenedAt}, NOW())`,
+    }).where(eq(guestReceipts.token, token));
+  }
+
+  async getRecentGuestReceipts(limit = 100): Promise<GuestReceipt[]> {
+    return db.select().from(guestReceipts).orderBy(desc(guestReceipts.createdAt)).limit(limit);
+  }
+
+  async getGuestReceiptsByReservationIds(reservationIds: string[]): Promise<GuestReceipt[]> {
+    if (reservationIds.length === 0) return [];
+    return db.select().from(guestReceipts)
+      .where(inArray(guestReceipts.reservationId, reservationIds))
+      .orderBy(desc(guestReceipts.createdAt));
   }
 
   // ── Quo SMS mirror ──

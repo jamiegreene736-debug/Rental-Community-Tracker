@@ -43,6 +43,11 @@
 //   - /alternatives/* — tokenized guest-facing alternative-stay photo pages.
 //     Creation/drafting APIs stay protected; only the random-token rendered
 //     page is public so it can be sent to a guest.
+//   - /receipt/* — tokenized guest-facing payment/refund receipt pages
+//     (server/guest-receipts.ts). Same model as /alternatives: only the
+//     random-token rendered page is public; the creation path is the
+//     server-side scheduler, and the operator-facing tracking/log/toggle APIs
+//     stay protected.
 //   - /api/buy-in-emails/inbound — server-to-server email webhook only
 //     when BUY_IN_EMAIL_WEBHOOK_SECRET matches. This records PM/vendor
 //     replies from alias email threads without giving guests/vendors the
@@ -78,6 +83,7 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/quo/webhooks/",
   "/agreement/",
   "/alternatives/",
+  "/receipt/",
   "/admin/agreement/",
   "/api/rental-agreements/",
 ];

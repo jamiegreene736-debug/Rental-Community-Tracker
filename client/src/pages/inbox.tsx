@@ -4237,6 +4237,20 @@ export default function InboxPage() {
                                     {channelBadge(channel)}
                                   </>
                                 )}
+                                {/* Tag auto-sent payment/refund receipts (they post as
+                                    normal host messages; this is display-only and never
+                                    shown to the guest). */}
+                                {isHost && /confirming a (payment|refund) of \$/i.test(bodyText) && (
+                                  <>
+                                    <span>·</span>
+                                    <span
+                                      className="inline-flex items-center gap-0.5 rounded bg-sky-100 px-1 py-0.5 font-medium text-sky-700 dark:bg-sky-950/50 dark:text-sky-300"
+                                      data-testid={`badge-thread-receipt-${p._id}`}
+                                    >
+                                      📄 {/confirming a refund of \$/i.test(bodyText) ? "Refund receipt" : "Payment receipt"}
+                                    </span>
+                                  </>
+                                )}
                               </div>
                             </div>
                           );

@@ -43,6 +43,42 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-10 (guest payment/refund RECEIPTS — auto-message + durable page):
+  Operator asked: when he sends a refund (or takes a payment) via Guesty, auto-send
+  the guest a message that's a receipt of it, store it in the guest inbox, "try
+  another way too," and find a good place in the UI to see it was sent. SHIPPED on
+  branch `claude/guest-receipt-messages` (built in an isolated worktree off `main`
+  because the shared `claude/city-research-dedup-and-radius` branch had concurrent
+  uncommitted edits to the same files). Discovery: a MANUAL "Send payment receipt"
+  dialog already existed in `client/src/pages/inbox.tsx` (`buildReceiptBody` →
+  Guesty `/send-message`); this AUTOMATES it and adds refunds. Pieces: (1) new
+  scheduler `server/guest-receipts.ts` (clone of `booking-confirmations.ts`, every
+  5 min) polls reservations by `-lastUpdatedAt`, detects collected payments + real
+  refunds via the new canonical `server/guesty-money.ts` (verbatim MIRROR of the
+  `dashboardRevenue30DayHandler` money helpers), and for each txn in a tight
+  `RECEIPT_BACKFILL_HOURS`=48 window posts a receipt into the Guesty conversation
+  (→ guest's channel + our inbox) and mints a durable `/receipt/:token` page (the
+  "second way"; clone of `/alternatives/:token`). (2) dedup ledger `guest_receipts`
+  (UNIQUE `dedup_key` = `reservationId|kind|day|amount`; day+amount is jitter-stable
+  → never double-send). (3) rollout AUTO-ON with OFF toggle
+  (`/api/inbox/guest-receipts/toggle`, env `GUEST_RECEIPTS_DISABLED`). (4) operator
+  UI: primary = "Guest receipts sent" tile + feed in the Operations revenue dialog
+  (`home.tsx`, from our own ledger); secondary = sky "Receipt sent" row badge on
+  `bookings.tsx` (`POST /api/operations/guest-receipts/sent-status`) + "📄 Receipt"
+  chip in the inbox thread. (5) `server/auth.ts` PUBLIC_PATH_PREFIXES widened with
+  `/receipt/` (guest page only — see the matching Decision Log + Load-Bearing entry
+  per the auth note's rule). Wording is channel-NEUTRAL ("a payment was processed" /
+  "a refund was issued") because it fires for Airbnb/VRBO too where we don't hold the
+  card. Built + reviewed via a 4-dimension adversarial Workflow (6 findings fixed:
+  forward-only channel-skip, retry rebuilds body from current data, `sentAt`→ISO,
+  dedup trade-off documented). Verified: `tests/receipt-message.test.ts` 28/0, full
+  `npm test` green, `npm run build` clean, `npm run check` zero new TS errors
+  (baseline 285). Full rationale in AGENTS.md "Guest payment/refund receipts
+  auto-send" Load-Bearing subsection + the 2026-06-10 Decision Log line. NOTE: tables
+  auto-create on deploy via `db:push` AND `server/schema-maintenance.ts`
+  (`guest_receipts` CREATE TABLE IF NOT EXISTS); the feed/logs/sent-status endpoints
+  fail-soft (return empty) until then.
+
 - 2026-06-10 (city research: surface MULTIPLE distinct combos per pool — "find more
   than the duplicate combo"): Operator saw a bulk buy-in queue scan where the nearby-
   city expansion surfaced the SAME two listings across 4 different cities for a ~6BR

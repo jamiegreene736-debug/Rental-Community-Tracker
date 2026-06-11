@@ -8,6 +8,7 @@ import { startAutoReplyScheduler } from "./auto-reply";
 import { startAvailabilityScheduler } from "./availability-scheduler";
 import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
+import { startGuestReceiptScheduler } from "./guest-receipts";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 import { ensureRuntimeSchema } from "./schema-maintenance";
 import { ensureTopMarketScanCacheLogicVersion } from "./top-market-scan-cache";
@@ -141,6 +142,7 @@ app.get("/api/auth/session", (_req, res) => {
       startAvailabilityScheduler();
       startPhotoListingScheduler();
       startBookingConfirmationScheduler();
+      startGuestReceiptScheduler();
       const startTopMarketCacheRefresh = app.get("startTopMarketCacheRefresh") as
         | (() => Promise<unknown>)
         | undefined;
