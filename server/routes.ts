@@ -234,6 +234,7 @@ import {
   mergeDiscoveredScoutRowsByResort,
 } from "@shared/alternative-scout-resort";
 import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
+import { titlesShareWalkableCommunity } from "@shared/city-vrbo-combo";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
   unitBuilderData,
@@ -10039,6 +10040,10 @@ Requirements:
           unitToken: finalGuess.unitToken,
           address: finalGuess.address,
           addressSource: finalGuess.source,
+          // City-wide candidates can be from ANY resort in town (the note is
+          // stamped by the city-VRBO attach paths) — for those, the configured-
+          // resort footprint fallback below is NOT trustworthy on its own.
+          cityWide: /city-?wide/i.test(String(buyIn?.notes ?? "")),
         };
       }),
     );
@@ -10049,6 +10054,14 @@ Requirements:
     }).length;
 
     let worstPair: { a: typeof units[number]; b: typeof units[number]; walk: WalkResult } | null = null;
+    // A pair is UNVERIFIABLE when (a) we have no real geocoded walk (the value
+    // came from the configured resort's footprint default), (b) at least one
+    // unit was a CITY-WIDE candidate (could be from any resort in town), and
+    // (c) the two titles carry no positive same/adjacent-community evidence.
+    // Trusting the footprint fallback there is how a Puamana unit and a Wyndham
+    // Ka Eo Kai unit got attached to one booking as a "4 minute walk"
+    // (2026-06-10). Such a pair must FAIL the proximity gate.
+    let unverifiedPair: { a: typeof units[number]; b: typeof units[number]; walk: WalkResult } | null = null;
     for (let i = 0; i < units.length; i++) {
       for (let j = i + 1; j < units.length; j++) {
         let walk = await walkBetween(units[i].address, units[j].address, resortName).catch(() => fallbackWalkForResort(resortName));
@@ -10058,6 +10071,13 @@ Requirements:
           // than telling the operator two unknown buildings are "steps apart."
           walk = fallbackWalkForResort(resortName);
         }
+        if (
+          walk.source !== "geocoded" &&
+          (units[i].cityWide || units[j].cityWide) &&
+          !titlesShareWalkableCommunity(String(units[i].title ?? ""), String(units[j].title ?? ""))
+        ) {
+          unverifiedPair = { a: units[i], b: units[j], walk };
+        }
         if (!worstPair || walk.minutes > worstPair.walk.minutes) {
           worstPair = { a: units[i], b: units[j], walk };
         }
@@ -10065,6 +10085,31 @@ Requirements:
     }
 
     if (!worstPair) return null;
+    if (unverifiedPair) {
+      // Honest failure: we cannot place these units near each other, and their
+      // titles say different resorts — surface that instead of the footprint
+      // minutes that would otherwise sail through the gate.
+      return {
+        propertyId: Number.isFinite(propertyId) ? propertyId : null,
+        community: communityName,
+        resortName: displayResort ?? resortName,
+        units,
+        walk: {
+          ...unverifiedPair.walk,
+          description:
+            `Different resorts by listing title ("${String(unverifiedPair.a.title ?? "").slice(0, 60)}" vs ` +
+            `"${String(unverifiedPair.b.title ?? "").slice(0, 60)}") and no location data — ` +
+            `walking distance cannot be verified for these city-wide units.`,
+        },
+        confidence: "unverified-cross-resort" as const,
+        withinLimit: false,
+        maxMinutes: MAX_BUY_IN_WALK_MINUTES,
+        worstPair: {
+          buyInIds: [unverifiedPair.a.buyInId, unverifiedPair.b.buyInId],
+          unitLabels: [unverifiedPair.a.unitLabel, unverifiedPair.b.unitLabel],
+        },
+      };
+    }
     const displayWalk = relabelWalkDescription(worstPair.walk, displayResort ?? resortName);
     return {
       propertyId: Number.isFinite(propertyId) ? propertyId : null,
@@ -19300,7 +19345,9 @@ Requirements:
       if (proximity && !proximity.withinLimit) {
         return res.status(409).json({
           error: "Buy-in units too far apart",
-          message: `Buy-in units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking distance. Estimated ${proximity.walk.minutes} minutes between ${proximity.worstPair.unitLabels.join(" and ")}.`,
+          message: proximity.confidence === "unverified-cross-resort"
+            ? `Cannot verify ${proximity.worstPair.unitLabels.join(" and ")} are walkable: ${proximity.walk.description}`
+            : `Buy-in units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking distance. Estimated ${proximity.walk.minutes} minutes between ${proximity.worstPair.unitLabels.join(" and ")}.`,
           walk: proximity.walk,
           maxMinutes: MAX_BUY_IN_WALK_MINUTES,
           confidence: proximity.confidence,

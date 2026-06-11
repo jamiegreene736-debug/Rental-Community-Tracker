@@ -8,6 +8,7 @@ import {
   suggestCityVrboComboPair,
   suggestCityVrboComboPairs,
   summarizeCityVrboMatching,
+  titlesShareWalkableCommunity,
   type CityVrboListing,
 } from "../shared/city-vrbo-combo";
 
@@ -315,6 +316,29 @@ const brSet = (c: CityVrboComboPairLike) => new Set(c.picks.map((p) => p.bedroom
 check("plural: combo[0] is the cheaper 4+2 split", !!splitDivCombos[0] && brSet(splitDivCombos[0]).has(4) && brSet(splitDivCombos[0]).has(2), splitDivCombos[0]?.picks?.map((p) => p.bedrooms));
 check("plural: combo[1] is the 3+3 split (different split, URL-disjoint)",
   !!splitDivCombos[1] && [...brSet(splitDivCombos[1])].every((b) => b === 3) && noDupUrls(splitDivCombos), splitDivCombos[1]?.picks?.map((p) => p.bedrooms));
+
+// ── titlesShareWalkableCommunity: the attach-route proximity guard's
+// cross-resort evidence check (2026-06-10 incident: a Puamana unit + a Wyndham
+// Ka Eo Kai unit attached to one booking as a "4 minute walk" because geocoding
+// failed and the configured-resort footprint fallback passed the gate).
+check("guard: the actual incident pair (Puamana vs Wyndham Ka Eo Kai) is NOT same-community",
+  !titlesShareWalkableCommunity(
+    "Puamana Peaceful 3BR North Shore Stay",
+    "Princeville Paradise 2BR Suite @ Wyndham Ka Eo Kai",
+  ));
+check("guard: same complex by dictionary ('Kaha Lani' both sides) IS same-community",
+  titlesShareWalkableCommunity(
+    "Kaha Lani Oceanfront Resort #129 - Beautiful and Private 2 B",
+    "2 Bedroom Ocean View w/Lanai – Kaha Lani 107",
+  ));
+check("guard: same complex by phrase ('Poipu Kai Resort' both sides) IS same-community",
+  titlesShareWalkableCommunity("Poipu Kai Resort 3BR A", "Poipu Kai Resort 2BR garden view"));
+check("guard: curated-adjacent complexes (Poipu Kai + Kiahuna Plantation) ARE walkable together",
+  titlesShareWalkableCommunity("Poipu Kai Resort 3BR ocean view", "Kiahuna Plantation #245 garden suite"));
+check("guard: two GENERIC titles (no resort evidence either side) are NOT assumed same-community",
+  !titlesShareWalkableCommunity("Ocean view 3BR with pool", "Beautiful 2BR condo near the beach"));
+check("guard: generic title vs named complex is NOT same-community",
+  !titlesShareWalkableCommunity("Ocean view 3BR with pool", "Poipu Kai Resort 2BR"));
 
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
