@@ -43,6 +43,45 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-10 (buy-in searches SURVIVE deploys: durable scan outcome + boot resume;
+  commits 121caa4 / 97fe102 / e91565a, all deployed + live-verified): Operator hit two
+  incidents the same day. (1) Saw the bulk queue "look into individual VRBO listings" —
+  NOT a bug: Phase-4 no-pair detail enrichment (city-vrbo-inventory.ts), running since
+  ~Jun 7, made VISIBLE by the daemon's new external-display mode. Fix: `skipDetailEnrich`
+  flag threaded through runCityScanCore; the AUTOMATED home-city loopback passes
+  `skipEnrich=1`; per operator choice the nearby-town expansion + single-unit walk KEEP
+  enrichment, and the manual "Scan city VRBO" button is unchanged. (2) "Yesterday it had
+  a combo, today nothing" (Cecilio Marquez, Princeville): the scan HAD found 4 walkable
+  pairs but all over-budget (VRBO's pool genuinely shrank 245→190 overnight; cheap 3BRs
+  gone) — and the 22:21 deploy then WIPED the in-memory job, erasing the explanation.
+  Deploys land every ~10 min from concurrent sessions; each killed every in-flight
+  search silently. Fixes, all LOAD-BEARING (full rationale in the memory file
+  deploy-survival-resume-architecture + commit messages):
+  • `auto_fill_loss_options` gained done_message/error/started_at/request/job_id/owner/
+    resume_attempts; new `bulk_auto_fill_state` table. **`npm run db:push` on boot
+    SILENTLY SKIPS ADD COLUMN on existing tables** (root-caused: done_message missing in
+    prod broke /auto-fill/last until a manual ALTER) — apply DDL via psql against the
+    Postgres service's DATABASE_PUBLIC_URL (TCP proxy), then keep shared/schema.ts in sync.
+  • server/shutdown.ts is the ONLY SIGTERM handler (register via onShutdown(); a second
+    process.once would race exits). Auto-fill stamps active jobs "interrupted"; bulk
+    flushes its final snapshot (terminal status preserved).
+  • server/auto-fill-resume.ts (15s after listen — ladder needs loopback HTTP): resumes
+    the bulk queue under the SAME bulkJobId, then standalone rows under the SAME jobId
+    with forceRestart:false (operator re-run in the boot window WINS via single-flight).
+    Rails: 3h window; 2-attempt cap with the increment AWAITED pre-start; operator queue
+    blocks a bulk resume; corrupt/superseded snapshots stamped terminal; a dead run's
+    partial combo attach is deliberately NOT auto-detached (indistinguishable from an
+    operator attach; the resumed run usually completes the combo).
+  • /api/operations/auto-fill/last maps a stale running row to status "interrupted";
+    LastBuyInSearchPanel renders the red "⚠ Incomplete scan" notice + the durable
+    doneMessage. Client AutoFillJobPoller tolerates ~60s of 404s (redeploy gap).
+  Live-verified end-to-end: started Cecilio's search, killed it with a mid-scan deploy →
+  row stamped interrupted ("was: resort — Searching the resort…") → new boot resumed the
+  SAME jobId (attempts=1) → search continued into home-city. 15-agent adversarial review
+  pre-ship: 11 confirmed findings fixed/resolved. NOTE: AGENTS.md needs the Decision-Log
+  + Load-Bearing entries for this, but it carries another session's uncommitted edits —
+  add them when that lands.
+
 - 2026-06-10 (city research: surface MULTIPLE distinct combos per pool — "find more
   than the duplicate combo"): Operator saw a bulk buy-in queue scan where the nearby-
   city expansion surfaced the SAME two listings across 4 different cities for a ~6BR
