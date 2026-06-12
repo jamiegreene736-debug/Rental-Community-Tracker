@@ -869,6 +869,39 @@ export function verifyResolvedUnitsShareCommunity(
   return "unresolved";
 }
 
+// ── Description-verified community evidence stamped into buy-in notes ──────────
+// When the auto-fill job confirms (via the verify-combo-community description scrape)
+// that two city-wide units resolve to the SAME community, it stamps the resolved
+// community KEYS into each unit's buy-in notes with this marker. The attach proximity
+// gate (estimateAttachedBuyInProximity) then reads them back as a THIRD evidence type
+// — alongside (a) real geo-coords and (b) titlesShareWalkableCommunity — to authorize a
+// city-wide cross-resort attach. The gate RE-CHECKS the key intersection from the notes
+// (defense in depth), so a single stale/one-sided marker can never pass on its own.
+// Format (one space-delimited ` · ` segment, keys joined by ";"):
+//   · CommunityVerified: dict:kiahuna-plantation;phrase:kiahuna
+export const BUYIN_COMMUNITY_VERIFIED_LABEL = "CommunityVerified:";
+
+export function formatVerifiedCommunityNote(keys: string[]): string {
+  const clean = Array.from(new Set((keys ?? []).map((k) => String(k).trim()).filter(Boolean)));
+  return clean.length ? ` · ${BUYIN_COMMUNITY_VERIFIED_LABEL} ${clean.join(";")}` : "";
+}
+
+export function parseVerifiedCommunityKeysFromNotes(notes: string | null | undefined): string[] {
+  const m = String(notes ?? "").match(/·\s*CommunityVerified:\s*([^·]+)/i);
+  if (!m) return [];
+  return m[1]
+    .split(";")
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
+
+/** True only when BOTH key sets are non-empty AND share at least one community key. */
+export function verifiedKeysShareCommunity(a: string[] | null | undefined, b: string[] | null | undefined): boolean {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || b.length === 0) return false;
+  const setA = new Set(a);
+  return b.some((k) => setA.has(k));
+}
+
 /**
  * Walkable-adjacency FALLBACK: when no single complex satisfies the bedroom plan,
  * try pairing ACROSS complexes that share a curated walkable cluster. Medium

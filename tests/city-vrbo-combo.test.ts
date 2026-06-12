@@ -12,6 +12,9 @@ import {
   titlesShareWalkableCommunity,
   resolveUnitCommunityFromText,
   verifyResolvedUnitsShareCommunity,
+  formatVerifiedCommunityNote,
+  parseVerifiedCommunityKeysFromNotes,
+  verifiedKeysShareCommunity,
   type CityVrboListing,
 } from "../shared/city-vrbo-combo";
 
@@ -487,6 +490,62 @@ check("guard: generic title vs named complex is NOT same-community",
   // A genuine "Kiahuna Plantation" prose mention (no street type) is unaffected.
   const kiahunaReal = resolveUnitCommunityFromText({ title: "Condo", descriptionText: "Stay at Kiahuna Plantation with resort grounds and tennis." });
   check("enrich precision: a genuine 'Kiahuna Plantation' mention still resolves", kiahunaReal.dictCanonicals.includes("kiahuna plantation"));
+}
+
+// ── CommunityVerified notes marker (the auto-attach evidence the proximity gate reads) ──
+// Round-trip: format → parse recovers the keys, even with other ` · ` markers around it.
+{
+  const note = formatVerifiedCommunityNote(["dict:kiahuna-plantation", "phrase:kiahuna"]);
+  check("format produces a ` · CommunityVerified:` segment", /· CommunityVerified: dict:kiahuna-plantation;phrase:kiahuna/.test(note), note);
+  check("round-trip parse recovers the keys",
+    JSON.stringify(parseVerifiedCommunityKeysFromNotes(note)) === JSON.stringify(["dict:kiahuna-plantation", "phrase:kiahuna"]));
+  // Realistic notes: the marker sits BETWEEN Geo: and the (last) photo marker.
+  const fullNotes = `Auto-filled from Vrbo — Kiahuna 245 · Verified by find-buy-in · Buy-in source: original city (Koloa)${note} · Manual photo URLs: https://x/a.jpg https://x/b.jpg`;
+  check("parse ignores surrounding markers (stops at next ` · `)",
+    JSON.stringify(parseVerifiedCommunityKeysFromNotes(fullNotes)) === JSON.stringify(["dict:kiahuna-plantation", "phrase:kiahuna"]),
+    parseVerifiedCommunityKeysFromNotes(fullNotes));
+}
+check("empty keys → empty marker → empty parse",
+  formatVerifiedCommunityNote([]) === "" && parseVerifiedCommunityKeysFromNotes("Auto-filled from Vrbo — x").length === 0);
+check("dedupes + trims keys on format", formatVerifiedCommunityNote([" dict:a ", "dict:a", "dict:b"]) === " · CommunityVerified: dict:a;dict:b");
+
+// verifiedKeysShareCommunity — the gate's (c) evidence test: BOTH non-empty AND intersect.
+check("share: intersecting keys → true", verifiedKeysShareCommunity(["dict:kiahuna", "phrase:x"], ["dict:kiahuna"]));
+check("share: disjoint keys → false (different communities, no false attach)",
+  !verifiedKeysShareCommunity(["dict:kiahuna"], ["dict:poipu-kai"]));
+check("share: one side empty → false (a lone/stale marker can't authorize)",
+  !verifiedKeysShareCommunity([], ["dict:kiahuna"]) && !verifiedKeysShareCommunity(["dict:kiahuna"], []));
+check("share: both empty → false", !verifiedKeysShareCommunity([], []));
+// End-to-end shape: keys resolved from two same-community descriptions intersect.
+{
+  const a = resolveUnitCommunityFromText({ title: "Kiahuna Plantation 245", descriptionText: "Located in the Kiahuna Plantation resort in Poipu." });
+  const b = resolveUnitCommunityFromText({ title: "Poipu condo", descriptionText: "Our unit is inside Kiahuna Plantation, steps to the pool." });
+  check("resolved same-community description keys intersect via verifiedKeysShareCommunity",
+    a.keys.length > 0 && b.keys.length > 0 && verifiedKeysShareCommunity(a.keys, b.keys), { a: a.keys, b: b.keys });
+}
+
+// AUTO-ATTACH SAFETY (review 2026-06-12): two DIFFERENT-resort units sharing a generic
+// TITLE lead ("Tropical Garden Villas Unit 5/9") resolve "same-community" on the LOOSE
+// all-keys check (a shared phrase: key) — the 2026-06-10 cross-resort mis-attach class. The
+// auto-attach path restricts to dict: canonicals (known resort names, which on the verify
+// path come only from the DESCRIPTION), so it must NOT treat them as the same community.
+{
+  const dictOnly = (keys: string[]) => keys.filter((k) => k.startsWith("dict:"));
+  const poipuKaiUnit = resolveUnitCommunityFromText({ title: "Tropical Garden Villas Unit 5", descriptionText: "Located in the Poipu Kai resort." });
+  const kiahunaUnit = resolveUnitCommunityFromText({ title: "Tropical Garden Villas Unit 9", descriptionText: "Located in Kiahuna Plantation." });
+  // Loose check (manual display) MAY match on the shared title phrase — that's allowed.
+  // But the dict-restricted auto-attach guard must reject (different known resorts).
+  check("auto-attach dict-guard: different-resort units sharing a title phrase do NOT share a dict canonical",
+    !verifiedKeysShareCommunity(dictOnly(poipuKaiUnit.keys), dictOnly(kiahunaUnit.keys)),
+    { a: dictOnly(poipuKaiUnit.keys), b: dictOnly(kiahunaUnit.keys) });
+}
+// Same-resort descriptions DO share a dict canonical → auto-attach guard accepts.
+{
+  const dictOnly = (keys: string[]) => keys.filter((k) => k.startsWith("dict:"));
+  const a = resolveUnitCommunityFromText({ title: "Tropical Garden Villas Unit 5", descriptionText: "Inside Kiahuna Plantation, Poipu." });
+  const b = resolveUnitCommunityFromText({ title: "Garden condo", descriptionText: "Our home is in Kiahuna Plantation." });
+  check("auto-attach dict-guard: same-resort descriptions share a dict canonical → accepted",
+    verifiedKeysShareCommunity(dictOnly(a.keys), dictOnly(b.keys)), { a: dictOnly(a.keys), b: dictOnly(b.keys) });
 }
 
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
