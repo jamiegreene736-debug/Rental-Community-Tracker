@@ -13459,6 +13459,46 @@ Requirements:
     }
   });
 
+  // ── VRBO payment terms (due now / balance due date) for a listing+dates ───
+  // Operator-triggered: drives the listing to the VRBO checkout page via the
+  // sidecar and reads the payment schedule WITHOUT booking (scheduleOnly — no
+  // traveler fill, no payment surface). Lets the operator see, before buying a
+  // unit in, how much is due at booking and when the balance is auto-charged
+  // (cash-flow planning). VRBO only: the schedule is host-configured and shown at
+  // checkout; HomeToGo's feed doesn't expose it (only freeCancellation).
+  app.post("/api/operations/vrbo-payment-schedule", async (req: Request, res: Response) => {
+    try {
+      const listingUrl = typeof req.body?.listingUrl === "string" ? req.body.listingUrl.trim() : "";
+      const checkIn = typeof req.body?.checkIn === "string" ? req.body.checkIn.trim() : "";
+      const checkOut = typeof req.body?.checkOut === "string" ? req.body.checkOut.trim() : "";
+      // SSRF guard: the sidecar navigates this URL in the local Chrome (page.goto),
+      // so restrict to vrbo.com listing detail pages (the daemon enforces this too).
+      if (!/^https?:\/\/(?:www\.)?vrbo\.com\//i.test(listingUrl)) {
+        return res.status(400).json({ error: "a vrbo.com listing URL is required" });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+      }
+      const { fetchVrboPaymentScheduleViaSidecar } = await import("./vrbo-sidecar-queue");
+      const r = await fetchVrboPaymentScheduleViaSidecar({
+        listingUrl, checkIn, checkOut,
+        queueContext: { scanLabel: "vrbo-payment-schedule", dateLabel: `${checkIn}→${checkOut}` },
+      });
+      if (!r.paymentSchedule) {
+        return res.status(200).json({
+          ok: false,
+          workerOnline: r.workerOnline,
+          reason: r.reason || "could not read the VRBO checkout payment schedule (listing may be unavailable for these dates)",
+          durationMs: r.durationMs,
+        });
+      }
+      return res.json({ ok: true, paymentSchedule: r.paymentSchedule, workerOnline: r.workerOnline, durationMs: r.durationMs });
+    } catch (e: any) {
+      console.error("[vrbo-payment-schedule] error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   // ── Nearby-city combo expansion (background job + polling) ────────────────
   // When a >=2-unit combo booking's resort + home-city VRBO scans both fail to
   // surface a same-community pair, the client starts this job, which widens the
