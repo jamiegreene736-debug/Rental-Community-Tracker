@@ -4341,6 +4341,103 @@ type CheckoutJobClientStatus = {
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
 
+type VrboPaymentScheduleClient = {
+  total: number | null;
+  dueToday: number | null;
+  balanceDue: number | null;
+  balanceDueDate: string | null;
+  balanceDueDateRaw?: string | null;
+  currency?: string | null;
+  paymentPlanAvailable: boolean;
+  payInFullRequired?: boolean;
+  source?: string | null;
+  url?: string;
+};
+
+// On-demand "Payment terms" for an attached VRBO unit: opens the VRBO checkout
+// page via the sidecar (no booking) and reads how much is due at booking + when
+// the balance is auto-charged. Result expands into its own full-width row below
+// the action buttons. VRBO only — HomeToGo's feed doesn't expose a schedule.
+function PaymentTermsButton({ buyIn }: { buyIn: BuyIn }) {
+  const { toast } = useToast();
+  const url = buyIn.airbnbListingUrl || "";
+  const isVrbo = /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
+  const [result, setResult] = useState<{ ok: boolean; paymentSchedule?: VrboPaymentScheduleClient; reason?: string } | null>(null);
+  const fetchTerms = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/operations/vrbo-payment-schedule", {
+        listingUrl: url,
+        checkIn: buyIn.checkIn,
+        checkOut: buyIn.checkOut,
+      });
+      return (await res.json()) as { ok: boolean; paymentSchedule?: VrboPaymentScheduleClient; reason?: string };
+    },
+    onMutate: () => {
+      toast({
+        title: "Reading the VRBO checkout…",
+        description: "Opening the checkout page to read the payment schedule — ~1–2 min. No booking is made.",
+      });
+    },
+    onSuccess: (data) => {
+      setResult(data);
+      if (!data.ok) {
+        toast({
+          title: "Couldn't read VRBO payment terms",
+          description: data.reason || "The checkout was slow/busy, or the listing may be unavailable for these dates. Try again.",
+          variant: "destructive",
+        });
+      }
+    },
+    onError: (e: any) =>
+      toast({ title: "Payment terms failed", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+
+  if (!isVrbo || !buyIn.checkIn || !buyIn.checkOut) return null;
+  const ps = result?.ok ? result.paymentSchedule : null;
+  const fmtDate = (iso?: string | null) => {
+    if (!iso) return null;
+    const d = new Date(`${iso}T00:00:00`);
+    return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  };
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-7"
+        disabled={fetchTerms.isPending}
+        onClick={() => fetchTerms.mutate()}
+        data-testid={`button-payment-terms-${buyIn.id}`}
+        title="Open the VRBO checkout (no booking) and read how much is due now + when the balance is charged"
+      >
+        {fetchTerms.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <WalletCards className="h-3.5 w-3.5 mr-1" />}
+        {fetchTerms.isPending ? "Reading checkout…" : "Payment terms"}
+      </Button>
+      {result && (
+        <div className="w-full mt-1 rounded border border-sky-200 bg-sky-50/70 px-2 py-1.5 text-[11px] dark:border-sky-900 dark:bg-sky-950/30">
+          {ps ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+              <span className="font-semibold text-sky-900 dark:text-sky-200">
+                Due at booking: {fmtMoney(ps.dueToday ?? ps.total ?? 0)}
+              </span>
+              {ps.paymentPlanAvailable && ps.balanceDue ? (
+                <span className="text-foreground">
+                  Balance {fmtMoney(ps.balanceDue)} due {fmtDate(ps.balanceDueDate) ?? ps.balanceDueDateRaw ?? "later"}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">Paid in full at booking (no payment plan)</span>
+              )}
+              {ps.total != null && <span className="text-muted-foreground">Total {fmtMoney(ps.total)}</span>}
+            </div>
+          ) : (
+            <span className="text-amber-700 dark:text-amber-400">{result.reason || "Couldn't read the payment schedule."}</span>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
   const { toast } = useToast();
   const [job, setJob] = useState<CheckoutJobClientStatus | null>(null);
@@ -9954,6 +10051,8 @@ export default function Bookings() {
                                   {/* Book this attached unit on VRBO (automated up to payment;
                                       operator enters the card in the yellow-bordered popup). */}
                                   {slot.buyIn && <BuyThisUnitInButton buyIn={slot.buyIn} reservation={r} />}
+                                  {/* On-demand VRBO payment schedule (due now / balance due date). */}
+                                  {slot.buyIn && <PaymentTermsButton buyIn={slot.buyIn} />}
                                   {/* Per-guest booking inbox (firstname.lastname@emailprivaccy.com). */}
                                   {slot.buyIn && <GuestInboxButton buyIn={slot.buyIn} />}
                                   {slot.buyIn.airbnbListingUrl && (
