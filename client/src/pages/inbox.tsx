@@ -2181,7 +2181,7 @@ export default function InboxPage() {
   const isAgent = session?.role === "agent";
   const isAdmin = session?.role === "admin";
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
-  // Controlled so the top attention banner's "Open thread" can jump to Messages.
+  // Controlled so the AI Drafts tab's "Open thread" can jump to Messages.
   const [activeTab, setActiveTab] = useState<string>("messages");
   const [replyText, setReplyText] = useState("");
   const [draftLoading, setDraftLoading] = useState(false);
@@ -3571,7 +3571,11 @@ export default function InboxPage() {
         <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Guest Inbox</h1>
           <p className="text-xs text-muted-foreground">
-            {isAgent ? "Messages · Missed calls · Arrival details" : "Messages · Reservations · Auto-Messages"}
+            {isAgent
+              ? "Messages · Missed calls · Arrival details"
+              : isAdmin
+                ? "Messages · AI Drafts · Reservations · Auto-Messages"
+                : "Messages · Reservations · Auto-Messages"}
           </p>
         </div>
         {!isAgent && pendingRes.length > 0 && (
@@ -3587,13 +3591,54 @@ export default function InboxPage() {
       </div>
 
       <div className="max-w-7xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
-        {/* ── AI AUTO-REPLY ATTENTION BANNER ──
-            Replaces the old "AI Draft Approval" tab. Auto-send is OFF by default
-            (2026-06-09) so EVERY AI draft surfaces here for the operator to edit
-            + Save (which teaches the AI) or Send. If the operator flips Auto-send
-            ON, clean drafts send themselves and only held messages surface. */}
-        {isAdmin && (
-          <div className="mb-4" data-testid="panel-auto-reply">
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <TabsList className="mb-4 sm:mb-6 flex h-auto w-full max-w-full justify-start overflow-x-auto p-1 sm:w-auto" data-testid="tabs-inbox">
+            <TabsTrigger value="messages" data-testid="tab-messages">
+              <MessageSquare className="h-4 w-4 mr-1.5" /> Messages
+            </TabsTrigger>
+            {isAdmin && (
+              <TabsTrigger value="ai-drafts" data-testid="tab-ai-drafts">
+                <Bot className="h-4 w-4 mr-1.5" /> AI Drafts
+                {sortedAttentionAutoReplyLogs.length > 0 && (
+                  <span
+                    className={`ml-1.5 rounded-full text-white text-[10px] min-w-4 h-4 px-1 flex items-center justify-center ${
+                      hasUrgentAutoReply ? "bg-red-600" : "bg-amber-500"
+                    }`}
+                  >
+                    {sortedAttentionAutoReplyLogs.length}
+                  </span>
+                )}
+              </TabsTrigger>
+            )}
+            {!isAgent && (
+              <TabsTrigger value="reservations" data-testid="tab-reservations">
+                <Calendar className="h-4 w-4 mr-1.5" /> Reservations
+                {pendingRes.length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
+                    {pendingRes.length}
+                  </span>
+                )}
+              </TabsTrigger>
+            )}
+            {!isAgent && (
+              <TabsTrigger value="auto-messages" data-testid="tab-auto-messages">
+                <Zap className="h-4 w-4 mr-1.5" /> Auto-Messages
+              </TabsTrigger>
+            )}
+          </TabsList>
+
+          {/* ── AI DRAFTS TAB ──
+              The AI auto-reply review queue. Was the top attention banner
+              (2026-06-09), and before that the "AI Draft Approval" tab; the
+              operator asked for it back as its own tab (2026-06-12). Auto-send is
+              OFF by default so EVERY AI draft surfaces here for the operator to
+              edit + Save (which teaches the AI) or Send. If the operator flips
+              Auto-send ON, clean drafts send themselves and only held messages
+              surface. The trigger badge surfaces the needs-review count so it
+              stays discoverable while another tab is active. */}
+          <TabsContent value="ai-drafts">
+            {isAdmin && (
+              <div className="mb-4" data-testid="panel-auto-reply">
             {/* Status + automation controls */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border bg-card px-3 py-2">
               <div className="flex items-center gap-2 text-sm font-medium">
@@ -3801,30 +3846,19 @@ export default function InboxPage() {
                 </div>
               </div>
             )}
-          </div>
-        )}
 
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="mb-4 sm:mb-6 flex h-auto w-full max-w-full justify-start overflow-x-auto p-1 sm:w-auto" data-testid="tabs-inbox">
-            <TabsTrigger value="messages" data-testid="tab-messages">
-              <MessageSquare className="h-4 w-4 mr-1.5" /> Messages
-            </TabsTrigger>
-            {!isAgent && (
-              <TabsTrigger value="reservations" data-testid="tab-reservations">
-                <Calendar className="h-4 w-4 mr-1.5" /> Reservations
-                {pendingRes.length > 0 && (
-                  <span className="ml-1.5 rounded-full bg-amber-500 text-white text-[10px] w-4 h-4 flex items-center justify-center">
-                    {pendingRes.length}
-                  </span>
-                )}
-              </TabsTrigger>
+            {sortedAttentionAutoReplyLogs.length === 0 && (
+              <div
+                className="mt-2 rounded-lg border border-dashed bg-card p-4 text-center text-sm text-muted-foreground"
+                data-testid="panel-auto-reply-empty"
+              >
+                <Bot className="h-5 w-5 mx-auto mb-1 text-muted-foreground/60" />
+                No AI drafts need your review right now.
+              </div>
             )}
-            {!isAgent && (
-              <TabsTrigger value="auto-messages" data-testid="tab-auto-messages">
-                <Zap className="h-4 w-4 mr-1.5" /> Auto-Messages
-              </TabsTrigger>
+          </div>
             )}
-          </TabsList>
+          </TabsContent>
 
           {/* ── MESSAGES TAB ── */}
           <TabsContent value="messages">
