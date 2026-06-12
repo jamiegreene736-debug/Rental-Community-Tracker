@@ -11040,6 +11040,31 @@ Requirements:
     }
   });
 
+  // POST /api/simplelogin/test-alias  body: { prefix?, guestName? }
+  // Diagnostic (operator-only, portal-gated): mint a REAL alias on the guest
+  // booking domain (emailprivaccy.com) via the EXACT booking code path, to confirm
+  // the custom domain + mailbox + API key are wired before relying on it in a real
+  // booking. Returns the created address + the mailbox(es) it forwards to. The
+  // alias persists in SimpleLogin (delete it there if unwanted).
+  app.post("/api/simplelogin/test-alias", async (req, res) => {
+    try {
+      const { createSimpleLoginAlias, extractSimpleLoginAliasEmail } = await import("./simplelogin");
+      const { BUYIN_TRAVELER_EMAIL_DOMAIN } = await import("./buy-in-checkout-job");
+      const prefix = (String(req.body?.prefix ?? "diagnostic.test").trim().toLowerCase().replace(/[^a-z0-9.]+/g, "")) || "diagnostic.test";
+      const guestName = String(req.body?.guestName ?? "Diagnostic Test").trim() || null;
+      const alias = await createSimpleLoginAlias({ prefix, domain: BUYIN_TRAVELER_EMAIL_DOMAIN, guestName, note: "diagnostic test alias (buy-in email setup check)" });
+      const email = extractSimpleLoginAliasEmail(alias) || `${prefix}@${BUYIN_TRAVELER_EMAIL_DOMAIN}`;
+      const forwardsTo = Array.isArray(alias?.mailboxes)
+        ? alias.mailboxes.map((m: any) => m?.email).filter(Boolean)
+        : alias?.mailbox?.email
+          ? [alias.mailbox.email]
+          : [];
+      res.json({ ok: true, email, domain: BUYIN_TRAVELER_EMAIL_DOMAIN, onCorrectDomain: email.toLowerCase().endsWith(`@${BUYIN_TRAVELER_EMAIL_DOMAIN.toLowerCase()}`), forwardsTo });
+    } catch (err: any) {
+      res.status(400).json({ ok: false, error: err?.message ?? String(err) });
+    }
+  });
+
   app.get("/api/bookings/:reservationId/buy-in-communications", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
@@ -11172,6 +11197,44 @@ Requirements:
         return res.status(400).json({ error: "from, to, and body or attachments are required" });
       }
 
+      // Guest booking inbox: a message addressed to a guest's
+      // firstname.lastname@emailprivaccy.com booking alias (e.g. a VRBO booking
+      // confirmation) is stored in that guest's portal inbox, keyed by the alias
+      // address and kept forever. This runs BEFORE vendor matching so guest mail
+      // is never 404'd as "no matching vendor contact".
+      const guestEmailDomain = (process.env.BUYIN_TRAVELER_EMAIL_DOMAIN || "emailprivaccy.com").trim().toLowerCase();
+      const guestBuyIn = await storage.getBuyInByTravelerEmail(toEmail);
+      const isGuestAlias = !!guestBuyIn || (!!guestEmailDomain && toEmail.endsWith(`@${guestEmailDomain}`));
+      if (isGuestAlias) {
+        const providerMessageId = String(req.body?.messageId ?? req.body?.message_id ?? "") || null;
+        // Idempotent on relay retries.
+        if (providerMessageId) {
+          const recent = await storage.getGuestInboxMessages(toEmail, 100);
+          if (recent.some((m) => m.providerMessageId && m.providerMessageId === providerMessageId)) {
+            return res.json({ deduped: true });
+          }
+        }
+        const localPart = toEmail.split("@")[0] || "";
+        const guestName = localPart
+          .split(/[._]+/).filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || null;
+        const stored = await storage.createGuestInboxMessage({
+          aliasEmail: toEmail,
+          guestName,
+          buyInId: guestBuyIn?.id ?? null,
+          reservationId: guestBuyIn?.guestyReservationId ?? null,
+          direction: "inbound",
+          fromEmail,
+          toEmail,
+          subject,
+          body,
+          attachmentsJson: attachments.length ? JSON.stringify(attachments) : null,
+          providerMessageId,
+          rawPayload: JSON.stringify(req.body ?? {}),
+        });
+        return res.json({ guestInboxMessage: stored });
+      }
+
       let [contact] = await db
         .select()
         .from(buyInVendorContacts)
@@ -11231,6 +11294,30 @@ Requirements:
     } catch (err: any) {
       const message = err?.message ?? "Unknown error";
       res.status(/attachment/i.test(message) ? 400 : 500).json({ error: "Failed to record inbound buy-in email", message });
+    }
+  });
+
+  // GET /api/guest-inbox?aliasEmail=jamie.greene@emailprivaccy.com  (or ?buyInId=123)
+  // Per-guest booking inbox: the messages received at a guest's
+  // firstname.lastname@emailprivaccy.com address (VRBO confirmations, host
+  // messages, etc.), newest first. Powers the bookings-row "Guest inbox" button.
+  app.get("/api/guest-inbox", async (req, res) => {
+    try {
+      let aliasEmail = String(req.query.aliasEmail ?? "").trim().toLowerCase();
+      const buyInId = Number(req.query.buyInId);
+      if (!aliasEmail && Number.isFinite(buyInId) && buyInId > 0) {
+        const buyIn = await storage.getBuyIn(buyInId);
+        aliasEmail = String(buyIn?.travelerEmail ?? "").trim().toLowerCase();
+      }
+      if (!aliasEmail) return res.json({ aliasEmail: null, guestName: null, messages: [] });
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+      const messages = await storage.getGuestInboxMessages(aliasEmail, limit);
+      const guestName = messages.find((m) => m.guestName)?.guestName
+        ?? ((aliasEmail.split("@")[0] || "").split(/[._]+/).filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || null);
+      res.json({ aliasEmail, guestName, messages });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch guest inbox", message: err?.message ?? String(err) });
     }
   });
 
@@ -13372,6 +13459,46 @@ Requirements:
     }
   });
 
+  // ── VRBO payment terms (due now / balance due date) for a listing+dates ───
+  // Operator-triggered: drives the listing to the VRBO checkout page via the
+  // sidecar and reads the payment schedule WITHOUT booking (scheduleOnly — no
+  // traveler fill, no payment surface). Lets the operator see, before buying a
+  // unit in, how much is due at booking and when the balance is auto-charged
+  // (cash-flow planning). VRBO only: the schedule is host-configured and shown at
+  // checkout; HomeToGo's feed doesn't expose it (only freeCancellation).
+  app.post("/api/operations/vrbo-payment-schedule", async (req: Request, res: Response) => {
+    try {
+      const listingUrl = typeof req.body?.listingUrl === "string" ? req.body.listingUrl.trim() : "";
+      const checkIn = typeof req.body?.checkIn === "string" ? req.body.checkIn.trim() : "";
+      const checkOut = typeof req.body?.checkOut === "string" ? req.body.checkOut.trim() : "";
+      // SSRF guard: the sidecar navigates this URL in the local Chrome (page.goto),
+      // so restrict to vrbo.com listing detail pages (the daemon enforces this too).
+      if (!/^https?:\/\/(?:www\.)?vrbo\.com\//i.test(listingUrl)) {
+        return res.status(400).json({ error: "a vrbo.com listing URL is required" });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ error: "checkIn and checkOut required (YYYY-MM-DD)" });
+      }
+      const { fetchVrboPaymentScheduleViaSidecar } = await import("./vrbo-sidecar-queue");
+      const r = await fetchVrboPaymentScheduleViaSidecar({
+        listingUrl, checkIn, checkOut,
+        queueContext: { scanLabel: "vrbo-payment-schedule", dateLabel: `${checkIn}→${checkOut}` },
+      });
+      if (!r.paymentSchedule) {
+        return res.status(200).json({
+          ok: false,
+          workerOnline: r.workerOnline,
+          reason: r.reason || "could not read the VRBO checkout payment schedule (listing may be unavailable for these dates)",
+          durationMs: r.durationMs,
+        });
+      }
+      return res.json({ ok: true, paymentSchedule: r.paymentSchedule, workerOnline: r.workerOnline, durationMs: r.durationMs });
+    } catch (e: any) {
+      console.error("[vrbo-payment-schedule] error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   // ── Nearby-city combo expansion (background job + polling) ────────────────
   // When a >=2-unit combo booking's resort + home-city VRBO scans both fail to
   // surface a same-community pair, the client starts this job, which widens the
@@ -13546,6 +13673,76 @@ Requirements:
       const { cancelAutoFillJob } = await import("./auto-fill-job");
       const ok = cancelAutoFillJob(String(req.params.jobId));
       if (!ok) return res.status(404).json({ error: "auto-fill job not found or expired" });
+      return res.json({ ok: true });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // ── Buy-in checkout (server/buy-in-checkout-job.ts) ──────────────────────────
+  // The step after a unit is attached: BOOK it on vrbo.com, automated UP TO
+  // payment, then surface the (yellow) sidecar Chrome window for the operator to
+  // enter card details + click "Book now". One job per buy-in (single-flight).
+  // The bookings page's per-unit "Buy this unit in" button starts it and polls.
+  app.post("/api/operations/buy-in-checkout", async (req: Request, res: Response) => {
+    try {
+      const { startBuyInCheckoutJob } = await import("./buy-in-checkout-job");
+      const started = startBuyInCheckoutJob({
+        buyInId: Number(req.body?.buyInId),
+        reservationId: String(req.body?.reservationId ?? ""),
+        guestFirstName: req.body?.guestFirstName ?? null,
+        guestLastName: req.body?.guestLastName ?? null,
+      });
+      return res.status(202).json(started);
+    } catch (e: any) {
+      const { CheckoutValidationError } = await import("./buy-in-checkout-job");
+      if (e instanceof CheckoutValidationError) return res.status(400).json({ error: e.message });
+      console.error("[buy-in-checkout] start error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // active MUST be registered before :jobId so "active" isn't matched as a jobId.
+  // Rediscovery is keyed by buyInId so a returning client can re-attach per-unit
+  // pollers. Pass reservationIds (the visible rows) and/or buyInIds.
+  app.get("/api/operations/buy-in-checkout/active", async (req: Request, res: Response) => {
+    try {
+      const { getCheckoutJobsForReservation, getCheckoutJobForBuyIn, serializeCheckoutJob } = await import("./buy-in-checkout-job");
+      const reservationIds = String(req.query.reservationIds ?? req.query.reservationId ?? "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const buyInIds = String(req.query.buyInIds ?? req.query.buyInId ?? "")
+        .split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
+      const out: Record<string, any> = {};
+      for (const rid of reservationIds) {
+        for (const job of getCheckoutJobsForReservation(rid)) out[String(job.buyInId)] = serializeCheckoutJob(job);
+      }
+      for (const bid of buyInIds) {
+        const job = getCheckoutJobForBuyIn(bid);
+        if (job) out[String(bid)] = serializeCheckoutJob(job);
+      }
+      return res.json({ jobs: out });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/operations/buy-in-checkout/:jobId", async (req: Request, res: Response) => {
+    try {
+      const { getBuyInCheckoutJob, serializeCheckoutJob } = await import("./buy-in-checkout-job");
+      const job = getBuyInCheckoutJob(String(req.params.jobId));
+      if (!job) return res.status(404).json({ error: "checkout job not found or expired" });
+      return res.json(serializeCheckoutJob(job));
+    } catch (e: any) {
+      console.error("[buy-in-checkout] poll error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.post("/api/operations/buy-in-checkout/:jobId/cancel", async (req: Request, res: Response) => {
+    try {
+      const { cancelBuyInCheckoutJob } = await import("./buy-in-checkout-job");
+      const ok = cancelBuyInCheckoutJob(String(req.params.jobId));
+      if (!ok) return res.status(404).json({ error: "checkout job not found or expired" });
       return res.json({ ok: true });
     } catch (e: any) {
       return res.status(500).json({ error: e?.message ?? String(e) });

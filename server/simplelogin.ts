@@ -132,15 +132,32 @@ export async function createSimpleLoginAlias(input: {
   prefix: string;
   guestName?: string | null;
   note?: string;
+  // Force the alias onto a SPECIFIC custom domain (e.g. "emailprivaccy.com") so
+  // the address is exactly <prefix>@<domain>. Throws if that domain isn't a
+  // verified custom domain in the SimpleLogin account. Falls back to the env
+  // preference / first custom suffix when omitted (other callers' behavior).
+  domain?: string | null;
 }): Promise<any> {
   const options = await simpleLoginRequest<{ suffixes: SimpleLoginSuffix[] }>(
     "GET",
     "/api/v5/alias/options?hostname=nexstay.operations",
   );
-  const suffixPreference = process.env.SIMPLELOGIN_ALIAS_SUFFIX || process.env.SIMPLELOGIN_ALIAS_DOMAIN || "";
-  const suffix = (options.suffixes ?? []).find((s) => suffixPreference && s.suffix.includes(suffixPreference))
-    ?? (options.suffixes ?? []).find((s) => s.is_custom)
-    ?? options.suffixes?.[0];
+  const suffixes = options.suffixes ?? [];
+  const wantDomain = (input.domain || process.env.SIMPLELOGIN_ALIAS_SUFFIX || process.env.SIMPLELOGIN_ALIAS_DOMAIN || "")
+    .trim().toLowerCase().replace(/^@/, "");
+  let suffix: SimpleLoginSuffix | undefined;
+  if (wantDomain) {
+    // Prefer the bare "@domain" suffix (so we get prefix@domain, not
+    // prefix.word@domain), then any suffix on that domain.
+    suffix = suffixes.find((s) => s.suffix.toLowerCase() === `@${wantDomain}`)
+      ?? suffixes.find((s) => s.suffix.toLowerCase().includes(wantDomain));
+    if (!suffix && input.domain) {
+      throw new Error(`SimpleLogin has no alias suffix for "${input.domain}". Add + verify that custom domain in SimpleLogin first.`);
+    }
+  }
+  suffix = suffix
+    ?? suffixes.find((s) => s.is_custom)
+    ?? suffixes[0];
   if (!suffix) throw new Error("SimpleLogin returned no alias suffixes");
 
   const mailboxPayload = await simpleLoginRequest<{ mailboxes: SimpleLoginMailbox[] }>("GET", "/api/v2/mailboxes");

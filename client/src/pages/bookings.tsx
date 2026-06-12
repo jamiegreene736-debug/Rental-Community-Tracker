@@ -4321,6 +4321,328 @@ const FILL_SOURCE_TONE: Record<"green" | "blue" | "amber", string> = {
 // back to the durable last-scan record (lastSearchByReservation, fed by
 // /api/operations/auto-fill/last) for the reason + timestamp on anything not yet
 // full. `last` is the most-recent finished/live AutoFillJobStatus for this row.
+// ── Per-unit "Buy this unit in" button (server/buy-in-checkout-job.ts) ────────
+// Starts the VRBO checkout for ONE attached unit: automated up to payment, then
+// the sidecar Chrome window pops up (yellow border, like the CAPTCHA handoff) for
+// the operator to enter card details + click "Book now". This button only
+// triggers + reflects status; the operator always enters payment themselves.
+type CheckoutJobClientStatus = {
+  jobId: string;
+  status: "queued" | "running" | "awaiting_payment" | "completed" | "failed";
+  done: boolean;
+  phase: string;
+  message: string;
+  buyInId: number;
+  reservationId: string;
+  unitLabel: string;
+  travelerEmail: string | null;
+  confirmationNumber: string | null;
+  error: string | null;
+  timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
+};
+
+type VrboPaymentScheduleClient = {
+  total: number | null;
+  dueToday: number | null;
+  balanceDue: number | null;
+  balanceDueDate: string | null;
+  balanceDueDateRaw?: string | null;
+  currency?: string | null;
+  paymentPlanAvailable: boolean;
+  payInFullRequired?: boolean;
+  source?: string | null;
+  url?: string;
+};
+
+// On-demand "Payment terms" for an attached VRBO unit: opens the VRBO checkout
+// page via the sidecar (no booking) and reads how much is due at booking + when
+// the balance is auto-charged. Result expands into its own full-width row below
+// the action buttons. VRBO only — HomeToGo's feed doesn't expose a schedule.
+function PaymentTermsButton({ buyIn }: { buyIn: BuyIn }) {
+  const { toast } = useToast();
+  const url = buyIn.airbnbListingUrl || "";
+  const isVrbo = /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
+  const [result, setResult] = useState<{ ok: boolean; paymentSchedule?: VrboPaymentScheduleClient; reason?: string } | null>(null);
+  const fetchTerms = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/operations/vrbo-payment-schedule", {
+        listingUrl: url,
+        checkIn: buyIn.checkIn,
+        checkOut: buyIn.checkOut,
+      });
+      return (await res.json()) as { ok: boolean; paymentSchedule?: VrboPaymentScheduleClient; reason?: string };
+    },
+    onMutate: () => {
+      toast({
+        title: "Reading the VRBO checkout…",
+        description: "Opening the checkout page to read the payment schedule — ~1–2 min. No booking is made.",
+      });
+    },
+    onSuccess: (data) => {
+      setResult(data);
+      if (!data.ok) {
+        toast({
+          title: "Couldn't read VRBO payment terms",
+          description: data.reason || "The checkout was slow/busy, or the listing may be unavailable for these dates. Try again.",
+          variant: "destructive",
+        });
+      }
+    },
+    onError: (e: any) =>
+      toast({ title: "Payment terms failed", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+
+  if (!isVrbo || !buyIn.checkIn || !buyIn.checkOut) return null;
+  const ps = result?.ok ? result.paymentSchedule : null;
+  const fmtDate = (iso?: string | null) => {
+    if (!iso) return null;
+    const d = new Date(`${iso}T00:00:00`);
+    return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  };
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-7"
+        disabled={fetchTerms.isPending}
+        onClick={() => fetchTerms.mutate()}
+        data-testid={`button-payment-terms-${buyIn.id}`}
+        title="Open the VRBO checkout (no booking) and read how much is due now + when the balance is charged"
+      >
+        {fetchTerms.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <WalletCards className="h-3.5 w-3.5 mr-1" />}
+        {fetchTerms.isPending ? "Reading checkout…" : "Payment terms"}
+      </Button>
+      {result && (
+        <div className="w-full mt-1 rounded border border-sky-200 bg-sky-50/70 px-2 py-1.5 text-[11px] dark:border-sky-900 dark:bg-sky-950/30">
+          {ps ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+              <span className="font-semibold text-sky-900 dark:text-sky-200">
+                Due at booking: {fmtMoney(ps.dueToday ?? ps.total ?? 0)}
+              </span>
+              {ps.paymentPlanAvailable && ps.balanceDue ? (
+                <span className="text-foreground">
+                  Balance {fmtMoney(ps.balanceDue)} due {fmtDate(ps.balanceDueDate) ?? ps.balanceDueDateRaw ?? "later"}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">Paid in full at booking (no payment plan)</span>
+              )}
+              {ps.total != null && <span className="text-muted-foreground">Total {fmtMoney(ps.total)}</span>}
+            </div>
+          ) : (
+            <span className="text-amber-700 dark:text-amber-400">{result.reason || "Couldn't read the payment schedule."}</span>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
+  const { toast } = useToast();
+  const [job, setJob] = useState<CheckoutJobClientStatus | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+
+  // Rediscover any live checkout job for this unit on mount (survives reloads).
+  useEffect(() => {
+    let cancelled = false;
+    apiGetJson<{ jobs: Record<string, CheckoutJobClientStatus> }>(`/api/operations/buy-in-checkout/active?buyInIds=${buyIn.id}`)
+      .then((data) => {
+        if (cancelled) return;
+        const existing = data.jobs?.[String(buyIn.id)];
+        if (existing) {
+          setJob(existing);
+          if (!existing.done) setJobId(existing.jobId);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [buyIn.id]);
+
+  // Poll while a job is live.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const data = await apiGetJson<CheckoutJobClientStatus>(`/api/operations/buy-in-checkout/${jobId}`);
+        if (cancelled) return;
+        setJob(data);
+        if (data.done) { setJobId(null); return; }
+      } catch (e: any) {
+        // 404 = job lost (TTL/redeploy); the buy_ins row keeps the durable status.
+        if (/\b(404|401|403)\b/.test(String(e?.message ?? ""))) { if (!cancelled) setJobId(null); return; }
+      }
+      if (!cancelled) timer = setTimeout(tick, 2500);
+    };
+    timer = setTimeout(tick, 1500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [jobId]);
+
+  const fullName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "";
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  const guestFirstName = reservation.guest?.firstName || parts[0] || "";
+  const guestLastName = parts.length > 1 ? parts.slice(1).join(" ") : "";
+
+  const start = async () => {
+    setStarting(true);
+    try {
+      const res = await apiRequest("POST", "/api/operations/buy-in-checkout", {
+        buyInId: buyIn.id,
+        reservationId: reservation._id,
+        guestFirstName,
+        guestLastName,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      setJob({
+        jobId: data.jobId, status: data.status ?? "queued", done: false, phase: "queued",
+        message: "Starting…", buyInId: buyIn.id, reservationId: reservation._id, unitLabel: buyIn.unitLabel,
+        travelerEmail: null, confirmationNumber: null, error: null,
+        timestamps: { createdAt: Date.now(), startedAt: null, finishedAt: null },
+      });
+      setJobId(data.jobId);
+      toast({
+        title: "Buying this unit in",
+        description: "Driving the VRBO checkout — the Chrome window will pop up (yellow border) when it's time for you to enter the card.",
+      });
+    } catch (e: any) {
+      toast({ title: "Couldn't start the booking", description: String(e?.message ?? e), variant: "destructive" });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const booked = job?.status === "completed" || buyIn.bookingStatus === "booked";
+  const confirmation = job?.confirmationNumber ?? buyIn.bookingConfirmation;
+  if (booked) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+        title={confirmation ? `Booked on VRBO · confirmation ${confirmation}` : "Booked on VRBO"}
+        data-testid={`badge-bought-in-${reservation._id}-${buyIn.id}`}
+      >
+        <CheckCircle2 className="h-3.5 w-3.5" /> Bought in{confirmation ? ` · ${confirmation}` : ""}
+      </span>
+    );
+  }
+
+  const live = !!jobId && job && !job.done;
+  if (live && job) {
+    const awaiting = job.status === "awaiting_payment";
+    return (
+      <span
+        className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-medium ${awaiting
+          ? "border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-600 dark:bg-amber-950/40 dark:text-amber-200"
+          : "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"}`}
+        title={job.message}
+        data-testid={`status-bought-in-${reservation._id}-${buyIn.id}`}
+      >
+        {awaiting ? <WalletCards className="h-3.5 w-3.5" /> : <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+        {awaiting ? "Enter card in the Chrome window ▸" : (job.message || "Buying in…")}
+      </span>
+    );
+  }
+
+  const failed = job?.status === "failed" || buyIn.bookingStatus === "failed";
+  return (
+    <Button
+      size="sm"
+      variant={failed ? "ghost" : "default"}
+      onClick={start}
+      disabled={starting}
+      data-testid={`button-buy-unit-in-${reservation._id}-${buyIn.id}`}
+      title={failed
+        ? (job?.error || buyIn.bookingError || "Retry the VRBO checkout for this unit")
+        : "Start the VRBO checkout for this unit — automated up to payment, then you enter the card"}
+    >
+      {starting ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <ShoppingCart className="h-3.5 w-3.5 mr-1" />}
+      {failed ? "Retry buy-in" : "Buy this unit in"}
+    </Button>
+  );
+}
+
+// ── Per-guest booking inbox (firstname.lastname@emailprivaccy.com) ───────────
+// Reads the messages received at this unit's guest booking address (VRBO
+// confirmation, host messages) — stored forever in the portal. Shows once the
+// unit has a booking email.
+type GuestInboxMessageClient = {
+  id: number;
+  subject: string;
+  fromEmail: string;
+  toEmail: string;
+  body: string;
+  receivedAt: string;
+};
+
+function GuestInboxButton({ buyIn }: { buyIn: BuyIn }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<{ aliasEmail: string | null; guestName: string | null; messages: GuestInboxMessageClient[] } | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    apiGetJson<{ aliasEmail: string | null; guestName: string | null; messages: GuestInboxMessageClient[] }>(`/api/guest-inbox?buyInId=${buyIn.id}`)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData({ aliasEmail: buyIn.travelerEmail ?? null, guestName: null, messages: [] }); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, buyIn.id]);
+
+  const email = buyIn.travelerEmail;
+  if (!email) return null; // only once the unit has a booking email
+  const count = data?.messages.length ?? 0;
+
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => setOpen(true)}
+        title={`Guest inbox — ${email}`}
+        data-testid={`button-guest-inbox-${buyIn.id}`}
+      >
+        <Mail className="h-3.5 w-3.5 mr-1" /> Inbox{count ? ` (${count})` : ""}
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Guest inbox{data?.guestName ? ` — ${data.guestName}` : ""}</DialogTitle>
+            <DialogDescription>{email}</DialogDescription>
+          </DialogHeader>
+          {loading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground py-6">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : !data || data.messages.length === 0 ? (
+            <div className="text-sm text-muted-foreground py-6">
+              No messages yet. VRBO confirmations and host messages sent to {email} will appear here and are kept forever.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {data.messages.map((m) => (
+                <div key={m.id} className="rounded border p-3 text-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium truncate">{m.subject}</span>
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">From: {m.fromEmail}</div>
+                  <div className="mt-2 whitespace-pre-wrap break-words text-sm">{String(m.body || "").slice(0, 6000)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 function LastScanCell({ reservation, last, scanning }: { reservation: GuestyReservation; last?: AutoFillJobStatus; scanning?: boolean }) {
   const total = reservation.slotsTotal ?? 0;
   const filled = reservation.slotsFilled ?? 0;
@@ -9726,6 +10048,13 @@ export default function Bookings() {
                                       when there's a URL to verify; the
                                       dialog handles the loading state and
                                       manual cost edit. */}
+                                  {/* Book this attached unit on VRBO (automated up to payment;
+                                      operator enters the card in the yellow-bordered popup). */}
+                                  {slot.buyIn && <BuyThisUnitInButton buyIn={slot.buyIn} reservation={r} />}
+                                  {/* On-demand VRBO payment schedule (due now / balance due date). */}
+                                  {slot.buyIn && <PaymentTermsButton buyIn={slot.buyIn} />}
+                                  {/* Per-guest booking inbox (firstname.lastname@emailprivaccy.com). */}
+                                  {slot.buyIn && <GuestInboxButton buyIn={slot.buyIn} />}
                                   {slot.buyIn.airbnbListingUrl && (
                                     <Button
                                       size="sm"
