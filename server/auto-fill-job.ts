@@ -31,7 +31,7 @@ import { storage } from "./storage";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { evaluateComboProfit, profitToleranceUsd } from "@shared/buy-in-profit";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
-import { suggestCityVrboComboPairs, type CityVrboListing } from "@shared/city-vrbo-combo";
+import { suggestCityVrboComboPairs, formatVerifiedCommunityNote, type CityVrboListing } from "@shared/city-vrbo-combo";
 import {
   getExpansionJob,
   nearbyTownsForCommunity,
@@ -90,6 +90,16 @@ const SINGLE_UNIT_NEARBY_BUDGET_MS = Math.max(60_000, Number(process.env.AUTO_FI
 // town search) — skip it so a home-area unit isn't re-offered as "nearby". Mirrors
 // the combo expansion's COLLAPSE_JACCARD.
 const SINGLE_UNIT_NEARBY_COLLAPSE_JACCARD = 0.85;
+
+// Auto-verify community: after the ladder can't auto-attach a combo but HAS surfaced
+// cross-resort same-community alternatives, open the listings (verify-combo-community)
+// and AUTO-ATTACH the cheapest one whose descriptions CONFIRM the units share a
+// community — so the operator no longer has to click "Verify community". Bounded so it
+// can't balloon the per-booking time (it opens listing detail pages, ~30-60s each).
+const AUTO_VERIFY_COMMUNITY_ENABLED = process.env.AUTO_VERIFY_COMMUNITY !== "0"; // default ON
+const AUTO_VERIFY_COMMUNITY_MAX = Math.max(0, Math.min(5, Number(process.env.AUTO_VERIFY_COMMUNITY_MAX ?? 2) || 0));
+const AUTO_VERIFY_COMMUNITY_BUDGET_MS = Math.max(60_000, Number(process.env.AUTO_VERIFY_COMMUNITY_BUDGET_MS) || 4 * 60_000);
+const AUTO_VERIFY_COMMUNITY_OP_TIMEOUT_MS = 230_000; // > the endpoint's own ~200s sidecar wallet
 
 // ── types ────────────────────────────────────────────────────────────────────
 type JobStatus = "queued" | "running" | "completed" | "failed";
@@ -507,6 +517,9 @@ type LiveCandidate = {
   alternateUrls?: string[];
   verified?: string;
   verifiedReason?: string;
+  // Description-resolved community keys for this unit (set by the auto-verify pass);
+  // attachPick stamps them as the "CommunityVerified:" notes marker the gate trusts.
+  verifiedCommunityKeys?: string[];
   airbnbAnchorUrl?: string | null;
   airbnbAnchorPrice?: number | null;
   groundFloorStatus?: string | null;
@@ -599,6 +612,7 @@ function liveCandidateFromCityRow(row: any, bedrooms: number, nights: number): L
     lng: row.lng,
     verified: "yes",
     verifiedReason: "City VRBO map inventory",
+    verifiedCommunityKeys: Array.isArray(row.verifiedCommunityKeys) ? row.verifiedCommunityKeys : undefined,
   };
 }
 
@@ -836,9 +850,14 @@ async function attachPick(args: {
   const geoSuffix = (typeof pick.lat === "number" && typeof pick.lng === "number" && Number.isFinite(pick.lat) && Number.isFinite(pick.lng))
     ? ` · Geo: ${pick.lat.toFixed(6)},${pick.lng.toFixed(6)}`
     : "";
+  // Description-verified community keys (set by the auto-verify pass) — read back by the
+  // attach proximity gate (estimateAttachedBuyInProximity → parseVerifiedCommunityKeysFromNotes)
+  // as the (c) evidence branch authorizing a city-wide cross-resort attach. MUST come before
+  // the photo marker, which has to stay last (AGENTS.md Load-Bearing #1).
+  const communityVerifiedSuffix = formatVerifiedCommunityNote(pick.verifiedCommunityKeys ?? []);
   // Manual photo URLs marker MUST stay last (AGENTS.md Load-Bearing #1).
   const photoSuffix = buyInPhotoNotesSuffix([pick.image, ...(pick.images ?? [])]);
-  const notes = `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${groundFloorSuffix}${identitySuffix}${sourceSuffix}${geoSuffix}${photoSuffix}`;
+  const notes = `Auto-filled from ${pick.sourceLabel} — ${pick.title}${verifySuffix}${comboSuffix}${tosSuffix}${groundFloorSuffix}${identitySuffix}${sourceSuffix}${geoSuffix}${communityVerifiedSuffix}${photoSuffix}`;
 
   try {
     const createResp = await postJson(`${base}/api/buy-ins`, {
@@ -1514,6 +1533,15 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
       if (!attachedNearby && remainingSlots().length > 0) setEscalation(job, { nearbyStatus: "exhausted" });
     }
 
+    // Auto-verify community on the surfaced cross-resort ALTERNATIVES and auto-attach
+    // the cheapest CONFIRMED same-community one — so the operator no longer has to click
+    // "Verify community". Runs only when slots are still empty after the whole ladder;
+    // non-fatal. The verdict is also stamped on the alternatives for display either way.
+    if (!job.canceled) {
+      try { await autoVerifyAndAttachAlternatives(job, base, used); }
+      catch (e: any) { console.warn(`[auto-fill] auto-verify-community failed (non-fatal): ${e?.message ?? e}`); }
+    }
+
     // All-or-nothing: a combo left partially filled by ANY stage rolls back to
     // empty (the single-unit fallback above only guards its own stage). doneMessage
     // recomputes from job.attached, so a rollback correctly reports 0 filled.
@@ -1832,6 +1860,103 @@ async function attachCityCombo(
 // Drive the existing nearby-city expansion job IN-PROCESS (start + poll to
 // terminal) and attach the found combo. No HTTP — the expansion module's
 // functions are imported directly.
+// Open the surfaced cross-resort ALTERNATIVE combos (operator-click-only because the
+// attach gate couldn't auto-confirm them from titles/coords), read each listing's
+// description to resolve its community, and AUTO-ATTACH the cheapest one whose units
+// CONFIRM the same community — stamping the verified keys so the proximity gate accepts
+// the attach as REAL evidence (the (c) branch), not a bypass. Replaces the operator's
+// manual "Verify community" click. Inconclusive ("different"/"could not confirm") combos
+// are left surfaced WITH the verdict stamped (autoVerified/autoVerifiedSummary) for
+// display, so the operator still sees the answer without clicking. Conservative: ONLY a
+// "same-community" key-intersection verdict auto-attaches; "walkable-adjacent" does NOT.
+async function autoVerifyAndAttachAlternatives(job: AutoFillJob, base: string, used: Set<string>): Promise<void> {
+  if (!AUTO_VERIFY_COMMUNITY_ENABLED || AUTO_VERIFY_COMMUNITY_MAX === 0) return;
+  const remaining = () => job.slots.filter((s) => !job.attached.some((a) => a.unitId === s.unitId));
+  if (remaining().length < 2) return; // need >=2 empty slots for a combo
+  // Gate-passing, non-loss alternatives whose picks are all priced VRBO listings, cheapest
+  // first. (HomeToGo picks carry exact coords → the gate's (a) branch already auto-attaches
+  // them, so they never need this; restricting to VRBO also matches what the verify endpoint
+  // can scrape.)
+  const candidates = (job.comboOptions as any[])
+    .filter((o) => o && o.isAlternative && !o.isLoss
+      && Array.isArray(o.picks) && o.picks.length >= 2
+      && o.picks.every((p: any) => p?.url && /vrbo\.com|homeaway/i.test(String(p.url))))
+    .sort((a, b) => (Number(a.totalCost) || Infinity) - (Number(b.totalCost) || Infinity));
+  if (candidates.length === 0) return;
+  const deadline = Date.now() + AUTO_VERIFY_COMMUNITY_BUDGET_MS;
+  let verified = 0;
+  for (const opt of candidates) {
+    if (job.canceled || Date.now() > deadline || remaining().length < 2) break;
+    if (verified >= AUTO_VERIFY_COMMUNITY_MAX) break;
+    if (opt.picks.length !== remaining().length) continue; // combo must fill exactly the empty slots
+    verified += 1;
+    touch(job, { phase: "verify-community", message: `Verifying community for ${opt.label}…`, progress: 88 });
+    const units = (opt.picks as any[]).map((p) => ({ url: String(p.url), title: String(p.title ?? "") }));
+    let data: any = null;
+    try {
+      const resp = await postJson(`${base}/api/operations/verify-combo-community`, { units }, AUTO_VERIFY_COMMUNITY_OP_TIMEOUT_MS);
+      data = resp.ok ? resp.data : null;
+    } catch { data = null; }
+    if (!data || typeof data.verdict !== "string") continue;
+    // Stamp the verdict on the option for display (operator sees it without clicking).
+    opt.autoVerified = data.verdict;
+    opt.autoVerifiedSummary = typeof data.summary === "string" ? data.summary : null;
+    touch(job);
+    if (data.verdict !== "same-community") continue; // ONLY a confirmed same-community combo auto-attaches
+    // AUTO-ATTACH SAFETY (adversarial review 2026-06-12): the endpoint's "same-community"
+    // verdict can come from a shared generic TITLE phrase — two DIFFERENT resorts both titled
+    // e.g. "Tropical Garden Villas Unit N" resolve to the same `phrase:` key — which is exactly
+    // the 2026-06-10 cross-resort mis-attach class. So auto-attach (NOT the operator-facing
+    // display, which stays loose for recall) requires a shared DICTIONARY canonical: a known
+    // resort NAME. On the verify path dict: keys come ONLY from the scraped DESCRIPTION
+    // (phrase:/complex: keys come from titles, which we don't trust here), so this drops the
+    // false positives without losing any genuine description-confirmed match. The marker we
+    // stamp is therefore dict-only, so the gate's verifiedKeysShareCommunity re-check is
+    // inherently dict-based too.
+    const dictKeysByUrl = new Map<string, string[]>();
+    for (const u of (Array.isArray(data.units) ? data.units : [])) {
+      if (!u?.url || !Array.isArray(u.communityKeys)) continue;
+      const dictKeys = u.communityKeys.map(String).filter((k: string) => k.startsWith("dict:"));
+      if (dictKeys.length) dictKeysByUrl.set(listingUrlKey(String(u.url)), dictKeys);
+    }
+    // Common dict canonical(s) across EVERY pick — the resort name they all share.
+    let commonDict: string[] | null = null;
+    let everyHasDict = true;
+    for (const p of (opt.picks as any[])) {
+      const keys = dictKeysByUrl.get(listingUrlKey(String(p.url))) ?? [];
+      if (keys.length === 0) { everyHasDict = false; break; }
+      const set = new Set(keys);
+      commonDict = commonDict === null ? Array.from(set) : commonDict.filter((k) => set.has(k));
+    }
+    // Require a real shared known resort: every unit named one AND they intersect.
+    if (!everyHasDict || !commonDict || commonDict.length === 0) continue;
+    const sharedDict = commonDict;
+    const picksWithKeys = (opt.picks as any[]).map((p) => ({
+      ...p,
+      verifiedCommunityKeys: sharedDict,
+    }));
+    const before = job.attached.length;
+    touch(job, { phase: "verify-community", message: `Community confirmed — attaching ${opt.label}…`, progress: 92 });
+    await attachCityCombo(
+      job, base,
+      { suggestedPair: { picks: picksWithKeys, bedrooms: opt.bedrooms }, citySearchTerm: opt.scopeCategory === "nearby" ? "nearby city" : "city" },
+      used,
+      "home-city",
+    );
+    if (job.attached.length > before && remaining().length === 0) {
+      // Fully attached → it's a real pick now, not an alternative. Drop the card so the
+      // client doesn't also offer it as an operator choice, and refresh totals.
+      const i = (job.comboOptions as any[]).indexOf(opt);
+      if (i >= 0) (job.comboOptions as any[]).splice(i, 1);
+      recomputeTotals(job);
+      break;
+    }
+    // Partial attach can't happen for a same-length combo, but if it does the final
+    // reconcileComboAllOrNothing rolls it back; leave the card and stop.
+    if (job.attached.length > before) break;
+  }
+}
+
 async function runExpansion(
   job: AutoFillJob,
   base: string,
