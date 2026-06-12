@@ -1167,7 +1167,7 @@ Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture
 
 Unit A is a 3-bedroom, 3-bathroom two-story condo (~1,600 sq ft) with central AC, a King master suite, Queen second and third bedrooms, a loft sleeping area, and a queen sleeper sofa. The open-concept living area opens to a covered lanai with tropical breezes and garden views.
 
-Unit B is a bright 3-bedroom, 2-bathroom two-story condo (~1,600 sq ft) with garden and mountain views, a stainless steel kitchen with granite counters, and a lanai with comfortable seating. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+Unit B is a bright 3-bedroom, 2-bathroom two-story condo (~1,600 sq ft) with garden and mountain views, a stainless steel kitchen with granite counters, and a lanai with comfortable seating. Sleeps 8 with a King master, Queen second bedroom, a third bedroom with two twin beds, and a queen sleeper sofa.
 
 Both units enjoy access to Mauna Kai's shared pool and hot tub. Princeville's convenient location offers easy access to Hideaways Beach, Hanalei Bay, the Princeville golf courses, and the dramatic Na Pali Coast. Nearby: Queen's Bath tide pools, Princeville Makai Golf Course, Na Pali Coast boat tours, Kilauea Lighthouse, taro fields of Hanalei Valley. Fine dining at Makana Terrace, casual eats in Hanalei town.
 
@@ -1218,7 +1218,7 @@ The open floor plan on the main level creates a wonderful gathering space where 
 
 The stainless steel kitchen is fully equipped for meal preparation, with granite counters and modern appliances. The lanai features comfortable seating for outdoor dining and relaxation.
 
-The king-bedded master suite is on the main level with an en-suite bath. Two upstairs bedrooms offer a queen bed and twin beds respectively, sharing a full bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests. WiFi, cable TV, in-unit washer/dryer, and all linens are included.
+The king-bedded master suite is on the main level with an en-suite bath. Two upstairs bedrooms offer a queen bed and two twin beds respectively, sharing a full bath. A queen sleeper sofa in the living area provides additional sleeping for two more guests. WiFi, cable TV, in-unit washer/dryer, and all linens are included.
 
 The shared pool and hot tub provide a refreshing retreat. Princeville's convenient location offers easy access to grocery stores, restaurants, and the Princeville golf courses.
 
@@ -1237,7 +1237,7 @@ Kauai's North Shore stretches before you with endless possibilities - from the t
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Kaha Lani Resort. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two oceanfront condos within the Kaha Lani Resort in Kapaa, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, with stunning ocean views and steps to family-friendly Lydgate Beach Park.
 
-Unit A is a spacious 3-bedroom, 3-bathroom oceanfront condo (~1,700 sq ft) with an open floor plan, ocean views from the lanai, and AC throughout. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+Unit A is a spacious 3-bedroom, 3-bathroom oceanfront condo (~1,700 sq ft) with an open floor plan, ocean views from the lanai, and AC throughout. Sleeps 8 with a King master, Queen second bedroom, a third bedroom with two twin beds, and a queen sleeper sofa.
 
 Unit B is a comfortable 2-bedroom, 2-bathroom ocean view condo (~1,200 sq ft) with a renovated kitchen, private lanai with ocean views, and a relaxing tropical retreat feel. Sleeps 6 with a King master, Queen second bedroom, and a sofa sleeper.
 
@@ -1317,7 +1317,7 @@ Kapaa town is minutes away with its bike path, shopping, and diverse dining opti
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Makahuena at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two oceanfront condos within Makahuena at Poipu, a resort community at the southernmost point of Kauai, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 12 guests, with dramatic ocean views and direct access to rugged Makahuena Point.
 
-Unit A is an oceanfront 3-bedroom, 2-bathroom corner condo (~1,500 sq ft) with expansive ocean views, a full kitchen, and a private lanai. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa. AC and ceiling fans throughout.
+Unit A is an oceanfront 3-bedroom, 2-bathroom corner condo (~1,500 sq ft) with expansive ocean views, a full kitchen, and a private lanai. Sleeps 8 with a King master, Queen second bedroom, a third bedroom with two twin beds, and a queen sleeper sofa. AC and ceiling fans throughout.
 
 Unit B is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set within the tropical resort grounds with ocean views, a full kitchen, and a private lanai. Sleeps 4 with a King master, Queen second bedroom. AC and ceiling fans included.
 
@@ -1694,7 +1694,7 @@ The unbeatable Poipu location puts Brennecke's Beach, Poipu Beach Park, and Ship
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 5 bedrooms and can accommodate up to 14 guests, with AC throughout and easy access to Poipu Beach.
 
-Unit A is a 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with AC, a tropical garden setting, a full kitchen, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+Unit A is a 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with AC, a tropical garden setting, a full kitchen, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, a third bedroom with two twin beds, and a queen sleeper sofa.
 
 Unit B is a garden view 2-bedroom, 2-bathroom townhome (~1,100 sq ft) with AC, a full kitchen, and a lanai overlooking the tropical gardens. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa.
 
@@ -1719,12 +1719,12 @@ Important: This listing represents our managed portfolio of similar units within
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 8,
-        shortDescription: "3BR/3BA townhome at Pili Mai at Poipu with AC, tropical garden setting, full kitchen, and steps to Poipu Beach. King master, queen, and twin bedrooms plus queen sleeper sofa. Access to resort pool and grounds.",
+        shortDescription: "3BR/3BA townhome at Pili Mai at Poipu with AC, tropical garden setting, full kitchen, and steps to Poipu Beach. King master, queen second bedroom, and a third bedroom with two twin beds, plus queen sleeper sofa. Access to resort pool and grounds.",
         longDescription: `Welcome to this 3-bedroom, 3-bathroom townhome at Pili Mai at Poipu, a premier resort community in the heart of Poipu.
 
 This spacious townhome offers modern comfort with air conditioning throughout, complemented by ceiling fans and tropical breezes. The tropical garden setting creates a relaxing atmosphere.
 
-The king-bedded master suite features a private en-suite bathroom. The second bedroom has a queen bed, and the third offers twin beds - each with its own bathroom. A queen sleeper sofa in the living area provides additional sleeping for two more guests. The fully equipped kitchen, comfortable living area, and dining space create a welcoming home base.
+The king-bedded master suite features a private en-suite bathroom. The second bedroom has a queen bed, and the third offers two twin beds - each with its own bathroom. A queen sleeper sofa in the living area provides additional sleeping for two more guests. The fully equipped kitchen, comfortable living area, and dining space create a welcoming home base.
 
 The resort grounds feature manicured gardens, meandering paths, and the resort pool. Walk to Poipu Beach, consistently rated one of Hawaii's best.
 
@@ -1768,9 +1768,9 @@ Nearby attractions include Spouting Horn blowhole, Allerton Garden, and the scen
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Pili Mai at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
     combinedDescription: `This listing is comprised of two spacious 3-bedroom townhomes within Pili Mai at Poipu, a premier resort community in the heart of Poipu. Together they offer 6 bedrooms and can accommodate up to 16 guests, with AC throughout and easy access to Poipu Beach.
 
-Unit A is a tropical 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with AC, a full kitchen, covered lanai with garden views, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+Unit A is a tropical 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with AC, a full kitchen, covered lanai with garden views, and private bathrooms for each bedroom. Sleeps 8 with a King master, Queen second bedroom, a third bedroom with two twin beds, and a queen sleeper sofa.
 
-Unit B is a stylish 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with a modern aesthetic, AC throughout, a quality kitchen, and a lanai overlooking the resort's spectacular gardens. Sleeps 8 with a King master, Queen second bedroom, Twin third bedroom, and a queen sleeper sofa.
+Unit B is a stylish 3-bedroom, 3-bathroom townhome (~1,500 sq ft) with a modern aesthetic, AC throughout, a quality kitchen, and a lanai overlooking the resort's spectacular gardens. Sleeps 8 with a King master, Queen second bedroom, a third bedroom with two twin beds, and a queen sleeper sofa.
 
 Walk to Poipu Beach from the resort. Nearby: Poipu Shopping Village, Kukui'ula Village (dining/shops), Spouting Horn blowhole, National Tropical Botanical Garden, Koloa Town historic district. Snorkeling at Poipu Beach with sea turtles and monk seals. Great restaurants including The Beach House, Merriman's, and Tidepools. Outstanding snorkeling at Koloa Landing.
 
@@ -1793,12 +1793,12 @@ Important: This listing represents our managed portfolio of similar units within
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 8,
-        shortDescription: "Tropical 3BR/3BA townhome at Pili Mai at Poipu with AC, full kitchen, lanai with garden views, and easy access to Poipu Beach. King master, queen and twin bedrooms plus queen sleeper sofa.",
+        shortDescription: "Tropical 3BR/3BA townhome at Pili Mai at Poipu with AC, full kitchen, lanai with garden views, and easy access to Poipu Beach. King master, queen second bedroom, and a third bedroom with two twin beds, plus queen sleeper sofa.",
         longDescription: `Welcome to this 3-bedroom, 3-bathroom townhome at Pili Mai at Poipu, a premier resort community in the heart of Poipu.
 
 This well-appointed unit features AC throughout, an open floor plan with the living room flowing into the fully equipped kitchen and dining area. The covered lanai provides a peaceful outdoor space surrounded by tropical plants and the resort's beautiful grounds.
 
-Three bedrooms each have their own bathroom: the king-bedded master suite, queen second bedroom, and twin-bedded third room. A queen sleeper sofa in the living area provides additional sleeping for two more guests. All rooms feature ceiling fans and AC for comfort.
+Three bedrooms each have their own bathroom: the king-bedded master suite, queen second bedroom, and a third bedroom with two twin beds. A queen sleeper sofa in the living area provides additional sleeping for two more guests. All rooms feature ceiling fans and AC for comfort.
 
 The kitchen is fully stocked for home cooking, and the dining area accommodates the whole group. WiFi, cable TV, washer/dryer access, and all linens are provided.
 
@@ -1815,12 +1815,12 @@ Explore the south shore's attractions including Spouting Horn, the National Trop
         bathrooms: "3",
         sqft: "~1,500",
         maxGuests: 8,
-        shortDescription: "Stylish 3BR/3BA townhome at Pili Mai at Poipu. AC, modern kitchen, comfortable bedrooms with private baths, queen sleeper sofa, and lanai overlooking gardens. King, queen, and twin beds. Walk to Poipu Beach.",
+        shortDescription: "Stylish 3BR/3BA townhome at Pili Mai at Poipu. AC, modern kitchen, comfortable bedrooms with private baths, queen sleeper sofa, and lanai overlooking gardens. King, queen, and two twin beds. Walk to Poipu Beach.",
         longDescription: `Welcome to this stylish 3-bedroom, 3-bathroom townhome at Pili Mai at Poipu, a premier resort community in the heart of Poipu.
 
 Updated with a modern aesthetic, this townhome offers comfortable living with AC throughout. The open layout connects the living, dining, and kitchen areas for easy entertaining.
 
-Each bedroom features its own private bathroom. The king-bedded master suite provides a private retreat, while the queen and twin-bedded rooms accommodate additional guests comfortably. A queen sleeper sofa in the living area provides additional sleeping for two more guests. Ceiling fans supplement the AC.
+Each bedroom features its own private bathroom. The king-bedded master suite provides a private retreat, while the queen second bedroom and the third bedroom's two twin beds accommodate additional guests comfortably. A queen sleeper sofa in the living area provides additional sleeping for two more guests. Ceiling fans supplement the AC.
 
 The modern kitchen has quality appliances, ample counter space, and all the essentials for preparing meals. The lanai overlooks the resort's spectacular gardens.
 

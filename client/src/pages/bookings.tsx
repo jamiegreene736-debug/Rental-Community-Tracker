@@ -6666,6 +6666,14 @@ export default function Bookings() {
   useEffect(() => {
     reservationsRef.current = reservations;
   }, [reservations]);
+  // Latest loaded last-scan map, so the durable /auto-fill/last backfill poller can
+  // skip rows that ALREADY have a scan loaded without a stale render closure. Needed
+  // because the poller now backfills any row MISSING an entry (incl. filled rows and
+  // rows whose in-row AutoFillJobPoller unmounted before resolving) — see the poller.
+  const lastSearchByReservationRef = useRef<Record<string, AutoFillJobStatus>>({});
+  useEffect(() => {
+    lastSearchByReservationRef.current = lastSearchByReservation;
+  }, [lastSearchByReservation]);
   const clearExpansionJob = (reservationId: string) => {
     setExpansionJobs((prev) => {
       if (!(reservationId in prev)) return prev;
@@ -7157,11 +7165,19 @@ export default function Bookings() {
     const fetchLast = async () => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       const ids = reservationsRef.current
-        .filter((r) => (r.slotsFilled ?? 0) < (r.slotsTotal ?? 0))
         .map((r) => r._id)
-        // Skip reservations a server-side bulk queue currently owns — the bulk
-        // dialog drives their progress; a row poller here would race it (B1).
-        .filter((id) => !(id in autoFillJobs) && !bulkActiveReservationIdsRef.current.has(id));
+        // Backfill the durable last-scan for any visible row that doesn't ALREADY have
+        // one loaded — including FILLED rows and rows whose in-row AutoFillJobPoller
+        // unmounted (row collapsed / navigated) before it streamed a result. That gap
+        // previously left such rows stuck on "Not scanned" even though the scan WAS
+        // persisted server-side (observed on manually-added bookings). Rows that already
+        // have an entry — loaded here OR streamed live by an active poller — are skipped,
+        // so this never overwrites / races a live update. Bulk-owned rows are still
+        // skipped: the bulk dialog drives their progress (B1).
+        .filter((id) =>
+          !(id in lastSearchByReservationRef.current) &&
+          !bulkActiveReservationIdsRef.current.has(id),
+        );
       if (ids.length === 0) return;
       try {
         const data = await apiGetJson<{ jobs: Record<string, AutoFillJobStatus> }>(
@@ -9596,9 +9612,9 @@ export default function Bookings() {
                             className="bg-background rounded border"
                             data-testid={`slot-${r._id}-${slot.unitId}`}
                           >
-                          <div
-                            className="flex flex-col gap-3 px-3 py-2.5 md:flex-row md:items-center"
-                          >
+                          <div className="flex flex-col gap-2.5 px-3 py-2.5">
+                            {/* Row 1: unit label + buy-in info (inline, info truncates). */}
+                            <div className="flex items-center gap-3">
                             <div className="shrink-0 md:w-24">
                               <p className="text-sm font-medium">{slot.unitLabel}</p>
                               <p className="text-[10px] text-muted-foreground">{slot.bedrooms} BR</p>
@@ -9699,7 +9715,10 @@ export default function Bookings() {
                                 <p className="text-xs text-muted-foreground italic">No buy-in attached for this unit</p>
                               )}
                             </div>
-                            <div className="shrink-0 flex w-full flex-wrap items-center gap-1 md:w-auto md:justify-end">
+                            </div>
+                            {/* Row 2: action toolbar — its own full-width wrapping row so the
+                                8+ buttons never overflow/overlap the info column above. */}
+                            <div className="flex flex-wrap items-center gap-1">
                               {slot.buyIn ? (
                                 <>
                                   {/* Verify rate — on-demand vision check
