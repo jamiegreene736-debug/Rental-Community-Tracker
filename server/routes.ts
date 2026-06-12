@@ -99,7 +99,7 @@ import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./a
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { formatReceiptMoney, formatReceiptLongDate } from "@shared/receipt-message";
-import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts } from "./guest-receipts";
+import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
@@ -7067,18 +7067,65 @@ export async function registerRoutes(
       // A bare negative payment line is a refund even without a label.
       return paymentAmount(entry) < 0;
     };
+    // Refund timestamp resolver (mirror of server/guesty-money.ts refundDate).
+    // Guesty stamps a refund with `refundedAt`, not `paidAt`, so refunds were
+    // dropped for "no date" by paymentDate() alone.
+    const refundDate = (entry: any): Date | null => {
+      for (const field of ["refundedAt", "refunded_at", "refundedOn", "refundDate", "refund_date"]) {
+        const raw = entry?.[field];
+        if (raw) {
+          const d = new Date(String(raw));
+          if (!Number.isNaN(d.getTime())) return d;
+        }
+      }
+      return paymentDate(entry);
+    };
+    const refundEntryActive = (entry: any): boolean => {
+      const status = String(entry?.status ?? entry?.paymentStatus ?? "").toLowerCase();
+      return !/(fail|declin|void|cancel|pending|scheduled|authorized|authorization)/.test(status);
+    };
+    const nestedRefundRecords = (entry: any): any[] => {
+      const out: any[] = [];
+      for (const bucket of [entry?.refund, entry?.refunds, entry?.refundDetails, entry?.refundedPayments]) {
+        if (Array.isArray(bucket)) out.push(...bucket);
+        else if (bucket && typeof bucket === "object") out.push(bucket);
+      }
+      return out;
+    };
     const reservationRefundItems = (reservation: any): any[] => {
       const money = reservation?.money ?? {};
-      const pools: any[] = [
+      const out: any[] = [];
+      // Refund-only locations are refunds by definition.
+      for (const entry of [
         ...(Array.isArray(reservation?.refunds) ? reservation.refunds : []),
         ...(Array.isArray(money?.refunds) ? money.refunds : []),
+      ]) {
+        if (refundEntryActive(entry)) out.push(entry);
+      }
+      // Payment/transaction rows: prefer nested refund records (authoritative
+      // partial amount) over the parent row to avoid double-counting; otherwise
+      // the row itself may be a standalone refund.
+      for (const row of [
         ...(Array.isArray(reservation?.payments) ? reservation.payments : []),
         ...(Array.isArray(money?.payments) ? money.payments : []),
         ...(Array.isArray(money?.transactions) ? money.transactions : []),
-      ];
-      return pools.filter(refundLooksReal);
+      ]) {
+        const nested = nestedRefundRecords(row);
+        if (nested.length > 0) {
+          for (const n of nested) if (refundEntryActive(n)) out.push(n);
+        } else if (refundLooksReal(row)) {
+          out.push(row);
+        }
+      }
+      return out;
     };
-    const refundAmount = (entry: any): number => Math.abs(paymentAmount(entry));
+    const refundAmount = (entry: any): number => {
+      const explicit = asNum(
+        entry?.refundedAmount ?? entry?.refundAmount ?? entry?.amountRefunded ?? entry?.totalRefunded,
+      );
+      if (explicit > 0) return explicit;
+      return Math.abs(paymentAmount(entry));
+    };
 
     const reservationNights = (reservation: any): number => {
       const explicit = asNum(reservation?.nightsCount ?? reservation?.nights);
@@ -7285,7 +7332,7 @@ export async function registerRoutes(
         for (const refund of reservationRefundItems(reservation)) {
           const amount = refundAmount(refund);
           if (amount <= 0) continue;
-          const refundedAt = paymentDate(refund);
+          const refundedAt = refundDate(refund);
           if (!refundedAt || refundedAt < start || refundedAt > now) continue;
           const key = [
             reservationId,
@@ -42316,6 +42363,31 @@ CONSTRAINTS
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Guest-receipt run failed", message: err.message });
+    }
+  });
+
+  // Manual force-send a receipt for ONE reservation (operator escape hatch when
+  // the auto-scheduler missed a refund/payment). Body: { reservationId? |
+  // confirmationCode?, kind?: "refund"|"payment", amount?, dateIso? }. With an
+  // explicit amount it force-sends even if detection can't see the txn.
+  app.post("/api/inbox/guest-receipts/send-for-reservation", async (req, res) => {
+    try {
+      const { reservationId, confirmationCode, kind, amount, dateIso } = (req.body ?? {}) as {
+        reservationId?: string; confirmationCode?: string; kind?: "refund" | "payment"; amount?: number; dateIso?: string;
+      };
+      if (!reservationId && !confirmationCode) {
+        return res.status(400).json({ error: "Provide reservationId or confirmationCode" });
+      }
+      const result = await sendReceiptForReservation({
+        reservationId,
+        confirmationCode,
+        kind: kind === "payment" ? "payment" : kind === "refund" ? "refund" : undefined,
+        amount: typeof amount === "number" && amount > 0 ? amount : undefined,
+        dateIso: dateIso || undefined,
+      });
+      res.status(result.ok ? 200 : 422).json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: "Manual receipt send failed", message: err.message });
     }
   });
 

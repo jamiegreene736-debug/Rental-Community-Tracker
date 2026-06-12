@@ -66,6 +66,23 @@ export function paymentDate(payment: any): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+// Refund timestamp resolver. Guesty stamps a refund with `refundedAt` (or a
+// snake/variant), NOT the payment-style `paidAt`, so refunds were silently
+// dropped for "no date" by paymentDate() alone. Check the refund-specific
+// fields first, then fall back to the generic payment date fields (covers a
+// bare negative payment line whose only date is `createdAt`).
+const REFUND_DATE_FIELDS = ["refundedAt", "refunded_at", "refundedOn", "refundDate", "refund_date"];
+export function refundDate(entry: any): Date | null {
+  for (const field of REFUND_DATE_FIELDS) {
+    const raw = entry?.[field];
+    if (raw) {
+      const d = new Date(String(raw));
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  }
+  return paymentDate(entry);
+}
+
 export function paymentDescription(payment: any): string {
   return String(payment?.description ?? payment?.note ?? payment?.label ?? payment?.type ?? payment?.kind ?? "");
 }
@@ -120,19 +137,63 @@ export function refundLooksReal(entry: any): boolean {
   return paymentAmount(entry) < 0;
 }
 
+// Is a refund entry NOT failed/pending/void? (A nested refund record often has
+// no status at all, in which case it is treated as a real, settled refund.)
+function refundEntryActive(entry: any): boolean {
+  const status = String(entry?.status ?? entry?.paymentStatus ?? "").toLowerCase();
+  return !/(fail|declin|void|cancel|pending|scheduled|authorized|authorization)/.test(status);
+}
+
+// Guesty frequently records a refund as a NESTED record hanging off the original
+// payment/transaction (money.payments[].refunds[] / .refund), while the parent
+// payment row stays "SUCCEEDED" — so refundLooksReal() is false for the parent
+// and the refund would be invisible. Pull those nested records out.
+function nestedRefundRecords(entry: any): any[] {
+  const out: any[] = [];
+  for (const bucket of [entry?.refund, entry?.refunds, entry?.refundDetails, entry?.refundedPayments]) {
+    if (Array.isArray(bucket)) out.push(...bucket);
+    else if (bucket && typeof bucket === "object") out.push(bucket);
+  }
+  return out;
+}
+
 export function reservationRefundItems(reservation: any): any[] {
   const money = reservation?.money ?? {};
-  const pools: any[] = [
+  const out: any[] = [];
+  // 1. Entries that live in a refund-only location are refunds by definition.
+  for (const entry of [
     ...(Array.isArray(reservation?.refunds) ? reservation.refunds : []),
     ...(Array.isArray(money?.refunds) ? money.refunds : []),
+  ]) {
+    if (refundEntryActive(entry)) out.push(entry);
+  }
+  // 2. Payment / transaction rows. If a row carries nested refund records, use
+  //    THOSE (the authoritative refunded amount) and do not also count the row,
+  //    to avoid double-counting a partially-refunded payment. Otherwise, the row
+  //    itself may be a standalone refund (negative amount or refund status).
+  for (const row of [
     ...(Array.isArray(reservation?.payments) ? reservation.payments : []),
     ...(Array.isArray(money?.payments) ? money.payments : []),
     ...(Array.isArray(money?.transactions) ? money.transactions : []),
-  ];
-  return pools.filter(refundLooksReal);
+  ]) {
+    const nested = nestedRefundRecords(row);
+    if (nested.length > 0) {
+      for (const n of nested) if (refundEntryActive(n)) out.push(n);
+    } else if (refundLooksReal(row)) {
+      out.push(row);
+    }
+  }
+  return out;
 }
 
+// Absolute refunded amount. Prefer an explicit refunded-amount field (a nested
+// record on an otherwise-positive payment carries the partial amount here);
+// fall back to the absolute transaction amount for a plain negative/refund row.
 export function refundAmount(entry: any): number {
+  const explicit = asNum(
+    entry?.refundedAmount ?? entry?.refundAmount ?? entry?.amountRefunded ?? entry?.totalRefunded,
+  );
+  if (explicit > 0) return explicit;
   return Math.abs(paymentAmount(entry));
 }
 
@@ -181,7 +242,7 @@ export function realRefundsForReceipts(reservation: any): ReceiptTransaction[] {
   for (const item of reservationRefundItems(reservation)) {
     const amount = refundAmount(item);
     if (!(amount > 0)) continue;
-    const date = paymentDate(item);
+    const date = refundDate(item);
     if (!date) continue;
     out.push({ amount, date, dateIso: date.toISOString(), description: paymentDescription(item) });
   }

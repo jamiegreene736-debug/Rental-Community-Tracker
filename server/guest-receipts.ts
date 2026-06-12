@@ -207,7 +207,7 @@ export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunRes
     for (const item of pending) {
       if (sendsThisRun >= MAX_SENDS_PER_RUN) { skipped++; continue; }
       try {
-        const outcome = await processTransaction(item, now);
+        const { outcome } = await processTransaction(item, now);
         if (outcome === "sent") { sent++; sendsThisRun++; }
         else if (outcome === "error") { errors++; }
         else { skipped++; }
@@ -230,7 +230,7 @@ export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunRes
   return _lastRunResult;
 }
 
-async function processTransaction(item: PendingTxn, now: number): Promise<"sent" | "skipped" | "error"> {
+async function processTransaction(item: PendingTxn, now: number): Promise<{ outcome: "sent" | "skipped" | "error"; body?: string; reason?: string }> {
   const { kind, txn, reservation } = item;
   const reservationId = String(reservation?._id ?? reservation?.id ?? "");
   const dedupKey = receiptDedupKey({ reservationId, kind, dateIso: txn.dateIso, amount: txn.amount });
@@ -240,16 +240,16 @@ async function processTransaction(item: PendingTxn, now: number): Promise<"sent"
   // Forward match only: a configured token is treated as a substring of the
   // channel (e.g. "airbnb" mutes "airbnb2"). Do NOT also reverse-match — a
   // misconfigured longer token would silently swallow real channels.
-  if (SKIP_CHANNELS.some((s) => channelLc.includes(s))) return "skipped";
+  if (SKIP_CHANNELS.some((s) => channelLc.includes(s))) return { outcome: "skipped", reason: `channel ${channel} is muted` };
 
   // Already sent? done. (A pending/error row is reused below to retry.)
   const existing = await storage.getGuestReceiptByDedupKey(dedupKey);
-  if (existing && existing.status === "sent") return "skipped";
+  if (existing && existing.status === "sent") return { outcome: "skipped", reason: "already sent", body: existing.messageBody ?? undefined };
 
   // Need a conversation to post into. If none yet, do NOT write a row — retry
   // on a later tick once Guesty has a conversation for the reservation.
   const conversationId = conversationIdForReservation(reservation);
-  if (!conversationId) return "skipped";
+  if (!conversationId) return { outcome: "skipped", reason: "no Guesty conversation for reservation yet" };
 
   // Reuse the token from a prior attempt so the durable link stays stable, but
   // ALWAYS rebuild the body/payload from the CURRENT reservation so a RETRY
@@ -351,8 +351,8 @@ async function processTransaction(item: PendingTxn, now: number): Promise<"sent"
       // UNIQUE(dedup_key) race — another tick already created it. Let that one
       // own the send; re-check and skip if it already went out.
       const reread = await storage.getGuestReceiptByDedupKey(dedupKey);
-      if (!reread || reread.status === "sent") return "skipped";
-      return "skipped";
+      if (!reread || reread.status === "sent") return { outcome: "skipped", reason: "concurrent tick owns this send" };
+      return { outcome: "skipped", reason: "concurrent tick owns this send" };
     }
   } else {
     // Retry path: refresh the stored body + page payload so the durable page and
@@ -365,12 +365,96 @@ async function processTransaction(item: PendingTxn, now: number): Promise<"sent"
     await sendGuestyMessage(conversationId, body, channel);
     await storage.markGuestReceiptSent(token, conversationId, channel);
     console.log(`[guest-receipts] sent ${kind} receipt $${txn.amount.toFixed(2)} to reservation ${reservationId} (${channel})`);
-    return "sent";
+    return { outcome: "sent", body };
   } catch (e: any) {
     await storage.markGuestReceiptError(token, e?.message ?? String(e)).catch(() => {});
     console.error(`[guest-receipts] send failed (${kind}, reservation ${reservationId}): ${e?.message ?? e}`);
-    return "error";
+    return { outcome: "error", body, reason: e?.message ?? String(e) };
   }
+}
+
+// ── Manual force-send for a single reservation ────────────────────────────
+// Operator escape hatch for when a refund/payment was issued in Guesty but the
+// auto-scheduler did not pick it up (e.g. it fell outside the backfill window,
+// or Guesty exposed the money in a shape detection missed). Fetches just this
+// reservation, runs the SAME body-build + send + ledger path as the scheduler,
+// and — unlike the scheduler — ignores the backfill window. An explicit
+// {amount,dateIso} forces a receipt even if detection still cannot see the txn.
+export async function sendReceiptForReservation(opts: {
+  reservationId?: string;
+  confirmationCode?: string;
+  kind?: ReceiptKind;
+  amount?: number;
+  dateIso?: string;
+}): Promise<{
+  ok: boolean;
+  reservationId: string | null;
+  results: Array<{ kind: ReceiptKind; amount: number; outcome: string; reason?: string; body?: string }>;
+  message: string;
+}> {
+  const fields = encodeURIComponent(
+    "_id status checkIn checkOut listing listingId money payments refunds guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
+  );
+
+  let reservation: any = null;
+  if (opts.reservationId) {
+    const data = await guestyRequest("GET", `/reservations/${encodeURIComponent(opts.reservationId)}?fields=${fields}`).catch(() => null);
+    reservation = data?.result ?? data?.data ?? (data && data._id ? data : null) ?? null;
+  }
+  if (!reservation && opts.confirmationCode) {
+    const filters = encodeURIComponent(JSON.stringify([{ field: "confirmationCode", operator: "$eq", value: opts.confirmationCode }]));
+    const data = await guestyRequest("GET", `/reservations?limit=1&fields=${fields}&filters=${filters}`).catch(() => null);
+    reservation = unwrapReservations(data)[0] ?? null;
+  }
+  if (!reservation) {
+    return { ok: false, reservationId: opts.reservationId ?? null, results: [], message: "Reservation not found in Guesty" };
+  }
+
+  const reservationId = String(reservation?._id ?? reservation?.id ?? "");
+  const now = Date.now();
+  const pending: PendingTxn[] = [];
+
+  if (opts.amount && opts.amount > 0) {
+    // Explicit override — trust the operator's amount/date, skip detection.
+    const kind: ReceiptKind = opts.kind ?? "refund";
+    const date = opts.dateIso ? new Date(opts.dateIso) : new Date(now);
+    const dateIso = Number.isNaN(date.getTime()) ? new Date(now).toISOString() : date.toISOString();
+    pending.push({ kind, txn: { amount: opts.amount, date: new Date(dateIso), dateIso, description: `Manual ${kind} receipt` }, reservation });
+  } else {
+    // Detection path — no backfill-window filter, so an older txn still sends.
+    if (!opts.kind || opts.kind === "payment") {
+      for (const txn of collectedPaymentsForReceipts(reservation)) pending.push({ kind: "payment", txn, reservation });
+    }
+    if (!opts.kind || opts.kind === "refund") {
+      for (const txn of realRefundsForReceipts(reservation)) pending.push({ kind: "refund", txn, reservation });
+    }
+  }
+
+  if (pending.length === 0) {
+    return {
+      ok: false,
+      reservationId,
+      results: [],
+      message: "No payment or refund transactions detected on this reservation. Pass an explicit amount (and date) to force-send.",
+    };
+  }
+
+  const results: Array<{ kind: ReceiptKind; amount: number; outcome: string; reason?: string; body?: string }> = [];
+  for (const item of pending) {
+    try {
+      const { outcome, body, reason } = await processTransaction(item, now);
+      results.push({ kind: item.kind, amount: item.txn.amount, outcome, reason, body });
+    } catch (e: any) {
+      results.push({ kind: item.kind, amount: item.txn.amount, outcome: "error", reason: e?.message ?? String(e) });
+    }
+  }
+  const sent = results.filter((r) => r.outcome === "sent").length;
+  return {
+    ok: sent > 0,
+    reservationId,
+    results,
+    message: `Sent ${sent} of ${results.length} receipt(s) for reservation ${reservationId}`,
+  };
 }
 
 export function startGuestReceiptScheduler() {

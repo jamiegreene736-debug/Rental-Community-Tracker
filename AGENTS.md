@@ -802,6 +802,28 @@ page. Constraints — don't "simplify" them away:
    `guestReceipts` array on `/api/dashboard/revenue-30-days` reflects exactly what
    we SENT (status `sent`, in-window), so the tile can't disagree with reality.
    Locked by `tests/receipt-message.test.ts` (builders + sanitize + dedup key).
+8. **Refund extraction must handle NESTED refunds + `refundedAt` dating** (added
+   2026-06-12). Guesty commonly records a refund as a nested record on the
+   original, still-`SUCCEEDED` payment (`money.payments[].refunds[]` / `.refund`)
+   rather than as a standalone refund row, AND stamps it with `refundedAt` (not
+   `paidAt`). The original code only scanned top-level rows via `refundLooksReal`
+   and dated refunds with `paymentDate()` (no `refundedAt`), so a refund issued
+   against a collected payment was invisible to BOTH the receipt scheduler and the
+   revenue tile. `reservationRefundItems` now descends into nested refund records
+   (and prefers them over the parent row to avoid double-counting a partial
+   refund), `refundDate()` reads the `refundedAt`/variants first, and
+   `refundAmount()` prefers an explicit `refundedAmount`/`refundAmount` field for
+   partials. Mirrored in BOTH `server/guesty-money.ts` and the
+   `dashboardRevenue30DayHandler` inline copies. Locked by
+   `tests/guesty-money-refunds.test.ts`.
+9. **Manual escape hatch:** `POST /api/inbox/guest-receipts/send-for-reservation`
+   (`sendReceiptForReservation` in `server/guest-receipts.ts`) force-sends a
+   receipt for ONE reservation (by `reservationId` or `confirmationCode`),
+   IGNORING the backfill window. An explicit `{ kind, amount, dateIso }` forces a
+   send even if detection still can't see the txn. It reuses the SAME
+   build+send+ledger path as the scheduler (so dedup still prevents a later
+   auto-tick from re-sending). For when a refund was issued but the auto-poll
+   missed it.
 
 ## Load-Bearing Decisions
 
