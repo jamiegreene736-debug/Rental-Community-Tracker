@@ -315,14 +315,35 @@ export type SidecarVrboBookParams = {
   email: string; // unique per-unit traveler alias
   phone: string; // fixed operator booking phone (407 449 7941)
   bedrooms?: number;
+  // When true, the worker drives to the checkout page, reads the payment schedule
+  // (due now / balance + balance-due date), and RETURNS — never fills traveler
+  // fields, never surfaces the window, never books. Used by the payment-terms probe.
+  scheduleOnly?: boolean;
   queueContext?: SidecarQueueContext;
 };
 
+// VRBO's checkout payment plan: how much is due at booking and (when the stay is
+// far enough out that the host allows a plan) how much/when the balance is charged.
+export type VrboPaymentSchedule = {
+  total: number | null;
+  dueToday: number | null;
+  balanceDue: number | null;
+  balanceDueDate: string | null;
+  currency?: string | null;
+  paymentPlanAvailable: boolean;
+  payInFullRequired?: boolean;
+  source?: string | null;
+  raw?: string;
+  url?: string;
+  error?: string;
+};
+
 export type SidecarVrboBookResult = {
-  stage: "booked" | "awaiting_payment_timeout";
+  stage: "booked" | "awaiting_payment_timeout" | "payment_schedule";
   confirmed: boolean;
   confirmationNumber: string | null;
   travelerFilled?: Record<string, boolean>;
+  paymentSchedule?: VrboPaymentSchedule | null;
   listingUrl?: string;
   navUrl?: string;
 };
@@ -3194,6 +3215,57 @@ export async function bookVrboUnitViaSidecar(opts: {
   });
   return {
     result: (r.results as SidecarVrboBookResult | undefined) ?? null,
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+// Read VRBO's payment schedule for a listing+dates WITHOUT booking. Enqueues a
+// `vrbo_book` op in scheduleOnly mode: the worker drives to the checkout page,
+// scrapes the due-now / balance / balance-due-date, and returns. Short wallet
+// (a few minutes) since there's no human-paced payment wait. listingUrl MUST be a
+// vrbo.com detail page (the daemon's buildVrboBookingUrl enforces this too).
+export async function fetchVrboPaymentScheduleViaSidecar(opts: {
+  listingUrl: string;
+  checkIn: string;
+  checkOut: string;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+  queueBudgetMs?: number;
+  signal?: AbortSignal;
+  queueContext?: SidecarQueueContext;
+}): Promise<{
+  paymentSchedule: VrboPaymentSchedule | null;
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (!opts.listingUrl || !/^https?:\/\/(?:www\.)?vrbo\.com\//i.test(opts.listingUrl)) {
+    return { paymentSchedule: null, workerOnline: false, durationMs: 0, reason: "a vrbo.com listing URL is required" };
+  }
+  const params: SidecarVrboBookParams = {
+    buyInId: 0,
+    listingUrl: opts.listingUrl,
+    checkIn: opts.checkIn,
+    checkOut: opts.checkOut,
+    firstName: "",
+    lastName: "",
+    email: "",
+    phone: "",
+    scheduleOnly: true,
+    queueContext: { ...opts.queueContext, forceFresh: true, skipResultCache: true },
+  };
+  const r = await awaitOpResult({
+    enqueueArgs: { opType: "vrbo_book", params },
+    pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    walletBudgetMs: opts.walletBudgetMs ?? (Number(process.env.SIDECAR_VRBO_PAYSCHED_WALLET_MS) || 4 * 60_000),
+    queueBudgetMs: opts.queueBudgetMs ?? (Number(process.env.SIDECAR_VRBO_PAYSCHED_QUEUE_MS) || 6 * 60_000),
+    signal: opts.signal,
+  });
+  const result = (r.results as SidecarVrboBookResult | undefined) ?? null;
+  return {
+    paymentSchedule: result?.paymentSchedule ?? null,
     workerOnline: r.workerOnline,
     durationMs: r.durationMs,
     reason: r.reason,
