@@ -24,6 +24,22 @@ export type CityVrboCoverage = {
   droppedNoPrice: number;
   /** rawHarvested covers >= COVERAGE_COMPLETE_RATIO of VRBO's total (or total unknown). */
   looksComplete: boolean;
+  // ── HomeToGo source completeness (mirrors the VRBO reconciliation) ───────────
+  // HomeToGo runs as a SEPARATE sidecar op against its own /searchdetails feed, so
+  // it gets its own "did we pull all of them" signal. The reconciliation target is
+  // the FEED's own offer total (apples-to-apples with the scoped offers we harvest,
+  // both pre-filter) — NOT the rendered all-provider "N rentals" header (we drop
+  // Vrbo/Expedia, so that would always look short). 0/unknown when HomeToGo is off.
+  /** HomeToGo /searchdetails feed's own reported offer total (null when not exposed). */
+  hometogoReportedTotal: number | null;
+  /** Raw scoped HomeToGo offers the sidecar harvested for the search (pre-filter). */
+  hometogoRawHarvested: number;
+  /**
+   * HomeToGo harvest reached the feed total OR a genuine scroll plateau (the feed
+   * stopped serving new offers) — i.e. NOT truncated by the wallet budget / scroll
+   * cap. Unknown total never false-alarms, same policy as VRBO.
+   */
+  hometogoLooksComplete: boolean;
 };
 
 // A harvest is "complete" when we deduped-captured at least this fraction of
@@ -45,6 +61,12 @@ export function buildCityScanCoverage(args: {
   droppedBelowMinBedrooms: number;
   droppedNoPrice: number;
   vrboReportedTotal: number | null;
+  // HomeToGo source (all optional — omit/undefined when HomeToGo is disabled or the
+  // op returned no harvest diag; the VRBO call site is unchanged when these are absent).
+  hometogoReportedTotal?: number | null;
+  hometogoRawHarvested?: number;
+  /** Worker reached the feed total OR a genuine plateau (not budget/scroll-cap truncated). */
+  hometogoHarvestComplete?: boolean;
 }): CityVrboCoverage {
   const rawHarvested = Math.max(0, Math.round(Number(args.rawHarvested) || 0));
   const total =
@@ -53,6 +75,21 @@ export function buildCityScanCoverage(args: {
       : null;
   // Unknown/unreliable total => don't false-alarm => treat as complete.
   const looksComplete = total == null || rawHarvested >= Math.floor(COVERAGE_COMPLETE_RATIO * total);
+
+  // HomeToGo completeness: COMPLETE when the worker genuinely exhausted the feed
+  // (reached-total / plateau), OR we pulled >= 90% of the feed's own total, OR there is
+  // no feed total to judge against (no false alarm). Only a budget / scroll-cap cutoff
+  // SHORT of a known feed total reads as incomplete.
+  const hometogoReportedTotal =
+    args.hometogoReportedTotal != null && Number.isFinite(args.hometogoReportedTotal) && args.hometogoReportedTotal > 0
+      ? Math.round(args.hometogoReportedTotal)
+      : null;
+  const hometogoRawHarvested = Math.max(0, Math.round(Number(args.hometogoRawHarvested) || 0));
+  const hometogoLooksComplete =
+    Boolean(args.hometogoHarvestComplete) ||
+    hometogoReportedTotal == null ||
+    hometogoRawHarvested >= Math.floor(COVERAGE_COMPLETE_RATIO * hometogoReportedTotal);
+
   return {
     vrboReportedTotal: total,
     rawHarvested,
@@ -60,5 +97,8 @@ export function buildCityScanCoverage(args: {
     droppedBelowMinBedrooms: Math.max(0, Math.round(Number(args.droppedBelowMinBedrooms) || 0)),
     droppedNoPrice: Math.max(0, Math.round(Number(args.droppedNoPrice) || 0)),
     looksComplete,
+    hometogoReportedTotal,
+    hometogoRawHarvested,
+    hometogoLooksComplete,
   };
 }

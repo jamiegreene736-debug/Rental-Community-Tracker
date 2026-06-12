@@ -17,6 +17,9 @@ import {
   type CityVrboCoverage,
 } from "@shared/city-vrbo-coverage";
 import { listingIsOutOfArea, coordsWithinState } from "@shared/listing-geo";
+// Type-only (erased at compile) — the queue module itself is dynamically imported below
+// to avoid a load-time cycle, so a top-level import type can't reintroduce one.
+import type { SidecarHometogoHarvest } from "./vrbo-sidecar-queue";
 
 export type CityVrboFilterPipeline = {
   rawSidecar: number;
@@ -74,6 +77,8 @@ type CityVrboScrapeCacheEntry = {
     rawCount: number;
     /** How many of rawCount came from the HomeToGo onsite source (0 when disabled). */
     hometogoCount?: number;
+    /** HomeToGo harvest-completeness diag (null when HomeToGo off / no diag). */
+    hometogoHarvest?: SidecarHometogoHarvest | null;
     mapHarvest: Record<string, unknown> | null;
   };
   normalizePipeline: Omit<CityVrboFilterPipeline, "phraseFilter" | "afterPhraseFilter" | "phraseBuckets" | "suggestedPair">;
@@ -470,8 +475,13 @@ async function scrapeCityVrboPool(args: {
   // (Booking.com/Agoda/Airbnb/Hotels.com/…) are net-new (operator spec 2026-06-12). The
   // cross-source dedup below removes any HomeToGo offer that's the same physical unit as a
   // VRBO listing, so the broadened keep can't double-book.
+  // Keep BOTH the candidates AND the harvest-completeness diag (mapHarvest.hometogo) so
+  // the coverage summary can flag a TRUNCATED HomeToGo harvest (mirrors VRBO). The diag
+  // is null on failure / when HomeToGo is disabled — coverage then treats it as unknown
+  // (no false alarm).
+  type HometogoScrape = { candidates: SidecarVrboCandidate[]; harvest: SidecarHometogoHarvest | null };
   const hometogoEnabled = process.env.CITY_HOMETOGO_ENABLED === "1";
-  const hometogoPromise: Promise<SidecarVrboCandidate[]> = hometogoEnabled
+  const hometogoPromise: Promise<HometogoScrape> = hometogoEnabled
     ? searchHometogoViaSidecar({
         destination: citySearchTerm,
         searchTerm: citySearchTerm,
@@ -482,12 +492,15 @@ async function scrapeCityVrboPool(args: {
         walletBudgetMs: args.walletBudgetMs ?? CITY_VRBO_WALLET_BUDGET_MS,
         queueContext: { scanLabel: `${scanLabel}:hometogo`, dateLabel: `${args.checkIn}→${args.checkOut}`, skipResultCache: true },
       })
-        .then((res) => (res?.candidates ?? []) as SidecarVrboCandidate[])
+        .then((res) => ({
+          candidates: (res?.candidates ?? []) as SidecarVrboCandidate[],
+          harvest: (res?.mapHarvest?.hometogo ?? null) as SidecarHometogoHarvest | null,
+        }))
         .catch((err) => {
           console.warn(`[city-vrbo-inventory] HomeToGo scan failed (non-fatal): ${String((err as Error)?.message ?? err).slice(0, 160)}`);
-          return [] as SidecarVrboCandidate[];
+          return { candidates: [] as SidecarVrboCandidate[], harvest: null };
         })
-    : Promise.resolve([] as SidecarVrboCandidate[]);
+    : Promise.resolve({ candidates: [] as SidecarVrboCandidate[], harvest: null });
   const runScan = () => searchVrboViaSidecar({
     destination: citySearchTerm,
     searchTerm: citySearchTerm,
@@ -552,7 +565,8 @@ async function scrapeCityVrboPool(args: {
   // offer carries EXACT coords, we hard-drop any whose lat/lon fall outside the target state's
   // bounding box BEFORE the pool — defense-in-depth that makes a destination flake harmless and
   // keeps an out-of-region unit from ever reaching the combo matcher / the coords attach gate.
-  const hometogoRaw = await hometogoPromise;
+  const hometogoScrape = await hometogoPromise;
+  const hometogoRaw = hometogoScrape.candidates;
   const hometogoCandidates = hometogoRaw.filter((c) => coordsWithinState(c.lat, c.lng, targetState));
   const hometogoDroppedOOR = hometogoRaw.length - hometogoCandidates.length;
   if (hometogoDroppedOOR > 0) {
@@ -606,6 +620,7 @@ async function scrapeCityVrboPool(args: {
       reason: r?.reason ?? "",
       rawCount: mergedCandidates.length,
       hometogoCount: hometogoDeduped.length,
+      hometogoHarvest: hometogoScrape.harvest ?? null,
       mapHarvest: r?.mapHarvest ?? null,
     },
     normalizePipeline: pipeline,
@@ -845,12 +860,18 @@ async function runCityScanCore(args: {
   // usable = the priced, >=2BR pool the matcher works from (afterNormalize, the
   // pre-phrase-filter count — phrase filters narrow per-search but the city's
   // usable inventory is the >=2BR total). vrboReportedTotal is VRBO's own count.
+  const htgHarvest = scrapeEntry.sidecar.hometogoHarvest ?? null;
   const coverage = buildCityScanCoverage({
     rawHarvested: scrapeEntry.rawListings.length,
     usable: filtered.filterPipeline.afterNormalize,
     droppedBelowMinBedrooms: filtered.filterPipeline.droppedBelowMinBedrooms,
     droppedNoPrice: filtered.filterPipeline.droppedNoPrice,
     vrboReportedTotal: vrboReportedTotalFromMapHarvest(scrapeEntry.sidecar.mapHarvest),
+    // HomeToGo reconciles against its FEED's own offer total; scopedOffers is the raw
+    // (pre-filter) count we harvested. harvestComplete = reached-total/plateau.
+    hometogoReportedTotal: htgHarvest?.reportedTotal ?? null,
+    hometogoRawHarvested: htgHarvest?.scopedOffers ?? 0,
+    hometogoHarvestComplete: htgHarvest?.harvestComplete ?? undefined,
   });
   // Observability for a GENUINE under-harvest (vs the >=2BR filter): if we
   // captured well under VRBO's own reported total, warn so it's greppable and
@@ -860,6 +881,16 @@ async function runCityScanCore(args: {
       `[city-vrbo-inventory] INCOMPLETE harvest "${args.logLabel}" ${args.checkIn}→${args.checkOut}: ` +
       `rawHarvested=${coverage.rawHarvested} of VRBO total ${coverage.vrboReportedTotal} ` +
       `(usable >=2BR=${coverage.usable}); scan may have missed pages`,
+    );
+  }
+  // Same guard for HomeToGo: only fires on a genuine truncation (budget/scroll-cap cut
+  // SHORT of the feed's own total) — a reached-total/plateau or unknown-total harvest does
+  // not warn. htgHarvest?.harvestStop names which terminal condition cut it off.
+  if (htgHarvest && !coverage.hometogoLooksComplete && coverage.hometogoReportedTotal) {
+    console.warn(
+      `[city-vrbo-inventory] INCOMPLETE HomeToGo harvest "${args.logLabel}" ${args.checkIn}→${args.checkOut}: ` +
+      `scopedOffers=${coverage.hometogoRawHarvested} of feed total ${coverage.hometogoReportedTotal} ` +
+      `(stop=${htgHarvest.harvestStop ?? "?"}); HomeToGo scan was truncated`,
     );
   }
 

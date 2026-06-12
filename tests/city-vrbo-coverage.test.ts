@@ -69,5 +69,46 @@ check("mapHarvest {graphqlTotalCount:0} → null", vrboReportedTotalFromMapHarve
 check("mapHarvest null → null", vrboReportedTotalFromMapHarvest(null) === null);
 check("mapHarvest {} → null", vrboReportedTotalFromMapHarvest({}) === null);
 
+// ── HomeToGo source completeness (mirrors the VRBO reconciliation) ───────────
+console.log("\ncity-vrbo-coverage: HomeToGo feed-total reconciliation");
+
+// VRBO-only call site (no HomeToGo args) → safe defaults, never false-alarms.
+{
+  const c = buildCityScanCoverage({ rawHarvested: 142, usable: 82, droppedBelowMinBedrooms: 55, droppedNoPrice: 5, vrboReportedTotal: 144 });
+  check("no HomeToGo args → hometogoReportedTotal null, raw 0, looksComplete true (back-compat)",
+    c.hometogoReportedTotal === null && c.hometogoRawHarvested === 0 && c.hometogoLooksComplete === true, c);
+}
+// Feed total known, pulled >= 90% → complete.
+{
+  const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
+    hometogoReportedTotal: 100, hometogoRawHarvested: 92, hometogoHarvestComplete: false });
+  check("HTG 92/100 (>=floor(0.9·100)=90) → hometogoLooksComplete", c.hometogoLooksComplete && c.hometogoReportedTotal === 100, c);
+}
+// Feed total known, pulled < 90%, harvest cut off by budget → INCOMPLETE (the flag).
+{
+  const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
+    hometogoReportedTotal: 100, hometogoRawHarvested: 60, hometogoHarvestComplete: false });
+  check("HTG 60/100 + budget cutoff → INCOMPLETE (truncation flagged)", !c.hometogoLooksComplete, c);
+}
+// Feed total known, pulled < 90%, BUT worker hit a genuine plateau → complete (backend-cap safety).
+{
+  const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
+    hometogoReportedTotal: 600, hometogoRawHarvested: 200, hometogoHarvestComplete: true });
+  check("HTG 200/600 but harvestComplete (plateau) → complete (feed cap below header, not a miss)", c.hometogoLooksComplete, c);
+}
+// Feed total NOT exposed (null) → never false-alarm, even on a budget cutoff.
+{
+  const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
+    hometogoReportedTotal: null, hometogoRawHarvested: 12, hometogoHarvestComplete: false });
+  check("HTG unknown feed total → hometogoLooksComplete (no false alarm)", c.hometogoLooksComplete && c.hometogoReportedTotal === null, c);
+}
+// Feed total 0 / garbage → treated as unknown (null) → complete.
+{
+  const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
+    hometogoReportedTotal: 0, hometogoRawHarvested: NaN as unknown as number, hometogoHarvestComplete: false });
+  check("HTG feed total 0 → null + raw coerces to 0 + complete",
+    c.hometogoReportedTotal === null && c.hometogoRawHarvested === 0 && c.hometogoLooksComplete, c);
+}
+
 console.log(`\ncity-vrbo-coverage: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

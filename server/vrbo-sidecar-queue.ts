@@ -627,6 +627,29 @@ export type SidecarProviderHealth = {
 // was VRBO-only.
 export type SidecarVrboCandidate = SidecarPropertyCandidate;
 
+// HomeToGo completeness diagnostics, surfaced by the worker's runHometogoSearch under
+// mapHarvest.hometogo. Lets the server flag a TRUNCATED HomeToGo harvest the same way the
+// VRBO graphqlTotalCount drives city-vrbo-coverage. See city-vrbo-coverage.
+export type SidecarHometogoHarvest = {
+  /** Deduped offers seen across ALL searchIds (incl. any stale/global fire). */
+  rawOffers?: number;
+  /** Deduped offers from the FINAL scoped searchId (the real, in-region pool). */
+  scopedOffers?: number;
+  /** Candidates kept after the provider/region filter. */
+  kept?: number;
+  /** The /searchdetails feed's OWN reported offer total for the searchId (null = not exposed). */
+  reportedTotal?: number | null;
+  /** Same as reportedTotal pre-null-coalesce (0 when the feed exposes no total). */
+  feedTotal?: number;
+  /** Rendered all-provider "N rentals" header count — context/logging only, NOT the gate. */
+  headerTotal?: number;
+  /** reached-total | plateau | budget | max-scrolls */
+  harvestStop?: string | null;
+  /** harvestStop is reached-total or plateau (the feed was genuinely exhausted, not cut off). */
+  harvestComplete?: boolean;
+  error?: string | null;
+};
+
 export type SidecarMapHarvestStats = {
   harvestPasses?: number;
   finalHarvestTotal?: number;
@@ -645,6 +668,8 @@ export type SidecarMapHarvestStats = {
   graphqlUiPages?: number;
   graphqlPaginationStop?: string | null;
   graphqlTotalCount?: number;
+  /** HomeToGo source completeness (present only on hometogo_search results). */
+  hometogo?: SidecarHometogoHarvest | null;
 };
 
 const queue = new Map<string, SidecarRequest>();
@@ -832,6 +857,25 @@ function normalizeMapHarvestStats(raw: unknown): SidecarMapHarvestStats | null {
         noBedrooms: num((item.extractDrops as Record<string, unknown>).noBedrooms),
       }
     : null;
+  // Preserve the HomeToGo completeness sub-object (otherwise it's silently stripped and
+  // the server can't flag a truncated HomeToGo harvest).
+  const hometogo: SidecarHometogoHarvest | null =
+    item.hometogo && typeof item.hometogo === "object" && !Array.isArray(item.hometogo)
+      ? (() => {
+          const h = item.hometogo as Record<string, unknown>;
+          return {
+            rawOffers: num(h.rawOffers),
+            scopedOffers: num(h.scopedOffers),
+            kept: num(h.kept),
+            reportedTotal: h.reportedTotal == null ? null : (num(h.reportedTotal) ?? null),
+            feedTotal: num(h.feedTotal),
+            headerTotal: num(h.headerTotal),
+            harvestStop: typeof h.harvestStop === "string" ? h.harvestStop : null,
+            harvestComplete: typeof h.harvestComplete === "boolean" ? h.harvestComplete : undefined,
+            error: typeof h.error === "string" ? h.error : null,
+          };
+        })()
+      : null;
   return {
     harvestPasses: num(item.harvestPasses),
     finalHarvestTotal: num(item.finalHarvestTotal),
@@ -850,6 +894,7 @@ function normalizeMapHarvestStats(raw: unknown): SidecarMapHarvestStats | null {
     graphqlUiPages: num(item.graphqlUiPages),
     graphqlPaginationStop: typeof item.graphqlPaginationStop === "string" ? item.graphqlPaginationStop : null,
     graphqlTotalCount: num(item.graphqlTotalCount),
+    hometogo,
   };
 }
 
