@@ -464,9 +464,12 @@ async function scrapeCityVrboPool(args: {
   // with the VRBO scan (own sidecar concurrency group) so it inherits the nearby-town
   // expansion + home-city retry for free without serializing behind VRBO. Gated by
   // CITY_HOMETOGO_ENABLED (default OFF until the worker handler is live) and fully
-  // NON-FATAL: any HomeToGo failure leaves the VRBO pool untouched. The worker keeps the
-  // "Booking through HomeToGo" (onsite) subset PLUS Booking.com clickout offers (net-new —
-  // no other buy-in source scrapes Booking.com); it drops every other OTA (Vrbo/Expedia).
+  // NON-FATAL: any HomeToGo failure leaves the VRBO pool untouched. The worker keeps
+  // EVERYTHING HomeToGo aggregates EXCEPT the Expedia/Vrbo family (Vrbo/Expedia/Abritel/
+  // HomeAway/FeWo-direkt — already scraped from VRBO): onsite PMs + all other-OTA clickout
+  // (Booking.com/Agoda/Airbnb/Hotels.com/…) are net-new (operator spec 2026-06-12). The
+  // cross-source dedup below removes any HomeToGo offer that's the same physical unit as a
+  // VRBO listing, so the broadened keep can't double-book.
   const hometogoEnabled = process.env.CITY_HOMETOGO_ENABLED === "1";
   const hometogoPromise: Promise<SidecarVrboCandidate[]> = hometogoEnabled
     ? searchHometogoViaSidecar({

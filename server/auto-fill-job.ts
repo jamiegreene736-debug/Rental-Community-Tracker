@@ -1273,6 +1273,47 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
               (cc) => { const vv = gate(cc); return { acceptable: vv.acceptable, profit: vv.profit }; });
           }
         }
+        // ── Resort-stage HomeToGo combos (operator spec 2026-06-12) ──
+        // The resort AUTO-ATTACH above is VRBO-only on purpose (a HomeToGo pick must
+        // clear the attach proximity guard's real-evidence rule, so it can't be
+        // auto-attached with the optimistic resort footprint — that's the 2026-06-10
+        // cross-resort incident). But the spec wants resort-name combos found across
+        // BOTH sources. fetchCity() already runs the community scan WITH HomeToGo
+        // (memoized), so reuse its HomeToGo listings, merge with the resort VRBO pool,
+        // run the SAME same-community matcher, and SURFACE the HomeToGo-involved resort
+        // combos as operator-verify alternatives — the operator attaches via
+        // attachComboMutation, which routes through the city-wide proximity guard
+        // (HomeToGo coords / shared-title evidence), so an unverifiable cross-resort
+        // pair is rejected at attach. Non-fatal + additive: never blocks the ladder.
+        // Recompute against the CURRENT remaining slots — the VRBO auto-attach above
+        // may have filled some, so the surfaced HomeToGo alternatives match what's
+        // actually still needed (when the resort VRBO combo filled EVERY slot this is
+        // empty and we skip; runResortHomeCitySwap then surfaces home-city HomeToGo).
+        const htgPlan = remainingSlots().map((s) => s.bedrooms);
+        if (cityCapable && resortListings.length >= 1 && htgPlan.length >= 2) {
+          try {
+            const cityForHtg = await fetchCity();
+            const htgListings = ((cityForHtg?.listings ?? []) as CityVrboListing[])
+              .filter((l) => /hometogo/i.test(String(l?.sourceLabel ?? "")));
+            if (htgListings.length) {
+              const seenUrls = new Set(resortListings.map((l) => listingUrlKey(l.url)).filter(Boolean));
+              const mergedPool: CityVrboListing[] = [...resortListings];
+              for (const h of htgListings) {
+                const k = listingUrlKey(h.url);
+                if (!k || seenUrls.has(k)) continue;
+                seenUrls.add(k);
+                mergedPool.push(h);
+              }
+              const htgPairs = suggestCityVrboComboPairs(mergedPool, htgPlan, job.nights, RESORT_COMBO_LIMIT)
+                .filter((p) => Array.isArray(p?.picks) && p.picks.some((pk: any) => /hometogo/i.test(String(pk?.sourceLabel ?? ""))));
+              surfaceAlternativeCombos(job, htgPairs, `${job.community ?? "Resort"} (resort + HomeToGo)`,
+                { scopeCategory: "home" },
+                (cc) => { const v = gate(cc); return { acceptable: v.acceptable, profit: v.profit }; });
+            }
+          } catch (e: any) {
+            console.warn(`[auto-fill] resort HomeToGo combo surfacing failed (non-fatal): ${e?.message ?? e}`);
+          }
+        }
         filledUnitIds = await refreshFilled();
         if (remainingSlots().length === 0) {
           // Resort Stage 1.5 filled every slot — still consult HomeToGo + VRBO and
