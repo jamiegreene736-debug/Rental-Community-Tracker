@@ -883,13 +883,13 @@ async function runCityScanCore(args: {
       `(usable >=2BR=${coverage.usable}); scan may have missed pages`,
     );
   }
-  // Same guard for HomeToGo: only fires on a genuine truncation (budget/scroll-cap cut
-  // SHORT of the feed's own total) — a reached-total/plateau or unknown-total harvest does
-  // not warn. htgHarvest?.harvestStop names which terminal condition cut it off.
-  if (htgHarvest && !coverage.hometogoLooksComplete && coverage.hometogoReportedTotal) {
+  // Same guard for HomeToGo: fires on a genuine truncation (budget / scroll-cap cutoff) — a
+  // reached-total/plateau harvest, or one HomeToGo never ran, does not warn. Reports the feed
+  // total when the feed exposed one, else "unknown". htgHarvest.harvestStop names the cutoff.
+  if (htgHarvest && !coverage.hometogoLooksComplete) {
     console.warn(
       `[city-vrbo-inventory] INCOMPLETE HomeToGo harvest "${args.logLabel}" ${args.checkIn}→${args.checkOut}: ` +
-      `scopedOffers=${coverage.hometogoRawHarvested} of feed total ${coverage.hometogoReportedTotal} ` +
+      `scopedOffers=${coverage.hometogoRawHarvested} of feed total ${coverage.hometogoReportedTotal ?? "unknown"} ` +
       `(stop=${htgHarvest.harvestStop ?? "?"}); HomeToGo scan was truncated`,
     );
   }

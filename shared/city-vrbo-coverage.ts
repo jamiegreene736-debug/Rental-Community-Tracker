@@ -85,10 +85,20 @@ export function buildCityScanCoverage(args: {
       ? Math.round(args.hometogoReportedTotal)
       : null;
   const hometogoRawHarvested = Math.max(0, Math.round(Number(args.hometogoRawHarvested) || 0));
+  // Three cases, by the worker's terminal harvest state:
+  //  - undefined  → HomeToGo did NOT run (disabled / errored / VRBO-only call) → n/a → complete.
+  //  - true       → reached-total or plateau (results UI exhausted) → complete.
+  //  - false      → budget / scroll-cap cutoff → complete ONLY if we still pulled >=90% of a
+  //                 KNOWN feed total; an unknown total + a cutoff is possibly-truncated → flag it.
+  // (Unlike VRBO, an unknown total does NOT auto-pass here: a budget/max-scrolls stop is itself
+  // evidence of truncation regardless of whether the feed exposed a number.)
   const hometogoLooksComplete =
-    Boolean(args.hometogoHarvestComplete) ||
-    hometogoReportedTotal == null ||
-    hometogoRawHarvested >= Math.floor(COVERAGE_COMPLETE_RATIO * hometogoReportedTotal);
+    args.hometogoHarvestComplete === undefined
+      ? true
+      : args.hometogoHarvestComplete
+        ? true
+        : hometogoReportedTotal != null &&
+          hometogoRawHarvested >= Math.floor(COVERAGE_COMPLETE_RATIO * hometogoReportedTotal);
 
   return {
     vrboReportedTotal: total,

@@ -72,17 +72,17 @@ check("mapHarvest {} → null", vrboReportedTotalFromMapHarvest({}) === null);
 // ── HomeToGo source completeness (mirrors the VRBO reconciliation) ───────────
 console.log("\ncity-vrbo-coverage: HomeToGo feed-total reconciliation");
 
-// VRBO-only call site (no HomeToGo args) → safe defaults, never false-alarms.
+// VRBO-only call site (HomeToGo did NOT run — harvestComplete undefined) → n/a, complete.
 {
   const c = buildCityScanCoverage({ rawHarvested: 142, usable: 82, droppedBelowMinBedrooms: 55, droppedNoPrice: 5, vrboReportedTotal: 144 });
-  check("no HomeToGo args → hometogoReportedTotal null, raw 0, looksComplete true (back-compat)",
+  check("no HomeToGo args → hometogoReportedTotal null, raw 0, looksComplete true (n/a, back-compat)",
     c.hometogoReportedTotal === null && c.hometogoRawHarvested === 0 && c.hometogoLooksComplete === true, c);
 }
-// Feed total known, pulled >= 90% → complete.
+// Feed total known, pulled >= 90%, cut off → still complete (we got effectively all).
 {
   const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
     hometogoReportedTotal: 100, hometogoRawHarvested: 92, hometogoHarvestComplete: false });
-  check("HTG 92/100 (>=floor(0.9·100)=90) → hometogoLooksComplete", c.hometogoLooksComplete && c.hometogoReportedTotal === 100, c);
+  check("HTG 92/100 + cutoff (>=floor(0.9·100)=90) → hometogoLooksComplete", c.hometogoLooksComplete && c.hometogoReportedTotal === 100, c);
 }
 // Feed total known, pulled < 90%, harvest cut off by budget → INCOMPLETE (the flag).
 {
@@ -90,23 +90,31 @@ console.log("\ncity-vrbo-coverage: HomeToGo feed-total reconciliation");
     hometogoReportedTotal: 100, hometogoRawHarvested: 60, hometogoHarvestComplete: false });
   check("HTG 60/100 + budget cutoff → INCOMPLETE (truncation flagged)", !c.hometogoLooksComplete, c);
 }
-// Feed total known, pulled < 90%, BUT worker hit a genuine plateau → complete (backend-cap safety).
+// Plateau (results UI exhausted) below a huge all-provider feed total → complete (the common
+// big-metro case: feed says ~1500, the UI only serves a few hundred, we got them all).
 {
   const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
-    hometogoReportedTotal: 600, hometogoRawHarvested: 200, hometogoHarvestComplete: true });
-  check("HTG 200/600 but harvestComplete (plateau) → complete (feed cap below header, not a miss)", c.hometogoLooksComplete, c);
+    hometogoReportedTotal: 1503, hometogoRawHarvested: 300, hometogoHarvestComplete: true });
+  check("HTG 300/1503 but harvestComplete (plateau) → complete (UI exhausted, not a miss)", c.hometogoLooksComplete, c);
 }
-// Feed total NOT exposed (null) → never false-alarm, even on a budget cutoff.
+// Ran + cut off (harvestComplete=false) with NO exposed feed total → possibly-truncated → INCOMPLETE.
 {
   const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
     hometogoReportedTotal: null, hometogoRawHarvested: 12, hometogoHarvestComplete: false });
-  check("HTG unknown feed total → hometogoLooksComplete (no false alarm)", c.hometogoLooksComplete && c.hometogoReportedTotal === null, c);
+  check("HTG unknown total + cutoff → INCOMPLETE (a cutoff is itself truncation evidence)",
+    !c.hometogoLooksComplete && c.hometogoReportedTotal === null, c);
 }
-// Feed total 0 / garbage → treated as unknown (null) → complete.
+// Ran + plateau with NO exposed feed total → complete (no false alarm: UI was exhausted).
 {
   const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
-    hometogoReportedTotal: 0, hometogoRawHarvested: NaN as unknown as number, hometogoHarvestComplete: false });
-  check("HTG feed total 0 → null + raw coerces to 0 + complete",
+    hometogoReportedTotal: null, hometogoRawHarvested: 28, hometogoHarvestComplete: true });
+  check("HTG unknown total + plateau → complete (no false alarm)", c.hometogoLooksComplete, c);
+}
+// Feed total 0 / garbage coerces to null; with a plateau stop → complete.
+{
+  const c = buildCityScanCoverage({ rawHarvested: 0, usable: 0, droppedBelowMinBedrooms: 0, droppedNoPrice: 0, vrboReportedTotal: null,
+    hometogoReportedTotal: 0, hometogoRawHarvested: NaN as unknown as number, hometogoHarvestComplete: true });
+  check("HTG feed total 0 → null + raw coerces to 0 + (plateau) complete",
     c.hometogoReportedTotal === null && c.hometogoRawHarvested === 0 && c.hometogoLooksComplete, c);
 }
 

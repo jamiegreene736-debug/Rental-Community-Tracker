@@ -1,0 +1,316 @@
+{
+ "searchSummary": {
+  "totalCountRaw": 1503,
+  "totalCount": "1,503",
+  "totalCountLabel": "1,503 offers",
+  "locationCountRaw": 1781,
+  "minAvailability": 0.93,
+  "titlePage": "Poipu Vacation Rentals & Vacation Homes - HomeToGo",
+  "seoHeading": "1,503 offers",
+  "exposedPriceType": "bf"
+ },
+ "totalRaw": 2936,
+ "offers": [
+  {
+   "id": "9f6329db5e3e4ead93a7a98412fb9bf2",
+   "title": "Condo",
+   "imageLinks": {
+    "small": "//cdn.hometogo.net/small/v1/632/c32/86fd561c5e96c9712a2e1ba986.jpg",
+    "medium": "//cdn.hometogo.net/medium/v1/632/c32/86fd561c5e96c9712a2e1ba986.jpg",
+    "large": "//cdn.hometogo.net/large/v1/632/c32/86fd561c5e96c9712a2e1ba986.jpg",
+    "thumbnail": "//cdn.hometogo.net/small/v1/632/c32/86fd561c5e96c9712a2e1ba986.jpg",
+    "aspectRatio": 1.5039164490861618,
+    "altText": "Condo with yard - 0"
+   },
+   "preferredImageId": null,
+   "lowestPriceInfo": {
+    "display": "$677"
+   },
+   "deepLink": "/deeplink/?params=eJwtjksKwjAURfeSqRbya34LEJw5cAMvLy80UG1pIyLi3k3Q4b3nwL1vNi8ItSx3Ftioo9EZDRJiZke2bgWpvlZqrC4V5ksvGtin5Xl6zP8cGG9dLTfaK9zWliWXZuBmEOIqbOBj0ObAZeDdK6kJPhslfYojKdIEySuw4J0WMkcfs-wbBBtO526Ts8KCFM75pDBBp7gR9c8_jX2-MbM7mA",
+   "actions": {
+    "conversion": {
+     "first": {
+      "link": "/rental/9f6329db5e3e4ead93a7a98412fb9bf2?location=54b64fc6ceccf&pricetype=totalPrice&showFullPrice=0&duration=7&searchId=e8717a21889d3cda",
+      "conversionCategory": "rental_open",
+      "action": "follow",
+      "offerId": "9f6329db5e3e4ead93a7a98412fb9bf2"
+     },
+     "second": {
+      "link": "/rental/9f6329db5e3e4ead93a7a98412fb9bf2?location=54b64fc6ceccf&pricetype=totalPrice&showFullPrice=0&duration=7&searchId=e8717a21889d3cda",
+      "conversionCategory": "rental_open",
+      "action": "follow",
+      "offerId": "9f6329db5e3e4ead93a7a98412fb9bf2"
+     },
+     "third": {
+      "link": "/rental/9f6329db5e3e4ead93a7a98412fb9bf2?location=54b64fc6ceccf&pricetype=totalPrice&showFullPrice=0&duration=7&searchId=e8717a21889d3cda",
+      "conversionCategory": "rental_open",
+      "action": "follow",
+      "offerId": "9f6329db5e3e4ead93a7a98412fb9bf2"
+     },
+     "fourth": {
+      "link": "/deeplink/?params=eJwtjksKwjAURfeSqRbya34LEJw5cAMvLy80UG1pIyLi3k3Q4b3nwL1vNi8ItSx3Ftioo9EZDRJiZke2bgWpvlZqrC4V5ksvGtin5Xl6zP8cGG9dLTfaK9zWliWXZuBmEOIqbOBj0ObAZeDdK6kJPhslfYojKdIEySuw4J0WMkcfs-wbBBtO526Ts8KCFM75pDBBp7gR9c8_jX2-MbM7mA&clo=2",
+      "conversionCategory": "clickout",
+      "action": "follow",
+      "offerId": "9f6329db5e3e4ead93a7a98412fb9bf2"
+     },
+     "fifth": {
+      "link": "/rental/9f6329db5e3e4ead93a7a98412fb9bf2?location=54b64fc6ceccf&pricetype=totalPrice&showFullPrice=0&searchId=e8717a21889d3cda",
+      "conversionCategory": "rental_open",
+      "action": "follow",
+      "offerId": "9f6329db5e3e4ead93a7a98412fb9bf2"
+     }
+    },
+    "wishList": {
+     "add": {
+      "link": "/pinboard/update/9f6329db5e3e4ead93a7a98412fb9bf2",
+      "method": "POST",
+      "parameters": {
+       "locationId": "54b64fc6ceccf"
+      }
+     },
+     "delete": {
+      "link": "/pinboard/all/9f6329db5e3e4ead93a7a98412fb9bf2",
+      "method": "DELETE",
+      "parameters": {}
+     }
+    }
+   },
+   "initialPrice": null,
+   "locationTrailHeader": "Poipu, Koloa, Hawaii, United States",
+   "rentalObjectId": "bea0e02348c789ce",
+   "geoLocation": {
+    "lat": 21.877846,
+    "lon": -159.457327
+   },
+   "fullGeoHash": "87ys7qwxw",
+   "nearby": false,
+   "alias": [
+    "homeAway-129638773",
+    "43cf213a7e9cebf8",
+    "9f6329db5e3e4ead93a7a98412fb9bf2",
+    "edbd53f9d2e401c0",
+    "1ddddf6e607a3f34",
+    "bea0e02348c789ce",
+    "56df7688f4c2362bf11d1288dcd095c6"
+   ],
+   "amenities": {
+    "labelSectionTitle": "Amenities",
+    "common": [
+     {
+      "label": "Dishwasher",
+      "amenity": "dishwasher"
+     },
+     {
+      "label": "TV",
+      "amenity": "tv"
+     },
+     {
+      "label": "Air conditioning",
+      "amenity": "air_conditioning"
+     },
+     {
+      "label": "WiFi",
+      "amenity": "internet"
+     },
+     {
+      "label": "Microwave",
+      "amenity": "microwave"
+     },
+     {
+      "label": "Crib",
+      "amenity": "cot"
+     },
+     {
+      "label": "No pets",
+      "amenity": "no_dogs"
+     },
+     {
+      "label": "No smoking",
+      "amenity": "smoking_not_allowed"
+     },
+     {
+      "label": "Kitchen",
+      "amenity": "kitchen"
+     },
+     {
+      "label": "Yard",
+      "amenity": "garden"
+     },
+     {
+      "label": "Hairdryer",
+      "amenity": "hairdryer"
+     },
+     {
+      "label": "Iron",
+      "amenity": "iron"
+     },
+     {
+      "label": "Coffee machine",
+      "amenity": "coffee_machine"
+     },
+     {
+      "label": "Toaster",
+      "amenity": "toaster"
+     }
+    ]
+   },
+   "analyticsSnowPlow": {},
+   "serpImageIndex": 0
+  },
+  {
+   "id": "206867431b039f121ba003ea46e42ae5",
+   "title": "1070 ft\u00b2 Condo",
+   "imageLinks": {
+    "small": "//cdn.hometogo.net/small/v1/257/daa/34f2157a3c47fd30480f3b357c.jpg",
+    "medium": "//cdn.hometogo.net/medium/v1/257/daa/34f2157a3c47fd30480f3b357c.jpg",
+    "large": "//cdn.hometogo.net/large/v1/257/daa/34f2157a3c47fd30480f3b357c.jpg",
+    "thumbnail": "//cdn.hometogo.net/small/v1/257/daa/34f2157a3c47fd30480f3b357c.jpg",
+    "aspectRatio": 1.5,
+    "altText": "Nice condo with yard, pool & terrace - 0"
+   },
+   "preferredImageId": null,
+   "lowestPriceInfo": {
+    "display": "$227"
+   },
+   "deepLink": "/deeplink/?params=eJwtjk0KwjAQhe-SrRYmP03SHEBw58ILTKdTGmhNaSMi4t1N1OV73wfvvcScCHNMNxFEa3prRrLERKM4inWLxPm5cmE5ZZwvtShgn9LjdJ__OQgoXY4L7xmXtWQFyjZgGymv0gVog7EHUAGqF4evYL11RssedDdKJXsE0IzGslHIbd1g3Gg6V5u9kw6V9L4bNA1YKW3M9fNPE-8P4Xs6gA",
+   "actions": {
+    "conversion": {
+     "first": {
+      "link": "/rental/206867431b039f121ba003ea46e42ae5?location=54b64fc6ceccf&pricetype=totalPrice&showFullPrice=0&duration=7&searchId=e8717a21889d3cda",
+      "conversionCategory": "rental_open",
+      "action": "follow",
+      "offerId": "206867431b039f121ba003ea46e42ae5"
+     },
+     "second": {
+      "link": "/rental/206867431b039f121ba003ea46e42ae5?location=54b64fc6ceccf&pricetype=totalPrice&showFullPrice=0&duration=7&searchId=e8717a21889d3cda",
+      "conversionCategory": "rental_open",
+      "action": "follow",
+      "offerId": "206867431b039f121ba003ea46e42ae5"
+     },
+     "third": {
+      "link": "/rental/206867431b039f121ba003ea46e42ae5?location=54b64fc6ceccf&pricetype=totalPrice&showFullPrice=0&duration=7&searchId=e8717a21889d3cda",
+      "conversionCategory": "rental_open",
+      "action": "follow",
+      "offerId": "206867431b039f121ba003ea46e42ae5"
+     },
+     "fourth": {
+      "link": "/deeplink/?params=eJwtjk0KwjAQhe-SrRYmP03SHEBw58ILTKdTGmhNaSMi4t1N1OV73wfvvcScCHNMNxFEa3prRrLERKM4inWLxPm5cmE5ZZwvtShgn9LjdJ__OQgoXY4L7xmXtWQFyjZgGymv0gVog7EHUAGqF4evYL11RssedDdKJXsE0IzGslHIbd1g3Gg6V5u9kw6V9L4bNA1YKW3M9fNPE-8P4Xs6gA&clo=2",
+      "conversionCategory": "clickout",
+      "action": "follow",
+      "offerId": "206867431b039f121ba003ea46e42ae5"
+     },
+     "fifth": {
+      "link": "/rental/206867431b039f121ba003ea46e42ae5?location=54b64fc6ceccf&pricetype=totalPrice&showFullPrice=0&searchId=e8717a21889d3cda",
+      "conversionCategory": "rental_open",
+      "action": "follow",
+      "offerId": "206867431b039f121ba003ea46e42ae5"
+     }
+    },
+    "wishList": {
+     "add": {
+      "link": "/pinboard/update/206867431b039f121ba003ea46e42ae5",
+      "method": "POST",
+      "parameters": {
+       "locationId": "54b64fc6ceccf"
+      }
+     },
+     "delete": {
+      "link": "/pinboard/all/206867431b039f121ba003ea46e42ae5",
+      "method": "DELETE",
+      "parameters": {}
+     }
+    }
+   },
+   "initialPrice": null,
+   "locationTrailHeader": "Poipu, Koloa, Hawaii, United States",
+   "rentalObjectId": "7bfbbda6194ee9bb",
+   "geoLocation": {
+    "lat": 21.881783,
+    "lon": -159.467411
+   },
+   "fullGeoHash": "87ys7prqs",
+   "nearby": false,
+   "alias": [
+    "homeAway-25730812",
+    "3200eaec507d0273",
+    "206867431b039f121ba003ea46e42ae5",
+    "bedbc7e17b0af9e7",
+    "67f421d9c2817ce5",
+    "12988e8a349b5856",
+    "7bfbbda6194ee9bb",
+    "6d4efe578a1e66e5c84a1668c400dba9"
+   ],
+   "amenities": {
+    "labelSectionTitle": "Amenities",
+    "common": [
+     {
+      "label": "Pool",
+      "amenity": "pool"
+     },
+     {
+      "label": "Dishwasher",
+      "amenity": "dishwasher"
+     },
+     {
+      "label": "Balcony/patio",
+      "amenity": "terrace"
+     },
+     {
+      "label": "Washing machine",
+      "amenity": "washing_machine_available"
+     },
+     {
+      "label": "TV",
+      "amenity": "tv"
+     },
+     {
+      "label": "WiFi",
+      "amenity": "internet"
+     },
+     {
+      "label": "Microwave",
+      "amenity": "microwave"
+     },
+     {
+      "label": "No pets",
+      "amenity": "no_dogs"
+     },
+     {
+      "label": "No smoking",
+      "amenity": "smoking_not_allowed"
+     },
+     {
+      "label": "Kitchen",
+      "amenity": "kitchen"
+     },
+     {
+      "label": "Yard",
+      "amenity": "garden"
+     },
+     {
+      "label": "Grill",
+      "amenity": "barbecue"
+     },
+     {
+      "label": "Hairdryer",
+      "amenity": "hairdryer"
+     },
+     {
+      "label": "Iron",
+      "amenity": "iron"
+     },
+     {
+      "label": "Coffee machine",
+      "amenity": "coffee_machine"
+     },
+     {
+      "label": "Toaster",
+      "amenity": "toaster"
+     }
+    ]
+   },
+   "analyticsSnowPlow": {},
+   "serpImageIndex": 0
+  }
+ ]
+}

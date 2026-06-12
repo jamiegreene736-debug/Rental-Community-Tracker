@@ -7,7 +7,7 @@
     "dev": "NODE_ENV=development tsx server/index.ts",
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
-    "test": "tsx tests/pipeline-logic.test.ts && tsx tests/availability-window.test.ts && tsx tests/hybrid-pricing.test.ts && tsx tests/sidecar-concurrency.test.ts && tsx tests/quo-call.test.ts && tsx tests/auth-agent.test.ts && tsx tests/rentcast-discovery.test.ts && tsx tests/realtyapi-discovery.test.ts && tsx tests/city-vrbo-expansion.smoke.ts && tsx tests/city-vrbo-combo.test.ts && tsx tests/hometogo-proximity.test.ts && tsx tests/auto-fill-combo-assign.test.ts && tsx tests/buy-in-profit.test.ts && tsx tests/combo-splits.test.ts && tsx tests/city-vrbo-coverage.test.ts && tsx tests/listing-geo.test.ts && tsx tests/sidecar-request-key.test.ts",
+    "test": "tsx tests/pipeline-logic.test.ts && tsx tests/availability-window.test.ts && tsx tests/hybrid-pricing.test.ts && tsx tests/sidecar-concurrency.test.ts && tsx tests/quo-call.test.ts && tsx tests/auth-agent.test.ts && tsx tests/rentcast-discovery.test.ts && tsx tests/realtyapi-discovery.test.ts && tsx tests/city-vrbo-expansion.smoke.ts && tsx tests/city-vrbo-combo.test.ts && tsx tests/hometogo-proximity.test.ts && tsx tests/auto-fill-combo-assign.test.ts && tsx tests/buy-in-profit.test.ts && tsx tests/combo-splits.test.ts && tsx tests/city-vrbo-coverage.test.ts && tsx tests/listing-geo.test.ts && tsx tests/sidecar-request-key.test.ts && tsx tests/hometogo-feed-total.test.mjs",
     "check": "tsc",
     "db:push": "drizzle-kit push",
     "sidecar:install": "./scripts/install-vrbo-sidecar-launchagent.sh"
