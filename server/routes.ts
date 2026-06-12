@@ -13369,8 +13369,14 @@ Requirements:
             const r = await scrapeVrboPhotosViaSidecar({
               url: u.url,
               maxPhotos: 8,
-              walletBudgetMs: 90_000,
+              // Longer than the default since verify now yields to the bulk and may
+              // wait for its idle gaps; kept under Railway's ~300s edge timeout.
+              walletBudgetMs: 200_000,
               pollIntervalMs: 1500,
+              // Yield the shared VRBO concurrency slot to an in-progress bulk/
+              // auto-fill search — verify only fills its idle gaps, never preempts
+              // or stalls the queue's own searches. (Still single-file vs VRBO.)
+              queueContext: { background: true, scanLabel: "verify-combo-community" },
             });
             const descriptionText = String((r as { descriptionText?: string | null }).descriptionText ?? "");
             const resolved = resolveUnitCommunityFromText({

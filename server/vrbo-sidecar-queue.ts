@@ -148,6 +148,7 @@ function fullStateNameLower(state?: string | null): string | undefined {
 export type SidecarVrboPhotoScrapeParams = {
   url: string;
   maxPhotos?: number;
+  queueContext?: SidecarQueueContext;
 };
 
 // CODEX NOTE (2026-05-04, claude/sidecar-zillow-scrape): Zillow
@@ -433,6 +434,15 @@ export type SidecarQueueContext = {
   skipResultCache?: boolean;
   /** When true, bypass request-key dedupe and enqueue a new browser run. */
   forceFresh?: boolean;
+  /**
+   * Low-priority op: the worker prefers any claimable NON-background op first, so
+   * an operator-triggered side task (e.g. "Verify community" photo scrapes) yields
+   * the shared VRBO concurrency slot to an in-progress bulk/auto-fill search and
+   * only runs in its idle gaps. It still gets claimed when nothing else is ready,
+   * so it never starves. Does NOT bypass the concurrency limit — VRBO ops stay
+   * single-file regardless (bot-detection protection).
+   */
+  background?: boolean;
 };
 
 export type SidecarSearchVariationAttempt = {
@@ -1899,11 +1909,22 @@ export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarReq
   // keeps polling (heartbeat stays green so the operator sees
   // it's still alive) but no work gets dispatched until resume.
   if (queuePaused) return null;
+  // Claim the oldest claimable PENDING op, but prefer a non-background op over a
+  // background one (queueContext.background) — so an operator side task like
+  // "Verify community" yields the shared VRBO slot to the bulk/auto-fill search
+  // and only fills its idle gaps. Background ops are still claimed when no
+  // foreground op is ready, so they never starve.
+  const isBackground = (r: SidecarRequest): boolean =>
+    (r.params as { queueContext?: SidecarQueueContext } | undefined)?.queueContext?.background === true;
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
     if (r.status !== "pending") continue;
     if (!canClaimOp(r, normalizedRuntime)) continue;
-    if (!oldest || r.createdAt < oldest.createdAt) oldest = r;
+    if (!oldest) { oldest = r; continue; }
+    const rBg = isBackground(r), oBg = isBackground(oldest);
+    // Foreground beats background; within the same priority, oldest wins.
+    if (rBg !== oBg) { if (!rBg) oldest = r; }
+    else if (r.createdAt < oldest.createdAt) oldest = r;
   }
   if (!oldest) return null;
   oldest.status = "in_progress";
@@ -2642,6 +2663,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   walletBudgetMs?: number;
   signal?: AbortSignal;
   stopGeneration?: number;
+  queueContext?: SidecarQueueContext;
 }): Promise<{
   photos: string[];
   bedText: string;
@@ -2673,7 +2695,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "vrbo_photo_scrape",
-      params: { url: opts.url, maxPhotos: opts.maxPhotos ?? 40 },
+      params: { url: opts.url, maxPhotos: opts.maxPhotos ?? 40, queueContext: opts.queueContext },
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs ?? 90_000,
