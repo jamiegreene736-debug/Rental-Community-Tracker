@@ -9877,9 +9877,9 @@ export default function Bookings() {
                             className="bg-background rounded border"
                             data-testid={`slot-${r._id}-${slot.unitId}`}
                           >
-                          <div
-                            className="flex flex-col gap-3 px-3 py-2.5 md:flex-row md:items-center"
-                          >
+                          <div className="flex flex-col gap-2.5 px-3 py-2.5">
+                            {/* Row 1: unit label + buy-in info (inline, info truncates). */}
+                            <div className="flex items-center gap-3">
                             <div className="shrink-0 md:w-24">
                               <p className="text-sm font-medium">{slot.unitLabel}</p>
                               <p className="text-[10px] text-muted-foreground">{slot.bedrooms} BR</p>
@@ -9980,7 +9980,10 @@ export default function Bookings() {
                                 <p className="text-xs text-muted-foreground italic">No buy-in attached for this unit</p>
                               )}
                             </div>
-                            <div className="shrink-0 flex w-full flex-wrap items-center gap-1 md:w-auto md:justify-end">
+                            </div>
+                            {/* Row 2: action toolbar — its own full-width wrapping row so the
+                                8+ buttons never overflow/overlap the info column above. */}
+                            <div className="flex flex-wrap items-center gap-1">
                               {slot.buyIn ? (
                                 <>
                                   {/* Verify rate — on-demand vision check
