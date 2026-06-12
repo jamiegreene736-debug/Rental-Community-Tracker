@@ -1712,7 +1712,9 @@ function cachedSuccessfulResult(requestKey: string): CachedSidecarResult | null 
 
 // Build a stable, opType-aware dedup key. Two enqueues with the same
 // op type AND same canonical params get folded into one request.
-function makeRequestKey(
+// Exported for tests (sidecar-request-key.test.ts): a missing case here silently
+// returned `undefined` and cross-contaminated HomeToGo results (2026-06-12).
+export function makeRequestKey(
   opType: SidecarOpType,
   params: SidecarRequest["params"],
 ): string {
@@ -1752,6 +1754,16 @@ function makeRequestKey(
           ].map((n) => Number(n).toFixed(5)).join(",")
         : "no-bounds";
       return `${opType}|${mode}|${boundsKey}|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|all-bedrooms`;
+    }
+    case "hometogo_search": {
+      // LOAD-BEARING: this case MUST include the dates + town. It was MISSING
+      // (no case, no default), so every HomeToGo search returned `undefined` and
+      // they all collided on one dedup key — a July search's offers got served to
+      // a June reservation's expansion (the operator saw "HomeToGo units for July"
+      // attached to a June booking, 2026-06-12). Key on town + dates + scope so
+      // distinct searches never fold together; identical re-enqueues still dedup.
+      const p = params as SidecarHometogoParams;
+      return `hometogo_search|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.cityWideInventory ? "city" : "resort"}`;
     }
     case "vrbo_photo_scrape": {
       const p = params as SidecarVrboPhotoScrapeParams;
@@ -1797,6 +1809,23 @@ function makeRequestKey(
       const p = params as SidecarGuestyDisconnectParams;
       return `guesty_disconnect_channel|${p.guestyListingId}|${p.channel}`;
     }
+    case "vrbo_book": {
+      // vrbo_book always enqueues with forceFresh+skipResultCache, so this key is
+      // never used for dedup/cache today — but give it a distinct, params-derived
+      // key anyway so a future non-forceFresh caller can't collide on `undefined`.
+      const p = params as SidecarVrboBookParams;
+      return `vrbo_book|${p.scheduleOnly ? "schedule" : "book"}|${p.listingUrl}|${p.checkIn}|${p.checkOut}|${p.buyInId ?? 0}`;
+    }
+  }
+  // SAFETY DEFAULT: never return `undefined` — that silently collides every op of
+  // a missing type onto one cache/dedup key (the 2026-06-12 HomeToGo July-on-June
+  // bug). Fall back to a params-derived key (excluding the volatile queueContext)
+  // so an unhandled opType degrades to per-params uniqueness, not cross-contamination.
+  try {
+    const { queueContext: _ignored, ...rest } = (params as Record<string, unknown>) ?? {};
+    return `${opType}|${JSON.stringify(rest)}`;
+  } catch {
+    return `${opType}|unkeyed`;
   }
 }
 
