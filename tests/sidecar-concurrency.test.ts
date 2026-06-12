@@ -119,4 +119,43 @@ assert.equal(
 
 resetQueue();
 
+// ── Background ops (e.g. "Verify community") yield to the bulk search ─────────
+// A background vrbo_photo_scrape shares the "vrbo_search" concurrency group with
+// the bulk's vrbo_search. It must NOT preempt a ready foreground search, but must
+// still run when nothing foreground is waiting (no starvation).
+{
+  resetQueue();
+  // Background scrape enqueued FIRST (older)...
+  enqueueOp({
+    opType: "vrbo_photo_scrape",
+    params: { url: "https://www.vrbo.com/111", maxPhotos: 8, queueContext: { background: true, scanLabel: "verify-combo-community" } },
+  });
+  // ...then a foreground bulk search (newer). Despite being newer, it wins.
+  enqueueOp({
+    opType: "vrbo_search",
+    params: {
+      destination: "Poipu Kai", searchTerm: "Poipu Kai", checkIn: "2026-07-10", checkOut: "2026-07-17",
+      bedrooms: 3, queueContext: { ...buyInQueueContext, providerLabel: "VRBO" },
+    },
+  });
+  const claim = next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  assert.equal(claim?.opType, "vrbo_search", "foreground bulk search must preempt the older background verify scrape");
+  // Group is now at its limit of 1 → the background scrape can't double up vs VRBO.
+  const blocked = next({ slot: "2", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  assert.equal(blocked, null, "background scrape must not run concurrently with the bulk VRBO search (single-file)");
+}
+
+// Background op is NOT starved: when it's the only thing pending, it gets claimed.
+{
+  resetQueue();
+  enqueueOp({
+    opType: "vrbo_photo_scrape",
+    params: { url: "https://www.vrbo.com/222", maxPhotos: 8, queueContext: { background: true } },
+  });
+  const claim = next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  assert.equal(claim?.opType, "vrbo_photo_scrape", "a lone background op must still be claimed (no starvation)");
+}
+
+resetQueue();
+
 console.log("sidecar concurrency suite passed");
