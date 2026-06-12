@@ -3259,7 +3259,9 @@ export async function fetchVrboPaymentScheduleViaSidecar(opts: {
   const r = await awaitOpResult({
     enqueueArgs: { opType: "vrbo_book", params },
     pollIntervalMs: opts.pollIntervalMs ?? 2000,
-    walletBudgetMs: opts.walletBudgetMs ?? (Number(process.env.SIDECAR_VRBO_PAYSCHED_WALLET_MS) || 4 * 60_000),
+    // Kept under Railway's ~300s edge timeout: with heartbeats the op runs once
+    // (~100s) and posts its result well inside this window.
+    walletBudgetMs: opts.walletBudgetMs ?? (Number(process.env.SIDECAR_VRBO_PAYSCHED_WALLET_MS) || 270_000),
     queueBudgetMs: opts.queueBudgetMs ?? (Number(process.env.SIDECAR_VRBO_PAYSCHED_QUEUE_MS) || 6 * 60_000),
     signal: opts.signal,
   });
