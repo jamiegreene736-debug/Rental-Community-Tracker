@@ -234,7 +234,7 @@ import {
   mergeDiscoveredScoutRowsByResort,
 } from "@shared/alternative-scout-resort";
 import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, walkBetweenCoords, parseGeoNote, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
-import { titlesShareWalkableCommunity } from "@shared/city-vrbo-combo";
+import { titlesShareWalkableCommunity, parseVerifiedCommunityKeysFromNotes, verifiedKeysShareCommunity } from "@shared/city-vrbo-combo";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
   unitBuilderData,
@@ -10051,6 +10051,9 @@ Requirements:
           cityWide: /city-?wide/i.test(String(buyIn?.notes ?? "")),
           // Exact source coordinates (HomeToGo onsite offers stamp "Geo:" in notes).
           coords: coordsFromBuyInNotes(buyIn?.notes),
+          // Description-verified community keys (auto-fill stamps "CommunityVerified:" after
+          // the verify-combo-community scrape confirms two city-wide units share a community).
+          verifiedKeys: parseVerifiedCommunityKeysFromNotes(buyIn?.notes),
         };
       }),
     );
@@ -10109,7 +10112,13 @@ Requirements:
         if (
           (units[i].cityWide || units[j].cityWide) &&
           !geoTrustworthy &&
-          !titlesShareWalkableCommunity(String(units[i].title ?? ""), String(units[j].title ?? ""))
+          !titlesShareWalkableCommunity(String(units[i].title ?? ""), String(units[j].title ?? "")) &&
+          // (c) Description-verified evidence: the auto-fill job opened both listings and
+          // confirmed their descriptions resolve to the SAME community, stamping the
+          // intersecting keys into both notes. Re-checked here from the notes (not trusted
+          // blindly) — needs BOTH units' markers to share a key, so a one-sided/stale marker
+          // can't authorize a cross-resort attach. See parseVerifiedCommunityKeysFromNotes.
+          !verifiedKeysShareCommunity(units[i].verifiedKeys, units[j].verifiedKeys)
         ) {
           unverifiedPair = { a: units[i], b: units[j], walk };
         }

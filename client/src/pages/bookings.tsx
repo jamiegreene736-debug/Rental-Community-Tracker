@@ -381,6 +381,12 @@ type AutoFillComboOption = {
   // "⚠ community unconfirmed" and prompts the operator to verify walkability before
   // booking. Never auto-attached. See server suggestUnconfirmedCityVrboComboPairs.
   unconfirmedCommunity?: boolean;
+  // Auto-verify community result, stamped server-side by the auto-fill job (it opened the
+  // listings and resolved each unit's community) so the operator sees the answer WITHOUT
+  // clicking "Verify community". A "same-community" result is auto-ATTACHED server-side
+  // (and removed from this list); the other verdicts stay here with the answer shown.
+  autoVerified?: "same-community" | "walkable-adjacent" | "different" | "unresolved";
+  autoVerifiedSummary?: string | null;
   // Which scan stage surfaced this loss pair, for the scan-scope chip. home = same
   // city as the community (resort / home-city / single-unit fallback); tier1/tier2 =
   // the nearby drive-time expansion rings. driveMinutesCeiling is the env-accurate
@@ -5083,7 +5089,33 @@ function AlternateCombosPanel({
                     ) : null,
                   )}
                 </div>
-                {option.unconfirmedCommunity ? (
+                {option.autoVerified ? (
+                  <div
+                    className={`mt-1 rounded border px-2 py-1 text-[10px] ${
+                      option.autoVerified === "same-community"
+                        ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                        : option.autoVerified === "walkable-adjacent"
+                        ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                        : option.autoVerified === "different"
+                        ? "border-red-300 bg-red-50 text-red-800 dark:border-red-700 dark:bg-red-950/40 dark:text-red-300"
+                        : "border-slate-300 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300"
+                    }`}
+                  >
+                    <span className="font-semibold">
+                      {option.autoVerified === "same-community"
+                        ? "✓ Same community (auto-verified)"
+                        : option.autoVerified === "walkable-adjacent"
+                        ? "Walkable-adjacent (auto-verified)"
+                        : option.autoVerified === "different"
+                        ? "✗ Different communities (auto-verified)"
+                        : "Could not auto-confirm community"}
+                    </span>
+                    {option.autoVerifiedSummary ? <span className="ml-1 opacity-90">{option.autoVerifiedSummary}</span> : null}
+                    {option.autoVerified !== "same-community" ? (
+                      <div className="mt-1"><VerifyCommunityButton option={option} /></div>
+                    ) : null}
+                  </div>
+                ) : option.unconfirmedCommunity ? (
                   <>
                     <p className="mt-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
                       ⚠ community unconfirmed — verify walkability before booking
