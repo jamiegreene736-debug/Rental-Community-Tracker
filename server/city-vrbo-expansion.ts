@@ -26,6 +26,7 @@ import {
   haversineMiles,
 } from "@shared/buy-in-market";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import { classifyVrboDestination } from "./vrbo-region-resolver";
 import {
   getCachedCommunityListingUrls,
   runCityVrboInventoryScanForCity,
@@ -64,6 +65,11 @@ const TIER2_CITY_CAP = envInt("CITY_VRBO_EXPANSION_TIER2_CITY_CAP", 8, 1);
 const EXPANSION_BUDGET_MS = envInt("CITY_VRBO_EXPANSION_BUDGET_MS", 38 * 60_000, 5 * 60_000);
 const EXPANSION_JOB_TTL_MS = envInt("CITY_VRBO_EXPANSION_JOB_TTL_MS", 38 * 60_000, 5 * 60_000);
 const HOME_RADIUS_KM = envInt("CITY_VRBO_EXPANSION_HOME_RADIUS_KM", 5, 1);
+// Validate each nearby town against Vrbo's region catalog before scanning it: a town
+// Vrbo doesn't know as a region degrades to a keyword/"<town> condos" listing search
+// (1 junk listing, ~90s wasted). Default ON; CITY_VRBO_REGION_VALIDATION=0 reverts to
+// the old "search every Photon town name" behavior.
+const REGION_VALIDATION = (process.env.CITY_VRBO_REGION_VALIDATION ?? "1") !== "0";
 
 // ── public types ───────────────────────────────────────────────────────────
 export type ExpansionJobStatus =
@@ -448,6 +454,14 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
   }
 
   try {
+    // Vrbo regionIds of the towns we've PLANNED to scan, across both tiers — a later
+    // town that resolves to the same region returns the same pool, so we drop it
+    // BEFORE paying the ~90s scan (a recall-safe, pre-scan complement to the post-scan
+    // Jaccard collapse-guard below).
+    const planRegionIds = new Set<string>();
+    // If Vrbo's suggestions API turns out unreachable/rate-limited for this run, stop
+    // probing it after the first miss (don't hammer it) and scan every town as before.
+    let regionApiDown = false;
     for (const tier of [1, 2] as const) {
       if (Date.now() > deadline || job.canceled) break;
       const maxMin = tier === 1 ? TIER1_MAX_MIN : TIER2_MAX_MIN;
@@ -465,15 +479,40 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
         limit: cap * 3,
       });
 
-      const plan: Array<{ term: string; placeName: string; driveMinutes: number }> = [];
+      const plan: Array<{ term: string; placeName: string; driveMinutes: number; regionId?: string }> = [];
       for (const t of towns) {
+        if (Date.now() > deadline || job.canceled) break; // classification awaits — respect the budget
         // Coords-first home exclusion: the community KEY ("Kapaa Beachfront") is
         // not a town name, so name-only exclusion misses the home town. Drop any
         // town essentially at the community's location.
         if (haversineMiles(loc.lat, loc.lng, t.lat, t.lng) * 1.60934 <= HOME_RADIUS_KM) continue;
         const term = `${t.placeName}, ${t.state || loc.state}`;
         if (searched.has(normTerm(term))) continue; // home (tier 1) + all tier-1 towns (tier 2)
-        plan.push({ term, placeName: t.placeName, driveMinutes: t.driveMinutes });
+        // Only scan REAL Vrbo regions. A non-region Photon town ("Lawai", "Omao")
+        // degrades to a keyword/"<town> condos" listing search on Vrbo — 1 junk
+        // result, ~90s wasted. SKIP a CONFIRMED non-region; on an API hiccup
+        // ("unreachable") scan anyway so a Vrbo outage can't drop coverage (recall).
+        let regionId: string | undefined;
+        if (REGION_VALIDATION && !regionApiDown) {
+          const klass = await classifyVrboDestination(term);
+          if (klass.status === "unreachable") {
+            // Rate-limited / API down for this run → stop probing, scan all remaining
+            // towns exactly as before (recall-safe: never skip on an API failure).
+            regionApiDown = true;
+            console.warn(`[city-vrbo-expansion] Vrbo region API unreachable — disabling region pre-validation for the rest of this run (scanning all towns)`);
+          } else if (klass.status === "not-region") {
+            console.log(`[city-vrbo-expansion] "${term}" is not a Vrbo-searchable region — skipping (would be a keyword/listing search, not a town pool)`);
+            continue;
+          } else if (klass.status === "region") {
+            regionId = klass.regionId;
+            if (planRegionIds.has(regionId)) {
+              console.log(`[city-vrbo-expansion] "${term}" resolves to an already-planned Vrbo region (${regionId}) — skipping duplicate before scanning`);
+              continue;
+            }
+            planRegionIds.add(regionId);
+          }
+        }
+        plan.push({ term, placeName: t.placeName, driveMinutes: t.driveMinutes, regionId });
         if (plan.length >= cap) break;
       }
 
