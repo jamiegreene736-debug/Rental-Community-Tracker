@@ -5151,9 +5151,11 @@ function AlternateCombosPanel({
                         : "Could not auto-confirm community"}
                     </span>
                     {option.autoVerifiedSummary ? <span className="ml-1 opacity-90">{option.autoVerifiedSummary}</span> : null}
-                    {option.autoVerified !== "same-community" ? (
-                      <div className="mt-1"><VerifyCommunityButton option={option} /></div>
-                    ) : null}
+                    {/* No manual "Verify community" button here: the auto-fill / bulk job
+                        already opened the listings and verified the community itself — this
+                        verdict IS that result. (The button only survives on the MANUAL
+                        "Scan city VRBO" panel below, where no server-side auto-verify runs,
+                        i.e. options without an `autoVerified` stamp.) */}
                   </div>
                 ) : option.unconfirmedCommunity ? (
                   <>
