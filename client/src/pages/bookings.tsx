@@ -10878,8 +10878,8 @@ export default function Bookings() {
 
             <div className="overflow-hidden rounded border">
               <div className="max-h-[460px] overflow-auto">
-                <div className="min-w-[980px]">
-                  <div className="sticky top-0 z-10 grid grid-cols-[120px_1.3fr_1.2fr_2fr_1.5fr] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                <div className="min-w-[760px]">
+                  <div className="sticky top-0 z-10 grid grid-cols-[120px_minmax(0,1.3fr)_minmax(0,1.2fr)_minmax(0,2fr)_minmax(0,1.5fr)] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
                     <div>Status</div>
                     <div>Listing name</div>
                     <div>Guest</div>
@@ -10900,7 +10900,7 @@ export default function Bookings() {
                         return (
                         <div key={item.id}>
                         <div
-                          className="grid grid-cols-[120px_1.3fr_1.2fr_2fr_1.5fr] gap-3 px-3 py-2.5 text-sm"
+                          className="grid grid-cols-[120px_minmax(0,1.3fr)_minmax(0,1.2fr)_minmax(0,2fr)_minmax(0,1.5fr)] gap-3 px-3 py-2.5 text-sm"
                           data-testid={`bulk-buy-in-queue-item-${item.reservationId}`}
                         >
                           <div>
@@ -10937,7 +10937,7 @@ export default function Bookings() {
                           </div>
                           <p className="text-xs text-muted-foreground">{item.queuedFor}</p>
                           <div className="min-w-0">
-                            <p className={`text-xs ${item.status === "failed" ? "text-red-700" : "text-muted-foreground"}`}>
+                            <p className={`whitespace-pre-wrap break-words text-xs ${item.status === "failed" ? "text-red-700" : "text-muted-foreground"}`}>
                               {item.message}
                             </p>
                             {item.error && (
