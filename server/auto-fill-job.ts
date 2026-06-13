@@ -97,16 +97,22 @@ const SINGLE_UNIT_NEARBY_COLLAPSE_JACCARD = 0.85;
 // and AUTO-ATTACH the cheapest one whose descriptions CONFIRM the units share a
 // community — so the operator no longer has to click "Verify community".
 //
-// COVER EVERY surfaced combo (operator demand, 2026-06-13): the cap used to be 2, so a
+// COVER the surfaced combos (operator demand, 2026-06-13): the cap used to be 2, so a
 // pool that surfaced 5 "unconfirmed N" combos left combos 3-5 with no verdict and a
-// manual "Verify community" button — exactly what the operator keeps reporting. The
-// system must do the check ITSELF on all of them. The hard per-booking time budget below
-// (not the count cap) is the real guard against ballooning the queue: each combo opens
-// listing detail pages (~30-60s each) and the loop stops the moment the budget is spent;
-// any combo it can't reach is stamped "unresolved" (deferred) so the client still shows a
-// verdict instead of a button.
+// manual "Verify community" button. The system must do the check ITSELF. The hard
+// per-booking time budget below (not the count cap) is the real guard against ballooning
+// the queue: each combo opens 2 listing detail pages (~12s each, single-file with the
+// VRBO search lane) and the loop stops the moment the budget is spent; any combo it
+// can't reach is stamped "unresolved" (deferred) so the client still shows a verdict
+// instead of a button.
+//
+// SPEED (2026-06-13, Phase-1.1): the cap is 5 (was 10). Combos are verified CHEAPEST-FIRST,
+// so the 5 most profitable get a real verdict; 6+ get the deferred "unresolved" stamp (no
+// button) at a fraction of the wall-clock. 10 combos was up to ~20 scrapes x 12s = ~4min
+// of single-file scraping per unfillable booking — a real slowdown. Revert with
+// AUTO_VERIFY_COMMUNITY_MAX=10 (the budget caps it either way).
 const AUTO_VERIFY_COMMUNITY_ENABLED = process.env.AUTO_VERIFY_COMMUNITY !== "0"; // default ON
-const AUTO_VERIFY_COMMUNITY_MAX = Math.max(0, Math.min(16, Number(process.env.AUTO_VERIFY_COMMUNITY_MAX ?? 10) || 0));
+const AUTO_VERIFY_COMMUNITY_MAX = Math.max(0, Math.min(16, Number(process.env.AUTO_VERIFY_COMMUNITY_MAX ?? 5) || 0));
 const AUTO_VERIFY_COMMUNITY_BUDGET_MS = Math.max(60_000, Number(process.env.AUTO_VERIFY_COMMUNITY_BUDGET_MS) || 6 * 60_000);
 const AUTO_VERIFY_COMMUNITY_OP_TIMEOUT_MS = 230_000; // > the endpoint's own ~200s sidecar wallet
 
