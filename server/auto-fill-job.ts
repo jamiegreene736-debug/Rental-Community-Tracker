@@ -95,11 +95,19 @@ const SINGLE_UNIT_NEARBY_COLLAPSE_JACCARD = 0.85;
 // Auto-verify community: after the ladder can't auto-attach a combo but HAS surfaced
 // cross-resort same-community alternatives, open the listings (verify-combo-community)
 // and AUTO-ATTACH the cheapest one whose descriptions CONFIRM the units share a
-// community — so the operator no longer has to click "Verify community". Bounded so it
-// can't balloon the per-booking time (it opens listing detail pages, ~30-60s each).
+// community — so the operator no longer has to click "Verify community".
+//
+// COVER EVERY surfaced combo (operator demand, 2026-06-13): the cap used to be 2, so a
+// pool that surfaced 5 "unconfirmed N" combos left combos 3-5 with no verdict and a
+// manual "Verify community" button — exactly what the operator keeps reporting. The
+// system must do the check ITSELF on all of them. The hard per-booking time budget below
+// (not the count cap) is the real guard against ballooning the queue: each combo opens
+// listing detail pages (~30-60s each) and the loop stops the moment the budget is spent;
+// any combo it can't reach is stamped "unresolved" (deferred) so the client still shows a
+// verdict instead of a button.
 const AUTO_VERIFY_COMMUNITY_ENABLED = process.env.AUTO_VERIFY_COMMUNITY !== "0"; // default ON
-const AUTO_VERIFY_COMMUNITY_MAX = Math.max(0, Math.min(5, Number(process.env.AUTO_VERIFY_COMMUNITY_MAX ?? 2) || 0));
-const AUTO_VERIFY_COMMUNITY_BUDGET_MS = Math.max(60_000, Number(process.env.AUTO_VERIFY_COMMUNITY_BUDGET_MS) || 4 * 60_000);
+const AUTO_VERIFY_COMMUNITY_MAX = Math.max(0, Math.min(16, Number(process.env.AUTO_VERIFY_COMMUNITY_MAX ?? 10) || 0));
+const AUTO_VERIFY_COMMUNITY_BUDGET_MS = Math.max(60_000, Number(process.env.AUTO_VERIFY_COMMUNITY_BUDGET_MS) || 6 * 60_000);
 const AUTO_VERIFY_COMMUNITY_OP_TIMEOUT_MS = 230_000; // > the endpoint's own ~200s sidecar wallet
 
 // ── types ────────────────────────────────────────────────────────────────────
@@ -1588,6 +1596,23 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
     if (!job.canceled) {
       try { await autoVerifyAndAttachAlternatives(job, base, used); }
       catch (e: any) { console.warn(`[auto-fill] auto-verify-community failed (non-fatal): ${e?.message ?? e}`); }
+      // Backstop so the operator NEVER sees a manual "Verify community" button on a
+      // bulk/auto-fill result (their long-standing report): any surfaced "community
+      // unconfirmed" alternative the verify pass couldn't reach — budget spent, slots
+      // already filled before it ran, or worker offline — still gets an honest verdict.
+      // We stamp "unresolved" (the system DID try; VRBO hides the location), which the UI
+      // renders as text instead of a button. Gated on the feature flag so turning
+      // auto-verify OFF cleanly restores the manual button. Manual "Scan city VRBO" combos
+      // take a different code path (no autoVerified stamp) and KEEP their button.
+      if (!job.canceled && AUTO_VERIFY_COMMUNITY_ENABLED) {
+        for (const o of (job.comboOptions as any[])) {
+          if (o && o.isAlternative && o.unconfirmedCommunity && !o.autoVerified) {
+            o.autoVerified = "unresolved";
+            o.autoVerifiedSummary =
+              "Auto-check could not confirm the community for this combo (VRBO hides the location). Open both listings to verify walkability before booking.";
+          }
+        }
+      }
     }
 
     // All-or-nothing: a combo left partially filled by ANY stage rolls back to
