@@ -43,15 +43,21 @@ export async function resumeInterruptedAutoFillWork(): Promise<void> {
         if (it?.reservationId) bulkOwnedReservations.add(String(it.reservationId));
       }
       if (attempts < RESUME_MAX_ATTEMPTS) {
+        // Bump the attempt counter DURABLY BEFORE starting the resumed queue —
+        // matching the standalone-row path below. If the resumed queue crash-loops
+        // the server faster than runBulkJob's own snapshot can land, the increment
+        // must already be written or the 2-attempt cap never engages and the queue
+        // resurrects forever. (resumeBulkAutoFillJob only starts the in-memory loop;
+        // the caller owns the durable counter.)
+        await storage.upsertBulkAutoFillState({ id: row.id, status: "running", state: row.state, resumeAttempts: attempts + 1 });
         const resumed = resumeBulkAutoFillJob(row.state, attempts + 1);
         if (resumed) {
-          await storage.upsertBulkAutoFillState({ id: row.id, status: "running", state: row.state, resumeAttempts: attempts + 1 });
           console.log(`[auto-fill-resume] resumed bulk queue ${resumed.bulkJobId} (attempt ${attempts + 1}/${RESUME_MAX_ATTEMPTS})`);
         } else {
           // Unusable snapshot OR an operator already started a fresh queue on
           // this process (operator wins). Stamp the row terminal either way so
           // a corrupt/superseded snapshot can't retry on every boot.
-          await storage.upsertBulkAutoFillState({ id: row.id, status: "completed", state: row.state, resumeAttempts: attempts });
+          await storage.upsertBulkAutoFillState({ id: row.id, status: "completed", state: row.state, resumeAttempts: attempts + 1 });
           console.warn(`[auto-fill-resume] bulk queue ${row.id} not resumed (superseded or unusable snapshot) — stamped terminal`);
         }
       } else {

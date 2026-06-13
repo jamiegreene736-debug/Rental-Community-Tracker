@@ -13285,6 +13285,13 @@ Requirements:
       }
       const filterPhrase = typeof req.query.phrase === "string" ? req.query.phrase.trim() : "";
       const skipCache = req.query.nocache === "1";
+      // skipEnrich=1 → suppress Phase-4 detail-page enrichment (no opening of
+      // individual VRBO listing detail pages). The AUTOMATED auto-fill / bulk
+      // buy-in loopback (server/auto-fill-job.ts fetchCity) sets this so the
+      // unattended queue never drives the sidecar into per-listing detail pages;
+      // the operator's MANUAL "Scan city VRBO" button omits it and keeps full
+      // enrichment. See city-vrbo-inventory.ts runCityScanCore Phase-4 gate.
+      const skipDetailEnrich = req.query.skipEnrich === "1";
       const { runCityVrboInventoryScan } = await import("./city-vrbo-inventory");
       const payload = await runCityVrboInventoryScan({
         community: unitConfig.community,
@@ -13293,6 +13300,7 @@ Requirements:
         bedroomPlan: unitConfig.units.map((unit) => unit.bedrooms),
         filterPhrase: filterPhrase || undefined,
         skipCache,
+        skipDetailEnrich,
       });
       const responsePayload = {
         propertyId,
@@ -13369,8 +13377,14 @@ Requirements:
             const r = await scrapeVrboPhotosViaSidecar({
               url: u.url,
               maxPhotos: 8,
-              walletBudgetMs: 90_000,
+              // Longer than the default since verify now yields to the bulk and may
+              // wait for its idle gaps; kept under Railway's ~300s edge timeout.
+              walletBudgetMs: 200_000,
               pollIntervalMs: 1500,
+              // Yield the shared VRBO concurrency slot to an in-progress bulk/
+              // auto-fill search — verify only fills its idle gaps, never preempts
+              // or stalls the queue's own searches. (Still single-file vs VRBO.)
+              queueContext: { background: true, scanLabel: "verify-combo-community" },
             });
             const descriptionText = String((r as { descriptionText?: string | null }).descriptionText ?? "");
             const resolved = resolveUnitCommunityFromText({

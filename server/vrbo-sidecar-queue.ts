@@ -148,6 +148,7 @@ function fullStateNameLower(state?: string | null): string | undefined {
 export type SidecarVrboPhotoScrapeParams = {
   url: string;
   maxPhotos?: number;
+  queueContext?: SidecarQueueContext;
 };
 
 // CODEX NOTE (2026-05-04, claude/sidecar-zillow-scrape): Zillow
@@ -433,6 +434,15 @@ export type SidecarQueueContext = {
   skipResultCache?: boolean;
   /** When true, bypass request-key dedupe and enqueue a new browser run. */
   forceFresh?: boolean;
+  /**
+   * Low-priority op: the worker prefers any claimable NON-background op first, so
+   * an operator-triggered side task (e.g. "Verify community" photo scrapes) yields
+   * the shared VRBO concurrency slot to an in-progress bulk/auto-fill search and
+   * only runs in its idle gaps. It still gets claimed when nothing else is ready,
+   * so it never starves. Does NOT bypass the concurrency limit — VRBO ops stay
+   * single-file regardless (bot-detection protection).
+   */
+  background?: boolean;
 };
 
 export type SidecarSearchVariationAttempt = {
@@ -1712,7 +1722,9 @@ function cachedSuccessfulResult(requestKey: string): CachedSidecarResult | null 
 
 // Build a stable, opType-aware dedup key. Two enqueues with the same
 // op type AND same canonical params get folded into one request.
-function makeRequestKey(
+// Exported for tests (sidecar-request-key.test.ts): a missing case here silently
+// returned `undefined` and cross-contaminated HomeToGo results (2026-06-12).
+export function makeRequestKey(
   opType: SidecarOpType,
   params: SidecarRequest["params"],
 ): string {
@@ -1752,6 +1764,16 @@ function makeRequestKey(
           ].map((n) => Number(n).toFixed(5)).join(",")
         : "no-bounds";
       return `${opType}|${mode}|${boundsKey}|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|all-bedrooms`;
+    }
+    case "hometogo_search": {
+      // LOAD-BEARING: this case MUST include the dates + town. It was MISSING
+      // (no case, no default), so every HomeToGo search returned `undefined` and
+      // they all collided on one dedup key — a July search's offers got served to
+      // a June reservation's expansion (the operator saw "HomeToGo units for July"
+      // attached to a June booking, 2026-06-12). Key on town + dates + scope so
+      // distinct searches never fold together; identical re-enqueues still dedup.
+      const p = params as SidecarHometogoParams;
+      return `hometogo_search|${(p.searchTerm || p.destination).toLowerCase().trim()}|${p.destination.toLowerCase().trim()}|${p.checkIn}|${p.checkOut}|${p.cityWideInventory ? "city" : "resort"}`;
     }
     case "vrbo_photo_scrape": {
       const p = params as SidecarVrboPhotoScrapeParams;
@@ -1797,6 +1819,23 @@ function makeRequestKey(
       const p = params as SidecarGuestyDisconnectParams;
       return `guesty_disconnect_channel|${p.guestyListingId}|${p.channel}`;
     }
+    case "vrbo_book": {
+      // vrbo_book always enqueues with forceFresh+skipResultCache, so this key is
+      // never used for dedup/cache today — but give it a distinct, params-derived
+      // key anyway so a future non-forceFresh caller can't collide on `undefined`.
+      const p = params as SidecarVrboBookParams;
+      return `vrbo_book|${p.scheduleOnly ? "schedule" : "book"}|${p.listingUrl}|${p.checkIn}|${p.checkOut}|${p.buyInId ?? 0}`;
+    }
+  }
+  // SAFETY DEFAULT: never return `undefined` — that silently collides every op of
+  // a missing type onto one cache/dedup key (the 2026-06-12 HomeToGo July-on-June
+  // bug). Fall back to a params-derived key (excluding the volatile queueContext)
+  // so an unhandled opType degrades to per-params uniqueness, not cross-contamination.
+  try {
+    const { queueContext: _ignored, ...rest } = (params as Record<string, unknown>) ?? {};
+    return `${opType}|${JSON.stringify(rest)}`;
+  } catch {
+    return `${opType}|unkeyed`;
   }
 }
 
@@ -1899,11 +1938,22 @@ export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarReq
   // keeps polling (heartbeat stays green so the operator sees
   // it's still alive) but no work gets dispatched until resume.
   if (queuePaused) return null;
+  // Claim the oldest claimable PENDING op, but prefer a non-background op over a
+  // background one (queueContext.background) — so an operator side task like
+  // "Verify community" yields the shared VRBO slot to the bulk/auto-fill search
+  // and only fills its idle gaps. Background ops are still claimed when no
+  // foreground op is ready, so they never starve.
+  const isBackground = (r: SidecarRequest): boolean =>
+    (r.params as { queueContext?: SidecarQueueContext } | undefined)?.queueContext?.background === true;
   let oldest: SidecarRequest | null = null;
   for (const r of queue.values()) {
     if (r.status !== "pending") continue;
     if (!canClaimOp(r, normalizedRuntime)) continue;
-    if (!oldest || r.createdAt < oldest.createdAt) oldest = r;
+    if (!oldest) { oldest = r; continue; }
+    const rBg = isBackground(r), oBg = isBackground(oldest);
+    // Foreground beats background; within the same priority, oldest wins.
+    if (rBg !== oBg) { if (!rBg) oldest = r; }
+    else if (r.createdAt < oldest.createdAt) oldest = r;
   }
   if (!oldest) return null;
   oldest.status = "in_progress";
@@ -2642,6 +2692,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   walletBudgetMs?: number;
   signal?: AbortSignal;
   stopGeneration?: number;
+  queueContext?: SidecarQueueContext;
 }): Promise<{
   photos: string[];
   bedText: string;
@@ -2673,7 +2724,7 @@ export async function scrapeVrboPhotosViaSidecar(opts: {
   const r = await awaitOpResult({
     enqueueArgs: {
       opType: "vrbo_photo_scrape",
-      params: { url: opts.url, maxPhotos: opts.maxPhotos ?? 40 },
+      params: { url: opts.url, maxPhotos: opts.maxPhotos ?? 40, queueContext: opts.queueContext },
     },
     pollIntervalMs: opts.pollIntervalMs,
     walletBudgetMs: opts.walletBudgetMs ?? 90_000,
