@@ -13628,12 +13628,25 @@ Requirements:
         if (persisted) {
           const finishedMs = persisted.finishedAt ? new Date(persisted.finishedAt).getTime() : null;
           const updatedMs = persisted.updatedAt ? new Date(persisted.updatedAt).getTime() : Date.now();
+          const startedMs = persisted.startedAt ? new Date(persisted.startedAt).getTime() : null;
+          // INTERRUPTED detection: we're in this branch precisely because no live
+          // in-memory job exists for the reservation — so a row still stamped
+          // "running" means a deploy/restart killed the search mid-run (the
+          // SIGTERM hook stamps "interrupted" when it gets the chance; a hard
+          // kill leaves "running"). Surface it as an explicit error status so
+          // the scan panel can tell the operator the scan is INCOMPLETE, not
+          // empty-handed. The combos shown alongside are the PREVIOUS completed
+          // search's (preserved by markAutoFillSearchStarted).
+          const wasInterrupted = persisted.status === "running" || persisted.status === "interrupted";
           out[id] = {
             jobId: `persisted:${id}`,
-            status: persisted.status ?? "completed",
+            status: wasInterrupted ? "interrupted" : (persisted.status ?? "completed"),
             done: true,
             phase: "done",
-            message: "",
+            message: wasInterrupted
+              ? (persisted.error
+                  || `Search interrupted mid-run (server restarted${startedMs ? ` — started ${new Date(startedMs).toLocaleString()}` : ""}). Results below are from the previous completed search. Re-run Auto-fill to finish.`)
+              : (persisted.doneMessage ?? ""),
             progress: 100,
             reservationId: id,
             escalation: { resort: "idle", homeCity: "idle", foundAt: null },
@@ -13645,8 +13658,8 @@ Requirements:
             slotsTotal: persisted.slotsTotal ?? 0,
             slotsFilled: persisted.slotsFilled ?? 0,
             totalCost: null,
-            error: null,
-            timestamps: { createdAt: updatedMs, startedAt: null, finishedAt: finishedMs },
+            error: wasInterrupted ? null : (persisted.error ?? null),
+            timestamps: { createdAt: updatedMs, startedAt: startedMs, finishedAt: finishedMs },
           };
         }
       }

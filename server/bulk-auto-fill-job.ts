@@ -32,12 +32,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { storage } from "./storage";
+import { onShutdown } from "./shutdown";
 import {
   startAutoFillJob,
   getAutoFillJob,
   cancelAutoFillJob,
   serializeAutoFillJob,
   type AutoFillSlotInput,
+  type AutoFillExpansionProgress,
 } from "./auto-fill-job";
 
 // How often the orchestrator re-reads a running auto-fill job's status. Matches
@@ -100,6 +102,14 @@ type BulkItemState = {
   error?: string;
   filled: number;
   totalSlots: number;
+  // Live loading-bar telemetry mirrored from the running auto-fill job each poll,
+  // so the queue dialog can render an in-depth per-row progress bar and tell a
+  // working search from a stalled one. `lastProgressAt` is stamped only when the
+  // phase/message/progress/filled actually CHANGES — so a frozen value = stalled.
+  progress: number;
+  phase: string;
+  expansionProgress: AutoFillExpansionProgress | null;
+  lastProgressAt: number | null;
   autoFillJobId: string | null;
   startedAt: number | null;
   finishedAt: number | null;
@@ -114,6 +124,8 @@ type BulkItemState = {
   altCombos: any[];
   // retained for processing, not serialized to the client
   _input: BulkAutoFillItemInput;
+  // last serialized progress signature — to detect real forward movement (stall guard)
+  _lastProgressKey?: string;
 };
 
 type BulkJobStatus = "running" | "completed" | "cancelled";
@@ -144,6 +156,11 @@ export type BulkAutoFillItemView = {
   error?: string;
   filled: number;
   totalSlots: number;
+  // Loading-bar telemetry (see BulkItemState).
+  progress: number;
+  phase: string;
+  expansionProgress: AutoFillExpansionProgress | null;
+  lastProgressAt: number | null;
   startedAt: string | null;
   finishedAt: string | null;
   lossCombos: any[];
@@ -164,6 +181,9 @@ export type BulkAutoFillJobStatus = {
   queued: number;
   currentIndex: number;
   items: BulkAutoFillItemView[];
+  // Server clock at serialize time — the client compares it against each item's
+  // lastProgressAt to render "updated Ns ago" / a stall warning without clock skew.
+  serverNow: number;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
 
@@ -186,7 +206,50 @@ function isTerminalBulk(status: BulkJobStatus): boolean {
   return status === "completed" || status === "cancelled";
 }
 
-function touch(job: BulkJob): void { job.updatedAt = Date.now(); }
+// ── deploy-survival persistence ──────────────────────────────────────────────
+// The whole BulkJob (incl. each item's self-contained _input) snapshots to the
+// bulk_auto_fill_state jsonb row on every touch (debounced — touch fires every
+// poll tick). On boot, server/auto-fill-resume.ts rebuilds the queue from this
+// row under the SAME id and continues from the first non-terminal item, so a
+// Railway redeploy mid-queue costs ~one re-run item instead of the whole queue.
+// Which resume attempt the CURRENT in-memory queue is on (0 = fresh start);
+// persisted so a queue that keeps killing the server can't resurrect forever.
+let currentBulkResumeAttempt = 0;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePersist(job: BulkJob): void {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    void storage.upsertBulkAutoFillState({
+      id: job.id,
+      status: job.status,
+      state: job,
+      resumeAttempts: currentBulkResumeAttempt,
+    }).catch(() => { /* best effort */ });
+  }, 1500);
+  persistTimer.unref?.();
+}
+
+function touch(job: BulkJob): void {
+  job.updatedAt = Date.now();
+  schedulePersist(job);
+}
+
+// Deploy shutdown: flush the latest queue snapshot (the debounce timer may not
+// have fired). A RUNNING queue is stamped interrupted so the boot resume picks
+// it up; a TERMINAL queue is persisted with its terminal status — without this,
+// a queue that completed <1.5s before SIGTERM would still read "running" in the
+// DB and get pointlessly resurrected on boot (review finding 2026-06-10).
+onShutdown(async () => {
+  const job = latestBulkJobId ? bulkJobs.get(latestBulkJobId) : null;
+  if (!job) return;
+  await storage.upsertBulkAutoFillState({
+    id: job.id,
+    status: isTerminalBulk(job.status) ? job.status : "interrupted",
+    state: job,
+    resumeAttempts: currentBulkResumeAttempt,
+  });
+});
 
 function cleanupStale(): void {
   const now = Date.now();
@@ -214,12 +277,19 @@ async function sidecarIsOnline(): Promise<boolean> {
 // ── orchestration ──────────────────────────────────────────────────────────
 async function runBulkJob(job: BulkJob): Promise<void> {
   job.status = "running";
-  job.startedAt = Date.now();
+  // Resume re-entry keeps the original start time (the queue began then; this
+  // process is just continuing it).
+  job.startedAt = job.startedAt ?? Date.now();
   touch(job);
 
   for (let i = 0; i < job.items.length; i += 1) {
     job.currentIndex = i;
     const item = job.items[i];
+
+    // Boot-resume re-entry: items the dead process already finished keep their
+    // results — only queued/re-queued items run. No-op on a fresh queue (all
+    // items start "queued").
+    if (item.status !== "queued" && item.status !== "running") continue;
 
     if (job.canceled) {
       item.status = "cancelled";
@@ -338,7 +408,22 @@ async function runBulkJob(job: BulkJob): Promise<void> {
         // Surface the auto-fill job's LIVE phase message (e.g. "Searching the home
         // city on VRBO…", "Widening to nearby cities…") so the dialog reflects real
         // progress instead of freezing on the pre-search "Detaching…" notice.
-        if (last.message) item.message = last.message;
+        const nextMessage = last.message || item.message;
+        // Mirror the loading-bar telemetry onto the item. lastProgressAt is stamped
+        // ONLY when something the operator reads as forward movement changes — the
+        // phase message, the overall %, the slots filled, or the expansion's current
+        // city. A lastProgressAt that stops advancing is the "this search is stuck"
+        // signal the client renders (vs. a healthy search that's just slow).
+        const expProg = last.expansionProgress ?? null;
+        const progressKey = `${nextMessage}|${last.progress}|${last.slotsFilled}|${expProg?.currentCity ?? ""}|${expProg?.citiesScanned ?? -1}`;
+        if (progressKey !== item._lastProgressKey) {
+          item.lastProgressAt = Date.now();
+          item._lastProgressKey = progressKey;
+        }
+        item.message = nextMessage;
+        item.progress = last.progress;
+        item.phase = last.phase;
+        item.expansionProgress = expProg;
         touch(job);
         if (last.done) break;
         if (Date.now() - itemStartedAt > ITEM_CAP_MS) break;
@@ -461,6 +546,10 @@ export function startBulkAutoFillJob(items: BulkAutoFillItemInput[]): { bulkJobI
       message: "Queued",
       filled: 0,
       totalSlots: slots.length,
+      progress: 0,
+      phase: "queued",
+      expansionProgress: null,
+      lastProgressAt: null,
       autoFillJobId: null,
       startedAt: null,
       finishedAt: null,
@@ -484,6 +573,7 @@ export function startBulkAutoFillJob(items: BulkAutoFillItemInput[]): { bulkJobI
   };
   bulkJobs.set(id, job);
   latestBulkJobId = id;
+  currentBulkResumeAttempt = 0; // fresh queue — not a resume
 
   // Clicking Start is explicit intent to run — make sure the sidecar queue isn't
   // left PAUSED (a prior "Clear Queue" pause makes the queue REFUSE every enqueue,
@@ -499,6 +589,61 @@ export function startBulkAutoFillJob(items: BulkAutoFillItemInput[]): { bulkJobI
   });
 
   return { bulkJobId: id, reused: false };
+}
+
+// BOOT-RESUME ONLY (server/auto-fill-resume.ts): rebuild the queue a deploy
+// killed from its persisted jsonb snapshot and continue it. Same id (open
+// dialogs keep polling), terminal items keep their results, the item that was
+// mid-flight is re-queued (its per-reservation auto-fill forceRestarts fresh —
+// the dead run's detaches are idempotent and any partial attaches are seen via
+// refreshFilled + reconciled by the all-or-nothing pass). Returns null when the
+// snapshot is unusable.
+export function resumeBulkAutoFillJob(state: unknown, resumeAttempt: number): { bulkJobId: string } | null {
+  const snap = state as BulkJob | null;
+  if (!snap || typeof snap !== "object" || !snap.id || !Array.isArray(snap.items)) return null;
+  if (bulkJobs.has(snap.id)) return { bulkJobId: snap.id }; // already live (double-call guard)
+  // OPERATOR WINS (review finding 2026-06-10): if the operator already started a
+  // FRESH queue on this process (within the 15s boot-resume window), do NOT
+  // resurrect the dead one alongside it — two concurrent runBulkJob loops would
+  // double-drive the same reservations and fight over latestBulkJobId. The
+  // caller stamps the dead row terminal so it never resurrects.
+  for (const live of Array.from(bulkJobs.values())) {
+    if (!isTerminalBulk(live.status)) {
+      console.warn(`[bulk-auto-fill] not resuming queue ${snap.id} — operator queue ${live.id} is already running`);
+      return null;
+    }
+  }
+  const job: BulkJob = {
+    id: String(snap.id),
+    status: "running",
+    createdAt: Number(snap.createdAt) || Date.now(),
+    updatedAt: Date.now(),
+    startedAt: Number(snap.startedAt) || null,
+    finishedAt: null,
+    canceled: false,
+    currentIndex: 0,
+    items: snap.items.map((it) => ({
+      ...it,
+      // The mid-flight item re-runs from scratch on this process.
+      ...(it.status === "running"
+        ? { status: "queued" as BulkItemStatus, message: "Re-queued after server restart", autoFillJobId: null, startedAt: null, finishedAt: null }
+        : {}),
+    })),
+  };
+  bulkJobs.set(job.id, job);
+  latestBulkJobId = job.id;
+  currentBulkResumeAttempt = resumeAttempt;
+  // Same unpause guard as startBulkAutoFillJob — resuming is explicit intent.
+  void import("./vrbo-sidecar-queue")
+    .then((m) => { try { m.resumeQueue(); } catch { /* best effort */ } })
+    .catch(() => { /* best effort */ });
+  void runBulkJob(job).catch((err) => {
+    job.status = "completed";
+    job.finishedAt = Date.now();
+    console.error("[bulk-auto-fill] resumed orchestrator crashed", err);
+  });
+  console.log(`[bulk-auto-fill] resumed queue ${job.id} (attempt ${resumeAttempt}) — ${job.items.filter((i) => i.status === "queued").length} item(s) left`);
+  return { bulkJobId: job.id };
 }
 
 export function getBulkAutoFillJob(jobId: string): BulkJob | null {
@@ -553,12 +698,17 @@ export function serializeBulkAutoFillJob(job: BulkJob): BulkAutoFillJobStatus {
       error: it.error,
       filled: it.filled,
       totalSlots: it.totalSlots,
+      progress: it.progress ?? 0,
+      phase: it.phase ?? "",
+      expansionProgress: it.expansionProgress ?? null,
+      lastProgressAt: it.lastProgressAt ?? null,
       startedAt: it.startedAt ? new Date(it.startedAt).toISOString() : null,
       finishedAt: it.finishedAt ? new Date(it.finishedAt).toISOString() : null,
       lossCombos: it.lossCombos ?? [],
       lossLog: it.lossLog ?? [],
       altCombos: it.altCombos ?? [],
     })),
+    serverNow: Date.now(),
     timestamps: { createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt },
   };
 }

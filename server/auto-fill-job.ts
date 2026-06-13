@@ -28,6 +28,7 @@
 
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
+import { onShutdown } from "./shutdown";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { evaluateComboProfit, profitToleranceUsd } from "@shared/buy-in-profit";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -145,6 +146,16 @@ export type StartAutoFillInput = {
   // orchestrator's single-flight and could forceRestart it mid-search. See
   // AGENTS.md "Bulk buy-in queue is a SERVER-SIDE background job" (B1).
   owner?: "row" | "bulk";
+  // BOOT-RESUME ONLY (server/auto-fill-resume.ts): re-register the job under
+  // the SAME id the dead process used, so an operator's still-open poller
+  // (polling /api/operations/auto-fill/:jobId) survives the redeploy without a
+  // 404. Safe at boot because the jobs map is empty; never set this from a
+  // client-facing route.
+  resumeJobId?: string;
+  // Which resume attempt this is (1-based). Persisted to the durable row so a
+  // job that keeps killing the server can't resurrect forever (cap enforced by
+  // the resume module, default 2).
+  resumeAttempt?: number;
 };
 
 // Per-city economics recorded by the profit gate (resort, home-city, and each
@@ -220,6 +231,16 @@ type AutoFillSearchAudit = {
   diagnostics?: any;
 };
 
+// Live per-city sub-progress of the nearby-city expansion stage. Surfaced so the
+// bulk-queue loading bar shows real movement ("city 3/8 — now Hanapepe") during the
+// long "Widening to nearby cities" phase instead of a frozen message. Null otherwise.
+export type AutoFillExpansionProgress = {
+  tierLabel: string | null;
+  citiesScanned: number;
+  citiesPlanned: number;
+  currentCity: string | null;
+};
+
 type AutoFillJob = {
   id: string;
   status: JobStatus;
@@ -248,6 +269,7 @@ type AutoFillJob = {
   minProfit: number;
   gateEnabled: boolean;
   escalation: AutoFillEscalation;
+  expansionProgress?: AutoFillExpansionProgress | null;
   attached: AutoFillAttached[];
   skipped: AutoFillSkipped[];
   searchAudits: AutoFillSearchAudit[];
@@ -270,6 +292,7 @@ export type AutoFillJobStatus = {
   progress: number;
   reservationId: string;
   escalation: AutoFillEscalation;
+  expansionProgress?: AutoFillExpansionProgress | null;
   attached: AutoFillAttached[];
   skipped: AutoFillSkipped[];
   searchAudits: AutoFillSearchAudit[];
@@ -304,6 +327,23 @@ const activeJobIds = new Set<string>();
 
 const TERMINAL = new Set<JobStatus>(["completed", "failed"]);
 const isTerminal = (s: JobStatus) => TERMINAL.has(s);
+
+// ── graceful-shutdown stamp ────────────────────────────────────────────────
+// Railway sends SIGTERM before replacing the process on EVERY deploy — and
+// deploys land frequently (7 between 19:54 and 22:21 on 2026-06-10 alone). An
+// in-flight search used to die silently. Stamp every non-terminal job
+// "interrupted" in Postgres; the boot resume (server/auto-fill-resume.ts) then
+// picks these rows up (along with hard-killed "running" rows) and restarts the
+// search on the new process. Shared coordinator: see server/shutdown.ts.
+onShutdown(async () => {
+  const active = Array.from(autoFillJobs.values()).filter((j) => !isTerminal(j.status));
+  await Promise.allSettled(active.map((j) =>
+    storage.markAutoFillSearchInterrupted(
+      j.reservationId,
+      `Search interrupted mid-run by a server restart/redeploy (was: ${j.phase || "running"} — ${j.message || "in progress"}). It resumes automatically when the server is back.`,
+    ),
+  ));
+});
 
 function cleanupStaleJobs(): void {
   const now = Date.now();
@@ -477,6 +517,14 @@ function finalize(job: AutoFillJob): void {
     comboOptions: job.comboOptions,
     cityEconomics: job.cityEconomics,
     finishedAt: job.finishedAt != null ? new Date(job.finishedAt) : null,
+    // Durable WHY: job.message holds the terminal doneMessage on completion (the
+    // "No profitable combination found … best option … coverage" economics) and
+    // the last phase message on failure. Without this, a redeploy left the
+    // operator bare loss cards with no explanation (observed 2026-06-10: the
+    // 22:21 deploy erased Cecilio Marquez's "$10,648 loss" doneMessage).
+    doneMessage: job.message || null,
+    error: job.error,
+    startedAt: job.startedAt != null ? new Date(job.startedAt) : null,
   }).catch(() => { /* best effort */ });
 }
 
@@ -1988,6 +2036,21 @@ async function runExpansion(
     const exp = getExpansionJob(expansionJobId);
     if (!exp) break; // lost (redeploy)
     const s = serializeExpansionJob(exp);
+    // Surface the expansion's LIVE per-city sub-progress onto the job so the
+    // bulk-queue loading bar moves through the long nearby phase instead of
+    // freezing on a single "Widening to nearby cities…" line. The message CHANGES
+    // each city, which is what drives the bulk item's lastProgressAt (stall signal).
+    const planned = Number(s.totalCount) || 0;
+    const scanned = Number(s.scannedCount) || 0;
+    const tierLabel = s.phase?.label ?? null;
+    job.expansionProgress = { tierLabel, citiesScanned: scanned, citiesPlanned: planned, currentCity: s.currentCity ?? null };
+    const expMessage = planned > 0
+      ? `Nearby cities${tierLabel ? ` (${tierLabel})` : ""}: searched ${scanned}/${planned}${s.currentCity ? ` — now ${s.currentCity}` : ""}`
+      : "Widening to nearby cities (drive-time)…";
+    // Ramp 60→95 across the planned cities so the bar advances city-by-city.
+    const expProgress = planned > 0 ? Math.min(95, 60 + Math.round((scanned / planned) * 35)) : Math.max(job.progress, 60);
+    job.message = expMessage;
+    job.progress = expProgress;
     setEscalation(job, {
       // Strip lossPair + altPairs from the LIVE escalation copy — the client doesn't
       // need the picks here (they arrive as attachable comboOptions); keeps polling
@@ -2001,6 +2064,9 @@ async function runExpansion(
     if (s.done) { terminal = s; break; }
     await new Promise((r) => setTimeout(r, EXPANSION_POLL_INTERVAL_MS));
   }
+  // Expansion finished — clear the live per-city sub-progress (later stages, if any,
+  // shouldn't render a stale "now <city>").
+  job.expansionProgress = null;
   // Fold each nearby city's combo economics into the ladder (accepted OR skipped).
   for (const c of terminal?.cityResults ?? []) {
     if (typeof c.comboCost === "number") {
@@ -2071,6 +2137,7 @@ export function serializeAutoFillJob(job: AutoFillJob): AutoFillJobStatus {
     progress: job.progress,
     reservationId: job.reservationId,
     escalation: job.escalation,
+    expansionProgress: job.expansionProgress ?? null,
     attached: job.attached,
     skipped: job.skipped,
     searchAudits: job.searchAudits,
@@ -2125,7 +2192,9 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
     activeJobByReservation.delete(reservationId);
   }
 
-  const id = newJobId("afj");
+  // Boot-resume re-registers under the dead process's id so open client pollers
+  // survive the redeploy; safe only because the jobs map is empty at boot.
+  const id = input.resumeJobId && !autoFillJobs.has(input.resumeJobId) ? input.resumeJobId : newJobId("afj");
   const now = Date.now();
   const expectedRevenue = Number(input.expectedRevenue) || 0;
   const gateEnabled = expectedRevenue > 0;
@@ -2170,6 +2239,21 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
   autoFillJobs.set(id, job);
   activeJobByReservation.set(reservationId, id);
   lastJobByReservation.set(reservationId, id);
+  // Durable "running" stamp (preserves the previous search's combos): if a
+  // deploy/restart kills this job mid-run, the stale "running" row is what lets
+  // /api/operations/auto-fill/last surface the search as INTERRUPTED — and,
+  // since the FULL request is persisted alongside, what lets the boot resume
+  // (server/auto-fill-resume.ts) restart the search on the new process.
+  // finalize() overwrites it on any terminal path.
+  void storage.markAutoFillSearchStarted({
+    reservationId,
+    propertyId: job.propertyId,
+    slotsTotal: job.slots.length,
+    request: { ...input, resumeJobId: undefined, resumeAttempt: undefined },
+    jobId: id,
+    owner: job.owner,
+    resumeAttempts: input.resumeAttempt ?? 0,
+  }).catch(() => { /* best effort */ });
   void runAutoFillJob(job).catch((err) => {
     job.status = "failed";
     job.error = String(err?.message ?? err);
