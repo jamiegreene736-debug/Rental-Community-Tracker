@@ -175,6 +175,83 @@ async function resolveViaSuggestionsApi(destination: string): Promise<VrboRegion
   }
 }
 
+// ── 3-state destination classifier (for nearby-city expansion pre-validation) ──
+// resolveVrboRegion() collapses "Vrbo has no region for this town" and "we
+// couldn't reach Vrbo's suggestions API" into the SAME `null` (and negative-caches
+// it). That's fine for find-buy-in (a null just means fall through), but the
+// nearby-city expansion needs to DROP towns that aren't Vrbo regions WITHOUT ever
+// dropping a town just because the API hiccupped — else one outage silently wipes
+// out all nearby coverage (recall). So this returns a DISCRIMINATED result:
+//   "region"      → Vrbo has a searchable regionId (use it; safe to scan + dedupe)
+//   "not-region"  → the suggestions API answered (HTTP 200) but has NO region for
+//                   this town → it would degrade to a keyword/"<town> condos" listing
+//                   search → SKIP it.
+//   "unreachable" → HTTP error / timeout / network throw → we DON'T know → caller
+//                   must SCAN ANYWAY (recall-safe). Never cached, so it retries.
+// Only "region" (shared positive cache, 7d) and "not-region" (own short negative
+// cache) are remembered; "unreachable" is never cached.
+export type VrboDestinationClass =
+  | { status: "region"; regionId: string; latLong: string }
+  | { status: "not-region" }
+  | { status: "unreachable" };
+
+const notRegionCache = new Map<string, number>(); // normalizedDest → expiresAt (CONFIRMED not-a-region only)
+
+export async function classifyVrboDestination(destination: string): Promise<VrboDestinationClass> {
+  const key = normalizeDest(destination);
+  // Positive caches first (hardcoded + the shared dynamic cache resolveVrboRegion fills).
+  const known = knownLookup(destination);
+  if (known) return { status: "region", regionId: known.regionId, latLong: known.latLong };
+  const cached = cacheLookup(destination);
+  if (cached) return { status: "region", regionId: cached.regionId, latLong: cached.latLong };
+  // CONFIRMED not-a-region cache (only set on a real HTTP-200 "no region" answer).
+  const nr = notRegionCache.get(key);
+  if (nr && nr > Date.now()) return { status: "not-region" };
+  try {
+    const url = `${SUGGESTIONS_ENDPOINT}?query=${encodeURIComponent(destination)}&locale=en_US`;
+    const r = await fetch(url, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) {
+      console.warn(`[vrbo-region:classify] HTTP ${r.status} for "${destination}" — treating as UNREACHABLE (scan anyway)`);
+      return { status: "unreachable" }; // recall-safe: don't skip on an API error
+    }
+    const data = (await r.json().catch(() => null)) as any;
+    const list = data?.suggestions ?? data?.results ?? data?.data;
+    // RECALL-SAFE: only a RECOGNIZED suggestions ARRAY lets us conclude "not a
+    // region". An error object / changed shape / `{error,code}` body (Vrbo's rate
+    // limiter sometimes answers 200-with-error) is NOT a trustworthy "no region" —
+    // treat it as unreachable and scan anyway, never skip a town on an ambiguous body.
+    if (!Array.isArray(list)) {
+      console.warn(`[vrbo-region:classify] unrecognized 200 response for "${destination}" — treating as UNREACHABLE (scan anyway)`);
+      return { status: "unreachable" };
+    }
+    // Scan the top few suggestions for the first that carries a region identifier
+    // (a property/hotel suggestion carries a listingId, not a regionId — so this is
+    // itself a region-vs-listing discriminator).
+    for (const s of list.slice(0, 6)) {
+      const regionId = s?.data?.regionId ?? s?.regionId ?? s?.gaiaId ?? s?.placeId ?? null;
+      if (!regionId) continue;
+      const lat = s?.data?.latitude ?? s?.latitude ?? s?.coordinates?.lat ?? s?.geometry?.location?.lat ?? null;
+      const lng = s?.data?.longitude ?? s?.longitude ?? s?.coordinates?.lng ?? s?.geometry?.location?.lng ?? null;
+      const display = s?.value ?? s?.label ?? s?.fullName ?? destination;
+      const region: VrboRegion = {
+        regionId: String(regionId),
+        latLong: lat && lng ? `${lat},${lng}` : "",
+        displayDestination: String(display),
+      };
+      // Share the positive resolution with resolveVrboRegion's cache (7d).
+      dynamicCache.set(key, { value: region, expiresAt: Date.now() + RESOLUTION_TTL_MS });
+      return { status: "region", regionId: region.regionId, latLong: region.latLong };
+    }
+    // HTTP 200 but no region in the suggestions → Vrbo genuinely doesn't have this
+    // town as a searchable region. Cache the confirmed negative (short TTL).
+    notRegionCache.set(key, Date.now() + NEGATIVE_TTL_MS);
+    return { status: "not-region" };
+  } catch (e: any) {
+    console.warn(`[vrbo-region:classify] error for "${destination}": ${e?.message ?? e} — treating as UNREACHABLE (scan anyway)`);
+    return { status: "unreachable" }; // recall-safe
+  }
+}
+
 async function resolveViaBrowserbase(
   destination: string,
   bbApiKey: string,
