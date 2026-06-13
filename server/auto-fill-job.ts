@@ -231,6 +231,16 @@ type AutoFillSearchAudit = {
   diagnostics?: any;
 };
 
+// Live per-city sub-progress of the nearby-city expansion stage. Surfaced so the
+// bulk-queue loading bar shows real movement ("city 3/8 — now Hanapepe") during the
+// long "Widening to nearby cities" phase instead of a frozen message. Null otherwise.
+export type AutoFillExpansionProgress = {
+  tierLabel: string | null;
+  citiesScanned: number;
+  citiesPlanned: number;
+  currentCity: string | null;
+};
+
 type AutoFillJob = {
   id: string;
   status: JobStatus;
@@ -259,6 +269,7 @@ type AutoFillJob = {
   minProfit: number;
   gateEnabled: boolean;
   escalation: AutoFillEscalation;
+  expansionProgress?: AutoFillExpansionProgress | null;
   attached: AutoFillAttached[];
   skipped: AutoFillSkipped[];
   searchAudits: AutoFillSearchAudit[];
@@ -281,6 +292,7 @@ export type AutoFillJobStatus = {
   progress: number;
   reservationId: string;
   escalation: AutoFillEscalation;
+  expansionProgress?: AutoFillExpansionProgress | null;
   attached: AutoFillAttached[];
   skipped: AutoFillSkipped[];
   searchAudits: AutoFillSearchAudit[];
@@ -2024,6 +2036,21 @@ async function runExpansion(
     const exp = getExpansionJob(expansionJobId);
     if (!exp) break; // lost (redeploy)
     const s = serializeExpansionJob(exp);
+    // Surface the expansion's LIVE per-city sub-progress onto the job so the
+    // bulk-queue loading bar moves through the long nearby phase instead of
+    // freezing on a single "Widening to nearby cities…" line. The message CHANGES
+    // each city, which is what drives the bulk item's lastProgressAt (stall signal).
+    const planned = Number(s.totalCount) || 0;
+    const scanned = Number(s.scannedCount) || 0;
+    const tierLabel = s.phase?.label ?? null;
+    job.expansionProgress = { tierLabel, citiesScanned: scanned, citiesPlanned: planned, currentCity: s.currentCity ?? null };
+    const expMessage = planned > 0
+      ? `Nearby cities${tierLabel ? ` (${tierLabel})` : ""}: searched ${scanned}/${planned}${s.currentCity ? ` — now ${s.currentCity}` : ""}`
+      : "Widening to nearby cities (drive-time)…";
+    // Ramp 60→95 across the planned cities so the bar advances city-by-city.
+    const expProgress = planned > 0 ? Math.min(95, 60 + Math.round((scanned / planned) * 35)) : Math.max(job.progress, 60);
+    job.message = expMessage;
+    job.progress = expProgress;
     setEscalation(job, {
       // Strip lossPair + altPairs from the LIVE escalation copy — the client doesn't
       // need the picks here (they arrive as attachable comboOptions); keeps polling
@@ -2037,6 +2064,9 @@ async function runExpansion(
     if (s.done) { terminal = s; break; }
     await new Promise((r) => setTimeout(r, EXPANSION_POLL_INTERVAL_MS));
   }
+  // Expansion finished — clear the live per-city sub-progress (later stages, if any,
+  // shouldn't render a stale "now <city>").
+  job.expansionProgress = null;
   // Fold each nearby city's combo economics into the ladder (accepted OR skipped).
   for (const c of terminal?.cityResults ?? []) {
     if (typeof c.comboCost === "number") {
@@ -2107,6 +2137,7 @@ export function serializeAutoFillJob(job: AutoFillJob): AutoFillJobStatus {
     progress: job.progress,
     reservationId: job.reservationId,
     escalation: job.escalation,
+    expansionProgress: job.expansionProgress ?? null,
     attached: job.attached,
     skipped: job.skipped,
     searchAudits: job.searchAudits,

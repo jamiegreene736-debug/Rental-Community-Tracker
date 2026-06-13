@@ -39,6 +39,7 @@ import {
   cancelAutoFillJob,
   serializeAutoFillJob,
   type AutoFillSlotInput,
+  type AutoFillExpansionProgress,
 } from "./auto-fill-job";
 
 // How often the orchestrator re-reads a running auto-fill job's status. Matches
@@ -101,6 +102,14 @@ type BulkItemState = {
   error?: string;
   filled: number;
   totalSlots: number;
+  // Live loading-bar telemetry mirrored from the running auto-fill job each poll,
+  // so the queue dialog can render an in-depth per-row progress bar and tell a
+  // working search from a stalled one. `lastProgressAt` is stamped only when the
+  // phase/message/progress/filled actually CHANGES — so a frozen value = stalled.
+  progress: number;
+  phase: string;
+  expansionProgress: AutoFillExpansionProgress | null;
+  lastProgressAt: number | null;
   autoFillJobId: string | null;
   startedAt: number | null;
   finishedAt: number | null;
@@ -115,6 +124,8 @@ type BulkItemState = {
   altCombos: any[];
   // retained for processing, not serialized to the client
   _input: BulkAutoFillItemInput;
+  // last serialized progress signature — to detect real forward movement (stall guard)
+  _lastProgressKey?: string;
 };
 
 type BulkJobStatus = "running" | "completed" | "cancelled";
@@ -145,6 +156,11 @@ export type BulkAutoFillItemView = {
   error?: string;
   filled: number;
   totalSlots: number;
+  // Loading-bar telemetry (see BulkItemState).
+  progress: number;
+  phase: string;
+  expansionProgress: AutoFillExpansionProgress | null;
+  lastProgressAt: number | null;
   startedAt: string | null;
   finishedAt: string | null;
   lossCombos: any[];
@@ -165,6 +181,9 @@ export type BulkAutoFillJobStatus = {
   queued: number;
   currentIndex: number;
   items: BulkAutoFillItemView[];
+  // Server clock at serialize time — the client compares it against each item's
+  // lastProgressAt to render "updated Ns ago" / a stall warning without clock skew.
+  serverNow: number;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
 
@@ -389,7 +408,22 @@ async function runBulkJob(job: BulkJob): Promise<void> {
         // Surface the auto-fill job's LIVE phase message (e.g. "Searching the home
         // city on VRBO…", "Widening to nearby cities…") so the dialog reflects real
         // progress instead of freezing on the pre-search "Detaching…" notice.
-        if (last.message) item.message = last.message;
+        const nextMessage = last.message || item.message;
+        // Mirror the loading-bar telemetry onto the item. lastProgressAt is stamped
+        // ONLY when something the operator reads as forward movement changes — the
+        // phase message, the overall %, the slots filled, or the expansion's current
+        // city. A lastProgressAt that stops advancing is the "this search is stuck"
+        // signal the client renders (vs. a healthy search that's just slow).
+        const expProg = last.expansionProgress ?? null;
+        const progressKey = `${nextMessage}|${last.progress}|${last.slotsFilled}|${expProg?.currentCity ?? ""}|${expProg?.citiesScanned ?? -1}`;
+        if (progressKey !== item._lastProgressKey) {
+          item.lastProgressAt = Date.now();
+          item._lastProgressKey = progressKey;
+        }
+        item.message = nextMessage;
+        item.progress = last.progress;
+        item.phase = last.phase;
+        item.expansionProgress = expProg;
         touch(job);
         if (last.done) break;
         if (Date.now() - itemStartedAt > ITEM_CAP_MS) break;
@@ -512,6 +546,10 @@ export function startBulkAutoFillJob(items: BulkAutoFillItemInput[]): { bulkJobI
       message: "Queued",
       filled: 0,
       totalSlots: slots.length,
+      progress: 0,
+      phase: "queued",
+      expansionProgress: null,
+      lastProgressAt: null,
       autoFillJobId: null,
       startedAt: null,
       finishedAt: null,
@@ -660,12 +698,17 @@ export function serializeBulkAutoFillJob(job: BulkJob): BulkAutoFillJobStatus {
       error: it.error,
       filled: it.filled,
       totalSlots: it.totalSlots,
+      progress: it.progress ?? 0,
+      phase: it.phase ?? "",
+      expansionProgress: it.expansionProgress ?? null,
+      lastProgressAt: it.lastProgressAt ?? null,
       startedAt: it.startedAt ? new Date(it.startedAt).toISOString() : null,
       finishedAt: it.finishedAt ? new Date(it.finishedAt).toISOString() : null,
       lossCombos: it.lossCombos ?? [],
       lossLog: it.lossLog ?? [],
       altCombos: it.altCombos ?? [],
     })),
+    serverNow: Date.now(),
     timestamps: { createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt },
   };
 }

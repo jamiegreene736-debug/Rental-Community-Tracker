@@ -516,6 +516,14 @@ type LossLogEntry = {
   units?: Array<{ bedrooms: number; url: string; title?: string; totalPrice?: number; sourceLabel?: string }>;
 };
 
+// Live per-city sub-progress of the nearby-city expansion (mirrors the server).
+type BulkExpansionProgress = {
+  tierLabel: string | null;
+  citiesScanned: number;
+  citiesPlanned: number;
+  currentCity: string | null;
+};
+
 type BulkBuyInQueueItem = {
   id: string;
   jobId: string;
@@ -532,6 +540,18 @@ type BulkBuyInQueueItem = {
   error?: string;
   filled?: number;
   totalSlots?: number;
+  // In-depth loading-bar telemetry mirrored from the running auto-fill job (server
+  // bulk-auto-fill-job.ts). `progress` is 0–100; `lastProgressAt`/`serverNow` (server
+  // clock, ms) drive the "updated Ns ago" + stall warning; `expansionProgress` gives
+  // the live per-city movement during the long nearby-cities phase.
+  progress?: number;
+  phase?: string;
+  expansionProgress?: BulkExpansionProgress | null;
+  lastProgressAt?: number | null;
+  serverNow?: number;
+  // client wall-clock when this status was received — lets the row extrapolate the
+  // server clock between 3s polls for a smooth, skew-free "updated Ns ago" tick.
+  _clientFetchedAt?: number;
   startedAt?: string;
   finishedAt?: string;
   // Over-budget combos found but not attached (would lose money) + per-city loss
@@ -1696,12 +1716,17 @@ type BulkAutoFillJobStatus = {
     error?: string;
     filled: number;
     totalSlots: number;
+    progress?: number;
+    phase?: string;
+    expansionProgress?: BulkExpansionProgress | null;
+    lastProgressAt?: number | null;
     startedAt: string | null;
     finishedAt: string | null;
     lossCombos: AutoFillComboOption[];
     lossLog: LossLogEntry[];
     altCombos?: AutoFillComboOption[];
   }>;
+  serverNow: number;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
 
@@ -5163,6 +5188,140 @@ function AlternateCombosPanel({
   );
 }
 
+// ── Bulk queue: in-depth per-row loading bar ─────────────────────────────────
+// Surfaces the auto-fill ladder's live stage, overall %, per-city nearby-expansion
+// movement, slots filled, elapsed time, AND a STALL warning (no forward progress
+// for a while) so the operator can tell a healthy-but-slow search from a stuck one.
+// Driven by telemetry the server mirrors onto each item (bulk-auto-fill-job.ts).
+// A frozen value past BULK_STALL_MS = "this one looks broken".
+const BULK_STALL_MS = 7 * 60_000; // > one ~4.5-min find-buy-in lane; longer = likely stuck
+
+const BULK_LADDER_STAGES: Array<{ key: string; label: string; icon: React.ReactNode; phases: string[] }> = [
+  { key: "resort", label: "Resort", icon: <Building2 className="h-3 w-3" />, phases: ["resort"] },
+  { key: "home", label: "Home city", icon: <Search className="h-3 w-3" />, phases: ["home-city"] },
+  { key: "nearby", label: "Nearby cities", icon: <MapPin className="h-3 w-3" />, phases: ["nearby"] },
+  { key: "fallback", label: "Per-unit fallback", icon: <Zap className="h-3 w-3" />, phases: ["single-unit-city"] },
+  { key: "verify", label: "Verify community", icon: <Clock3 className="h-3 w-3" />, phases: ["verify-community"] },
+];
+
+function bulkStageIndexForPhase(phase: string | undefined): number {
+  if (!phase) return -1;
+  if (phase === "done") return BULK_LADDER_STAGES.length; // everything behind us
+  return BULK_LADDER_STAGES.findIndex((s) => s.phases.includes(phase)); // -1 when queued/prep
+}
+
+function fmtDuration(ms: number): string {
+  if (ms < 1000) return "0s";
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+function BulkRowProgress({ item }: { item: BulkBuyInQueueItem }) {
+  // Live-tick "ago"/elapsed between 3s polls so the bar visibly breathes.
+  const [, force] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const progress = Math.max(0, Math.min(100, Math.round(item.progress ?? 0)));
+  const currentStage = bulkStageIndexForPhase(item.phase);
+  const filled = item.filled ?? 0;
+  const total = item.totalSlots ?? 0;
+  const exp = item.expansionProgress;
+
+  // Server-clock freshness (no skew): lastProgressAt is stamped only on real forward
+  // movement, so we extrapolate with the client delta since the last poll for a live tick.
+  const serverNow = item.serverNow ?? Date.now();
+  const liveNow = serverNow + (Date.now() - (item._clientFetchedAt ?? Date.now()));
+  const agoMs = item.lastProgressAt != null ? Math.max(0, liveNow - item.lastProgressAt) : null;
+  const stalled = agoMs != null && agoMs > BULK_STALL_MS;
+  const agoLabel = agoMs == null ? "starting…" : agoMs < 2000 ? "just now" : fmtDuration(agoMs) + " ago";
+
+  const startedMs = item.startedAt ? new Date(item.startedAt).getTime() : null;
+  const elapsedMs = startedMs != null ? Math.max(0, liveNow - startedMs) : null;
+
+  return (
+    <div className={`rounded-md border px-3 py-2 ${stalled ? "border-amber-300 bg-amber-50/70" : "border-blue-200 bg-blue-50/40 dark:border-blue-900 dark:bg-blue-950/30"}`}>
+      {/* Stage tracker */}
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        {BULK_LADDER_STAGES.map((s, i) => {
+          const state = currentStage === BULK_LADDER_STAGES.length || i < currentStage ? "done" : i === currentStage ? "active" : "pending";
+          return (
+            <div
+              key={s.key}
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                state === "done"
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300"
+                  : state === "active"
+                    ? stalled
+                      ? "bg-amber-200 text-amber-900"
+                      : "bg-blue-200 text-blue-900 dark:bg-blue-900/60 dark:text-blue-200"
+                    : "bg-muted text-muted-foreground/50"
+              }`}
+            >
+              {state === "done" ? <CheckCircle2 className="h-3 w-3" /> : state === "active" ? <Loader2 className={`h-3 w-3 ${stalled ? "" : "animate-spin"}`} /> : s.icon}
+              {s.label}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Overall progress */}
+      <div className="flex items-center gap-2">
+        <Progress value={progress} className="h-2 flex-1" />
+        <span className="w-9 text-right text-[10px] tabular-nums text-muted-foreground">{progress}%</span>
+      </div>
+      <p className="mt-1.5 text-[11px] leading-snug text-foreground/80">{item.message}</p>
+
+      {/* Per-city nearby-expansion detail — the long phase that used to look frozen */}
+      {exp && exp.citiesPlanned > 0 && (
+        <div className="mt-1.5">
+          <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <MapPin className="h-3 w-3 shrink-0" />
+              <span className="truncate">
+                {exp.tierLabel ? `Nearby (${exp.tierLabel})` : "Nearby cities"} · city {Math.min(exp.citiesScanned + 1, exp.citiesPlanned)}/{exp.citiesPlanned}
+                {exp.currentCity ? ` · now ${exp.currentCity}` : ""}
+              </span>
+            </span>
+            <span className="shrink-0 tabular-nums">{exp.citiesScanned}/{exp.citiesPlanned}</span>
+          </div>
+          <Progress value={(exp.citiesScanned / exp.citiesPlanned) * 100} className="mt-0.5 h-1" />
+        </div>
+      )}
+
+      {/* Footer: slots · freshness/stall · elapsed */}
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
+        <span className="inline-flex items-center gap-1 font-medium">
+          <span className={`h-1.5 w-1.5 rounded-full ${total > 0 && filled >= total ? "bg-emerald-500" : "bg-blue-400"}`} />
+          {filled}/{total || "?"} units found
+        </span>
+        {stalled ? (
+          <span className="inline-flex items-center gap-1 font-semibold text-amber-700">
+            <AlertCircle className="h-3 w-3" /> No new progress for {agoMs != null ? fmtDuration(agoMs) : "?"} — may be slow or stuck
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 text-muted-foreground">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            </span>
+            updated {agoLabel}
+          </span>
+        )}
+        {elapsedMs != null && (
+          <span className="inline-flex items-center gap-1 text-muted-foreground/70">
+            <Clock3 className="h-3 w-3" /> {fmtDuration(elapsedMs)} elapsed
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ComboComparisonPanel({
   options,
   targetResortName,
@@ -7921,6 +8080,12 @@ export default function Bookings() {
       error: si.error,
       filled: si.filled,
       totalSlots: si.totalSlots,
+      progress: si.progress,
+      phase: si.phase,
+      expansionProgress: si.expansionProgress ?? null,
+      lastProgressAt: si.lastProgressAt ?? null,
+      serverNow: status.serverNow,
+      _clientFetchedAt: Date.now(),
       startedAt: si.startedAt ?? undefined,
       finishedAt: si.finishedAt ?? undefined,
       lossCombos: si.lossCombos ?? [],
@@ -10780,6 +10945,11 @@ export default function Bookings() {
                             )}
                           </div>
                         </div>
+                        {item.status === "running" && (
+                          <div className="px-3 pb-2.5">
+                            <BulkRowProgress item={item} />
+                          </div>
+                        )}
                         {itemHasLoss && (
                           <div className="px-3 pb-3">
                             <LastBuyInSearchPanel
