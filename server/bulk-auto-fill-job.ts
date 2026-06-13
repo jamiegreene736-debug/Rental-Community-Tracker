@@ -335,11 +335,36 @@ async function runBulkJob(job: BulkJob): Promise<void> {
       // nulls guestyReservationId/attachedAt — no side effects — so a direct call
       // is safe and complete (the HTTP route does exactly this).
       //
+      // AUTHORITATIVE (2026-06-13): the detach set is read from the DB
+      // (getBuyInsByReservation), NOT just the client-supplied buyInIdsToDetach.
+      // That client list is derived from a possibly-STALE in-memory reservation
+      // snapshot — reservation.slots[].buyIn?.id, which the server only hydrates
+      // when a buy-in's unitId matches a configured slot at fetch time. If the
+      // snapshot is stale (units attached by a prior run the client hasn't
+      // refetched) or a buy-in's unitId doesn't line up with a slot, the client
+      // list comes through empty/incomplete, the override no-ops, and the
+      // per-reservation auto-fill job — which reads the DB fresh in refreshFilled()
+      // — bails "All slots were already filled." Reading the DB here makes the
+      // override fire regardless of client state, which is exactly what the
+      // operator expects ("override even if slots are filled"). The client ids are
+      // UNION-ed in as belt-and-suspenders; detach is idempotent so an id present
+      // in both lists is detached once.
+      let dbAttachedIds: number[] = [];
+      try {
+        const attached = await storage.getBuyInsByReservation(item._input.reservationId);
+        dbAttachedIds = attached.map((b) => Number(b.id)).filter((n) => Number.isFinite(n));
+      } catch (e: any) {
+        // DB read failed — fall back to the client list (better than skipping the
+        // override entirely). The atomic detach below still rolls back on error.
+        console.error("[bulk-auto-fill] could not read attached buy-ins for override detach", item.reservationId, e?.message ?? e);
+      }
+      const clientDetachIds = (item._input.buyInIdsToDetach ?? []).map(Number).filter((n) => Number.isFinite(n));
+      //
       // ATOMIC (B2): detach is reversible until the search starts. We track what
       // we detached; if ANY detach throws, we RE-ATTACH the already-detached units
       // so the reservation ends EXACTLY as it began — never stranded partially
       // detached on the money path — then fail the item.
-      const toDetach = (item._input.buyInIdsToDetach ?? []).map(Number).filter((n) => Number.isFinite(n));
+      const toDetach = Array.from(new Set<number>([...dbAttachedIds, ...clientDetachIds]));
       if (toDetach.length > 0) {
         item.message = `Detaching ${toDetach.length} attached unit${toDetach.length === 1 ? "" : "s"} for a fresh search…`;
         touch(job);
