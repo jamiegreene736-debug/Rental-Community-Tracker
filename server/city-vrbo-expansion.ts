@@ -79,6 +79,34 @@ const REGION_DEDUP = (process.env.CITY_VRBO_REGION_DEDUP ?? "1") !== "0";
 // region, no combo), the tier's distinct regions are exhausted — stop scanning more of THAT
 // tier (the next, farther tier still runs). 0 disables.
 const STOP_AFTER_CONSEC_DUPS = envInt("CITY_VRBO_EXPANSION_STOP_AFTER_DUPS", 5, 0);
+// Lever ② (parallel expansion): how many city scans to keep IN FLIGHT at once.
+// 1 = legacy single-file (every scan's skipRegionIds snapshot includes all prior
+// towns). 2 pairs with SIDECAR_VRBO_CONCURRENCY=2 to ~halve a deep walk; results
+// are still consumed in plan order and the post-scan collapse-guard drops any
+// within-window duplicate pool, so no combo is double-surfaced (the only cost of a
+// within-window region collision is one redundant harvest).
+const EXPANSION_CONCURRENCY = envInt("CITY_VRBO_EXPANSION_CONCURRENCY", 2, 1);
+// Lever ① (abandon a hopeless walk): stop scanning the remaining cities only when ALL of:
+// (a) >= ABANDON_MIN_PRICED cities have returned a PRICED combo, (b) the cheapest combo
+// found anywhere hasn't improved for ABANDON_PLATEAU cities, AND (c) that cheapest combo is
+// CLEARLY hopeless — its cost exceeds revenue by >= ABANDON_RATIO (i.e. far from break-even,
+// not a near-miss). Condition (c) is the recall guard: a near-miss tail (best combo only a
+// little over budget) is NEVER abandoned, because a slightly-cheaper later city could tip it
+// profitable — only a walk that is both PLATEAUED and DEEPLY underwater is cut. The run that
+// motivated this had best combos only ~6-15% over budget (near-misses) → those keep searching;
+// a 1.5x+ best (e.g. -$6k on $12k revenue) is the kind that gets cut. Recall-safe by
+// construction; Lever ② (parallel) does the bulk of the speedup. Profit-gate-only.
+// CITY_VRBO_EXPANSION_ABANDON=0 disables (grinds every planned city as before).
+const ABANDON_ENABLED = (process.env.CITY_VRBO_EXPANSION_ABANDON ?? "1") !== "0";
+const ABANDON_MIN_PRICED = envInt("CITY_VRBO_EXPANSION_ABANDON_MIN_PRICED", 4, 1);
+const ABANDON_PLATEAU = envInt("CITY_VRBO_EXPANSION_ABANDON_PLATEAU", 3, 1);
+// Cheapest combo must cost >= this multiple of revenue to count as "clearly hopeless".
+// >1 always (a ratio <=1 would mean the best combo is already at/under revenue — profitable-ish
+// — which must NEVER be abandoned). Default 1.5 = 50% over revenue.
+const ABANDON_RATIO = (() => {
+  const raw = Number(process.env.CITY_VRBO_EXPANSION_ABANDON_RATIO);
+  return Number.isFinite(raw) && raw > 1 ? raw : 1.5;
+})();
 
 // ── public types ───────────────────────────────────────────────────────────
 export type ExpansionJobStatus =
@@ -475,6 +503,13 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
     // If Vrbo's suggestions API turns out unreachable/rate-limited for this run, stop
     // probing it after the first miss (don't hammer it) and scan every town as before.
     let regionApiDown = false;
+    // Lever ① abandon-state (spans BOTH tiers — the goal is to stop the whole
+    // reservation once it's clearly unfillable). bestComboCost = cheapest PRICED combo
+    // seen anywhere; pricedCityCount = cities that returned a priced pair;
+    // citiesSinceImprovement = priced cities since bestComboCost last dropped.
+    let bestComboCost = Number.POSITIVE_INFINITY;
+    let pricedCityCount = 0;
+    let citiesSinceImprovement = 0;
     for (const tier of [1, 2] as const) {
       if (Date.now() > deadline || job.canceled) break;
       const maxMin = tier === 1 ? TIER1_MAX_MIN : TIER2_MAX_MIN;
@@ -545,7 +580,46 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
       // Lever 3 stop-loss: consecutive duplicate/junk towns in THIS tier (resets on any
       // genuinely-new region or a found combo).
       let consecutiveDupOrJunk = 0;
-      for (const p of plan) {
+
+      // Lever ② parallel expansion: keep up to EXPANSION_CONCURRENCY city scans IN FLIGHT
+      // at once and consume them IN PLAN ORDER, so every branch below (collapse guard,
+      // profit gate, stop-loss) behaves exactly as it did single-file. Each scan snapshots
+      // scannedRegionIds at LAUNCH, so two towns launched in the same window don't pre-skip
+      // against each other (daemon Lever-1) — the post-scan collapse guard still drops a
+      // same-pool duplicate (one redundant harvest is the only cost). CONCURRENCY=1 ⇒ exact
+      // legacy single-file (each scan's snapshot includes every prior town).
+      const launchCityScan = (pl: { term: string; placeName: string; driveMinutes: number; regionId?: string }) =>
+        runCityVrboInventoryScanForCity({
+          citySearchTerm: pl.term,
+          checkIn: job.checkIn,
+          checkOut: job.checkOut,
+          bedroomPlan: job.bedroomPlan,
+          // The nearby town has no community; pass the ORIGINATING property's state so a
+          // Florida combo's expansion towns aren't filtered against the "Hawaii" default.
+          targetState: BUY_IN_MARKET_LOCATIONS[job.community]?.state,
+          skipRegionIds: REGION_DEDUP ? Array.from(scannedRegionIds) : undefined,
+        }).then(
+          (scan) => ({ p: pl, scan, err: null as unknown }),
+          (err) => ({ p: pl, scan: null as unknown as CityVrboScanResult, err }),
+        );
+
+      const inflight: Array<{
+        p: { term: string; placeName: string; driveMinutes: number; regionId?: string };
+        promise: ReturnType<typeof launchCityScan>;
+      }> = [];
+      let launchIdx = 0;
+      const fillWindow = () => {
+        while (inflight.length < EXPANSION_CONCURRENCY && launchIdx < plan.length) {
+          const pl = plan[launchIdx++];
+          // Record as searched + mark scanning at LAUNCH (several may be "scanning" at once).
+          searched.add(normTerm(pl.term));
+          job.citiesSearched.push(pl.term);
+          setCityResult(job, pl.term, { status: "scanning" });
+          inflight.push({ p: pl, promise: launchCityScan(pl) });
+        }
+      };
+
+      for (let ci = 0; ci < plan.length; ci++) {
         if (Date.now() > deadline) {
           markRemaining(job, "skipped", "expansion time budget exhausted");
           job.status = "exhausted";
@@ -558,43 +632,28 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
           finalize(job);
           return;
         }
-        // Worker can drop mid-job; re-check before each scan so we never queue a
-        // doomed PENDING scan against an offline worker.
+        // Worker can drop mid-job; re-check before consuming so we never wait on a
+        // doomed scan against an offline worker (markRemaining covers the in-flight ones).
         if (!getHeartbeat().isOnline) {
-          setCityResult(job, p.term, { status: "skipped", reason: "sidecar went offline" });
           markRemaining(job, "skipped", "sidecar offline");
           job.status = "worker_offline";
           finalize(job);
           return;
         }
 
-        searched.add(normTerm(p.term));
-        job.citiesSearched.push(p.term);
+        // Ensure the window is full, then consume the NEXT town's scan in plan order.
+        fillWindow();
+        const consumed = await inflight.shift()!.promise;
+        const p = consumed.p;
         job.progress.currentCity = p.term;
-        setCityResult(job, p.term, { status: "scanning" });
 
-        let scan: CityVrboScanResult;
-        try {
-          scan = await runCityVrboInventoryScanForCity({
-            citySearchTerm: p.term,
-            checkIn: job.checkIn,
-            checkOut: job.checkOut,
-            bedroomPlan: job.bedroomPlan,
-            // The nearby town has no community; pass the ORIGINATING property's
-            // state so a Florida combo's expansion towns aren't filtered against
-            // the "Hawaii" default (HI properties still pass "Hawaii").
-            targetState: BUY_IN_MARKET_LOCATIONS[job.community]?.state,
-            // Lever 1/2: the Vrbo regions already scanned this run. Passing an array (even
-            // empty) puts the daemon in region-dedup mode so it skips the harvest for a
-            // duplicate region or a junk non-region town.
-            skipRegionIds: REGION_DEDUP ? Array.from(scannedRegionIds) : undefined,
-          });
-        } catch (err: any) {
-          setCityResult(job, p.term, { status: "scan-error", reason: String(err?.message ?? err) });
+        if (consumed.err) {
+          setCityResult(job, p.term, { status: "scan-error", reason: String((consumed.err as any)?.message ?? consumed.err) });
           job.progress.citiesScanned += 1;
           touch(job);
           continue;
         }
+        const scan: CityVrboScanResult = consumed.scan;
 
         job.progress.citiesScanned += 1;
         job.workerOnline = scan.sidecar.workerOnline;
@@ -746,6 +805,42 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
             altPairs: (scan.suggestedPairs ?? []).slice(1),
             reason: `combo $${Math.round(comboCost).toLocaleString()} → est. profit $${Math.round(profit).toLocaleString()} (worse than the $${Math.abs(Math.round(job.minProfit)).toLocaleString()} max-loss limit); searched on`,
           });
+          // Lever ① abandon-on-hopeless: this city produced a PRICED but losing combo.
+          // Track the cheapest priced combo seen anywhere; once we have enough priced
+          // evidence and the best is still a loss that hasn't improved for a while, no
+          // city is going to make it profitable — stop the walk instead of grinding the
+          // rest. Recall-safe: any improvement resets the plateau counter, so a search
+          // that keeps finding cheaper inventory runs to completion.
+          pricedCityCount += 1;
+          if (comboCost < bestComboCost) {
+            bestComboCost = comboCost;
+            citiesSinceImprovement = 0;
+          } else {
+            citiesSinceImprovement += 1;
+          }
+          if (
+            ABANDON_ENABLED &&
+            job.profitGateEnabled &&
+            job.revenueAvailable > 0 &&
+            pricedCityCount >= ABANDON_MIN_PRICED &&
+            citiesSinceImprovement >= ABANDON_PLATEAU &&
+            // RECALL GUARD: only abandon when the cheapest combo is CLEARLY hopeless
+            // (>= ABANDON_RATIO x revenue), never a near-miss that a later city could tip
+            // profitable. (The old `revenue - bestComboCost < minProfit` term was a tautology
+            // here — every combo in this branch already failed the gate — so it did no work.)
+            bestComboCost > job.revenueAvailable * ABANDON_RATIO
+          ) {
+            console.log(
+              `[city-vrbo-expansion] abandoning remaining cities — ${pricedCityCount} priced, ` +
+              `cheapest combo $${Math.round(bestComboCost).toLocaleString()} is ` +
+              `${(bestComboCost / job.revenueAvailable).toFixed(2)}x the $${Math.round(job.revenueAvailable).toLocaleString()} revenue ` +
+              `(>= ${ABANDON_RATIO}x, clearly hopeless) and hasn't improved in ${citiesSinceImprovement} cities`,
+            );
+            markRemaining(job, "skipped", "no profitable combo possible — cheapest nearby combo is a loss and stopped improving");
+            job.status = "exhausted";
+            finalize(job);
+            return;
+          }
           touch(job);
           continue;
         }
